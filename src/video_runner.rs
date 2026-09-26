@@ -11,8 +11,8 @@ use crate::video_argv::{
 use crate::video_plan::{StreamPlan, plan_streams};
 use crate::video_probe::page_host;
 use crate::video_progress::{
-    PROGRESS_GRANULARITY, grid_needs_rebuild, is_ytdlp_merge_line, last_log_line, leg_changed,
-    parse_ytdlp_after_move, parse_ytdlp_template, piece_marks, trace_format_lines,
+    PROGRESS_GRANULARITY, grid_needs_rebuild, is_ytdlp_merge_line, last_error_line, last_log_line,
+    leg_changed, parse_ytdlp_after_move, parse_ytdlp_template, piece_marks, trace_format_lines,
 };
 use crate::video_quality::default_video_filename;
 use crate::video_spawn::{
@@ -685,6 +685,9 @@ enum Exit {
     CaptureWaitFailed,
     /// The remux failed, so the raw shell is the only usable copy of the capture.
     RemuxFailed,
+    /// The recorder exited nonzero on its own: the raw shell may hold a partial
+    /// capture worth salvaging, but the row fails instead of adopting it as finished.
+    RecorderFailed,
     /// The rename failed unexpectedly: keep both the raw shell and this attempt's completed remux.
     RenameFailed,
     /// Nothing was recorded, so there is nothing to salvage.
@@ -982,7 +985,30 @@ pub(crate) async fn run_live_ytdlp(
             }
             waited = tokio::time::timeout(timeout, child.wait()) => {
                 match waited {
-                    Ok(Ok(_)) => group.disarm(),
+                    Ok(Ok(status)) => {
+                        group.disarm();
+                        if !status.success() {
+                            // The recorder exited on its own with a failure: adopting
+                            // its partial as Finished would claim a capture that never
+                            // really ran (e.g. ffmpeg choking on the playlist seconds
+                            // in). Fail loudly with yt-dlp's own error line instead;
+                            // the raw shell is kept for salvage, only scratch is swept.
+                            progress.abort();
+                            let log_tail = join_drain(logs).await.unwrap_or_default();
+                            let detail = last_error_line(&log_tail, "recorder failed");
+                            sweep_live_capture(
+                                &out,
+                                &part,
+                                &state,
+                                staging,
+                                None,
+                                Staging::Sweep,
+                                Exit::RecorderFailed,
+                            )
+                            .await;
+                            return Err(VideoError::part_failed(detail));
+                        }
+                    }
                     Ok(Err(e)) => {
                         // Reap, then reclaim — never the other way round. The
                         // sweep keeps a finished recording, taking only scratch.

@@ -141,3 +141,21 @@ pub(crate) fn last_log_line(output: &str, fallback: &str) -> String {
         .trim()
         .to_string()
 }
+
+/// Last `ERROR:` line of captured child output, for failure detail: yt-dlp
+/// prints a Python traceback after its error line, so the last non-blank line
+/// is usually a useless `File "...", line N, in ...`.
+pub(crate) fn last_error_line(output: &str, fallback: &str) -> String {
+    output
+        .lines()
+        .rev()
+        .find_map(|l| {
+            let trimmed = l.trim();
+            if trimmed.starts_with("ERROR:") {
+                Some(trimmed.to_owned())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| last_log_line(output, fallback))
+}

@@ -3625,6 +3625,37 @@ exit 0
     bin
 }
 
+/// Fake yt-dlp for a recorder that dies mid-capture: writes a partial `.part`
+/// shell, prints yt-dlp's error line followed by its traceback, exits nonzero.
+fn fake_ytdlp_live_crash(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-live-crash");
+    std::fs::write(
+        &bin,
+        probe_guard(
+            r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+echo "[Grab];downloading;3;100;100;1000;5"
+printf 'tsbytes' > "$out.part"
+echo "ERROR: ffmpeg exited with code 183" >&2
+echo '  File "yt_dlp/YoutubeDL.py", line 1092, in trouble' >&2
+exit 1
+"#,
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
 /// Fake ffmpeg remux: copies its `-i` input to the trailing output.
 fn fake_ffmpeg_copy(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ffmpeg-copy");
@@ -3727,6 +3758,48 @@ fn live_capture_empty_fails_with_detail() {
         Err(e) => assert!(e.to_string().contains("404"), "yt-dlp line surfaces: {e}"),
         ok => panic!("expected failure, got {ok:?}"),
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn live_capture_crash_fails_instead_of_adopting() {
+    // A recorder that exits nonzero on its own must fail the row with yt-dlp's
+    // error line — adopting its partial as Finished claims a capture that never ran.
+    let dir = std::env::temp_dir().join(format!("grab-fakelive-crash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live_crash(&dir);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        &AttemptGate::new(),
+        "https://youtu.be/grabtest",
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+        None,
+    ));
+    match res {
+        Err(e) => assert!(
+            e.to_string().contains("ffmpeg exited with code 183"),
+            "yt-dlp's error line surfaces, not the traceback: {e}"
+        ),
+        ok => panic!("expected failure, got {ok:?}"),
+    }
+    assert!(!job.dest.exists(), "crashed partial must not deliver");
+    assert!(
+        dir.join("v.live.mp4.part").exists(),
+        "raw shell kept for salvage"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

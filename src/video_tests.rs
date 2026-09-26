@@ -9132,10 +9132,8 @@ fn a_group_that_refuses_to_quiesce_is_reported_rather_than_assumed() {
 fn fake_ytdlp_impersonate(dir: &std::path::Path, table: Option<&str>) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-impersonate");
     let script = match table {
-        Some(t) => format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--list-impersonate-targets\" ]; then\nprintf '%s' 'TABLE'\nexit 0\nfi\nexit 1\n"
-        )
-        .replace("TABLE", &t.replace('\'', "'\"'\"'")),
+        Some(t) => "#!/bin/sh\nif [ \"$1\" = \"--list-impersonate-targets\" ]; then\nprintf '%s' 'TABLE'\nexit 0\nfi\nexit 1\n"
+            .replace("TABLE", &t.replace('\'', "'\"'\"'")),
         None => "#!/bin/sh\nexit 1\n".to_string(),
     };
     std::fs::write(&bin, script).unwrap();

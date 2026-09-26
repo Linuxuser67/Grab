@@ -13,12 +13,13 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// Owns the add dialog's in-flight lookup marker (`video_inflight`) for one
-/// resolve kick. Every exit path of the kick future — early return or landed
+/// resolve kick. The marker is the kicked URL paired with the kick's
+/// generation. Every exit path of the kick future — early return or landed
 /// result — drops the guard, clearing the marker only when this kick's
 /// generation is still current, so a stale generation never clears a newer
 /// kick's marker.
 struct InflightGuard {
-    inflight: Rc<RefCell<Option<String>>>,
+    inflight: Rc<RefCell<Option<(String, u64)>>>,
     generation: Rc<Cell<u64>>,
     my: u64,
 }
@@ -29,6 +30,16 @@ impl Drop for InflightGuard {
             self.inflight.take();
         }
     }
+}
+
+/// Twin suppression for the add dialog's resolve kick: true when a resolve
+/// for this exact URL is already running *for the current generation*.
+/// A stale generation's marker must not suppress a re-kick — its result will
+/// lose the generation race and be discarded, so suppressing on the URL alone
+/// would leave the dialog with no preview and every retry suppressed until
+/// the URL text changes.
+fn inflight_suppresses(inflight: &Option<(String, u64)>, url: &str, generation: u64) -> bool {
+    matches!(inflight, Some((u, g)) if u.as_str() == url && *g == generation)
 }
 
 /// Present on the active window when there is one, standalone otherwise.
@@ -536,7 +547,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     // while the debounced keystroke lookup may still be in flight; without
     // this both spawn yt-dlp and the loser's result is discarded by the
     // generation guard anyway.
-    let video_inflight: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let video_inflight: Rc<RefCell<Option<(String, u64)>>> = Rc::new(RefCell::new(None));
     // The details-page Add button, desensitized while a lookup is in flight (a
     // dead button says so upfront). Populated once the button exists.
     let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
@@ -556,16 +567,19 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         let inflight = video_inflight.clone();
         Rc::new(move |probe_unlisted: bool| {
             // Twin suppression: a resolve for this exact URL is already
-            // running (Enter while the debounced lookup is still in flight is
-            // the usual trigger). The twin's result would lose the generation
-            // race anyway — don't spawn a second yt-dlp.
+            // running for the current generation (Enter while the debounced
+            // lookup is still in flight is the usual trigger). The twin's
+            // result would lose the generation race anyway — don't spawn a
+            // second yt-dlp. The marker carries the owning kick's generation
+            // so a stale marker — its resolve already doomed by a generation
+            // bump — never suppresses a re-kick for the same URL.
             let url = url_row2.text().trim().to_string();
-            if inflight.borrow().as_deref() == Some(url.as_str()) {
+            if inflight_suppresses(&inflight.borrow(), &url, generation.get()) {
                 return;
             }
             let my = generation.get() + 1;
             generation.set(my);
-            inflight.replace(Some(url));
+            inflight.replace(Some((url, my)));
             let (
                 generation_b,
                 last_b,
@@ -1603,11 +1617,11 @@ mod tests {
 
     #[test]
     fn inflight_guard_clears_only_for_current_generation() {
-        let inflight: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let inflight: Rc<RefCell<Option<(String, u64)>>> = Rc::new(RefCell::new(None));
         let generation = Rc::new(Cell::new(1u64));
 
         // The owning generation clears the marker on drop.
-        inflight.replace(Some("https://youtu.be/x".to_string()));
+        inflight.replace(Some(("https://youtu.be/x".to_string(), 1)));
         drop(InflightGuard {
             inflight: inflight.clone(),
             generation: generation.clone(),
@@ -1616,13 +1630,46 @@ mod tests {
         assert!(inflight.borrow().is_none());
 
         // A stale generation leaves a newer kick's marker alone.
-        inflight.replace(Some("https://youtu.be/y".to_string()));
+        inflight.replace(Some(("https://youtu.be/y".to_string(), 2)));
         generation.set(2);
         drop(InflightGuard {
             inflight: inflight.clone(),
             generation: generation.clone(),
             my: 1,
         });
-        assert_eq!(inflight.borrow().as_deref(), Some("https://youtu.be/y"));
+        assert_eq!(
+            inflight.borrow().clone(),
+            Some(("https://youtu.be/y".to_string(), 2))
+        );
+    }
+
+    #[test]
+    fn twin_kick_for_current_generation_is_suppressed() {
+        let marker = Some(("https://youtu.be/a".to_string(), 2));
+        assert!(inflight_suppresses(&marker, "https://youtu.be/a", 2));
+        // A different URL is never a twin.
+        assert!(!inflight_suppresses(&marker, "https://youtu.be/b", 2));
+        // No marker, no suppression.
+        assert!(!inflight_suppresses(&None, "https://youtu.be/a", 2));
+    }
+
+    #[test]
+    fn stale_inflight_marker_does_not_suppress_rekick() {
+        // A -> B -> A: the first A kick's marker goes stale when typing bumps
+        // the generation, its result is discarded, and its guard leaves the
+        // marker (a newer generation is current). The re-kick for A must
+        // still spawn — suppressing on the URL alone would wedge the dialog
+        // with no preview and every retry suppressed.
+        let mut generation = 0u64;
+        generation += 1; // typed A
+        generation += 1; // kicked A
+        let marker = Some(("https://youtu.be/a".to_string(), generation));
+        generation += 1; // typed B (debounced kick skipped)
+        generation += 1; // typed A again
+        assert!(!inflight_suppresses(
+            &marker,
+            "https://youtu.be/a",
+            generation
+        ));
     }
 }

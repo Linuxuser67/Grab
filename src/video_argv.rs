@@ -170,7 +170,19 @@ fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob) {
     ));
 }
 
+/// Playlist scoping for a yt-dlp download argv. A row picked from a playlist
+/// re-resolves the collection URL, so it selects its entry by 1-based position:
+/// `--no-playlist` would silently download the collection's first entry for
+/// every picked row (N copies of story one). Plain rows keep `--no-playlist`.
+pub(crate) fn playlist_scope_args(playlist_index: Option<usize>) -> Vec<String> {
+    match playlist_index {
+        Some(index) => vec!["--playlist-items".to_string(), (index + 1).to_string()],
+        None => vec!["--no-playlist".to_string()],
+    }
+}
+
 /// yt-dlp argv for one unified direct download into a staging temp. Pure.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn unified_download_argv(
     job: &VideoJob,
     spec: &str,
@@ -178,10 +190,11 @@ pub(crate) fn unified_download_argv(
     merge_ext: &str,
     ffmpeg_bin: &Path,
     out: &Path,
+    playlist_index: Option<usize>,
 ) -> Vec<String> {
-    let mut args = vec![
-        "--ignore-config".to_string(),
-        "--no-playlist".to_string(),
+    let mut args = vec!["--ignore-config".to_string()];
+    args.extend(playlist_scope_args(playlist_index));
+    args.extend([
         "--newline".to_string(),
         "--progress".to_string(),
         "--progress-template".to_string(),
@@ -196,7 +209,7 @@ pub(crate) fn unified_download_argv(
         ffmpeg_location_dir(ffmpeg_bin),
         "--print".to_string(),
         "after_move:filepath".to_string(),
-    ];
+    ]);
     if let Some(limit) = job.speed_limit {
         args.push("--ratelimit".to_string());
         args.push(limit.to_string());
@@ -247,10 +260,15 @@ pub(crate) fn hls_format_spec(quality: &str, pinned: Option<&str>) -> String {
 }
 
 /// yt-dlp argv for a live capture: kill-safe MPEG-TS, endless fragment retries bounded by our timeout. Pure.
-pub(crate) fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path) -> Vec<String> {
-    let mut args = vec![
-        "--ignore-config".to_string(),
-        "--no-playlist".to_string(),
+pub(crate) fn live_capture_argv(
+    job: &VideoJob,
+    hls_format_id: &str,
+    out: &Path,
+    playlist_index: Option<usize>,
+) -> Vec<String> {
+    let mut args = vec!["--ignore-config".to_string()];
+    args.extend(playlist_scope_args(playlist_index));
+    args.extend([
         "--newline".to_string(),
         "--progress".to_string(),
         "--progress-template".to_string(),
@@ -262,7 +280,7 @@ pub(crate) fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path)
         "infinite".to_string(),
         "-o".to_string(),
         ytdlp_output_template(out),
-    ];
+    ]);
     if job.is_live && job.live_from_start {
         args.push("--live-from-start".to_string());
     }
@@ -362,11 +380,12 @@ pub(crate) fn hls_download_argv(
     hls_format_id: &str,
     ffmpeg_bin: &Path,
     dest: &Path,
+    playlist_index: Option<usize>,
 ) -> Vec<String> {
     let out_template = dest_part_path(dest, "hls", "%(ext)s");
-    let mut args = vec![
-        "--ignore-config".to_string(),
-        "--no-playlist".to_string(),
+    let mut args = vec!["--ignore-config".to_string()];
+    args.extend(playlist_scope_args(playlist_index));
+    args.extend([
         "--newline".to_string(),
         "--progress".to_string(),
         "--progress-template".to_string(),
@@ -381,7 +400,7 @@ pub(crate) fn hls_download_argv(
         ffmpeg_location_dir(ffmpeg_bin),
         "--print".to_string(),
         "after_move:filepath".to_string(),
-    ];
+    ]);
     if let Some(limit) = job.speed_limit {
         args.push("--ratelimit".to_string());
         args.push(limit.to_string());

@@ -8,7 +8,8 @@ use crate::media_types::{
 use crate::video_argv::{
     YTDLP_PROGRESS_TEMPLATE, apply_proxy_env, container_truth_name, fallback_to_live_edge,
     hls_download_argv, hls_format_spec, live_capture_argv, live_remux_argv, merge_output_ext,
-    part_fallback_spec, proxy_cli_args, unified_download_argv, unified_format_spec,
+    part_fallback_spec, playlist_scope_args, proxy_cli_args, unified_download_argv,
+    unified_format_spec,
 };
 use crate::video_plan::{
     StreamSel, find_hls_format, find_usable_format, plan_streams, select_audio_original_first,
@@ -54,7 +55,7 @@ use crate::video_tools::{
     browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
     ensure_tool_versions, extract_ffmpeg_toolchain, find_in_dirs, is_youtube_url,
     parse_yt_dlp_version, quickjs_download_url, quickjs_expected_sha256, toolchain_dir_in,
-    user_lib_dir, ytdlp_identity_args, ytdlp_update_available,
+    user_lib_dir, ytdlp_identity_args, ytdlp_supports_impersonation, ytdlp_update_available,
 };
 use crate::video_types::FetchedVideo;
 use crate::video_types::codec_preference;
@@ -1367,8 +1368,11 @@ fn story_tray_json() -> serde_json::Value {
 #[test]
 fn pick_playlist_entry_finds_picked_story() {
     let value = story_tray_json();
-    let entry = pick_playlist_entry(&value, Some("s2")).expect("picked entry");
+    let (entry, index) = pick_playlist_entry(&value, Some("s2")).expect("picked entry");
     assert_eq!(entry.get("id").and_then(|id| id.as_str()), Some("s2"));
+    // The download scopes itself with `--playlist-items` (1-based), so the
+    // reported position must be the entry's real spot in the tray.
+    assert_eq!(index, 1);
     assert!(pick_playlist_entry(&value, None).is_none());
     assert!(pick_playlist_entry(&value, Some("gone")).is_none());
 }
@@ -1377,7 +1381,8 @@ fn pick_playlist_entry_finds_picked_story() {
 fn picked_story_entry_parses_as_single_video() {
     // The worker-selected entry must survive the single-video parse into the Video model.
     let value = story_tray_json();
-    let entry = pick_playlist_entry(&value, Some("s1")).expect("picked entry");
+    let (entry, index) = pick_playlist_entry(&value, Some("s1")).expect("picked entry");
+    assert_eq!(index, 0);
     let video = parse_single_video(entry).expect("video");
     assert_eq!(video.title, "Story 1");
 }
@@ -3261,7 +3266,10 @@ fn fetch_video_page_parses_dump_json() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let FetchedVideo::Single(video) = crate::runtime::tokio_rt()
+    let FetchedVideo::Single {
+        video,
+        playlist_index,
+    } = crate::runtime::tokio_rt()
         .block_on(fetch_video_page(
             &bin,
             "https://example.com/v",
@@ -3275,6 +3283,8 @@ fn fetch_video_page_parses_dump_json() {
         panic!("single-video dump must parse as Single");
     };
     assert!(video.formats.is_empty());
+    // A plain single-video dump carries no playlist position.
+    assert_eq!(playlist_index, None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3465,7 +3475,7 @@ fn live_argv_pins_planner_id_in_mpegts() {
     let job = live_test_job();
     let out = std::path::Path::new("/tmp/staging/live.mp4");
     // Planner-resolved id rides along verbatim; yt-dlp's sort never gets a second vote.
-    let argv = live_capture_argv(&job, "h1080", out);
+    let argv = live_capture_argv(&job, "h1080", out, None);
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
     assert_eq!(argv[f + 1], "h1080+ba/b");
     assert!(argv.contains(&"--hls-use-mpegts".to_string()));
@@ -3482,7 +3492,7 @@ fn live_argv_pins_planner_id_in_mpegts() {
     assert_eq!(argv[argv.len() - 1], "https://x.com/u/status/1");
     let mut pinned = live_test_job();
     pinned.video_format_id = Some("h720".into());
-    let argv = live_capture_argv(&pinned, "h720", out);
+    let argv = live_capture_argv(&pinned, "h720", out, None);
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
     assert_eq!(argv[f + 1], "h720+ba/b");
 }
@@ -3572,11 +3582,25 @@ fn live_remux_argv_stamps_the_source_url_so_the_id_survives() {
 }
 
 /// Fake yt-dlp for live: emits one progress line, writes the `.part` shell (or fails barren).
+/// Every yt-dlp fake answers the impersonation probe the way the real binary
+/// does: `--list-impersonate-targets` is recognized and exits immediately.
+/// Fakes have no curl_cffi, so the faithful answer is an empty table (exit 0,
+/// no output), which the probe reads as unsupported. Without this the probe
+/// would run the fake's main behavior — sleeps, spawned descendants, stray
+/// files — and burn its whole timeout before the test's real spawn.
+fn probe_guard(script: &str) -> String {
+    script.replacen(
+        "#!/bin/sh\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--list-impersonate-targets\" ]; then exit 0; fi\n",
+        1,
+    )
+}
+
 fn fake_ytdlp_live(dir: &std::path::Path, fail: bool) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live");
     std::fs::write(
         &bin,
-        if fail {
+        probe_guard(if fail {
             "#!/bin/sh\necho \"ERROR: [Video] 1: Got error 404\" >&2\nexit 1\n"
         } else {
             r#"#!/bin/sh
@@ -3590,7 +3614,7 @@ echo "[Grab];downloading;3;100;100;1000;5"
 printf 'tsbytes' > "$out.part"
 exit 0
 "#
-        },
+        }),
     )
     .unwrap();
     #[cfg(unix)]
@@ -3652,6 +3676,7 @@ fn live_capture_adopts_part_and_remuxes() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"tsbytes");
@@ -3696,6 +3721,7 @@ fn live_capture_empty_fails_with_detail() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert!(e.to_string().contains("404"), "yt-dlp line surfaces: {e}"),
@@ -3709,7 +3735,8 @@ fn fake_ytdlp_slow(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-slow");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -3721,6 +3748,7 @@ printf 'partial' > "$out.part"
 printf '{"downloader": {"current_fragment": {"index": 0}}}' > "$out.ytdl"
 sleep 60
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -3756,6 +3784,7 @@ fn live_capture_stale_staging_never_adopts() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(res.is_err(), "barren run must fail, got {res:?}");
     assert!(!job.dest.exists(), "stale bytes must not deliver");
@@ -3787,6 +3816,7 @@ fn live_capture_refuses_existing_dest() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -3827,6 +3857,7 @@ fn live_capture_refusal_reclaims_stale_scratch() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -3890,6 +3921,7 @@ fn live_capture_abort_adopts_partial() {
             abort_rx,
             std::time::Duration::from_secs(30),
             tx,
+            None,
         )
         .await
     });
@@ -3920,7 +3952,8 @@ fn fake_ytdlp_live_with_state(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-state");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -3932,6 +3965,7 @@ printf 'recorded' > "$out.part"
 printf '{"downloader": {"current_fragment": {"index": 7}}}' > "$out.ytdl"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -3989,6 +4023,7 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(res.is_err(), "failed remux must fail the row, got {res:?}");
     assert!(
@@ -4014,7 +4049,8 @@ fn fake_ytdlp_live_barren_with_state(dir: &std::path::Path) -> std::path::PathBu
     let bin = dir.join("fake-ytdlp-live-barren-state");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -4024,6 +4060,7 @@ done
 printf '{"downloader": {"current_fragment": {"index": 0}}}' > "$out.ytdl"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -4058,6 +4095,7 @@ fn live_capture_barren_start_sweeps_state_file() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(res.is_err(), "barren run must fail, got {res:?}");
     assert!(
@@ -4131,6 +4169,7 @@ fn live_capture_lost_rename_race_sweeps_state() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -4244,6 +4283,7 @@ fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
                 stop_rx,
                 std::time::Duration::from_secs(600),
                 tx,
+                None,
             )
             .await
         }
@@ -4398,6 +4438,7 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
                 stop_rx,
                 std::time::Duration::from_secs(60),
                 tx,
+                None,
             )
             .await
         }
@@ -4621,7 +4662,7 @@ fn fake_ytdlp_live_payload(
 ) -> std::path::PathBuf {
     write_fake(
         &dir.join(bin_name),
-        &format!(
+        &probe_guard(&format!(
             r#"#!/bin/sh
 out=""
 prev=""
@@ -4634,7 +4675,7 @@ printf '{{"downloader": {{}}}}' > "$out.ytdl"
 exit 0
 "#,
             payload = payload
-        ),
+        )),
     )
 }
 
@@ -4670,6 +4711,7 @@ fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
         abort1,
         std::time::Duration::from_secs(30),
         tx1,
+        None,
     ));
     // Must be the unexpected-rename branch: a requeue would sweep away
     // the very temp this guards.
@@ -4704,6 +4746,7 @@ fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
         abort2,
         std::time::Duration::from_secs(30),
         tx2,
+        None,
     ));
     assert!(
         matches!(second, Ok(Some(_))),
@@ -4785,6 +4828,7 @@ fn a_sweep_never_removes_another_attempts_remux() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(res.is_err(), "a barren attempt must fail the row");
     assert_eq!(
@@ -4822,6 +4866,7 @@ fn live_capture_rename_failure_keeps_completed_remux() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     // Must be the rename-failure branch: a requeue would sweep the very file this guards.
     match res {
@@ -4847,7 +4892,7 @@ fn fake_ytdlp_live_retry(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-retry");
     std::fs::write(
         &bin,
-        format!(
+        probe_guard(&format!(
             r#"#!/bin/sh
 out=""
 prev=""
@@ -4871,7 +4916,7 @@ exit 0
 "#,
             count = dir.join("retry-count").display(),
             marker = dir.join("retry-saw-stale-state").display(),
-        ),
+        )),
     )
     .unwrap();
     #[cfg(unix)]
@@ -4907,6 +4952,7 @@ fn live_capture_retry_never_inherits_stale_state() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(Some(_))),
@@ -4935,7 +4981,7 @@ fn fake_ytdlp_live_abortable(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-abortable");
     std::fs::write(
         &bin,
-        format!(
+        probe_guard(&format!(
             r#"#!/bin/sh
 out=""
 prev=""
@@ -4959,7 +5005,7 @@ exit 0
 "#,
             pidfile = dir.join("recorder-pid").display(),
             childpid = dir.join("recorder-child-pid").display(),
-        ),
+        )),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5104,6 +5150,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
                 abort_rx,
                 std::time::Duration::from_secs(600),
                 tx,
+                None,
             )
             .await;
         }
@@ -5191,7 +5238,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
 /// Fake recorder that stays blocked, so only the group kill under test can end it.
 fn fake_sleeper(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-sleeper");
-    std::fs::write(&bin, "#!/bin/sh\nsleep 600\n").unwrap();
+    std::fs::write(&bin, probe_guard("#!/bin/sh\nsleep 600\n")).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -5250,7 +5297,8 @@ fn fake_ytdlp_hls_scripted(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-scripted");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -5267,6 +5315,7 @@ printf 'hlsbytes' > "$out"
 printf '%s\n' "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5300,6 +5349,7 @@ fn hls_map_survives_estimate_wobble() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut inits = Vec::new();
@@ -5337,7 +5387,8 @@ fn fake_ytdlp_hls_upward_wobble(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-upwobble");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -5352,6 +5403,7 @@ printf 'hlsbytes' > "$out"
 printf '%s\n' "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5386,6 +5438,7 @@ fn hls_map_rebuilds_on_upward_wobble() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut inits = Vec::new();
@@ -5421,11 +5474,13 @@ fn fake_ytdlp_hls_goes_silent(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-silent");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 echo '[Grab];downloading;1000000;2000000;2000000;NA;NA'
 sleep 30
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5442,7 +5497,8 @@ fn fake_ytdlp_hls_keeps_talking(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-talking");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -5460,6 +5516,7 @@ printf 'hlsbytes' > "$out"
 printf '%s\n' "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5493,6 +5550,7 @@ fn hls_stall_watchdog_kills_silent_download() {
         abort_rx,
         std::time::Duration::from_secs(2),
         tx,
+        None,
     ));
     let err = res.expect_err("silent yt-dlp should stall out");
     assert!(
@@ -5525,6 +5583,7 @@ fn hls_stall_watchdog_spares_progressing_download() {
         abort_rx,
         std::time::Duration::from_secs(2),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -5555,6 +5614,7 @@ fn hls_stall_watchdog_spares_silent_merge() {
         abort_rx,
         std::time::Duration::from_secs(2),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -5567,7 +5627,8 @@ fn fake_ytdlp_hls_silent_merge(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-silmerge");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -5581,6 +5642,7 @@ printf 'hlsbytes' > "$out"
 printf '%s\n' "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5596,7 +5658,8 @@ fn fake_ytdlp_hls(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -5608,6 +5671,7 @@ out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
 printf 'hlsbytes' > "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5661,6 +5725,7 @@ fn vod_hls_pins_planner_variant_id() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
@@ -5727,6 +5792,7 @@ fn vod_hls_refuses_existing_dest() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -6001,7 +6067,7 @@ fn fetch_video_page_rejects_garbage_stdout() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let bin = dir.join("fake-ytdlp");
-    std::fs::write(&bin, "#!/bin/sh\necho 'not json'\nexit 0\n").unwrap();
+    std::fs::write(&bin, probe_guard("#!/bin/sh\necho 'not json'\nexit 0\n")).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -6028,11 +6094,11 @@ fn fake_argv_dump_bin(dir_name: &str, stdout: &str) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp");
     std::fs::write(
         &bin,
-        format!(
+        probe_guard(&format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}/args.txt\"\ncat \"{}/out.txt\"\n",
             dir.display(),
             dir.display(),
-        ),
+        )),
     )
     .unwrap();
     #[cfg(unix)]
@@ -6065,7 +6131,10 @@ fn fetch_video_page_resolves_without_flat_playlist() {
         })
         .to_string(),
     );
-    let FetchedVideo::Single(_video) = crate::runtime::tokio_rt()
+    let FetchedVideo::Single {
+        video: _video,
+        playlist_index: _,
+    } = crate::runtime::tokio_rt()
         .block_on(fetch_video_page(
             &bin,
             "https://example.com/v",
@@ -6381,6 +6450,7 @@ fn hls_argv_escapes_percent_in_stem() {
         "h1080",
         std::path::Path::new("/usr/bin/ffmpeg"),
         &dest,
+        None,
     );
     let o = argv.iter().position(|a| a == "-o").expect("-o");
     assert_eq!(argv[o + 1], "/tmp/dl/100%%.hls.%(ext)s");
@@ -6390,7 +6460,7 @@ fn hls_argv_escapes_percent_in_stem() {
 fn live_capture_argv_escapes_percent_in_stem() {
     let job = live_test_job();
     let out = std::path::Path::new("/tmp/staging/100%.live.mp4");
-    let argv = live_capture_argv(&job, "h720", out);
+    let argv = live_capture_argv(&job, "h720", out, None);
     let o = argv.iter().position(|a| a == "-o").expect("-o");
     assert_eq!(argv[o + 1], "/tmp/staging/100%%.live.mp4");
 }
@@ -6449,6 +6519,50 @@ fn clean_dest_parts_keeps_finished_and_foreign_files() {
 }
 
 #[test]
+fn playlist_scope_args_selects_picked_entry() {
+    // Plain rows keep `--no-playlist`; a row picked from a playlist selects
+    // its entry by 1-based position instead.
+    assert_eq!(playlist_scope_args(None), vec!["--no-playlist".to_string()]);
+    assert_eq!(
+        playlist_scope_args(Some(0)),
+        vec!["--playlist-items".to_string(), "1".to_string()]
+    );
+    assert_eq!(
+        playlist_scope_args(Some(2)),
+        vec!["--playlist-items".to_string(), "3".to_string()]
+    );
+}
+
+#[test]
+fn picked_row_download_argv_scopes_to_its_entry() {
+    // Regression: highlight rows re-resolve the tray URL, so `--no-playlist`
+    // downloaded the tray's first story for every row (N byte-identical
+    // files). The picked entry's position must scope every download argv.
+    let job = direct_test_job();
+    let out = std::path::Path::new("/tmp/staging/video.mp4");
+    let ff = std::path::Path::new("/usr/bin/ffmpeg");
+    for argv in [
+        unified_download_argv(&job, "v123+a456/bv*+ba/b", true, "mp4", ff, out, Some(2)),
+        live_capture_argv(&job, "h720", out, Some(2)),
+        hls_download_argv(&job, "h720", ff, out, Some(2)),
+    ] {
+        assert!(
+            !argv.contains(&"--no-playlist".to_string()),
+            "picked row must not pass --no-playlist: {argv:?}"
+        );
+        let p = argv
+            .iter()
+            .position(|a| a == "--playlist-items")
+            .expect("--playlist-items");
+        assert_eq!(argv[p + 1], "3", "{argv:?}");
+    }
+    // And plain rows are untouched.
+    let argv = unified_download_argv(&job, "v123+a456/bv*+ba/b", true, "mp4", ff, out, None);
+    assert!(argv.contains(&"--no-playlist".to_string()));
+    assert!(!argv.iter().any(|a| a == "--playlist-items"));
+}
+
+#[test]
 fn download_builders_use_machine_progress_and_ignore_config() {
     // Every yt-dlp spawn parses `--progress-template` lines (never human
     // prose) and ignores ambient user configs that could reshape argv.
@@ -6462,9 +6576,16 @@ fn download_builders_use_machine_progress_and_ignore_config() {
             "mp4",
             std::path::Path::new("/usr/bin/ffmpeg"),
             out,
+            None,
         ),
-        live_capture_argv(&job, "h720", out),
-        hls_download_argv(&job, "h720", std::path::Path::new("/usr/bin/ffmpeg"), out),
+        live_capture_argv(&job, "h720", out, None),
+        hls_download_argv(
+            &job,
+            "h720",
+            std::path::Path::new("/usr/bin/ffmpeg"),
+            out,
+            None,
+        ),
     ] {
         assert!(argv.contains(&"--ignore-config".to_string()), "{argv:?}");
         let t = argv
@@ -6493,7 +6614,13 @@ fn hls_argv_takes_subtitle_flags() {
     job.subtitles = Some("ar".into());
     job.embed_subs = true;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     for t in SUBTITLE_TOKENS {
         assert!(argv.iter().any(|a| a == *t), "{t} missing: {argv:?}");
     }
@@ -6518,7 +6645,7 @@ fn every_download_path_embeds_metadata() {
 
     let mut merged = direct_test_job();
     merged.quality = "1080".into();
-    let m = unified_download_argv(&merged, "a456/ba/b", true, "", ff, out);
+    let m = unified_download_argv(&merged, "a456/ba/b", true, "", ff, out, None);
     assert!(
         m.contains(&"--embed-metadata".to_string()),
         "merged path lost its tags"
@@ -6527,7 +6654,7 @@ fn every_download_path_embeds_metadata() {
     // Progressive single stream: not merging, and previously untagged.
     let mut progressive = direct_test_job();
     progressive.quality = "best".into();
-    let p = unified_download_argv(&progressive, "a456/ba/b", false, "", ff, out);
+    let p = unified_download_argv(&progressive, "a456/ba/b", false, "", ff, out, None);
     assert!(
         p.contains(&"--embed-metadata".to_string()),
         "a progressive download has no tags, so its id is lost with the filename"
@@ -6537,7 +6664,7 @@ fn every_download_path_embeds_metadata() {
     let mut audio = direct_test_job();
     audio.quality = "best".into();
     audio.audio_only = true;
-    let a = unified_download_argv(&audio, "a456/ba/b", false, "", ff, out);
+    let a = unified_download_argv(&audio, "a456/ba/b", false, "", ff, out, None);
     assert!(
         a.contains(&"--embed-metadata".to_string()),
         "an audio-only download has no tags, so its id is lost with the filename"
@@ -6548,7 +6675,13 @@ fn every_download_path_embeds_metadata() {
     let mut hls = direct_test_job();
     hls.quality = "best".into();
     hls.audio_only = true;
-    let h = hls_download_argv(&hls, "h1080", ff, std::path::Path::new("/tmp/dl/v.mkv"));
+    let h = hls_download_argv(
+        &hls,
+        "h1080",
+        ff,
+        std::path::Path::new("/tmp/dl/v.mkv"),
+        None,
+    );
     assert!(
         h.contains(&"--embed-metadata".to_string()),
         "the HLS leg never embedded metadata, so its id is lost with the filename"
@@ -6570,6 +6703,7 @@ fn unified_argv_extracts_audio_for_audio_only() {
         "",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(argv.contains(&"--extract-audio".to_string()));
     let af = argv
@@ -6590,7 +6724,13 @@ fn hls_argv_extracts_audio_for_audio_only() {
     job.audio_only = true;
     job.subtitles = Some("en".into());
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(argv.contains(&"--extract-audio".to_string()));
     let af = argv
         .iter()
@@ -6607,7 +6747,12 @@ fn live_capture_argv_never_takes_subtitles() {
     // configured, live captures must not pass subtitle flags.
     let mut job = live_test_job();
     job.subtitles = Some("en".into());
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert_no_subtitle_tokens(&argv);
 }
 
@@ -6628,6 +6773,7 @@ fn unified_argv_embeds_subs_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(
         argv.iter().any(|a| a == "--embed-subs"),
@@ -6646,7 +6792,13 @@ fn hls_argv_embeds_subs_when_enabled() {
     job.embed_subs = true;
     job.subtitles = Some("en".into());
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(
         argv.iter().any(|a| a == "--embed-subs"),
         "--embed-subs missing: {argv:?}"
@@ -6662,7 +6814,12 @@ fn live_capture_argv_never_takes_embed_subs() {
     // leg exists, so the embed flag stays off even when enabled.
     let mut job = live_test_job();
     job.embed_subs = true;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--embed-subs"));
 }
 
@@ -6679,6 +6836,7 @@ fn unified_argv_leaves_fragments_serial() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
 }
@@ -6696,6 +6854,7 @@ fn unified_argv_cuts_sponsors_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let pos = argv
         .iter()
@@ -6716,6 +6875,7 @@ fn unified_argv_cuts_sponsors_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--sponsorblock-remove"));
 }
@@ -6733,6 +6893,7 @@ fn unified_argv_marks_sponsors_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let pos = argv
         .iter()
@@ -6753,6 +6914,7 @@ fn unified_argv_marks_sponsors_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--sponsorblock-mark"));
 }
@@ -6763,7 +6925,13 @@ fn hls_argv_leaves_fragments_serial() {
     // setting is the app engine's own.
     let job = direct_test_job();
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
 }
 
@@ -6772,7 +6940,13 @@ fn hls_argv_cuts_sponsors_when_enabled() {
     let mut job = direct_test_job();
     job.sponsorblock_remove = true;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     let pos = argv
         .iter()
         .position(|a| a == "--sponsorblock-remove")
@@ -6780,7 +6954,13 @@ fn hls_argv_cuts_sponsors_when_enabled() {
     assert_eq!(argv[pos + 1], "sponsor");
     // Default off: no trace of the flag.
     job.sponsorblock_remove = false;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--sponsorblock-remove"));
 }
 
@@ -6789,7 +6969,13 @@ fn hls_argv_marks_sponsors_when_enabled() {
     let mut job = direct_test_job();
     job.sponsorblock_mark = true;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     let pos = argv
         .iter()
         .position(|a| a == "--sponsorblock-mark")
@@ -6802,7 +6988,13 @@ fn hls_argv_marks_sponsors_when_enabled() {
     );
     // Default off: no trace of the flag.
     job.sponsorblock_mark = false;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--sponsorblock-mark"));
 }
 
@@ -6811,7 +7003,13 @@ fn hls_argv_remuxes_video_when_enabled() {
     let mut job = direct_test_job();
     job.remux_video = Some("mkv".to_string());
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     let pos = argv
         .iter()
         .position(|a| a == "--remux-video")
@@ -6821,7 +7019,13 @@ fn hls_argv_remuxes_video_when_enabled() {
     assert!(pos < sep, "remux flag must precede the URL separator");
     // Default off: no trace of the flag.
     job.remux_video = None;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--remux-video"));
 }
 
@@ -6831,7 +7035,12 @@ fn live_capture_argv_never_remuxes_video() {
     // must not appear (the builder structurally ignores the field).
     let mut job = live_test_job();
     job.remux_video = Some("mkv".to_string());
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--remux-video"));
 }
 
@@ -6840,7 +7049,12 @@ fn live_capture_argv_has_no_concurrent_fragments() {
     // Every yt-dlp leg runs fragments at the serial default; live
     // edge recording never tuned it in the first place.
     let job = live_test_job();
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
 }
 
@@ -6851,7 +7065,12 @@ fn live_capture_argv_never_cuts_sponsors() {
     let mut job = live_test_job();
     job.sponsorblock_remove = true;
     job.sponsorblock_mark = true;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--sponsorblock-remove"));
     assert!(!argv.iter().any(|a| a == "--sponsorblock-mark"));
 }
@@ -6869,6 +7088,7 @@ fn unified_argv_embeds_chapters_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let pos = argv
         .iter()
@@ -6885,6 +7105,7 @@ fn unified_argv_embeds_chapters_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--embed-chapters"));
 }
@@ -6903,6 +7124,7 @@ fn unified_argv_remuxes_video_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let pos = argv
         .iter()
@@ -6920,6 +7142,7 @@ fn unified_argv_remuxes_video_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--remux-video"));
 }
@@ -6940,11 +7163,23 @@ fn hls_argv_embeds_chapters_when_enabled() {
     let mut job = direct_test_job();
     job.embed_chapters = true;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(argv.iter().any(|a| a == "--embed-chapters"));
     // Default off: no trace of the flag.
     job.embed_chapters = false;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--embed-chapters"));
 }
 
@@ -6963,6 +7198,7 @@ fn audio_only_rows_still_get_chapters() {
         "m4a",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(argv.iter().any(|a| a == "--embed-chapters"));
 }
@@ -6973,7 +7209,12 @@ fn live_capture_argv_never_embeds_chapters() {
     // exists, so even opted in this flag must not appear.
     let mut job = live_test_job();
     job.embed_chapters = true;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--embed-chapters"));
 }
 
@@ -7001,13 +7242,21 @@ fn vod_and_live_argv_never_emit_removed_tuning_flags() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let hls = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let hls = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     let live = live_capture_argv(
         &live_test_job(),
         "h720",
         std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
     );
     for argv in [&unified, &hls, &live] {
         for flag in gone {
@@ -7033,6 +7282,7 @@ fn unified_argv_ratelimit_when_set() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let pos = argv.iter().position(|a| a == "--ratelimit").expect("flag");
     assert_eq!(argv[pos + 1], "512000");
@@ -7047,6 +7297,7 @@ fn unified_argv_ratelimit_when_set() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--ratelimit"));
 }
@@ -7065,6 +7316,7 @@ fn unified_argv_mtime_when_set() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let pos = argv.iter().position(|a| a == "--mtime").expect("flag");
     let sep = argv.iter().position(|a| a == "--").expect("separator");
@@ -7078,6 +7330,7 @@ fn unified_argv_mtime_when_set() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--mtime"));
 }
@@ -7087,14 +7340,26 @@ fn hls_argv_ratelimit_when_set() {
     let mut job = direct_test_job();
     job.speed_limit = Some(2_097_152);
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     let pos = argv.iter().position(|a| a == "--ratelimit").expect("flag");
     assert_eq!(argv[pos + 1], "2097152");
     let sep = argv.iter().position(|a| a == "--").expect("separator");
     assert!(pos < sep, "ratelimit must precede the URL separator");
     // Default off: no trace of the flag.
     job.speed_limit = None;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--ratelimit"));
 }
 
@@ -7104,7 +7369,12 @@ fn live_capture_argv_never_ratelimit() {
     // even opted in the flag must not appear.
     let mut job = live_test_job();
     job.speed_limit = Some(512_000);
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--ratelimit"));
 }
 
@@ -7113,13 +7383,25 @@ fn hls_argv_mtime_when_set() {
     let mut job = direct_test_job();
     job.keep_server_date = true;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     let pos = argv.iter().position(|a| a == "--mtime").expect("flag");
     let sep = argv.iter().position(|a| a == "--").expect("separator");
     assert!(pos < sep, "mtime must precede the URL separator");
     // Default off: no trace of the flag.
     job.keep_server_date = false;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--mtime"));
 }
 
@@ -7129,7 +7411,12 @@ fn live_capture_argv_never_mtime() {
     // mtime yt-dlp set: excluded like the other VOD-only opt-ins.
     let mut job = live_test_job();
     job.keep_server_date = true;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--mtime"));
 }
 
@@ -7147,12 +7434,19 @@ fn audio_only_legs_never_pass_an_extraction_quality() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(argv.contains(&"--extract-audio".to_string()));
     assert!(argv.contains(&"--audio-format".to_string()));
     assert!(!argv.iter().any(|a| a == "--audio-quality"));
     let dest = std::path::Path::new("/tmp/dl/v.m4a");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(argv.contains(&"--extract-audio".to_string()));
     assert!(argv.contains(&"--audio-format".to_string()));
     assert!(!argv.iter().any(|a| a == "--audio-quality"));
@@ -7165,6 +7459,7 @@ fn audio_only_legs_never_pass_an_extraction_quality() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--audio-quality"));
 }
@@ -7175,7 +7470,12 @@ fn live_capture_argv_never_audio_quality() {
     // yt-dlp extraction step, so the flag must not appear.
     let mut job = live_test_job();
     job.audio_only = true;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--audio-quality"));
 }
 
@@ -7185,7 +7485,12 @@ fn live_capture_argv_live_from_start_when_enabled() {
     // instead of the live edge.
     let mut job = live_test_job();
     job.live_from_start = true;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     let pos = argv
         .iter()
         .position(|a| a == "--live-from-start")
@@ -7194,7 +7499,12 @@ fn live_capture_argv_live_from_start_when_enabled() {
     assert!(pos < sep, "flag must precede the URL separator");
     // Disabled: no trace of the flag.
     job.live_from_start = false;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--live-from-start"));
 }
 
@@ -7231,15 +7541,27 @@ fn live_from_start_stays_off_non_live_rows() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--live-from-start"));
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--live-from-start"));
     // Even the live builder refuses a misrouted non-live row.
     let mut live_job = live_test_job();
     live_job.is_live = false;
-    let argv = live_capture_argv(&live_job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &live_job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--live-from-start"));
 }
 
@@ -7355,7 +7677,7 @@ fn fake_ytdlp_probe(dir: &std::path::Path, json: &str, fail: bool) -> std::path:
         "#!/bin/sh\nfor a in \"$@\"; do\n    if [ \"$a\" = \"--dump-json\" ]; then\n        printf '%s' 'JSON'\n        exit 0\n    fi\ndone\nexit 1\n"
             .replace("JSON", &json.replace('\'', "'\"'\"'"))
     };
-    std::fs::write(&bin, script).unwrap();
+    std::fs::write(&bin, probe_guard(&script)).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -7382,8 +7704,12 @@ fn resolve_subtitle_lang_picks_preferred_when_offered() {
     );
     let job = probe_test_job(Some("fr"));
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
-    let res =
-        crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(&fake, &job, &mut abort_rx));
+    let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        &fake,
+        &job,
+        &mut abort_rx,
+        None,
+    ));
     assert_eq!(res, Ok(Some("fr".to_string())));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -7402,8 +7728,12 @@ fn resolve_subtitle_lang_falls_back_to_english() {
     );
     let job = probe_test_job(Some("de"));
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
-    let res =
-        crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(&fake, &job, &mut abort_rx));
+    let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        &fake,
+        &job,
+        &mut abort_rx,
+        None,
+    ));
     assert_eq!(res, Ok(Some("en".to_string())));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -7418,8 +7748,12 @@ fn resolve_subtitle_lang_probe_failure_drops_subtitles() {
     let fake = fake_ytdlp_probe(&dir, "", true);
     let job = probe_test_job(Some("en"));
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
-    let res =
-        crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(&fake, &job, &mut abort_rx));
+    let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        &fake,
+        &job,
+        &mut abort_rx,
+        None,
+    ));
     assert_eq!(res, Ok(None));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -7433,6 +7767,7 @@ fn resolve_subtitle_lang_no_preference_means_no_probe() {
         std::path::Path::new("/nonexistent/yt-dlp"),
         &job,
         &mut abort_rx,
+        None,
     ));
     assert_eq!(res, Ok(None));
 }
@@ -7447,6 +7782,7 @@ fn resolve_subtitle_lang_spawn_failure_drops_subtitles() {
         std::path::Path::new("/nonexistent/yt-dlp"),
         &job,
         &mut abort_rx,
+        None,
     ));
     assert_eq!(res, Ok(None));
 }
@@ -7505,7 +7841,7 @@ fn fake_ytdlp_hls_subs(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-subs");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(r#"#!/bin/sh
 out=""
 dump=""
 prev=""
@@ -7524,7 +7860,7 @@ printf 'hlsbytes' > "$media"
 side="$(printf '%s' "$stem" | sed 's/\.mp4$//').en.srt"
 printf 'subbytes' > "$(dirname "$out")/$side"
 exit 0
-"#,
+"#),
     )
     .unwrap();
     #[cfg(unix)]
@@ -7578,6 +7914,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
@@ -7614,6 +7951,7 @@ fn hls_embed_skips_sidecar_collection() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
@@ -7644,7 +7982,8 @@ fn subtitle_leg_failure_cannot_sink_media() {
     let bin = dir.join("fake-ytdlp-subfail");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 skip=""
 prev=""
@@ -7661,6 +8000,7 @@ out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
 printf 'hlsbytes' > "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -7684,6 +8024,7 @@ exit 0
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(Some(_))),
@@ -7705,7 +8046,8 @@ fn fake_ytdlp(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 dump=""
 prev=""
@@ -7728,6 +8070,7 @@ printf 'unified' > "$out"
 printf 'subtitles' > "$(dirname "$out")/$stem.en.srt"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -7743,7 +8086,9 @@ fn fake_ytdlp_fail(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-fail");
     std::fs::write(
         &bin,
-        "#!/bin/sh\necho 'ERROR: [Video] 1: Unable to download: 403 Forbidden' >&2\nexit 1\n",
+        probe_guard(
+            "#!/bin/sh\necho 'ERROR: [Video] 1: Unable to download: 403 Forbidden' >&2\nexit 1\n",
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -7759,7 +8104,8 @@ fn fake_ytdlp_live_shell_only(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-shell");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -7770,6 +8116,7 @@ printf 'tsbytes' > "$out.part"
 sleep 2
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -7805,6 +8152,7 @@ fn live_part_shell_announces_recording_and_is_swept() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"tsbytes");
@@ -7939,6 +8287,7 @@ fn unified_runner_downloads_claims_and_collects() {
         &mut abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(7))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"unified");
@@ -7997,6 +8346,7 @@ fn a_unified_leg_finishing_over_a_live_recording_leaves_it_alone() {
         &mut abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(Some(7))),
@@ -8038,6 +8388,7 @@ fn unified_runner_surfaces_failure_tail() {
         &mut abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert!(e.to_string().contains("403"), "tail surfaces: {e}"),
@@ -8055,7 +8406,7 @@ fn unified_runner_abort_stays_quiet() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let bin = dir.join("fake-ytdlp");
-    std::fs::write(&bin, "#!/bin/sh\nsleep 60\nexit 0\n").unwrap();
+    std::fs::write(&bin, probe_guard("#!/bin/sh\nsleep 60\nexit 0\n")).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -8080,6 +8431,7 @@ fn unified_runner_abort_stays_quiet() {
             &mut abort_rx,
             std::time::Duration::from_secs(30),
             tx,
+            None,
         ))
     });
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -8116,6 +8468,7 @@ fn unified_runner_refuses_existing_dest() {
         &mut abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -8135,7 +8488,8 @@ fn unified_runner_rejects_empty_output() {
     let bin = dir.join("fake-ytdlp-empty");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -8146,6 +8500,7 @@ out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
 : > "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -8171,6 +8526,7 @@ exit 0
         &mut abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert!(e.to_string().contains("empty stream"), "got {e}"),
@@ -8299,7 +8655,7 @@ fn discover_unified_output_prefers_after_move_and_excludes() {
                     .unwrap()
                     .to_string()
             )
-            .as_deref()
+            .as_deref(),
         ),
         Some(out.clone())
     );
@@ -8326,6 +8682,7 @@ fn unified_argv_takes_subtitle_flags() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     for t in SUBTITLE_TOKENS {
         assert!(argv.iter().any(|a| a == *t), "{t} missing: {argv:?}");
@@ -8345,7 +8702,8 @@ fn fake_ytdlp_two_legs(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-two-legs");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -8364,6 +8722,7 @@ echo "$out"
 printf 'twolegs' > "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -8400,6 +8759,7 @@ fn unified_runner_sums_two_leg_progress() {
         &mut abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut max_seen = 0u64;
@@ -8423,7 +8783,7 @@ fn has_fetchable_media_matrix() {
         Some(720),
         None,
         "https",
-        false
+        false,
     ),]));
     assert!(has_fetchable_media(&yes));
     // Empty extraction: plain file fallback.
@@ -8588,6 +8948,7 @@ fn a_discard_before_the_commit_delivers_nothing() {
         stop_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(None)),
@@ -8629,6 +8990,7 @@ fn a_commit_before_the_discard_delivers_and_is_recorded() {
         stop_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(Some(_))),
@@ -8667,6 +9029,7 @@ fn a_unified_leg_honours_a_discard_before_its_commit() {
         &mut stop_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(None)),
@@ -8702,6 +9065,7 @@ fn an_hls_leg_honours_a_discard_before_its_commit() {
         stop_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(None)),
@@ -8741,6 +9105,7 @@ fn a_closed_stop_receiver_stops_delivery_rather_than_authorising_it() {
         stop_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(None)),
@@ -8801,5 +9166,97 @@ fn a_group_that_refuses_to_quiesce_is_reported_rather_than_assumed() {
         libc::killpg(pgid, libc::SIGKILL);
     }
     let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── impersonation probe ──────────────────────────────────────────────
+
+/// Fake yt-dlp answering `--list-impersonate-targets` with `table` (exit 0
+/// for the probe, 1 otherwise); `None` makes every invocation fail.
+fn fake_ytdlp_impersonate(dir: &std::path::Path, table: Option<&str>) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-impersonate");
+    let script = match table {
+        Some(t) => "#!/bin/sh\nif [ \"$1\" = \"--list-impersonate-targets\" ]; then\nprintf '%s' 'TABLE'\nexit 0\nfi\nexit 1\n"
+            .replace("TABLE", &t.replace('\'', "'\"'\"'")),
+        None => "#!/bin/sh\nexit 1\n".to_string(),
+    };
+    std::fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+fn impersonate_test_dir(name: &str) -> std::path::PathBuf {
+    // The probe cache is process-global and keyed by binary path: every test
+    // needs its own dir or a sibling test's cached answer leaks in.
+    let dir = std::env::temp_dir().join(format!("grab-imp-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn impersonation_probe_true_when_chrome_available() {
+    let dir = impersonate_test_dir("avail");
+    let bin = fake_ytdlp_impersonate(
+        &dir,
+        Some(
+            "[info] Available impersonate targets\nClient      OS       Source\nChrome-131  macOS-14   curl_cffi\n",
+        ),
+    );
+    assert!(ytdlp_supports_impersonation(&bin));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn impersonation_probe_false_when_all_unavailable() {
+    let dir = impersonate_test_dir("unavail");
+    let bin = fake_ytdlp_impersonate(
+        &dir,
+        Some(
+            "[info] Available impersonate targets\nClient  OS  Source\nChrome  -   curl_cffi (unavailable)\n",
+        ),
+    );
+    assert!(!ytdlp_supports_impersonation(&bin));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn impersonation_probe_false_on_probe_failure() {
+    let dir = impersonate_test_dir("fail");
+    let bin = fake_ytdlp_impersonate(&dir, None);
+    assert!(!ytdlp_supports_impersonation(&bin));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ytdlp_command_prepends_impersonate_when_supported() {
+    let dir = impersonate_test_dir("cmd-on");
+    let bin = fake_ytdlp_impersonate(
+        &dir,
+        Some("[info] Available impersonate targets\nClient  OS  Source\nChrome  -  curl_cffi\n"),
+    );
+    let args: Vec<String> = ytdlp_command(&bin)
+        .as_std()
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(args[..2], ["--impersonate", "chrome"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ytdlp_command_skips_impersonate_when_unsupported() {
+    let dir = impersonate_test_dir("cmd-off");
+    let bin = fake_ytdlp_impersonate(&dir, None);
+    let args: Vec<String> = ytdlp_command(&bin)
+        .as_std()
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert!(!args.iter().any(|a| a == "--impersonate"));
     let _ = std::fs::remove_dir_all(&dir);
 }

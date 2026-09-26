@@ -3,7 +3,9 @@
 //! `video` facade.
 
 use gettextrs::gettext;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
 use yt_dlp::client::deps::{Libraries, LibraryInstaller};
 use yt_dlp::model::DrmStatus;
@@ -257,6 +259,95 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
     let youtube = find_in_dirs("yt-dlp", &dirs).ok_or_else(VideoError::missing_tools)?;
     let ffmpeg = find_in_dirs("ffmpeg", &dirs).ok_or_else(VideoError::missing_tools)?;
     Ok(Libraries::new(youtube, ffmpeg))
+}
+
+/// Cached `--impersonate` support per yt-dlp binary path.
+static IMPERSONATE_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+
+/// Whether `youtube_bin` supports `--impersonate` (curl_cffi present).
+/// Passing the flag to a binary without the dependency hard-fails every
+/// spawn ("Impersonate target ... is not available"), so probe once per
+/// binary path and cache the answer: a PATH-provided yt-dlp may lack it.
+pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
+    let cache = IMPERSONATE_SUPPORT.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock()
+        && let Some(&hit) = guard.get(youtube_bin)
+    {
+        return hit;
+    }
+    let supported = probe_impersonate_support(youtube_bin);
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(youtube_bin.to_path_buf(), supported);
+    }
+    supported
+}
+
+/// One-shot `--list-impersonate-targets` probe: a `Chrome` row without an
+/// "(unavailable)" marker means curl_cffi can impersonate. Any spawn failure,
+/// non-zero exit, or timeout resolves to `false` — a wedged binary must not
+/// hang the spawn that is being prepared, and must not leave children behind.
+fn probe_impersonate_support(youtube_bin: &Path) -> bool {
+    use std::io::Read as _;
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt as _;
+    let mut cmd = std::process::Command::new(youtube_bin);
+    cmd.arg("--list-impersonate-targets")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let exited_cleanly = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    kill_probe(&mut child);
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => {
+                kill_probe(&mut child);
+                return false;
+            }
+        }
+    };
+    if !exited_cleanly {
+        return false;
+    }
+    let mut out = String::new();
+    let read_ok = child
+        .stdout
+        .take()
+        .is_some_and(|mut pipe| pipe.read_to_string(&mut out).is_ok());
+    read_ok
+        && out.lines().any(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("chrome") && !line.contains("unavailable")
+        })
+}
+
+/// Best-effort kill of a wedged probe: the whole process group, so a binary
+/// that ignores its flags takes its children down with it. Always reaps.
+fn kill_probe(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        // try_wait just reported it still running, so the group is ours.
+        // SAFETY: constant signal number; ESRCH (raced exit) is harmless.
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Install just yt-dlp into the user library dir. Split from ffmpeg so the UI

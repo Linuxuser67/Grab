@@ -140,14 +140,20 @@ pub(crate) async fn fetch_video_page(
     .await?;
     if let Some(playlist) = parse_playlist_json(&value, url) {
         if playlist_item_id.is_some() {
-            if let Some(entry) = pick_playlist_entry(&value, playlist_item_id) {
-                return parse_single_video(entry).map(|v| FetchedVideo::Single(Box::new(v)));
+            if let Some((entry, playlist_index)) = pick_playlist_entry(&value, playlist_item_id) {
+                return parse_single_video(entry).map(|v| FetchedVideo::Single {
+                    video: Box::new(v),
+                    playlist_index: Some(playlist_index),
+                });
             }
             return Err(playlist_resolve_error(playlist_item_id));
         }
         return Ok(FetchedVideo::Playlist(playlist));
     }
-    parse_single_video(value).map(|v| FetchedVideo::Single(Box::new(v)))
+    parse_single_video(value).map(|v| FetchedVideo::Single {
+        video: Box::new(v),
+        playlist_index: None,
+    })
 }
 
 /// Extract metadata for one URL (the page URL is what survives restarts, not the media URLs).
@@ -209,6 +215,13 @@ pub async fn fetch_video_infos(
 /// `qjs`; a system `qjs` elsewhere on PATH still works when Grab never installed one.
 pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(youtube_bin);
+    // Impersonate a real browser's TLS fingerprint where the binary supports
+    // it (curl_cffi): some sites cut plain-HTTP-client streams off mid-flight.
+    // Probed once per binary and cached — a PATH-provided yt-dlp without the
+    // dependency hard-fails on the flag, so never pass it blindly.
+    if crate::video_tools::ytdlp_supports_impersonation(youtube_bin) {
+        cmd.arg("--impersonate").arg("chrome");
+    }
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

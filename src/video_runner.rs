@@ -5,8 +5,8 @@ use crate::attempt_gate::AttemptGate;
 use crate::file_names::is_url_derived_name;
 use crate::video_argv::{
     VideoJob, apply_proxy_env, container_truth_name, fallback_to_live_edge, hls_download_argv,
-    live_capture_argv, live_remux_argv, merge_output_ext, proxy_cli_args, unified_download_argv,
-    unified_format_spec, unified_output_template, write_manifest,
+    live_capture_argv, live_remux_argv, merge_output_ext, playlist_scope_args, proxy_cli_args,
+    unified_download_argv, unified_format_spec, unified_output_template, write_manifest,
 };
 use crate::video_plan::{StreamPlan, plan_streams};
 use crate::video_probe::page_host;
@@ -93,6 +93,7 @@ pub async fn run_video_download(
         gettext("Resolving media…")
     });
     let mut video: Option<Video> = None;
+    let mut playlist_index: Option<usize> = None;
     for attempt in 0u32..3 {
         match fetch_video_page(
             &youtube_bin,
@@ -104,8 +105,12 @@ pub async fn run_video_download(
         )
         .await
         {
-            Ok(FetchedVideo::Single(v)) => {
+            Ok(FetchedVideo::Single {
+                video: v,
+                playlist_index: index,
+            }) => {
                 video = Some(*v);
+                playlist_index = index;
                 break;
             }
             // No picked entry: the spawner expands the collection into per-item rows instead of failing it.
@@ -186,6 +191,7 @@ pub async fn run_video_download(
                 abort,
                 timeout,
                 tx,
+                playlist_index,
             )
             .await
             .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
@@ -200,6 +206,7 @@ pub async fn run_video_download(
             abort,
             timeout,
             tx,
+            playlist_index,
         )
         .await
         .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
@@ -307,6 +314,7 @@ pub async fn run_video_download(
         &mut abort,
         timeout,
         tx,
+        playlist_index,
     )
     .await
     .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished))
@@ -327,6 +335,7 @@ pub(crate) async fn run_unified_ytdlp(
     abort: &mut oneshot::Receiver<StopIntent>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
+    playlist_index: Option<usize>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
     // Split rows merge; adopted singles download one file, nothing to merge.
@@ -337,11 +346,19 @@ pub(crate) async fn run_unified_ytdlp(
     // (preferred, else English, else none) before the media argv is built.
     // An abort here stops the download; a probe failure just drops subtitles.
     let mut job = job.clone();
-    job.subtitles = match resolve_subtitle_lang(youtube_bin, &job, abort).await {
+    job.subtitles = match resolve_subtitle_lang(youtube_bin, &job, abort, playlist_index).await {
         Ok(lang) => lang,
         Err(()) => return Ok(None),
     };
-    let argv = unified_download_argv(&job, spec, merging, &merge_ext, ffmpeg_bin, &out_template);
+    let argv = unified_download_argv(
+        &job,
+        spec,
+        merging,
+        &merge_ext,
+        ffmpeg_bin,
+        &out_template,
+        playlist_index,
+    );
     // Single-counter progress with the pump's granularity gate; `done` is capped against the metadata total so the bar never passes 100%.
     let sent = Arc::new(AtomicU64::new(0));
     let report = {
@@ -774,17 +791,17 @@ pub(crate) async fn resolve_subtitle_lang(
     youtube_bin: &Path,
     job: &VideoJob,
     abort: &mut oneshot::Receiver<StopIntent>,
+    playlist_index: Option<usize>,
 ) -> Result<Option<String>, ()> {
     let pref = match job.subtitles.as_deref() {
         Some(p) => p.to_ascii_lowercase(),
         None => return Ok(None),
     };
-    let mut argv = vec![
-        "--ignore-config".to_string(),
-        "--no-playlist".to_string(),
-        "--skip-download".to_string(),
-        "--dump-json".to_string(),
-    ];
+    let mut argv = vec!["--ignore-config".to_string()];
+    // A picked row probes the collection URL: scope to its entry, or the
+    // subtitles come from the tray's first entry while the media is another.
+    argv.extend(playlist_scope_args(playlist_index));
+    argv.extend(["--skip-download".to_string(), "--dump-json".to_string()]);
     argv.extend(proxy_cli_args(job.proxy.as_ref()));
     argv.extend(ytdlp_identity_args(
         &job.cookies_browser,
@@ -856,6 +873,7 @@ pub(crate) async fn run_live_ytdlp(
     mut abort: oneshot::Receiver<StopIntent>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
+    playlist_index: Option<usize>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
     use tokio::io::AsyncBufReadExt as _;
@@ -886,7 +904,12 @@ pub(crate) async fn run_live_ytdlp(
         let _ = tokio::fs::remove_file(&part).await;
         let _ = tokio::fs::remove_file(&state).await;
         let mut cmd = ytdlp_command(youtube_bin);
-        cmd.args(live_capture_argv(attempt, hls_format_id, &out));
+        cmd.args(live_capture_argv(
+            attempt,
+            hls_format_id,
+            &out,
+            playlist_index,
+        ));
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
         let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
         // Without this guard a shutdown orphans the recorder (and the ffmpeg it may have started) still writing to the capture.
@@ -1194,6 +1217,7 @@ pub(crate) async fn run_hls_ytdlp(
     mut abort: oneshot::Receiver<StopIntent>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
+    playlist_index: Option<usize>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
     use tokio::io::AsyncBufReadExt as _;
@@ -1208,7 +1232,8 @@ pub(crate) async fn run_hls_ytdlp(
     // (preferred, else English, else none) before the media argv is built.
     // An abort here stops the download; a probe failure just drops subtitles.
     let mut job = job.clone();
-    job.subtitles = match resolve_subtitle_lang(youtube_bin, &job, &mut abort).await {
+    job.subtitles = match resolve_subtitle_lang(youtube_bin, &job, &mut abort, playlist_index).await
+    {
         Ok(lang) => lang,
         Err(()) => return Ok(None),
     };
@@ -1218,6 +1243,7 @@ pub(crate) async fn run_hls_ytdlp(
         hls_format_id,
         ffmpeg_bin,
         &job.dest,
+        playlist_index,
     ));
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;

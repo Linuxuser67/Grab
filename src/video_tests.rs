@@ -55,7 +55,7 @@ use crate::video_tools::{
     browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
     ensure_tool_versions, extract_ffmpeg_toolchain, find_in_dirs, is_youtube_url,
     parse_yt_dlp_version, quickjs_download_url, quickjs_expected_sha256, toolchain_dir_in,
-    user_lib_dir, ytdlp_identity_args, ytdlp_update_available,
+    user_lib_dir, ytdlp_identity_args, ytdlp_supports_impersonation, ytdlp_update_available,
 };
 use crate::video_types::FetchedVideo;
 use crate::video_types::codec_preference;
@@ -9122,5 +9122,99 @@ fn a_group_that_refuses_to_quiesce_is_reported_rather_than_assumed() {
         libc::killpg(pgid, libc::SIGKILL);
     }
     let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── impersonation probe ──────────────────────────────────────────────
+
+/// Fake yt-dlp answering `--list-impersonate-targets` with `table` (exit 0
+/// for the probe, 1 otherwise); `None` makes every invocation fail.
+fn fake_ytdlp_impersonate(dir: &std::path::Path, table: Option<&str>) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-impersonate");
+    let script = match table {
+        Some(t) => format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--list-impersonate-targets\" ]; then\nprintf '%s' 'TABLE'\nexit 0\nfi\nexit 1\n"
+        )
+        .replace("TABLE", &t.replace('\'', "'\"'\"'")),
+        None => "#!/bin/sh\nexit 1\n".to_string(),
+    };
+    std::fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+fn impersonate_test_dir(name: &str) -> std::path::PathBuf {
+    // The probe cache is process-global and keyed by binary path: every test
+    // needs its own dir or a sibling test's cached answer leaks in.
+    let dir = std::env::temp_dir().join(format!("grab-imp-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn impersonation_probe_true_when_chrome_available() {
+    let dir = impersonate_test_dir("avail");
+    let bin = fake_ytdlp_impersonate(
+        &dir,
+        Some(
+            "[info] Available impersonate targets\nClient      OS       Source\nChrome-131  macOS-14   curl_cffi\n",
+        ),
+    );
+    assert!(ytdlp_supports_impersonation(&bin));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn impersonation_probe_false_when_all_unavailable() {
+    let dir = impersonate_test_dir("unavail");
+    let bin = fake_ytdlp_impersonate(
+        &dir,
+        Some(
+            "[info] Available impersonate targets\nClient  OS  Source\nChrome  -   curl_cffi (unavailable)\n",
+        ),
+    );
+    assert!(!ytdlp_supports_impersonation(&bin));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn impersonation_probe_false_on_probe_failure() {
+    let dir = impersonate_test_dir("fail");
+    let bin = fake_ytdlp_impersonate(&dir, None);
+    assert!(!ytdlp_supports_impersonation(&bin));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ytdlp_command_prepends_impersonate_when_supported() {
+    let dir = impersonate_test_dir("cmd-on");
+    let bin = fake_ytdlp_impersonate(
+        &dir,
+        Some("[info] Available impersonate targets\nClient  OS  Source\nChrome  -  curl_cffi\n"),
+    );
+    let args: Vec<String> = ytdlp_command(&bin)
+        .as_std()
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(args[..2], ["--impersonate", "chrome"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ytdlp_command_skips_impersonate_when_unsupported() {
+    let dir = impersonate_test_dir("cmd-off");
+    let bin = fake_ytdlp_impersonate(&dir, None);
+    let args: Vec<String> = ytdlp_command(&bin)
+        .as_std()
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert!(!args.iter().any(|a| a == "--impersonate"));
     let _ = std::fs::remove_dir_all(&dir);
 }

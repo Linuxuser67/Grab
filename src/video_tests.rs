@@ -3662,6 +3662,7 @@ fn live_capture_adopts_part_and_remuxes() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"tsbytes");
@@ -3706,6 +3707,7 @@ fn live_capture_empty_fails_with_detail() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert!(e.to_string().contains("404"), "yt-dlp line surfaces: {e}"),
@@ -3766,6 +3768,7 @@ fn live_capture_stale_staging_never_adopts() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(res.is_err(), "barren run must fail, got {res:?}");
     assert!(!job.dest.exists(), "stale bytes must not deliver");
@@ -3797,6 +3800,7 @@ fn live_capture_refuses_existing_dest() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -3837,6 +3841,7 @@ fn live_capture_refusal_reclaims_stale_scratch() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -3900,6 +3905,7 @@ fn live_capture_abort_adopts_partial() {
             abort_rx,
             std::time::Duration::from_secs(30),
             tx,
+            None,
         )
         .await
     });
@@ -3999,6 +4005,7 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(res.is_err(), "failed remux must fail the row, got {res:?}");
     assert!(
@@ -4068,6 +4075,7 @@ fn live_capture_barren_start_sweeps_state_file() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(res.is_err(), "barren run must fail, got {res:?}");
     assert!(
@@ -4141,6 +4149,7 @@ fn live_capture_lost_rename_race_sweeps_state() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -4254,6 +4263,7 @@ fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
                 stop_rx,
                 std::time::Duration::from_secs(600),
                 tx,
+                None,
             )
             .await
         }
@@ -4408,6 +4418,7 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
                 stop_rx,
                 std::time::Duration::from_secs(60),
                 tx,
+                None,
             )
             .await
         }
@@ -4680,6 +4691,7 @@ fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
         abort1,
         std::time::Duration::from_secs(30),
         tx1,
+        None,
     ));
     // Must be the unexpected-rename branch: a requeue would sweep away
     // the very temp this guards.
@@ -4714,6 +4726,7 @@ fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
         abort2,
         std::time::Duration::from_secs(30),
         tx2,
+        None,
     ));
     assert!(
         matches!(second, Ok(Some(_))),
@@ -4795,6 +4808,7 @@ fn a_sweep_never_removes_another_attempts_remux() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(res.is_err(), "a barren attempt must fail the row");
     assert_eq!(
@@ -4832,6 +4846,7 @@ fn live_capture_rename_failure_keeps_completed_remux() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     // Must be the rename-failure branch: a requeue would sweep the very file this guards.
     match res {
@@ -4917,6 +4932,7 @@ fn live_capture_retry_never_inherits_stale_state() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(Some(_))),
@@ -5114,6 +5130,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
                 abort_rx,
                 std::time::Duration::from_secs(600),
                 tx,
+                None,
             )
             .await;
         }
@@ -5310,6 +5327,7 @@ fn hls_map_survives_estimate_wobble() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut inits = Vec::new();
@@ -5396,6 +5414,7 @@ fn hls_map_rebuilds_on_upward_wobble() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut inits = Vec::new();
@@ -5503,6 +5522,7 @@ fn hls_stall_watchdog_kills_silent_download() {
         abort_rx,
         std::time::Duration::from_secs(2),
         tx,
+        None,
     ));
     let err = res.expect_err("silent yt-dlp should stall out");
     assert!(
@@ -5535,6 +5555,7 @@ fn hls_stall_watchdog_spares_progressing_download() {
         abort_rx,
         std::time::Duration::from_secs(2),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -5565,6 +5586,7 @@ fn hls_stall_watchdog_spares_silent_merge() {
         abort_rx,
         std::time::Duration::from_secs(2),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -5671,6 +5693,7 @@ fn vod_hls_pins_planner_variant_id() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
@@ -5737,6 +5760,7 @@ fn vod_hls_refuses_existing_dest() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -7200,6 +7224,7 @@ fn vod_and_live_argv_never_emit_removed_tuning_flags() {
         &live_test_job(),
         "h720",
         std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
     );
     for argv in [&unified, &hls, &live] {
         for flag in gone {
@@ -7499,7 +7524,12 @@ fn live_from_start_stays_off_non_live_rows() {
     // Even the live builder refuses a misrouted non-live row.
     let mut live_job = live_test_job();
     live_job.is_live = false;
-    let argv = live_capture_argv(&live_job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &live_job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--live-from-start"));
 }
 
@@ -7642,8 +7672,12 @@ fn resolve_subtitle_lang_picks_preferred_when_offered() {
     );
     let job = probe_test_job(Some("fr"));
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
-    let res =
-        crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(&fake, &job, &mut abort_rx));
+    let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        &fake,
+        &job,
+        &mut abort_rx,
+        None,
+    ));
     assert_eq!(res, Ok(Some("fr".to_string())));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -7662,8 +7696,12 @@ fn resolve_subtitle_lang_falls_back_to_english() {
     );
     let job = probe_test_job(Some("de"));
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
-    let res =
-        crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(&fake, &job, &mut abort_rx));
+    let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        &fake,
+        &job,
+        &mut abort_rx,
+        None,
+    ));
     assert_eq!(res, Ok(Some("en".to_string())));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -7678,8 +7716,12 @@ fn resolve_subtitle_lang_probe_failure_drops_subtitles() {
     let fake = fake_ytdlp_probe(&dir, "", true);
     let job = probe_test_job(Some("en"));
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
-    let res =
-        crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(&fake, &job, &mut abort_rx));
+    let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        &fake,
+        &job,
+        &mut abort_rx,
+        None,
+    ));
     assert_eq!(res, Ok(None));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -7693,6 +7735,7 @@ fn resolve_subtitle_lang_no_preference_means_no_probe() {
         std::path::Path::new("/nonexistent/yt-dlp"),
         &job,
         &mut abort_rx,
+        None,
     ));
     assert_eq!(res, Ok(None));
 }
@@ -7707,6 +7750,7 @@ fn resolve_subtitle_lang_spawn_failure_drops_subtitles() {
         std::path::Path::new("/nonexistent/yt-dlp"),
         &job,
         &mut abort_rx,
+        None,
     ));
     assert_eq!(res, Ok(None));
 }
@@ -7838,6 +7882,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
@@ -7874,6 +7919,7 @@ fn hls_embed_skips_sidecar_collection() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
@@ -7944,6 +7990,7 @@ exit 0
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(Some(_))),
@@ -8065,6 +8112,7 @@ fn live_part_shell_announces_recording_and_is_swept() {
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"tsbytes");
@@ -8199,6 +8247,7 @@ fn unified_runner_downloads_claims_and_collects() {
         &mut abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(7))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"unified");
@@ -8257,6 +8306,7 @@ fn a_unified_leg_finishing_over_a_live_recording_leaves_it_alone() {
         &mut abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(Some(7))),
@@ -8298,6 +8348,7 @@ fn unified_runner_surfaces_failure_tail() {
         &mut abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert!(e.to_string().contains("403"), "tail surfaces: {e}"),
@@ -8340,6 +8391,7 @@ fn unified_runner_abort_stays_quiet() {
             &mut abort_rx,
             std::time::Duration::from_secs(30),
             tx,
+            None,
         ))
     });
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -8376,6 +8428,7 @@ fn unified_runner_refuses_existing_dest() {
         &mut abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -8431,6 +8484,7 @@ exit 0
         &mut abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     match res {
         Err(e) => assert!(e.to_string().contains("empty stream"), "got {e}"),
@@ -8560,7 +8614,6 @@ fn discover_unified_output_prefers_after_move_and_excludes() {
                     .to_string()
             )
             .as_deref(),
-            None,
         ),
         Some(out.clone())
     );
@@ -8662,6 +8715,7 @@ fn unified_runner_sums_two_leg_progress() {
         &mut abort_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut max_seen = 0u64;
@@ -8686,7 +8740,6 @@ fn has_fetchable_media_matrix() {
         None,
         "https",
         false,
-        None,
     ),]));
     assert!(has_fetchable_media(&yes));
     // Empty extraction: plain file fallback.
@@ -8851,6 +8904,7 @@ fn a_discard_before_the_commit_delivers_nothing() {
         stop_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(None)),
@@ -8892,6 +8946,7 @@ fn a_commit_before_the_discard_delivers_and_is_recorded() {
         stop_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(Some(_))),
@@ -8930,6 +8985,7 @@ fn a_unified_leg_honours_a_discard_before_its_commit() {
         &mut stop_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(None)),
@@ -8965,6 +9021,7 @@ fn an_hls_leg_honours_a_discard_before_its_commit() {
         stop_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(None)),
@@ -9004,6 +9061,7 @@ fn a_closed_stop_receiver_stops_delivery_rather_than_authorising_it() {
         stop_rx,
         std::time::Duration::from_secs(30),
         tx,
+        None,
     ));
     assert!(
         matches!(res, Ok(None)),

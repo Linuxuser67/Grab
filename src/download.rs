@@ -763,8 +763,9 @@ impl DownloadManager {
         } else {
             gettext("Finished")
         });
-        // Restored duplicates collapse too: the last Done row per URL wins.
-        self.drop_finished_duplicates(&url, item.id());
+        // Restored rows keep their place: every finished download stays visible,
+        // matching Parabolic's main list (its one-record-per-URL rule lives in
+        // the separate History view, which Grab does not have).
         self.insert(item);
     }
 
@@ -1080,8 +1081,7 @@ impl DownloadManager {
                             } else {
                                 gettext("Finished")
                             });
-                            // One finished record per URL (Parabolic parity): re-downloads replace instead of stacking.
-                            this.drop_finished_duplicates(&url, id);
+                            // Finished rows stay: re-downloads stack as their own rows (Parabolic parity).
                             this.segment_state.borrow_mut().remove(&id);
                             this.torrent_pieces.borrow_mut().remove(&id);
                             // Filtered torrents: drop untoggled files now that every selected byte is on disk. Skipped while seeding (serving still reads those spans).
@@ -1136,8 +1136,7 @@ impl DownloadManager {
                             item.set_progress(1.0);
                             this.pending_names.borrow_mut().remove(&id);
                             this.server_mtime.borrow_mut().remove(&id);
-                            // Like Finished: an older Done carrier for the URL leaves so re-expansions replace instead of stacking.
-                            this.drop_finished_duplicates(&url, id);
+                            // Expansion carriers stay too: re-expansions stack like re-downloads.
                         }
                         done = true;
                         break;
@@ -2029,25 +2028,6 @@ impl DownloadManager {
                 video_source: self.video_source(it.id()),
             })
             .collect()
-    }
-
-    /// Drop finished rows for `url` other than `keep_id`: one finished record per URL (Parabolic parity). Store-only; callers persist.
-    pub(crate) fn drop_finished_duplicates(&self, url: &str, keep_id: u64) {
-        let Ok(key) = normalize_url(url) else {
-            return;
-        };
-        let ids: Vec<u64> = self
-            .items()
-            .filter(|it| {
-                it.status() == DownloadStatus::Done
-                    && it.id() != keep_id
-                    && normalize_url(&it.url()).is_ok_and(|u| u == key)
-            })
-            .map(|it| it.id())
-            .collect();
-        for id in ids {
-            self.drop_finished_row(id);
-        }
     }
 
     /// Drop one finished row: files stay on disk. Unlike `remove` there is nothing to cancel, snapshot or clean.

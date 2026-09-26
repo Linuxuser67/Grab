@@ -256,7 +256,10 @@ pub(crate) struct StreamSel {
     #[allow(dead_code)]
     pub(crate) url: String,
     pub(crate) size: Option<u64>,
-    /// Whether the stream carries an audio track (muxed files do).
+    /// Whether the stream may carry an audio track: true unless the
+    /// extractor explicitly marks it audio-less (`acodec: none`). Sparse
+    /// extractors (Instagram stories) omit `acodec` on muxed direct files,
+    /// so absent means adoptable — matching yt-dlp's single-file `best`.
     pub(crate) has_audio: bool,
 }
 
@@ -281,11 +284,17 @@ impl StreamSel {
                 .clone()
                 .ok_or_else(VideoError::unavailable)?,
             size: filesize_of(f),
+            // Absent acodec is "unknown", not "none": sparse extractors
+            // (Instagram stories) only set `acodec: none` when the media is
+            // truly audio-less, and omit it on muxed direct files. Treating
+            // unknown as adoptable keeps those single-file downloads alive;
+            // an explicit `none` still fails cleanly when no audio split
+            // exists.
             has_audio: f
                 .codec_info
                 .audio_codec
                 .as_deref()
-                .is_some_and(|c| c != "none"),
+                .is_none_or(|c| c != "none"),
         })
     }
 }

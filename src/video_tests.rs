@@ -2902,6 +2902,48 @@ fn plan_adopts_unknown_video_despite_separate_audio() {
     assert!(plan.hls_sel.is_none());
 }
 
+/// Instagram story shape: direct mp4s carry `vcodec` but no `acodec`
+/// (the extractor only writes `acodec: none` when the media is truly
+/// audio-less); some entries lack even `vcodec`. All are muxed single
+/// files, so the plan must adopt the tallest in-cap one instead of
+/// failing on the missing audio split.
+fn instagram_story_like_video() -> yt_dlp::model::Video {
+    let sparse = |id: &str, height: u32, vcodec: Option<&str>| {
+        let mut v = serde_json::json!({
+            "format": id,
+            "format_id": id,
+            "protocol": "https",
+            "ext": "mp4",
+            "url": format!("https://cdn.example/{id}.mp4"),
+            "height": height,
+            "http_headers": {},
+        });
+        if let Some(c) = vcodec {
+            v["vcodec"] = serde_json::json!(c);
+        }
+        v
+    };
+    test_video(serde_json::json!([
+        sparse("s1080", 1080, Some("h264")),
+        sparse("s720", 720, Some("h264")),
+        sparse("s480a", 480, None),
+        sparse("s480b", 480, None),
+        sparse("s360", 360, None),
+    ]))
+}
+
+#[test]
+fn plan_adopts_story_mp4_with_absent_acodec() {
+    // The highlight bug: the story's direct mp4s were classified
+    // video-only for the missing acodec, so the muxed adoption skipped
+    // them and the row failed with "No suitable formats found".
+    let video = instagram_story_like_video();
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
+    assert!(plan.video_sel.is_none());
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "s1080");
+    assert!(plan.hls_sel.is_none());
+}
+
 #[test]
 fn plan_pinned_hls_wins_over_muxed_adoption() {
     // The x.com shadowing bug: the pin was dropped by the HTTPS-only

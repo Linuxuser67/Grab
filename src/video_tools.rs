@@ -337,7 +337,8 @@ fn probe_impersonate_support(youtube_bin: &Path) -> bool {
 /// that ignores its flags takes its children down with it. Always reaps.
 fn kill_probe(child: &mut std::process::Child) {
     #[cfg(unix)]
-    if let Some(pid) = child.id() {
+    {
+        let pid = child.id();
         // try_wait just reported it still running, so the group is ours.
         // SAFETY: constant signal number; ESRCH (raced exit) is harmless.
         unsafe {

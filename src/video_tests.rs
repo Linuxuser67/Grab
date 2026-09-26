@@ -8,7 +8,8 @@ use crate::media_types::{
 use crate::video_argv::{
     YTDLP_PROGRESS_TEMPLATE, apply_proxy_env, container_truth_name, fallback_to_live_edge,
     hls_download_argv, hls_format_spec, live_capture_argv, live_remux_argv, merge_output_ext,
-    part_fallback_spec, proxy_cli_args, unified_download_argv, unified_format_spec,
+    part_fallback_spec, playlist_scope_args, proxy_cli_args, unified_download_argv,
+    unified_format_spec,
 };
 use crate::video_plan::{
     StreamSel, find_hls_format, find_usable_format, plan_streams, select_audio_original_first,
@@ -1367,8 +1368,11 @@ fn story_tray_json() -> serde_json::Value {
 #[test]
 fn pick_playlist_entry_finds_picked_story() {
     let value = story_tray_json();
-    let entry = pick_playlist_entry(&value, Some("s2")).expect("picked entry");
+    let (entry, index) = pick_playlist_entry(&value, Some("s2")).expect("picked entry");
     assert_eq!(entry.get("id").and_then(|id| id.as_str()), Some("s2"));
+    // The download scopes itself with `--playlist-items` (1-based), so the
+    // reported position must be the entry's real spot in the tray.
+    assert_eq!(index, 1);
     assert!(pick_playlist_entry(&value, None).is_none());
     assert!(pick_playlist_entry(&value, Some("gone")).is_none());
 }
@@ -1377,7 +1381,8 @@ fn pick_playlist_entry_finds_picked_story() {
 fn picked_story_entry_parses_as_single_video() {
     // The worker-selected entry must survive the single-video parse into the Video model.
     let value = story_tray_json();
-    let entry = pick_playlist_entry(&value, Some("s1")).expect("picked entry");
+    let (entry, index) = pick_playlist_entry(&value, Some("s1")).expect("picked entry");
+    assert_eq!(index, 0);
     let video = parse_single_video(entry).expect("video");
     assert_eq!(video.title, "Story 1");
 }
@@ -3261,7 +3266,10 @@ fn fetch_video_page_parses_dump_json() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let FetchedVideo::Single(video) = crate::runtime::tokio_rt()
+    let FetchedVideo::Single {
+        video,
+        playlist_index,
+    } = crate::runtime::tokio_rt()
         .block_on(fetch_video_page(
             &bin,
             "https://example.com/v",
@@ -3275,6 +3283,8 @@ fn fetch_video_page_parses_dump_json() {
         panic!("single-video dump must parse as Single");
     };
     assert!(video.formats.is_empty());
+    // A plain single-video dump carries no playlist position.
+    assert_eq!(playlist_index, None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3465,7 +3475,7 @@ fn live_argv_pins_planner_id_in_mpegts() {
     let job = live_test_job();
     let out = std::path::Path::new("/tmp/staging/live.mp4");
     // Planner-resolved id rides along verbatim; yt-dlp's sort never gets a second vote.
-    let argv = live_capture_argv(&job, "h1080", out);
+    let argv = live_capture_argv(&job, "h1080", out, None);
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
     assert_eq!(argv[f + 1], "h1080+ba/b");
     assert!(argv.contains(&"--hls-use-mpegts".to_string()));
@@ -3482,7 +3492,7 @@ fn live_argv_pins_planner_id_in_mpegts() {
     assert_eq!(argv[argv.len() - 1], "https://x.com/u/status/1");
     let mut pinned = live_test_job();
     pinned.video_format_id = Some("h720".into());
-    let argv = live_capture_argv(&pinned, "h720", out);
+    let argv = live_capture_argv(&pinned, "h720", out, None);
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
     assert_eq!(argv[f + 1], "h720+ba/b");
 }
@@ -6065,7 +6075,10 @@ fn fetch_video_page_resolves_without_flat_playlist() {
         })
         .to_string(),
     );
-    let FetchedVideo::Single(_video) = crate::runtime::tokio_rt()
+    let FetchedVideo::Single {
+        video: _video,
+        playlist_index: _,
+    } = crate::runtime::tokio_rt()
         .block_on(fetch_video_page(
             &bin,
             "https://example.com/v",
@@ -6381,6 +6394,7 @@ fn hls_argv_escapes_percent_in_stem() {
         "h1080",
         std::path::Path::new("/usr/bin/ffmpeg"),
         &dest,
+        None,
     );
     let o = argv.iter().position(|a| a == "-o").expect("-o");
     assert_eq!(argv[o + 1], "/tmp/dl/100%%.hls.%(ext)s");
@@ -6390,7 +6404,7 @@ fn hls_argv_escapes_percent_in_stem() {
 fn live_capture_argv_escapes_percent_in_stem() {
     let job = live_test_job();
     let out = std::path::Path::new("/tmp/staging/100%.live.mp4");
-    let argv = live_capture_argv(&job, "h720", out);
+    let argv = live_capture_argv(&job, "h720", out, None);
     let o = argv.iter().position(|a| a == "-o").expect("-o");
     assert_eq!(argv[o + 1], "/tmp/staging/100%%.live.mp4");
 }
@@ -6449,6 +6463,50 @@ fn clean_dest_parts_keeps_finished_and_foreign_files() {
 }
 
 #[test]
+fn playlist_scope_args_selects_picked_entry() {
+    // Plain rows keep `--no-playlist`; a row picked from a playlist selects
+    // its entry by 1-based position instead.
+    assert_eq!(playlist_scope_args(None), vec!["--no-playlist".to_string()]);
+    assert_eq!(
+        playlist_scope_args(Some(0)),
+        vec!["--playlist-items".to_string(), "1".to_string()]
+    );
+    assert_eq!(
+        playlist_scope_args(Some(2)),
+        vec!["--playlist-items".to_string(), "3".to_string()]
+    );
+}
+
+#[test]
+fn picked_row_download_argv_scopes_to_its_entry() {
+    // Regression: highlight rows re-resolve the tray URL, so `--no-playlist`
+    // downloaded the tray's first story for every row (N byte-identical
+    // files). The picked entry's position must scope every download argv.
+    let job = direct_test_job();
+    let out = std::path::Path::new("/tmp/staging/video.mp4");
+    let ff = std::path::Path::new("/usr/bin/ffmpeg");
+    for argv in [
+        unified_download_argv(&job, "v123+a456/bv*+ba/b", true, "mp4", ff, out, Some(2)),
+        live_capture_argv(&job, "h720", out, Some(2)),
+        hls_download_argv(&job, "h720", ff, out, Some(2)),
+    ] {
+        assert!(
+            !argv.contains(&"--no-playlist".to_string()),
+            "picked row must not pass --no-playlist: {argv:?}"
+        );
+        let p = argv
+            .iter()
+            .position(|a| a == "--playlist-items")
+            .expect("--playlist-items");
+        assert_eq!(argv[p + 1], "3", "{argv:?}");
+    }
+    // And plain rows are untouched.
+    let argv = unified_download_argv(&job, "v123+a456/bv*+ba/b", true, "mp4", ff, out, None);
+    assert!(argv.contains(&"--no-playlist".to_string()));
+    assert!(!argv.iter().any(|a| a == "--playlist-items"));
+}
+
+#[test]
 fn download_builders_use_machine_progress_and_ignore_config() {
     // Every yt-dlp spawn parses `--progress-template` lines (never human
     // prose) and ignores ambient user configs that could reshape argv.
@@ -6462,9 +6520,16 @@ fn download_builders_use_machine_progress_and_ignore_config() {
             "mp4",
             std::path::Path::new("/usr/bin/ffmpeg"),
             out,
+            None,
         ),
-        live_capture_argv(&job, "h720", out),
-        hls_download_argv(&job, "h720", std::path::Path::new("/usr/bin/ffmpeg"), out),
+        live_capture_argv(&job, "h720", out, None),
+        hls_download_argv(
+            &job,
+            "h720",
+            std::path::Path::new("/usr/bin/ffmpeg"),
+            out,
+            None,
+        ),
     ] {
         assert!(argv.contains(&"--ignore-config".to_string()), "{argv:?}");
         let t = argv
@@ -6493,7 +6558,13 @@ fn hls_argv_takes_subtitle_flags() {
     job.subtitles = Some("ar".into());
     job.embed_subs = true;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     for t in SUBTITLE_TOKENS {
         assert!(argv.iter().any(|a| a == *t), "{t} missing: {argv:?}");
     }
@@ -6518,7 +6589,7 @@ fn every_download_path_embeds_metadata() {
 
     let mut merged = direct_test_job();
     merged.quality = "1080".into();
-    let m = unified_download_argv(&merged, "a456/ba/b", true, "", ff, out);
+    let m = unified_download_argv(&merged, "a456/ba/b", true, "", ff, out, None);
     assert!(
         m.contains(&"--embed-metadata".to_string()),
         "merged path lost its tags"
@@ -6527,7 +6598,7 @@ fn every_download_path_embeds_metadata() {
     // Progressive single stream: not merging, and previously untagged.
     let mut progressive = direct_test_job();
     progressive.quality = "best".into();
-    let p = unified_download_argv(&progressive, "a456/ba/b", false, "", ff, out);
+    let p = unified_download_argv(&progressive, "a456/ba/b", false, "", ff, out, None);
     assert!(
         p.contains(&"--embed-metadata".to_string()),
         "a progressive download has no tags, so its id is lost with the filename"
@@ -6537,7 +6608,7 @@ fn every_download_path_embeds_metadata() {
     let mut audio = direct_test_job();
     audio.quality = "best".into();
     audio.audio_only = true;
-    let a = unified_download_argv(&audio, "a456/ba/b", false, "", ff, out);
+    let a = unified_download_argv(&audio, "a456/ba/b", false, "", ff, out, None);
     assert!(
         a.contains(&"--embed-metadata".to_string()),
         "an audio-only download has no tags, so its id is lost with the filename"
@@ -6548,7 +6619,13 @@ fn every_download_path_embeds_metadata() {
     let mut hls = direct_test_job();
     hls.quality = "best".into();
     hls.audio_only = true;
-    let h = hls_download_argv(&hls, "h1080", ff, std::path::Path::new("/tmp/dl/v.mkv"));
+    let h = hls_download_argv(
+        &hls,
+        "h1080",
+        ff,
+        std::path::Path::new("/tmp/dl/v.mkv"),
+        None,
+    );
     assert!(
         h.contains(&"--embed-metadata".to_string()),
         "the HLS leg never embedded metadata, so its id is lost with the filename"
@@ -6570,6 +6647,7 @@ fn unified_argv_extracts_audio_for_audio_only() {
         "",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(argv.contains(&"--extract-audio".to_string()));
     let af = argv
@@ -6590,7 +6668,13 @@ fn hls_argv_extracts_audio_for_audio_only() {
     job.audio_only = true;
     job.subtitles = Some("en".into());
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(argv.contains(&"--extract-audio".to_string()));
     let af = argv
         .iter()
@@ -6607,7 +6691,12 @@ fn live_capture_argv_never_takes_subtitles() {
     // configured, live captures must not pass subtitle flags.
     let mut job = live_test_job();
     job.subtitles = Some("en".into());
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert_no_subtitle_tokens(&argv);
 }
 
@@ -6628,6 +6717,7 @@ fn unified_argv_embeds_subs_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(
         argv.iter().any(|a| a == "--embed-subs"),
@@ -6646,7 +6736,13 @@ fn hls_argv_embeds_subs_when_enabled() {
     job.embed_subs = true;
     job.subtitles = Some("en".into());
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(
         argv.iter().any(|a| a == "--embed-subs"),
         "--embed-subs missing: {argv:?}"
@@ -6662,7 +6758,12 @@ fn live_capture_argv_never_takes_embed_subs() {
     // leg exists, so the embed flag stays off even when enabled.
     let mut job = live_test_job();
     job.embed_subs = true;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--embed-subs"));
 }
 
@@ -6679,6 +6780,7 @@ fn unified_argv_leaves_fragments_serial() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
 }
@@ -6696,6 +6798,7 @@ fn unified_argv_cuts_sponsors_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let pos = argv
         .iter()
@@ -6716,6 +6819,7 @@ fn unified_argv_cuts_sponsors_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--sponsorblock-remove"));
 }
@@ -6733,6 +6837,7 @@ fn unified_argv_marks_sponsors_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let pos = argv
         .iter()
@@ -6753,6 +6858,7 @@ fn unified_argv_marks_sponsors_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--sponsorblock-mark"));
 }
@@ -6763,7 +6869,13 @@ fn hls_argv_leaves_fragments_serial() {
     // setting is the app engine's own.
     let job = direct_test_job();
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
 }
 
@@ -6772,7 +6884,13 @@ fn hls_argv_cuts_sponsors_when_enabled() {
     let mut job = direct_test_job();
     job.sponsorblock_remove = true;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     let pos = argv
         .iter()
         .position(|a| a == "--sponsorblock-remove")
@@ -6780,7 +6898,13 @@ fn hls_argv_cuts_sponsors_when_enabled() {
     assert_eq!(argv[pos + 1], "sponsor");
     // Default off: no trace of the flag.
     job.sponsorblock_remove = false;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--sponsorblock-remove"));
 }
 
@@ -6789,7 +6913,13 @@ fn hls_argv_marks_sponsors_when_enabled() {
     let mut job = direct_test_job();
     job.sponsorblock_mark = true;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     let pos = argv
         .iter()
         .position(|a| a == "--sponsorblock-mark")
@@ -6802,7 +6932,13 @@ fn hls_argv_marks_sponsors_when_enabled() {
     );
     // Default off: no trace of the flag.
     job.sponsorblock_mark = false;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--sponsorblock-mark"));
 }
 
@@ -6811,7 +6947,13 @@ fn hls_argv_remuxes_video_when_enabled() {
     let mut job = direct_test_job();
     job.remux_video = Some("mkv".to_string());
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     let pos = argv
         .iter()
         .position(|a| a == "--remux-video")
@@ -6821,7 +6963,13 @@ fn hls_argv_remuxes_video_when_enabled() {
     assert!(pos < sep, "remux flag must precede the URL separator");
     // Default off: no trace of the flag.
     job.remux_video = None;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--remux-video"));
 }
 
@@ -6831,7 +6979,12 @@ fn live_capture_argv_never_remuxes_video() {
     // must not appear (the builder structurally ignores the field).
     let mut job = live_test_job();
     job.remux_video = Some("mkv".to_string());
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--remux-video"));
 }
 
@@ -6840,7 +6993,12 @@ fn live_capture_argv_has_no_concurrent_fragments() {
     // Every yt-dlp leg runs fragments at the serial default; live
     // edge recording never tuned it in the first place.
     let job = live_test_job();
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
 }
 
@@ -6851,7 +7009,12 @@ fn live_capture_argv_never_cuts_sponsors() {
     let mut job = live_test_job();
     job.sponsorblock_remove = true;
     job.sponsorblock_mark = true;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--sponsorblock-remove"));
     assert!(!argv.iter().any(|a| a == "--sponsorblock-mark"));
 }
@@ -6869,6 +7032,7 @@ fn unified_argv_embeds_chapters_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let pos = argv
         .iter()
@@ -6885,6 +7049,7 @@ fn unified_argv_embeds_chapters_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--embed-chapters"));
 }
@@ -6903,6 +7068,7 @@ fn unified_argv_remuxes_video_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let pos = argv
         .iter()
@@ -6920,6 +7086,7 @@ fn unified_argv_remuxes_video_when_enabled() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--remux-video"));
 }
@@ -6940,11 +7107,23 @@ fn hls_argv_embeds_chapters_when_enabled() {
     let mut job = direct_test_job();
     job.embed_chapters = true;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(argv.iter().any(|a| a == "--embed-chapters"));
     // Default off: no trace of the flag.
     job.embed_chapters = false;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--embed-chapters"));
 }
 
@@ -6963,6 +7142,7 @@ fn audio_only_rows_still_get_chapters() {
         "m4a",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(argv.iter().any(|a| a == "--embed-chapters"));
 }
@@ -6973,7 +7153,12 @@ fn live_capture_argv_never_embeds_chapters() {
     // exists, so even opted in this flag must not appear.
     let mut job = live_test_job();
     job.embed_chapters = true;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--embed-chapters"));
 }
 
@@ -7001,9 +7186,16 @@ fn vod_and_live_argv_never_emit_removed_tuning_flags() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let hls = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let hls = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     let live = live_capture_argv(
         &live_test_job(),
         "h720",
@@ -7033,6 +7225,7 @@ fn unified_argv_ratelimit_when_set() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let pos = argv.iter().position(|a| a == "--ratelimit").expect("flag");
     assert_eq!(argv[pos + 1], "512000");
@@ -7047,6 +7240,7 @@ fn unified_argv_ratelimit_when_set() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--ratelimit"));
 }
@@ -7065,6 +7259,7 @@ fn unified_argv_mtime_when_set() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     let pos = argv.iter().position(|a| a == "--mtime").expect("flag");
     let sep = argv.iter().position(|a| a == "--").expect("separator");
@@ -7078,6 +7273,7 @@ fn unified_argv_mtime_when_set() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--mtime"));
 }
@@ -7087,14 +7283,26 @@ fn hls_argv_ratelimit_when_set() {
     let mut job = direct_test_job();
     job.speed_limit = Some(2_097_152);
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     let pos = argv.iter().position(|a| a == "--ratelimit").expect("flag");
     assert_eq!(argv[pos + 1], "2097152");
     let sep = argv.iter().position(|a| a == "--").expect("separator");
     assert!(pos < sep, "ratelimit must precede the URL separator");
     // Default off: no trace of the flag.
     job.speed_limit = None;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--ratelimit"));
 }
 
@@ -7104,7 +7312,12 @@ fn live_capture_argv_never_ratelimit() {
     // even opted in the flag must not appear.
     let mut job = live_test_job();
     job.speed_limit = Some(512_000);
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--ratelimit"));
 }
 
@@ -7113,13 +7326,25 @@ fn hls_argv_mtime_when_set() {
     let mut job = direct_test_job();
     job.keep_server_date = true;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     let pos = argv.iter().position(|a| a == "--mtime").expect("flag");
     let sep = argv.iter().position(|a| a == "--").expect("separator");
     assert!(pos < sep, "mtime must precede the URL separator");
     // Default off: no trace of the flag.
     job.keep_server_date = false;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--mtime"));
 }
 
@@ -7129,7 +7354,12 @@ fn live_capture_argv_never_mtime() {
     // mtime yt-dlp set: excluded like the other VOD-only opt-ins.
     let mut job = live_test_job();
     job.keep_server_date = true;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--mtime"));
 }
 
@@ -7147,12 +7377,19 @@ fn audio_only_legs_never_pass_an_extraction_quality() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(argv.contains(&"--extract-audio".to_string()));
     assert!(argv.contains(&"--audio-format".to_string()));
     assert!(!argv.iter().any(|a| a == "--audio-quality"));
     let dest = std::path::Path::new("/tmp/dl/v.m4a");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(argv.contains(&"--extract-audio".to_string()));
     assert!(argv.contains(&"--audio-format".to_string()));
     assert!(!argv.iter().any(|a| a == "--audio-quality"));
@@ -7165,6 +7402,7 @@ fn audio_only_legs_never_pass_an_extraction_quality() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--audio-quality"));
 }
@@ -7175,7 +7413,12 @@ fn live_capture_argv_never_audio_quality() {
     // yt-dlp extraction step, so the flag must not appear.
     let mut job = live_test_job();
     job.audio_only = true;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--audio-quality"));
 }
 
@@ -7185,7 +7428,12 @@ fn live_capture_argv_live_from_start_when_enabled() {
     // instead of the live edge.
     let mut job = live_test_job();
     job.live_from_start = true;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     let pos = argv
         .iter()
         .position(|a| a == "--live-from-start")
@@ -7194,7 +7442,12 @@ fn live_capture_argv_live_from_start_when_enabled() {
     assert!(pos < sep, "flag must precede the URL separator");
     // Disabled: no trace of the flag.
     job.live_from_start = false;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--live-from-start"));
 }
 
@@ -7231,10 +7484,17 @@ fn live_from_start_stays_off_non_live_rows() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     assert!(!argv.iter().any(|a| a == "--live-from-start"));
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        dest,
+        None,
+    );
     assert!(!argv.iter().any(|a| a == "--live-from-start"));
     // Even the live builder refuses a misrouted non-live row.
     let mut live_job = live_test_job();
@@ -8299,7 +8559,8 @@ fn discover_unified_output_prefers_after_move_and_excludes() {
                     .unwrap()
                     .to_string()
             )
-            .as_deref()
+            .as_deref(),
+            None,
         ),
         Some(out.clone())
     );
@@ -8326,6 +8587,7 @@ fn unified_argv_takes_subtitle_flags() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
+        None,
     );
     for t in SUBTITLE_TOKENS {
         assert!(argv.iter().any(|a| a == *t), "{t} missing: {argv:?}");
@@ -8423,7 +8685,8 @@ fn has_fetchable_media_matrix() {
         Some(720),
         None,
         "https",
-        false
+        false,
+        None,
     ),]));
     assert!(has_fetchable_media(&yes));
     // Empty extraction: plain file fallback.

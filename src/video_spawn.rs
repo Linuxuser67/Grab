@@ -140,14 +140,20 @@ pub(crate) async fn fetch_video_page(
     .await?;
     if let Some(playlist) = parse_playlist_json(&value, url) {
         if playlist_item_id.is_some() {
-            if let Some(entry) = pick_playlist_entry(&value, playlist_item_id) {
-                return parse_single_video(entry).map(|v| FetchedVideo::Single(Box::new(v)));
+            if let Some((entry, playlist_index)) = pick_playlist_entry(&value, playlist_item_id) {
+                return parse_single_video(entry).map(|v| FetchedVideo::Single {
+                    video: Box::new(v),
+                    playlist_index: Some(playlist_index),
+                });
             }
             return Err(playlist_resolve_error(playlist_item_id));
         }
         return Ok(FetchedVideo::Playlist(playlist));
     }
-    parse_single_video(value).map(|v| FetchedVideo::Single(Box::new(v)))
+    parse_single_video(value).map(|v| FetchedVideo::Single {
+        video: Box::new(v),
+        playlist_index: None,
+    })
 }
 
 /// Extract metadata for one URL (the page URL is what survives restarts, not the media URLs).

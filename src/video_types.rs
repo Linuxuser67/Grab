@@ -217,7 +217,14 @@ pub enum VideoOutcome {
 /// `parse_playlist_json` decides the shape.
 #[derive(Debug)]
 pub(crate) enum FetchedVideo {
-    Single(Box<Video>),
+    Single {
+        video: Box<Video>,
+        /// 0-based position of the picked entry in the re-resolved playlist
+        /// (`None` for a plain single video). The download scopes itself with
+        /// `--playlist-items` instead of `--no-playlist` so a picked row
+        /// fetches its own entry, not the tray's first.
+        playlist_index: Option<usize>,
+    },
     Playlist(crate::media_types::PlaylistInfo),
 }
 

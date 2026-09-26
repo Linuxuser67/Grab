@@ -678,18 +678,22 @@ pub(crate) fn playlist_resolve_error(playlist_item_id: Option<&str>) -> VideoErr
 /// re-resolves playlist-shaped (Instagram stories/highlights: every entry carries
 /// the collection URL, so the row has no per-item page). Matches on the entry id
 /// persisted at pick time; `None` when the row was not picked or the entry is
-/// gone.
+/// gone. Also returns the entry's 0-based position: the download re-resolves
+/// the same tray URL, so it scopes itself with `--playlist-items` (1-based)
+/// instead of `--no-playlist`, which would silently take the first entry for
+/// every picked row.
 pub(crate) fn pick_playlist_entry(
     value: &serde_json::Value,
     playlist_item_id: Option<&str>,
-) -> Option<serde_json::Value> {
+) -> Option<(serde_json::Value, usize)> {
     let want = playlist_item_id?;
     value
         .get("entries")
         .and_then(|entries| entries.as_array())?
         .iter()
-        .find(|entry| entry.get("id").and_then(|id| id.as_str()) == Some(want))
-        .cloned()
+        .enumerate()
+        .find(|(_, entry)| entry.get("id").and_then(|id| id.as_str()) == Some(want))
+        .map(|(index, entry)| (entry.clone(), index))
 }
 
 /// Parse one video-shaped dump into the worker's [`Video`] model,

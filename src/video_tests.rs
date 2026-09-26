@@ -3582,11 +3582,25 @@ fn live_remux_argv_stamps_the_source_url_so_the_id_survives() {
 }
 
 /// Fake yt-dlp for live: emits one progress line, writes the `.part` shell (or fails barren).
+/// Every yt-dlp fake answers the impersonation probe the way the real binary
+/// does: `--list-impersonate-targets` is recognized and exits immediately.
+/// Fakes have no curl_cffi, so the faithful answer is an empty table (exit 0,
+/// no output), which the probe reads as unsupported. Without this the probe
+/// would run the fake's main behavior — sleeps, spawned descendants, stray
+/// files — and burn its whole timeout before the test's real spawn.
+fn probe_guard(script: &str) -> String {
+    script.replacen(
+        "#!/bin/sh\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--list-impersonate-targets\" ]; then exit 0; fi\n",
+        1,
+    )
+}
+
 fn fake_ytdlp_live(dir: &std::path::Path, fail: bool) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live");
     std::fs::write(
         &bin,
-        if fail {
+        probe_guard(if fail {
             "#!/bin/sh\necho \"ERROR: [Video] 1: Got error 404\" >&2\nexit 1\n"
         } else {
             r#"#!/bin/sh
@@ -3600,7 +3614,7 @@ echo "[Grab];downloading;3;100;100;1000;5"
 printf 'tsbytes' > "$out.part"
 exit 0
 "#
-        },
+        }),
     )
     .unwrap();
     #[cfg(unix)]
@@ -3721,7 +3735,8 @@ fn fake_ytdlp_slow(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-slow");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -3733,6 +3748,7 @@ printf 'partial' > "$out.part"
 printf '{"downloader": {"current_fragment": {"index": 0}}}' > "$out.ytdl"
 sleep 60
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -3936,7 +3952,8 @@ fn fake_ytdlp_live_with_state(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-state");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -3948,6 +3965,7 @@ printf 'recorded' > "$out.part"
 printf '{"downloader": {"current_fragment": {"index": 7}}}' > "$out.ytdl"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -4031,7 +4049,8 @@ fn fake_ytdlp_live_barren_with_state(dir: &std::path::Path) -> std::path::PathBu
     let bin = dir.join("fake-ytdlp-live-barren-state");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -4041,6 +4060,7 @@ done
 printf '{"downloader": {"current_fragment": {"index": 0}}}' > "$out.ytdl"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -4642,7 +4662,7 @@ fn fake_ytdlp_live_payload(
 ) -> std::path::PathBuf {
     write_fake(
         &dir.join(bin_name),
-        &format!(
+        &probe_guard(&format!(
             r#"#!/bin/sh
 out=""
 prev=""
@@ -4655,7 +4675,7 @@ printf '{{"downloader": {{}}}}' > "$out.ytdl"
 exit 0
 "#,
             payload = payload
-        ),
+        )),
     )
 }
 
@@ -4872,7 +4892,7 @@ fn fake_ytdlp_live_retry(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-retry");
     std::fs::write(
         &bin,
-        format!(
+        probe_guard(&format!(
             r#"#!/bin/sh
 out=""
 prev=""
@@ -4896,7 +4916,7 @@ exit 0
 "#,
             count = dir.join("retry-count").display(),
             marker = dir.join("retry-saw-stale-state").display(),
-        ),
+        )),
     )
     .unwrap();
     #[cfg(unix)]
@@ -4961,7 +4981,7 @@ fn fake_ytdlp_live_abortable(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-abortable");
     std::fs::write(
         &bin,
-        format!(
+        probe_guard(&format!(
             r#"#!/bin/sh
 out=""
 prev=""
@@ -4985,7 +5005,7 @@ exit 0
 "#,
             pidfile = dir.join("recorder-pid").display(),
             childpid = dir.join("recorder-child-pid").display(),
-        ),
+        )),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5218,7 +5238,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
 /// Fake recorder that stays blocked, so only the group kill under test can end it.
 fn fake_sleeper(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-sleeper");
-    std::fs::write(&bin, "#!/bin/sh\nsleep 600\n").unwrap();
+    std::fs::write(&bin, probe_guard("#!/bin/sh\nsleep 600\n")).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -5277,7 +5297,8 @@ fn fake_ytdlp_hls_scripted(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-scripted");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -5294,6 +5315,7 @@ printf 'hlsbytes' > "$out"
 printf '%s\n' "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5365,7 +5387,8 @@ fn fake_ytdlp_hls_upward_wobble(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-upwobble");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -5380,6 +5403,7 @@ printf 'hlsbytes' > "$out"
 printf '%s\n' "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5450,11 +5474,13 @@ fn fake_ytdlp_hls_goes_silent(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-silent");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 echo '[Grab];downloading;1000000;2000000;2000000;NA;NA'
 sleep 30
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5471,7 +5497,8 @@ fn fake_ytdlp_hls_keeps_talking(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-talking");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -5489,6 +5516,7 @@ printf 'hlsbytes' > "$out"
 printf '%s\n' "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5599,7 +5627,8 @@ fn fake_ytdlp_hls_silent_merge(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-silmerge");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -5613,6 +5642,7 @@ printf 'hlsbytes' > "$out"
 printf '%s\n' "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -5628,7 +5658,8 @@ fn fake_ytdlp_hls(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -5640,6 +5671,7 @@ out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
 printf 'hlsbytes' > "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -6035,7 +6067,7 @@ fn fetch_video_page_rejects_garbage_stdout() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let bin = dir.join("fake-ytdlp");
-    std::fs::write(&bin, "#!/bin/sh\necho 'not json'\nexit 0\n").unwrap();
+    std::fs::write(&bin, probe_guard("#!/bin/sh\necho 'not json'\nexit 0\n")).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -6062,11 +6094,11 @@ fn fake_argv_dump_bin(dir_name: &str, stdout: &str) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp");
     std::fs::write(
         &bin,
-        format!(
+        probe_guard(&format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}/args.txt\"\ncat \"{}/out.txt\"\n",
             dir.display(),
             dir.display(),
-        ),
+        )),
     )
     .unwrap();
     #[cfg(unix)]
@@ -7645,7 +7677,7 @@ fn fake_ytdlp_probe(dir: &std::path::Path, json: &str, fail: bool) -> std::path:
         "#!/bin/sh\nfor a in \"$@\"; do\n    if [ \"$a\" = \"--dump-json\" ]; then\n        printf '%s' 'JSON'\n        exit 0\n    fi\ndone\nexit 1\n"
             .replace("JSON", &json.replace('\'', "'\"'\"'"))
     };
-    std::fs::write(&bin, script).unwrap();
+    std::fs::write(&bin, probe_guard(&script)).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -7809,7 +7841,7 @@ fn fake_ytdlp_hls_subs(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-subs");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(r#"#!/bin/sh
 out=""
 dump=""
 prev=""
@@ -7828,7 +7860,7 @@ printf 'hlsbytes' > "$media"
 side="$(printf '%s' "$stem" | sed 's/\.mp4$//').en.srt"
 printf 'subbytes' > "$(dirname "$out")/$side"
 exit 0
-"#,
+"#),
     )
     .unwrap();
     #[cfg(unix)]
@@ -7950,7 +7982,8 @@ fn subtitle_leg_failure_cannot_sink_media() {
     let bin = dir.join("fake-ytdlp-subfail");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 skip=""
 prev=""
@@ -7967,6 +8000,7 @@ out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
 printf 'hlsbytes' > "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -8012,7 +8046,8 @@ fn fake_ytdlp(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 dump=""
 prev=""
@@ -8035,6 +8070,7 @@ printf 'unified' > "$out"
 printf 'subtitles' > "$(dirname "$out")/$stem.en.srt"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -8050,7 +8086,9 @@ fn fake_ytdlp_fail(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-fail");
     std::fs::write(
         &bin,
-        "#!/bin/sh\necho 'ERROR: [Video] 1: Unable to download: 403 Forbidden' >&2\nexit 1\n",
+        probe_guard(
+            "#!/bin/sh\necho 'ERROR: [Video] 1: Unable to download: 403 Forbidden' >&2\nexit 1\n",
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -8066,7 +8104,8 @@ fn fake_ytdlp_live_shell_only(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-shell");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -8077,6 +8116,7 @@ printf 'tsbytes' > "$out.part"
 sleep 2
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -8366,7 +8406,7 @@ fn unified_runner_abort_stays_quiet() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let bin = dir.join("fake-ytdlp");
-    std::fs::write(&bin, "#!/bin/sh\nsleep 60\nexit 0\n").unwrap();
+    std::fs::write(&bin, probe_guard("#!/bin/sh\nsleep 60\nexit 0\n")).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -8448,7 +8488,8 @@ fn unified_runner_rejects_empty_output() {
     let bin = dir.join("fake-ytdlp-empty");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -8459,6 +8500,7 @@ out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
 : > "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -8660,7 +8702,8 @@ fn fake_ytdlp_two_legs(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-two-legs");
     std::fs::write(
         &bin,
-        r#"#!/bin/sh
+        probe_guard(
+            r#"#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
@@ -8679,6 +8722,7 @@ echo "$out"
 printf 'twolegs' > "$out"
 exit 0
 "#,
+        ),
     )
     .unwrap();
     #[cfg(unix)]

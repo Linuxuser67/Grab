@@ -285,16 +285,19 @@ pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
 /// One-shot `--list-impersonate-targets` probe: a `Chrome` row without an
 /// "(unavailable)" marker means curl_cffi can impersonate. Any spawn failure,
 /// non-zero exit, or timeout resolves to `false` — a wedged binary must not
-/// hang the spawn that is being prepared.
+/// hang the spawn that is being prepared, and must not leave children behind.
 fn probe_impersonate_support(youtube_bin: &Path) -> bool {
     use std::io::Read as _;
-    let mut child = match std::process::Command::new(youtube_bin)
-        .arg("--list-impersonate-targets")
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt as _;
+    let mut cmd = std::process::Command::new(youtube_bin);
+    cmd.arg("--list-impersonate-targets")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(_) => return false,
     };
@@ -304,13 +307,15 @@ fn probe_impersonate_support(youtube_bin: &Path) -> bool {
             Ok(Some(status)) => break status.success(),
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_probe(&mut child);
                     return false;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
-            Err(_) => return false,
+            Err(_) => {
+                kill_probe(&mut child);
+                return false;
+            }
         }
     };
     if !exited_cleanly {
@@ -326,6 +331,22 @@ fn probe_impersonate_support(youtube_bin: &Path) -> bool {
             let line = line.to_ascii_lowercase();
             line.contains("chrome") && !line.contains("unavailable")
         })
+}
+
+/// Best-effort kill of a wedged probe: the whole process group, so a binary
+/// that ignores its flags takes its children down with it. Always reaps.
+fn kill_probe(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // try_wait just reported it still running, so the group is ours.
+        // SAFETY: constant signal number; ESRCH (raced exit) is harmless.
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Install just yt-dlp into the user library dir. Split from ffmpeg so the UI

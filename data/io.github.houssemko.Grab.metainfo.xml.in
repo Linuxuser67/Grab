@@ -46,6 +46,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.11" date="2026-09-26">
+      <description>
+        <ul>
+          <li>Playlist rows now download the entry you picked instead of the playlist's first entry repeating.</li>
+          <li>yt-dlp now uses Chrome's TLS fingerprint where supported, fixing downloads that stalled or stopped early.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.10" date="2026-09-26">
       <description>
         <ul>

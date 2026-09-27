@@ -518,13 +518,13 @@ fn wire_torrent_picker(
     });
 }
 
-/// Controls for one add-panel session: hide the panel and check it is still
-/// open. Replaces the `WeakRef<adw::Dialog>` the flow used to thread through
-/// its submit paths — the panel is rebuilt on every show, so closing a session
-/// invalidates its liveness guard the way dropping the dialog used to.
+/// Controls for one add-form session. The form is persistent now — the
+/// session lives for the window lifetime and each successful add resets it
+/// via `reset` — so there is no hide/close path anymore. `alive` stays true
+/// for the window lifetime; the async lookup guards keep reading it the way
+/// they did when sessions could close.
 #[derive(Clone)]
 pub struct SessionCtl {
-    hide: Rc<dyn Fn()>,
     /// Shared across clones: the session installs the real reset *after*
     /// `build_add_session` hands out clones to the submit paths, so a plain
     /// `RefCell` here would leave every clone holding the initial no-op.
@@ -539,12 +539,8 @@ impl SessionCtl {
         self.alive.get()
     }
 
-    fn close(&self) {
-        (self.hide)();
-    }
-
     /// Successful submit: reset the entry page for the next add and confirm
-    /// with a toast. The panel stays open for rapid multi-add, the way
+    /// with a toast. The sidebar form stays put for rapid multi-add, the way
     /// Varia's quick-add box clears for the next URL instead of dismissing.
     pub(crate) fn succeed(&self, message: &str) {
         (self.reset.borrow())();
@@ -558,7 +554,6 @@ impl SessionCtl {
     #[cfg(test)]
     pub(crate) fn test_ctl() -> Self {
         Self {
-            hide: Rc::new(|| {}),
             reset: Rc::new(RefCell::new(Rc::new(|| {}))),
             toast: Rc::new(|_| {}),
             alive: Rc::new(Cell::new(true)),
@@ -567,100 +562,105 @@ impl SessionCtl {
     }
 }
 
-/// The add-download side panel: an `AdwOverlaySplitView` sidebar hosting the
-/// same multi-page flow the modal dialog used to, so adding a download no
-/// longer covers the main UI. Owned by the window; opened from the header and
-/// empty-state buttons, the app action, and Open With / drag-and-drop.
+/// The persistent add-download sidebar: an `AdwNavigationSplitView` sidebar
+/// hosting the add form, so adding a download is always one step away and no
+/// dialog or overlay covers the list. Owned by the window; the session is
+/// built once and each successful add resets the form. The header and
+/// empty-state buttons, the app action, and Open With / drag-and-drop focus
+/// the form via [`focus_form`].
 pub struct AddPanel {
-    split: adw::OverlaySplitView,
-    window: adw::ApplicationWindow,
-    manager: Rc<DownloadManager>,
-    toasts: adw::ToastOverlay,
-    session: RefCell<Option<SessionCtl>>,
+    split: adw::NavigationSplitView,
+    url_row: adw::EntryRow,
+    mode_group: adw::ToggleGroup,
+    torrent_choose: gtk4::Button,
+}
+
+/// Widget handles the sidebar form needs after building: focusing,
+/// pre-filling, and mode-aware focus targets.
+struct FormWidgets {
+    url_row: adw::EntryRow,
+    mode_group: adw::ToggleGroup,
+    torrent_choose: gtk4::Button,
 }
 
 impl AddPanel {
-    /// `split` is inserted into the window content by the caller; the panel
-    /// fills its sidebar on show.
+    /// Builds the form session eagerly and returns the panel plus the form
+    /// widget for the caller to place in the split's sidebar.
     pub fn new(
         manager: Rc<DownloadManager>,
         window: &adw::ApplicationWindow,
-        split: &adw::OverlaySplitView,
+        split: &adw::NavigationSplitView,
         toasts: &adw::ToastOverlay,
-    ) -> Rc<Self> {
-        Rc::new(Self {
-            split: split.clone(),
-            window: window.clone(),
-            manager,
-            toasts: toasts.clone(),
-            session: RefCell::new(None),
-        })
-    }
-
-    /// Show the panel, optionally pre-filled. A fresh session is built on
-    /// every show, the way the dialog was rebuilt on every open.
-    pub fn show(&self, initial_url: Option<&str>) {
-        self.hide();
-        let alive = Rc::new(Cell::new(true));
-        let split_w = self.split.downgrade();
-        let window = self.window.clone();
-        let alive_hide = alive.clone();
-        let hide: Rc<dyn Fn()> = Rc::new(move || {
-            alive_hide.set(false);
-            window.set_default_widget(Option::<&gtk4::Widget>::None);
-            if let Some(split) = split_w.upgrade() {
-                split.set_show_sidebar(false);
-                split.set_sidebar(Option::<&adw::NavigationView>::None);
-            }
-        });
-        let toasts = self.toasts.clone();
+    ) -> (Rc<Self>, adw::NavigationView) {
+        let toasts = toasts.clone();
         let toast: Rc<dyn Fn(&str)> = Rc::new(move |message| {
             toasts.add_toast(adw::Toast::new(message));
         });
         let ctl = SessionCtl {
-            hide,
             reset: Rc::new(RefCell::new(Rc::new(|| {}))),
             toast,
-            alive,
-            window: self.window.downgrade(),
+            alive: Rc::new(Cell::new(true)),
+            window: window.downgrade(),
         };
-        let (nav, reset) = build_add_session(&self.manager, &ctl, initial_url);
+        let (nav, reset, widgets) = build_add_session(&manager, &ctl, window);
         ctl.set_reset(reset);
-        nav.set_width_request(420);
-        self.split.set_sidebar(Some(&nav));
-        self.split.set_show_sidebar(true);
-        self.session.replace(Some(ctl));
+        let panel = Rc::new(Self {
+            split: split.clone(),
+            url_row: widgets.url_row,
+            mode_group: widgets.mode_group,
+            torrent_choose: widgets.torrent_choose,
+        });
+        (panel, nav)
     }
 
-    /// Hide the panel and invalidate its session; in-flight lookups from the
-    /// closed session are discarded by their liveness guard.
-    pub fn hide(&self) {
-        if let Some(session) = self.session.take() {
-            session.close();
+    /// Focus the form: reveal the sidebar when the split is collapsed and put
+    /// the cursor in the right input. A handed-in URL (Open With /
+    /// drag-and-drop) is always a link: it leaves torrent mode and lands
+    /// pre-filled, firing the same changed → debounce → lookup chain as
+    /// typing, so video pages resolve through the media pipeline.
+    pub fn focus_form(&self, initial_url: Option<&str>) {
+        if self.split.is_collapsed() {
+            self.split.set_show_content(false);
         }
-    }
-
-    /// Toggle for the header and empty-state buttons.
-    pub fn toggle(&self, initial_url: Option<&str>) {
-        if self.split.shows_sidebar() {
-            self.hide();
+        if let Some(url) = initial_url.map(str::trim).filter(|u| !u.is_empty())
+            && let Ok(normalized) = crate::download::normalize_url(url)
+        {
+            self.mode_group.set_active(0);
+            self.url_row.set_text(&normalized);
+            self.url_row.grab_focus();
+            return;
+        }
+        if self.mode_group.active() == 1 {
+            self.torrent_choose.grab_focus();
         } else {
-            self.show(initial_url);
+            self.url_row.grab_focus();
         }
     }
 }
 
-/// New-download flow, optionally pre-filled (drag-and-drop / Open With hands a
-/// URL in; the normal lookup flow then takes over, so drops never bypass the
-/// media pipeline). Builds one session's page stack; [`AddPanel`] hosts it in
-/// the sidebar and owns its lifetime through `ctl`.
+/// New-download flow for the persistent sidebar. Builds one session's page
+/// stack; [`AddPanel`] hosts it in the sidebar for the window lifetime and
+/// owns its reset through `ctl`. Returns the page stack, the post-add reset,
+/// and the form widget handles.
 fn build_add_session(
     manager: &Rc<DownloadManager>,
     ctl: &SessionCtl,
-    initial_url: Option<&str>,
-) -> (adw::NavigationView, Rc<dyn Fn()>) {
+    window: &adw::ApplicationWindow,
+) -> (adw::NavigationView, Rc<dyn Fn()>, FormWidgets) {
     let page = adw::PreferencesPage::new();
-    let group = adw::PreferencesGroup::new();
+
+    // Link / torrent mode switch: the URL rows and the torrent row are
+    // mutually exclusive inputs sharing one form. Lives in the group header,
+    // the designed spot for a mode switch.
+    let mode_group = adw::ToggleGroup::new();
+    let mode_link = adw::Toggle::builder().label(gettext("Link")).build();
+    let mode_torrent = adw::Toggle::builder().label(gettext("Torrent")).build();
+    mode_group.add(mode_link);
+    mode_group.add(mode_torrent);
+    mode_group.set_active(0);
+    let group = adw::PreferencesGroup::builder()
+        .header_suffix(&mode_group)
+        .build();
     page.add(&group);
 
     let url_row = adw::EntryRow::builder()
@@ -762,6 +762,8 @@ fn build_add_session(
         .activatable_widget(&torrent_btn)
         .build();
     torrent_row.add_suffix(&torrent_btn);
+    // Link mode is the default; the torrent row shows only in torrent mode.
+    torrent_row.set_visible(false);
     group.add(&torrent_row);
 
     let dest_label = gtk4::Label::builder()
@@ -1266,23 +1268,22 @@ fn build_add_session(
         error_label.clone(),
     );
 
-    let toolbar = adw::ToolbarView::new();
-    let hb = adw::HeaderBar::new();
-    hb.set_show_start_title_buttons(false);
-    hb.set_show_end_title_buttons(false);
-    let cancel_btn = gtk4::Button::builder()
-        .label(gettext("_Cancel"))
-        .use_underline(true)
-        .build();
+    // Persistent sidebar: no header bar and no Cancel — the form is always
+    // there. The Add button sits full-width under the form, Varia-style.
     let add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
         .use_underline(true)
         .css_classes(["suggested-action"])
+        .hexpand(true)
         .build();
-    hb.pack_start(&cancel_btn);
-    hb.pack_end(&add_btn);
-    toolbar.add_top_bar(&hb);
-    toolbar.set_content(Some(&page));
+    let entry_box = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    entry_box.set_margin_top(12);
+    entry_box.set_margin_start(12);
+    entry_box.set_margin_end(12);
+    entry_box.set_margin_bottom(12);
+    page.set_vexpand(true);
+    entry_box.append(&page);
+    entry_box.append(&add_btn);
 
     // Details page: the video step lives here behind an explicit Continue, so the final
     // Add is unreachable without a resolved preview. The back button is the nav view's.
@@ -1309,7 +1310,7 @@ fn build_add_session(
         .tag("entry")
         .title(gettext("New Download"))
         .can_pop(false)
-        .child(&toolbar)
+        .child(&entry_box)
         .build();
     let video_nav_page = adw::NavigationPage::builder()
         .tag("video")
@@ -1319,22 +1320,18 @@ fn build_add_session(
     let nav = adw::NavigationView::new();
     nav.push(&entry_nav_page);
 
-    // Enter submits from the rows, like the dialog's default widget did.
-    if let Some(win) = ctl.window.upgrade() {
-        win.set_default_widget(Some(&add_btn));
-    }
+    // The default widget follows the mode — Link: the Add button submits on
+    // Enter; torrent: none, the row's own activatable (Choose…) handles it.
+    // Owned by the mode switch below.
+    // Escape pops back to the entry page from the details page; on the entry
+    // page there is nothing to dismiss anymore.
     {
-        let session = ctl.clone();
-        cancel_btn.connect_clicked(move |_| session.close());
-    }
-    // Escape closes the panel from any page, the way it closed the dialog.
-    {
-        let session = ctl.clone();
+        let nav_esc = nav.clone();
         let shortcuts = gtk4::ShortcutController::new();
         shortcuts.add_shortcut(gtk4::Shortcut::new(
             gtk4::ShortcutTrigger::parse_string("Escape"),
             Some(gtk4::CallbackAction::new(move |_, _| {
-                session.close();
+                nav_esc.pop_to_tag("entry");
                 glib::Propagation::Stop
             })),
         ));
@@ -1539,19 +1536,49 @@ fn build_add_session(
         add_btn.set_sensitive(!url_row.text().trim().is_empty());
     }
 
-    // The panel hosts the returned page stack in its sidebar.
-    // Dropped/opened URLs land here pre-filled: setting the text fires the same changed →
-    // debounce → lookup chain as typing, so video pages resolve through the media pipeline.
-    if let Some(url) = initial_url.map(str::trim).filter(|u| !u.is_empty())
-        && let Ok(normalized) = crate::download::normalize_url(url)
+    // Link / torrent mode: mutually exclusive inputs. Torrent mode hides the
+    // URL rows and the Add button (torrents submit through Choose…); coming
+    // back to Link restores the video-mode rule for the file row. Enter
+    // submits from the Link rows via the default widget; in torrent mode the
+    // row's own activatable handles it, so there is no default widget.
     {
-        url_row.set_text(&normalized);
+        let mode = mode_group.clone();
+        let ur = url_row.clone();
+        let fr = file_row.clone();
+        let tr = torrent_row.clone();
+        let ab = add_btn.clone();
+        let win_w = window.downgrade();
+        let info = video_info.clone();
+        let apply = Rc::new(move || {
+            let torrent_mode = mode.active() == 1;
+            ur.set_visible(!torrent_mode);
+            tr.set_visible(torrent_mode);
+            ab.set_visible(!torrent_mode);
+            if let Some(win) = win_w.upgrade() {
+                if torrent_mode {
+                    win.set_default_widget(Option::<&gtk4::Widget>::None);
+                } else {
+                    win.set_default_widget(Some(&ab));
+                }
+            }
+            if torrent_mode {
+                fr.set_visible(false);
+            } else {
+                let text = ur.text().trim().to_string();
+                let fresh = info.borrow().as_ref().is_some_and(|p| p.page_url() == text);
+                fr.set_visible(!(crate::video::is_video_page(&text) || fresh));
+            }
+        });
+        let apply2 = Rc::clone(&apply);
+        mode_group.connect_active_notify(move |_| apply2());
+        apply();
     }
 
+    // The sidebar hosts the returned page stack persistently.
     // Keyboard-first: focus lands in the URL field so typing starts a
     // download with no tab stops (same pattern as the rename dialog).
-    // Deferred: the page stack isn't attached to the window until the
-    // caller shows the panel, and grab_focus fails on a rootless widget.
+    // Deferred: the form isn't attached to the window until the caller
+    // places it in the sidebar, and grab_focus fails on a rootless widget.
     {
         let url_row = url_row.clone();
         let session = ctl.clone();
@@ -1562,7 +1589,7 @@ fn build_add_session(
         });
     }
 
-    // single clipboard read per panel open; no watch, no polling.
+    // Single clipboard read per window open; no watch, no polling.
     {
         let url_row = url_row.clone();
         let session = ctl.clone();
@@ -1586,10 +1613,11 @@ fn build_add_session(
     }
 
     // Reset for rapid multi-add: after a successful add the entry page goes
-    // back to its fresh state and the panel stays open, the way Varia's
-    // quick-add box clears for the next URL. Installed on the session by the
-    // panel; `succeed` runs it before the toast.
+    // back to its fresh state, the way Varia's quick-add box clears for the
+    // next URL. Installed on the session by the panel; `succeed` runs it
+    // before the toast.
     let reset: Rc<dyn Fn()> = {
+        let mode = mode_group.clone();
         let url_row = url_row.clone();
         let file_row = file_row.clone();
         let error_label = error_label.clone();
@@ -1621,13 +1649,23 @@ fn build_add_session(
             // set_text fires changed: the video kick exits early on empty and
             // the file row's video-mode hiding is undone by the same handler.
             url_row.set_text("");
+            // Back to Link mode (fires the mode switch when it was torrent).
+            mode.set_active(0);
             // Back to the entry page when the add came from a pushed page.
             nav.pop_to_tag("entry");
             url_row.grab_focus();
         })
     };
 
-    (nav, reset)
+    (
+        nav,
+        reset,
+        FormWidgets {
+            url_row,
+            mode_group,
+            torrent_choose: torrent_btn,
+        },
+    )
 }
 /// Seconds as M:SS / H:MM:SS for picker subtitles.
 pub(crate) fn fmt_item_duration(secs: i64) -> String {

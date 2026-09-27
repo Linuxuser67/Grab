@@ -711,7 +711,7 @@ fn build_add_session(
     // One decision, one control — no separate switch. The audio switch below
     // serves playlist mode only, where pins don't apply across items.
     let video_format = FormatPicker::new();
-    video_group.add(video_format.widget());
+    video_group.add(&video_format.widget());
     let video_audio = adw::SwitchRow::builder()
         .title(gettext("Audio only"))
         .subtitle(gettext("Skip the video track"))

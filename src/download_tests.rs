@@ -5940,6 +5940,16 @@ fn torrent_folder_refuses_recorded_path_swapped_for_symlink() {
         victim.display()
     );
 
+    // Dangling swap: the link target doesn't exist — still refused, since
+    // `symlink_metadata` sees the link itself without following it.
+    std::fs::remove_file(&recorded).unwrap();
+    std::os::unix::fs::symlink(base.join("no-such-target"), &recorded).unwrap();
+    let folder = DownloadManager::torrent_folder(&item);
+    assert_ne!(
+        folder, recorded,
+        "torrent_folder trusted a dangling symlink for the recorded path"
+    );
+
     let _ = std::fs::remove_dir_all(&base);
 }
 

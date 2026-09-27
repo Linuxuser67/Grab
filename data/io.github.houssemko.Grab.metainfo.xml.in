@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.15" date="2026-09-27">
+      <description>
+        <ul>
+          <li>Live captures with the from-start toggle on now fall back to recording from the live edge when the stream doesn't support from-start, instead of failing.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.14" date="2026-09-27">
       <description>
         <ul>

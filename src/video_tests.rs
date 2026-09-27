@@ -8374,7 +8374,7 @@ async fn live_retry_aborts_stale_recording_watcher() {
     assert!(w1.await.unwrap_err().is_cancelled());
 
     // Attempt 2's watcher, owned by the guard like the live loop does.
-    let _w2 = RecordingWatcherGuard(spawn_recording_watcher(
+    let _w2 = RecordingWatcherGuard::new(spawn_recording_watcher(
         tx.clone(),
         shell.clone(),
         out.clone(),

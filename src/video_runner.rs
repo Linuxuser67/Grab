@@ -789,6 +789,11 @@ where
 /// Best-effort — on timeout the download simply gets no subtitles.
 const SUBTITLE_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Bound for draining the probe's stdout after a successful wait: the child's
+/// pipe can outlive it (a grandchild inheriting the descriptor), and an
+/// unbounded drain would stall the download on an otherwise fine probe.
+const SUBTITLE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Wall-clock bound for the merge phase: merges are local ffmpeg work and
 /// typically stream-copies finishing in minutes, so an hour is generous even
 /// on slow CPUs — while a truly hung ffmpeg no longer parks the row forever.
@@ -898,7 +903,17 @@ pub(crate) async fn resolve_subtitle_lang(
         tracing::warn!("subtitle probe failed; downloading without subtitles");
         return Ok(None);
     };
-    let out_bytes = drain.await.unwrap_or_default();
+    // The drain is bounded: the child's stdout can stay open after it exits
+    // (a grandchild inheriting the pipe), and an unbounded `drain.await`
+    // would stall the download on an otherwise successful probe. 5 s is
+    // generous — the info JSON is small and fully written by now.
+    let out_bytes = match tokio::time::timeout(SUBTITLE_DRAIN_TIMEOUT, drain).await {
+        Ok(bytes) => bytes.unwrap_or_default(),
+        Err(_) => {
+            tracing::warn!("subtitle probe drain timed out; downloading without subtitles");
+            return Ok(None);
+        }
+    };
     let info: serde_json::Value = match serde_json::from_slice(&out_bytes) {
         Ok(v) => v,
         Err(_) => {
@@ -945,7 +960,15 @@ pub(crate) fn spawn_recording_watcher(
 /// retry loop must never leave a watcher behind — a surviving watcher keeps
 /// polling for up to ~10 min and double-announces "Recording…" into the
 /// retry. Drop covers every attempt exit (`continue`, `break`, `return`).
-pub(crate) struct RecordingWatcherGuard(pub(crate) tokio::task::JoinHandle<()>);
+/// The handle stays private: every watcher must be owned by the guard, so the
+/// abort-on-drop invariant can't be bypassed by holding the raw `JoinHandle`.
+pub(crate) struct RecordingWatcherGuard(tokio::task::JoinHandle<()>);
+
+impl RecordingWatcherGuard {
+    pub(crate) fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self(handle)
+    }
+}
 
 impl Drop for RecordingWatcherGuard {
     fn drop(&mut self) {
@@ -1018,7 +1041,7 @@ pub(crate) async fn run_live_ytdlp(
         // yt-dlp records into the `.part` shell and only renames at the end:
         // the shell is what grows during capture; the final path covers a
         // capture that finalized instantly.
-        let _watcher = RecordingWatcherGuard(spawn_recording_watcher(
+        let _watcher = RecordingWatcherGuard::new(spawn_recording_watcher(
             tx.clone(),
             part.clone(),
             out.clone(),

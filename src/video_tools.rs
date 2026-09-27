@@ -291,8 +291,9 @@ static IMPERSONATE_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::
 /// test fakes answer immediately.
 pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
     let cache = IMPERSONATE_SUPPORT.get_or_init(|| Mutex::new(HashMap::new()));
-    {
-        let mut guard = cache.lock().unwrap();
+    // A poisoned cache must never panic the caller: skip the read and fall
+    // through to the safe default; the next call retries the lock.
+    if let Ok(mut guard) = cache.lock() {
         if let Some(&hit) = guard.get(youtube_bin) {
             return hit;
         }
@@ -305,10 +306,9 @@ pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
         false
     } else {
         let supported = probe_impersonate_support(youtube_bin);
-        cache
-            .lock()
-            .unwrap()
-            .insert(youtube_bin.to_path_buf(), supported);
+        if let Ok(mut guard) = cache.lock() {
+            guard.insert(youtube_bin.to_path_buf(), supported);
+        }
         supported
     }
 }
@@ -321,11 +321,11 @@ async fn warm_impersonation_cache(youtube_bin: std::path::PathBuf) {
     let supported = tokio::task::spawn_blocking(move || probe_impersonate_support(&youtube_bin))
         .await
         .unwrap_or(false);
-    IMPERSONATE_SUPPORT
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap()
-        .insert(key, supported);
+    // A poisoned cache drops the fill silently instead of panicking the
+    // background task: the next call re-probes and re-caches.
+    if let Ok(mut guard) = IMPERSONATE_SUPPORT.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        guard.insert(key, supported);
+    }
 }
 
 /// One-shot `--list-impersonate-targets` probe: a `Chrome` row without an

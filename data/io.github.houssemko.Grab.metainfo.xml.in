@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.13" date="2026-09-27">
+      <description>
+        <ul>
+          <li>Live captures now pass timestamp-alignment flags to the downloader, keeping split audio and video tracks in sync without re-encoding.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.12" date="2026-09-27">
       <description>
         <ul>

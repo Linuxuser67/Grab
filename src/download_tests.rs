@@ -5925,11 +5925,15 @@ fn torrent_folder_refuses_recorded_path_swapped_for_symlink() {
     // Post-finish swap: the recorded folder becomes a link onto the victim dir.
     std::fs::remove_dir(&recorded).unwrap();
     std::os::unix::fs::symlink(&victim, &recorded).unwrap();
-    assert!(recorded.is_dir(), "test setup: the link must resolve for is_dir");
+    assert!(
+        recorded.is_dir(),
+        "test setup: the link must resolve for is_dir"
+    );
 
     let folder = DownloadManager::torrent_folder(&item);
     assert_ne!(
-        folder, recorded,
+        folder,
+        recorded,
         "torrent_folder trusted the recorded path after it was swapped for a symlink: \
          delete/cleanup would then run through the link onto {}",
         victim.display()

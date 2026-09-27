@@ -231,6 +231,23 @@ fn initial_media_pick_preselects_preference_closest_pin() {
     assert_eq!(initial_media_pick(&pins, "480p"), MediaPick::Pin(2));
 }
 
+#[test]
+fn initial_media_pick_unknown_pref_falls_back_to_1080p() {
+    // Unknown values fall back to 1080p by design (quality_height): with
+    // 1080p in the middle the preselect is Pin(1) — a row-0 fallback would
+    // fail this, so the 1080p fallback is genuinely pinned.
+    let pins: Vec<VideoFormatOption> = [2160u32, 1080, 720]
+        .iter()
+        .map(|h| VideoFormatOption {
+            id: format!("v{h}"),
+            label: format!("{h}p"),
+            detail: String::new(),
+            height: *h,
+        })
+        .collect();
+    assert_eq!(initial_media_pick(&pins, "mystery"), MediaPick::Pin(1));
+}
+
 // ── session reset ────────────────────────────────────────────────────
 
 #[test]

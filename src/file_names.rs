@@ -190,10 +190,28 @@ pub(crate) fn sanitize_folder_name(title: &str) -> String {
 /// Titled subfolder for a multi-item collection (playlist, stories,
 /// highlights), torrent-style: sanitized, created eagerly, and reused when the
 /// same collection is added again (duplicate files then fail Parabolic-style
-/// at start instead of scattering ` (1)` copies).
+/// at start instead of scattering ` (1)` copies). Never follows a
+/// pre-existing symlink into place: a planted link with the collection name
+/// would redirect downloads outside the download dir (`create_dir_all`
+/// follows it), so a symlink — or any non-dir squatter — dedupes to a fresh
+/// name instead.
 pub(crate) fn collection_subdir(dir: &str, title: &str) -> String {
     let folder = shorten_filename(&sanitize_folder_name(title));
-    let path = std::path::Path::new(dir).join(&folder);
+    let base = std::path::Path::new(dir);
+    let folder = dedupe_filename(&folder, |n| {
+        let p = base.join(n);
+        match std::fs::symlink_metadata(&p) {
+            // `symlink_metadata` doesn't follow the link: a symlink reads as
+            // a symlink even when its target is a dir.
+            Ok(md) => {
+                let ft = md.file_type();
+                ft.is_symlink() || !ft.is_dir()
+            }
+            // Nothing there: the name is free.
+            Err(_) => false,
+        }
+    });
+    let path = base.join(&folder);
     let _ = std::fs::create_dir_all(&path);
     path.to_string_lossy().into_owned()
 }

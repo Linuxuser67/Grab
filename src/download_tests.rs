@@ -1848,6 +1848,40 @@ fn collection_subdir_reuses_titled_folder() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+#[cfg(unix)]
+#[test]
+fn collection_subdir_dodges_planted_symlink() {
+    // A pre-existing symlink with the collection name must not be followed:
+    // `create_dir_all` would happily create through it, redirecting downloads
+    // outside the download dir.
+    let base = std::env::temp_dir().join(format!("grab-collsym-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let target = base.join("elsewhere");
+    std::fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&target, base.join("My Mix")).unwrap();
+    let got = crate::file_names::collection_subdir(&base.to_string_lossy(), "My Mix");
+    assert!(got.ends_with("My Mix (1)"), "unexpected: {got}");
+    assert!(std::path::Path::new(&got).is_dir());
+    // Nothing was created through the link.
+    assert!(!target.join("My Mix").exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn collection_subdir_dodges_stray_file() {
+    // A non-dir squatter with the collection name used to make `create_dir_all`
+    // fail silently and hand back an unusable path; now it dedupes instead.
+    let base = std::env::temp_dir().join(format!("grab-collfile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(base.join("My Mix"), b"squatter").unwrap();
+    let got = crate::file_names::collection_subdir(&base.to_string_lossy(), "My Mix");
+    assert!(got.ends_with("My Mix (1)"), "unexpected: {got}");
+    assert!(std::path::Path::new(&got).is_dir());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn enqueue_keeps_name_when_file_exists() {
     // Parabolic-style: an on-disk file never renames the intake. The row keeps

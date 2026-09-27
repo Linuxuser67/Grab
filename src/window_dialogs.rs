@@ -1422,8 +1422,15 @@ fn push_playlist_items_page(
             }
             // One persist for the whole import, not one per row.
             let _batch = manager.batch_guard();
-            // One readdir for the whole import instead of one per row.
+            // Multiple items from one collection share a titled subfolder,
+            // torrent-style; a lone item keeps the flat behavior.
             let dir = manager.resolve_dir(Some(&dest_dir.borrow()));
+            let dir = if chosen.len() > 1 {
+                crate::file_names::collection_subdir(&dir, &playlist.title)
+            } else {
+                dir
+            };
+            // One readdir for the whole import instead of one per row.
             let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
             // Story segments are addressable as their own pages: queue those so each row
             // re-resolves its own segment instead of the tray (tray + format ids would

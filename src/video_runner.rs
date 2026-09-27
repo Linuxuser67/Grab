@@ -679,8 +679,8 @@ pub(crate) async fn remux_live_capture(
 enum Exit {
     /// The remuxed file was claimed at dest: shell and emptied staging dir are both redundant.
     Delivered,
-    /// Dest was claimed mid-capture; the row requeues under a fresh name, so shell and remux temp are both redundant.
-    Requeued,
+    /// Dest was claimed mid-capture; the row fails Parabolic-style, so shell and remux temp are both redundant.
+    DestClaimed,
     /// Reaping the recorder failed, so no remux was attempted: the raw shell may hold bytes the user wants.
     CaptureWaitFailed,
     /// The remux failed, so the raw shell is the only usable copy of the capture.
@@ -717,7 +717,7 @@ async fn sweep_live_capture(
 ) {
     if matches!(
         exit,
-        Exit::Delivered | Exit::Requeued | Exit::NothingRecorded
+        Exit::Delivered | Exit::DestClaimed | Exit::NothingRecorded
     ) {
         let _ = tokio::fs::remove_file(out).await;
         let _ = tokio::fs::remove_file(part).await;
@@ -884,7 +884,7 @@ pub(crate) async fn run_live_ytdlp(
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture beside the finished file: the `.part` shell shows in the user's folder while recording, and the file-growth watcher announces "Recording…" off this path.
     let out = dest_part_path(&job.dest, "live", ext);
-    // Overwrite pre-flight (Parabolic parity): refuse before recording so the pump requeues under a fresh name. Also reclaims this stem's part-namespace scratch; the finished file at dest is left be.
+    // Overwrite pre-flight (Parabolic parity): refuse before recording; the row fails instead of requeueing. Also reclaims this stem's part-namespace scratch; the finished file at dest is left be.
     if job.dest.exists() {
         clean_dest_parts(&job.dest);
         return Err(VideoError::exists());
@@ -1186,8 +1186,8 @@ pub(crate) async fn run_live_ytdlp(
             gate.mark_delivered();
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // The name was claimed mid-capture; the row requeues under a
-            // fresh name and records again, so the shell is redundant.
+            // The name was claimed mid-capture; the row fails Parabolic-style
+            // instead of recording again, so the shell is redundant.
             sweep_live_capture(
                 &out,
                 &part,
@@ -1195,7 +1195,7 @@ pub(crate) async fn run_live_ytdlp(
                 staging,
                 Some(&final_tmp),
                 Staging::Sweep,
-                Exit::Requeued,
+                Exit::DestClaimed,
             )
             .await;
             return Err(VideoError::exists());

@@ -124,8 +124,8 @@ impl VideoError {
     pub(crate) fn outdated() -> Self {
         Self::Message(gettext("Video tools are too old — update them to continue"))
     }
-    /// The exact [`crate::engine_msg::DEST_EXISTS`] sentence, so the pump's
-    /// foreign-file requeue path retries the merge under a fresh name.
+    /// The exact [`crate::engine_msg::DEST_EXISTS`] sentence, so a foreign
+    /// file at the destination fails the row Parabolic-style.
     pub(crate) fn exists() -> Self {
         Self::Message(crate::engine_msg::DEST_EXISTS.to_string())
     }

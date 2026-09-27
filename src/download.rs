@@ -8,7 +8,7 @@ use gettextrs::{gettext, ngettext};
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -152,6 +152,10 @@ pub struct DownloadManager {
     discards: RefCell<HashMap<u64, PendingDiscard>>,
     /// Rows currently capturing a live stream. Pause/cancel/park only signal these; the worker finalizes and its message drives the row.
     live_rows: RefCell<std::collections::HashSet<u64>>,
+    /// Rows whose engine ever started (session-only, persisted on [`StoredItem`]):
+    /// a fresh row refuses an existing dest Parabolic-style, while a restored
+    /// row resumes its own partial.
+    started: RefCell<HashSet<u64>>,
     /// Set by shutdown(): stale engine futures must not re-persist or
     /// re-mark rows once the authoritative shutdown persist has run.
     draining: Cell<bool>,
@@ -230,6 +234,7 @@ impl DownloadManager {
             queued: Cell::new(0),
             epoch: RefCell::new(HashMap::new()),
             segment_state: RefCell::new(HashMap::new()),
+            started: RefCell::new(HashSet::new()),
             torrent_pieces: RefCell::new(HashMap::new()),
             server_mtime: RefCell::new(HashMap::new()),
             video_sources: RefCell::new(HashMap::new()),
@@ -442,7 +447,12 @@ impl DownloadManager {
             .unwrap_or_else(|| self.effective_download_dir())
     }
 
-    /// Validate, dedupe and queue a download, starting it when a slot is free.
+    /// Validate and queue a download, starting it when a slot is free.
+    ///
+    /// Names dedupe against live rows and reservations only: an on-disk file
+    /// never renames the intake. The engine refuses a fresh row whose
+    /// destination already exists (Parabolic-style), so duplicates surface as
+    /// an error instead of scattering ` (1)` copies.
     ///
     /// # Errors
     /// Returns a display-ready message when the URL or filename is invalid.
@@ -469,14 +479,12 @@ impl DownloadManager {
         // Torrents record engine subfolders as output_dir, so the taken check covers those too.
         let name = dedupe_filename(&name, |n| {
             let p = std::path::Path::new(&dir).join(n);
-            p.exists()
-                // Plain rows never reach `clean_dest_parts`, so only the exact destination needs a reservation.
-                || self.dest_reserved(&p)
-                || self.items()
-                    .any(|it| {
-                        (it.dest_dir() == dir && it.filename() == n)
-                            || it.output_dir() == p.to_string_lossy()
-                    })
+            // Plain rows never reach `clean_dest_parts`, so only the exact destination needs a reservation.
+            self.dest_reserved(&p)
+                || self.items().any(|it| {
+                    (it.dest_dir() == dir && it.filename() == n)
+                        || it.output_dir() == p.to_string_lossy()
+                })
         });
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
         if crate::torrent::is_magnet(&url) {
@@ -566,7 +574,8 @@ impl DownloadManager {
     /// [`DownloadManager::enqueue_video`] with a precomputed directory listing,
     /// for bulk imports that would otherwise readdir once per row. The snapshot
     /// stays correct as rows land: the per-row dedupe also consults the live
-    /// store and the stem reservation map.
+    /// store and the stem reservation map. An on-disk file never renames the
+    /// intake (see [`DownloadManager::enqueue`]).
     pub(crate) fn enqueue_video_staged(
         self: &Rc<Self>,
         page_url: &str,
@@ -584,8 +593,7 @@ impl DownloadManager {
         );
         let name = dedupe_filename(&name, |n| {
             let p = std::path::Path::new(dir).join(n);
-            p.exists()
-                || crate::video_staging::stem_reserved_in(existing, name_stem(n))
+            crate::video_staging::stem_reserved_in(existing, name_stem(n))
                 // Stem-wide reservation (see `is_name_taken`): a discard in flight owns this destination.
                 || self.dest_reserved(&p)
                 || self.items()
@@ -629,6 +637,13 @@ impl DownloadManager {
         };
         let dest_dir = self.resolve_dir(Some(&item.dest_dir()));
         let _batch = self.batch_guard();
+        // Multi-item collections land in a titled subfolder, torrent-style; a
+        // lone item keeps the flat behavior.
+        let dest_dir = if pl.items.len() > 1 {
+            crate::file_names::collection_subdir(&dest_dir, &pl.title)
+        } else {
+            dest_dir
+        };
         // One readdir for the whole expansion instead of one per entry.
         let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
         let mut added = 0;
@@ -714,6 +729,12 @@ impl DownloadManager {
             } else {
                 tracing::warn!("dropping video source with mismatched page URL");
             }
+        }
+        // A row the engine started in a past session resumes its own
+        // partial; only a never-started row refuses an existing dest.
+        // Legacy queue files (started == None) keep the old resume behavior.
+        if stored.started.unwrap_or(true) {
+            self.started.borrow_mut().insert(item.id());
         }
         Ok(self.insert(item))
     }
@@ -875,6 +896,18 @@ impl DownloadManager {
             }
             None => match std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) {
                 0 => StartMode::Fresh,
+                // Parabolic-style dedup: a row that never started refuses an
+                // existing destination instead of truncating or renaming it.
+                // Restored/retried rows carry `started` and resume their own
+                // partials below (progress alone can't tell: a crash before
+                // the first tick restores at 0.0 with bytes on disk).
+                _ if !self.started.borrow().contains(&item.id()) => {
+                    item.set_status(DownloadStatus::Failed);
+                    item.set_detail(DEST_EXISTS.to_string());
+                    self.changed();
+                    self.notify_finished(&item, Err(DEST_EXISTS.to_string()));
+                    return;
+                }
                 _ => StartMode::Single,
             },
         };
@@ -902,6 +935,8 @@ impl DownloadManager {
         };
         let handle = tokio_rt().spawn(run_download(ctx, connections, mode));
         self.running.borrow_mut().insert(item.id(), handle);
+        // The engine owns the destination from here: later spawns resume it rather than refusing as foreign.
+        self.started.borrow_mut().insert(item.id());
         item.set_status(DownloadStatus::Downloading);
         // Attempts start indeterminate: clear any stale fraction so the row pulses through the connecting phase.
         item.set_progress(0.0);
@@ -920,7 +955,7 @@ impl DownloadManager {
         self.pump(item, item_id, generation, rx);
     }
 
-    /// Whether a finished-name candidate is taken (file on disk, reserved stem, or live row holding it). Shared by the Finished claim loop and the DEST_EXISTS requeue.
+    /// Whether a finished-name candidate is taken (file on disk, reserved stem, or live row holding it). Used by the Finished claim loop.
     fn is_name_taken(&self, dir: &str, existing: &[String], n: &str) -> bool {
         std::path::Path::new(dir).join(n).exists()
             || crate::video_staging::stem_reserved_in(existing, name_stem(n))
@@ -1146,26 +1181,9 @@ impl DownloadManager {
                         // A failed download keeps its URL-derived name.
                         this.pending_names.borrow_mut().remove(&id);
                         this.server_mtime.borrow_mut().remove(&id);
-                        if e == DEST_EXISTS
-                            && item.status() != DownloadStatus::Cancelled
-                            && item.status() != DownloadStatus::Paused
-                        {
-                            // A foreign file appeared at our path after dedupe: pick a fresh free name and requeue.
-                            let dir = item.dest_dir().to_string();
-                            let current = item.filename().to_string();
-                            let existing =
-                                crate::video_staging::dir_file_names(std::path::Path::new(&dir));
-                            let new_name = dedupe_filename(&current, |n| {
-                                this.is_name_taken(&dir, &existing, n)
-                            });
-                            item.set_filename(new_name);
-                            item.set_status(DownloadStatus::Queued);
-                            this.persist_queue();
-                            this.changed();
-                            this.start_next();
-                            done = true;
-                            break;
-                        }
+                        // DEST_EXISTS (a foreign file at our path) fails the row:
+                        // Parabolic-style, duplicates surface instead of
+                        // requeueing under a fresh name.
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
@@ -1819,6 +1837,7 @@ impl DownloadManager {
     pub fn remove(self: &Rc<Self>, id: u64) {
         self.cancel_inner(id, true, Stop::Discard);
         self.epoch.borrow_mut().remove(&id);
+        self.started.borrow_mut().remove(&id);
         // Video rows defer the sweep to `finish_discard`, which waits for the worker: a finalize path still inside its rename would otherwise deliver a file for a row that no longer exists.
         if self.video_sources.borrow().contains_key(&id) {
             let dest = self.find(id).map(|i| i.file_path()).unwrap_or_default();
@@ -2173,6 +2192,7 @@ impl DownloadManager {
                     selected_files,
                     output_dir,
                     video_source,
+                    started: Some(self.started.borrow().contains(&it.id())),
                 });
             }
         }

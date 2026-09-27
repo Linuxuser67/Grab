@@ -111,7 +111,7 @@ async fn single_loop(ctx: &FetchCtx, tries: &mut i32, expected: Option<u64>, cla
                 return;
             }
             Err(e) => {
-                // A taken path never frees on retry: fail at once so the pump requeues under a fresh name.
+                // A taken path never frees on retry: fail at once so the row surfaces the error instead of requeueing.
                 if e == DEST_EXISTS {
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return;

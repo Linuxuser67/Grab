@@ -59,6 +59,12 @@ pub(crate) struct StoredItem {
     /// Video-page source; only `Some(Page)` written so old files/versions stay compatible.
     #[serde(default)]
     pub(crate) video_source: Option<crate::media_types::VideoSource>,
+    /// Whether the engine ever started this row (additive, no version bump):
+    /// a restored row with bytes at dest resumes instead of refusing as foreign.
+    /// `None` = queue file predates the field: keep the legacy resume behavior
+    /// rather than refusing a partial the old version was downloading.
+    #[serde(default)]
+    pub(crate) started: Option<bool>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

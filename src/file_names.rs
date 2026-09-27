@@ -147,11 +147,58 @@ pub(crate) fn name_stem(name: &str) -> &str {
         .unwrap_or("")
 }
 
-pub(crate) fn sane_filename(s: &str) -> bool {
-    /// Explicit bidi controls (escapes, never literal glyphs: invisible in source).
-    fn is_bidi_control(c: char) -> bool {
-        matches!(c, '\u{200E}' | '\u{200F}' | '\u{61C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+/// Explicit bidi controls (escapes, never literal glyphs: invisible in source).
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{61C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Folder-safe form of a collection title (playlist, stories, highlights):
+/// path separators, NUL, controls and bidi overrides become `_`, runs
+/// collapse and edges trim; falls back to `"collection"` when nothing
+/// survives. Pure.
+pub(crate) fn sanitize_folder_name(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    for c in title.chars() {
+        if c == '/' || c == '\\' || c == '\0' || c.is_control() || is_bidi_control(c) {
+            out.push('_');
+        } else {
+            out.push(c);
+        }
     }
+    // Collapse runs and trim edges, mirroring the ASCII fold's tidying.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut prev_underscore = false;
+    for c in out.chars() {
+        if c == '_' {
+            if prev_underscore {
+                continue;
+            }
+            prev_underscore = true;
+        } else {
+            prev_underscore = false;
+        }
+        collapsed.push(c);
+    }
+    let trimmed = collapsed.trim_matches(|c| c == '_' || c == ' ' || c == '.');
+    if trimmed.is_empty() {
+        "collection".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Titled subfolder for a multi-item collection (playlist, stories,
+/// highlights), torrent-style: sanitized, created eagerly, and reused when the
+/// same collection is added again (duplicate files then fail Parabolic-style
+/// at start instead of scattering ` (1)` copies).
+pub(crate) fn collection_subdir(dir: &str, title: &str) -> String {
+    let folder = shorten_filename(&sanitize_folder_name(title));
+    let path = std::path::Path::new(dir).join(&folder);
+    let _ = std::fs::create_dir_all(&path);
+    path.to_string_lossy().into_owned()
+}
+
+pub(crate) fn sane_filename(s: &str) -> bool {
     !s.is_empty()
         && !s.contains('/')
         && !s.contains('\0')

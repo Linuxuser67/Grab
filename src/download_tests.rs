@@ -53,6 +53,7 @@ fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus)
         selected_files: None,
         output_dir: None,
         video_source: None,
+        started: None,
     }
 }
 
@@ -426,6 +427,7 @@ fn overcap_queue_keeps_active_first() {
             selected_files: None,
             output_dir: None,
             video_source: None,
+            started: None,
         },
         StoredItem {
             id: None,
@@ -438,6 +440,7 @@ fn overcap_queue_keeps_active_first() {
             selected_files: None,
             output_dir: None,
             video_source: None,
+            started: None,
         },
     ];
     for i in 0..1000 {
@@ -452,6 +455,7 @@ fn overcap_queue_keeps_active_first() {
             selected_files: None,
             output_dir: None,
             video_source: None,
+            started: None,
         });
     }
     let queue = StoredQueue {
@@ -981,6 +985,7 @@ fn a_pre_upgrade_row_never_lands_on_a_leftover_staging_dir() {
                 selected_files: None,
                 output_dir: None,
                 video_source: None,
+                started: None,
             }],
         })
         .unwrap(),
@@ -1085,6 +1090,7 @@ fn mismatched_video_source_dropped_on_restore() {
                 video_format_id: None,
                 playlist_item_id: None,
             }),
+            started: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -1814,6 +1820,250 @@ fn dedupes() {
 }
 
 #[test]
+fn sanitize_folder_name_strips_unsafe_characters() {
+    assert_eq!(
+        crate::file_names::sanitize_folder_name("My Playlist: Best/Of"),
+        "My Playlist_ Best_Of"
+    );
+    assert_eq!(
+        crate::file_names::sanitize_folder_name("a\\b\u{0}c\u{202e}d"),
+        "a_b_c_d"
+    );
+    assert_eq!(crate::file_names::sanitize_folder_name("a__b"), "a_b");
+    assert_eq!(crate::file_names::sanitize_folder_name("..."), "collection");
+    assert_eq!(crate::file_names::sanitize_folder_name("///"), "collection");
+    assert_eq!(crate::file_names::sanitize_folder_name("Mix"), "Mix");
+}
+
+#[test]
+fn collection_subdir_reuses_titled_folder() {
+    let base = std::env::temp_dir().join(format!("grab-collsub-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let base_s = base.to_string_lossy().into_owned();
+    let first = crate::file_names::collection_subdir(&base_s, "My Mix: Vol. 1");
+    let second = crate::file_names::collection_subdir(&base_s, "My Mix: Vol. 1");
+    assert_eq!(first, second);
+    assert!(std::path::Path::new(&first).is_dir());
+    assert!(first.ends_with("My Mix_ Vol. 1"));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn enqueue_keeps_name_when_file_exists() {
+    // Parabolic-style: an on-disk file never renames the intake. The row keeps
+    // its natural name and the engine refuses it at spawn; nothing is removed.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("keep-name-dup");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-keepdup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("dup.bin"), b"someone else").unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let item = manager
+        .enqueue(
+            "https://example.com/dup.bin",
+            Some(&dest_s),
+            Some("dup.bin"),
+        )
+        .expect("enqueue");
+    assert_eq!(item.filename(), "dup.bin");
+    // insert -> start_next -> spawn run synchronously: the fresh row refuses the foreign file.
+    assert_eq!(item.status(), DownloadStatus::Failed);
+    assert_eq!(item.detail(), crate::engine_msg::DEST_EXISTS);
+    assert_eq!(
+        std::fs::read(dest.join("dup.bin")).unwrap(),
+        b"someone else"
+    );
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn enqueue_video_keeps_name_when_file_exists() {
+    // Video intake likewise never renames for an on-disk file; the runner's
+    // pre-flight refuses the existing destination at start.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("keep-name-video-dup");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-keepviddup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("clip.mp4"), b"someone else").unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let item = manager
+        .enqueue_video(
+            "https://www.youtube.com/watch?v=gXtp6C-3JKo",
+            Some(&dest_s),
+            Some("clip.mp4"),
+            crate::media_types::VideoChoices {
+                quality: "1080p".to_string(),
+                audio_only: false,
+                video_format_id: None,
+                is_live: false,
+                playlist_item_id: None,
+            },
+        )
+        .expect("video enqueue");
+    assert_eq!(item.filename(), "clip.mp4");
+    assert_eq!(
+        std::fs::read(dest.join("clip.mp4")).unwrap(),
+        b"someone else"
+    );
+    // Let the tools-missing failure land so no worker outlives the test.
+    drain_engine(&manager, item.id());
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn restored_unstarted_row_refuses_existing_dest() {
+    // A queue-file row the engine never started is foreign to any bytes at
+    // dest, exactly like a fresh intake: it refuses instead of resuming.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("refuse-restored");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-refuserest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("foreign.bin"), b"not ours").unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let mut stored = stored_row(
+        "https://example.com/foreign.bin",
+        &dest_s,
+        "foreign.bin",
+        DownloadStatus::Downloading,
+    );
+    // Explicit never-started (new queue file): the bytes are foreign.
+    stored.started = Some(false);
+    let item = manager.restore_existing(&stored).expect("restore");
+    assert_eq!(item.status(), DownloadStatus::Failed);
+    assert_eq!(item.detail(), crate::engine_msg::DEST_EXISTS);
+    assert_eq!(
+        std::fs::read(dest.join("foreign.bin")).unwrap(),
+        b"not ours"
+    );
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn legacy_queue_row_without_started_resumes_partial() {
+    // Queue files from before `started` existed carry None: the legacy
+    // resume-anything-with-bytes behavior applies, so a pre-upgrade partial
+    // is not refused as foreign.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("resume-legacy");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-resumeleg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("partial.bin"), b"ours").unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    // `stored_row` leaves `started` as None: a legacy queue file.
+    let stored = stored_row(
+        "https://example.com/partial.bin",
+        &dest_s,
+        "partial.bin",
+        DownloadStatus::Downloading,
+    );
+    assert!(stored.started.is_none());
+    let item = manager.restore_existing(&stored).expect("restore");
+    assert_ne!(
+        item.detail(),
+        crate::engine_msg::DEST_EXISTS,
+        "legacy partial must resume, not refuse"
+    );
+    manager.cancel(item.id());
+    quiesce(&glib::MainContext::default());
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn expand_playlist_rows_use_titled_subfolder() {
+    // Multi-item collections land in a titled subfolder, torrent-style; the
+    // folder is reused, never suffixed, so repeats hit the new dedup errors.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("pl-subfolder");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-plsub-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let parent = manager
+        .enqueue_video(
+            "https://www.youtube.com/playlist?list=PLx",
+            Some(&dest_s),
+            Some("parent.mp4"),
+            crate::media_types::VideoChoices {
+                quality: "1080p".to_string(),
+                audio_only: false,
+                video_format_id: None,
+                is_live: false,
+                playlist_item_id: None,
+            },
+        )
+        .expect("parent enqueue");
+    // Stage a Page source so the expansion reads quality/audio_only.
+    manager.video_sources.borrow_mut().insert(
+        parent.id(),
+        crate::media_types::VideoSource::Page {
+            page_url: "https://www.youtube.com/playlist?list=PLx".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    let pl = crate::media_types::PlaylistInfo {
+        id: "PLx".to_string(),
+        title: "My Mix: Vol. 1".to_string(),
+        page_url: "https://www.youtube.com/playlist?list=PLx".to_string(),
+        kind: crate::media_types::PlaylistKind::Playlist,
+        total: 2,
+        items: vec![
+            crate::media_types::PlaylistItem {
+                index: 1,
+                id: "a".to_string(),
+                title: "First".to_string(),
+                page_url: "https://www.youtube.com/watch?v=aaa".to_string(),
+                duration: None,
+            },
+            crate::media_types::PlaylistItem {
+                index: 2,
+                id: "b".to_string(),
+                title: "Second".to_string(),
+                page_url: "https://www.youtube.com/watch?v=bbb".to_string(),
+                duration: None,
+            },
+        ],
+    };
+    let (added, total) = manager.expand_playlist_rows(parent.id(), &parent, &pl);
+    assert_eq!((added, total), (2, 2));
+    let sub = dest.join("My Mix_ Vol. 1");
+    assert!(sub.is_dir());
+    let ids: Vec<u64> = manager.items().map(|it| it.id()).collect();
+    for it in manager.items() {
+        if it.id() == parent.id() {
+            continue;
+        }
+        assert_eq!(it.dest_dir(), sub.to_string_lossy());
+    }
+    // Let the tools-missing failures land so no worker outlives the test.
+    for id in ids {
+        drain_engine(&manager, id);
+    }
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
 fn shortens_long_filenames() {
     assert_eq!(shorten_filename("short.mp4"), "short.mp4");
     let long = format!("{}.mp4", "a".repeat(300));
@@ -1909,6 +2159,7 @@ fn queue_roundtrip_and_mapping() {
                 selected_files: None,
                 output_dir: None,
                 video_source: None,
+                started: None,
             },
             StoredItem {
                 id: None,
@@ -1921,6 +2172,7 @@ fn queue_roundtrip_and_mapping() {
                 selected_files: None,
                 output_dir: None,
                 video_source: None,
+                started: None,
             },
         ],
     };
@@ -2068,6 +2320,7 @@ fn batch_restore_hundred_done() {
             selected_files: None,
             output_dir: None,
             video_source: None,
+            started: None,
         })
         .collect();
     let queue = StoredQueue {
@@ -2269,6 +2522,8 @@ fn restore_preserves_intent() {
         selected_files: None,
         output_dir: None,
         video_source: None,
+        // None: this round-trips a legacy queue file through restore.
+        started: None,
     })
     .collect();
     let queue = StoredQueue {
@@ -2972,6 +3227,7 @@ fn killed_segmented_resume_starts_over() {
                 selected_files: None,
                 output_dir: None,
                 video_source: None,
+                started: None,
             }],
         })
         .unwrap(),
@@ -3280,15 +3536,13 @@ fn restart_with_smaller_file_keeps_partial() {
     let manager = DownloadManager::new(store, settings.clone());
     let url = format!("http://127.0.0.1:{port}/t.bin");
     let dest = dl.to_string_lossy().into_owned();
-    // restore_existing, not enqueue: enqueue dedupes away from the pre-written
-    // partial, and the restore path is synchronous (no engine race).
+    // restore_existing, not enqueue: the restore path is synchronous (no engine race).
+    let mut stored = stored_row(&url, &dest, "t.bin", DownloadStatus::Downloading);
+    // The row started in a past session: its bytes are its own partial, so the
+    // engine resumes instead of refusing the destination as foreign.
+    stored.started = Some(true);
     let item = manager
-        .restore_existing(&stored_row(
-            &url,
-            &dest,
-            "t.bin",
-            DownloadStatus::Downloading,
-        ))
+        .restore_existing(&stored)
         .unwrap_or_else(|e| abort(&server, &e));
     let id = item.id();
     // Drain the engine's pump future on this thread (see MAIN_LOOP_LOCK).
@@ -4903,7 +5157,7 @@ fn a_reserved_destination_forces_plain_intake_to_dedupe() {
 
 #[test]
 fn a_finished_name_claim_honours_a_pending_discard() {
-    // Finished-name claims and DEST_EXISTS requeues share `is_name_taken`: reserved must read as taken.
+    // Finished-name claims consult `is_name_taken`: reserved must read as taken.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-claim");
     let settings = test_settings();

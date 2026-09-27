@@ -42,5 +42,5 @@ pub(crate) enum EngineMsg {
     Phase(String),
 }
 
-/// Fresh run found someone else's file at our path: pump requeues under a fresh name.
+/// Fresh run found someone else's file at our path: the row fails instead of renaming (Parabolic-style).
 pub(crate) const DEST_EXISTS: &str = "Destination already exists";

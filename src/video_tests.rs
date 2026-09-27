@@ -3866,7 +3866,7 @@ fn live_capture_stale_staging_never_adopts() {
 
 #[test]
 fn live_capture_refuses_existing_dest() {
-    // Overwrite pre-flight: a finished file at dest refuses before recording, requeueing under a fresh name.
+    // Overwrite pre-flight: a finished file at dest refuses before recording; the row fails Parabolic-style.
     let dir = std::env::temp_dir().join(format!("grab-fakelive-ow-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

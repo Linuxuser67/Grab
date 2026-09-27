@@ -377,7 +377,9 @@ pub fn build_window(
         let main_hb = header.clone();
         let btn_box = header_btn_box.clone();
         let sp = split.clone();
-        sp.connect_show_sidebar_notify(move |_| {
+        // Clone for the method receiver: the `move` closure takes `sp`, which
+        // conflicts with the `&self` borrow of the connect call.
+        sp.clone().connect_show_sidebar_notify(move |_| {
             // Reparent the button box to whichever header is active.
             if let Some(parent) = btn_box.parent() {
                 if let Some(hb) = parent.downcast_ref::<adw::HeaderBar>() {

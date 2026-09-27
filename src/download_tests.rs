@@ -1823,7 +1823,7 @@ fn dedupes() {
 fn sanitize_folder_name_strips_unsafe_characters() {
     assert_eq!(
         crate::file_names::sanitize_folder_name("My Playlist: Best/Of"),
-        "My Playlist_ Best_Of"
+        "My Playlist: Best_Of"
     );
     assert_eq!(
         crate::file_names::sanitize_folder_name("a\\b\u{0}c\u{202e}d"),
@@ -1840,11 +1840,11 @@ fn collection_subdir_reuses_titled_folder() {
     let base = std::env::temp_dir().join(format!("grab-collsub-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let base_s = base.to_string_lossy().into_owned();
-    let first = crate::file_names::collection_subdir(&base_s, "My Mix: Vol. 1");
-    let second = crate::file_names::collection_subdir(&base_s, "My Mix: Vol. 1");
+    let first = crate::file_names::collection_subdir(&base_s, "My Mix: Vol. 1/Deluxe");
+    let second = crate::file_names::collection_subdir(&base_s, "My Mix: Vol. 1/Deluxe");
     assert_eq!(first, second);
     assert!(std::path::Path::new(&first).is_dir());
-    assert!(first.ends_with("My Mix_ Vol. 1"));
+    assert!(first.ends_with("My Mix: Vol. 1_Deluxe"));
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -2047,7 +2047,7 @@ fn expand_playlist_rows_use_titled_subfolder() {
     };
     let (added, total) = manager.expand_playlist_rows(parent.id(), &parent, &pl);
     assert_eq!((added, total), (2, 2));
-    let sub = dest.join("My Mix_ Vol. 1");
+    let sub = dest.join("My Mix: Vol. 1");
     assert!(sub.is_dir());
     let ids: Vec<u64> = manager.items().map(|it| it.id()).collect();
     for it in manager.items() {

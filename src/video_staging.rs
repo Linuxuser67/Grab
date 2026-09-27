@@ -43,14 +43,43 @@ pub fn ensure_staging_dir(dir: &Path) -> Result<PathBuf, VideoError> {
 
 /// Remove a staging dir, guarded to stay under the staging root (never user data).
 pub fn clean_staging(dir: &Path) {
-    let (Ok(canon), Ok(root)) = (
-        std::fs::canonicalize(dir),
-        std::fs::canonicalize(staging_root()),
-    ) else {
+    clean_staging_in(&staging_root(), dir);
+}
+
+pub(crate) fn clean_staging_in(root: &Path, dir: &Path) {
+    let (Ok(canon), Ok(root)) = (std::fs::canonicalize(dir), std::fs::canonicalize(root)) else {
         return;
     };
     if canon.starts_with(&root) {
         let _ = std::fs::remove_dir_all(canon);
+    }
+}
+
+/// Remove per-item staging dirs with no live row (crash/kill leftovers: only
+/// restored rows reuse their ids, so nothing sweepable can resume). Only
+/// numeric dir names are touched — the `grab-cookies-*.txt` files and anything
+/// else under the root are left alone. Runs at startup after the queue is
+/// restored, before any worker starts, so nothing live is removed.
+pub fn sweep_orphan_staging(keep: &std::collections::HashSet<u64>) {
+    sweep_orphan_staging_in(&staging_root(), keep);
+}
+
+pub(crate) fn sweep_orphan_staging_in(root: &Path, keep: &std::collections::HashSet<u64>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let is_item = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u64>().ok())
+            .is_some_and(|id| !keep.contains(&id));
+        // `clean_staging_in` re-verifies the canonical path stays under the
+        // root, so a planted symlink can never divert the removal.
+        if is_dir && is_item {
+            clean_staging_in(root, &entry.path());
+        }
     }
 }
 

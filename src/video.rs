@@ -37,6 +37,7 @@ pub use crate::video_spawn::fetch_video_infos;
 /// [`video_staging`](crate::video_staging) now.
 pub use crate::video_staging::{
     clean_dest_parts, clean_staging, highest_staging_index, staging_dir, staging_root,
+    sweep_orphan_staging,
 };
 /// Facade: tool provisioning lives in [`video_tools`](crate::video_tools) now.
 pub use crate::video_tools::{

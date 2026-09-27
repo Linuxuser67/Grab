@@ -46,8 +46,8 @@ use crate::video_staging::{
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
     is_sparse_shell, is_ytdlp_fragment, manifest_path, read_manifest, release_remux_lease,
     reserve_remux_temp, resume_plan, sidecar_path_for, staging_dir, staging_root, stem_reserved_in,
-    sweep_partial_remuxes, sweep_staging_preserving_recordings, unified_candidate,
-    unified_temp_limit, ytdlp_output_template,
+    sweep_orphan_staging_in, sweep_partial_remuxes, sweep_staging_preserving_recordings,
+    unified_candidate, unified_temp_limit, ytdlp_output_template,
 };
 use crate::video_tools::VideoError;
 use crate::video_tools::{
@@ -504,6 +504,31 @@ fn clean_staging_removes_our_dir() {
     assert!(dir.exists());
     clean_staging(&dir);
     assert!(!dir.exists());
+}
+
+#[test]
+fn sweep_orphan_staging_keeps_live_rows_and_cookie_files() {
+    // Isolated root: the real staging root is shared with other tests running
+    // in parallel, and the sweep touches every numeric dir not in `keep`.
+    let root = std::env::temp_dir().join("grab-video-sweep-test");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let live_dir = root.join("991");
+    let orphan_dir = root.join("992");
+    let cookie = root.join("grab-cookies-1-1.txt");
+    let stray = root.join("not-a-staging-dir");
+    for d in [&live_dir, &orphan_dir] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(&cookie, "x").unwrap();
+    std::fs::write(&stray, "x").unwrap();
+    let keep: std::collections::HashSet<u64> = [991].into_iter().collect();
+    sweep_orphan_staging_in(&root, &keep);
+    assert!(live_dir.exists(), "live row's staging must survive");
+    assert!(!orphan_dir.exists(), "orphan staging must go");
+    assert!(cookie.exists(), "cookie files must survive");
+    assert!(stray.exists(), "non-numeric entries must survive");
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

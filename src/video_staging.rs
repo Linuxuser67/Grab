@@ -41,16 +41,66 @@ pub fn ensure_staging_dir(dir: &Path) -> Result<PathBuf, VideoError> {
     }
 }
 
+/// Canonicalize `dir`, returning it only if it stays under `root` (a planted
+/// symlink that escapes refuses instead of diverting the removal).
+fn guarded_staging_dir(root: &Path, dir: &Path) -> Option<PathBuf> {
+    let (Ok(canon), Ok(root)) = (std::fs::canonicalize(dir), std::fs::canonicalize(root)) else {
+        return None;
+    };
+    canon.starts_with(&root).then_some(canon)
+}
+
 /// Remove a staging dir, guarded to stay under the staging root (never user data).
 pub fn clean_staging(dir: &Path) {
-    let (Ok(canon), Ok(root)) = (
-        std::fs::canonicalize(dir),
-        std::fs::canonicalize(staging_root()),
-    ) else {
+    if let Some(canon) = guarded_staging_dir(&staging_root(), dir) {
+        let _ = std::fs::remove_dir_all(canon);
+    }
+}
+
+/// Reclaim one orphan staging dir: the scratch goes, completed `final.*`
+/// recordings stay (do not delete the user's only copy). The dir itself is
+/// removed only if nothing worth keeping remains, so it stays skipped by the
+/// id allocator.
+fn reclaim_orphan_staging_in(root: &Path, dir: &Path) {
+    let Some(canon) = guarded_staging_dir(root, dir) else {
         return;
     };
-    if canon.starts_with(&root) {
-        let _ = std::fs::remove_dir_all(canon);
+    // Re-verify after canonicalization: the target must still be a numeric
+    // child of the root, so a symlink swapped in mid-sweep cannot divert the
+    // removal onto the root itself or a non-item path.
+    let is_item = canon
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.parse::<u64>().ok())
+        .is_some();
+    if is_item {
+        sweep_staging_preserving_recordings(&canon);
+    }
+}
+
+/// Reclaim per-item staging dirs with no live row (crash/kill leftovers: only
+/// restored rows reuse their ids, so nothing swept can resume). Only numeric
+/// dir names are touched — the `grab-cookies-*.txt` files and anything else
+/// under the root are left alone. Runs at startup after the queue is restored,
+/// before any worker starts, so nothing live is removed.
+pub fn sweep_orphan_staging(keep: &std::collections::HashSet<u64>) {
+    sweep_orphan_staging_in(&staging_root(), keep);
+}
+
+pub(crate) fn sweep_orphan_staging_in(root: &Path, keep: &std::collections::HashSet<u64>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let is_orphan = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u64>().ok())
+            .is_some_and(|id| !keep.contains(&id));
+        if is_dir && is_orphan {
+            reclaim_orphan_staging_in(root, &entry.path());
+        }
     }
 }
 

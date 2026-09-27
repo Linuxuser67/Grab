@@ -313,10 +313,8 @@ pub fn build_window(
     // The toggle mirrors sidebar visibility (active = sidebar shown), so it
     // stays in sync when focus_form() reveals the sidebar too.
     split
-        .bind_property(
-            "show-content",
-            &sidebar_toggle,
-            "active",
+        .bind_property("show-content", &sidebar_toggle, "active")
+        .flags(
             glib::BindingFlags::BIDIRECTIONAL
                 | glib::BindingFlags::SYNC_CREATE
                 | glib::BindingFlags::INVERT_BOOLEAN,

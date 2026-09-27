@@ -6886,6 +6886,37 @@ fn live_capture_argv_never_takes_subtitles() {
     assert_no_subtitle_tokens(&argv);
 }
 
+#[test]
+fn live_capture_argv_keeps_flags_before_url_terminator() {
+    // Everything after `--` is a positional URL: a flag appended past it
+    // becomes an extra "URL" and yt-dlp aborts with "Fixed output name but
+    // more than one file to download". The timestamp flags must ride inside
+    // the builder, ahead of the terminator.
+    let job = live_test_job();
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.mp4"),
+        None,
+    );
+    let dd = argv
+        .iter()
+        .position(|a| a == "--")
+        .expect("no -- terminator");
+    assert_eq!(
+        argv.len(),
+        dd + 2,
+        "only the page URL may follow --: {argv:?}"
+    );
+    assert_eq!(argv[dd + 1], job.page_url);
+    let i = argv
+        .iter()
+        .position(|a| a == "--downloader-args")
+        .expect("--downloader-args missing");
+    assert!(i < dd, "--downloader-args landed past --: {argv:?}");
+    assert_eq!(argv[i + 1], crate::video_tools::LIVE_DOWNLOADER_ARGS);
+}
+
 // ── subtitle embedding ───────────────────────────────────────────────
 
 #[test]

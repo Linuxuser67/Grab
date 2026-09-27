@@ -118,6 +118,18 @@ impl VideoError {
             gettext("Couldn't merge video and audio: {detail}").replace("{detail}", &e.to_string()),
         )
     }
+    /// Append to the rendered message, preserving the variant: salvage exits
+    /// keep the raw shell inside the hidden staging dir, so the failure has
+    /// to name where the recording went.
+    pub(crate) fn with_suffix(self, suffix: impl std::fmt::Display) -> Self {
+        let suffix = suffix.to_string();
+        match self {
+            Self::MissingLibraries(s) => Self::MissingLibraries(format!("{s}{suffix}")),
+            Self::Fetch(s) => Self::Fetch(format!("{s}{suffix}")),
+            Self::Runtime(s) => Self::Runtime(format!("{s}{suffix}")),
+            Self::Message(s) => Self::Message(format!("{s}{suffix}")),
+        }
+    }
     pub(crate) fn interrupted() -> Self {
         Self::Message(gettext("Download interrupted"))
     }

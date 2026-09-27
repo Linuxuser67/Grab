@@ -22,9 +22,9 @@ use crate::video_spawn::{
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, collect_sidecar, dest_part_path,
-    discover_unified_output, ensure_staging_dir_in, file_len, read_manifest, release_remux_lease,
-    reserve_remux_temp, resume_plan, sidecar_path_for, staging_location_for_dest,
-    sweep_partial_remuxes, sweep_staging_preserving_recordings,
+    discover_unified_output, ensure_staging_dir_in, file_len, part_path, read_manifest,
+    release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
+    staging_location_for_dest, sweep_partial_remuxes, sweep_staging_preserving_recordings,
 };
 use crate::video_tools::{
     VideoError, ensure_tool_versions, resolve_libraries, ytdlp_identity_args,
@@ -709,6 +709,15 @@ enum Staging {
     Keep,
 }
 
+/// Salvage exits keep the raw shell inside the hidden staging dir: name it in
+/// the failure message so the recording stays findable.
+fn salvage_note(staging: &Path) -> String {
+    format!(
+        " {}",
+        gettext("(recording kept in {dir})").replace("{dir}", &staging.display().to_string())
+    )
+}
+
 /// Reclaim one live capture's scratch on any terminal exit. The `.ytdl` state file is always removed: a killed capture never cleans it, and a stale one would resume fragment N against a wiped shell (corrupt recording). Staging is never swept recursively: a sibling temp is an earlier attempt's completed recording. Best-effort throughout: a sweep racing a vanished file is a no-op, never worth failing a row over.
 async fn sweep_live_capture(
     out: &Path,
@@ -886,9 +895,10 @@ pub(crate) async fn run_live_ytdlp(
     use tokio::io::AsyncBufReadExt as _;
     // Fresh capture: a crashed run's live file must never be resumed into (append-only stream) nor adopted as an empty fresh capture.
     let ext = if job.audio_only { "m4a" } else { "mp4" };
-    // Capture beside the finished file: the `.part` shell shows in the user's folder while recording, and the file-growth watcher announces "Recording…" off this path.
-    let out = dest_part_path(&job.dest, "live", ext);
-    // Overwrite pre-flight (Parabolic parity): refuse before recording; the row fails instead of requeueing. Also reclaims this stem's part-namespace scratch; the finished file at dest is left be.
+    // Capture inside the row's staging dir: the `.part` shell stays hidden while
+    // recording, and the file-growth watcher announces "Recording…" off this path.
+    let out = part_path(staging, "live", ext);
+    // Overwrite pre-flight (Parabolic parity): refuse before recording; the row fails instead of requeueing. Also reclaims pre-upgrade dest-dir scratch for this stem (live parts used to sit beside the finished file); the finished file at dest is left be.
     if job.dest.exists() {
         clean_dest_parts(&job.dest);
         return Err(VideoError::exists());
@@ -1024,6 +1034,8 @@ pub(crate) async fn run_live_ytdlp(
                             // in). Fail loudly with yt-dlp's own error line instead;
                             // the raw shell is kept for salvage, only scratch is swept.
                             let detail = last_error_line(&log_tail, "recorder failed");
+                            let detail =
+                                format!("{detail}{}", salvage_note(staging));
                             sweep_live_capture(
                                 &out,
                                 &part,
@@ -1057,7 +1069,10 @@ pub(crate) async fn run_live_ytdlp(
                             },
                         )
                         .await;
-                        return Err(VideoError::runtime(&e));
+                        return Err(VideoError::runtime(format!(
+                            "{e}{}",
+                            salvage_note(staging)
+                        )));
                     }
                     Err(_) => {
                         // A stalled live capture still yields what it got.
@@ -1180,6 +1195,7 @@ pub(crate) async fn run_live_ytdlp(
     {
         // The remux never materialized, so the recorded shell is the user's only
         // copy: keep it for salvage, drop only the scratch around it.
+        let note = salvage_note(staging);
         sweep_live_capture(
             &out,
             &part,
@@ -1190,7 +1206,7 @@ pub(crate) async fn run_live_ytdlp(
             Exit::RemuxFailed,
         )
         .await;
-        return Err(e);
+        return Err(e.with_suffix(note));
     }
     // The linearization point. `try_commit` is a CAS, so there is no window
     // between deciding and acting for a concurrent removal to slip into:
@@ -1232,6 +1248,7 @@ pub(crate) async fn run_live_ytdlp(
             // An unexpected rename failure (permissions, I/O) leaves the shell
             // and the completed remux as the user's only copies: keep both
             // (see `sweep_live_capture` on why Staging::Keep).
+            let note = salvage_note(staging);
             sweep_live_capture(
                 &out,
                 &part,
@@ -1242,7 +1259,7 @@ pub(crate) async fn run_live_ytdlp(
                 Exit::RenameFailed,
             )
             .await;
-            return Err(VideoError::combine(&e));
+            return Err(VideoError::combine(format!("{e}{note}")));
         }
     }
     // Claimed: the remuxed file is at its final name, so the shell and

@@ -253,7 +253,6 @@ impl VideoManifest {
 }
 
 /// Fixed part names inside a row's staging dir.
-#[allow(dead_code)]
 pub(crate) fn part_path(dir: &Path, kind: &str, ext: &str) -> PathBuf {
     dir.join(format!("{kind}.{ext}"))
 }

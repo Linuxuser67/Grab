@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.4" date="2026-09-27">
+      <description>
+        <ul>
+          <li>The New Download sidebar now sits side by side with the download list at the HIG-recommended width instead of covering it; on narrow windows the list shows by default and the + button reveals the sidebar. The Download Details dialog no longer repeats information already shown in the list.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.3" date="2026-09-27">
       <description>
         <ul>

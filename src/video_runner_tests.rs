@@ -4,6 +4,8 @@
 
 use super::*;
 
+use crate::video_argv::VideoJob;
+
 /// `Exit::RenameFailed` keeps the user's only copy: nothing re-records, nothing is
 /// swept except `.ytdl` state. Also pins the non-recursive staging sweep, which is
 /// what keeps an earlier attempt's unplaceable remux durable.
@@ -169,4 +171,99 @@ fn a_stalled_reap_blocks_the_sweep() {
         "the sweep ran while the recorder had not been reaped: scratch would be \
          deleted under a live writer"
     );
+}
+
+/// Item 3: the post-wait drain must be bounded — a child that exits while a
+/// grandchild keeps its stdout pipe open must not stall the subtitle probe.
+/// The fake binary prints valid subtitle JSON, exits at once, and leaves
+/// `sleep 30` holding the pipe: without the drain timeout the probe blocks
+/// ~30 s and returns the parsed language; with it, it gives up after 5 s and
+/// yields `None`.
+#[cfg(unix)]
+#[test]
+fn subtitle_probe_drain_times_out_when_pipe_stays_open() {
+    let base = std::env::temp_dir().join(format!("grab-drain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let bin = base.join("fake-ytdlp-hanging-pipe");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\nprintf '{\"subtitles\": {\"en\": [{\"url\": \"http://x/y.vtt\"}]}}'\n( sleep 30 >&1 & )\nexit 0\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let job = VideoJob {
+        item_id: 1,
+        page_url: "https://example.com/v".into(),
+        playlist_item_id: None,
+        quality: "1080p".into(),
+        audio_only: false,
+        dest: base.join("v.mp4"),
+        speed_limit: None,
+        keep_server_date: false,
+        video_format_id: None,
+        is_live: false,
+        live_from_start: false,
+        newest_codecs: true,
+        cookies_browser: "none".into(),
+        subtitles: Some("en".into()),
+        embed_subs: false,
+        sponsorblock_remove: false,
+        sponsorblock_mark: false,
+        remux_video: None,
+        embed_chapters: false,
+        proxy: None,
+    };
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<StopIntent>();
+    let start = std::time::Instant::now();
+    let result =
+        crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(&bin, &job, &mut abort_rx, None));
+    let elapsed = start.elapsed();
+    assert_eq!(
+        result,
+        Ok(None),
+        "the drain must give up on a pipe that outlives the child, not parse the late output"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "the probe stalled on the drain: {elapsed:?}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Item 7: the guard's handle must stay private — construction goes through the
+/// constructor so the abort-on-drop invariant can't be bypassed — and dropping
+/// the guard must abort the watcher task.
+#[test]
+fn recording_watcher_guard_aborts_on_drop() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let flag = std::sync::Arc::new(AtomicBool::new(false));
+    let flag2 = flag.clone();
+    crate::runtime::tokio_rt().block_on(async {
+        let handle = tokio::spawn(async move {
+            loop {
+                flag2.store(true, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+            }
+        });
+        {
+            let _guard = RecordingWatcherGuard::new(handle);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(
+                flag.load(Ordering::SeqCst),
+                "test setup: the task must be running inside the guard"
+            );
+        }
+        // The guard dropped: an aborted task can never set the flag again.
+        flag.store(false, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "dropping the guard must abort the watcher task"
+        );
+    });
 }

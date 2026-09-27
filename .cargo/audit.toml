@@ -1,0 +1,8 @@
+[advisories]
+# RUSTSEC-2026-0293 (ringbuf <0.5.2): double free in Consumer::skip/clear
+# when an element's Drop panics. Not exploitable in this tree: the only
+# ringbuf user is librqbit-utp 0.7.0, whose buffer is SharedRb<Heap<u8>>
+# (stream_tx.rs) — u8's drop cannot panic, so the trigger is unreachable.
+# Upgrade blocked upstream: librqbit-utp 0.7.0 (newest) pins ringbuf ^0.4.7,
+# ringbuf 0.4.9 is yanked. Revisit when librqbit moves to ringbuf 0.5.
+ignore = ["RUSTSEC-2026-0293"]

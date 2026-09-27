@@ -207,6 +207,18 @@ msgstr ""
 msgid "Show in Folder"
 msgstr ""
 
+#: src/window.rs:283
+msgid "Show Sidebar"
+msgstr ""
+
+#: src/window.rs:226
+msgid "Hide Sidebar"
+msgstr ""
+
+#: src/window.rs:232
+msgid "Status"
+msgstr ""
+
 #: src/window.rs:387
 msgid "Move to Trash"
 msgstr ""
@@ -283,16 +295,16 @@ msgstr ""
 msgid "No Downloads Yet"
 msgstr ""
 
+#: src/window.rs:350
+msgid "No Downloads Match"
+msgstr ""
+
+#: src/window.rs:351
+msgid "Try a different search or filter"
+msgstr ""
+
 #: src/window.rs:986
 msgid "Add a download to get started"
-msgstr ""
-
-#: src/window.rs:1015
-msgid "Active"
-msgstr ""
-
-#: src/window.rs:1017
-msgid "Downloaded"
 msgstr ""
 
 #: src/window.rs:1055
@@ -301,10 +313,6 @@ msgstr ""
 
 #: src/window.rs:1060
 msgid "All"
-msgstr ""
-
-#: src/window.rs:1076
-msgid "Filter by status"
 msgstr ""
 
 #: src/window.rs:1225
@@ -555,7 +563,11 @@ msgstr ""
 msgid "Prevent sleep during downloads"
 msgstr ""
 
-#: src/preferences.rs:364
+#: src/window_dialogs.rs:656
+msgid "Link"
+msgstr ""
+
+#: src/preferences.rs:364 src/window_dialogs.rs:657
 msgid "Torrent"
 msgstr ""
 

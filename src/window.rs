@@ -188,16 +188,102 @@ pub fn build_window(
         .default_height(settings.window_height().max(300))
         .build();
 
-    // The add-download side panel lives in the split view's sidebar; the main
-    // UI is the content, so adding a download no longer covers it. Toasts stay
-    // outermost and overlay both.
-    let split = adw::OverlaySplitView::new();
-    // Start side: the panel slides in next to the header's menu button.
+    // Persistent sidebar: the add form lives in the split view's sidebar on
+    // the start side, with the filter navigation below it; the main UI is the
+    // content. Toasts stay outermost and overlay both.
+    let split = adw::NavigationSplitView::new();
     split.set_sidebar_position(gtk4::PackType::Start);
-    let add_panel = AddPanel::new(Rc::clone(&manager), &window, &split, &toasts);
-    // Narrow windows overlay the panel instead of squeezing the download
-    // list beside it: below 800px (420 panel + usable content) the sidebar
-    // floats over the content; wider windows reserve the space.
+    split.set_min_sidebar_width(300.0);
+    split.set_max_sidebar_width(340.0);
+    let (add_panel, form_nav) = AddPanel::new(Rc::clone(&manager), &window, &split, &toasts);
+    let sidebar_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    form_nav.set_vexpand(true);
+    sidebar_box.append(&form_nav);
+    let filter_separator = gtk4::Separator::new(gtk4::Orientation::Horizontal);
+    sidebar_box.append(&filter_separator);
+    // Filter navigation: the sidebar's HIG navigation pattern, one view per
+    // download state. Replaces the search-bar status dropdown. Categories
+    // hide when they have no downloads; the section itself is an ExpanderRow
+    // (the HIG collapsible) and hides when there is nothing to filter.
+    let filter_sel: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+    let filter_expander = adw::ExpanderRow::builder()
+        .title(gettext("Status"))
+        .subtitle(gettext("All"))
+        .expanded(true)
+        .build();
+    let filter_names: Vec<String> = vec![
+        gettext("All"),
+        gettext("Downloading"),
+        gettext("Paused"),
+        gettext("Queued"),
+        gettext("Done"),
+        gettext("Failed"),
+        gettext("Cancelled"),
+    ];
+    let filter_rows: Rc<Vec<(adw::ActionRow, gtk4::Image)>> = Rc::new(
+        filter_names
+            .iter()
+            .map(|name| {
+                let check = gtk4::Image::from_icon_name("object-select-symbolic");
+                check.set_valign(gtk4::Align::Center);
+                let row = adw::ActionRow::builder()
+                    .title(name)
+                    .activatable(true)
+                    .build();
+                row.add_prefix(&check);
+                filter_expander.add_row(&row);
+                (row, check)
+            })
+            .collect(),
+    );
+    sidebar_box.append(&filter_expander);
+    // Echo the pick: checkmark on the selected row, subtitle on the expander.
+    let refresh_filter_ui: Rc<dyn Fn()> = {
+        let sel = Rc::clone(&filter_sel);
+        let expander = filter_expander.clone();
+        let rows = Rc::clone(&filter_rows);
+        let names = filter_names.clone();
+        Rc::new(move || {
+            let s = sel.get() as usize;
+            for (j, (_, check)) in rows.iter().enumerate() {
+                check.set_visible(j == s);
+            }
+            if let Some(name) = names.get(s) {
+                expander.set_subtitle(name);
+            }
+        })
+    };
+    refresh_filter_ui();
+    // Narrow windows navigate between the sidebar and the list instead of
+    // showing both; the sidebar gets its own headerbar there so the panel
+    // can be collapsed back. Hidden on wide windows where the sidebar is
+    // persistent.
+    let sidebar_header = adw::HeaderBar::new();
+    let sidebar_add = gtk4::Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text(gettext("Hide Sidebar"))
+        .build();
+    sidebar_add.update_property(&[gtk4::accessible::Property::Label(&gettext("Hide Sidebar"))]);
+    sidebar_header.pack_end(&sidebar_add);
+    split
+        .bind_property("collapsed", &sidebar_header, "visible")
+        .sync_create()
+        .build();
+    {
+        let sp = split.clone();
+        sidebar_add.connect_clicked(move |_| sp.set_show_content(true));
+    }
+    let sidebar_toolbar = adw::ToolbarView::new();
+    sidebar_toolbar.add_top_bar(&sidebar_header);
+    sidebar_toolbar.set_content(Some(&sidebar_box));
+    // NavigationSplitView only takes NavigationPage children.
+    let sidebar_page = adw::NavigationPage::builder()
+        .child(&sidebar_toolbar)
+        .tag("sidebar")
+        .build();
+    split.set_sidebar(Some(&sidebar_page));
+    // Narrow windows navigate between the sidebar and the content instead of
+    // squeezing both side by side: below 800px the split collapses.
     {
         let breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
             adw::BreakpointConditionLengthType::MaxWidth,
@@ -247,6 +333,35 @@ pub fn build_window(
         .tooltip_text(gettext("Main Menu"))
         .build();
     menu_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Main Menu"))]);
+    // Sidebar toggle for collapsed (narrow) windows: flips between the
+    // sidebar and the download list. Hidden while both fit side by side.
+    let sidebar_toggle = gtk4::ToggleButton::builder()
+        .icon_name("sidebar-show-symbolic")
+        .tooltip_text(gettext("Show Sidebar"))
+        .build();
+    sidebar_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext("Show Sidebar"))]);
+    header.pack_start(&sidebar_toggle);
+    split
+        .bind_property("collapsed", &sidebar_toggle, "visible")
+        .sync_create()
+        .build();
+    // The toggle mirrors sidebar visibility (active = sidebar shown), so it
+    // stays in sync when focus_form() reveals the sidebar too.
+    split
+        .bind_property("show-content", &sidebar_toggle, "active")
+        .flags(
+            glib::BindingFlags::BIDIRECTIONAL
+                | glib::BindingFlags::SYNC_CREATE
+                | glib::BindingFlags::INVERT_BOOLEAN,
+        )
+        .build();
+    {
+        split.connect_collapsed_notify(|s| {
+            if !s.is_collapsed() {
+                s.set_show_content(true);
+            }
+        });
+    }
     header.pack_start(&menu_btn);
 
     let search_toggle = gtk4::ToggleButton::builder()
@@ -264,7 +379,16 @@ pub fn build_window(
     add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("New Download"))]);
     {
         let panel = Rc::clone(&add_panel);
-        add_btn.connect_clicked(move |_| panel.toggle(None));
+        let sp = split.clone();
+        add_btn.connect_clicked(move |_| {
+            // In collapsed mode the + toggles the panel: collapse it when
+            // it's showing, otherwise reveal and focus the form.
+            if sp.is_collapsed() && !sp.shows_content() {
+                sp.set_show_content(true);
+            } else {
+                panel.focus_form(None);
+            }
+        });
     }
     header.pack_start(&add_btn);
 
@@ -282,28 +406,22 @@ pub fn build_window(
     empty.set_child(Some(&empty_add));
     {
         let panel = Rc::clone(&add_panel);
-        empty_add.connect_clicked(move |_| panel.toggle(None));
+        empty_add.connect_clicked(move |_| panel.focus_form(None));
     }
     stack.add_named(&empty, Some("empty"));
+    let nomatch = adw::StatusPage::builder()
+        .icon_name("system-search-symbolic")
+        .title(gettext("No Downloads Match"))
+        .description(gettext("Try a different search or filter"))
+        .build();
+    stack.add_named(&nomatch, Some("nomatch"));
 
-    fn section_list(title: &str) -> (gtk4::Box, gtk4::ListBox) {
-        let label = gtk4::Label::builder()
-            .label(title)
-            .halign(gtk4::Align::Start)
-            .css_classes(["heading"])
-            .build();
-        let list = gtk4::ListBox::builder()
-            .selection_mode(gtk4::SelectionMode::None)
-            .css_classes(["boxed-list"])
-            .build();
-        let section = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-        section.append(&label);
-        section.append(&list);
-        (section, list)
-    }
-    let (active_section, active_list) = section_list(&gettext("Active"));
-    let (queued_section, queued_list) = section_list(&gettext("Queued"));
-    let (downloaded_section, downloaded_list) = section_list(&gettext("Downloaded"));
+    // Single filtered list: the sidebar navigation picks the state, so the
+    // old Active / Queued / Downloaded sections flatten into one view.
+    let list = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     content.set_margin_top(12);
     content.set_margin_bottom(12);
@@ -316,13 +434,8 @@ pub fn build_window(
         .build();
     stack.add_named(&scroll, Some("list"));
 
-    fn is_done(it: &crate::download::DownloadItem) -> bool {
-        it.status() == crate::download::DownloadStatus::Done
-    }
-    fn is_queued(it: &crate::download::DownloadItem) -> bool {
-        it.status() == crate::download::DownloadStatus::Queued
-    }
-    /// DropDown position for a status (0 = All); order must match the model.
+    /// Sidebar filter position for a status (0 = All); order must match the
+    /// navigation list rows.
     fn status_filter_index(s: crate::download::DownloadStatus) -> u32 {
         use crate::download::DownloadStatus::*;
         match s {
@@ -335,41 +448,17 @@ pub fn build_window(
         }
     }
 
-    // Search + status filter above the sections: non-matching rows are hidden
-    // in sync(), and empty sections collapse as usual.
+    // Search narrows the sidebar filter's view: non-matching rows are hidden
+    // in sync().
     let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-    let status_sel: Rc<Cell<u32>> = Rc::new(Cell::new(0));
     let search = gtk4::SearchEntry::builder()
         .placeholder_text(gettext("Search downloads"))
         .hexpand(true)
         .build();
-    let status_names = gtk4::StringList::new(&[]);
-    for name in [
-        gettext("All"),
-        gettext("Downloading"),
-        gettext("Paused"),
-        gettext("Queued"),
-        gettext("Done"),
-        gettext("Failed"),
-        gettext("Cancelled"),
-    ] {
-        status_names.append(&name);
-    }
-    let status_drop = gtk4::DropDown::builder()
-        .model(&status_names)
-        .selected(0)
-        .valign(gtk4::Align::Center)
-        .build();
-    status_drop.update_property(&[gtk4::accessible::Property::Label(&gettext(
-        "Filter by status",
-    ))]);
-    // HIG search pattern: a header toggle reveals a GtkSearchBar that may also
-    // hold extra widgets like the status filter.
+    // HIG search pattern: a header toggle reveals a GtkSearchBar holding the
+    // entry.
     let search_bar = gtk4::SearchBar::builder().show_close_button(true).build();
-    let filter_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    filter_box.append(&search);
-    filter_box.append(&status_drop);
-    search_bar.set_child(Some(&filter_box));
+    search_bar.set_child(Some(&search));
     search_bar.connect_entry(&search);
     search_bar.set_key_capture_widget(Some(&window));
     search_toggle
@@ -377,9 +466,7 @@ pub fn build_window(
         .bidirectional()
         .sync_create()
         .build();
-    content.append(&active_section);
-    content.append(&queued_section);
-    content.append(&downloaded_section);
+    content.append(&list);
 
     let rows: Rc<RefCell<HashMap<u64, gtk4::ListBoxRow>>> = Rc::new(RefCell::new(HashMap::new()));
     let sync: Rc<dyn Fn()> = {
@@ -389,22 +476,42 @@ pub fn build_window(
         let add = add_btn.clone();
         let search_btn = search_toggle.clone();
         let s = stack.clone();
-        let l_active = active_list.clone();
-        let l_queued = queued_list.clone();
-        let l_downloaded = downloaded_list.clone();
-        let sec_active = active_section.clone();
-        let sec_queued = queued_section.clone();
-        let sec_downloaded = downloaded_section.clone();
+        let l = list.clone();
+        let sp = split.clone();
         let query = Rc::clone(&query);
-        let status_sel = Rc::clone(&status_sel);
+        let filter_sel = Rc::clone(&filter_sel);
+        let filter_rows = Rc::clone(&filter_rows);
+        let filter_expander = filter_expander.clone();
+        let filter_separator = filter_separator.clone();
+        let refresh_filter_ui = Rc::clone(&refresh_filter_ui);
         Rc::new(move || {
             let store = m.store();
             let q = query.borrow();
-            let sel = status_sel.get();
+            // Count per category first: empty ones hide, and a selected
+            // category that emptied falls back to All.
+            let mut counts = [0u32; 7];
+            for i in 0..store.n_items() {
+                if let Some(it) = store
+                    .item(i)
+                    .and_downcast::<crate::download::DownloadItem>()
+                {
+                    counts[0] += 1;
+                    counts[status_filter_index(it.status()) as usize] += 1;
+                }
+            }
+            if filter_sel.get() != 0 && counts[filter_sel.get() as usize] == 0 {
+                filter_sel.set(0);
+                refresh_filter_ui();
+            }
+            let sel = filter_sel.get();
+            for (j, (row, _)) in filter_rows.iter().enumerate() {
+                row.set_visible(j == 0 && counts[0] > 0 || j > 0 && counts[j] > 0);
+            }
+            let has_downloads = counts[0] > 0;
+            filter_expander.set_visible(has_downloads);
+            filter_separator.set_visible(has_downloads);
             let mut present = std::collections::HashSet::new();
-            let mut n_active = 0;
-            let mut n_queued = 0;
-            let mut n_downloaded = 0;
+            let mut n_visible = 0;
             for i in 0..store.n_items() {
                 if let Some(it) = store
                     .item(i)
@@ -417,13 +524,7 @@ pub fn build_window(
                         shown = false;
                     }
                     if shown {
-                        if is_done(&it) {
-                            n_downloaded += 1;
-                        } else if is_queued(&it) {
-                            n_queued += 1;
-                        } else {
-                            n_active += 1;
-                        }
+                        n_visible += 1;
                     }
                     let existing = r.borrow().get(&it.id()).cloned();
                     let row = if let Some(row) = existing {
@@ -433,18 +534,11 @@ pub fn build_window(
                         r.borrow_mut().insert(it.id(), row.clone());
                         row
                     };
-                    let target = if is_done(&it) {
-                        &l_downloaded
-                    } else if is_queued(&it) {
-                        &l_queued
-                    } else {
-                        &l_active
-                    };
-                    if !row.is_ancestor(target) {
+                    if !row.is_ancestor(&l) {
                         if let Some(old) = row.parent().and_downcast::<gtk4::ListBox>() {
                             old.remove(&row);
                         }
-                        target.append(&row);
+                        l.append(&row);
                     }
                     row.set_visible(shown);
                 }
@@ -462,18 +556,22 @@ pub fn build_window(
                     old.remove(&row);
                 }
             }
-            sec_active.set_visible(n_active > 0);
-            sec_queued.set_visible(n_queued > 0);
-            sec_downloaded.set_visible(n_downloaded > 0);
             let has_items = store.n_items() > 0;
-            // Header + duplicates the empty-state pill, so show it only with the list.
-            add.set_visible(has_items);
+            // The sidebar form is the add UI on wide windows; the header +
+            // only shows while the sidebar is collapsed (narrow).
+            add.set_visible(has_items && sp.is_collapsed());
             search_btn.set_visible(has_items);
             if !has_items {
                 // List is gone, so nothing to search.
                 search_btn.set_active(false);
             }
-            s.set_visible_child_name(if has_items { "list" } else { "empty" });
+            s.set_visible_child_name(if !has_items {
+                "empty"
+            } else if n_visible == 0 {
+                "nomatch"
+            } else {
+                "list"
+            });
         })
     };
 
@@ -486,12 +584,32 @@ pub fn build_window(
         });
     }
     {
+        // Activating a category picks the filter; on narrow windows it also
+        // collapses the panel, returning to the list.
         let sync = Rc::clone(&sync);
-        let sel = Rc::clone(&status_sel);
-        status_drop.connect_selected_notify(move |d| {
-            sel.set(d.selected());
-            sync();
-        });
+        let sel = Rc::clone(&filter_sel);
+        let refresh = Rc::clone(&refresh_filter_ui);
+        let rows = Rc::clone(&filter_rows);
+        let sp = split.clone();
+        for (i, (row, _)) in rows.iter().enumerate() {
+            let row = row.clone();
+            let sync = Rc::clone(&sync);
+            let sel = Rc::clone(&sel);
+            let refresh = Rc::clone(&refresh);
+            let sp = sp.clone();
+            row.connect_activated(move |_| {
+                sel.set(i as u32);
+                refresh();
+                sync();
+                if sp.is_collapsed() {
+                    sp.set_show_content(true);
+                }
+            });
+        }
+    }
+    {
+        let sync = Rc::clone(&sync);
+        split.connect_collapsed_notify(move |_| sync());
     }
 
     // hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
@@ -603,7 +721,11 @@ pub fn build_window(
     toolbar.add_top_bar(&search_bar);
     toolbar.add_top_bar(&banner);
     toolbar.set_content(Some(&stack));
-    split.set_content(Some(&toolbar));
+    let content_page = adw::NavigationPage::builder()
+        .child(&toolbar)
+        .tag("content")
+        .build();
+    split.set_content(Some(&content_page));
     toasts.set_child(Some(&split));
     window.set_content(Some(toasts.as_ref()));
 

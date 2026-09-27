@@ -81,7 +81,7 @@ pub fn setup(app: &adw::Application) {
                     // Video pages take the panel path (pre-filled): plain
                     // enqueue would save the raw HTML page as a file.
                     if crate::video::is_video_page(uri.as_str()) {
-                        s.add_panel.show(Some(uri.as_str()));
+                        s.add_panel.focus_form(Some(uri.as_str()));
                         continue;
                     }
                     if let Err(e) = s.manager.enqueue(uri.as_str(), None, None) {
@@ -196,7 +196,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
             gio::ActionEntry::builder("add-download")
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
-                        s.add_panel.toggle(None);
+                        s.add_panel.focus_form(None);
                     }
                 })
                 .build()

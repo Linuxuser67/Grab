@@ -5,8 +5,9 @@ use crate::attempt_gate::AttemptGate;
 use crate::file_names::is_url_derived_name;
 use crate::video_argv::{
     VideoJob, apply_proxy_env, container_truth_name, fallback_to_live_edge, hls_download_argv,
-    live_capture_argv, live_remux_argv, merge_output_ext, playlist_scope_args, proxy_cli_args,
-    unified_download_argv, unified_format_spec, unified_output_template, write_manifest,
+    live_capture_argv, live_from_start_unsupported, live_remux_argv, merge_output_ext,
+    playlist_scope_args, proxy_cli_args, unified_download_argv, unified_format_spec,
+    unified_output_template, write_manifest,
 };
 use crate::video_plan::{StreamPlan, plan_streams};
 use crate::video_probe::page_host;
@@ -990,13 +991,35 @@ pub(crate) async fn run_live_ytdlp(
                     Ok(Ok(status)) => {
                         group.disarm();
                         if !status.success() {
+                            progress.abort();
+                            let log_tail = join_drain(logs).await.unwrap_or_default();
+                            // A from-start attempt the site can't honor fails
+                            // fast with a distinctive error and nothing
+                            // recorded: retry once from the live edge instead
+                            // of failing the row (same fallback as the
+                            // startup miss below).
+                            if live_from_start_unsupported(&log_tail)
+                                && fallback_to_live_edge(
+                                    attempt.is_live,
+                                    attempt.live_from_start,
+                                    false,
+                                    downgraded.is_some(),
+                                )
+                            {
+                                tx.send(EngineMsg::Phase(gettext(
+                                    "\"Live from start\" isn't available for this stream — recording from the live edge…",
+                                )))
+                                .ok();
+                                let mut edge = job.clone();
+                                edge.live_from_start = false;
+                                downgraded = Some(edge);
+                                continue;
+                            }
                             // The recorder exited on its own with a failure: adopting
                             // its partial as Finished would claim a capture that never
                             // really ran (e.g. ffmpeg choking on the playlist seconds
                             // in). Fail loudly with yt-dlp's own error line instead;
                             // the raw shell is kept for salvage, only scratch is swept.
-                            progress.abort();
-                            let log_tail = join_drain(logs).await.unwrap_or_default();
                             let detail = last_error_line(&log_tail, "recorder failed");
                             sweep_live_capture(
                                 &out,

@@ -7,9 +7,9 @@ use crate::media_types::{
 };
 use crate::video_argv::{
     YTDLP_PROGRESS_TEMPLATE, apply_proxy_env, container_truth_name, fallback_to_live_edge,
-    hls_download_argv, hls_format_spec, live_capture_argv, live_remux_argv, merge_output_ext,
-    part_fallback_spec, playlist_scope_args, proxy_cli_args, unified_download_argv,
-    unified_format_spec,
+    hls_download_argv, hls_format_spec, live_capture_argv, live_from_start_unsupported,
+    live_remux_argv, merge_output_ext, part_fallback_spec, playlist_scope_args, proxy_cli_args,
+    unified_download_argv, unified_format_spec,
 };
 use crate::video_plan::{
     StreamSel, find_hls_format, find_usable_format, plan_streams, select_audio_original_first,
@@ -7686,6 +7686,30 @@ fn fallback_to_live_edge_never_overrides_or_repeats() {
     assert!(!fallback_to_live_edge(true, true, true, false));
     // Already retried: exactly once, then the error stands.
     assert!(!fallback_to_live_edge(true, true, false, true));
+}
+
+#[test]
+fn live_from_start_unsupported_matches_ytdlp_rejection() {
+    // yt-dlp's exact wording (YoutubeDL.py `raise_no_formats`): the flag was
+    // passed but no formats are downloadable from the start.
+    let log = "[download] Sleeping 1 seconds ...\n\
+         ERROR: [SomeSite] abc123: --live-from-start is passed, but there are no formats \
+         that can be downloaded from the start. If you want to download from the current \
+         time, use --no-live-from-start\n";
+    assert!(live_from_start_unsupported(log));
+}
+
+#[test]
+fn live_from_start_unsupported_ignores_other_errors() {
+    // A generic failure mentioning the flag must not trigger the retry.
+    assert!(!live_from_start_unsupported(
+        "ERROR: --live-from-start is only supported with --wait-for-video 10\n"
+    ));
+    // The formats half alone is not the rejection either.
+    assert!(!live_from_start_unsupported(
+        "ERROR: no formats that can be downloaded from the start were listed\n"
+    ));
+    assert!(!live_from_start_unsupported(""));
 }
 
 #[test]

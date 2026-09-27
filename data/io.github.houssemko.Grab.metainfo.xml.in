@@ -46,6 +46,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.14" date="2026-09-27">
+      <description>
+        <ul>
+          <li>Merged MP4s now place the moov atom at the front, so playback can start before the whole file has arrived.</li>
+          <li>Fixed live captures aborting when extra downloader arguments were passed along with the URL.</li>
+          <li>The downloader capability probe no longer blocks background async work while it runs.</li>
+          <li>Collection folders no longer follow a pre-existing symlink with the same name; they use a fresh folder instead.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.13" date="2026-09-27">
       <description>
         <ul>

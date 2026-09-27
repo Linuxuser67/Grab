@@ -5858,13 +5858,13 @@ fn ensure_contained_parent_checks_before_creating() {
     // Existing real dir: allowed, still a dir.
     let real = base.join("real");
     std::fs::create_dir_all(&real).unwrap();
-    assert!(ensure_contained_parent(&real, &base_str));
+    assert!(ensure_contained_parent(&real, &base_str).unwrap());
     assert!(real.is_dir());
 
     // Missing parent: created, then verified.
     let fresh = base.join("fresh");
     assert!(!fresh.exists());
-    assert!(ensure_contained_parent(&fresh, &base_str));
+    assert!(ensure_contained_parent(&fresh, &base_str).unwrap());
     assert!(fresh.is_dir());
 
     // Planted link to an existing outside dir: refused, target untouched.
@@ -5873,7 +5873,7 @@ fn ensure_contained_parent_checks_before_creating() {
     std::fs::create_dir_all(&outside).unwrap();
     let link = base.join("link");
     std::os::unix::fs::symlink(&outside, &link).unwrap();
-    assert!(!ensure_contained_parent(&link, &base_str));
+    assert!(!ensure_contained_parent(&link, &base_str).unwrap());
     assert!(outside.read_dir().unwrap().next().is_none());
 
     // Dangling link: refused, and the target is NOT created through it.
@@ -5884,7 +5884,7 @@ fn ensure_contained_parent_checks_before_creating() {
         .join("never-created");
     let dangling = base.join("dangling");
     std::os::unix::fs::symlink(&dangling_target, &dangling).unwrap();
-    assert!(!ensure_contained_parent(&dangling, &base_str));
+    assert!(!ensure_contained_parent(&dangling, &base_str).unwrap());
     assert!(
         !dangling_target.exists(),
         "the link target must not be created through the link"
@@ -5940,4 +5940,41 @@ fn torrent_folder_refuses_recorded_path_swapped_for_symlink() {
     );
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn ensure_contained_parent_reports_mkdir_failure_distinctly() {
+    // A `create_dir_all` failure is `Err`, not a containment refusal: the
+    // caller must not blame the download folder. A file where the dir should
+    // be fails the create even as root (no permission-bit trick needed).
+    let base = std::env::temp_dir().join(format!("grab-ensure-mkdir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let base_str = base.to_string_lossy().into_owned();
+
+    let blocker = base.join("blocker");
+    std::fs::write(&blocker, b"x").unwrap();
+    let err = ensure_contained_parent(&blocker, &base_str).expect_err(
+        "a file blocking the parent dir must surface the mkdir failure, not Ok",
+    );
+    assert!(
+        !err.to_string().is_empty(),
+        "the io error should describe the failing create"
+    );
+
+    // Containment behavior is unchanged: existing inside -> Ok(true),
+    // existing outside -> Ok(false).
+    let inside = base.join("inside");
+    std::fs::create_dir_all(&inside).unwrap();
+    assert_eq!(ensure_contained_parent(&inside, &base_str).unwrap(), true);
+    let outside = std::env::temp_dir().join(format!(
+        "grab-ensure-mkdir-out-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    assert_eq!(ensure_contained_parent(&outside, &base_str).unwrap(), false);
+
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&outside);
 }

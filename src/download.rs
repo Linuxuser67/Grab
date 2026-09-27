@@ -133,12 +133,18 @@ fn parent_contained_in_dest(parent: &std::path::Path, dest_dir: &str) -> bool {
 /// while a missing parent is created, then verified (it can't harbor a link,
 /// but a link can be swapped in for the name mid-call). `symlink_metadata`
 /// sees even a dangling link, where `exists` would not.
-fn ensure_contained_parent(parent: &std::path::Path, dest_dir: &str) -> bool {
+///
+/// A `create_dir_all` failure is `Err`, not a containment refusal, so the
+/// caller reports it distinctly instead of blaming the download folder.
+fn ensure_contained_parent(
+    parent: &std::path::Path,
+    dest_dir: &str,
+) -> Result<bool, std::io::Error> {
     if std::fs::symlink_metadata(parent).is_ok() && !parent_contained_in_dest(parent, dest_dir) {
-        return false;
+        return Ok(false);
     }
-    let _ = std::fs::create_dir_all(parent);
-    parent_contained_in_dest(parent, dest_dir)
+    std::fs::create_dir_all(parent)?;
+    Ok(parent_contained_in_dest(parent, dest_dir))
 }
 
 pub struct DownloadManager {
@@ -909,8 +915,17 @@ impl DownloadManager {
             // download outside the destination: refuse instead of following
             // it. (Filenames can't contain separators, so the parent is the
             // destination itself today; this pins the invariant.)
-            if !ensure_contained_parent(parent, &item.dest_dir()) {
-                let detail = gettext("Download path escapes the download folder");
+            // A mkdir failure is reported distinctly: it is not a containment
+            // refusal, so "escapes the download folder" would mislead.
+            let blocked = match ensure_contained_parent(parent, &item.dest_dir()) {
+                Ok(true) => None,
+                Ok(false) => Some(gettext("Download path escapes the download folder")),
+                Err(e) => Some(
+                    gettext("Could not create the download folder: {error}")
+                        .replace("{error}", &e.to_string()),
+                ),
+            };
+            if let Some(detail) = blocked {
                 item.set_status(DownloadStatus::Failed);
                 item.set_detail(detail.clone());
                 self.changed();
@@ -2007,13 +2022,25 @@ impl DownloadManager {
     }
 
     /// Engine's real output folder for a torrent row: recorded at enqueue, else recomputed from the archive, else the row's own path.
-    /// The recomputed leaf goes through the same guard as the write path: a
-    /// symlink planted after the download finished would otherwise divert the
+    /// The recomputed leaf goes through the same guard as the write path; the
+    /// recorded branch refuses a path that is itself a symlink. Either way, a
+    /// symlink planted after the download finished can't divert the
     /// delete/trash onto its target.
     fn torrent_folder(item: &DownloadItem) -> std::path::PathBuf {
         let recorded = item.output_dir().to_string();
         if !recorded.is_empty() {
-            return std::path::PathBuf::from(recorded);
+            let path = std::path::PathBuf::from(recorded);
+            // Refuse a recorded folder that is itself a symlink: swapped in
+            // after the finish, `cleanup_unselected`'s `is_dir` check follows
+            // the link and the deletes run through it onto the target.
+            // `symlink_metadata` sees the link itself (even when dangling);
+            // fall through to the guarded recompute instead of trusting it.
+            let is_link = std::fs::symlink_metadata(&path)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if !is_link {
+                return path;
+            }
         }
         let dest = std::path::PathBuf::from(item.dest_dir().to_string());
         crate::torrent::torrent_output_dir(&dest, &item.url())

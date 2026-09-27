@@ -192,6 +192,8 @@ pub fn build_window(
     // UI is the content, so adding a download no longer covers it. Toasts stay
     // outermost and overlay both.
     let split = adw::OverlaySplitView::new();
+    // End side: the panel slides in next to the header's Add button.
+    split.set_sidebar_position(gtk4::PackType::End);
     let add_panel = AddPanel::new(Rc::clone(&manager), &window, &split);
     // Narrow windows overlay the panel instead of squeezing the download
     // list beside it: below 800px (420 panel + usable content) the sidebar
@@ -203,7 +205,7 @@ pub fn build_window(
             adw::LengthUnit::Px,
         ));
         breakpoint.add_setter(&split, "collapsed", Some(&glib::Value::from(true)));
-        window.add_breakpoint(&breakpoint);
+        window.add_breakpoint(breakpoint);
     }
 
     settings

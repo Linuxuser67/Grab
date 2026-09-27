@@ -142,7 +142,7 @@ fn submit_probe(
 ) {
     match probe {
         crate::video::ProbeResult::Single(v) => {
-            submit_probed_single(manager, dest, dialog, step, formats, lookup_add, &v);
+            submit_probed_single(manager, dest, ctl, step, formats, lookup_add, &v);
         }
         crate::video::ProbeResult::Playlist(pl) => {
             // Collections queue through the item picker: one row per chosen
@@ -398,8 +398,9 @@ impl AddPanel {
         let alive = Rc::new(Cell::new(true));
         let split_w = self.split.downgrade();
         let window = self.window.clone();
+        let alive_hide = alive.clone();
         let hide: Rc<dyn Fn()> = Rc::new(move || {
-            alive.set(false);
+            alive_hide.set(false);
             window.set_default_widget(Option::<&gtk4::Widget>::None);
             if let Some(split) = split_w.upgrade() {
                 split.set_show_sidebar(false);
@@ -428,7 +429,7 @@ impl AddPanel {
 
     /// Toggle for the header and empty-state buttons.
     pub fn toggle(&self, initial_url: Option<&str>) {
-        if self.split.show_sidebar() {
+        if self.split.shows_sidebar() {
             self.hide();
         } else {
             self.show(initial_url);
@@ -1132,10 +1133,10 @@ fn build_add_session(
         let session = ctl.clone();
         let shortcuts = gtk4::ShortcutController::new();
         shortcuts.add_shortcut(gtk4::Shortcut::new(
-            gtk4::ShortcutTrigger::parse_string("Escape").as_ref(),
-            Some(&gtk4::CallbackAction::new(move |_, _| {
+            gtk4::ShortcutTrigger::parse_string("Escape"),
+            Some(gtk4::CallbackAction::new(move |_, _| {
                 session.close();
-                true
+                glib::Propagation::Stop
             })),
         ));
         nav.add_controller(shortcuts);
@@ -1689,6 +1690,7 @@ pub fn show_torrent_files_dialog(
     }
     {
         let dialog_weak = dialog.downgrade();
+        let parent_close = parent.clone();
         add_btn.connect_clicked(move |_| {
             let selected: Vec<usize> = checks
                 .iter()
@@ -1713,7 +1715,7 @@ pub fn show_torrent_files_dialog(
                     if let Some(d) = dialog_weak.upgrade() {
                         d.close();
                     }
-                    if let Some(p) = parent.as_ref() {
+                    if let Some(p) = parent_close.as_ref() {
                         p.close();
                     }
                 }

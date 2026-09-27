@@ -189,12 +189,14 @@ pub fn build_window(
         .build();
 
     // Persistent sidebar: the add form lives in the split view's sidebar on
-    // the start side, with the filter navigation below it; the main UI is the
-    // content. Toasts stay outermost and overlay both.
+    // the start side, side by side with the download list, so the content
+    // shrinks instead of being covered. HIG sizing is the libadwaita
+    // default: 25% width fraction, 180sp minimum, 280sp maximum.
     let split = adw::NavigationSplitView::new();
     split.set_sidebar_position(gtk4::PackType::Start);
-    split.set_min_sidebar_width(300.0);
-    split.set_max_sidebar_width(340.0);
+    // Narrow windows show the download list by default; the + button reveals
+    // the sidebar on demand.
+    split.set_show_content(true);
     let (add_panel, form_nav) = AddPanel::new(Rc::clone(&manager), &window, &split, &toasts);
     let sidebar_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     form_nav.set_vexpand(true);
@@ -209,7 +211,6 @@ pub fn build_window(
     let filter_expander = adw::ExpanderRow::builder()
         .title(gettext("Status"))
         .subtitle(gettext("All"))
-        .expanded(true)
         .build();
     let filter_names: Vec<String> = vec![
         gettext("All"),
@@ -236,7 +237,17 @@ pub fn build_window(
             })
             .collect(),
     );
-    sidebar_box.append(&filter_expander);
+    // HIG container for the Status section: a boxed list gives the rounded
+    // corners and outline around the expander.
+    let filter_list = gtk4::ListBox::builder()
+        .css_classes(["boxed-list"])
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    filter_list.append(&filter_expander);
+    sidebar_box.append(&filter_list);
     // Echo the pick: checkmark on the selected row, subtitle on the expander.
     let refresh_filter_ui: Rc<dyn Fn()> = {
         let sel = Rc::clone(&filter_sel);
@@ -254,25 +265,46 @@ pub fn build_window(
         })
     };
     refresh_filter_ui();
-    // Narrow windows navigate between the sidebar and the list instead of
-    // showing both; the sidebar gets its own headerbar there so the panel
-    // can be collapsed back. Hidden on wide windows where the sidebar is
-    // persistent.
+    // The sidebar's own headerbar: back to the list, plus the menu/+ box
+    // while the narrow window is on the sidebar page. Only shown while
+    // collapsed; on wide windows the persistent sidebar needs no header.
     let sidebar_header = adw::HeaderBar::new();
-    let sidebar_add = gtk4::Button::builder()
-        .icon_name("list-add-symbolic")
+    let menu = gio::Menu::new();
+    menu.append(Some(&gettext("New Download")), Some("app.add-download"));
+    let section = gio::Menu::new();
+    section.append(Some(&gettext("Cancel All")), Some("app.cancel-all"));
+    section.append(Some(&gettext("Retry Failed")), Some("app.retry-failed"));
+    section.append(Some(&gettext("Clear Finished")), Some("app.clear-finished"));
+    section.append(
+        Some(&gettext("Open Download Folder")),
+        Some("app.open-folder"),
+    );
+    menu.append_section(None, &section);
+    let section2 = gio::Menu::new();
+    section2.append(Some(&gettext("Preferences")), Some("app.preferences"));
+    section2.append(Some(&gettext("Keyboard Shortcuts")), Some("app.shortcuts"));
+    section2.append(Some(&gettext("About")), Some("app.about"));
+    menu.append_section(None, &section2);
+    let menu_btn = gtk4::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .menu_model(&menu)
+        .tooltip_text(gettext("Main Menu"))
+        .build();
+    menu_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Main Menu"))]);
+    let sidebar_hide = gtk4::Button::builder()
+        .icon_name("go-previous-symbolic")
         .tooltip_text(gettext("Hide Sidebar"))
         .build();
-    sidebar_add.update_property(&[gtk4::accessible::Property::Label(&gettext("Hide Sidebar"))]);
-    sidebar_header.pack_end(&sidebar_add);
+    sidebar_hide.update_property(&[gtk4::accessible::Property::Label(&gettext("Hide Sidebar"))]);
+    sidebar_header.pack_start(&sidebar_hide);
+    {
+        let sp = split.clone();
+        sidebar_hide.connect_clicked(move |_| sp.set_show_content(true));
+    }
     split
         .bind_property("collapsed", &sidebar_header, "visible")
         .sync_create()
         .build();
-    {
-        let sp = split.clone();
-        sidebar_add.connect_clicked(move |_| sp.set_show_content(true));
-    }
     let sidebar_toolbar = adw::ToolbarView::new();
     sidebar_toolbar.add_top_bar(&sidebar_header);
     sidebar_toolbar.set_content(Some(&sidebar_box));
@@ -311,59 +343,6 @@ pub fn build_window(
         &gettext("Download Manager"),
     )));
 
-    let menu = gio::Menu::new();
-    menu.append(Some(&gettext("New Download")), Some("app.add-download"));
-    let section = gio::Menu::new();
-    section.append(Some(&gettext("Cancel All")), Some("app.cancel-all"));
-    section.append(Some(&gettext("Retry Failed")), Some("app.retry-failed"));
-    section.append(Some(&gettext("Clear Finished")), Some("app.clear-finished"));
-    section.append(
-        Some(&gettext("Open Download Folder")),
-        Some("app.open-folder"),
-    );
-    menu.append_section(None, &section);
-    let section2 = gio::Menu::new();
-    section2.append(Some(&gettext("Preferences")), Some("app.preferences"));
-    section2.append(Some(&gettext("Keyboard Shortcuts")), Some("app.shortcuts"));
-    section2.append(Some(&gettext("About")), Some("app.about"));
-    menu.append_section(None, &section2);
-    let menu_btn = gtk4::MenuButton::builder()
-        .icon_name("open-menu-symbolic")
-        .menu_model(&menu)
-        .tooltip_text(gettext("Main Menu"))
-        .build();
-    menu_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Main Menu"))]);
-    // Sidebar toggle for collapsed (narrow) windows: flips between the
-    // sidebar and the download list. Hidden while both fit side by side.
-    let sidebar_toggle = gtk4::ToggleButton::builder()
-        .icon_name("sidebar-show-symbolic")
-        .tooltip_text(gettext("Show Sidebar"))
-        .build();
-    sidebar_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext("Show Sidebar"))]);
-    header.pack_start(&sidebar_toggle);
-    split
-        .bind_property("collapsed", &sidebar_toggle, "visible")
-        .sync_create()
-        .build();
-    // The toggle mirrors sidebar visibility (active = sidebar shown), so it
-    // stays in sync when focus_form() reveals the sidebar too.
-    split
-        .bind_property("show-content", &sidebar_toggle, "active")
-        .flags(
-            glib::BindingFlags::BIDIRECTIONAL
-                | glib::BindingFlags::SYNC_CREATE
-                | glib::BindingFlags::INVERT_BOOLEAN,
-        )
-        .build();
-    {
-        split.connect_collapsed_notify(|s| {
-            if !s.is_collapsed() {
-                s.set_show_content(true);
-            }
-        });
-    }
-    header.pack_start(&menu_btn);
-
     let search_toggle = gtk4::ToggleButton::builder()
         .icon_name("system-search-symbolic")
         .tooltip_text(gettext("Search (Ctrl+F)"))
@@ -381,8 +360,9 @@ pub fn build_window(
         let panel = Rc::clone(&add_panel);
         let sp = split.clone();
         add_btn.connect_clicked(move |_| {
-            // In collapsed mode the + toggles the panel: collapse it when
-            // it's showing, otherwise reveal and focus the form.
+            // Narrow windows toggle between the sidebar form and the
+            // download list; on wide windows the sidebar is persistent, so
+            // the + just focuses the form.
             if sp.is_collapsed() && !sp.shows_content() {
                 sp.set_show_content(true);
             } else {
@@ -390,7 +370,46 @@ pub fn build_window(
             }
         });
     }
-    header.pack_start(&add_btn);
+    // Menu and + live in one box that relocates: far right of the sidebar
+    // header while the narrow window shows the sidebar page, far right of
+    // the main header otherwise. The menu button is always visible; the +
+    // shows only when there are downloads (the empty-state pill is the CTA
+    // otherwise).
+    let header_btn_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(6)
+        .build();
+    header_btn_box.append(&menu_btn);
+    header_btn_box.append(&add_btn);
+    header.pack_end(&header_btn_box);
+    let relocate_btn_box: Rc<dyn Fn()> = {
+        let sidebar_hb = sidebar_header.clone();
+        let main_hb = header.clone();
+        let btn_box = header_btn_box.clone();
+        let sp = split.clone();
+        Rc::new(move || {
+            // Reparent the button box to whichever header is active.
+            if let Some(parent) = btn_box.parent()
+                && let Some(hb) = parent.downcast_ref::<adw::HeaderBar>()
+            {
+                hb.remove(&btn_box);
+            }
+            if sp.is_collapsed() && !sp.shows_content() {
+                sidebar_hb.pack_end(&btn_box);
+            } else {
+                main_hb.pack_end(&btn_box);
+            }
+        })
+    };
+    {
+        let relocate = Rc::clone(&relocate_btn_box);
+        split.connect_collapsed_notify(move |_| relocate());
+    }
+    {
+        let relocate = Rc::clone(&relocate_btn_box);
+        split.connect_show_content_notify(move |_| relocate());
+    }
+    relocate_btn_box();
 
     let stack = adw::ViewStack::new();
     let empty = adw::StatusPage::builder()
@@ -477,11 +496,10 @@ pub fn build_window(
         let search_btn = search_toggle.clone();
         let s = stack.clone();
         let l = list.clone();
-        let sp = split.clone();
         let query = Rc::clone(&query);
         let filter_sel = Rc::clone(&filter_sel);
         let filter_rows = Rc::clone(&filter_rows);
-        let filter_expander = filter_expander.clone();
+        let filter_list = filter_list.clone();
         let filter_separator = filter_separator.clone();
         let refresh_filter_ui = Rc::clone(&refresh_filter_ui);
         Rc::new(move || {
@@ -508,7 +526,7 @@ pub fn build_window(
                 row.set_visible(j == 0 && counts[0] > 0 || j > 0 && counts[j] > 0);
             }
             let has_downloads = counts[0] > 0;
-            filter_expander.set_visible(has_downloads);
+            filter_list.set_visible(has_downloads);
             filter_separator.set_visible(has_downloads);
             let mut present = std::collections::HashSet::new();
             let mut n_visible = 0;
@@ -557,9 +575,10 @@ pub fn build_window(
                 }
             }
             let has_items = store.n_items() > 0;
-            // The sidebar form is the add UI on wide windows; the header +
-            // only shows while the sidebar is collapsed (narrow).
-            add.set_visible(has_items && sp.is_collapsed());
+            // The + toggles the sidebar and only shows when there are
+            // entries; the empty state's pill is the CTA otherwise. The menu
+            // button stays always visible.
+            add.set_visible(has_items);
             search_btn.set_visible(has_items);
             if !has_items {
                 // List is gone, so nothing to search.
@@ -601,6 +620,8 @@ pub fn build_window(
                 sel.set(i as u32);
                 refresh();
                 sync();
+                // In collapsed (narrow) mode the filter pick returns to the
+                // list; on wide the sidebar stays put.
                 if sp.is_collapsed() {
                     sp.set_show_content(true);
                 }

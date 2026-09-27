@@ -570,7 +570,7 @@ impl SessionCtl {
 
 /// The persistent add-download sidebar: an `AdwNavigationSplitView` sidebar
 /// hosting the add form, so adding a download is always one step away and no
-/// dialog or overlay covers the list. Owned by the window; the session is
+/// dialog covers the list. Owned by the window; the session is
 /// built once and each successful add resets the form. The header and
 /// empty-state buttons, the app action, and Open With / drag-and-drop focus
 /// the form via [`focus_form`].
@@ -608,8 +608,8 @@ impl AddPanel {
             toast,
             alive: Rc::new(Cell::new(true)),
             window: window.downgrade(),
-            // Narrow windows show the sidebar as a temporary panel; a
-            // successful add collapses back to the download list.
+            // A successful add returns to the download list when the split is
+            // collapsed on the sidebar page.
             on_succeed: Rc::new(move || {
                 if split_for_succeed.is_collapsed() {
                     split_for_succeed.set_show_content(true);
@@ -627,8 +627,8 @@ impl AddPanel {
         (panel, nav)
     }
 
-    /// Focus the form: reveal the sidebar when the split is collapsed and put
-    /// the cursor in the right input. A handed-in URL (Open With /
+    /// Focus the form: reveal the sidebar page when the split is collapsed and
+    /// put the cursor in the right input. A handed-in URL (Open With /
     /// drag-and-drop) is always a link: it leaves torrent mode and lands
     /// pre-filled, firing the same changed → debounce → lookup chain as
     /// typing, so video pages resolve through the media pipeline.

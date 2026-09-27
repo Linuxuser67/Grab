@@ -200,6 +200,12 @@ pub(crate) fn clean_staging_in(root: &Path, dir: &Path) {
     if let Some(canon) = guarded_staging_dir(root, dir) {
         let _ = std::fs::remove_dir_all(canon);
     }
+    // Drop the root itself when the last item dir is gone. remove_dir only
+    // succeeds on an empty dir, and the symlink guard above already refused
+    // a planted link, so a concurrent download's staging is safe.
+    if staging_root_is_real(root) {
+        let _ = std::fs::remove_dir(root);
+    }
 }
 
 /// Reclaim one orphan staging dir: the scratch goes, completed `final.*`

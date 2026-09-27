@@ -62,11 +62,6 @@ fn detail_value_label(text: &str) -> gtk4::Label {
         .build()
 }
 
-/// Whole-percent progress for the details dialog ("45%").
-fn fmt_progress(frac: f64) -> String {
-    format!("{}%", (frac.clamp(0.0, 1.0) * 100.0).round() as u64)
-}
-
 /// Show the details dialog for one row. Live rows update through the item's
 /// notify signals holding only weak label refs — the item outlives the
 /// dialog, so strong captures would leak the labels; there is no polling
@@ -98,64 +93,8 @@ pub(crate) fn show_download_details(
     dialog.set_child(Some(&toolbar));
     crate::ui_util::close_on_click(&close_btn, &dialog);
 
-    // Transfer group first: the live state is what the button is for.
-    let transfer = adw::PreferencesGroup::new();
-    page.add(&transfer);
-
-    let status_row = adw::ActionRow::builder().title(gettext("Status")).build();
-    let status_label = detail_value_label(&it.status().label());
-    status_row.add_suffix(&status_label);
-    transfer.add(&status_row);
-    {
-        let weak = status_label.downgrade();
-        it.connect_status_notify(move |it| {
-            if let Some(l) = weak.upgrade() {
-                l.set_text(&it.status().label());
-            }
-        });
-    }
-
-    let progress_row = adw::ActionRow::builder().title(gettext("Progress")).build();
-    let progress_label = detail_value_label(&fmt_progress(it.progress()));
-    progress_row.add_suffix(&progress_label);
-    transfer.add(&progress_row);
-    {
-        let weak = progress_label.downgrade();
-        it.connect_progress_notify(move |it| {
-            if let Some(l) = weak.upgrade() {
-                l.set_text(&fmt_progress(it.progress()));
-            }
-        });
-    }
-
-    // The engine's live line (speed/ETA/size) or the failure message:
-    // full-width, selectable and wrapping — the row caption ellipsizes it.
-    let detail_row = adw::ActionRow::new();
-    let detail_label = gtk4::Label::builder()
-        .label(it.detail())
-        .wrap(true)
-        .wrap_mode(gtk4::pango::WrapMode::WordChar)
-        .selectable(true)
-        .xalign(0.0)
-        .css_classes(["dimmed"])
-        .build();
-    detail_row.add_prefix(&detail_label);
-    detail_row.set_visible(!it.detail().is_empty());
-    transfer.add(&detail_row);
-    {
-        let weak_row = detail_row.downgrade();
-        let weak_label = detail_label.downgrade();
-        it.connect_detail_notify(move |it| {
-            let text = it.detail();
-            if let Some(l) = weak_label.upgrade() {
-                l.set_text(&text);
-            }
-            if let Some(r) = weak_row.upgrade() {
-                r.set_visible(!text.is_empty());
-            }
-        });
-    }
-
+    // Transfer state (status, progress, detail) lives in the list row itself;
+    // the dialog only shows what the row doesn't: file metadata.
     let file = adw::PreferencesGroup::new();
     page.add(&file);
 
@@ -168,22 +107,6 @@ pub(crate) fn show_download_details(
     let type_row = adw::ActionRow::builder().title(gettext("Type")).build();
     type_row.add_suffix(&detail_value_label(&download_kind_label(kind)));
     file.add(&type_row);
-
-    let name_row = adw::ActionRow::builder()
-        .title(gettext("File name"))
-        .build();
-    let name_label = detail_value_label(&it.filename());
-    name_label.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-    name_row.add_suffix(&name_label);
-    file.add(&name_row);
-    {
-        let weak = name_label.downgrade();
-        it.connect_filename_notify(move |it| {
-            if let Some(l) = weak.upgrade() {
-                l.set_text(&it.filename());
-            }
-        });
-    }
 
     let url_row = adw::ActionRow::builder().title(gettext("URL")).build();
     let url_label = detail_value_label(url.as_str());

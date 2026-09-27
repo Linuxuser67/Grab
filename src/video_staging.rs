@@ -35,7 +35,9 @@ pub fn legacy_staging_dir(item_id: u64) -> PathBuf {
 }
 
 /// Historic alias for the legacy tmpfs location (kept for tests probing
-/// pre-upgrade layouts).
+/// pre-upgrade layouts). Test-only: production resolves through
+/// [`staging_location_for_dest`].
+#[cfg(test)]
 pub fn staging_dir(item_id: u64) -> PathBuf {
     legacy_staging_dir(item_id)
 }
@@ -129,6 +131,8 @@ fn guarded_staging_dir(root: &Path, dir: &Path) -> Option<PathBuf> {
 }
 
 /// Remove a staging dir, guarded to stay under the staging root (never user data).
+/// Test-only: production cleans through [`clean_staging_in`] with the resolved root.
+#[cfg(test)]
 pub fn clean_staging(dir: &Path) {
     clean_staging_in(&staging_root(), dir);
 }

@@ -235,9 +235,46 @@ fn subtitle_probe_drain_times_out_when_pipe_stays_open() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Item 2 (handoff-4): on drain timeout the drain task must be aborted, not
+/// detached — dropping the `JoinHandle` leaves the task parked on the pipe
+/// until the grandchild exits (~30 s). The guard sender fires only when the
+/// task's future is actually dropped, so a detached task fails this test.
+#[test]
+fn drain_with_timeout_aborts_lingering_task() {
+    crate::runtime::tokio_rt().block_on(async {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        struct AbortGuard(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for AbortGuard {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        let lingering: tokio::task::JoinHandle<Vec<u8>> = tokio::spawn(async move {
+            let _guard = AbortGuard(Some(tx));
+            std::future::pending::<()>().await;
+            unreachable!("a lingering drain never resolves on its own")
+        });
+        let result = drain_with_timeout(lingering, std::time::Duration::from_millis(50)).await;
+        assert!(
+            result.is_none(),
+            "a drain that outlives its bound must yield None"
+        );
+        let aborted = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+        assert!(
+            aborted.is_ok(),
+            "drain task lingered after the timeout instead of being aborted"
+        );
+    });
+}
+
 /// Item 7: the guard's handle must stay private — construction goes through the
 /// constructor so the abort-on-drop invariant can't be bypassed — and dropping
 /// the guard must abort the watcher task.
+/// RED was compile-time: the test calls `RecordingWatcherGuard::new()`, which
+/// doesn't exist pre-GREEN (E0599) — an API-constraint RED, failing for the
+/// right reason (no way to build the guard except through the constructor).
 #[test]
 fn recording_watcher_guard_aborts_on_drop() {
     use std::sync::atomic::{AtomicBool, Ordering};

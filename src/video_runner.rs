@@ -794,6 +794,17 @@ const SUBTITLE_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 /// unbounded drain would stall the download on an otherwise fine probe.
 const SUBTITLE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Drain the probe's stdout with a deadline; `None` when the bound expires.
+async fn drain_with_timeout(
+    drain: tokio::task::JoinHandle<Vec<u8>>,
+    bound: Duration,
+) -> Option<Vec<u8>> {
+    match tokio::time::timeout(bound, drain).await {
+        Ok(bytes) => Some(bytes.unwrap_or_default()),
+        Err(_) => None,
+    }
+}
+
 /// Wall-clock bound for the merge phase: merges are local ffmpeg work and
 /// typically stream-copies finishing in minutes, so an hour is generous even
 /// on slow CPUs — while a truly hung ffmpeg no longer parks the row forever.
@@ -907,9 +918,9 @@ pub(crate) async fn resolve_subtitle_lang(
     // (a grandchild inheriting the pipe), and an unbounded `drain.await`
     // would stall the download on an otherwise successful probe. 5 s is
     // generous — the info JSON is small and fully written by now.
-    let out_bytes = match tokio::time::timeout(SUBTITLE_DRAIN_TIMEOUT, drain).await {
-        Ok(bytes) => bytes.unwrap_or_default(),
-        Err(_) => {
+    let out_bytes = match drain_with_timeout(drain, SUBTITLE_DRAIN_TIMEOUT).await {
+        Some(bytes) => bytes,
+        None => {
             tracing::warn!("subtitle probe drain timed out; downloading without subtitles");
             return Ok(None);
         }

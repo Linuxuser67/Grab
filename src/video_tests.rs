@@ -713,6 +713,42 @@ fn ensure_staging_dir_in_rejects_symlink_escape_from_dest_root() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+#[cfg(unix)]
+#[test]
+fn symlinked_staging_root_is_refused_for_writes_and_sweeps() {
+    // A planted `<dest>/.grab-video` symlink must not divert staging writes or
+    // orphan-sweep deletions onto its target: the root itself is untrusted.
+    use std::collections::HashSet;
+    let base = std::env::temp_dir().join(format!("grab-root-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dest = base.join("dest");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let target_item = outside.join("123");
+    std::fs::create_dir_all(&target_item).unwrap();
+    std::fs::write(target_item.join("nonfinal.tmp"), b"do not touch").unwrap();
+    let root = dest_staging_root(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    std::os::unix::fs::symlink(&outside, &root).unwrap();
+
+    // Staging creation refuses before writing anything through the link.
+    let err = ensure_staging_dir_in(&root, &root.join("123")).expect_err("linked root must fail");
+    assert!(err.to_string().contains("not a real directory"), "{err}");
+    assert!(
+        !target_item.join("123").exists(),
+        "nothing may be created through the linked root"
+    );
+
+    // The orphan sweep leaves the link target alone.
+    sweep_dest_staging(&dest, &HashSet::new());
+    assert_eq!(
+        std::fs::read(target_item.join("nonfinal.tmp")).unwrap(),
+        b"do not touch",
+        "sweep must not delete through the linked root"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 // ── VideoSource serde round-trip ───────────────────────────────────────
 
 #[test]

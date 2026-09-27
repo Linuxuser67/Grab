@@ -109,21 +109,40 @@ pub fn ensure_staging_dir(dir: &Path) -> Result<PathBuf, VideoError> {
 /// Create a staging dir under an explicit root, verifying it stays there (a
 /// pre-planted symlink must not redirect parts).
 pub fn ensure_staging_dir_in(root: &Path, dir: &Path) -> Result<PathBuf, VideoError> {
+    // Refuse a symlinked root before creating anything through it: the
+    // containment check below canonicalizes the root, which would otherwise
+    // validate a link pointing anywhere.
+    if !staging_root_is_real(root) {
+        return Err(VideoError::staging(gettext(
+            "staging root is not a real directory",
+        )));
+    }
     std::fs::create_dir_all(dir).map_err(VideoError::staging)?;
-    let canon = std::fs::canonicalize(dir).map_err(VideoError::staging)?;
-    let root = std::fs::canonicalize(root).map_err(VideoError::staging)?;
-    if canon.starts_with(&root) {
-        Ok(canon)
-    } else {
-        Err(VideoError::staging(gettext(
-            "staging directory escaped its root",
-        )))
+    guarded_staging_dir(root, dir)
+        .ok_or_else(|| VideoError::staging(gettext("staging directory escaped its root")))
+}
+
+/// The staging root itself must be a real directory. Canonicalizing a symlinked
+/// root would make the containment check self-validating (the link target
+/// trivially starts with itself), so a planted `.grab-video` link could divert
+/// staging writes — and, worse, orphan-sweep deletions — anywhere.
+fn staging_root_is_real(root: &Path) -> bool {
+    match std::fs::symlink_metadata(root) {
+        // symlink_metadata does not follow the final component, so a symlink
+        // reports is_dir() == false here.
+        Ok(meta) => meta.file_type().is_dir(),
+        // A missing root is fine: create_dir_all builds it as a real dir.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
     }
 }
 
 /// Canonicalize `dir`, returning it only if it stays under `root` (a planted
 /// symlink that escapes refuses instead of diverting the removal).
 fn guarded_staging_dir(root: &Path, dir: &Path) -> Option<PathBuf> {
+    if !staging_root_is_real(root) {
+        return None;
+    }
     let (Ok(canon), Ok(root)) = (std::fs::canonicalize(dir), std::fs::canonicalize(root)) else {
         return None;
     };

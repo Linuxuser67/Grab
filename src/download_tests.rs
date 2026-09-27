@@ -5817,6 +5817,7 @@ fn finalize_filename_applies_ascii_fold_for_late_names() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn parent_contained_in_dest_cases() {
     let base = std::env::temp_dir().join(format!("grab-parent-{}", std::process::id()));

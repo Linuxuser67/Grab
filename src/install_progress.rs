@@ -174,6 +174,10 @@ pub fn run(
     glib::spawn_future_local(async move {
         yt.set_downloading();
         // Pulse driver ticks the active row; started after first row goes active so the first tick can't stop early.
+        // Break-on-None is the teardown stop: `active` is only ever None after
+        // a stage failed or the last stage installed — the set_installed →
+        // set_downloading handoffs hold no await, so the tick can't observe an
+        // empty stage between rows.
         {
             let active = active.clone();
             glib::timeout_add_local(Duration::from_millis(100), move || {

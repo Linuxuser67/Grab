@@ -234,3 +234,36 @@ fn subtitle_probe_drain_times_out_when_pipe_stays_open() {
     );
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Item 7: the guard's handle must stay private — construction goes through the
+/// constructor so the abort-on-drop invariant can't be bypassed — and dropping
+/// the guard must abort the watcher task.
+#[test]
+fn recording_watcher_guard_aborts_on_drop() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let flag = std::sync::Arc::new(AtomicBool::new(false));
+    let flag2 = flag.clone();
+    crate::runtime::tokio_rt().block_on(async {
+        let handle = tokio::spawn(async move {
+            loop {
+                flag2.store(true, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+            }
+        });
+        {
+            let _guard = RecordingWatcherGuard::new(handle);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(
+                flag.load(Ordering::SeqCst),
+                "test setup: the task must be running inside the guard"
+            );
+        }
+        // The guard dropped: an aborted task can never set the flag again.
+        flag.store(false, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "dropping the guard must abort the watcher task"
+        );
+    });
+}

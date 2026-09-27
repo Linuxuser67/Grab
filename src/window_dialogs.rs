@@ -1,6 +1,6 @@
-//! Add-dialog flow: the new-download dialog, video probe steps, playlist
+//! Add-panel flow: the new-download side panel, video probe steps, playlist
 //! display and submit paths. UI module (gtk/adw + leaves + engines): the
-//! window builder opens it, the playlist picker reuses the count label.
+//! window builder owns the panel, the playlist picker reuses the count label.
 
 use crate::download::DownloadManager;
 use crate::window_rows::{default_name_for, error_label, selection_action_bar};
@@ -50,14 +50,6 @@ fn inflight_suppresses(
     matches!(inflight, Some((u, g, p)) if u.as_str() == url && *g == generation && *p == probe_unlisted)
 }
 
-/// Present on the active window when there is one, standalone otherwise.
-fn present_dialog(dialog: &adw::Dialog) {
-    let win = gio::Application::default()
-        .and_downcast::<adw::Application>()
-        .and_then(|app| app.active_window());
-    dialog.present(win.as_ref());
-}
-
 /// Widgets of the New Download dialog's video step (details page), managed as
 /// one unit: exactly one state visible at a time. The group header itself
 /// carries the video identity (title + page URL).
@@ -80,7 +72,7 @@ struct VideoStep {
 fn submit_probed_single(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
-    dialog: &glib::WeakRef<adw::Dialog>,
+    ctl: &SessionCtl,
     step: &Rc<VideoStep>,
     formats: &Rc<RefCell<Vec<Option<String>>>>,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
@@ -126,9 +118,7 @@ fn submit_probed_single(
         },
     ) {
         Ok(_) => {
-            if let Some(d) = dialog.upgrade() {
-                d.close();
-            }
+            ctl.close();
         }
         Err(e) => {
             show_video_error(step, &e);
@@ -143,7 +133,7 @@ fn submit_probed_single(
 fn submit_probe(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
-    dialog: &glib::WeakRef<adw::Dialog>,
+    ctl: &SessionCtl,
     step: &Rc<VideoStep>,
     formats: &Rc<RefCell<Vec<Option<String>>>>,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
@@ -161,7 +151,7 @@ fn submit_probe(
                 nav,
                 manager.clone(),
                 dest.clone(),
-                dialog.clone(),
+                ctl.clone(),
                 pl,
                 step.audio.is_active(),
             );
@@ -187,21 +177,19 @@ fn fallback_plain_failed(
     set_lookup_add(lookup_add, true);
 }
 
-/// Queue a probed link as a plain file and close the dialog: the fallback when
+/// Queue a probed link as a plain file and close the panel: the fallback when
 /// extraction finds no playable media on an unlisted page. `Err` when plain intake rejects the URL.
 fn queue_plain(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
-    dialog: &glib::WeakRef<adw::Dialog>,
+    ctl: &SessionCtl,
     file_row: &adw::EntryRow,
     url: &str,
 ) -> Result<(), String> {
     let typed = file_row.text().trim().to_string();
     let name = (!typed.is_empty()).then_some(typed);
     manager.enqueue(url, Some(&dest.borrow()), name.as_deref())?;
-    if let Some(d) = dialog.upgrade() {
-        d.close();
-    }
+    ctl.close();
     Ok(())
 }
 
@@ -292,13 +280,13 @@ fn wire_torrent_picker(
     torrent_btn: &gtk4::Button,
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
-    dialog: glib::WeakRef<adw::Dialog>,
+    session: SessionCtl,
     error_label: gtk4::Label,
 ) {
     torrent_btn.connect_clicked(move |_| {
         let m = manager.clone();
         let dd = dest_dir.clone();
-        let dialog = dialog.clone();
+        let session = session.clone();
         let error_label = error_label.clone();
         glib::spawn_future_local(async move {
             let filter = gtk4::FileFilter::new();
@@ -341,9 +329,7 @@ fn wire_torrent_picker(
             if entries.len() <= 1 {
                 match m.enqueue_torrent_file(bytes, &name, Some(&dd.borrow()), None) {
                     Ok(_) => {
-                        if let Some(d) = dialog.upgrade() {
-                            d.close();
-                        }
+                        session.close();
                     }
                     Err(e) => {
                         error_label.set_text(&e);
@@ -352,21 +338,113 @@ fn wire_torrent_picker(
                 }
                 return;
             }
-            show_torrent_files_dialog(m, dd, Some(dialog), name, bytes, entries);
+            show_torrent_files_dialog(m, dd, Some(session), name, bytes, entries);
         });
     });
 }
 
-/// New-download dialog, optionally pre-filled (drag-and-drop / Open With hands a
-/// URL in; the normal lookup flow then takes over, so drops never bypass the
-/// media pipeline).
-pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) {
-    let dialog = adw::Dialog::builder()
-        .title(gettext("New Download"))
-        .build();
-    dialog.set_follows_content_size(true);
-    dialog.set_content_width(420);
+/// Controls for one add-panel session: hide the panel and check it is still
+/// open. Replaces the `WeakRef<adw::Dialog>` the flow used to thread through
+/// its submit paths — the panel is rebuilt on every show, so closing a session
+/// invalidates its liveness guard the way dropping the dialog used to.
+#[derive(Clone)]
+pub struct SessionCtl {
+    hide: Rc<dyn Fn()>,
+    alive: Rc<Cell<bool>>,
+    window: glib::WeakRef<adw::ApplicationWindow>,
+}
 
+impl SessionCtl {
+    fn is_open(&self) -> bool {
+        self.alive.get()
+    }
+
+    fn close(&self) {
+        (self.hide)();
+    }
+}
+
+/// The add-download side panel: an `AdwOverlaySplitView` sidebar hosting the
+/// same multi-page flow the modal dialog used to, so adding a download no
+/// longer covers the main UI. Owned by the window; opened from the header and
+/// empty-state buttons, the app action, and Open With / drag-and-drop.
+pub struct AddPanel {
+    split: adw::OverlaySplitView,
+    window: adw::ApplicationWindow,
+    manager: Rc<DownloadManager>,
+    session: RefCell<Option<SessionCtl>>,
+}
+
+impl AddPanel {
+    /// `split` is inserted into the window content by the caller; the panel
+    /// fills its sidebar on show.
+    pub fn new(
+        manager: Rc<DownloadManager>,
+        window: &adw::ApplicationWindow,
+        split: &adw::OverlaySplitView,
+    ) -> Rc<Self> {
+        Rc::new(Self {
+            split: split.clone(),
+            window: window.clone(),
+            manager,
+            session: RefCell::new(None),
+        })
+    }
+
+    /// Show the panel, optionally pre-filled. A fresh session is built on
+    /// every show, the way the dialog was rebuilt on every open.
+    pub fn show(&self, initial_url: Option<&str>) {
+        self.hide();
+        let alive = Rc::new(Cell::new(true));
+        let split_w = self.split.downgrade();
+        let window = self.window.clone();
+        let hide: Rc<dyn Fn()> = Rc::new(move || {
+            alive.set(false);
+            window.set_default_widget(Option::<&gtk4::Widget>::None);
+            if let Some(split) = split_w.upgrade() {
+                split.set_show_sidebar(false);
+                split.set_sidebar(Option::<&adw::NavigationView>::None);
+            }
+        });
+        let ctl = SessionCtl {
+            hide,
+            alive,
+            window: self.window.downgrade(),
+        };
+        let nav = build_add_session(&self.manager, &ctl, initial_url);
+        nav.set_width_request(420);
+        self.split.set_sidebar(Some(&nav));
+        self.split.set_show_sidebar(true);
+        self.session.replace(Some(ctl));
+    }
+
+    /// Hide the panel and invalidate its session; in-flight lookups from the
+    /// closed session are discarded by their liveness guard.
+    pub fn hide(&self) {
+        if let Some(session) = self.session.take() {
+            session.close();
+        }
+    }
+
+    /// Toggle for the header and empty-state buttons.
+    pub fn toggle(&self, initial_url: Option<&str>) {
+        if self.split.show_sidebar() {
+            self.hide();
+        } else {
+            self.show(initial_url);
+        }
+    }
+}
+
+/// New-download flow, optionally pre-filled (drag-and-drop / Open With hands a
+/// URL in; the normal lookup flow then takes over, so drops never bypass the
+/// media pipeline). Builds one session's page stack; [`AddPanel`] hosts it in
+/// the sidebar and owns its lifetime through `ctl`.
+fn build_add_session(
+    manager: &Rc<DownloadManager>,
+    ctl: &SessionCtl,
+    initial_url: Option<&str>,
+) -> adw::NavigationView {
     let page = adw::PreferencesPage::new();
     let group = adw::PreferencesGroup::new();
     page.add(&group);
@@ -566,7 +644,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         let step2 = step.clone();
         let url_row2 = url_row.clone();
         let file_row2 = file_row.clone();
-        let dialog_weak = dialog.downgrade();
+        let session = ctl.clone();
         let formats_kick = format_ids.clone();
         let settings2 = manager.settings().clone();
         let lookup_add_kick = lookup_add.clone();
@@ -596,7 +674,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 info_b,
                 step_b,
                 url_b,
-                dialog_b,
+                session_b,
                 settings_b,
                 file_b,
                 formats_b,
@@ -610,7 +688,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 info.clone(),
                 step2.clone(),
                 url_row2.clone(),
-                dialog_weak.clone(),
+                session.clone(),
                 settings2.clone(),
                 file_row2.clone(),
                 formats_kick.clone(),
@@ -627,7 +705,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                     generation: generation_b.clone(),
                     my,
                 };
-                if dialog_b.upgrade().is_none() {
+                if !session_b.is_open() {
                     return;
                 }
                 let url = url_b.text().trim().to_string();
@@ -660,7 +738,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 let libs = match crate::video::resolve_libraries() {
                     Ok(libs) => libs,
                     Err(e) => {
-                        if dialog_b.upgrade().is_none() || generation_b.get() != my {
+                        if !session_b.is_open() || generation_b.get() != my {
                             return;
                         }
                         info_b.borrow_mut().take();
@@ -678,7 +756,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 {
                     Ok(proxy) => proxy,
                     Err(e) => {
-                        if dialog_b.upgrade().is_none() || generation_b.get() != my {
+                        if !session_b.is_open() || generation_b.get() != my {
                             return;
                         }
                         show_video_error(&step_b, &e);
@@ -696,7 +774,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 .await
                 {
                     Err(e) => {
-                        if dialog_b.upgrade().is_none() || generation_b.get() != my {
+                        if !session_b.is_open() || generation_b.get() != my {
                             return;
                         }
                         // Probed links fall back to today's outcome (queue the file directly)
@@ -705,7 +783,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         if !crate::video::is_video_page(&url)
                             && e.to_string().to_lowercase().contains("unsupported url")
                         {
-                            match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &url) {
+                            match queue_plain(&manager_b, &dest_b, &session_b, &file_b, &url) {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     fallback_plain_failed(
@@ -729,7 +807,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                 msg.contains("400") || msg.contains("bad request")
                             }
                         {
-                            match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &direct) {
+                            match queue_plain(&manager_b, &dest_b, &session_b, &file_b, &direct) {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     info_b.borrow_mut().take();
@@ -754,13 +832,13 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         set_lookup_add(&lookup_add_b, true);
                     }
                     Ok(probe) => {
-                        if dialog_b.upgrade().is_none() || generation_b.get() != my {
+                        if !session_b.is_open() || generation_b.get() != my {
                             return;
                         }
                         // Resolved but nothing playable, and not a listed video
                         // page: same plain fallback as above.
                         if !probe.fetchable() && !crate::video::is_video_page(&url) {
-                            match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &url) {
+                            match queue_plain(&manager_b, &dest_b, &session_b, &file_b, &url) {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     fallback_plain_failed(
@@ -864,7 +942,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     {
         let generation = video_generation.clone();
         let kick = kick_video.clone();
-        let dialog_weak = dialog.downgrade();
+        let session = ctl.clone();
         let step2 = step.clone();
         let info2 = video_info.clone();
         let quiet = video_quiet.clone();
@@ -894,11 +972,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
             }
             let my = generation.get() + 1;
             generation.set(my);
-            let (generation_b, kick_b, dialog_b) =
-                (generation.clone(), kick.clone(), dialog_weak.clone());
+            let (generation_b, kick_b, session_b) =
+                (generation.clone(), kick.clone(), session.clone());
             glib::spawn_future_local(async move {
                 glib::timeout_future(std::time::Duration::from_millis(600)).await;
-                if dialog_b.upgrade().is_none() || generation_b.get() != my {
+                if !session_b.is_open() || generation_b.get() != my {
                     return;
                 }
                 kick_b(false);
@@ -908,7 +986,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     {
         let step2 = step.clone();
         let kick = kick_video.clone();
-        let dialog_weak = dialog.downgrade();
+        let session = ctl.clone();
         let btn = video_install_btn.clone();
         // Outside Flatpak there is no bundled binary and host packages can't
         // be installed from here: guide through self-install instead.
@@ -926,17 +1004,17 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
             // the button (HIG: feedback lives with its control; stages stand in for the
             // percentages that don't exist).
             let (step_b, kick_b) = (step2.clone(), kick.clone());
-            let (dialog_err, dialog_ok) = (dialog_weak.clone(), dialog_weak.clone());
+            let (sess_err, sess_ok) = (session.clone(), session.clone());
             crate::install_progress::run(
                 &btn,
                 move |err| {
-                    if dialog_err.upgrade().is_none() {
+                    if !sess_err.is_open() {
                         return;
                     }
                     step_b.tools.set_subtitle(&err);
                 },
                 move || {
-                    if dialog_ok.upgrade().is_none() {
+                    if !sess_ok.is_open() {
                         return;
                     }
                     // Re-probe, don't just refresh: an unlisted URL that led
@@ -984,7 +1062,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         &torrent_btn,
         manager.clone(),
         dest_dir.clone(),
-        dialog.downgrade(),
+        ctl.clone(),
         error_label.clone(),
     );
 
@@ -1041,10 +1119,27 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     let nav = adw::NavigationView::new();
     nav.push(&entry_nav_page);
 
-    dialog.set_child(Some(&nav));
-    dialog.set_default_widget(Some(&add_btn));
-
-    crate::ui_util::close_on_click(&cancel_btn, &dialog);
+    // Enter submits from the rows, like the dialog's default widget did.
+    if let Some(win) = ctl.window.upgrade() {
+        win.set_default_widget(Some(&add_btn));
+    }
+    {
+        let session = ctl.clone();
+        cancel_btn.connect_clicked(move |_| session.close());
+    }
+    // Escape closes the panel from any page, the way it closed the dialog.
+    {
+        let session = ctl.clone();
+        let shortcuts = gtk4::ShortcutController::new();
+        shortcuts.add_shortcut(gtk4::Shortcut::new(
+            gtk4::ShortcutTrigger::parse_string("Escape").as_ref(),
+            Some(&gtk4::CallbackAction::new(move |_, _| {
+                session.close();
+                true
+            })),
+        ));
+        nav.add_controller(shortcuts);
+    }
     // One submit path for the Add button and URL apply: video pages go through the Page
     // intake (a matching preview is required so the row stores the resolved page, not a
     // stale URL); everything else keeps the direct enqueue.
@@ -1054,7 +1149,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         let url_row = url_row.clone();
         let file_row = file_row.clone();
         let error_label = error_label.clone();
-        let dialog_weak = dialog.downgrade();
+        let session = ctl.clone();
         let info = video_info.clone();
         let last_ok = video_last_ok.clone();
         let step2 = step.clone();
@@ -1082,9 +1177,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 }
             };
             let close = || {
-                if let Some(d) = dialog_weak.upgrade() {
-                    d.close();
-                }
+                session.close();
             };
             let url = url_row.text().trim().to_string();
             if crate::video::is_video_page(&url) {
@@ -1110,7 +1203,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                     Some(probe) => submit_probe(
                         &m,
                         &dd,
-                        &dialog_weak,
+                        &session,
                         &step2,
                         &formats,
                         &lookup_add_submit,
@@ -1160,7 +1253,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                             submit_probed_single(
                                 &m,
                                 &dd,
-                                &dialog_weak,
+                                &session,
                                 &step2,
                                 &formats,
                                 &lookup_add_submit,
@@ -1172,7 +1265,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                 &nav2,
                                 m.clone(),
                                 dd.clone(),
-                                dialog_weak.clone(),
+                                session.clone(),
                                 pl,
                                 step2.audio.is_active(),
                             );
@@ -1238,8 +1331,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         });
     }
 
-    present_dialog(&dialog);
-
+    // The panel hosts the returned page stack in its sidebar.
     // Dropped/opened URLs land here pre-filled: setting the text fires the same changed →
     // debounce → lookup chain as typing, so video pages resolve through the media pipeline.
     if let Some(url) = initial_url.map(str::trim).filter(|u| !u.is_empty())
@@ -1250,19 +1342,29 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
 
     // Keyboard-first: focus lands in the URL field so typing starts a
     // download with no tab stops (same pattern as the rename dialog).
-    url_row.grab_focus();
-
-    // single clipboard read per dialog open; no watch, no polling.
+    // Deferred: the page stack isn't attached to the window until the
+    // caller shows the panel, and grab_focus fails on a rootless widget.
     {
         let url_row = url_row.clone();
-        let dialog_weak = dialog.downgrade();
+        let session = ctl.clone();
+        glib::idle_add_local_once(move || {
+            if session.is_open() {
+                url_row.grab_focus();
+            }
+        });
+    }
+
+    // single clipboard read per panel open; no watch, no polling.
+    {
+        let url_row = url_row.clone();
+        let session = ctl.clone();
         glib::spawn_future_local(async move {
             let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
             let Some(clipboard) = clipboard else { return };
             let Ok(Some(text)) = clipboard.read_text_future().await else {
                 return;
             };
-            if dialog_weak.upgrade().is_none() {
+            if !session.is_open() {
                 return;
             }
             if !url_row.text().trim().is_empty() {
@@ -1274,6 +1376,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
             }
         });
     }
+
+    nav
 }
 /// Seconds as M:SS / H:MM:SS for picker subtitles.
 pub(crate) fn fmt_item_duration(secs: i64) -> String {
@@ -1339,7 +1443,7 @@ fn push_playlist_items_page(
     nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
-    parent: glib::WeakRef<adw::Dialog>,
+    parent: SessionCtl,
     playlist: crate::media_types::PlaylistInfo,
     audio_only: bool,
 ) {
@@ -1417,7 +1521,7 @@ fn push_playlist_items_page(
     });
 
     {
-        let parent_weak = parent.clone();
+        let parent = parent.clone();
         add_btn.connect_clicked(move |_| {
             let chosen: Vec<(usize, &crate::media_types::PlaylistItem)> = playlist
                 .items
@@ -1482,25 +1586,23 @@ fn push_playlist_items_page(
                 error_label.set_visible(true);
                 return;
             }
-            // Complete success closes the whole New Download dialog; a partial failure stays
+            // Complete success closes the whole New Download panel; a partial failure stays
             // on the picker so the remaining rows (unchecked above) can be retried.
-            if let Some(p) = parent_weak.upgrade() {
-                p.close();
-            }
+            parent.close();
         });
     }
 
-    // Enter queues the selection while the picker is up; the dialog's previous
+    // Enter queues the selection while the picker is up; the window's previous
     // default widget is restored when the page is popped.
-    if let Some(p) = parent.upgrade() {
-        let prev_default = p.default_widget();
-        p.set_default_widget(Some(&add_btn));
-        let parent_weak = parent.clone();
+    if let Some(win) = parent.window.upgrade() {
+        let prev_default = win.default_widget();
+        win.set_default_widget(Some(&add_btn));
+        let parent = parent.clone();
         nav.connect_popped(move |_, popped| {
             if popped.tag().as_deref() == Some("playlist")
-                && let Some(p) = parent_weak.upgrade()
+                && let Some(win) = parent.window.upgrade()
             {
-                p.set_default_widget(prev_default.as_ref());
+                win.set_default_widget(prev_default.as_ref());
             }
         });
     }
@@ -1512,7 +1614,7 @@ fn push_playlist_items_page(
 pub fn show_torrent_files_dialog(
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
-    parent: Option<glib::WeakRef<adw::Dialog>>,
+    parent: Option<SessionCtl>,
     file_name: String,
     bytes: Vec<u8>,
     entries: Vec<crate::torrent::TorrentFileEntry>,
@@ -1611,7 +1713,7 @@ pub fn show_torrent_files_dialog(
                     if let Some(d) = dialog_weak.upgrade() {
                         d.close();
                     }
-                    if let Some(p) = parent.as_ref().and_then(|w| w.upgrade()) {
+                    if let Some(p) = parent.as_ref() {
                         p.close();
                     }
                 }
@@ -1623,9 +1725,9 @@ pub fn show_torrent_files_dialog(
         });
     }
 
-    // No gtk Window parent exists here (invoked from an adw::Dialog): present
-    // standalone like the no-window fallback above.
-    dialog.present(None::<&gtk4::Window>);
+    // Parent the modal on the window when opened from the add panel; the
+    // standalone open path (no parent) keeps the no-window fallback.
+    dialog.present(parent.as_ref().and_then(|p| p.window.upgrade()).as_ref());
 }
 
 #[cfg(test)]

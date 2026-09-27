@@ -3,7 +3,7 @@
 
 use crate::download::DownloadManager;
 use crate::settings::AppSettings;
-use crate::window::{self, show_add_dialog};
+use crate::window::{self, AddPanel};
 use crate::window_rows::ngettext_count;
 use crate::{APP_ID, preferences};
 use adw::prelude::*;
@@ -21,6 +21,7 @@ struct State {
     toasts: Rc<adw::ToastOverlay>,
     window: adw::ApplicationWindow,
     search_bar: gtk4::SearchBar,
+    add_panel: Rc<AddPanel>,
 }
 
 pub fn setup(app: &adw::Application) {
@@ -43,6 +44,7 @@ pub fn setup(app: &adw::Application) {
                 toasts,
                 window: win.0,
                 search_bar: win.1,
+                add_panel: win.2,
             }));
 
             app.set_accels_for_action("app.add-download", &["<Control>n"]);
@@ -76,10 +78,10 @@ pub fn setup(app: &adw::Application) {
                 if let Ok(uri) = f.uri().parse::<url::Url>()
                     && matches!(uri.scheme(), "http" | "https" | "magnet")
                 {
-                    // Video pages take the dialog path (pre-filled): plain
+                    // Video pages take the panel path (pre-filled): plain
                     // enqueue would save the raw HTML page as a file.
                     if crate::video::is_video_page(uri.as_str()) {
-                        show_add_dialog(s.manager.clone(), Some(uri.as_str()));
+                        s.add_panel.show(Some(uri.as_str()));
                         continue;
                     }
                     if let Err(e) = s.manager.enqueue(uri.as_str(), None, None) {
@@ -194,7 +196,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
             gio::ActionEntry::builder("add-download")
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
-                        show_add_dialog(s.manager.clone(), None);
+                        s.add_panel.toggle(None);
                     }
                 })
                 .build()

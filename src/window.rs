@@ -8,9 +8,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Facade: the dialog flow lives in [`window_dialogs`](crate::window_dialogs)
+/// Facade: the add-panel flow lives in [`window_dialogs`](crate::window_dialogs)
 /// now; these re-exports keep the in-tree `crate::window::X` paths working.
-pub use crate::window_dialogs::{show_add_dialog, show_torrent_files_dialog};
+pub use crate::window_dialogs::{AddPanel, show_torrent_files_dialog};
 /// Facade: row widgets live in [`window_rows`](crate::window_rows) now.
 use crate::window_rows::build_row;
 pub use crate::window_rows::launch_path;
@@ -180,13 +180,31 @@ pub fn build_window(
     manager: Rc<DownloadManager>,
     settings: crate::settings::AppSettings,
     toasts: Rc<adw::ToastOverlay>,
-) -> (adw::ApplicationWindow, gtk4::SearchBar) {
+) -> (adw::ApplicationWindow, gtk4::SearchBar, Rc<AddPanel>) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Grab")
         .default_width(settings.window_width().max(400))
         .default_height(settings.window_height().max(300))
         .build();
+
+    // The add-download side panel lives in the split view's sidebar; the main
+    // UI is the content, so adding a download no longer covers it. Toasts stay
+    // outermost and overlay both.
+    let split = adw::OverlaySplitView::new();
+    let add_panel = AddPanel::new(Rc::clone(&manager), &window, &split);
+    // Narrow windows overlay the panel instead of squeezing the download
+    // list beside it: below 800px (420 panel + usable content) the sidebar
+    // floats over the content; wider windows reserve the space.
+    {
+        let breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+            adw::BreakpointConditionLengthType::MaxWidth,
+            800.0,
+            adw::LengthUnit::Px,
+        ));
+        breakpoint.add_setter(&split, "collapsed", Some(&glib::Value::from(true)));
+        window.add_breakpoint(&breakpoint);
+    }
 
     settings
         .bind(crate::settings::key::WINDOW_WIDTH, &window, "default-width")
@@ -243,8 +261,8 @@ pub fn build_window(
         .build();
     add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("New Download"))]);
     {
-        let m = Rc::clone(&manager);
-        add_btn.connect_clicked(move |_| show_add_dialog(m.clone(), None));
+        let panel = Rc::clone(&add_panel);
+        add_btn.connect_clicked(move |_| panel.toggle(None));
     }
     header.pack_end(&add_btn);
 
@@ -261,8 +279,8 @@ pub fn build_window(
         .build();
     empty.set_child(Some(&empty_add));
     {
-        let m = Rc::clone(&manager);
-        empty_add.connect_clicked(move |_| show_add_dialog(m.clone(), None));
+        let panel = Rc::clone(&add_panel);
+        empty_add.connect_clicked(move |_| panel.toggle(None));
     }
     stack.add_named(&empty, Some("empty"));
 
@@ -583,7 +601,8 @@ pub fn build_window(
     toolbar.add_top_bar(&search_bar);
     toolbar.add_top_bar(&banner);
     toolbar.set_content(Some(&stack));
-    toasts.set_child(Some(&toolbar));
+    split.set_content(Some(&toolbar));
+    toasts.set_child(Some(&split));
     window.set_content(Some(toasts.as_ref()));
 
     // Flip a named app action on/off; silently skips a missing one.
@@ -626,7 +645,7 @@ pub fn build_window(
         hook();
     }
 
-    (window, search_bar)
+    (window, search_bar, add_panel)
 }
 
 #[cfg(test)]

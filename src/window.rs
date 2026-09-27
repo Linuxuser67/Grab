@@ -199,15 +199,19 @@ pub fn build_window(
     let sidebar_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     form_nav.set_vexpand(true);
     sidebar_box.append(&form_nav);
-    sidebar_box.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
+    let filter_separator = gtk4::Separator::new(gtk4::Orientation::Horizontal);
+    sidebar_box.append(&filter_separator);
     // Filter navigation: the sidebar's HIG navigation pattern, one view per
-    // download state. Replaces the search-bar status dropdown.
+    // download state. Replaces the search-bar status dropdown. Categories
+    // hide when they have no downloads; the section itself is an ExpanderRow
+    // (the HIG collapsible) and hides when there is nothing to filter.
     let filter_sel: Rc<Cell<u32>> = Rc::new(Cell::new(0));
-    let filter_list = gtk4::ListBox::builder()
-        .selection_mode(gtk4::SelectionMode::Single)
-        .css_classes(["navigation-sidebar"])
+    let filter_expander = adw::ExpanderRow::builder()
+        .title(gettext("Status"))
+        .subtitle(gettext("All"))
+        .expanded(true)
         .build();
-    for name in [
+    let filter_names: Vec<String> = vec![
         gettext("All"),
         gettext("Downloading"),
         gettext("Paused"),
@@ -215,10 +219,41 @@ pub fn build_window(
         gettext("Done"),
         gettext("Failed"),
         gettext("Cancelled"),
-    ] {
-        filter_list.append(&adw::ActionRow::builder().title(name).build());
-    }
-    sidebar_box.append(&filter_list);
+    ];
+    let filter_rows: Rc<Vec<(adw::ActionRow, gtk4::Image)>> = Rc::new(
+        filter_names
+            .iter()
+            .map(|name| {
+                let check = gtk4::Image::from_icon_name("object-select-symbolic");
+                check.set_valign(gtk4::Align::Center);
+                let row = adw::ActionRow::builder()
+                    .title(name)
+                    .activatable(true)
+                    .build();
+                row.add_prefix(&check);
+                filter_expander.add_row(&row);
+                (row, check)
+            })
+            .collect(),
+    );
+    sidebar_box.append(&filter_expander);
+    // Echo the pick: checkmark on the selected row, subtitle on the expander.
+    let refresh_filter_ui: Rc<dyn Fn()> = {
+        let sel = Rc::clone(&filter_sel);
+        let expander = filter_expander.clone();
+        let rows = Rc::clone(&filter_rows);
+        let names = filter_names.clone();
+        Rc::new(move || {
+            let s = sel.get() as usize;
+            for (j, (_, check)) in rows.iter().enumerate() {
+                check.set_visible(j == s);
+            }
+            if let Some(name) = names.get(s) {
+                expander.set_subtitle(name);
+            }
+        })
+    };
+    refresh_filter_ui();
     // Narrow windows navigate between the sidebar and the list instead of
     // showing both; the sidebar gets its own headerbar there so the panel
     // can be collapsed back. Hidden on wide windows where the sidebar is
@@ -445,10 +480,36 @@ pub fn build_window(
         let sp = split.clone();
         let query = Rc::clone(&query);
         let filter_sel = Rc::clone(&filter_sel);
+        let filter_rows = Rc::clone(&filter_rows);
+        let filter_expander = filter_expander.clone();
+        let filter_separator = filter_separator.clone();
+        let refresh_filter_ui = Rc::clone(&refresh_filter_ui);
         Rc::new(move || {
             let store = m.store();
             let q = query.borrow();
+            // Count per category first: empty ones hide, and a selected
+            // category that emptied falls back to All.
+            let mut counts = [0u32; 7];
+            for i in 0..store.n_items() {
+                if let Some(it) = store
+                    .item(i)
+                    .and_downcast::<crate::download::DownloadItem>()
+                {
+                    counts[0] += 1;
+                    counts[status_filter_index(it.status()) as usize] += 1;
+                }
+            }
+            if filter_sel.get() != 0 && counts[filter_sel.get() as usize] == 0 {
+                filter_sel.set(0);
+                refresh_filter_ui();
+            }
             let sel = filter_sel.get();
+            for (j, (row, _)) in filter_rows.iter().enumerate() {
+                row.set_visible(j == 0 && counts[0] > 0 || j > 0 && counts[j] > 0);
+            }
+            let has_downloads = counts[0] > 0;
+            filter_expander.set_visible(has_downloads);
+            filter_separator.set_visible(has_downloads);
             let mut present = std::collections::HashSet::new();
             let mut n_visible = 0;
             for i in 0..store.n_items() {
@@ -523,32 +584,28 @@ pub fn build_window(
         });
     }
     {
+        // Activating a category picks the filter; on narrow windows it also
+        // collapses the panel, returning to the list.
         let sync = Rc::clone(&sync);
         let sel = Rc::clone(&filter_sel);
-        filter_list.connect_row_selected(move |_, row| {
-            if let Some(row) = row {
-                sel.set(row.index() as u32);
-                sync();
-            }
-        });
-        // Default to All; fires the handler above once, harmlessly.
-        if let Some(row) = filter_list.row_at_index(0) {
-            filter_list.select_row(Some(&row));
-        }
-    }
-    {
-        // Activating a filter (click or Enter, even the already-selected one)
-        // also collapses the panel on narrow windows, returning to the list.
-        let sync = Rc::clone(&sync);
-        let sel = Rc::clone(&filter_sel);
+        let refresh = Rc::clone(&refresh_filter_ui);
+        let rows = Rc::clone(&filter_rows);
         let sp = split.clone();
-        filter_list.connect_row_activated(move |_, row| {
-            sel.set(row.index() as u32);
-            sync();
-            if sp.is_collapsed() {
-                sp.set_show_content(true);
-            }
-        });
+        for (i, (row, _)) in rows.iter().enumerate() {
+            let row = row.clone();
+            let sync = Rc::clone(&sync);
+            let sel = Rc::clone(&sel);
+            let refresh = Rc::clone(&refresh);
+            let sp = sp.clone();
+            row.connect_activated(move |_| {
+                sel.set(i as u32);
+                refresh();
+                sync();
+                if sp.is_collapsed() {
+                    sp.set_show_content(true);
+                }
+            });
+        }
     }
     {
         let sync = Rc::clone(&sync);

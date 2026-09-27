@@ -387,6 +387,18 @@ pub(crate) fn fallback_to_live_edge(
     is_live && live_from_start && !aborted && !already_retried
 }
 
+/// Whether yt-dlp's stderr carries its distinctive `--live-from-start`
+/// rejection: the flag was passed but the live stream has no formats
+/// downloadable from the start (yt-dlp raises it during format selection, so
+/// nothing is ever recorded). Pure; matched on yt-dlp's wording, not the
+/// exit code.
+pub(crate) fn live_from_start_unsupported(log: &str) -> bool {
+    log.lines().any(|l| {
+        l.contains("--live-from-start")
+            && l.contains("no formats that can be downloaded from the start")
+    })
+}
+
 /// yt-dlp argv for one VOD HLS capture (planner-pinned variant id, merge/extract, proxy/identity). Pure.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hls_download_argv(

@@ -72,3 +72,29 @@ jobs:
       # --locked fails when the lock would need re-resolution; read-only otherwise.
       - run: cargo metadata --locked --format-version 1 >/dev/null
       - run: ./build-aux/gen-cargo-sources.py --check
+  # Read-only secret and supply-chain scanning: gitleaks over the full
+  # history plus cargo-audit against the RustSec advisory DB. No system
+  # deps, no behavior risk — fails only when a secret or a
+  # known-vulnerable dependency actually lands. Binaries are pinned like
+  # sentrux above so an upstream release can't silently change the verdict.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # gitleaks scans history; the default shallow checkout would
+          # hide every commit but the last.
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -sSL --fail https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o /tmp/gitleaks.tgz
+          tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
+          chmod +x /usr/local/bin/gitleaks
+      - run: gitleaks detect --source . -v
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Install cargo-audit
+        run: |
+          curl -sSL --fail https://github.com/RustSec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz -o /tmp/cargo-audit.tgz
+          tar -xzf /tmp/cargo-audit.tgz -C /tmp
+          install -m 755 /tmp/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit /usr/local/bin/cargo-audit
+      - run: cargo audit

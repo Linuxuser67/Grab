@@ -9394,6 +9394,22 @@ fn impersonation_probe_false_on_probe_failure() {
 }
 
 #[test]
+fn impersonation_probe_runs_off_worker_inside_runtime() {
+    // The blocking probe must survive `block_in_place` on a real multi-thread
+    // runtime (it panics outside one, which the plain #[test]s above cover).
+    let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
+    rt.block_on(async {
+        let dir = impersonate_test_dir("rt");
+        let bin = fake_ytdlp_impersonate(
+            &dir,
+            Some("[info] Available impersonate targets\nClient      OS       Source\nChrome-131  macOS-14   curl_cffi\n"),
+        );
+        assert!(ytdlp_supports_impersonation(&bin));
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
 fn ytdlp_command_prepends_impersonate_when_supported() {
     let dir = impersonate_test_dir("cmd-on");
     let bin = fake_ytdlp_impersonate(

@@ -515,17 +515,33 @@ fn sweep_orphan_staging_keeps_live_rows_and_cookie_files() {
     std::fs::create_dir_all(&root).unwrap();
     let live_dir = root.join("991");
     let orphan_dir = root.join("992");
+    let recording_dir = root.join("993");
     let cookie = root.join("grab-cookies-1-1.txt");
     let stray = root.join("not-a-staging-dir");
-    for d in [&live_dir, &orphan_dir] {
+    for d in [&live_dir, &orphan_dir, &recording_dir] {
         std::fs::create_dir_all(d).unwrap();
     }
+    std::fs::write(orphan_dir.join("grab-media.mp4.part"), b"scratch").unwrap();
+    // A completed recording is the user's only copy: its scratch is reclaimed
+    // but the recording itself (and its dir) must survive.
+    std::fs::write(recording_dir.join("final.1.mp4"), b"someone's recording").unwrap();
+    std::fs::write(recording_dir.join("grab-media.mp4.part"), b"scratch").unwrap();
     std::fs::write(&cookie, "x").unwrap();
     std::fs::write(&stray, "x").unwrap();
     let keep: std::collections::HashSet<u64> = [991].into_iter().collect();
     sweep_orphan_staging_in(&root, &keep);
     assert!(live_dir.exists(), "live row's staging must survive");
-    assert!(!orphan_dir.exists(), "orphan staging must go");
+    assert!(!orphan_dir.exists(), "scratch-only orphan must go");
+    assert!(recording_dir.exists(), "dir with a recording must survive");
+    assert_eq!(
+        std::fs::read(recording_dir.join("final.1.mp4")).unwrap(),
+        b"someone's recording",
+        "the recording must survive the sweep"
+    );
+    assert!(
+        !recording_dir.join("grab-media.mp4.part").exists(),
+        "the recording dir's scratch must be reclaimed"
+    );
     assert!(cookie.exists(), "cookie files must survive");
     assert!(stray.exists(), "non-numeric entries must survive");
     let _ = std::fs::remove_dir_all(&root);

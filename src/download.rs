@@ -2380,8 +2380,9 @@ impl DownloadManager {
             // Same for staged file selections (a future re-add stages fresh at intake).
             crate::torrent::prune_selections(&referenced);
             // Crash/kill leftovers: only restored rows reuse their staging ids, so a
-            // numeric staging dir with no live row can never resume. Swept here, after
-            // restore and before any worker starts.
+            // numeric staging dir with no live row can never resume. Reclaimed
+            // here, after restore and before any worker starts; completed
+            // `final.*` recordings are preserved (the user's only copy).
             let live: std::collections::HashSet<u64> = self.items().map(|it| it.id()).collect();
             crate::video::sweep_orphan_staging(&live);
             // No session yet: the sweep below would no-op, so skip the store walk.

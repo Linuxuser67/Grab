@@ -53,7 +53,11 @@ jobs:
           RUNTIME=$(python3 -c "import json; print(json.load(open('build-aux/io.github.houssemko.Grab.json'))['runtime-version'])")
           echo "RUNTIME=$RUNTIME" >> "$GITHUB_ENV"
           flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user -y flathub "org.gnome.Sdk//$RUNTIME" "org.freedesktop.Sdk.Extension.rust-stable//25.08"
+          # The rust-stable extension follows freedesktop-sdk branches
+          # (YY.08), not GNOME branches: GNOME 50 -> 25.08, GNOME 51 ->
+          # 26.08. A stale pin installs fine but never mounts inside the
+          # SDK, so cargo goes missing. Keep in sync with runtime-version.
+          flatpak install --user -y flathub "org.gnome.Sdk//$RUNTIME" "org.freedesktop.Sdk.Extension.rust-stable//26.08"
 
       # Same SDK layer cache as the Flatpak builds (immutable per
       # runtime version), plus the cargo registry: `cargo vendor`

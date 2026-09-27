@@ -22,9 +22,9 @@ use crate::video_spawn::{
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, collect_sidecar, dest_part_path,
-    discover_unified_output, ensure_staging_dir, file_len, read_manifest, release_remux_lease,
-    reserve_remux_temp, resume_plan, sidecar_path_for, staging_dir, sweep_partial_remuxes,
-    sweep_staging_preserving_recordings,
+    discover_unified_output, ensure_staging_dir_in, file_len, read_manifest, release_remux_lease,
+    reserve_remux_temp, resume_plan, sidecar_path_for, staging_location_for_dest,
+    sweep_partial_remuxes, sweep_staging_preserving_recordings,
 };
 use crate::video_tools::{
     VideoError, ensure_tool_versions, resolve_libraries, ytdlp_identity_args,
@@ -60,9 +60,12 @@ pub async fn run_video_download(
 ) -> Result<VideoOutcome, VideoError> {
     use crate::engine_msg::EngineMsg;
 
-    let staging = staging_dir(job.item_id);
-    // Keep the canonical path: `discover_unified_output` compares a canonicalized `after_move` against it (symlinked roots like `/tmp` would otherwise fail closed).
-    let staging = ensure_staging_dir(&staging)?;
+    // Stage beside the destination (same filesystem: atomic delivery, no tmpfs
+    // pressure). Legacy tmp dirs for rows staged before the move resolve here
+    // too, so a paused row keeps its resume data across the upgrade.
+    let loc = staging_location_for_dest(&job.dest, job.item_id);
+    // Keep the canonical path: `discover_unified_output` compares a canonicalized `after_move` against it (symlinked roots would otherwise fail closed).
+    let staging = ensure_staging_dir_in(&loc.root, &loc.dir)?;
     let libs = resolve_libraries()?;
     let (yt_version, ff_version) = ensure_tool_versions(&libs).await?;
     // quickjs-ng is the JS runtime Grab pins for YouTube; make sure it's

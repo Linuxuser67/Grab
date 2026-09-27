@@ -6,15 +6,87 @@ use crate::video_tools::VideoError;
 use gettextrs::gettext;
 use std::path::{Path, PathBuf};
 
-/// Shared root for extraction scratch space.
+/// Shared root for tiny engine scratch (cookie dumps, probe output). Stays on
+/// tmpfs: only small files ever land here. Bulky download parts stage beside
+/// the destination instead — `/tmp` is RAM-backed on many systems, so staging
+/// there fills memory and fails large downloads with "no space left".
 pub fn staging_root() -> PathBuf {
     std::env::temp_dir().join("grab-video")
 }
 
-/// Per-item staging dir holding the split `.video`/`.audio` parts and the
-/// muxed result while a merged video download is in flight.
-pub fn staging_dir(item_id: u64) -> PathBuf {
+/// Per-destination staging root: `<dest_dir>/.grab-video`. Dot-prefixed, so
+/// file managers hide the in-flight scratch next to the finished files.
+pub fn dest_staging_root(dest_dir: &Path) -> PathBuf {
+    dest_dir.join(".grab-video")
+}
+
+/// Per-item staging dir for a destination: `<dest_dir>/.grab-video/<id>/`.
+/// Same filesystem as the finished file, so delivery is an atomic rename and
+/// a crash leaves the scratch hidden beside the destination, not in tmpfs.
+pub fn staging_dir_for(dest_dir: &Path, item_id: u64) -> PathBuf {
+    dest_staging_root(dest_dir).join(item_id.to_string())
+}
+
+/// Legacy tmpfs location from before dest-side staging. Read fallback only:
+/// a paused row keeps its resume data across the upgrade until its staging
+/// drains through the normal completion/removal paths.
+pub fn legacy_staging_dir(item_id: u64) -> PathBuf {
     staging_root().join(item_id.to_string())
+}
+
+/// Historic alias for the legacy tmpfs location (kept for tests probing
+/// pre-upgrade layouts).
+pub fn staging_dir(item_id: u64) -> PathBuf {
+    legacy_staging_dir(item_id)
+}
+
+/// A resolved per-item staging dir plus the root it is guarded under: the
+/// dest-side root for current staging, the tmp root for legacy dirs still
+/// draining from before dest-side staging.
+#[derive(Debug, Clone)]
+pub struct StagingLocation {
+    pub dir: PathBuf,
+    pub root: PathBuf,
+}
+
+/// Resolve the staging dir in use: the dest-side one when present, else the
+/// legacy tmp one when present, else the dest-side one (for creation).
+pub fn staging_location(dest_dir: &Path, item_id: u64) -> StagingLocation {
+    let fresh = staging_dir_for(dest_dir, item_id);
+    if fresh.exists() {
+        let root = dest_staging_root(dest_dir);
+        return StagingLocation { dir: fresh, root };
+    }
+    let legacy = legacy_staging_dir(item_id);
+    if legacy.exists() {
+        return StagingLocation {
+            dir: legacy,
+            root: staging_root(),
+        };
+    }
+    StagingLocation {
+        dir: fresh,
+        root: dest_staging_root(dest_dir),
+    }
+}
+
+/// Resolve the staging location from a full destination *file* path (its
+/// parent anchors the dest-side root). Falls back to the legacy tmp dir when
+/// the destination has no parent.
+pub fn staging_location_for_dest(dest: &Path, item_id: u64) -> StagingLocation {
+    match dest.parent() {
+        Some(dir) => staging_location(dir, item_id),
+        None => StagingLocation {
+            dir: legacy_staging_dir(item_id),
+            root: staging_root(),
+        },
+    }
+}
+
+/// Whether any staging dir already exists for this id, dest-side or legacy:
+/// the id allocator must skip it so a fresh row never lands on a leftover.
+pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
+    staging_dir_for(dest_dir, item_id).exists() || legacy_staging_dir(item_id).exists()
 }
 
 /// Highest numeric staging dir present, if any (seeds the id allocator past leftovers).
@@ -29,9 +101,15 @@ pub fn highest_staging_index() -> Option<u64> {
 
 /// Create a staging dir, verifying it stays under the staging root (a pre-planted symlink must not redirect parts).
 pub fn ensure_staging_dir(dir: &Path) -> Result<PathBuf, VideoError> {
+    ensure_staging_dir_in(&staging_root(), dir)
+}
+
+/// Create a staging dir under an explicit root, verifying it stays there (a
+/// pre-planted symlink must not redirect parts).
+pub fn ensure_staging_dir_in(root: &Path, dir: &Path) -> Result<PathBuf, VideoError> {
     std::fs::create_dir_all(dir).map_err(VideoError::staging)?;
     let canon = std::fs::canonicalize(dir).map_err(VideoError::staging)?;
-    let root = std::fs::canonicalize(staging_root()).map_err(VideoError::staging)?;
+    let root = std::fs::canonicalize(root).map_err(VideoError::staging)?;
     if canon.starts_with(&root) {
         Ok(canon)
     } else {
@@ -52,7 +130,12 @@ fn guarded_staging_dir(root: &Path, dir: &Path) -> Option<PathBuf> {
 
 /// Remove a staging dir, guarded to stay under the staging root (never user data).
 pub fn clean_staging(dir: &Path) {
-    if let Some(canon) = guarded_staging_dir(&staging_root(), dir) {
+    clean_staging_in(&staging_root(), dir);
+}
+
+/// Remove a staging dir, guarded to stay under an explicit root (never user data).
+pub(crate) fn clean_staging_in(root: &Path, dir: &Path) {
+    if let Some(canon) = guarded_staging_dir(root, dir) {
         let _ = std::fs::remove_dir_all(canon);
     }
 }
@@ -85,6 +168,13 @@ fn reclaim_orphan_staging_in(root: &Path, dir: &Path) {
 /// before any worker starts, so nothing live is removed.
 pub fn sweep_orphan_staging(keep: &std::collections::HashSet<u64>) {
     sweep_orphan_staging_in(&staging_root(), keep);
+}
+
+/// Sweep one destination's staging root (`<dest_dir>/.grab-video`): numeric
+/// dirs with no live row are reclaimed exactly like the legacy tmp root. A
+/// missing root (never staged here, destination deleted) is a no-op.
+pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>) {
+    sweep_orphan_staging_in(&dest_staging_root(dest_dir), keep);
 }
 
 pub(crate) fn sweep_orphan_staging_in(root: &Path, keep: &std::collections::HashSet<u64>) {

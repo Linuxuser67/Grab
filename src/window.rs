@@ -381,10 +381,10 @@ pub fn build_window(
         // conflicts with the `&self` borrow of the connect call.
         sp.clone().connect_show_sidebar_notify(move |_| {
             // Reparent the button box to whichever header is active.
-            if let Some(parent) = btn_box.parent() {
-                if let Some(hb) = parent.downcast_ref::<adw::HeaderBar>() {
-                    hb.remove(&btn_box);
-                }
+            if let Some(parent) = btn_box.parent()
+                && let Some(hb) = parent.downcast_ref::<adw::HeaderBar>()
+            {
+                hb.remove(&btn_box);
             }
             if sp.shows_sidebar() {
                 sidebar_hb.pack_end(&btn_box);

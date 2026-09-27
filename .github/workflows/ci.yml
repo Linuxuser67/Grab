@@ -14,6 +14,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Least privilege: every job here only reads the repo (checkout, scan,
+# build, test) — no uploads, no writes. Without this the token inherits
+# the org/repo default instead of a declared scope.
+permissions:
+  contents: read
+
 jobs:
   # Style-only signal in ~1 minute, no system deps: rustfmt needs
   # neither the Fedora container nor the GTK stack.
@@ -88,6 +94,9 @@ jobs:
       - name: Install gitleaks
         run: |
           curl -sSL --fail https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o /tmp/gitleaks.tgz
+          # Pinned hash, cross-checked against the vendor-published
+          # gitleaks_8.30.1_checksums.txt: a swapped release asset fails here.
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tgz" | sha256sum -c -
           tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
           chmod +x /usr/local/bin/gitleaks
       - run: gitleaks detect --source . -v
@@ -95,6 +104,10 @@ jobs:
       - name: Install cargo-audit
         run: |
           curl -sSL --fail https://github.com/RustSec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz -o /tmp/cargo-audit.tgz
+          # Pinned hash (no vendor checksums published for this asset; the
+          # extracted binary was verified to report 0.22.2): a swapped
+          # release asset fails here instead of running unverified.
+          echo "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39  /tmp/cargo-audit.tgz" | sha256sum -c -
           tar -xzf /tmp/cargo-audit.tgz -C /tmp
           install -m 755 /tmp/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit /usr/local/bin/cargo-audit
       - run: cargo audit

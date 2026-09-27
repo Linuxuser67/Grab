@@ -57,6 +57,14 @@ pub(crate) async fn fetch_raw_dump_json(
     if flat_playlist {
         args.push("--flat-playlist".to_string());
     }
+    // An X `/video/N` (or `/photo/N`) URL addresses one item: without
+    // `--no-playlist` yt-dlp ignores the selector and the lookup resolves the
+    // tweet's whole media collection, so the probe would pop the item picker
+    // for a URL the user already narrowed to one video. The download worker
+    // re-resolves through this same function, so it stays consistent there.
+    if crate::video_probe::x_single_item_url(url) {
+        args.push("--no-playlist".to_string());
+    }
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(fetch_proxy));
     args.extend(ytdlp_identity_args(cookies_browser, None, url));

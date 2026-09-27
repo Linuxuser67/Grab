@@ -26,6 +26,7 @@ use crate::video_probe::{
     insta_shortcode_to_pk, is_direct_file_url, is_expired, is_http_url, now_unix,
     parse_playlist_json, parse_single_video, pick_playlist_entry, playlist_resolve_error,
     retarget_story_items, sanitize_video_json, story_segment_url, story_tray_url,
+    x_single_item_url,
 };
 use crate::video_progress::{
     grid_needs_rebuild, is_format_selection_line, is_ytdlp_merge_line, leg_changed,
@@ -1235,6 +1236,33 @@ fn insta_shortcode_to_pk_matches_ytdlp_vector() {
     // Outside the alphabet, empty, and overflow-adjacent junk fail.
     assert_eq!(insta_shortcode_to_pk("abc def!"), None);
     assert_eq!(insta_shortcode_to_pk(""), None);
+}
+
+#[test]
+fn x_single_item_url_matches_video_and_photo_selectors() {
+    // The reported URLs: an explicit `/video/1` selector, with and without the
+    // "copy address at current time" timestamp.
+    assert!(x_single_item_url(
+        "https://x.com/iamdothash/status/2103901914375045526/video/1"
+    ));
+    assert!(x_single_item_url(
+        "https://x.com/iamdothash/status/2103901914375045526/video/1?t=14"
+    ));
+    assert!(x_single_item_url(
+        "https://twitter.com/someuser/status/1234567890/photo/2"
+    ));
+    assert!(x_single_item_url(
+        "https://twitter.com/i/web/status/1234567890/video/3"
+    ));
+    // A plain status URL addresses the tweet's whole media collection.
+    assert!(!x_single_item_url(
+        "https://x.com/iamdothash/status/2103901914375045526"
+    ));
+    // Same path shape on another host is not an X selector.
+    assert!(!x_single_item_url(
+        "https://example.com/someuser/status/1234567890/video/1"
+    ));
+    assert!(!x_single_item_url("not a url"));
 }
 
 #[test]

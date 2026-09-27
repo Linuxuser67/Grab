@@ -509,6 +509,40 @@ pub(crate) fn parse_playlist_json(
     })
 }
 
+/// Whether an X/Twitter status URL addresses one media item directly
+/// (`…/status/<id>/video/<n>` or `/photo/<n>`) instead of the tweet's whole
+/// media collection. yt-dlp only honors that selector with `--no-playlist`;
+/// the probe never passes it, so without special-casing the lookup resolves
+/// the full collection and pops the item picker for a URL the user already
+/// narrowed to one video. Query strings (e.g. `?t=14`) don't affect the match.
+pub(crate) fn x_single_item_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if !matches!(
+        parsed.host_str(),
+        Some("x.com")
+            | Some("www.x.com")
+            | Some("twitter.com")
+            | Some("www.twitter.com")
+            | Some("m.twitter.com")
+            | Some("mobile.twitter.com")
+    ) {
+        return false;
+    }
+    let segments: Vec<&str> = parsed
+        .path_segments()
+        .map(|s| s.filter(|seg| !seg.is_empty()).collect())
+        .unwrap_or_default();
+    // ["<user>", "status", "<id>", "video"|"photo", "<n>"], with `i/web` as a
+    // two-segment stand-in for the username — mirrors the selector suffix in
+    // yt-dlp's TwitterIE `_VALID_URL` (`(?:(?:i/web|[^/]+)/status|statuses)`).
+    let is_digit = |n: &&str| n.bytes().all(|b| b.is_ascii_digit());
+    matches!(segments.as_slice(), [_, "status" | "statuses", _, kind, n]
+        | ["i", "web", "status" | "statuses", _, kind, n]
+        if (*kind == "video" || *kind == "photo") && is_digit(n))
+}
+
 /// Instagram's story extractor stamps every tray entry with the pasted URL. For a
 /// single-story link that is the *pasted* story, not the entry's: a row queued
 /// from such an entry would re-download the wrong story. Point story items at the

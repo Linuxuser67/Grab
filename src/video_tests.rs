@@ -565,7 +565,8 @@ fn ensure_staging_dir_roundtrip_and_clean() {
 #[cfg(unix)]
 #[test]
 fn ensure_staging_dir_rejects_symlink_escape() {
-    // Pre-planted symlink at the item path: creation follows it, but the canonical check must refuse the escape.
+    // Pre-planted symlink at the item path: refused before anything is
+    // created through it (leaf-first check, not the old create-then-verify).
     std::fs::create_dir_all(staging_root()).unwrap();
     let outside = std::env::temp_dir().join("grab-video-escape-target");
     let _ = std::fs::remove_dir_all(&outside);
@@ -575,10 +576,34 @@ fn ensure_staging_dir_rejects_symlink_escape() {
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&outside, &link).unwrap();
     let err = ensure_staging_dir(&link).expect_err("symlink escape must fail");
-    assert!(err.to_string().contains("escaped"), "{err}");
+    assert!(err.to_string().contains("not a real directory"), "{err}");
     assert!(outside.read_dir().unwrap().next().is_none());
     let _ = std::fs::remove_file(&link);
     let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_staging_dir_refuses_dangling_link() {
+    // A dangling leaf link is refused up front with a clear message (the old
+    // create-then-verify refused too, but only via a confusing "File exists"
+    // OS error from create_dir_all hitting EEXIST on the link).
+    std::fs::create_dir_all(staging_root()).unwrap();
+    let base = std::env::temp_dir().join(format!("grab-video-dangle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let target = base.join("never-created");
+    let link = staging_dir(u64::MAX - 6);
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let err = ensure_staging_dir(&link).expect_err("dangling link must fail");
+    assert!(err.to_string().contains("not a real directory"), "{err}");
+    assert!(
+        !target.exists(),
+        "the link target must not be created through the link"
+    );
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 // ── dest-side staging ────────────────────────────────────────────────
@@ -708,8 +733,30 @@ fn ensure_staging_dir_in_rejects_symlink_escape_from_dest_root() {
     let link = root.join("974");
     std::os::unix::fs::symlink(&outside, &link).unwrap();
     let err = ensure_staging_dir_in(&root, &link).expect_err("symlink escape must fail");
-    assert!(err.to_string().contains("escaped"), "{err}");
+    assert!(err.to_string().contains("not a real directory"), "{err}");
     assert!(outside.read_dir().unwrap().next().is_none());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_staging_dir_in_rejects_same_root_sibling_link() {
+    // A link to a same-root sibling canonicalizes inside the root, so the
+    // old containment check accepted it and parts landed cross-item.
+    let base = std::env::temp_dir().join(format!("grab-dest-sibling-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dest = base.join("dest");
+    let root = dest_staging_root(&dest);
+    let sibling = root.join("sibling");
+    std::fs::create_dir_all(&sibling).unwrap();
+    let link = root.join("975");
+    std::os::unix::fs::symlink(&sibling, &link).unwrap();
+    let err = ensure_staging_dir_in(&root, &link).expect_err("sibling link must fail");
+    assert!(err.to_string().contains("not a real directory"), "{err}");
+    assert!(
+        sibling.read_dir().unwrap().next().is_none(),
+        "parts must not land in the sibling item's dir"
+    );
     let _ = std::fs::remove_dir_all(&base);
 }
 

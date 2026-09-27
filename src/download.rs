@@ -126,6 +126,21 @@ fn parent_contained_in_dest(parent: &std::path::Path, dest_dir: &str) -> bool {
     }
 }
 
+/// Create the download's parent dir, refusing a planted symlink instead of
+/// following it. An existing parent is containment-checked *before* any
+/// filesystem touch — the old create-then-check ran create_dir_all first,
+/// which is a no-op on an existing path but needlessly touched the link —
+/// while a missing parent is created, then verified (it can't harbor a link,
+/// but a link can be swapped in for the name mid-call). `symlink_metadata`
+/// sees even a dangling link, where `exists` would not.
+fn ensure_contained_parent(parent: &std::path::Path, dest_dir: &str) -> bool {
+    if std::fs::symlink_metadata(parent).is_ok() && !parent_contained_in_dest(parent, dest_dir) {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(parent);
+    parent_contained_in_dest(parent, dest_dir)
+}
+
 pub struct DownloadManager {
     // Borrow discipline: never hold RefCells across `set_*` notifies or `changed()`; GTK re-enters and panics. Keep borrows scoped.
     store: gio::ListStore,
@@ -886,12 +901,11 @@ impl DownloadManager {
         self.server_mtime.borrow_mut().remove(&item.id());
         let dest = item.file_path();
         if let Some(parent) = dest.parent() {
-            let _ = std::fs::create_dir_all(parent);
             // A planted symlink in any parent component would divert the
             // download outside the destination: refuse instead of following
             // it. (Filenames can't contain separators, so the parent is the
             // destination itself today; this pins the invariant.)
-            if !parent_contained_in_dest(parent, &item.dest_dir()) {
+            if !ensure_contained_parent(parent, &item.dest_dir()) {
                 let detail = gettext("Download path escapes the download folder");
                 item.set_status(DownloadStatus::Failed);
                 item.set_detail(detail.clone());
@@ -1977,13 +1991,18 @@ impl DownloadManager {
     }
 
     /// Engine's real output folder for a torrent row: recorded at enqueue, else recomputed from the archive, else the row's own path.
+    /// The recomputed leaf goes through the same guard as the write path: a
+    /// symlink planted after the download finished would otherwise divert the
+    /// delete/trash onto its target.
     fn torrent_folder(item: &DownloadItem) -> std::path::PathBuf {
         let recorded = item.output_dir().to_string();
         if !recorded.is_empty() {
             return std::path::PathBuf::from(recorded);
         }
         let dest = std::path::PathBuf::from(item.dest_dir().to_string());
-        crate::torrent::torrent_output_dir(&dest, &item.url()).unwrap_or_else(|| item.file_path())
+        crate::torrent::torrent_output_dir(&dest, &item.url())
+            .map(|folder| crate::torrent::guard_output_folder(&dest, folder))
+            .unwrap_or_else(|| item.file_path())
     }
 
     /// Per-piece completion for the block map: segmented bitmap, torrent haves, or a prefix fill from byte progress. Empty when nothing is known.

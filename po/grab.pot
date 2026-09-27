@@ -1506,6 +1506,10 @@ msgstr ""
 msgid "(recording kept in {dir})"
 msgstr ""
 
+#: src/video_staging.rs:135
+msgid "staging directory is not a real directory"
+msgstr ""
+
 #: src/video_staging.rs:116
 msgid "staging root is not a real directory"
 msgstr ""

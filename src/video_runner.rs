@@ -913,6 +913,12 @@ pub(crate) async fn run_live_ytdlp(
             &out,
             playlist_index,
         ));
+        // LL-HLS timestamp hygiene for yt-dlp's ffmpeg downloader: split A/V
+        // manifests drift when the broadcaster drops frames; the flags keep
+        // the tracks aligned without re-encoding. Scoped `ffmpeg:` so native
+        // HLS downloads ignore them.
+        cmd.arg("--downloader-args")
+            .arg(crate::video_tools::LIVE_DOWNLOADER_ARGS);
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
         let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
         // Without this guard a shutdown orphans the recorder (and the ffmpeg it may have started) still writing to the capture.

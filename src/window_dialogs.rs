@@ -1699,13 +1699,14 @@ mod tests {
         let mut generation = 0u64;
         generation += 1; // typed A
         generation += 1; // kicked A
-        let marker = Some(("https://youtu.be/a".to_string(), generation));
+        let marker = Some(("https://youtu.be/a".to_string(), generation, false));
         generation += 1; // typed B (debounced kick skipped)
         generation += 1; // typed A again
         assert!(!inflight_suppresses(
             &marker,
             "https://youtu.be/a",
-            generation
+            generation,
+            false
         ));
     }
 }

@@ -1,12 +1,12 @@
 name: Prebuilt tarball
 
-# Official prebuilt archive for third-party repackagers (e.g. FlatPark,
+# Official prebuilt archives for third-party repackagers (e.g. FlatPark,
 # which wraps the vendor's own bytes and never builds from source).
 # Publishing a GitHub release (or manually dispatching with a tag) builds
 # the install tree from that tag inside the GNOME SDK — the same libc the
-# Flatpak runtime ships — and attaches Grab-<ver>-linux-x86_64.tar.gz back
-# to the release. A .flatpak bundle is deliberately NOT used here: it is
-# not an accepted vendor payload.
+# Flatpak runtime ships — and attaches Grab-<ver>-linux-<arch>.tar.gz back
+# to the release, one per architecture (x86_64, aarch64). A .flatpak bundle
+# is deliberately NOT used here: it is not an accepted vendor payload.
 on:
   release:
     types: [published]
@@ -18,7 +18,15 @@ on:
 
 jobs:
   tarball:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            tarball_arch: x86_64
+          - runs-on: ubuntu-24.04-arm
+            tarball_arch: aarch64
+    runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 90
     permissions:
       contents: write
@@ -57,9 +65,9 @@ jobs:
             ~/.local/share/flatpak
             ~/.cache/flatpak
             .cargo-home/registry
-          key: tarball-deps-${{ runner.os }}-${{ hashFiles('build-aux/io.github.houssemko.Grab.json', 'Cargo.lock') }}
+          key: tarball-deps-${{ runner.os }}-${{ matrix.tarball_arch }}-${{ hashFiles('build-aux/io.github.houssemko.Grab.json', 'Cargo.lock') }}
           restore-keys: |
-            tarball-deps-${{ runner.os }}-
+            tarball-deps-${{ runner.os }}-${{ matrix.tarball_arch }}-
 
       # Same offline-vendor trick as the Flatpak build, done by hand:
       # cargo vendor + a local source replacement, then meson install
@@ -87,9 +95,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TARBALL_ARCH: ${{ matrix.tarball_arch }}
         run: |
           VER="${TAG#v}"
-          TARBALL="Grab-$VER-linux-x86_64.tar.gz"
+          TARBALL="Grab-$VER-linux-$TARBALL_ARCH.tar.gz"
           tar -czf "$TARBALL" -C staging usr
           tar tzf "$TARBALL" | head -8
           ls -lh "$TARBALL"

@@ -5954,9 +5954,8 @@ fn ensure_contained_parent_reports_mkdir_failure_distinctly() {
 
     let blocker = base.join("blocker");
     std::fs::write(&blocker, b"x").unwrap();
-    let err = ensure_contained_parent(&blocker, &base_str).expect_err(
-        "a file blocking the parent dir must surface the mkdir failure, not Ok",
-    );
+    let err = ensure_contained_parent(&blocker, &base_str)
+        .expect_err("a file blocking the parent dir must surface the mkdir failure, not Ok");
     assert!(
         !err.to_string().is_empty(),
         "the io error should describe the failing create"
@@ -5967,10 +5966,8 @@ fn ensure_contained_parent_reports_mkdir_failure_distinctly() {
     let inside = base.join("inside");
     std::fs::create_dir_all(&inside).unwrap();
     assert_eq!(ensure_contained_parent(&inside, &base_str).unwrap(), true);
-    let outside = std::env::temp_dir().join(format!(
-        "grab-ensure-mkdir-out-{}",
-        std::process::id()
-    ));
+    let outside =
+        std::env::temp_dir().join(format!("grab-ensure-mkdir-out-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&outside);
     std::fs::create_dir_all(&outside).unwrap();
     assert_eq!(ensure_contained_parent(&outside, &base_str).unwrap(), false);

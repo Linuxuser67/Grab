@@ -188,15 +188,15 @@ pub fn build_window(
         .default_height(settings.window_height().max(300))
         .build();
 
-    // Collapsible sidebar: the add form lives in the split view's sidebar on
-    // the start side, with the filter navigation below it; the main UI is the
-    // content. Collapsed by default; the header + button toggles it. Toasts
-    // stay outermost and overlay both.
-    let split = adw::OverlaySplitView::new();
+    // Persistent sidebar: the add form lives in the split view's sidebar on
+    // the start side, side by side with the download list, so the content
+    // shrinks instead of being covered. HIG sizing is the libadwaita
+    // default: 25% width fraction, 180sp minimum, 280sp maximum.
+    let split = adw::NavigationSplitView::new();
     split.set_sidebar_position(gtk4::PackType::Start);
-    split.set_min_sidebar_width(300.0);
-    split.set_max_sidebar_width(340.0);
-    split.set_show_sidebar(false);
+    // Narrow windows show the download list by default; the + button reveals
+    // the sidebar on demand.
+    split.set_show_content(true);
     let (add_panel, form_nav) = AddPanel::new(Rc::clone(&manager), &window, &split, &toasts);
     let sidebar_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     form_nav.set_vexpand(true);
@@ -265,10 +265,9 @@ pub fn build_window(
         })
     };
     refresh_filter_ui();
-    // The sidebar's own headerbar: the main menu is integrated here, in the
-    // panel, with a button to collapse it back. Always shown with the
-    // sidebar (the HIG split-view pattern); on narrow windows this is the
-    // overlay's headerbar, the way back to the list.
+    // The sidebar's own headerbar: back to the list, plus the menu/+ box
+    // while the narrow window is on the sidebar page. Only shown while
+    // collapsed; on wide windows the persistent sidebar needs no header.
     let sidebar_header = adw::HeaderBar::new();
     let menu = gio::Menu::new();
     menu.append(Some(&gettext("New Download")), Some("app.add-download"));
@@ -300,12 +299,21 @@ pub fn build_window(
     sidebar_header.pack_start(&sidebar_hide);
     {
         let sp = split.clone();
-        sidebar_hide.connect_clicked(move |_| sp.set_show_sidebar(false));
+        sidebar_hide.connect_clicked(move |_| sp.set_show_content(true));
     }
+    split
+        .bind_property("collapsed", &sidebar_header, "visible")
+        .sync_create()
+        .build();
     let sidebar_toolbar = adw::ToolbarView::new();
     sidebar_toolbar.add_top_bar(&sidebar_header);
     sidebar_toolbar.set_content(Some(&sidebar_box));
-    split.set_sidebar(Some(&sidebar_toolbar));
+    // NavigationSplitView only takes NavigationPage children.
+    let sidebar_page = adw::NavigationPage::builder()
+        .child(&sidebar_toolbar)
+        .tag("sidebar")
+        .build();
+    split.set_sidebar(Some(&sidebar_page));
     // Narrow windows navigate between the sidebar and the content instead of
     // squeezing both side by side: below 800px the split collapses.
     {
@@ -352,19 +360,21 @@ pub fn build_window(
         let panel = Rc::clone(&add_panel);
         let sp = split.clone();
         add_btn.connect_clicked(move |_| {
-            // The + toggles the sidebar: collapse it when it's showing,
-            // otherwise reveal and focus the form.
-            if sp.shows_sidebar() {
-                sp.set_show_sidebar(false);
+            // Narrow windows toggle between the sidebar form and the
+            // download list; on wide windows the sidebar is persistent, so
+            // the + just focuses the form.
+            if sp.is_collapsed() && !sp.shows_content() {
+                sp.set_show_content(true);
             } else {
                 panel.focus_form(None);
             }
         });
     }
     // Menu and + live in one box that relocates: far right of the sidebar
-    // header when the panel is open, far right of the main header when it's
-    // closed. The menu button is always visible; the + shows only when there
-    // are downloads (the empty-state pill is the CTA otherwise).
+    // header while the narrow window shows the sidebar page, far right of
+    // the main header otherwise. The menu button is always visible; the +
+    // shows only when there are downloads (the empty-state pill is the CTA
+    // otherwise).
     let header_btn_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
         .spacing(6)
@@ -372,27 +382,34 @@ pub fn build_window(
     header_btn_box.append(&menu_btn);
     header_btn_box.append(&add_btn);
     header.pack_end(&header_btn_box);
-    {
+    let relocate_btn_box: Rc<dyn Fn()> = {
         let sidebar_hb = sidebar_header.clone();
         let main_hb = header.clone();
         let btn_box = header_btn_box.clone();
         let sp = split.clone();
-        // Clone for the method receiver: the `move` closure takes `sp`, which
-        // conflicts with the `&self` borrow of the connect call.
-        sp.clone().connect_show_sidebar_notify(move |_| {
+        Rc::new(move || {
             // Reparent the button box to whichever header is active.
             if let Some(parent) = btn_box.parent()
                 && let Some(hb) = parent.downcast_ref::<adw::HeaderBar>()
             {
                 hb.remove(&btn_box);
             }
-            if sp.shows_sidebar() {
+            if sp.is_collapsed() && !sp.shows_content() {
                 sidebar_hb.pack_end(&btn_box);
             } else {
                 main_hb.pack_end(&btn_box);
             }
-        });
+        })
+    };
+    {
+        let relocate = Rc::clone(&relocate_btn_box);
+        split.connect_collapsed_notify(move |_| relocate());
     }
+    {
+        let relocate = Rc::clone(&relocate_btn_box);
+        split.connect_show_content_notify(move |_| relocate());
+    }
+    relocate_btn_box();
 
     let stack = adw::ViewStack::new();
     let empty = adw::StatusPage::builder()
@@ -603,10 +620,10 @@ pub fn build_window(
                 sel.set(i as u32);
                 refresh();
                 sync();
-                // In overlay (narrow) mode the filter pick dismisses the
-                // panel back to the list; on wide the panel stays as left.
+                // In collapsed (narrow) mode the filter pick returns to the
+                // list; on wide the sidebar stays put.
                 if sp.is_collapsed() {
-                    sp.set_show_sidebar(false);
+                    sp.set_show_content(true);
                 }
             });
         }
@@ -725,7 +742,11 @@ pub fn build_window(
     toolbar.add_top_bar(&search_bar);
     toolbar.add_top_bar(&banner);
     toolbar.set_content(Some(&stack));
-    split.set_content(Some(&toolbar));
+    let content_page = adw::NavigationPage::builder()
+        .child(&toolbar)
+        .tag("content")
+        .build();
+    split.set_content(Some(&content_page));
     toasts.set_child(Some(&split));
     window.set_content(Some(toasts.as_ref()));
 

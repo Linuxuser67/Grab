@@ -323,7 +323,10 @@ async fn warm_impersonation_cache(youtube_bin: std::path::PathBuf) {
         .unwrap_or(false);
     // A poisoned cache drops the fill silently instead of panicking the
     // background task: the next call re-probes and re-caches.
-    if let Ok(mut guard) = IMPERSONATE_SUPPORT.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+    if let Ok(mut guard) = IMPERSONATE_SUPPORT
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
         guard.insert(key, supported);
     }
 }

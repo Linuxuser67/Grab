@@ -266,7 +266,7 @@ pub fn build_window(
         let panel = Rc::clone(&add_panel);
         add_btn.connect_clicked(move |_| panel.toggle(None));
     }
-    header.pack_end(&add_btn);
+    header.pack_start(&add_btn);
 
     let stack = adw::ViewStack::new();
     let empty = adw::StatusPage::builder()

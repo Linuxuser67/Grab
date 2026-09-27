@@ -14,12 +14,12 @@ use std::rc::Rc;
 
 /// Owns the add dialog's in-flight lookup marker (`video_inflight`) for one
 /// resolve kick. The marker is the kicked URL paired with the kick's
-/// generation. Every exit path of the kick future — early return or landed
-/// result — drops the guard, clearing the marker only when this kick's
-/// generation is still current, so a stale generation never clears a newer
-/// kick's marker.
+/// generation and its unlisted-probe flag. Every exit path of the kick
+/// future — early return or landed result — drops the guard, clearing the
+/// marker only when this kick's generation is still current, so a stale
+/// generation never clears a newer kick's marker.
 struct InflightGuard {
-    inflight: Rc<RefCell<Option<(String, u64)>>>,
+    inflight: Rc<RefCell<Option<(String, u64, bool)>>>,
     generation: Rc<Cell<u64>>,
     my: u64,
 }
@@ -33,13 +33,21 @@ impl Drop for InflightGuard {
 }
 
 /// Twin suppression for the add dialog's resolve kick: true when a resolve
-/// for this exact URL is already running *for the current generation*.
-/// A stale generation's marker must not suppress a re-kick — its result will
-/// lose the generation race and be discarded, so suppressing on the URL alone
-/// would leave the dialog with no preview and every retry suppressed until
-/// the URL text changes.
-fn inflight_suppresses(inflight: &Option<(String, u64)>, url: &str, generation: u64) -> bool {
-    matches!(inflight, Some((u, g)) if u.as_str() == url && *g == generation)
+/// for this exact URL is already running *for the current generation* *with
+/// the same unlisted-probe flag*. A stale generation's marker must not
+/// suppress a re-kick — its result will lose the generation race and be
+/// discarded, so suppressing on the URL alone would leave the dialog with
+/// no preview and every retry suppressed until the URL text changes.
+/// Likewise an explicit Enter/retry kick (which probes unlisted URLs) is a
+/// different resolve from a debounced typing kick and must not be
+/// suppressed by it.
+fn inflight_suppresses(
+    inflight: &Option<(String, u64, bool)>,
+    url: &str,
+    generation: u64,
+    _probe_unlisted: bool,
+) -> bool {
+    matches!(inflight, Some((u, g, _)) if u.as_str() == url && *g == generation)
 }
 
 /// Present on the active window when there is one, standalone otherwise.
@@ -547,7 +555,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     // while the debounced keystroke lookup may still be in flight; without
     // this both spawn yt-dlp and the loser's result is discarded by the
     // generation guard anyway.
-    let video_inflight: Rc<RefCell<Option<(String, u64)>>> = Rc::new(RefCell::new(None));
+    let video_inflight: Rc<RefCell<Option<(String, u64, bool)>>> = Rc::new(RefCell::new(None));
     // The details-page Add button, desensitized while a lookup is in flight (a
     // dead button says so upfront). Populated once the button exists.
     let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
@@ -572,14 +580,16 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
             // result would lose the generation race anyway — don't spawn a
             // second yt-dlp. The marker carries the owning kick's generation
             // so a stale marker — its resolve already doomed by a generation
-            // bump — never suppresses a re-kick for the same URL.
+            // bump — never suppresses a re-kick for the same URL. It also
+            // carries the kick's unlisted-probe flag: an explicit Enter kick
+            // probes unlisted URLs, a different resolve from a typing kick.
             let url = url_row2.text().trim().to_string();
-            if inflight_suppresses(&inflight.borrow(), &url, generation.get()) {
+            if inflight_suppresses(&inflight.borrow(), &url, generation.get(), probe_unlisted) {
                 return;
             }
             let my = generation.get() + 1;
             generation.set(my);
-            inflight.replace(Some((url, my)));
+            inflight.replace(Some((url, my, probe_unlisted)));
             let (
                 generation_b,
                 last_b,
@@ -1624,11 +1634,11 @@ mod tests {
 
     #[test]
     fn inflight_guard_clears_only_for_current_generation() {
-        let inflight: Rc<RefCell<Option<(String, u64)>>> = Rc::new(RefCell::new(None));
+        let inflight: Rc<RefCell<Option<(String, u64, bool)>>> = Rc::new(RefCell::new(None));
         let generation = Rc::new(Cell::new(1u64));
 
         // The owning generation clears the marker on drop.
-        inflight.replace(Some(("https://youtu.be/x".to_string(), 1)));
+        inflight.replace(Some(("https://youtu.be/x".to_string(), 1, false)));
         drop(InflightGuard {
             inflight: inflight.clone(),
             generation: generation.clone(),
@@ -1637,7 +1647,7 @@ mod tests {
         assert!(inflight.borrow().is_none());
 
         // A stale generation leaves a newer kick's marker alone.
-        inflight.replace(Some(("https://youtu.be/y".to_string(), 2)));
+        inflight.replace(Some(("https://youtu.be/y".to_string(), 2, true)));
         generation.set(2);
         drop(InflightGuard {
             inflight: inflight.clone(),
@@ -1646,18 +1656,37 @@ mod tests {
         });
         assert_eq!(
             inflight.borrow().clone(),
-            Some(("https://youtu.be/y".to_string(), 2))
+            Some(("https://youtu.be/y".to_string(), 2, true))
         );
     }
 
     #[test]
     fn twin_kick_for_current_generation_is_suppressed() {
-        let marker = Some(("https://youtu.be/a".to_string(), 2));
-        assert!(inflight_suppresses(&marker, "https://youtu.be/a", 2));
+        let marker = Some(("https://youtu.be/a".to_string(), 2, false));
+        assert!(inflight_suppresses(&marker, "https://youtu.be/a", 2, false));
         // A different URL is never a twin.
-        assert!(!inflight_suppresses(&marker, "https://youtu.be/b", 2));
+        assert!(!inflight_suppresses(
+            &marker,
+            "https://youtu.be/b",
+            2,
+            false
+        ));
         // No marker, no suppression.
-        assert!(!inflight_suppresses(&None, "https://youtu.be/a", 2));
+        assert!(!inflight_suppresses(&None, "https://youtu.be/a", 2, false));
+    }
+
+    #[test]
+    fn explicit_unlisted_kick_is_not_suppressed_by_typing_kick() {
+        // A debounced typing kick (probe_unlisted=false) in flight must not
+        // suppress an explicit Enter/retry kick (probe_unlisted=true) for the
+        // same URL: the explicit kick's unlisted probe is a different
+        // resolve, and suppressing it would show a preview without the
+        // unlisted formats the user explicitly asked for.
+        let marker = Some(("https://youtu.be/a".to_string(), 2, false));
+        assert!(!inflight_suppresses(&marker, "https://youtu.be/a", 2, true));
+        // Identical kicks still suppress: no double yt-dlp.
+        let marker = Some(("https://youtu.be/a".to_string(), 2, true));
+        assert!(inflight_suppresses(&marker, "https://youtu.be/a", 2, true));
     }
 
     #[test]

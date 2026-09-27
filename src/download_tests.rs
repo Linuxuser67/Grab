@@ -1238,6 +1238,7 @@ fn unremove_restores_video_source() {
         output_dir: item.output_dir().to_string(),
         segments: None,
         video_source: manager.video_source(id),
+        started: false,
     };
     manager.remove(id);
     assert_eq!(manager.video_source(id), None);
@@ -2163,6 +2164,70 @@ fn legacy_queue_row_without_started_resumes_partial() {
         "legacy partial must resume, not refuse"
     );
     manager.cancel(item.id());
+    quiesce(&glib::MainContext::default());
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn unremove_restores_started_for_single_connection_partial() {
+    // Undo of a removed single-connection partial must keep the row's
+    // `started` mark under its new id: the bytes at dest are its own
+    // partial, so the spawn gate resumes them instead of failing the row
+    // at DEST_EXISTS as a foreign file (which no retry could escape).
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("unremove-started");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-unremstart-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("partial.bin"), b"ours").unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    // A row the engine started (single-connection: no segment bitmap).
+    // Inserted Paused so nothing spawns before the snapshot; flipped to
+    // Downloading to mirror a live row at remove time.
+    let id = manager.alloc_id_for(std::path::Path::new(&dest_s));
+    let item = DownloadItem::new(
+        id,
+        "https://example.com/partial.bin",
+        "partial.bin",
+        &dest_s,
+    );
+    item.set_status(DownloadStatus::Paused);
+    let item = manager.insert(item);
+    item.set_status(DownloadStatus::Downloading);
+    manager.started.borrow_mut().insert(id);
+    // Snapshot exactly like the remove-button handler, then remove.
+    let snap = RemovedSnapshot {
+        url: item.url().to_string(),
+        dest_dir: item.dest_dir().to_string(),
+        filename: item.filename().to_string(),
+        status: item.status(),
+        progress: item.progress(),
+        detail: item.detail().to_string(),
+        output_dir: item.output_dir().to_string(),
+        segments: manager.segments_of(id),
+        video_source: manager.video_source(id),
+        started: manager.has_started(id),
+    };
+    manager.remove(id);
+    assert!(
+        !manager.has_started(id),
+        "remove must drop the old id's mark"
+    );
+    // Undo re-inserts as Queued and the scheduler spawns synchronously.
+    let restored = manager.unremove(snap);
+    assert!(
+        manager.has_started(restored.id()),
+        "unremove dropped `started`: the restored row's own partial fails at DEST_EXISTS"
+    );
+    assert_ne!(
+        restored.detail(),
+        crate::engine_msg::DEST_EXISTS,
+        "restored single-connection partial was refused as a foreign file"
+    );
+    // Let the resumed attempt land so no worker outlives the test.
+    manager.cancel(restored.id());
     quiesce(&glib::MainContext::default());
     let _ = std::fs::remove_dir_all(&dest);
 }
@@ -5447,6 +5512,7 @@ fn released_reservation_wakes_parked_unremoved_row() {
             video_format_id: None,
             playlist_item_id: None,
         }),
+        started: false,
     };
     let revived = manager.unremove(snap);
     let id = revived.id();
@@ -5524,6 +5590,7 @@ fn an_unremove_of_a_settled_row_stays_settled_while_reserved() {
             video_format_id: None,
             playlist_item_id: None,
         }),
+        started: false,
     };
     let revived = manager.unremove(snap);
     assert_eq!(

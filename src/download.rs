@@ -1982,10 +1982,12 @@ impl DownloadManager {
         if let Some(st) = snap.segments {
             self.segment_state.borrow_mut().insert(item.id(), st);
         }
-        // Mutation (RED): the snapshot's started mark is captured but
-        // deliberately not restored — the GREEN commit restores it. The read
-        // keeps the field live for dead-code analysis.
-        let _ = snap.started;
+        // An Undo-restored row keeps its started mark under its new id: the
+        // partial on disk is its own bytes, so the spawn gate resumes it
+        // instead of failing it at DEST_EXISTS as a foreign file.
+        if snap.started {
+            self.started.borrow_mut().insert(item.id());
+        }
         // Re-stage before insert (see `enqueue_video`): the persist carries it and `start_next` dispatches on it.
         if let Some(src) = snap.video_source {
             self.video_sources.borrow_mut().insert(item.id(), src);

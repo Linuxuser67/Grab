@@ -45,9 +45,9 @@ fn inflight_suppresses(
     inflight: &Option<(String, u64, bool)>,
     url: &str,
     generation: u64,
-    _probe_unlisted: bool,
+    probe_unlisted: bool,
 ) -> bool {
-    matches!(inflight, Some((u, g, _)) if u.as_str() == url && *g == generation)
+    matches!(inflight, Some((u, g, p)) if u.as_str() == url && *g == generation && *p == probe_unlisted)
 }
 
 /// Present on the active window when there is one, standalone otherwise.

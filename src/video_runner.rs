@@ -794,14 +794,19 @@ const SUBTITLE_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 /// unbounded drain would stall the download on an otherwise fine probe.
 const SUBTITLE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Drain the probe's stdout with a deadline; `None` when the bound expires.
+/// Drain the probe's stdout with a deadline; on expiry abort the drain task so
+/// it can't linger on a pipe held open by a grandchild, then `None`.
 async fn drain_with_timeout(
-    drain: tokio::task::JoinHandle<Vec<u8>>,
+    mut drain: tokio::task::JoinHandle<Vec<u8>>,
     bound: Duration,
 ) -> Option<Vec<u8>> {
-    match tokio::time::timeout(bound, drain).await {
+    match tokio::time::timeout(bound, &mut drain).await {
         Ok(bytes) => Some(bytes.unwrap_or_default()),
-        Err(_) => None,
+        Err(_) => {
+            drain.abort();
+            let _ = drain.await;
+            None
+        }
     }
 }
 

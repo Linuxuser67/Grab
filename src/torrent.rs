@@ -901,7 +901,11 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
                     let folder = if dest_is_final {
                         dest
                     } else {
-                        output_folder_for(&dest, raw_name, multi, &stub)
+                        // The engine follows its output folder blindly:
+                        // re-guard the recomputed leaf here — a symlink
+                        // planted while queued would otherwise divert the
+                        // writes. Already-guarded paths reuse as-is.
+                        guard_output_folder(&dest, output_folder_for(&dest, raw_name, multi, &stub))
                     };
                     (hash_hex, hash_id, stub, folder, Adder::File(bytes))
                 }
@@ -912,11 +916,6 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
             }
         }
     };
-    // The engine follows its output folder blindly: re-guard it here for the
-    // recomputed (.torrent, no intake record) case — a symlink planted while
-    // queued would otherwise divert the writes. Already-guarded paths
-    // (magnets, recorded subfolders) reuse as-is.
-    let folder = guard_output_folder(&dest, folder);
     // Slot policy (resume ours, reject another row's hash): `claim_slot`.
     let resumed = {
         let mut active = ACTIVE.lock().await;

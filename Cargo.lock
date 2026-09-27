@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "grab"
-version = "4.4.4-beta.11"
+version = "4.4.4-beta.12"
 dependencies = [
  "futures-util",
  "gettext-rs",

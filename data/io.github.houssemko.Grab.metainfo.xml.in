@@ -46,6 +46,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.12" date="2026-09-27">
+      <description>
+        <ul>
+          <li>Playlists and multi-item stories now download into a folder named after the collection.</li>
+          <li>Adding a download whose file already exists fails the row instead of renaming it; existing files are never overwritten.</li>
+          <li>Live downloads now fail clearly when the recorder errors, instead of keeping a partial capture.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.11" date="2026-09-26">
       <description>
         <ul>

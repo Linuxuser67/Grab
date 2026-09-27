@@ -1330,6 +1330,35 @@ fn pipeline_reports_missing_tools() {
     assert!(!staging.exists());
 }
 
+#[test]
+fn clean_staging_in_drops_empty_root() {
+    // Removing the last download must not leave an empty `.grab-video` behind.
+    let dest_dir = std::env::temp_dir().join(format!("grab-root-test-{}", std::process::id()));
+    let root = dest_staging_root(&dest_dir);
+    let item_dir = staging_dir_for(&dest_dir, 7);
+    std::fs::create_dir_all(&item_dir).unwrap();
+    clean_staging_in(&root, &item_dir);
+    assert!(!item_dir.exists());
+    assert!(!root.exists(), "empty staging root should be removed");
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+#[test]
+fn clean_staging_in_keeps_nonempty_root() {
+    // A root that still holds another item's staging (or cookie files) stays.
+    let dest_dir = std::env::temp_dir().join(format!("grab-root-test2-{}", std::process::id()));
+    let root = dest_staging_root(&dest_dir);
+    let item_a = staging_dir_for(&dest_dir, 7);
+    let item_b = staging_dir_for(&dest_dir, 8);
+    std::fs::create_dir_all(&item_a).unwrap();
+    std::fs::create_dir_all(&item_b).unwrap();
+    clean_staging_in(&root, &item_a);
+    assert!(!item_a.exists());
+    assert!(root.exists(), "root with remaining items must stay");
+    assert!(item_b.exists());
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
 // ── preview freshness (dialog kick/submit gate) ──────────────────────
 
 fn test_video_info(page_url: &str) -> ProbeResult {

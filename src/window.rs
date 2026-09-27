@@ -237,7 +237,17 @@ pub fn build_window(
             })
             .collect(),
     );
-    sidebar_box.append(&filter_expander);
+    // HIG container for the Status section: a boxed list gives the rounded
+    // corners and outline around the expander.
+    let filter_list = gtk4::ListBox::builder()
+        .css_classes(["boxed-list"])
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    filter_list.append(&filter_expander);
+    sidebar_box.append(&filter_list);
     // Echo the pick: checkmark on the selected row, subtitle on the expander.
     let refresh_filter_ui: Rc<dyn Fn()> = {
         let sel = Rc::clone(&filter_sel);
@@ -282,13 +292,12 @@ pub fn build_window(
         .tooltip_text(gettext("Main Menu"))
         .build();
     menu_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Main Menu"))]);
-    sidebar_header.pack_start(&menu_btn);
     let sidebar_hide = gtk4::Button::builder()
         .icon_name("go-previous-symbolic")
         .tooltip_text(gettext("Hide Sidebar"))
         .build();
     sidebar_hide.update_property(&[gtk4::accessible::Property::Label(&gettext("Hide Sidebar"))]);
-    sidebar_header.pack_end(&sidebar_hide);
+    sidebar_header.pack_start(&sidebar_hide);
     {
         let sp = split.clone();
         sidebar_hide.connect_clicked(move |_| sp.set_show_sidebar(false));
@@ -352,7 +361,36 @@ pub fn build_window(
             }
         });
     }
-    header.pack_start(&add_btn);
+    // Menu and + live in one box that relocates: far right of the sidebar
+    // header when the panel is open, far right of the main header when it's
+    // closed. The menu button is always visible; the + shows only when there
+    // are downloads (the empty-state pill is the CTA otherwise).
+    let header_btn_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(6)
+        .build();
+    header_btn_box.append(&menu_btn);
+    header_btn_box.append(&add_btn);
+    header.pack_end(&header_btn_box);
+    {
+        let sidebar_hb = sidebar_header.clone();
+        let main_hb = header.clone();
+        let btn_box = header_btn_box.clone();
+        let sp = split.clone();
+        sp.connect_show_sidebar_notify(move |_| {
+            // Reparent the button box to whichever header is active.
+            if let Some(parent) = btn_box.parent() {
+                if let Some(hb) = parent.downcast_ref::<adw::HeaderBar>() {
+                    hb.remove(&btn_box);
+                }
+            }
+            if sp.shows_sidebar() {
+                sidebar_hb.pack_end(&btn_box);
+            } else {
+                main_hb.pack_end(&btn_box);
+            }
+        });
+    }
 
     let stack = adw::ViewStack::new();
     let empty = adw::StatusPage::builder()
@@ -442,7 +480,7 @@ pub fn build_window(
         let query = Rc::clone(&query);
         let filter_sel = Rc::clone(&filter_sel);
         let filter_rows = Rc::clone(&filter_rows);
-        let filter_expander = filter_expander.clone();
+        let filter_list = filter_list.clone();
         let filter_separator = filter_separator.clone();
         let refresh_filter_ui = Rc::clone(&refresh_filter_ui);
         Rc::new(move || {
@@ -469,7 +507,7 @@ pub fn build_window(
                 row.set_visible(j == 0 && counts[0] > 0 || j > 0 && counts[j] > 0);
             }
             let has_downloads = counts[0] > 0;
-            filter_expander.set_visible(has_downloads);
+            filter_list.set_visible(has_downloads);
             filter_separator.set_visible(has_downloads);
             let mut present = std::collections::HashSet::new();
             let mut n_visible = 0;
@@ -519,7 +557,8 @@ pub fn build_window(
             }
             let has_items = store.n_items() > 0;
             // The + toggles the sidebar and only shows when there are
-            // entries; the empty state's pill is the CTA otherwise.
+            // entries; the empty state's pill is the CTA otherwise. The menu
+            // button stays always visible.
             add.set_visible(has_items);
             search_btn.set_visible(has_items);
             if !has_items {

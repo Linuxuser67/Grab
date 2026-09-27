@@ -1162,6 +1162,10 @@ msgstr ""
 msgid "ffmpeg install progress"
 msgstr ""
 
+#: src/install_progress.rs:157
+msgid "quickjs install progress"
+msgstr ""
+
 #: src/video.rs:149
 msgid "Best"
 msgstr ""
@@ -1410,18 +1414,20 @@ msgstr ""
 msgid "_Check Again"
 msgstr ""
 
+#: src/install_help.rs:59
+msgid "Run this command in a terminal, then press Check Again."
+msgstr ""
+
 #: src/install_help.rs:68
-msgid "Run these commands in a terminal, then press Check Again."
+msgid "Install the tools manually"
 msgstr ""
 
-#: src/install_help.rs:77
-msgid "Install both tools manually"
+#: src/install_help.rs:63
+msgid "Install tools"
 msgstr ""
 
-#: src/install_help.rs:79
-msgid ""
-"Grab couldn't detect your distribution. Install both tools, make sure they "
-"are on your PATH, then press Check Again."
+#: src/install_help.rs:69
+msgid "Install yt-dlp, ffmpeg and quickjs yourself and make sure they are on your PATH, then press Check Again."
 msgstr ""
 
 #: src/install_help.rs:105 src/install_help.rs:108
@@ -1490,5 +1496,21 @@ msgstr ""
 msgid ""
 "Discover torrent peers on the local network via Local Service Discovery. "
 "Applies when the torrent engine first starts."
+msgstr ""
+
+#: src/video_runner.rs:717
+msgid "(recording kept in {dir})"
+msgstr ""
+
+#: src/video_staging.rs:116
+msgid "staging root is not a real directory"
+msgstr ""
+
+#: src/window_rows.rs:232
+msgid "Stop Recording"
+msgstr ""
+
+#: src/window_rows.rs:732
+msgid "Saving recording…"
 msgstr ""
 

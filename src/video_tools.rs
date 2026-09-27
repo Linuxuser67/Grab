@@ -350,6 +350,15 @@ fn kill_probe(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// `--downloader-args` value for yt-dlp's ffmpeg downloader on live captures.
+/// LL-HLS timestamp hygiene: split A/V HLS manifests drift when the
+/// broadcaster drops frames; `-copyts -avoid_negative_ts make_zero` keeps the
+/// tracks aligned and `-fps_mode passthrough` avoids frame-rate munging on
+/// copy — all without re-encoding. `-fps_mode` needs ffmpeg 7+, which the
+/// current toolchain floor (9+) satisfies, so no version gating.
+pub(crate) const LIVE_DOWNLOADER_ARGS: &str =
+    "ffmpeg:-fps_mode passthrough -copyts -avoid_negative_ts make_zero";
+
 /// Install just yt-dlp into the user library dir. Split from ffmpeg so the UI
 /// can report honest per-tool stages; the crate installer exposes no progress.
 /// Await from a spawned task — never block the GTK thread.

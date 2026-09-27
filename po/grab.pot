@@ -211,6 +211,10 @@ msgstr ""
 msgid "Show Sidebar"
 msgstr ""
 
+#: src/window.rs:226
+msgid "Hide Sidebar"
+msgstr ""
+
 #: src/window.rs:387
 msgid "Move to Trash"
 msgstr ""

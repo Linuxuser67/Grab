@@ -532,6 +532,8 @@ pub struct SessionCtl {
     toast: Rc<dyn Fn(&str)>,
     alive: Rc<Cell<bool>>,
     window: glib::WeakRef<adw::ApplicationWindow>,
+    /// Runs after a successful submit, post-reset and post-toast.
+    on_succeed: Rc<dyn Fn()>,
 }
 
 impl SessionCtl {
@@ -540,11 +542,14 @@ impl SessionCtl {
     }
 
     /// Successful submit: reset the entry page for the next add and confirm
-    /// with a toast. The sidebar form stays put for rapid multi-add, the way
-    /// Varia's quick-add box clears for the next URL instead of dismissing.
+    /// with a toast. On wide windows the sidebar form stays put for rapid
+    /// multi-add, the way Varia's quick-add box clears for the next URL
+    /// instead of dismissing; on narrow windows the sidebar is a temporary
+    /// panel, so `on_succeed` returns to the download list.
     pub(crate) fn succeed(&self, message: &str) {
         (self.reset.borrow())();
         (self.toast)(message);
+        (self.on_succeed)();
     }
 
     pub(crate) fn set_reset(&self, reset: Rc<dyn Fn()>) {
@@ -558,6 +563,7 @@ impl SessionCtl {
             toast: Rc::new(|_| {}),
             alive: Rc::new(Cell::new(true)),
             window: glib::WeakRef::new(),
+            on_succeed: Rc::new(|| {}),
         }
     }
 }
@@ -596,11 +602,19 @@ impl AddPanel {
         let toast: Rc<dyn Fn(&str)> = Rc::new(move |message| {
             toasts.add_toast(adw::Toast::new(message));
         });
+        let split_for_succeed = split.clone();
         let ctl = SessionCtl {
             reset: Rc::new(RefCell::new(Rc::new(|| {}))),
             toast,
             alive: Rc::new(Cell::new(true)),
             window: window.downgrade(),
+            // Narrow windows show the sidebar as a temporary panel; a
+            // successful add collapses back to the download list.
+            on_succeed: Rc::new(move || {
+                if split_for_succeed.is_collapsed() {
+                    split_for_succeed.set_show_content(true);
+                }
+            }),
         };
         let (nav, reset, widgets) = build_add_session(&manager, &ctl, window);
         ctl.set_reset(reset);

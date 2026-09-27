@@ -219,9 +219,31 @@ pub fn build_window(
         filter_list.append(&adw::ActionRow::builder().title(name).build());
     }
     sidebar_box.append(&filter_list);
+    // Narrow windows navigate between the sidebar and the list instead of
+    // showing both; the sidebar gets its own headerbar there so the panel
+    // can be collapsed back. Hidden on wide windows where the sidebar is
+    // persistent.
+    let sidebar_header = adw::HeaderBar::new();
+    let sidebar_add = gtk4::Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text(gettext("Hide Sidebar"))
+        .build();
+    sidebar_add.update_property(&[gtk4::accessible::Property::Label(&gettext("Hide Sidebar"))]);
+    sidebar_header.pack_end(&sidebar_add);
+    split
+        .bind_property("collapsed", &sidebar_header, "visible")
+        .sync_create()
+        .build();
+    {
+        let sp = split.clone();
+        sidebar_add.connect_clicked(move |_| sp.set_show_content(true));
+    }
+    let sidebar_toolbar = adw::ToolbarView::new();
+    sidebar_toolbar.add_top_bar(&sidebar_header);
+    sidebar_toolbar.set_content(Some(&sidebar_box));
     // NavigationSplitView only takes NavigationPage children.
     let sidebar_page = adw::NavigationPage::builder()
-        .child(&sidebar_box)
+        .child(&sidebar_toolbar)
         .tag("sidebar")
         .build();
     split.set_sidebar(Some(&sidebar_page));
@@ -324,7 +346,16 @@ pub fn build_window(
     add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("New Download"))]);
     {
         let panel = Rc::clone(&add_panel);
-        add_btn.connect_clicked(move |_| panel.focus_form(None));
+        let sp = split.clone();
+        add_btn.connect_clicked(move |_| {
+            // In collapsed mode the + toggles the panel: collapse it when
+            // it's showing, otherwise reveal and focus the form.
+            if sp.is_collapsed() && !sp.shows_content() {
+                sp.set_show_content(true);
+            } else {
+                panel.focus_form(None);
+            }
+        });
     }
     header.pack_start(&add_btn);
 
@@ -506,6 +537,20 @@ pub fn build_window(
         if let Some(row) = filter_list.row_at_index(0) {
             filter_list.select_row(Some(&row));
         }
+    }
+    {
+        // Activating a filter (click or Enter, even the already-selected one)
+        // also collapses the panel on narrow windows, returning to the list.
+        let sync = Rc::clone(&sync);
+        let sel = Rc::clone(&filter_sel);
+        let sp = split.clone();
+        filter_list.connect_row_activated(move |_, row| {
+            sel.set(row.index() as u32);
+            sync();
+            if sp.is_collapsed() {
+                sp.set_show_content(true);
+            }
+        });
     }
     {
         let sync = Rc::clone(&sync);

@@ -3675,6 +3675,7 @@ fn test_options() -> Vec<VideoFormatOption> {
         .map(|h| VideoFormatOption {
             id: format!("v{h}"),
             label: format!("{h}p"),
+            detail: String::new(),
             height: *h,
         })
         .collect()
@@ -3700,6 +3701,7 @@ fn default_quality_index_preselects() {
         .map(|h| VideoFormatOption {
             id: format!("v{h}"),
             label: format!("{h}p"),
+            detail: String::new(),
             height: *h,
         })
         .collect::<Vec<_>>();

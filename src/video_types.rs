@@ -228,11 +228,13 @@ pub(crate) enum FetchedVideo {
     Playlist(crate::media_types::PlaylistInfo),
 }
 
-/// One video-only format, deduplicated and labeled for the dialog combo.
+/// One video-only format, deduplicated and labeled for the dialog picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoFormatOption {
     pub id: String,
     pub label: String,
+    /// Label without the "{height}p · " prefix, for picker row subtitles.
+    pub detail: String,
     pub height: u32,
 }
 
@@ -392,13 +394,14 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoForma
         .into_iter()
         .map(|(height, f)| {
             let short = format_short_label(f);
-            let label = match filesize_of(f) {
-                Some(n) => format!("{height}p · {short} · {}", fmt_video_bytes(n)),
-                None => format!("{height}p · {short}"),
+            let detail = match filesize_of(f) {
+                Some(n) => format!("{short} · {}", fmt_video_bytes(n)),
+                None => short,
             };
             VideoFormatOption {
                 id: f.format_id.clone(),
-                label,
+                label: format!("{height}p · {detail}"),
+                detail,
                 height,
             }
         })

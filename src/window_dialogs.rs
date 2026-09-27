@@ -58,10 +58,188 @@ struct VideoStep {
     group: adw::PreferencesGroup,
     name: adw::EntryRow,
     revert: gtk4::Button,
-    quality: adw::ComboRow,
+    /// Single-video format choice set (Automatic / pins / audio-only). The
+    /// audio switch below serves playlist mode, where pins don't apply.
+    format: Rc<FormatPicker>,
     audio: adw::SwitchRow,
     tools: adw::ActionRow,
     error: adw::ActionRow,
+}
+
+/// The details page's media-format choice: the preference-driven automatic
+/// path, one exact pinned format (index into [`MediaState::pins`]), or
+/// audio-only. One decision, one control — no separate switch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum MediaPick {
+    #[default]
+    Automatic,
+    Pin(usize),
+    AudioOnly,
+}
+
+/// Dialog-local media-format state for the details page: the pinnable formats
+/// of the current resolve and the user's pick. Rebuilt per lookup; the pick
+/// resets so a pin never carries over.
+#[derive(Default)]
+pub(crate) struct MediaState {
+    pub(crate) pins: RefCell<Vec<crate::video_types::VideoFormatOption>>,
+    pub(crate) pick: Cell<MediaPick>,
+}
+
+/// Enqueue parameters for a media pick: the exact pinned format id (none for
+/// Automatic — the global preference applies — and for audio-only) and the
+/// audio-only flag. A stale pin index degrades to no pin, never a panic.
+pub(crate) fn media_pick_params(
+    pick: MediaPick,
+    pins: &[crate::video_types::VideoFormatOption],
+) -> (Option<String>, bool) {
+    match pick {
+        MediaPick::Pin(i) => (pins.get(i).map(|opt| opt.id.clone()), false),
+        MediaPick::Automatic => (None, false),
+        MediaPick::AudioOnly => (None, true),
+    }
+}
+
+/// Preselect for a fresh resolve: the preference-closest pin, or Automatic
+/// when nothing is pinnable. Audio-only never preselects — it stays off by
+/// design until the user picks it.
+pub(crate) fn initial_media_pick(
+    pins: &[crate::video_types::VideoFormatOption],
+    quality_pref: &str,
+) -> MediaPick {
+    if pins.is_empty() {
+        MediaPick::Automatic
+    } else {
+        MediaPick::Pin(crate::video::default_quality_index(pins, quality_pref))
+    }
+}
+
+/// One activatable row inside the media-format picker.
+struct FormatRow {
+    pick: MediaPick,
+    row: adw::ActionRow,
+    check: gtk4::Image,
+}
+
+/// Media-format picker for the details page: an `AdwExpanderRow` holding the
+/// whole choice set as activatable rows — Automatic first (the preference
+/// default), one row per pinnable format tallest-first, then Audio only. The
+/// checkmark marks the pick and the expander subtitle echoes it, so the panel
+/// keeps one primary action instead of a per-row button stack.
+struct FormatPicker {
+    expander: adw::ExpanderRow,
+    rows: RefCell<Vec<FormatRow>>,
+}
+
+impl FormatPicker {
+    fn new() -> Rc<Self> {
+        let expander = adw::ExpanderRow::builder()
+            .title(gettext("Media format"))
+            .subtitle(gettext("Automatic"))
+            .build();
+        expander.set_visible(false);
+        Rc::new(Self {
+            expander,
+            rows: RefCell::new(Vec::new()),
+        })
+    }
+
+    fn widget(&self) -> adw::ExpanderRow {
+        self.expander.clone()
+    }
+
+    fn set_visible(&self, visible: bool) {
+        self.expander.set_visible(visible);
+    }
+
+    /// Rebuild the rows for a fresh resolve and apply `media`'s pick. The
+    /// pick hook fires only on user row clicks, never here: the resolve seeds
+    /// dependent state (file name) itself.
+    fn rebuild(
+        self: &Rc<Self>,
+        media: &Rc<MediaState>,
+        on_pick: &Rc<dyn Fn(MediaPick, MediaPick)>,
+    ) {
+        for r in self.rows.borrow().iter() {
+            r.row.unparent();
+        }
+        self.rows.borrow_mut().clear();
+        let pins = media.pins.borrow();
+        self.add_row(
+            MediaPick::Automatic,
+            &gettext("Automatic"),
+            &gettext("Uses your preferred quality"),
+            media,
+            on_pick,
+        );
+        for (i, opt) in pins.iter().enumerate() {
+            self.add_row(
+                MediaPick::Pin(i),
+                &format!("{}p", opt.height),
+                &opt.detail,
+                media,
+                on_pick,
+            );
+        }
+        self.add_row(
+            MediaPick::AudioOnly,
+            &gettext("Audio only"),
+            &gettext("Skip the video track"),
+            media,
+            on_pick,
+        );
+        self.refresh(media.pick.get(), &pins);
+    }
+
+    fn add_row(
+        self: &Rc<Self>,
+        pick: MediaPick,
+        title: &str,
+        subtitle: &str,
+        media: &Rc<MediaState>,
+        on_pick: &Rc<dyn Fn(MediaPick, MediaPick)>,
+    ) {
+        let check = gtk4::Image::from_icon_name("object-select-symbolic");
+        check.set_valign(gtk4::Align::Center);
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(subtitle)
+            .activatable(true)
+            .build();
+        row.add_prefix(&check);
+        {
+            let this = self.clone();
+            let media = media.clone();
+            let on_pick = on_pick.clone();
+            row.connect_activated(move |_| {
+                let old = media.pick.get();
+                if old == pick {
+                    return;
+                }
+                media.pick.set(pick);
+                this.refresh(pick, &media.pins.borrow());
+                on_pick(old, pick);
+            });
+        }
+        self.expander.add_row(&row);
+        self.rows.borrow_mut().push(FormatRow { pick, row, check });
+    }
+
+    /// Mark the pick with the checkmark and echo it in the expander subtitle.
+    fn refresh(&self, pick: MediaPick, pins: &[crate::video_types::VideoFormatOption]) {
+        for r in self.rows.borrow().iter() {
+            r.check.set_visible(r.pick == pick);
+        }
+        let subtitle = match pick {
+            MediaPick::Automatic => gettext("Automatic"),
+            MediaPick::AudioOnly => gettext("Audio only"),
+            MediaPick::Pin(i) => pins
+                .get(i)
+                .map(|opt| opt.label.clone())
+                .unwrap_or_else(|| gettext("Automatic")),
+        };
+        self.expander.set_subtitle(&subtitle);
+    }
 }
 
 /// Queue one probed video from the Add dialog and close it. Shared by the
@@ -74,12 +252,13 @@ fn submit_probed_single(
     dest: &Rc<RefCell<String>>,
     ctl: &SessionCtl,
     step: &Rc<VideoStep>,
-    formats: &Rc<RefCell<Vec<Option<String>>>>,
+    media: &Rc<MediaState>,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     v: &crate::video::VideoInfo,
 ) {
     let typed = step.name.text().trim().to_string();
-    let audio_only = step.audio.is_active();
+    let pick = media.pick.get();
+    let (format_id, audio_only) = media_pick_params(pick, &media.pins.borrow());
     // Default name from the video title and id; the intake sanitizes it.
     let settings = manager.settings();
     let auto = typed
@@ -92,10 +271,7 @@ fn submit_probed_single(
     };
     // Exact picks pin the format with its height as fallback, so a dropped pin still
     // degrades to the chosen height; audio-only rows drop the pin, and Automatic (no
-    // pin) falls back to the global preference. Combo rows and formats share one order.
-    let selected = step.quality.selected() as usize;
-    let format_id = formats.borrow().get(selected).cloned().flatten();
-    let format_id = if audio_only { None } else { format_id };
+    // pin) falls back to the global preference.
     let quality = match format_id.clone() {
         Some(id) => v
             .formats
@@ -135,14 +311,14 @@ fn submit_probe(
     dest: &Rc<RefCell<String>>,
     ctl: &SessionCtl,
     step: &Rc<VideoStep>,
-    formats: &Rc<RefCell<Vec<Option<String>>>>,
+    media: &Rc<MediaState>,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     nav: &adw::NavigationView,
     probe: crate::video::ProbeResult,
 ) {
     match probe {
         crate::video::ProbeResult::Single(v) => {
-            submit_probed_single(manager, dest, ctl, step, formats, lookup_add, &v);
+            submit_probed_single(manager, dest, ctl, step, media, lookup_add, &v);
         }
         crate::video::ProbeResult::Playlist(pl) => {
             // Collections queue through the item picker: one row per chosen
@@ -205,7 +381,7 @@ fn hide_video_step(v: &VideoStep) {
     v.status.set_visible(false);
     v.name.set_visible(false);
     v.revert.set_visible(false);
-    v.quality.set_visible(false);
+    v.format.set_visible(false);
     v.audio.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
@@ -220,8 +396,7 @@ fn show_video_ready(v: &VideoStep) {
     hide_video_step(v);
     v.name.set_visible(true);
     v.revert.set_visible(true);
-    v.quality.set_visible(true);
-    v.audio.set_visible(true);
+    v.format.set_visible(true);
 }
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
@@ -350,7 +525,10 @@ fn wire_torrent_picker(
 #[derive(Clone)]
 pub struct SessionCtl {
     hide: Rc<dyn Fn()>,
-    reset: RefCell<Rc<dyn Fn()>>,
+    /// Shared across clones: the session installs the real reset *after*
+    /// `build_add_session` hands out clones to the submit paths, so a plain
+    /// `RefCell` here would leave every clone holding the initial no-op.
+    reset: Rc<RefCell<Rc<dyn Fn()>>>,
     toast: Rc<dyn Fn(&str)>,
     alive: Rc<Cell<bool>>,
     window: glib::WeakRef<adw::ApplicationWindow>,
@@ -368,13 +546,24 @@ impl SessionCtl {
     /// Successful submit: reset the entry page for the next add and confirm
     /// with a toast. The panel stays open for rapid multi-add, the way
     /// Varia's quick-add box clears for the next URL instead of dismissing.
-    fn succeed(&self, message: &str) {
+    pub(crate) fn succeed(&self, message: &str) {
         (self.reset.borrow())();
         (self.toast)(message);
     }
 
-    fn set_reset(&self, reset: Rc<dyn Fn()>) {
+    pub(crate) fn set_reset(&self, reset: Rc<dyn Fn()>) {
         *self.reset.borrow_mut() = reset;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_ctl() -> Self {
+        Self {
+            hide: Rc::new(|| {}),
+            reset: Rc::new(RefCell::new(Rc::new(|| {}))),
+            toast: Rc::new(|_| {}),
+            alive: Rc::new(Cell::new(true)),
+            window: glib::WeakRef::new(),
+        }
     }
 }
 
@@ -430,7 +619,7 @@ impl AddPanel {
         });
         let ctl = SessionCtl {
             hide,
-            reset: RefCell::new(Rc::new(|| {})),
+            reset: Rc::new(RefCell::new(Rc::new(|| {}))),
             toast,
             alive,
             window: self.window.downgrade(),
@@ -517,16 +706,12 @@ fn build_add_session(
     video_name.set_visible(false);
     video_revert_btn.set_visible(false);
     video_group.add(&video_name);
-    // Format picker, filled per video on resolve: exact pinnable formats,
-    // tallest first (the preference preselects the closest row). Starts with
-    // and returns to a single Automatic row — global preference, no pin.
-    let video_quality = adw::ComboRow::builder()
-        .title(gettext("Media format"))
-        .subtitle(gettext("Uses your preferred quality"))
-        .model(&gtk4::StringList::new(&[gettext("Automatic").as_str()]))
-        .build();
-    video_quality.set_visible(false);
-    video_group.add(&video_quality);
+    // Format picker, rebuilt per resolve: Automatic first (the preference
+    // default), one row per pinnable format tallest-first, then Audio only.
+    // One decision, one control — no separate switch. The audio switch below
+    // serves playlist mode only, where pins don't apply across items.
+    let video_format = FormatPicker::new();
+    video_group.add(&video_format.widget());
     let video_audio = adw::SwitchRow::builder()
         .title(gettext("Audio only"))
         .subtitle(gettext("Skip the video track"))
@@ -561,23 +746,11 @@ fn build_add_session(
         group: video_group,
         name: video_name,
         revert: video_revert_btn,
-        quality: video_quality,
+        format: video_format,
         audio: video_audio,
         tools: video_tools,
         error: video_error,
     });
-    // Dialog-local choices: quality is initialized from Preferences (not
-    // bound); audio-only is always off by design — no global preference
-    // exists. Exact picks are per lookup, so nothing persists here.
-    step.quality.set_selected(0);
-    // Audio-only is per-download only (see above); the quality row is moot while on.
-    step.audio.set_active(false);
-    {
-        let q = step.quality.clone();
-        step.audio.connect_active_notify(move |sw| {
-            q.set_sensitive(!sw.is_active());
-        });
-    }
 
     let torrent_btn = gtk4::Button::builder()
         .label(gettext("Choose…"))
@@ -648,9 +821,34 @@ fn build_add_session(
     let video_generation = Rc::new(Cell::new(0u64));
     let video_last_ok = Rc::new(RefCell::new(String::new()));
     let video_info = Rc::new(RefCell::new(None::<crate::video::ProbeResult>));
-    // Index-aligned with the format combo rows: exact format ids, or a
-    // single `None` for the Automatic row. Reset on every resolve.
-    let format_ids: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
+    // Dialog-local media-format state: the current resolve's pinnable formats
+    // and the user's pick. Rebuilt on every resolve; the pick resets so a pin
+    // never carries over (audio-only persists — it is a mode, not a pin).
+    let media_state: Rc<MediaState> = Rc::new(MediaState::default());
+    // Picking into or out of audio-only re-seeds an untouched name: the
+    // resolve-time seed ran under the other mode, so without this the row keeps
+    // a video-container name for an audio download (or vice versa). An edited
+    // name is never clobbered.
+    let on_media_pick: Rc<dyn Fn(MediaPick, MediaPick)> = {
+        let name = step.name.clone();
+        let info = video_info.clone();
+        let settings = manager.settings().clone();
+        Rc::new(move |old, new| {
+            let was_audio = old == MediaPick::AudioOnly;
+            let is_audio = new == MediaPick::AudioOnly;
+            if was_audio == is_audio {
+                return;
+            }
+            if let Some(p) = info.borrow().as_ref() {
+                let current = name.text().to_string();
+                if current.trim().is_empty()
+                    || current == default_name_for(&settings, p.title(), was_audio)
+                {
+                    name.set_text(&default_name_for(&settings, p.title(), is_audio));
+                }
+            }
+        })
+    };
     // Set while the submit path re-arms the apply tick: the changed handler must
     // ignore that synthetic edit, or every failed Enter-submit would re-resolve.
     let video_quiet = Rc::new(Cell::new(false));
@@ -670,7 +868,8 @@ fn build_add_session(
         let url_row2 = url_row.clone();
         let file_row2 = file_row.clone();
         let session = ctl.clone();
-        let formats_kick = format_ids.clone();
+        let media_kick = media_state.clone();
+        let on_pick_kick = on_media_pick.clone();
         let settings2 = manager.settings().clone();
         let lookup_add_kick = lookup_add.clone();
         let manager_kick = manager.clone();
@@ -702,7 +901,8 @@ fn build_add_session(
                 session_b,
                 settings_b,
                 file_b,
-                formats_b,
+                media_b,
+                on_pick_b,
                 lookup_add_b,
                 manager_b,
                 dest_b,
@@ -716,7 +916,8 @@ fn build_add_session(
                 session.clone(),
                 settings2.clone(),
                 file_row2.clone(),
-                formats_kick.clone(),
+                media_kick.clone(),
+                on_pick_kick.clone(),
                 lookup_add_kick.clone(),
                 manager_kick.clone(),
                 dest_kick.clone(),
@@ -903,7 +1104,7 @@ fn build_add_session(
                                         default_name_for(
                                             &settings_b,
                                             &v.title,
-                                            step_b.audio.is_active(),
+                                            media_b.pick.get() == MediaPick::AudioOnly,
                                         )
                                     } else {
                                         typed
@@ -912,30 +1113,19 @@ fn build_add_session(
                                 }
                                 *last_b.borrow_mut() = url;
                                 // Rebuild the format picker from this resolve (tallest first,
-                                // preference preselects the closest row) or a single Automatic
-                                // row when nothing is pinnable. Selection resets — a pin must
-                                // never carry over.
-                                let mut labels = Vec::new();
-                                let mut ids: Vec<Option<String>> = Vec::new();
-                                for opt in &v.formats {
-                                    labels.push(opt.label.clone());
-                                    ids.push(Some(opt.id.clone()));
-                                }
-                                if labels.is_empty() {
-                                    labels.push(gettext("Automatic"));
-                                    ids.push(None);
-                                }
-                                let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-                                step_b
-                                    .quality
-                                    .set_model(Some(&gtk4::StringList::new(&refs)));
-                                *formats_b.borrow_mut() = ids;
-                                step_b
-                                    .quality
-                                    .set_selected(crate::video::default_quality_index(
-                                        &v.formats,
-                                        &settings_b.video_quality(),
-                                    ) as u32);
+                                // preference preselects the closest pin) or just Automatic
+                                // plus Audio only when nothing is pinnable. A pin never
+                                // carries over; audio-only persists — it is a mode, not a
+                                // pin.
+                                let pins = v.formats.clone();
+                                let pick = if media_b.pick.get() == MediaPick::AudioOnly {
+                                    MediaPick::AudioOnly
+                                } else {
+                                    initial_media_pick(&pins, &settings_b.video_quality())
+                                };
+                                media_b.pins.replace(pins);
+                                media_b.pick.set(pick);
+                                step_b.format.rebuild(&media_b, &on_pick_b);
                                 *info_b.borrow_mut() = Some(crate::video::ProbeResult::Single(v));
                                 show_video_ready(&step_b);
                                 set_lookup_add(&lookup_add_b, true);
@@ -1055,33 +1245,18 @@ fn build_add_session(
     }
     // One-click restore of the title default (audio-aware, like submit).
     {
-        let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
+        let (name, media, info) = (step.name.clone(), media_state.clone(), video_info.clone());
         let settings = manager.settings().clone();
         step.revert.connect_clicked(move |_| {
             if let Some(p) = info.borrow().as_ref() {
-                name.set_text(&default_name_for(&settings, p.title(), audio.is_active()));
+                let audio = media.pick.get() == MediaPick::AudioOnly;
+                name.set_text(&default_name_for(&settings, p.title(), audio));
                 name.grab_focus();
             }
         });
     }
-    // Toggling the mode re-seeds an untouched name: the resolve-time seed ran under
-    // the other mode, so without this the row keeps a video-container name for an
-    // audio download (or vice versa). An edited name is never clobbered.
-    {
-        let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
-        let settings = manager.settings().clone();
-        audio.connect_active_notify(move |sw| {
-            if let Some(p) = info.borrow().as_ref() {
-                let active = sw.is_active();
-                let current = name.text().to_string();
-                if current.trim().is_empty()
-                    || current == default_name_for(&settings, p.title(), !active)
-                {
-                    name.set_text(&default_name_for(&settings, p.title(), active));
-                }
-            }
-        });
-    }
+    // Picking into or out of audio-only re-seeds an untouched name; wired
+    // through the picker's hook above (on_media_pick).
 
     wire_torrent_picker(
         &torrent_btn,
@@ -1182,7 +1357,7 @@ fn build_add_session(
         let quiet = video_quiet.clone();
         let nav2 = nav.clone();
         let video_nav_page2 = video_nav_page.clone();
-        let formats = format_ids.clone();
+        let media = media_state.clone();
         let lookup_add_submit = lookup_add.clone();
         move |rearm_apply: bool| {
             let fail = |message: &str| {
@@ -1227,7 +1402,7 @@ fn build_add_session(
                         &dd,
                         &session,
                         &step2,
-                        &formats,
+                        &media,
                         &lookup_add_submit,
                         &nav2,
                         probe,
@@ -1277,7 +1452,7 @@ fn build_add_session(
                                 &dd,
                                 &session,
                                 &step2,
-                                &formats,
+                                &media,
                                 &lookup_add_submit,
                                 &v,
                             );
@@ -1422,7 +1597,8 @@ fn build_add_session(
         let generation = video_generation.clone();
         let info = video_info.clone();
         let last_ok = video_last_ok.clone();
-        let formats = format_ids.clone();
+        let media = media_state.clone();
+        let on_pick = on_media_pick.clone();
         let inflight = video_inflight.clone();
         let nav = nav.clone();
         Rc::new(move || {
@@ -1431,9 +1607,12 @@ fn build_add_session(
             inflight.replace(None);
             info.borrow_mut().take();
             last_ok.borrow_mut().clear();
-            formats.borrow_mut().clear();
-            formats.borrow_mut().push(None);
-            step.quality.set_selected(0);
+            // Back to the idle pick: Automatic, no pins. The hook can't fire
+            // meaningfully here — info is already taken, so the name re-seed
+            // is a no-op.
+            media.pick.set(MediaPick::Automatic);
+            media.pins.borrow_mut().clear();
+            step.format.rebuild(&media, &on_pick);
             step.audio.set_active(false);
             hide_video_step(&step);
             error_label.set_visible(false);

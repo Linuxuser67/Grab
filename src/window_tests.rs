@@ -1,7 +1,11 @@
 use crate::download::DownloadStatus;
 use crate::download_details::{DownloadKind, download_kind};
 use crate::media_types::{PlaylistKind, VideoSource};
-use crate::window_dialogs::{fmt_item_duration, playlist_count_label};
+use crate::video_types::VideoFormatOption;
+use crate::window_dialogs::{
+    MediaPick, SessionCtl, fmt_item_duration, initial_media_pick, media_pick_params,
+    playlist_count_label,
+};
 use crate::window_rows::{PulseTick, StopCopy, pulse_tick, should_pulse, stop_copy};
 
 #[test]
@@ -162,4 +166,87 @@ fn download_kind_classifies_details_dialog_types() {
         DownloadKind::File
     );
     assert_eq!(download_kind(false, None, false), DownloadKind::File);
+}
+
+// ── media-format picker ──────────────────────────────────────────────
+
+fn media_test_pins() -> Vec<VideoFormatOption> {
+    [1080u32, 720, 480]
+        .iter()
+        .map(|h| VideoFormatOption {
+            id: format!("v{h}"),
+            label: format!("{h}p"),
+            detail: String::new(),
+            height: *h,
+        })
+        .collect()
+}
+
+#[test]
+fn media_pick_pin_returns_its_id_and_not_audio() {
+    let pins = media_test_pins();
+    let (id, audio) = media_pick_params(MediaPick::Pin(1), &pins);
+    assert_eq!(id.as_deref(), Some("v720"));
+    assert!(!audio, "a pinned format is a video download");
+}
+
+#[test]
+fn media_pick_automatic_returns_none_and_not_audio() {
+    let pins = media_test_pins();
+    let (id, audio) = media_pick_params(MediaPick::Automatic, &pins);
+    assert_eq!(
+        id, None,
+        "Automatic carries no pin — the global preference applies"
+    );
+    assert!(!audio);
+}
+
+#[test]
+fn media_pick_audio_only_returns_none_and_audio() {
+    let pins = media_test_pins();
+    let (id, audio) = media_pick_params(MediaPick::AudioOnly, &pins);
+    assert_eq!(id, None, "audio-only drops the pin");
+    assert!(audio);
+}
+
+#[test]
+fn media_pick_stale_pin_index_degrades_to_no_pin() {
+    // A pin index that outlives its resolve must not panic or pin garbage.
+    let pins = media_test_pins();
+    let (id, audio) = media_pick_params(MediaPick::Pin(99), &pins);
+    assert_eq!(id, None);
+    assert!(!audio);
+}
+
+#[test]
+fn initial_media_pick_without_pins_is_automatic() {
+    assert_eq!(initial_media_pick(&[], "720p"), MediaPick::Automatic);
+}
+
+#[test]
+fn initial_media_pick_preselects_preference_closest_pin() {
+    let pins = media_test_pins();
+    assert_eq!(initial_media_pick(&pins, "best"), MediaPick::Pin(0));
+    assert_eq!(initial_media_pick(&pins, "720p"), MediaPick::Pin(1));
+    assert_eq!(initial_media_pick(&pins, "480p"), MediaPick::Pin(2));
+}
+
+// ── session reset ────────────────────────────────────────────────────
+
+#[test]
+fn session_ctl_clone_sees_reset_installed_after_clone() {
+    // Regression: SessionCtl used to hold the reset callback in a plain
+    // RefCell, so #[derive(Clone)] snapshotted the initial no-op and every
+    // submit path — all working on pre-install clones — showed the toast
+    // without resetting the form.
+    let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+    let ctl = SessionCtl::test_ctl();
+    let cloned = ctl.clone();
+    let fired_b = fired.clone();
+    ctl.set_reset(std::rc::Rc::new(move || fired_b.set(true)));
+    cloned.succeed("Download added");
+    assert!(
+        fired.get(),
+        "reset installed after cloning must reach the clones"
+    );
 }

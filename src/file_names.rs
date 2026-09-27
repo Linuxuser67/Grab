@@ -187,33 +187,80 @@ pub(crate) fn sanitize_folder_name(title: &str) -> String {
     }
 }
 
+/// Whether `p` squats a directory name without being a real dir: a symlink
+/// (checked with `symlink_metadata`, which doesn't follow the link — a
+/// symlink reads as a symlink even when its target is a dir) or any non-dir.
+fn is_squatter(p: &std::path::Path) -> bool {
+    match std::fs::symlink_metadata(p) {
+        Ok(md) => {
+            let ft = md.file_type();
+            ft.is_symlink() || !ft.is_dir()
+        }
+        // Nothing there: the name is free.
+        Err(_) => false,
+    }
+}
+
+/// Atomically create `base/name` as a real directory, reusing an existing
+/// real dir but never following a planted symlink into place.
+///
+/// `create_dir` (not `_all`) is the atomic check-and-create: a symlink
+/// planted between the dedupe scan and the create fails with
+/// `AlreadyExists`, and the name dedupes to a fresh one. A post-create
+/// `symlink_metadata` re-check closes the residual gap after our own
+/// create. Retries are bounded: a persistent squatter can't spin us forever.
+///
+/// Returns the directory to use. On unrecoverable I/O errors (base
+/// unwritable etc.) it keeps the old best-effort behavior and returns the
+/// path; the write then fails loudly at its own site.
+pub(crate) fn create_guarded_dir(base: &std::path::Path, name: &str) -> std::path::PathBuf {
+    // Keep the old ensure-parents behavior; only the leaf is guarded.
+    let _ = std::fs::create_dir_all(base);
+    let mut tried: Vec<String> = Vec::new();
+    for _ in 0..32 {
+        let candidate = dedupe_filename(name, |n| {
+            tried.iter().any(|t| t.as_str() == n) || is_squatter(&base.join(n))
+        });
+        tried.push(candidate.clone());
+        let path = base.join(&candidate);
+        match std::fs::create_dir(&path) {
+            Ok(()) => {
+                // We created it: only a swap in the gap after create could
+                // leave a non-dir here — retry under a fresh name.
+                if !is_squatter(&path) {
+                    return path;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A real dir (pre-existing, or ours from an earlier retry)
+                // is reused, preserving share-the-folder semantics; a
+                // symlink or non-dir squatter dedupes on the next round.
+                if let Ok(md) = std::fs::symlink_metadata(&path)
+                    && md.file_type().is_dir()
+                {
+                    return path;
+                }
+            }
+            Err(_) => return path,
+        }
+    }
+    // Absurd contention: hand back the last candidate; writes fail loudly.
+    base.join(tried.pop().unwrap_or_else(|| name.to_string()))
+}
+
 /// Titled subfolder for a multi-item collection (playlist, stories,
 /// highlights), torrent-style: sanitized, created eagerly, and reused when the
 /// same collection is added again (duplicate files then fail Parabolic-style
 /// at start instead of scattering ` (1)` copies). Never follows a
 /// pre-existing symlink into place: a planted link with the collection name
-/// would redirect downloads outside the download dir (`create_dir_all`
-/// follows it), so a symlink — or any non-dir squatter — dedupes to a fresh
-/// name instead.
+/// would redirect downloads outside the download dir, so a symlink — or any
+/// non-dir squatter — dedupes to a fresh name instead. The create itself is
+/// atomic, closing the dedupe-then-create race.
 pub(crate) fn collection_subdir(dir: &str, title: &str) -> String {
     let folder = shorten_filename(&sanitize_folder_name(title));
-    let base = std::path::Path::new(dir);
-    let folder = dedupe_filename(&folder, |n| {
-        let p = base.join(n);
-        match std::fs::symlink_metadata(&p) {
-            // `symlink_metadata` doesn't follow the link: a symlink reads as
-            // a symlink even when its target is a dir.
-            Ok(md) => {
-                let ft = md.file_type();
-                ft.is_symlink() || !ft.is_dir()
-            }
-            // Nothing there: the name is free.
-            Err(_) => false,
-        }
-    });
-    let path = base.join(&folder);
-    let _ = std::fs::create_dir_all(&path);
-    path.to_string_lossy().into_owned()
+    create_guarded_dir(std::path::Path::new(dir), &folder)
+        .to_string_lossy()
+        .into_owned()
 }
 
 pub(crate) fn sane_filename(s: &str) -> bool {
@@ -438,4 +485,91 @@ pub(crate) fn strip_dedupe_suffix(name: &str) -> String {
         }
     }
     name.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Unique scratch dir per test (never a shared staging parent).
+    fn unique_dir(tag: &str) -> PathBuf {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("grab-guarded-{tag}-{}-{n}", std::process::id()))
+    }
+
+    fn plant_symlink(link: &std::path::Path, target: &std::path::Path) {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[test]
+    fn guarded_dir_creates_real_dir() {
+        let base = unique_dir("create");
+        let got = create_guarded_dir(&base, "Videos");
+        assert_eq!(got, base.join("Videos"));
+        assert!(got.is_dir() && !got.is_symlink());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn guarded_dir_dedupes_planted_symlink() {
+        let base = unique_dir("symlink");
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("evil-target");
+        std::fs::write(&target, b"do not touch").unwrap();
+        plant_symlink(&base.join("Videos"), &target);
+
+        let got = create_guarded_dir(&base, "Videos");
+        // Deduped past the squatter, never through it.
+        assert_ne!(got, base.join("Videos"));
+        assert!(got.is_dir() && !got.is_symlink());
+        // The planted link and its target are untouched.
+        assert!(base.join("Videos").is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), b"do not touch");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn guarded_dir_dedupes_non_dir_squatter() {
+        let base = unique_dir("file");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("Videos"), b"squatter").unwrap();
+
+        let got = create_guarded_dir(&base, "Videos");
+        assert_ne!(got, base.join("Videos"));
+        assert!(got.is_dir());
+        // The squatting file is untouched.
+        assert_eq!(std::fs::read(base.join("Videos")).unwrap(), b"squatter");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn guarded_dir_reuses_real_dir() {
+        let base = unique_dir("reuse");
+        let existing = base.join("Videos");
+        std::fs::create_dir_all(&existing).unwrap();
+
+        let got = create_guarded_dir(&base, "Videos");
+        assert_eq!(got, existing);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn collection_subdir_dodges_symlink() {
+        let base = unique_dir("collection");
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        plant_symlink(&base.join("My Show"), &target);
+
+        let got = PathBuf::from(collection_subdir(base.to_str().unwrap(), "My Show"));
+        assert_ne!(got, base.join("My Show"));
+        assert!(got.is_dir() && !got.is_symlink());
+        // Nothing was written through the link.
+        assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+        std::fs::remove_dir_all(&base).ok();
+    }
 }

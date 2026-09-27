@@ -453,3 +453,47 @@ fn read_archive_bytes_rejects_unresolvable_urls() {
     assert_eq!(read_archive_bytes("torrent:relative.torrent"), None);
     assert_eq!(read_archive_bytes("torrent:/tmp/evil.torrent"), None);
 }
+
+#[test]
+fn guard_output_folder_dedupes_planted_symlink() {
+    let base = std::env::temp_dir().join(format!("grab-torrent-guard-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let target =
+        std::env::temp_dir().join(format!("grab-torrent-guard-target-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&target, base.join("Big Torrent")).unwrap();
+
+    let guarded = guard_output_folder(&base, base.join("Big Torrent"));
+    // Deduped past the squatter, never through it.
+    assert_ne!(guarded, base.join("Big Torrent"));
+    assert!(guarded.is_dir() && !guarded.is_symlink());
+    // Nothing was written through the link.
+    assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
+#[test]
+fn guard_output_folder_reuses_real_dir() {
+    let base = std::env::temp_dir().join(format!("grab-torrent-reuse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let existing = base.join("Big Torrent");
+    std::fs::create_dir_all(&existing).unwrap();
+
+    assert_eq!(guard_output_folder(&base, existing.clone()), existing);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn guard_output_folder_leaves_flat_dest_alone() {
+    let base = std::env::temp_dir().join(format!("grab-torrent-flat-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+
+    // The dest dir itself (flat single-file download): no leaf to guard.
+    assert_eq!(guard_output_folder(&base, base.clone()), base);
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -5701,3 +5701,31 @@ fn finalize_filename_applies_ascii_fold_for_late_names() {
         shorten_filename("Café & Croissants.mp4")
     );
 }
+
+#[test]
+fn parent_contained_in_dest_cases() {
+    let base = std::env::temp_dir().join(format!("grab-parent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let base_str = base.to_string_lossy().into_owned();
+
+    // The destination itself and a real subdir: contained.
+    assert!(parent_contained_in_dest(&base, &base_str));
+    let sub = base.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    assert!(parent_contained_in_dest(&sub, &base_str));
+
+    // A planted symlink escaping the destination: refused.
+    let target = std::env::temp_dir().join(format!("grab-parent-target-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::create_dir_all(&target).unwrap();
+    let link = base.join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(!parent_contained_in_dest(&link, &base_str));
+
+    // Unresolvable paths fail closed.
+    assert!(!parent_contained_in_dest(&base.join("nope"), &base_str));
+
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&target);
+}

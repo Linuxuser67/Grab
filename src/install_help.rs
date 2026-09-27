@@ -61,15 +61,11 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
                 ))
                 .build();
             command_row(&group, &gettext("Install tools"), &pkgs.install_all);
-            if !pkgs.has_quickjs_package {
-                // No distro quickjs package: the command above installs only
-                // yt-dlp and ffmpeg, so link the upstream quickjs releases
-                // instead of dead-ending.
-                link_row(
-                    &group,
-                    "quickjs",
-                    "https://github.com/quickjs-ng/quickjs/releases",
-                );
+            // No distro quickjs package: the command above installs only
+            // yt-dlp and ffmpeg, so link the upstream quickjs releases
+            // instead of dead-ending.
+            for (tool, url) in extra_link_rows(&pkgs) {
+                link_row(&group, tool, url);
             }
             page.add(&group);
         }
@@ -137,6 +133,16 @@ pub(crate) fn command_row(
     row
 }
 
+/// Link rows the distro group needs beyond the install command: the upstream
+/// quickjs releases when the distro has no quickjs package (the command then
+/// covers only yt-dlp and ffmpeg). Pure so tests pin the dialog's rows
+/// without needing a display.
+fn extra_link_rows(
+    _pkgs: &crate::video_tools::DistroPackages,
+) -> Vec<(&'static str, &'static str)> {
+    Vec::new()
+}
+
 /// One outbound-link row for the manual fallback.
 fn link_row(group: &adw::PreferencesGroup, tool: &str, url: &'static str) {
     let row = adw::ActionRow::builder().title(tool).build();
@@ -150,4 +156,34 @@ fn link_row(group: &adw::PreferencesGroup, tool: &str, url: &'static str) {
         gtk4::UriLauncher::new(url).launch(root.as_ref(), gio::Cancellable::NONE, |_| {});
     });
     group.add(&row);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::video_tools::DistroPackages;
+
+    fn pkgs(has_quickjs_package: bool) -> DistroPackages {
+        DistroPackages {
+            distro: "Void".to_string(),
+            install_all: "sudo xbps-install -S yt-dlp ffmpeg".to_string(),
+            has_quickjs_package,
+        }
+    }
+
+    #[test]
+    fn quickjs_link_row_appears_without_distro_package() {
+        // The dialog must not dead-end on distros without a quickjs package:
+        // the upstream releases link has to be among the group's rows.
+        assert_eq!(
+            extra_link_rows(&pkgs(false)),
+            vec![("quickjs", "https://github.com/quickjs-ng/quickjs/releases")]
+        );
+    }
+
+    #[test]
+    fn no_quickjs_link_row_with_distro_package() {
+        // The install command already covers quickjs here; no extra row.
+        assert!(extra_link_rows(&pkgs(true)).is_empty());
+    }
 }

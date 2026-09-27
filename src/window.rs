@@ -194,7 +194,7 @@ pub fn build_window(
     let split = adw::OverlaySplitView::new();
     // End side: the panel slides in next to the header's Add button.
     split.set_sidebar_position(gtk4::PackType::End);
-    let add_panel = AddPanel::new(Rc::clone(&manager), &window, &split);
+    let add_panel = AddPanel::new(Rc::clone(&manager), &window, &split, &toasts);
     // Narrow windows overlay the panel instead of squeezing the download
     // list beside it: below 800px (420 panel + usable content) the sidebar
     // floats over the content; wider windows reserve the space.

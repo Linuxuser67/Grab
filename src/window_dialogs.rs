@@ -3,7 +3,7 @@
 //! window builder owns the panel, the playlist picker reuses the count label.
 
 use crate::download::DownloadManager;
-use crate::window_rows::{default_name_for, error_label, selection_action_bar};
+use crate::window_rows::{default_name_for, error_label, ngettext_count, selection_action_bar};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
@@ -118,7 +118,7 @@ fn submit_probed_single(
         },
     ) {
         Ok(_) => {
-            ctl.close();
+            ctl.succeed(&gettext("Download added"));
         }
         Err(e) => {
             show_video_error(step, &e);
@@ -189,7 +189,7 @@ fn queue_plain(
     let typed = file_row.text().trim().to_string();
     let name = (!typed.is_empty()).then_some(typed);
     manager.enqueue(url, Some(&dest.borrow()), name.as_deref())?;
-    ctl.close();
+    ctl.succeed(&gettext("Download added"));
     Ok(())
 }
 
@@ -329,7 +329,7 @@ fn wire_torrent_picker(
             if entries.len() <= 1 {
                 match m.enqueue_torrent_file(bytes, &name, Some(&dd.borrow()), None) {
                     Ok(_) => {
-                        session.close();
+                        session.succeed(&gettext("Torrent added"));
                     }
                     Err(e) => {
                         error_label.set_text(&e);
@@ -350,6 +350,8 @@ fn wire_torrent_picker(
 #[derive(Clone)]
 pub struct SessionCtl {
     hide: Rc<dyn Fn()>,
+    reset: RefCell<Rc<dyn Fn()>>,
+    toast: Rc<dyn Fn(&str)>,
     alive: Rc<Cell<bool>>,
     window: glib::WeakRef<adw::ApplicationWindow>,
 }
@@ -362,6 +364,18 @@ impl SessionCtl {
     fn close(&self) {
         (self.hide)();
     }
+
+    /// Successful submit: reset the entry page for the next add and confirm
+    /// with a toast. The panel stays open for rapid multi-add, the way
+    /// Varia's quick-add box clears for the next URL instead of dismissing.
+    fn succeed(&self, message: &str) {
+        (self.reset.borrow())();
+        (self.toast)(message);
+    }
+
+    fn set_reset(&self, reset: Rc<dyn Fn()>) {
+        *self.reset.borrow_mut() = reset;
+    }
 }
 
 /// The add-download side panel: an `AdwOverlaySplitView` sidebar hosting the
@@ -372,6 +386,7 @@ pub struct AddPanel {
     split: adw::OverlaySplitView,
     window: adw::ApplicationWindow,
     manager: Rc<DownloadManager>,
+    toasts: adw::ToastOverlay,
     session: RefCell<Option<SessionCtl>>,
 }
 
@@ -382,11 +397,13 @@ impl AddPanel {
         manager: Rc<DownloadManager>,
         window: &adw::ApplicationWindow,
         split: &adw::OverlaySplitView,
+        toasts: &adw::ToastOverlay,
     ) -> Rc<Self> {
         Rc::new(Self {
             split: split.clone(),
             window: window.clone(),
             manager,
+            toasts: toasts.clone(),
             session: RefCell::new(None),
         })
     }
@@ -407,12 +424,19 @@ impl AddPanel {
                 split.set_sidebar(Option::<&adw::NavigationView>::None);
             }
         });
+        let toasts = self.toasts.clone();
+        let toast: Rc<dyn Fn(&str)> = Rc::new(move |message| {
+            toasts.add_toast(adw::Toast::new(message));
+        });
         let ctl = SessionCtl {
             hide,
+            reset: RefCell::new(Rc::new(|| {})),
+            toast,
             alive,
             window: self.window.downgrade(),
         };
-        let nav = build_add_session(&self.manager, &ctl, initial_url);
+        let (nav, reset) = build_add_session(&self.manager, &ctl, initial_url);
+        ctl.set_reset(reset);
         nav.set_width_request(420);
         self.split.set_sidebar(Some(&nav));
         self.split.set_show_sidebar(true);
@@ -445,7 +469,7 @@ fn build_add_session(
     manager: &Rc<DownloadManager>,
     ctl: &SessionCtl,
     initial_url: Option<&str>,
-) -> adw::NavigationView {
+) -> (adw::NavigationView, Rc<dyn Fn()>) {
     let page = adw::PreferencesPage::new();
     let group = adw::PreferencesGroup::new();
     page.add(&group);
@@ -1177,9 +1201,6 @@ fn build_add_session(
                     quiet.set(false);
                 }
             };
-            let close = || {
-                session.close();
-            };
             let url = url_row.text().trim().to_string();
             if crate::video::is_video_page(&url) {
                 // Structural guarantee: the final Add lives on the details page, so from
@@ -1291,7 +1312,7 @@ fn build_add_session(
                     Some(fname.as_str())
                 },
             ) {
-                Ok(_) => close(),
+                Ok(_) => session.succeed(&gettext("Download added")),
                 Err(e) => fail(&e),
             }
         }
@@ -1330,6 +1351,17 @@ fn build_add_session(
                 b.set_label(&gettext("_Add Download"));
             }
         });
+    }
+
+    // The entry-page Add button is a dead click with no URL typed: desensitize
+    // it until the row is non-empty, the way Varia gates its quick-add buttons.
+    {
+        let b = add_btn.clone();
+        let ur = url_row.clone();
+        ur.connect_changed(move |row| {
+            b.set_sensitive(!row.text().trim().is_empty());
+        });
+        add_btn.set_sensitive(!url_row.text().trim().is_empty());
     }
 
     // The panel hosts the returned page stack in its sidebar.
@@ -1378,7 +1410,45 @@ fn build_add_session(
         });
     }
 
-    nav
+    // Reset for rapid multi-add: after a successful add the entry page goes
+    // back to its fresh state and the panel stays open, the way Varia's
+    // quick-add box clears for the next URL. Installed on the session by the
+    // panel; `succeed` runs it before the toast.
+    let reset: Rc<dyn Fn()> = {
+        let url_row = url_row.clone();
+        let file_row = file_row.clone();
+        let error_label = error_label.clone();
+        let step = step.clone();
+        let generation = video_generation.clone();
+        let info = video_info.clone();
+        let last_ok = video_last_ok.clone();
+        let formats = format_ids.clone();
+        let inflight = video_inflight.clone();
+        let nav = nav.clone();
+        Rc::new(move || {
+            // Drop any in-flight lookup for the submitted URL.
+            generation.set(generation.get() + 1);
+            inflight.replace(None);
+            info.borrow_mut().take();
+            last_ok.borrow_mut().clear();
+            formats.borrow_mut().clear();
+            formats.borrow_mut().push(None);
+            step.quality.set_selected(0);
+            step.audio.set_active(false);
+            hide_video_step(&step);
+            error_label.set_visible(false);
+            url_row.remove_css_class("error");
+            file_row.set_text("");
+            // set_text fires changed: the video kick exits early on empty and
+            // the file row's video-mode hiding is undone by the same handler.
+            url_row.set_text("");
+            // Back to the entry page when the add came from a pushed page.
+            nav.pop_to_tag("entry");
+            url_row.grab_focus();
+        })
+    };
+
+    (nav, reset)
 }
 /// Seconds as M:SS / H:MM:SS for picker subtitles.
 pub(crate) fn fmt_item_duration(secs: i64) -> String {
@@ -1587,9 +1657,13 @@ fn push_playlist_items_page(
                 error_label.set_visible(true);
                 return;
             }
-            // Complete success closes the whole New Download panel; a partial failure stays
-            // on the picker so the remaining rows (unchecked above) can be retried.
-            parent.close();
+            // Complete success resets the panel for the next add; a partial failure
+            // stays on the picker so the remaining rows (unchecked above) can be retried.
+            parent.succeed(&ngettext_count(
+                "1 download added",
+                "{n} downloads added",
+                chosen.len(),
+            ));
         });
     }
 
@@ -1716,7 +1790,7 @@ pub fn show_torrent_files_dialog(
                         d.close();
                     }
                     if let Some(p) = parent_close.as_ref() {
-                        p.close();
+                        p.succeed(&gettext("Torrent added"));
                     }
                 }
                 Err(e) => {

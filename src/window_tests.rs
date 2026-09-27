@@ -1,5 +1,6 @@
 use crate::download::DownloadStatus;
-use crate::media_types::PlaylistKind;
+use crate::download_details::{DownloadKind, download_kind};
+use crate::media_types::{PlaylistKind, VideoSource};
 use crate::window_dialogs::{fmt_item_duration, playlist_count_label};
 use crate::window_rows::{PulseTick, StopCopy, pulse_tick, should_pulse, stop_copy};
 
@@ -120,4 +121,45 @@ fn playlist_count_label_zero_uses_plural() {
         "0 highlights"
     );
     assert_eq!(playlist_count_label(PlaylistKind::Playlist, 0), "0 items");
+}
+
+#[test]
+fn download_kind_classifies_details_dialog_types() {
+    fn page(audio_only: bool) -> VideoSource {
+        VideoSource::Page {
+            page_url: "https://example.com/watch".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "best".to_string(),
+            audio_only,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        }
+    }
+    // The URL decides first: a torrent stays a torrent whatever the source says.
+    assert_eq!(download_kind(true, None, false), DownloadKind::Torrent);
+    assert_eq!(
+        download_kind(true, Some(&page(false)), false),
+        DownloadKind::Torrent
+    );
+    assert_eq!(
+        download_kind(false, Some(&page(false)), true),
+        DownloadKind::LiveVideo,
+        "a live page reads as a live video, not a plain one"
+    );
+    assert_eq!(
+        download_kind(false, Some(&page(false)), false),
+        DownloadKind::Video
+    );
+    assert_eq!(
+        download_kind(false, Some(&page(true)), true),
+        DownloadKind::Audio,
+        "audio-only wins over the live flag: no video track exists"
+    );
+    assert_eq!(
+        download_kind(false, Some(&VideoSource::Direct), false),
+        DownloadKind::File
+    );
+    assert_eq!(download_kind(false, None, false), DownloadKind::File);
 }

@@ -1522,3 +1522,16 @@ msgstr ""
 msgid "Saving recording…"
 msgstr ""
 
+#: src/window_dialogs.rs:121 src/window_dialogs.rs:192 src/window_dialogs.rs:1315
+msgid "Download added"
+msgstr ""
+
+#: src/window_dialogs.rs:332 src/window_dialogs.rs:1793
+msgid "Torrent added"
+msgstr ""
+
+#: src/window_dialogs.rs:1663
+msgid "1 download added"
+msgid_plural "{n} downloads added"
+msgstr[0] ""
+msgstr[1] ""

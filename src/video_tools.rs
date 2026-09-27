@@ -275,11 +275,27 @@ pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
     {
         return hit;
     }
-    let supported = probe_impersonate_support(youtube_bin);
+    // The probe sleeps in a poll loop and can take up to the deadline on a
+    // wedged binary: keep it off the async worker when there is one.
+    // Outside a multi-thread runtime (unit tests) it runs inline —
+    // `block_in_place` panics there.
+    let supported = if in_multi_thread_runtime() {
+        tokio::task::block_in_place(|| probe_impersonate_support(youtube_bin))
+    } else {
+        probe_impersonate_support(youtube_bin)
+    };
     if let Ok(mut guard) = cache.lock() {
         guard.insert(youtube_bin.to_path_buf(), supported);
     }
     supported
+}
+
+/// Whether we're on a Tokio multi-thread worker: the only context where
+/// `block_in_place` is legal (it panics outside a runtime and on
+/// current-thread runtimes).
+fn in_multi_thread_runtime() -> bool {
+    tokio::runtime::Handle::try_current()
+        .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
 }
 
 /// One-shot `--list-impersonate-targets` probe: a `Chrome` row without an

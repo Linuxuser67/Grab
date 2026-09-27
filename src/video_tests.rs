@@ -8303,7 +8303,7 @@ async fn await_child_still_bounds_stall_when_not_merging() {
     .await;
     let _ = child.kill().await;
     assert!(
-        matches!(res, Err(_)),
+        res.is_err(),
         "stall budget did not fire while downloading: {res:?}"
     );
 }

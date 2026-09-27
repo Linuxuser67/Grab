@@ -113,6 +113,19 @@ fn pending_resolve_detail(audio_only: bool) -> String {
     }
 }
 
+/// Whether `parent` resolves inside `dest_dir`: canonicalizing both sides
+/// proves no planted symlink in the parent chain diverts the write outside
+/// the destination. Unresolvable paths fail closed.
+fn parent_contained_in_dest(parent: &std::path::Path, dest_dir: &str) -> bool {
+    match (
+        std::fs::canonicalize(parent),
+        std::fs::canonicalize(dest_dir),
+    ) {
+        (Ok(canon), Ok(base)) => canon.starts_with(&base),
+        _ => false,
+    }
+}
+
 pub struct DownloadManager {
     // Borrow discipline: never hold RefCells across `set_*` notifies or `changed()`; GTK re-enters and panics. Keep borrows scoped.
     store: gio::ListStore,
@@ -874,6 +887,18 @@ impl DownloadManager {
         let dest = item.file_path();
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
+            // A planted symlink in any parent component would divert the
+            // download outside the destination: refuse instead of following
+            // it. (Filenames can't contain separators, so the parent is the
+            // destination itself today; this pins the invariant.)
+            if !parent_contained_in_dest(parent, &item.dest_dir()) {
+                let detail = gettext("Download path escapes the download folder");
+                item.set_status(DownloadStatus::Failed);
+                item.set_detail(detail.clone());
+                self.changed();
+                self.notify_finished(&item, Err(detail));
+                return;
+            }
         }
         // Fail fast on junk; later edits apply without re-queueing.
         let limit = opts.limit_rate.trim();
@@ -1350,11 +1375,24 @@ impl DownloadManager {
         // Magnets recorded their subfolder at enqueue; archived torrents recompute theirs from metadata.
         let recorded = item.output_dir().to_string();
         let dest = if recorded.is_empty() {
+            let _ = std::fs::create_dir_all(&dir);
             dir.clone()
         } else {
-            std::path::PathBuf::from(&recorded)
+            // Re-guard the recorded subfolder at spawn: a symlink planted
+            // after intake (a wide window for queued torrents) would
+            // otherwise divert the engine's writes. A squatted name dedupes
+            // to a fresh folder, like collection subfolders.
+            let recorded_path = std::path::PathBuf::from(&recorded);
+            let guarded = crate::torrent::guard_output_folder(&dir, recorded_path.clone());
+            if guarded != recorded_path {
+                item.set_output_dir(guarded.to_string_lossy().into_owned());
+            } else if guarded.parent() != Some(dir.as_path()) {
+                // Not under the dest dir (shouldn't happen: every recorded
+                // path is dir-joined): keep the old ensure-exists behavior.
+                let _ = std::fs::create_dir_all(&guarded);
+            }
+            guarded
         };
-        let _ = std::fs::create_dir_all(&dest);
         let settings = &self.settings;
         let seed_finished = settings.torrent_seed_finished();
         let peer_limit: Option<usize> = None; // rqbit default

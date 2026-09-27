@@ -553,7 +553,28 @@ async fn verify_quickjs_hash(part: &Path) -> Result<(), VideoError> {
     Ok(())
 }
 
+/// Pre-create guard for tool downloads and extracts: a planted symlink at
+/// `dest` would divert the bytes — and the later chmod — onto an arbitrary
+/// file, so refuse instead of following it. A stale regular file (crashed
+/// run) is removed so the caller can create atomically with `create_new`,
+/// which never follows a freshly planted link either (it just fails).
+fn refuse_symlink_target(dest: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(dest) {
+        Ok(m) if m.file_type().is_symlink() => Err(format!(
+            "refusing to write through symlink {}",
+            dest.display()
+        )),
+        Ok(_) => std::fs::remove_file(dest)
+            .map_err(|e| format!("couldn't clear {}: {e}", dest.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("couldn't inspect {}: {e}", dest.display())),
+    }
+}
+
 async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
+    // Refuse a planted symlink before any I/O: it would divert the download
+    // (and the later chmod) onto an arbitrary file.
+    refuse_symlink_target(dest)?;
     let response = reqwest::get(url)
         .await
         .map_err(|e| format!("couldn't fetch {url}: {e}"))?;
@@ -564,7 +585,10 @@ async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
     // a compromised endpoint must not be able to fill memory or disk before
     // we notice. (Currently only the quickjs download uses this helper.)
     let mut downloaded: u64 = 0;
-    let mut file = tokio::fs::File::create(dest)
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
         .await
         .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
     let mut stream = response.bytes_stream();
@@ -656,7 +680,13 @@ fn extract_ffmpeg_toolchain_inner(archive: &Path, dir: &Path) -> Result<PathBuf,
             _ => continue,
         };
         let dest = dir.join(tool);
-        let mut out = std::fs::File::create(&dest)
+        // A planted symlink would divert the extracted binary (and the
+        // chmod) onto an arbitrary file: refuse instead of following it.
+        refuse_symlink_target(&dest)?;
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
             .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
         std::io::copy(&mut entry, &mut out)
             .map_err(|e| format!("couldn't extract {}: {e}", dest.display()))?;
@@ -1145,4 +1175,74 @@ pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, St
     }
     let ff = ff.ok_or_else(VideoError::missing_tools)?;
     Ok((yt, ff))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Unique scratch dir per test (never a shared staging parent).
+    fn unique_dir(tag: &str) -> PathBuf {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("grab-tools-{tag}-{}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn refuse_symlink_target_rejects_link() {
+        let dir = unique_dir("symlink");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        std::fs::write(&target, b"precious").unwrap();
+        let link = dir.join("qjs.part");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = refuse_symlink_target(&link).unwrap_err();
+        assert!(err.contains("symlink"), "unexpected error: {err}");
+        // Untouched: the link still points at the intact target.
+        assert!(link.is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), b"precious");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refuse_symlink_target_clears_regular_file() {
+        let dir = unique_dir("regular");
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = dir.join("qjs.part");
+        std::fs::write(&part, b"stale").unwrap();
+
+        refuse_symlink_target(&part).unwrap();
+        assert!(!part.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refuse_symlink_target_missing_is_fine() {
+        let dir = unique_dir("missing");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        refuse_symlink_target(&dir.join("qjs.part")).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn download_to_file_refuses_symlink_before_network() {
+        let dir = unique_dir("dl-symlink");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        std::fs::write(&target, b"precious").unwrap();
+        let link = dir.join("qjs.part");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        // Unroutable URL: the symlink guard must fire before any I/O.
+        let err = download_to_file("http://127.0.0.1:1/nope", &link)
+            .await
+            .unwrap_err();
+        assert!(err.contains("symlink"), "unexpected error: {err}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"precious");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

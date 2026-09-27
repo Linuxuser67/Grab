@@ -302,6 +302,27 @@ fn output_folder_for(
     dest.join(dir)
 }
 
+/// Guard a torrent output folder at write time: `folder` is either the dest
+/// dir itself (flat download) or `dest/<leaf>`. The engine follows its
+/// output folder blindly, so a symlink planted at the leaf — after intake,
+/// or while the row sat queued — would divert the writes outside the
+/// download dir. The leaf goes through the same atomic create-and-dedupe as
+/// collection subfolders: a squatted name lands in a fresh folder instead
+/// of being followed, and an existing real dir is reused so resume keeps
+/// working.
+pub(crate) fn guard_output_folder(
+    dest: &std::path::Path,
+    folder: std::path::PathBuf,
+) -> std::path::PathBuf {
+    let (Some(parent), Some(leaf)) = (folder.parent(), folder.file_name()) else {
+        return folder;
+    };
+    if parent != dest {
+        return folder;
+    }
+    crate::file_names::create_guarded_dir(dest, &leaf.to_string_lossy())
+}
+
 /// Two or more files means the torrent downloads into its own folder.
 fn is_multi_file<T>(files: Option<&[T]>) -> bool {
     files.is_some_and(|f| f.len() >= 2)
@@ -891,6 +912,11 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
             }
         }
     };
+    // The engine follows its output folder blindly: re-guard it here for the
+    // recomputed (.torrent, no intake record) case — a symlink planted while
+    // queued would otherwise divert the writes. Already-guarded paths
+    // (magnets, recorded subfolders) reuse as-is.
+    let folder = guard_output_folder(&dest, folder);
     // Slot policy (resume ours, reject another row's hash): `claim_slot`.
     let resumed = {
         let mut active = ACTIVE.lock().await;

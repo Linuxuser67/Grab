@@ -949,6 +949,10 @@ msgstr ""
 msgid "Download interrupted"
 msgstr ""
 
+#: src/download.rs:895
+msgid "Download path escapes the download folder"
+msgstr ""
+
 #: src/download.rs:1262 src/download.rs:1474
 msgid "Incomplete download"
 msgstr ""

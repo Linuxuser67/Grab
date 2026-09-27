@@ -160,6 +160,10 @@ pub(crate) struct DistroPackages {
     /// only where a distro package is known — not on openSUSE, Void or
     /// Solus, where the command would fail.
     pub install_all: String,
+    /// Whether the distro has a known quickjs package (i.e. `install_all`
+    /// covers quickjs). Where false, the install-help dialog must also show
+    /// the upstream quickjs release link, or those distros dead-end.
+    pub has_quickjs_package: bool,
 }
 
 fn package_manager(id: &str) -> Option<&'static str> {
@@ -216,13 +220,13 @@ pub(crate) fn distro_packages(os_release: &str) -> Option<DistroPackages> {
     let id = id?;
     let pm =
         package_manager(id).or_else(|| id_like.split_whitespace().find_map(package_manager))?;
-    let quickjs = quickjs_package(id)
-        .or_else(|| id_like.split_whitespace().find_map(quickjs_package))
-        .map(|pkg| format!(" {pkg}"))
-        .unwrap_or_default();
+    let quickjs_pkg =
+        quickjs_package(id).or_else(|| id_like.split_whitespace().find_map(quickjs_package));
+    let quickjs = quickjs_pkg.map(|pkg| format!(" {pkg}")).unwrap_or_default();
     Some(DistroPackages {
         distro: name.unwrap_or(id).to_string(),
         install_all: format!("{pm} yt-dlp ffmpeg{quickjs}"),
+        has_quickjs_package: quickjs_pkg.is_some(),
     })
 }
 
@@ -1202,6 +1206,36 @@ mod tests {
     fn unique_dir(tag: &str) -> PathBuf {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         std::env::temp_dir().join(format!("grab-tools-{tag}-{}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn distro_packages_reports_quickjs_coverage() {
+        // Distros with a known quickjs package get it in the install
+        // command; distros without one (Void, Solus, openSUSE) omit it, and
+        // the dialog must fall back to the upstream release link there.
+        let fedora = distro_packages("ID=fedora\nNAME=\"Fedora Linux\"\n").unwrap();
+        assert!(fedora.has_quickjs_package);
+        assert!(
+            fedora.install_all.contains("quickjs-ng"),
+            "{}",
+            fedora.install_all
+        );
+
+        let void = distro_packages("ID=void\nNAME=\"Void Linux\"\n").unwrap();
+        assert!(!void.has_quickjs_package);
+        assert!(
+            !void.install_all.contains("quickjs"),
+            "{}",
+            void.install_all
+        );
+
+        let solus = distro_packages("ID=solus\nNAME=\"Solus\"\n").unwrap();
+        assert!(!solus.has_quickjs_package);
+
+        // ID_LIKE fallback: a derivative inherits the parent's packages.
+        let derivative =
+            distro_packages("ID=neon\nID_LIKE=\"ubuntu debian\"\nNAME=\"KDE neon\"\n").unwrap();
+        assert!(derivative.has_quickjs_package);
     }
 
     #[test]

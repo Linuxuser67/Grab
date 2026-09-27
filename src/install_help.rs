@@ -61,6 +61,16 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
                 ))
                 .build();
             command_row(&group, &gettext("Install tools"), &pkgs.install_all);
+            if !pkgs.has_quickjs_package {
+                // No distro quickjs package: the command above installs only
+                // yt-dlp and ffmpeg, so link the upstream quickjs releases
+                // instead of dead-ending.
+                link_row(
+                    &group,
+                    "quickjs",
+                    "https://github.com/quickjs-ng/quickjs/releases",
+                );
+            }
             page.add(&group);
         }
         None => {

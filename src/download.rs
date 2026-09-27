@@ -210,6 +210,10 @@ pub(crate) struct RemovedSnapshot {
     pub segments: Option<SegmentState>,
     /// Staged video source, so Undo on a video row keeps the Page marker instead of demoting it.
     pub video_source: Option<crate::media_types::VideoSource>,
+    /// Whether the engine ever started this row: an Undo-restored partial is
+    /// the row's own bytes, so the spawn gate must resume it instead of
+    /// refusing it Parabolic-style as a foreign file at the destination.
+    pub started: bool,
 }
 
 /// One validated queue entry awaiting the restore apply phase (module level so a mid-loop failure never leaves half-spawned engines).
@@ -1954,6 +1958,12 @@ impl DownloadManager {
         self.segment_state.borrow().get(&id).cloned()
     }
 
+    /// Whether the engine ever started this row (for Undo snapshots, which
+    /// are built outside this module).
+    pub(crate) fn has_started(&self, id: u64) -> bool {
+        self.started.borrow().contains(&id)
+    }
+
     /// Re-insert a previously removed download (Undo). Restored `Downloading` restarts as `Queued`; a restored bitmap resumes, a stale one is dropped at spawn.
     pub fn unremove(self: &Rc<Self>, snap: RemovedSnapshot) -> DownloadItem {
         let item = DownloadItem::new(
@@ -1971,6 +1981,12 @@ impl DownloadManager {
         item.set_output_dir(snap.output_dir);
         if let Some(st) = snap.segments {
             self.segment_state.borrow_mut().insert(item.id(), st);
+        }
+        // An Undo-restored row keeps its started mark under its new id: the
+        // partial on disk is its own bytes, so the spawn gate resumes it
+        // instead of failing it at DEST_EXISTS as a foreign file.
+        if snap.started {
+            self.started.borrow_mut().insert(item.id());
         }
         // Re-stage before insert (see `enqueue_video`): the persist carries it and `start_next` dispatches on it.
         if let Some(src) = snap.video_source {
@@ -2142,6 +2158,7 @@ impl DownloadManager {
                 output_dir: it.output_dir().to_string(),
                 segments: self.segments_of(it.id()),
                 video_source: self.video_source(it.id()),
+                started: self.has_started(it.id()),
             })
             .collect()
     }

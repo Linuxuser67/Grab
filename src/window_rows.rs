@@ -789,6 +789,7 @@ pub(crate) fn build_row(
                 output_dir: it.output_dir().to_string(),
                 segments: m.segments_of(id),
                 video_source: m.video_source(id),
+                started: m.has_started(id),
             };
             let name = snapshot.filename.clone();
             m.remove(id);

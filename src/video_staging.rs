@@ -117,9 +117,48 @@ pub fn ensure_staging_dir_in(root: &Path, dir: &Path) -> Result<PathBuf, VideoEr
             "staging root is not a real directory",
         )));
     }
-    std::fs::create_dir_all(dir).map_err(VideoError::staging)?;
+    // Leaf-first: a planted symlink at the leaf is refused before the old
+    // create_dir_all-then-verify ran. A same-root sibling link even passed
+    // the containment check below (it canonicalizes inside the root), so
+    // parts landed cross-item; other links were rejected, but only after the
+    // filesystem had already been touched through the link.
+    ensure_real_staging_leaf(dir)?;
     guarded_staging_dir(root, dir)
         .ok_or_else(|| VideoError::staging(gettext("staging directory escaped its root")))
+}
+
+/// The staging leaf must be a real directory, never a symlink: build the
+/// parent chain, then create the leaf atomically, so a pre-planted link is
+/// refused up front and a link racing for the name can't be followed into
+/// place. Staging names are item ids, so unlike shareable folders there is
+/// nothing to dedupe to — refusing loudly is the safe behavior.
+fn ensure_real_staging_leaf(dir: &Path) -> Result<(), VideoError> {
+    let refused = || VideoError::staging(gettext("staging directory is not a real directory"));
+    match std::fs::symlink_metadata(dir) {
+        // `symlink_metadata` doesn't follow the final component, so a link
+        // reads as a link even when its target is a dir.
+        Ok(md) if md.file_type().is_symlink() => Err(refused()),
+        Ok(md) if !md.file_type().is_dir() => Err(refused()),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = dir.parent() {
+                std::fs::create_dir_all(parent).map_err(VideoError::staging)?;
+            }
+            match std::fs::create_dir(dir) {
+                Ok(()) => Ok(()),
+                // Lost a race for the name: whoever won must still be a real
+                // dir — a link that appeared in the gap is refused.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    match std::fs::symlink_metadata(dir) {
+                        Ok(md) if md.file_type().is_dir() => Ok(()),
+                        _ => Err(refused()),
+                    }
+                }
+                Err(e) => Err(VideoError::staging(e)),
+            }
+        }
+        Err(e) => Err(VideoError::staging(e)),
+    }
 }
 
 /// The staging root itself must be a real directory. Canonicalizing a symlinked

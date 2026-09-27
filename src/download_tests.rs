@@ -1910,6 +1910,54 @@ fn delete_download_trashes_torrent_subfolder() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn torrent_folder_delete_path_never_follows_a_planted_link() {
+    // The delete/trash path recomputes the engine's folder from the archive:
+    // a symlink planted at that leaf must dedupe to a fresh folder, never
+    // resolve through the link onto its target.
+    let stem = format!("grab-torrentguard-{}", std::process::id());
+    let pseudo =
+        crate::torrent::archive_torrent_file(&format!("{stem}.torrent"), &multi_torrent_bytes())
+            .unwrap();
+    let base = std::env::temp_dir().join(format!("grab-torrentguard-{stem}"));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let dest = base.to_string_lossy().into_owned();
+
+    let outside = std::env::temp_dir().join(format!("grab-torrentguard-out-{stem}"));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("precious.txt"), b"do not touch").unwrap();
+    // Meta name is "bar": the recomputed leaf is <dest>/bar.
+    let link = base.join("bar");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+    // output_dir left empty: forces the recompute path, like rows whose
+    // folder was never recorded.
+    let item = DownloadItem::new(10, &pseudo, "mymeta", &dest);
+    assert!(item.output_dir().is_empty());
+    let folder = DownloadManager::torrent_folder(&item);
+    assert_ne!(
+        folder, link,
+        "the delete path must not resolve through the planted link"
+    );
+    assert!(
+        folder.is_dir()
+            && !std::fs::symlink_metadata(&folder)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+        "the delete path lands in a fresh real dir, not the link: {folder:?}"
+    );
+    assert!(outside.join("precious.txt").exists());
+    assert!(outside.read_dir().unwrap().count() == 1);
+
+    crate::torrent::delete_archive_for_url(&pseudo);
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
 #[test]
 fn dedupes() {
     let taken = |n: &str| matches!(n, "f.iso" | "f (1).iso");
@@ -5728,4 +5776,53 @@ fn parent_contained_in_dest_cases() {
 
     let _ = std::fs::remove_dir_all(&base);
     let _ = std::fs::remove_dir_all(&target);
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_contained_parent_checks_before_creating() {
+    // The ordering fix: an existing escaping parent is refused *without*
+    // creating the link's target through the link first.
+    let base = std::env::temp_dir().join(format!("grab-ensure-parent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let base_str = base.to_string_lossy().into_owned();
+
+    // Existing real dir: allowed, still a dir.
+    let real = base.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    assert!(ensure_contained_parent(&real, &base_str));
+    assert!(real.is_dir());
+
+    // Missing parent: created, then verified.
+    let fresh = base.join("fresh");
+    assert!(!fresh.exists());
+    assert!(ensure_contained_parent(&fresh, &base_str));
+    assert!(fresh.is_dir());
+
+    // Planted link to an existing outside dir: refused, target untouched.
+    let outside = std::env::temp_dir().join(format!("grab-ensure-outside-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let link = base.join("link");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    assert!(!ensure_contained_parent(&link, &base_str));
+    assert!(outside.read_dir().unwrap().next().is_none());
+
+    // Dangling link: refused, and the target is NOT created through it.
+    // (create_dir_all on a leaf link hits EEXIST on the link itself, so even
+    // the old order created nothing here — this pins the refusal contract.)
+    let dangling_target = std::env::temp_dir()
+        .join(format!("grab-ensure-dangle-{}", std::process::id()))
+        .join("never-created");
+    let dangling = base.join("dangling");
+    std::os::unix::fs::symlink(&dangling_target, &dangling).unwrap();
+    assert!(!ensure_contained_parent(&dangling, &base_str));
+    assert!(
+        !dangling_target.exists(),
+        "the link target must not be created through the link"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&outside);
 }

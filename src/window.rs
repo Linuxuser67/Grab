@@ -188,13 +188,15 @@ pub fn build_window(
         .default_height(settings.window_height().max(300))
         .build();
 
-    // Persistent sidebar: the add form lives in the split view's sidebar on
+    // Collapsible sidebar: the add form lives in the split view's sidebar on
     // the start side, with the filter navigation below it; the main UI is the
-    // content. Toasts stay outermost and overlay both.
-    let split = adw::NavigationSplitView::new();
+    // content. Collapsed by default; the header + button toggles it. Toasts
+    // stay outermost and overlay both.
+    let split = adw::OverlaySplitView::new();
     split.set_sidebar_position(gtk4::PackType::Start);
     split.set_min_sidebar_width(300.0);
     split.set_max_sidebar_width(340.0);
+    split.set_show_sidebar(false);
     let (add_panel, form_nav) = AddPanel::new(Rc::clone(&manager), &window, &split, &toasts);
     let sidebar_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     form_nav.set_vexpand(true);
@@ -209,7 +211,6 @@ pub fn build_window(
     let filter_expander = adw::ExpanderRow::builder()
         .title(gettext("Status"))
         .subtitle(gettext("All"))
-        .expanded(true)
         .build();
     let filter_names: Vec<String> = vec![
         gettext("All"),
@@ -254,34 +255,48 @@ pub fn build_window(
         })
     };
     refresh_filter_ui();
-    // Narrow windows navigate between the sidebar and the list instead of
-    // showing both; the sidebar gets its own headerbar there so the panel
-    // can be collapsed back. Hidden on wide windows where the sidebar is
-    // persistent.
+    // The sidebar's own headerbar: the main menu is integrated here, in the
+    // panel, with a button to collapse it back. Always shown with the
+    // sidebar (the HIG split-view pattern); on narrow windows this is the
+    // overlay's headerbar, the way back to the list.
     let sidebar_header = adw::HeaderBar::new();
-    let sidebar_add = gtk4::Button::builder()
-        .icon_name("list-add-symbolic")
+    let menu = gio::Menu::new();
+    menu.append(Some(&gettext("New Download")), Some("app.add-download"));
+    let section = gio::Menu::new();
+    section.append(Some(&gettext("Cancel All")), Some("app.cancel-all"));
+    section.append(Some(&gettext("Retry Failed")), Some("app.retry-failed"));
+    section.append(Some(&gettext("Clear Finished")), Some("app.clear-finished"));
+    section.append(
+        Some(&gettext("Open Download Folder")),
+        Some("app.open-folder"),
+    );
+    menu.append_section(None, &section);
+    let section2 = gio::Menu::new();
+    section2.append(Some(&gettext("Preferences")), Some("app.preferences"));
+    section2.append(Some(&gettext("Keyboard Shortcuts")), Some("app.shortcuts"));
+    section2.append(Some(&gettext("About")), Some("app.about"));
+    menu.append_section(None, &section2);
+    let menu_btn = gtk4::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .menu_model(&menu)
+        .tooltip_text(gettext("Main Menu"))
+        .build();
+    menu_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Main Menu"))]);
+    sidebar_header.pack_start(&menu_btn);
+    let sidebar_hide = gtk4::Button::builder()
+        .icon_name("go-previous-symbolic")
         .tooltip_text(gettext("Hide Sidebar"))
         .build();
-    sidebar_add.update_property(&[gtk4::accessible::Property::Label(&gettext("Hide Sidebar"))]);
-    sidebar_header.pack_end(&sidebar_add);
-    split
-        .bind_property("collapsed", &sidebar_header, "visible")
-        .sync_create()
-        .build();
+    sidebar_hide.update_property(&[gtk4::accessible::Property::Label(&gettext("Hide Sidebar"))]);
+    sidebar_header.pack_end(&sidebar_hide);
     {
         let sp = split.clone();
-        sidebar_add.connect_clicked(move |_| sp.set_show_content(true));
+        sidebar_hide.connect_clicked(move |_| sp.set_show_sidebar(false));
     }
     let sidebar_toolbar = adw::ToolbarView::new();
     sidebar_toolbar.add_top_bar(&sidebar_header);
     sidebar_toolbar.set_content(Some(&sidebar_box));
-    // NavigationSplitView only takes NavigationPage children.
-    let sidebar_page = adw::NavigationPage::builder()
-        .child(&sidebar_toolbar)
-        .tag("sidebar")
-        .build();
-    split.set_sidebar(Some(&sidebar_page));
+    split.set_sidebar(Some(&sidebar_toolbar));
     // Narrow windows navigate between the sidebar and the content instead of
     // squeezing both side by side: below 800px the split collapses.
     {
@@ -311,59 +326,6 @@ pub fn build_window(
         &gettext("Download Manager"),
     )));
 
-    let menu = gio::Menu::new();
-    menu.append(Some(&gettext("New Download")), Some("app.add-download"));
-    let section = gio::Menu::new();
-    section.append(Some(&gettext("Cancel All")), Some("app.cancel-all"));
-    section.append(Some(&gettext("Retry Failed")), Some("app.retry-failed"));
-    section.append(Some(&gettext("Clear Finished")), Some("app.clear-finished"));
-    section.append(
-        Some(&gettext("Open Download Folder")),
-        Some("app.open-folder"),
-    );
-    menu.append_section(None, &section);
-    let section2 = gio::Menu::new();
-    section2.append(Some(&gettext("Preferences")), Some("app.preferences"));
-    section2.append(Some(&gettext("Keyboard Shortcuts")), Some("app.shortcuts"));
-    section2.append(Some(&gettext("About")), Some("app.about"));
-    menu.append_section(None, &section2);
-    let menu_btn = gtk4::MenuButton::builder()
-        .icon_name("open-menu-symbolic")
-        .menu_model(&menu)
-        .tooltip_text(gettext("Main Menu"))
-        .build();
-    menu_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Main Menu"))]);
-    // Sidebar toggle for collapsed (narrow) windows: flips between the
-    // sidebar and the download list. Hidden while both fit side by side.
-    let sidebar_toggle = gtk4::ToggleButton::builder()
-        .icon_name("sidebar-show-symbolic")
-        .tooltip_text(gettext("Show Sidebar"))
-        .build();
-    sidebar_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext("Show Sidebar"))]);
-    header.pack_start(&sidebar_toggle);
-    split
-        .bind_property("collapsed", &sidebar_toggle, "visible")
-        .sync_create()
-        .build();
-    // The toggle mirrors sidebar visibility (active = sidebar shown), so it
-    // stays in sync when focus_form() reveals the sidebar too.
-    split
-        .bind_property("show-content", &sidebar_toggle, "active")
-        .flags(
-            glib::BindingFlags::BIDIRECTIONAL
-                | glib::BindingFlags::SYNC_CREATE
-                | glib::BindingFlags::INVERT_BOOLEAN,
-        )
-        .build();
-    {
-        split.connect_collapsed_notify(|s| {
-            if !s.is_collapsed() {
-                s.set_show_content(true);
-            }
-        });
-    }
-    header.pack_start(&menu_btn);
-
     let search_toggle = gtk4::ToggleButton::builder()
         .icon_name("system-search-symbolic")
         .tooltip_text(gettext("Search (Ctrl+F)"))
@@ -381,10 +343,10 @@ pub fn build_window(
         let panel = Rc::clone(&add_panel);
         let sp = split.clone();
         add_btn.connect_clicked(move |_| {
-            // In collapsed mode the + toggles the panel: collapse it when
-            // it's showing, otherwise reveal and focus the form.
-            if sp.is_collapsed() && !sp.shows_content() {
-                sp.set_show_content(true);
+            // The + toggles the sidebar: collapse it when it's showing,
+            // otherwise reveal and focus the form.
+            if sp.shows_sidebar() {
+                sp.set_show_sidebar(false);
             } else {
                 panel.focus_form(None);
             }
@@ -477,7 +439,6 @@ pub fn build_window(
         let search_btn = search_toggle.clone();
         let s = stack.clone();
         let l = list.clone();
-        let sp = split.clone();
         let query = Rc::clone(&query);
         let filter_sel = Rc::clone(&filter_sel);
         let filter_rows = Rc::clone(&filter_rows);
@@ -557,9 +518,9 @@ pub fn build_window(
                 }
             }
             let has_items = store.n_items() > 0;
-            // The sidebar form is the add UI on wide windows; the header +
-            // only shows while the sidebar is collapsed (narrow).
-            add.set_visible(has_items && sp.is_collapsed());
+            // The + toggles the sidebar and only shows when there are
+            // entries; the empty state's pill is the CTA otherwise.
+            add.set_visible(has_items);
             search_btn.set_visible(has_items);
             if !has_items {
                 // List is gone, so nothing to search.
@@ -601,8 +562,10 @@ pub fn build_window(
                 sel.set(i as u32);
                 refresh();
                 sync();
+                // In overlay (narrow) mode the filter pick dismisses the
+                // panel back to the list; on wide the panel stays as left.
                 if sp.is_collapsed() {
-                    sp.set_show_content(true);
+                    sp.set_show_sidebar(false);
                 }
             });
         }
@@ -721,11 +684,7 @@ pub fn build_window(
     toolbar.add_top_bar(&search_bar);
     toolbar.add_top_bar(&banner);
     toolbar.set_content(Some(&stack));
-    let content_page = adw::NavigationPage::builder()
-        .child(&toolbar)
-        .tag("content")
-        .build();
-    split.set_content(Some(&content_page));
+    split.set_content(Some(&toolbar));
     toasts.set_child(Some(&split));
     window.set_content(Some(toasts.as_ref()));
 

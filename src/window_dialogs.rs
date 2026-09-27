@@ -568,14 +568,14 @@ impl SessionCtl {
     }
 }
 
-/// The persistent add-download sidebar: an `AdwNavigationSplitView` sidebar
+/// The persistent add-download sidebar: an `AdwOverlaySplitView` sidebar
 /// hosting the add form, so adding a download is always one step away and no
-/// dialog or overlay covers the list. Owned by the window; the session is
+/// dialog covers the list. Owned by the window; the session is
 /// built once and each successful add resets the form. The header and
 /// empty-state buttons, the app action, and Open With / drag-and-drop focus
 /// the form via [`focus_form`].
 pub struct AddPanel {
-    split: adw::NavigationSplitView,
+    split: adw::OverlaySplitView,
     url_row: adw::EntryRow,
     mode_group: adw::ToggleGroup,
     torrent_choose: gtk4::Button,
@@ -595,7 +595,7 @@ impl AddPanel {
     pub fn new(
         manager: Rc<DownloadManager>,
         window: &adw::ApplicationWindow,
-        split: &adw::NavigationSplitView,
+        split: &adw::OverlaySplitView,
         toasts: &adw::ToastOverlay,
     ) -> (Rc<Self>, adw::NavigationView) {
         let toasts = toasts.clone();
@@ -608,11 +608,11 @@ impl AddPanel {
             toast,
             alive: Rc::new(Cell::new(true)),
             window: window.downgrade(),
-            // Narrow windows show the sidebar as a temporary panel; a
-            // successful add collapses back to the download list.
+            // A successful add collapses the sidebar back to the download list
+            // when it's acting as a temporary (narrow/overlay) panel.
             on_succeed: Rc::new(move || {
                 if split_for_succeed.is_collapsed() {
-                    split_for_succeed.set_show_content(true);
+                    split_for_succeed.set_show_sidebar(false);
                 }
             }),
         };
@@ -633,9 +633,7 @@ impl AddPanel {
     /// pre-filled, firing the same changed → debounce → lookup chain as
     /// typing, so video pages resolve through the media pipeline.
     pub fn focus_form(&self, initial_url: Option<&str>) {
-        if self.split.is_collapsed() {
-            self.split.set_show_content(false);
-        }
+        self.split.set_show_sidebar(true);
         if let Some(url) = initial_url.map(str::trim).filter(|u| !u.is_empty())
             && let Ok(normalized) = crate::download::normalize_url(url)
         {

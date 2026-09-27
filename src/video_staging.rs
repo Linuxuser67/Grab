@@ -62,7 +62,18 @@ pub fn clean_staging(dir: &Path) {
 /// removed only if nothing worth keeping remains, so it stays skipped by the
 /// id allocator.
 fn reclaim_orphan_staging_in(root: &Path, dir: &Path) {
-    if let Some(canon) = guarded_staging_dir(root, dir) {
+    let Some(canon) = guarded_staging_dir(root, dir) else {
+        return;
+    };
+    // Re-verify after canonicalization: the target must still be a numeric
+    // child of the root, so a symlink swapped in mid-sweep cannot divert the
+    // removal onto the root itself or a non-item path.
+    let is_item = canon
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.parse::<u64>().ok())
+        .is_some();
+    if is_item {
         sweep_staging_preserving_recordings(&canon);
     }
 }

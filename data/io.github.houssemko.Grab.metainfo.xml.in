@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.17" date="2026-09-27">
+      <description>
+        <ul>
+          <li>Live captures now stage their in-progress files in the hidden <code>.grab-video</code> folder next to the destination, like regular downloads. If a recording fails but the media is kept, the failure message now names the folder it was kept in.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.16" date="2026-09-27">
       <description>
         <ul>

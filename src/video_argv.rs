@@ -225,6 +225,11 @@ pub(crate) fn unified_download_argv(
     } else if merging {
         args.push("--merge-output-format".to_string());
         args.push(merge_ext.to_string());
+        if merge_ext == "mp4" {
+            // moov atom to the front so merged mp4s start playback without a full scan.
+            args.push("--postprocessor-args".to_string());
+            args.push(crate::video_tools::MERGER_FASTSTART_ARGS.to_string());
+        }
     }
     if job.embed_subs {
         args.push("--embed-subs".to_string());
@@ -280,6 +285,15 @@ pub(crate) fn live_capture_argv(
         "infinite".to_string(),
         "-o".to_string(),
         ytdlp_output_template(out),
+        // LL-HLS timestamp hygiene for yt-dlp's ffmpeg downloader: split A/V
+        // manifests drift when the broadcaster drops frames; the flags keep
+        // the tracks aligned without re-encoding. Scoped `ffmpeg:` so native
+        // HLS downloads ignore them. Must sit before the `--` URL terminator
+        // below: everything after `--` is a positional URL, so a flag placed
+        // past it becomes an extra "URL" and yt-dlp aborts with "Fixed output
+        // name but more than one file to download".
+        "--downloader-args".to_string(),
+        crate::video_tools::LIVE_DOWNLOADER_ARGS.to_string(),
     ]);
     if job.is_live && job.live_from_start {
         args.push("--live-from-start".to_string());
@@ -415,6 +429,9 @@ pub(crate) fn hls_download_argv(
     } else {
         args.push("--merge-output-format".to_string());
         args.push("mp4".to_string());
+        // moov atom to the front so merged mp4s start playback without a full scan.
+        args.push("--postprocessor-args".to_string());
+        args.push(crate::video_tools::MERGER_FASTSTART_ARGS.to_string());
     }
     if job.embed_subs {
         args.push("--embed-subs".to_string());

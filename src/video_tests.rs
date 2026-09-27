@@ -6762,6 +6762,63 @@ fn every_download_path_embeds_metadata() {
 }
 
 #[test]
+fn merged_mp4_moves_moov_to_front() {
+    // Merged mp4s get `-movflags +faststart` (scoped Merger+ffmpeg) so
+    // playback starts without a full scan.
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let ff = std::path::Path::new("/usr/bin/ffmpeg");
+    let mut job = direct_test_job();
+    job.quality = "1080".into();
+    let argv = unified_download_argv(&job, "a456/ba/b", true, "mp4", ff, out, None);
+    let i = argv
+        .iter()
+        .position(|a| a == "--postprocessor-args")
+        .expect("faststart ppa missing");
+    assert_eq!(argv[i + 1], crate::video_tools::MERGER_FASTSTART_ARGS);
+}
+
+#[test]
+fn merged_webm_skips_moov_flag() {
+    // movflags are meaningless outside the mp4 family; don't pass them.
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let ff = std::path::Path::new("/usr/bin/ffmpeg");
+    let mut job = direct_test_job();
+    job.quality = "1080".into();
+    let argv = unified_download_argv(&job, "a456/ba/b", true, "webm", ff, out, None);
+    assert!(
+        !argv.iter().any(|a| a == "--postprocessor-args"),
+        "{argv:?}"
+    );
+}
+
+#[test]
+fn audio_only_extraction_skips_moov_flag() {
+    // No merge happens on the audio-only path, so no Merger args either.
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let ff = std::path::Path::new("/usr/bin/ffmpeg");
+    let mut job = direct_test_job();
+    job.audio_only = true;
+    let argv = unified_download_argv(&job, "ba/b", false, "", ff, out, None);
+    assert!(
+        !argv.iter().any(|a| a == "--postprocessor-args"),
+        "{argv:?}"
+    );
+}
+
+#[test]
+fn hls_merge_moves_moov_to_front() {
+    let out = std::path::Path::new("/tmp/dl/v.mp4");
+    let ff = std::path::Path::new("/usr/bin/ffmpeg");
+    let job = direct_test_job();
+    let argv = hls_download_argv(&job, "h720", ff, out, None);
+    let i = argv
+        .iter()
+        .position(|a| a == "--postprocessor-args")
+        .expect("faststart ppa missing");
+    assert_eq!(argv[i + 1], crate::video_tools::MERGER_FASTSTART_ARGS);
+}
+
+#[test]
 fn unified_argv_extracts_audio_for_audio_only() {
     // Dialog audio-only choice on a direct row: extract to m4a (native
     // containers vary by codec) instead of merging; never pass subtitle flags.
@@ -6827,6 +6884,37 @@ fn live_capture_argv_never_takes_subtitles() {
         None,
     );
     assert_no_subtitle_tokens(&argv);
+}
+
+#[test]
+fn live_capture_argv_keeps_flags_before_url_terminator() {
+    // Everything after `--` is a positional URL: a flag appended past it
+    // becomes an extra "URL" and yt-dlp aborts with "Fixed output name but
+    // more than one file to download". The timestamp flags must ride inside
+    // the builder, ahead of the terminator.
+    let job = live_test_job();
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.mp4"),
+        None,
+    );
+    let dd = argv
+        .iter()
+        .position(|a| a == "--")
+        .expect("no -- terminator");
+    assert_eq!(
+        argv.len(),
+        dd + 2,
+        "only the page URL may follow --: {argv:?}"
+    );
+    assert_eq!(argv[dd + 1], job.page_url);
+    let i = argv
+        .iter()
+        .position(|a| a == "--downloader-args")
+        .expect("--downloader-args missing");
+    assert!(i < dd, "--downloader-args landed past --: {argv:?}");
+    assert_eq!(argv[i + 1], crate::video_tools::LIVE_DOWNLOADER_ARGS);
 }
 
 // ── subtitle embedding ───────────────────────────────────────────────

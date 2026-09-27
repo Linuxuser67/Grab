@@ -907,18 +907,14 @@ pub(crate) async fn run_live_ytdlp(
         let _ = tokio::fs::remove_file(&part).await;
         let _ = tokio::fs::remove_file(&state).await;
         let mut cmd = ytdlp_command(youtube_bin);
+        // The builder argv ends with `-- <page URL>`: nothing may be appended
+        // after it — anything past `--` becomes a positional URL.
         cmd.args(live_capture_argv(
             attempt,
             hls_format_id,
             &out,
             playlist_index,
         ));
-        // LL-HLS timestamp hygiene for yt-dlp's ffmpeg downloader: split A/V
-        // manifests drift when the broadcaster drops frames; the flags keep
-        // the tracks aligned without re-encoding. Scoped `ffmpeg:` so native
-        // HLS downloads ignore them.
-        cmd.arg("--downloader-args")
-            .arg(crate::video_tools::LIVE_DOWNLOADER_ARGS);
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
         let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
         // Without this guard a shutdown orphans the recorder (and the ffmpeg it may have started) still writing to the capture.

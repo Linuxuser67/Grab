@@ -2,6 +2,7 @@
 //! shared builders. UI leaf module (gtk/adw).
 
 use crate::download::{DownloadManager, RemovedSnapshot};
+use crate::download_details::show_download_details;
 use crate::download_pieces::{BLOCK_CELLS, aggregate};
 use crate::download_store::DownloadStatus;
 use adw::prelude::*;
@@ -438,6 +439,7 @@ pub(crate) fn build_row(
     let reveal_btn = icon_button("folder-open-symbolic", &gettext("Show in Folder"));
     let delete_btn = icon_button("user-trash-symbolic", &gettext("Move to Trash"));
     let remove_btn = icon_button("list-remove-symbolic", &gettext("Remove from list"));
+    let info_btn = icon_button("info-outline-symbolic", &gettext("Download Details"));
 
     top.append(&name);
     top.append(&status);
@@ -449,6 +451,7 @@ pub(crate) fn build_row(
     top.append(&reveal_btn);
     top.append(&delete_btn);
     top.append(&remove_btn);
+    top.append(&info_btn);
 
     let detail = gtk4::Label::builder()
         .label(item.detail())
@@ -800,6 +803,13 @@ pub(crate) fn build_row(
                 m2.unremove(snapshot.clone());
             });
             t.add_toast(toast);
+        });
+    }
+    {
+        let m = Rc::clone(manager);
+        let anchor = row.clone();
+        info_btn.connect_clicked(move |_| {
+            show_download_details(m.clone(), id, &anchor);
         });
     }
     row

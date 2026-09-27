@@ -1535,3 +1535,35 @@ msgid "1 download added"
 msgid_plural "{n} downloads added"
 msgstr[0] ""
 msgstr[1] ""
+
+#: src/download_details.rs:83
+msgid "Download Details"
+msgstr ""
+
+#: src/download_details.rs:105
+msgid "Status"
+msgstr ""
+
+#: src/download_details.rs:118
+msgid "Progress"
+msgstr ""
+
+#: src/download_details.rs:198
+msgid "Save location"
+msgstr ""
+
+#: src/download_details.rs:48
+msgid "Live video"
+msgstr ""
+
+#: src/download_details.rs:49
+msgid "Video"
+msgstr ""
+
+#: src/download_details.rs:50
+msgid "Audio"
+msgstr ""
+
+#: src/download_details.rs:51
+msgid "File"
+msgstr ""

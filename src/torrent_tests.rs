@@ -454,6 +454,7 @@ fn read_archive_bytes_rejects_unresolvable_urls() {
     assert_eq!(read_archive_bytes("torrent:/tmp/evil.torrent"), None);
 }
 
+#[cfg(unix)]
 #[test]
 fn guard_output_folder_dedupes_planted_symlink() {
     let base = std::env::temp_dir().join(format!("grab-torrent-guard-{}", std::process::id()));

@@ -137,10 +137,12 @@ pub(crate) fn command_row(
 /// quickjs releases when the distro has no quickjs package (the command then
 /// covers only yt-dlp and ffmpeg). Pure so tests pin the dialog's rows
 /// without needing a display.
-fn extra_link_rows(
-    _pkgs: &crate::video_tools::DistroPackages,
-) -> Vec<(&'static str, &'static str)> {
-    Vec::new()
+fn extra_link_rows(pkgs: &crate::video_tools::DistroPackages) -> Vec<(&'static str, &'static str)> {
+    if pkgs.has_quickjs_package {
+        Vec::new()
+    } else {
+        vec![("quickjs", "https://github.com/quickjs-ng/quickjs/releases")]
+    }
 }
 
 /// One outbound-link row for the manual fallback.

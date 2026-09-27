@@ -34,8 +34,9 @@ use crate::video_progress::{
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_runner::{
-    pick_subtitle_lang, remux_live_capture, resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp,
-    run_unified_ytdlp,
+    RecordingWatcherGuard, await_child, pick_subtitle_lang, remux_live_capture,
+    resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp,
+    spawn_recording_watcher,
 };
 use crate::video_spawn::{
     ProcessGroupGuard, await_group_quiescence, fetch_raw_dump_json, fetch_video_page, reap_child,
@@ -8217,6 +8218,141 @@ fn resolve_subtitle_lang_spawn_failure_drops_subtitles() {
     assert_eq!(res, Ok(None));
 }
 
+/// Fake yt-dlp for the subtitle probe that emits an info JSON larger than the
+/// OS pipe buffer (>64 KiB): real `--dump-json` output gets there on videos
+/// with many subtitle tracks.
+fn fake_ytdlp_big_probe(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-big-probe");
+    let script = "#!/bin/sh\nfor a in \"$@\"; do\n    if [ \"$a\" = \"--dump-json\" ]; then\n        printf '{\"subtitles\":{\"en\":[{\"url\":\"http://x/en\",\"ext\":\"vtt\"}]},\"pad\":\"'\n        head -c 100000 /dev/zero | tr '\\000' 'x'\n        printf '\"}'\n        exit 0\n    fi\ndone\nexit 1\n";
+    std::fs::write(&bin, probe_guard(script)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn resolve_subtitle_lang_drains_large_probe_output() {
+    // Regression: the probe waited for the child before draining stdout, so
+    // an info JSON larger than the pipe buffer stalled to the 60 s timeout
+    // and subtitles were silently dropped. The drain must run concurrently
+    // with the wait, so a big-but-fast probe resolves promptly.
+    let dir = std::env::temp_dir().join(format!("grab-probe-big-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_big_probe(&dir);
+    let job = probe_test_job(Some("en"));
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let start = std::time::Instant::now();
+    let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        &fake,
+        &job,
+        &mut abort_rx,
+        None,
+    ));
+    let elapsed = start.elapsed();
+    assert_eq!(res, Ok(Some("en".to_string())));
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "probe stalled on >64 KiB output: {elapsed:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn merge_wait_is_bounded_by_wall_clock() {
+    // Regression: a hung merge used to wait unbounded, parking the row and
+    // its slot forever. The merge wall-clock must bound it instead.
+    let mut child = tokio::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("sleep binary");
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        await_child(
+            &mut child,
+            true,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(2),
+        ),
+    )
+    .await;
+    let _ = child.kill().await;
+    match res {
+        Ok(Err(_elapsed)) => {}
+        other => panic!("hung merge was not bounded by the wall-clock: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn await_child_still_bounds_stall_when_not_merging() {
+    // The non-merge path is unchanged: the stall budget still applies while
+    // downloading.
+    let mut child = tokio::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("sleep binary");
+    let res = await_child(
+        &mut child,
+        false,
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(60),
+    )
+    .await;
+    let _ = child.kill().await;
+    assert!(
+        matches!(res, Err(_)),
+        "stall budget did not fire while downloading: {res:?}"
+    );
+}
+
+#[tokio::test]
+async fn live_retry_aborts_stale_recording_watcher() {
+    // Regression: the live-edge retry spawned a second file-growth watcher
+    // without stopping the first, so "Recording…" was announced twice. The
+    // guard must abort the stale watcher before the retry's watcher starts.
+    let dir = std::env::temp_dir().join(format!("grab-watcher-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let shell = dir.join("live.mp4.part");
+    let out = dir.join("live.mp4");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Attempt 1's watcher, aborted as the retry path does; the abort is
+    // confirmed before bytes land so no race can double-announce.
+    let w1 = spawn_recording_watcher(tx.clone(), shell.clone(), out.clone());
+    w1.abort();
+    assert!(w1.await.unwrap_err().is_cancelled());
+
+    // Attempt 2's watcher, owned by the guard like the live loop does.
+    let _w2 = RecordingWatcherGuard(spawn_recording_watcher(
+        tx.clone(),
+        shell.clone(),
+        out.clone(),
+    ));
+
+    // The retry records: bytes land.
+    tokio::fs::write(&shell, b"x").await.unwrap();
+
+    // Exactly one "Recording…" may arrive, even across several poll cycles.
+    let mut count = 0;
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(2));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            msg = rx.recv() => {
+                if msg.is_none() { break; }
+                count += 1;
+            }
+        }
+    }
+    assert_eq!(count, 1, "stale watcher double-announced Recording…");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn sidecar_path_for_cases() {
     // yt-dlp drops `--write-subs` sidecars as `<out-stem>.<lang>.srt`
@@ -9666,20 +9802,51 @@ fn impersonation_probe_false_on_probe_failure() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn impersonation_probe_runs_off_worker_inside_runtime() {
-    // The blocking probe must survive `block_in_place` on a real multi-thread
-    // runtime (it panics outside one, which the plain #[test]s above cover).
-    let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
-    rt.block_on(async {
-        let dir = impersonate_test_dir("rt");
-        let bin = fake_ytdlp_impersonate(
-            &dir,
-            Some("[info] Available impersonate targets\nClient      OS       Source\nChrome-131  macOS-14   curl_cffi\n"),
-        );
-        assert!(ytdlp_supports_impersonation(&bin));
-        let _ = std::fs::remove_dir_all(&dir);
-    });
+/// Fake yt-dlp whose `--list-impersonate-targets` sleeps `delay_secs` before
+/// printing the chrome table: models a slow binary for the non-blocking test.
+fn fake_ytdlp_slow_impersonate(dir: &std::path::Path, delay_secs: u64) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-slow-impersonate");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--list-impersonate-targets\" ]; then\nsleep {delay_secs}\nprintf '[info] Available impersonate targets\\nClient  OS  Source\\nChrome  -  curl_cffi\\n'\nexit 0\nfi\nexit 1\n"
+    );
+    std::fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[tokio::test]
+async fn impersonation_probe_never_blocks_the_async_worker() {
+    // Regression: the probe used to park the calling async worker for up to
+    // ~15 s. Now the first call returns the safe default immediately and the
+    // probe fills the cache in the background.
+    let dir = impersonate_test_dir("nonblocking");
+    let bin = fake_ytdlp_slow_impersonate(&dir, 3);
+    let start = std::time::Instant::now();
+    assert!(
+        !ytdlp_supports_impersonation(&bin),
+        "unknown support must default to false, not block"
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(1),
+        "sync probe blocked the async worker: {:?}",
+        start.elapsed()
+    );
+    // The background fill eventually records the real answer.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if ytdlp_supports_impersonation(&bin) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("background probe did not fill the cache");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -225,6 +225,11 @@ pub(crate) fn unified_download_argv(
     } else if merging {
         args.push("--merge-output-format".to_string());
         args.push(merge_ext.to_string());
+        if merge_ext == "mp4" {
+            // moov atom to the front so merged mp4s start playback without a full scan.
+            args.push("--postprocessor-args".to_string());
+            args.push(crate::video_tools::MERGER_FASTSTART_ARGS.to_string());
+        }
     }
     if job.embed_subs {
         args.push("--embed-subs".to_string());
@@ -415,6 +420,9 @@ pub(crate) fn hls_download_argv(
     } else {
         args.push("--merge-output-format".to_string());
         args.push("mp4".to_string());
+        // moov atom to the front so merged mp4s start playback without a full scan.
+        args.push("--postprocessor-args".to_string());
+        args.push(crate::video_tools::MERGER_FASTSTART_ARGS.to_string());
     }
     if job.embed_subs {
         args.push("--embed-subs".to_string());

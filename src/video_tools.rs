@@ -359,6 +359,12 @@ fn kill_probe(child: &mut std::process::Child) {
 pub(crate) const LIVE_DOWNLOADER_ARGS: &str =
     "ffmpeg:-fps_mode passthrough -copyts -avoid_negative_ts make_zero";
 
+/// `--postprocessor-args` value moving the moov atom to the front of merged
+/// mp4s so playback starts without a full scan. Scoped `Merger+ffmpeg` (per
+/// yt-dlp's `PP+EXE:ARGS` syntax) so metadata/subtitle fixups are untouched.
+/// mov-only: only passed when the merge target is mp4-family.
+pub(crate) const MERGER_FASTSTART_ARGS: &str = "Merger+ffmpeg:-movflags +faststart";
+
 /// Install just yt-dlp into the user library dir. Split from ffmpeg so the UI
 /// can report honest per-tool stages; the crate installer exposes no progress.
 /// Await from a spawned task — never block the GTK thread.

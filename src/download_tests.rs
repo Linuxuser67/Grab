@@ -5720,7 +5720,7 @@ fn parent_contained_in_dest_cases() {
     let _ = std::fs::remove_dir_all(&target);
     std::fs::create_dir_all(&target).unwrap();
     let link = base.join("link");
-    std::os::unix::fs::symlink(&target, &link).unwrap();
+    std::os::unix::fs::symlink(&target, link).unwrap();
     assert!(!parent_contained_in_dest(&link, &base_str));
 
     // Unresolvable paths fail closed.

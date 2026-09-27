@@ -463,7 +463,7 @@ fn guard_output_folder_dedupes_planted_symlink() {
         std::env::temp_dir().join(format!("grab-torrent-guard-target-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&target);
     std::fs::create_dir_all(&target).unwrap();
-    std::os::unix::fs::symlink(&target, &base.join("Big Torrent")).unwrap();
+    std::os::unix::fs::symlink(&target, base.join("Big Torrent")).unwrap();
 
     let guarded = guard_output_folder(&base, base.join("Big Torrent"));
     // Deduped past the squatter, never through it.

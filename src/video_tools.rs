@@ -276,38 +276,52 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
 /// Cached `--impersonate` support per yt-dlp binary path.
 static IMPERSONATE_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
 
-/// Whether `youtube_bin` supports `--impersonate` (curl_cffi present).
-/// Passing the flag to a binary without the dependency hard-fails every
-/// spawn ("Impersonate target ... is not available"), so probe once per
-/// binary path and cache the answer: a PATH-provided yt-dlp may lack it.
+/// Whether `--impersonate chrome` is known-supported for this binary.
+///
+/// Sync and never blocks an async worker: returns the cached probe result,
+/// or `false` (the safe default) while the probe is still running. The first
+/// call for a binary kicks the probe off on the blocking pool — the probe can
+/// take up to ~15 s on a wedged binary, so the download proceeds without the
+/// flag rather than parking a worker; the next download gets the cached
+/// answer. Outside a Tokio runtime (unit tests) the probe runs inline; the
+/// test fakes answer immediately.
 pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
     let cache = IMPERSONATE_SUPPORT.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock()
-        && let Some(&hit) = guard.get(youtube_bin)
     {
-        return hit;
+        let mut guard = cache.lock().unwrap();
+        if let Some(&hit) = guard.get(youtube_bin) {
+            return hit;
+        }
+        // Claim the key with the safe default so concurrent first calls don't
+        // spawn duplicate probes; the background fill overwrites it.
+        guard.insert(youtube_bin.to_path_buf(), false);
     }
-    // The probe sleeps in a poll loop and can take up to the deadline on a
-    // wedged binary: keep it off the async worker when there is one.
-    // Outside a multi-thread runtime (unit tests) it runs inline —
-    // `block_in_place` panics there.
-    let supported = if in_multi_thread_runtime() {
-        tokio::task::block_in_place(|| probe_impersonate_support(youtube_bin))
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::spawn(warm_impersonation_cache(youtube_bin.to_path_buf()));
+        false
     } else {
-        probe_impersonate_support(youtube_bin)
-    };
-    if let Ok(mut guard) = cache.lock() {
-        guard.insert(youtube_bin.to_path_buf(), supported);
+        let supported = probe_impersonate_support(youtube_bin);
+        cache
+            .lock()
+            .unwrap()
+            .insert(youtube_bin.to_path_buf(), supported);
+        supported
     }
-    supported
 }
 
-/// Whether we're on a Tokio multi-thread worker: the only context where
-/// `block_in_place` is legal (it panics outside a runtime and on
-/// current-thread runtimes).
-fn in_multi_thread_runtime() -> bool {
-    tokio::runtime::Handle::try_current()
-        .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+/// Probe once on the blocking pool and cache the result. Spawned in the
+/// background by `ytdlp_supports_impersonation`; the `unwrap_or(false)` keeps
+/// a panicking probe from taking the answer above the safe default.
+async fn warm_impersonation_cache(youtube_bin: std::path::PathBuf) {
+    let key = youtube_bin.clone();
+    let supported = tokio::task::spawn_blocking(move || probe_impersonate_support(&youtube_bin))
+        .await
+        .unwrap_or(false);
+    IMPERSONATE_SUPPORT
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(key, supported);
 }
 
 /// One-shot `--list-impersonate-targets` probe: a `Chrome` row without an

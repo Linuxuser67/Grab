@@ -1368,7 +1368,6 @@ fn test_video_info(page_url: &str) -> ProbeResult {
     ProbeResult::Single(VideoInfo {
         title: "T".into(),
         duration: None,
-        duration_string: None,
         page_url: page_url.into(),
         expires_at: None,
         formats: Box::default(),

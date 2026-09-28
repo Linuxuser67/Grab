@@ -948,7 +948,7 @@ fn wire_torrent_picker(
     });
 }
 
-fn show_video_playlist(v: &VideoStep, pl: &crate::media_types::PlaylistInfo) {
+fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
     hide_video_step(v);
     v.group.set_visible(true);
     v.audio.set_visible(true);
@@ -1968,7 +1968,6 @@ mod tests {
         crate::video::ProbeResult::Single(crate::video::VideoInfo {
             title: "Test title".into(),
             duration: None,
-            duration_string: None,
             page_url: "https://youtu.be/x".into(),
             expires_at: None,
             formats: Box::new([]),

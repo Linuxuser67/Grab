@@ -122,8 +122,6 @@ pub struct VideoInfo {
     /// Duration in seconds; read only in tests today.
     #[allow(dead_code)]
     pub duration: Option<i64>,
-    /// Preformatted duration from the extractor (e.g. "41:21").
-    pub duration_string: Option<Box<str>>,
     /// Canonical page URL — the identity persisted across restarts.
     pub page_url: Box<str>,
     /// Unix time after which every resolved format URL is stale; written at
@@ -158,7 +156,6 @@ impl VideoInfo {
         Self {
             title: v.title.clone().into_boxed_str(),
             duration: v.duration,
-            duration_string: v.duration_string.clone().map(String::into_boxed_str),
             page_url: page_url.into_boxed_str(),
             expires_at,
             formats: video_format_options(v, newest_first),

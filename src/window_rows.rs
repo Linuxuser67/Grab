@@ -220,13 +220,14 @@ pub(crate) enum RowMedia {
 
 impl RowMedia {
     /// Symbolic icon name; every name verified against the Adwaita theme so a
-    /// row can never render a broken-image icon.
+    /// row can never render a broken-image icon. HIG minimal: geometric
+    /// device icons over detailed MIME-type glyphs.
     pub(crate) fn icon_name(self) -> &'static str {
         match self {
             RowMedia::Live => "media-record-symbolic",
-            RowMedia::Audio => "audio-x-generic-symbolic",
+            RowMedia::Audio => "audio-headphones-symbolic",
             RowMedia::Torrent => "emblem-shared-symbolic",
-            RowMedia::Video => "video-x-generic-symbolic",
+            RowMedia::Video => "video-display-symbolic",
             RowMedia::File => "document-save-symbolic",
         }
     }
@@ -549,7 +550,7 @@ pub(crate) fn build_row(
     );
     let media_icon = gtk4::Image::builder()
         .icon_name(media.icon_name())
-        .pixel_size(32)
+        .pixel_size(16)
         .valign(gtk4::Align::Center)
         .build();
     media_icon.update_property(&[gtk4::accessible::Property::Label(&match media {

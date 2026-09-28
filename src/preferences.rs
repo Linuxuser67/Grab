@@ -605,7 +605,7 @@ pub fn show(
     }
     let video_page = adw::PreferencesPage::builder()
         .title(gettext("Media"))
-        .icon_name("video-x-generic-symbolic")
+        .icon_name("video-display-symbolic")
         .build();
     let video_quality_group = adw::PreferencesGroup::builder()
         .title(gettext("Quality"))

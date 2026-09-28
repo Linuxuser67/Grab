@@ -643,10 +643,6 @@ fn push_playlist_items_page(
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .spacing(6)
-        .margin_top(12)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
         .build();
     if crate::video_probe::playlist_truncated(&playlist) {
         let notice = gtk4::Label::builder()
@@ -823,10 +819,6 @@ fn push_torrent_picker_page(
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .spacing(6)
-        .margin_top(12)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
         .build();
     list_box.append(&grid);
     let error_caption = gtk4::Label::builder()
@@ -1049,13 +1041,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     card.set_margin_start(12);
     card.set_margin_end(12);
     card.add_css_class("card");
-    // Clamp the card width (HIG): a form card should not stretch full-width.
-    // AdwClamp centers the card and caps its width for comfortable density.
-    let clamp = adw::Clamp::builder()
-        .maximum_size(600)
-        .tightening_threshold(400)
-        .child(&card)
-        .build();
 
     // No in-card title: the card only opens from explicit "New Download"
     // affordances (+, Ctrl+N, the empty-state pill), so restating it is
@@ -1066,13 +1051,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .icon_name("window-close-symbolic")
         .css_classes(["flat", "circular"])
         .tooltip_text(gettext("Cancel"))
-        .valign(gtk4::Align::Center)
         .build();
     cancel_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Cancel"))]);
 
     let nav = adw::NavigationView::new();
     card.append(&nav);
-    revealer.set_child(Some(&clamp));
+    revealer.set_child(Some(&card));
 
     // Form page: URL row (entry + Add), the video preview block, then the
     // file / torrent / destination rows.
@@ -1086,38 +1070,34 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     form.set_margin_start(12);
     form.set_margin_end(12);
 
-    // gtk4::Entry (not adw::EntryRow): the row lives directly in a Box,
-    // not in a PreferencesGroup, so EntryRow loses its list styling and
-    // stretches wrong. A plain Entry is the correct inline widget.
-    let url_entry = gtk4::Entry::builder()
-        .placeholder_text(gettext("Paste a download link"))
+    let url_entry = adw::EntryRow::builder()
+        .title(gettext("Paste a download link"))
         .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
-    // The lookup spinner sits beside the entry (browser-address-bar style):
-    // no separate status line for the transient loading state.
+    // The lookup spinner lives in the entry's suffix slot
+    // (browser-address-bar style): no separate status line for the
+    // transient loading state. The suffix is unmapped when hidden, so
+    // showing it reserves space (minor shift, not a new row).
     let url_spinner = adw::Spinner::new();
     url_spinner.set_visible(false);
-    url_spinner.set_valign(gtk4::Align::Center);
+    url_entry.add_suffix(&url_spinner);
     let add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
         .use_underline(true)
         .css_classes(["suggested-action"])
-        .valign(gtk4::Align::Center)
         .build();
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
     let opts_toggle = gtk4::ToggleButton::builder()
         .icon_name("emblem-system-symbolic")
         .tooltip_text(gettext("Download options"))
-        .valign(gtk4::Align::Center)
         .build();
     opts_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Download options",
     ))]);
     let url_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     url_box.append(&url_entry);
-    url_box.append(&url_spinner);
     url_box.append(&add_btn);
     url_box.append(&opts_toggle);
     url_box.append(&cancel_btn);

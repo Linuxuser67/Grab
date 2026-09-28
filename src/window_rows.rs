@@ -192,6 +192,41 @@ pub(crate) fn stop_copy(is_live: bool) -> StopCopy {
     }
 }
 
+/// What a download row is, for its leading icon: media identity, not state.
+/// State already shows in the status label, spinner, progress bar and action
+/// buttons, so the icon is fixed when the row is built and never refreshes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowMedia {
+    /// Live capture; the icon renders in the error color while it records.
+    Live,
+    /// Audio-only video download.
+    Audio,
+    /// Magnet link or .torrent file (peer-shared, hence the shared emblem).
+    Torrent,
+    /// Ordinary video page.
+    Video,
+    /// Plain direct file of unknown type.
+    File,
+}
+
+impl RowMedia {
+    /// Symbolic icon name; every name verified against the Adwaita theme so a
+    /// row can never render a broken-image icon.
+    pub(crate) fn icon_name(self) -> &'static str {
+        // RED: withheld; the table lands in the GREEN commit.
+        let _ = self;
+        ""
+    }
+}
+
+/// Classify a row's media from manager lookups. Pure over the lookups so the
+/// mapping is unit-testable; `build_row` does the GTK and the gettext.
+pub(crate) fn row_media(live: bool, audio_only: bool, torrent: bool, page: bool) -> RowMedia {
+    // RED: withheld; the mapping lands in the GREEN commit.
+    let _ = (live, audio_only, torrent, page);
+    unimplemented!("row_media mapping lands in the GREEN commit")
+}
+
 /// Set a row button's icon, tooltip, and screen-reader label from one verb so
 /// the accessible name can't drift off the visual one.
 fn set_toggle_verb(btn: &gtk4::Button, icon: &str, tip: &str) {

@@ -1,7 +1,7 @@
 use crate::download::DownloadStatus;
 use crate::inline_add::{fmt_item_duration, playlist_count_label};
 use crate::media_types::PlaylistKind;
-use crate::window_rows::{PulseTick, StopCopy, pulse_tick, should_pulse, stop_copy};
+use crate::window_rows::{PulseTick, RowMedia, StopCopy, pulse_tick, row_media, should_pulse, stop_copy};
 
 #[test]
 fn stop_copy_distinguishes_a_live_capture_from_a_discard() {
@@ -120,4 +120,41 @@ fn playlist_count_label_zero_uses_plural() {
         "0 highlights"
     );
     assert_eq!(playlist_count_label(PlaylistKind::Playlist, 0), "0 items");
+}
+
+#[test]
+fn row_media_live_wins_over_everything() {
+    // A live audio-only torrent page is still a live capture first.
+    assert_eq!(row_media(true, true, true, true), RowMedia::Live);
+}
+
+#[test]
+fn row_media_audio_beats_torrent_and_page() {
+    assert_eq!(row_media(false, true, true, true), RowMedia::Audio);
+}
+
+#[test]
+fn row_media_torrent_beats_plain_video_page() {
+    assert_eq!(row_media(false, false, true, true), RowMedia::Torrent);
+}
+
+#[test]
+fn row_media_video_page_beats_plain_file() {
+    assert_eq!(row_media(false, false, false, true), RowMedia::Video);
+}
+
+#[test]
+fn row_media_plain_direct_falls_back_to_file() {
+    assert_eq!(row_media(false, false, false, false), RowMedia::File);
+}
+
+#[test]
+fn row_media_icon_names_are_real_adwaita_symbolic_names() {
+    // Each name checked against /usr/share/icons/Adwaita/symbolic: a missing
+    // name would render a broken-image icon in every row.
+    assert_eq!(RowMedia::Live.icon_name(), "media-record-symbolic");
+    assert_eq!(RowMedia::Audio.icon_name(), "audio-x-generic-symbolic");
+    assert_eq!(RowMedia::Torrent.icon_name(), "emblem-shared-symbolic");
+    assert_eq!(RowMedia::Video.icon_name(), "video-x-generic-symbolic");
+    assert_eq!(RowMedia::File.icon_name(), "document-save-symbolic");
 }

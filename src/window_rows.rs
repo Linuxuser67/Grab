@@ -473,105 +473,36 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
     })
 }
 
-/// Pops up a details dialog when a download fails: HIG simple dialog, no
-/// header bar — floating close button, heading, scrollable monospace log,
-/// and a Copy button bottom-right.
+/// Pops up a details dialog when a download fails, using AdwAlertDialog:
+/// heading + filename body, the log as extra-child, Copy as the suggested
+/// response.
 fn show_failure_dialog(parent: &gtk4::Widget, item: &crate::download::DownloadItem) {
-    let dialog = adw::Dialog::new();
-    dialog.set_title(&gettext("Download Failed"));
-    dialog.set_content_width(480);
-    dialog.set_content_height(380);
+    let dialog = adw::AlertDialog::new(
+        Some(&gettext("Download Failed")),
+        Some(&item.filename()),
+    );
 
-    // Overlay holds the floating close button over the content.
-    let overlay = gtk4::Overlay::new();
-
-    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-
-    let heading = gtk4::Label::builder()
-        .label(gettext("Download Failed"))
-        .css_classes(["title-1"])
-        .halign(gtk4::Align::Start)
-        .margin_top(24)
-        .margin_start(24)
-        .margin_end(24)
-        .build();
-    let sub = gtk4::Label::builder()
-        .label(item.filename())
-        .css_classes(["dimmed"])
-        .halign(gtk4::Align::Start)
-        .ellipsize(gtk4::pango::EllipsizeMode::Middle)
-        .margin_top(2)
-        .margin_start(24)
-        .margin_end(24)
-        .margin_bottom(14)
-        .build();
-    body.append(&heading);
-    body.append(&sub);
-
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .vexpand(true)
-        .hexpand(true)
-        .margin_start(24)
-        .margin_end(24)
-        .css_classes(["card"])
-        .build();
     let text = gtk4::TextView::builder()
         .editable(false)
         .cursor_visible(false)
         .monospace(true)
         .wrap_mode(gtk4::WrapMode::WordChar)
-        .margin_top(10)
-        .margin_bottom(10)
-        .margin_start(12)
-        .margin_end(12)
         .build();
     text.buffer().set_text(&item.detail());
-    scrolled.set_child(Some(&text));
-    body.append(&scrolled);
+    dialog.set_extra_child(Some(&text));
 
-    let actions = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .halign(gtk4::Align::End)
-        .spacing(8)
-        .margin_top(16)
-        .margin_bottom(20)
-        .margin_start(24)
-        .margin_end(24)
-        .build();
-    let copy_btn = gtk4::Button::builder()
-        .label(gettext("Copy"))
-        .css_classes(["suggested-action"])
-        .build();
-    actions.append(&copy_btn);
-    body.append(&actions);
+    dialog.add_responses(&[("copy", &gettext("Copy")), ("close", &gettext("Close"))]);
+    dialog.set_response_appearance("copy", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("copy"));
+    dialog.set_close_response("close");
 
-    overlay.set_child(Some(&body));
-
-    let close_btn = gtk4::Button::builder()
-        .icon_name("window-close-symbolic")
-        .css_classes(["flat", "circular"])
-        .tooltip_text(gettext("Close"))
-        .halign(gtk4::Align::End)
-        .valign(gtk4::Align::Start)
-        .margin_top(8)
-        .margin_end(8)
-        .build();
-    overlay.add_overlay(&close_btn);
-
-    dialog.set_child(Some(&overlay));
-
-    {
-        let dialog_weak = dialog.downgrade();
-        close_btn.connect_clicked(move |_| {
-            if let Some(dialog) = dialog_weak.upgrade() {
-                dialog.close();
-            }
-        });
-    }
     {
         let detail = item.detail();
-        copy_btn.connect_clicked(move |btn| {
-            btn.clipboard().set_text(&detail);
+        let clipboard = parent.clipboard();
+        dialog.connect_response(None, move |_dialog, response| {
+            if response == "copy" {
+                clipboard.set_text(&detail);
+            }
         });
     }
 

@@ -200,7 +200,7 @@ struct FormatOption {
 /// The video preview block inside the form: exactly one state row shows at a
 /// time, driven by the probe below.
 struct VideoStep {
-    status: adw::ActionRow,
+    loading: gtk4::Box,
     group: adw::PreferencesGroup,
     name: adw::EntryRow,
     revert: gtk4::Button,
@@ -222,7 +222,7 @@ struct VideoStep {
 
 fn hide_video_step(v: &VideoStep) {
     v.group.set_visible(false);
-    v.status.set_visible(false);
+    v.loading.set_visible(false);
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
@@ -259,8 +259,7 @@ fn reset_video_step(step: &VideoStep) {
 
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
-    v.group.set_visible(true);
-    v.status.set_visible(true);
+    v.loading.set_visible(true);
 }
 
 fn show_video_ready(v: &VideoStep) {
@@ -1071,13 +1070,23 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // Video preview block: hidden until a lookup runs; exactly one state shows.
     let video_group = adw::PreferencesGroup::new();
     video_group.set_visible(false);
-    let video_status = adw::ActionRow::builder()
-        .title(gettext("Looking up…"))
-        .build();
+    // The loading state is a bare spinner + label, not a group row: the
+    // card chrome is disproportionate for a transient status line.
+    let video_loading = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    video_loading.set_margin_top(6);
+    video_loading.set_margin_bottom(6);
+    video_loading.set_margin_start(4);
     let video_spinner = gtk4::Spinner::new();
     video_spinner.set_spinning(true);
-    video_status.add_suffix(&video_spinner);
-    video_group.add(&video_status);
+    let video_loading_label = gtk4::Label::builder()
+        .label(gettext("Looking up…"))
+        .css_classes(["dimmed"])
+        .halign(gtk4::Align::Start)
+        .valign(gtk4::Align::Center)
+        .build();
+    video_loading.append(&video_spinner);
+    video_loading.append(&video_loading_label);
+    video_loading.set_visible(false);
     let video_name = adw::EntryRow::builder()
         .title(gettext("File name"))
         .activates_default(false)
@@ -1131,7 +1140,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_error.add_suffix(&video_retry_btn);
     video_group.add(&video_error);
     let step = Rc::new(VideoStep {
-        status: video_status,
+        loading: video_loading.clone(),
         group: video_group.clone(),
         name: video_name,
         revert: video_revert_btn,
@@ -1154,6 +1163,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             format.set_sensitive(!sw.is_active());
         });
     }
+    form.append(&video_loading);
     form.append(&video_group);
 
     let group = adw::PreferencesGroup::new();

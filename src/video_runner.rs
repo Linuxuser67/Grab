@@ -1144,7 +1144,7 @@ pub(crate) async fn run_live_ytdlp(
         // stall deadline; a stdout line or output growth pushes the deadline
         // out, so a progressing capture is never killed. Only true silence
         // trips it, and the partial is still adopted below.
-        let (aborted, discarded) = 'wait: loop {
+        let (aborted, discarded) = loop {
             let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
             tokio::select! {
                 biased;

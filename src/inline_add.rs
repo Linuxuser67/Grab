@@ -397,24 +397,28 @@ fn submit_probed_single(
             .unwrap_or_else(|| manager.settings().video_quality()),
         None => manager.settings().video_quality(),
     };
-    match manager.enqueue_video(
-        &v.page_url,
-        Some(&dest.borrow()),
-        name,
-        crate::media_types::VideoChoices {
-            quality,
-            audio_only,
-            video_format_id: format_id,
-            is_live: v.is_live,
-            playlist_item_id: None,
+    enqueue_and_close(
+        dest,
+        close_card,
+        |d| {
+            manager.enqueue_video(
+                &v.page_url,
+                d,
+                name,
+                crate::media_types::VideoChoices {
+                    quality,
+                    audio_only,
+                    video_format_id: format_id,
+                    is_live: v.is_live,
+                    playlist_item_id: None,
+                },
+            )
         },
-    ) {
-        Ok(_) => close_card(),
-        Err(e) => {
-            show_video_error(step, &e);
+        |e| {
+            show_video_error(step, e);
             set_lookup_add(lookup_add, true);
-        }
-    }
+        },
+    );
 }
 
 /// Dispatch a fresh preview to its submit path: singles queue with their pinned
@@ -466,6 +470,24 @@ fn fallback_plain_failed(
     );
     show_video_error(step, error);
     set_lookup_add(lookup_add, true);
+}
+
+/// Enqueue with the card's destination, then collapse the card on success.
+///
+/// RED: this keeps the pre-fix shape — a `dest.borrow()` temporary in the
+/// `match` scrutinee, which lives into the arms. `close_card()` re-borrows
+/// the same cell mutably (it resets the destination), so every successful
+/// Add panics with "RefCell already borrowed" and aborts the app.
+fn enqueue_and_close<T>(
+    dest: &Rc<RefCell<String>>,
+    close_card: &Rc<dyn Fn()>,
+    enqueue: impl FnOnce(Option<&str>) -> Result<T, String>,
+    on_err: impl FnOnce(&str),
+) {
+    match enqueue(Some(&dest.borrow())) {
+        Ok(_) => close_card(),
+        Err(e) => on_err(&e),
+    }
 }
 
 /// Queue a probed link as a plain file and collapse the card: the fallback when
@@ -757,18 +779,15 @@ fn push_torrent_picker_page(
             }
             // All on means no filter: pass None, not every index.
             let only = (selected.len() < checks.len()).then_some(selected);
-            match manager.enqueue_torrent_file(
-                bytes.clone(),
-                &file_name,
-                Some(&dest_dir.borrow()),
-                only,
-            ) {
-                Ok(_) => close_card(),
-                Err(e) => {
-                    error_label.set_text(&e);
+            enqueue_and_close(
+                &dest_dir,
+                &close_card,
+                |d| manager.enqueue_torrent_file(bytes.clone(), &file_name, d, only),
+                |e| {
+                    error_label.set_text(e);
                     error_label.set_visible(true);
-                }
-            }
+                },
+            );
         });
     }
 
@@ -829,13 +848,15 @@ fn wire_torrent_picker(
                 }
             };
             if entries.len() <= 1 {
-                match m.enqueue_torrent_file(bytes, &name, Some(&dd.borrow()), None) {
-                    Ok(_) => close_card(),
-                    Err(e) => {
-                        error_label.set_text(&e);
+                enqueue_and_close(
+                    &dd,
+                    &close_card,
+                    |d| m.enqueue_torrent_file(bytes, &name, d, None),
+                    |e| {
+                        error_label.set_text(e);
                         error_label.set_visible(true);
-                    }
-                }
+                    },
+                );
                 return;
             }
             push_torrent_picker_page(&nav, m, dd, close_card, name, bytes, entries);
@@ -1541,18 +1562,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 return;
             }
             let fname = file_row.text().trim().to_string();
-            match m.enqueue(
-                &url,
-                Some(&dd.borrow()),
-                if fname.is_empty() {
-                    None
-                } else {
-                    Some(fname.as_str())
+            enqueue_and_close(
+                &dd,
+                &close_card,
+                |d| {
+                    m.enqueue(
+                        &url,
+                        d,
+                        if fname.is_empty() {
+                            None
+                        } else {
+                            Some(fname.as_str())
+                        },
+                    )
                 },
-            ) {
-                Ok(_) => close_card(),
-                Err(e) => fail(&e),
-            }
+                |e| fail(e),
+            );
         })
     };
     {
@@ -1962,5 +1987,41 @@ mod tests {
             generation,
             false
         ));
+    }
+
+    #[test]
+    fn enqueue_and_close_releases_dest_borrow_before_close() {
+        // Regression: every Add path used to run
+        // `match enqueue(..., Some(&dest.borrow())) { Ok(_) => close_card(), ... }`.
+        // The borrow temporary in a match scrutinee lives into the arms, so
+        // close_card()'s mutable re-borrow (it resets the destination) panicked
+        // with "RefCell already borrowed" and aborted the app on every
+        // successful video, plain, and torrent Add.
+        let dest = Rc::new(RefCell::new("/dl".to_string()));
+        let closed = Rc::new(std::cell::Cell::new(false));
+        let closed2 = Rc::clone(&closed);
+        let dest2 = Rc::clone(&dest);
+        let close: Rc<dyn Fn()> = Rc::new(move || {
+            dest2.replace("/default".to_string());
+            closed2.set(true);
+        });
+        let seen = Rc::new(RefCell::new(String::new()));
+        let seen2 = Rc::clone(&seen);
+        enqueue_and_close(
+            &dest,
+            &close,
+            |d| {
+                seen2.replace(d.unwrap_or("?").to_string());
+                Ok::<(), String>(())
+            },
+            |_| panic!("enqueue reported success"),
+        );
+        assert!(closed.get(), "card closes after a successful enqueue");
+        assert_eq!(seen.borrow().as_str(), "/dl");
+        assert_eq!(
+            dest.borrow().as_str(),
+            "/default",
+            "close ran with the destination borrow released"
+        );
     }
 }

@@ -485,11 +485,26 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
 /// Column count for a picker grid, from the entry count: a pair stays a
 /// readable single column; more entries flow into up to four columns.
 /// Fixed per picker (set via min/max-columns) — selecting never reflows.
-/// A picker list (HIG `GtkListView` with `GtkMultiSelection` and
-/// `AdwActionRow`): click toggles selection, no checkboxes. All entries
-/// start selected, matching the old checked-by-default rows. Returns the
-/// view and its selection model for the caller to wire.
-fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::MultiSelection) {
+/// Adaptive columns for the picker grid: no empty trailing cells.
+/// 1-3 items fill one row; 4 splits 2x2; larger counts use the widest
+/// grid (up to 4 columns) with minimal empty spaces.
+fn picker_columns(count: usize) -> u32 {
+    match count {
+        0..=3 => count.max(1) as u32,
+        4 => 2,
+        5..=6 => 3,
+        7..=8 => 4,
+        9 => 3, // 3x3 perfect
+        _ => 4, // Cap at 4; larger sets scroll
+    }
+}
+
+/// A picker grid (HIG `GtkGridView` with `GtkMultiSelection` and
+/// `AdwActionRow` cells): click toggles selection, no checkboxes. Columns
+/// adapt to the item count so there are no empty trailing cells. All
+/// entries start selected, matching the old checked-by-default rows.
+/// Returns the view and its selection model for the caller to wire.
+fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::MultiSelection) {
     let store = gio::ListStore::new::<gtk4::StringObject>();
     for (title, _) in entries.iter() {
         store.append(&gtk4::StringObject::new(title));
@@ -517,11 +532,14 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::Mul
         });
     }
 
-    let list = gtk4::ListView::builder()
+    let columns = picker_columns(entries.len());
+    let grid = gtk4::GridView::builder()
         .model(&selection)
         .factory(&factory)
+        .min_columns(columns)
+        .max_columns(columns)
         .build();
-    (list, selection)
+    (grid, selection)
 }
 
 /// Wire the pickers' bottom action bar to a grid's multi-selection: the
@@ -599,7 +617,7 @@ fn push_playlist_items_page(
             })
             .collect(),
     );
-    let (list, selection) = picker_list(Rc::clone(&entries));
+    let (grid, selection) = picker_grid(Rc::clone(&entries));
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -617,7 +635,7 @@ fn push_playlist_items_page(
             .build();
         list_box.append(&notice);
     }
-    list_box.append(&list);
+    list_box.append(&grid);
     // The error caption lives under the grid, like the old row list.
     let error_caption = gtk4::Label::builder()
         .label("")
@@ -775,13 +793,13 @@ fn push_torrent_picker_page(
             })
             .collect(),
     );
-    let (list, selection) = picker_list(grid_entries);
+    let (grid, selection) = picker_grid(grid_entries);
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .spacing(6)
         .build();
-    list_box.append(&list);
+    list_box.append(&grid);
     let error_caption = gtk4::Label::builder()
         .label("")
         .css_classes(["error", "caption"])
@@ -1934,6 +1952,23 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picker_columns_adapts_without_empty_cells() {
+        // 1-3 items fill a single row; 4 splits 2x2; larger counts use
+        // the widest grid with minimal trailing empty cells.
+        assert_eq!(picker_columns(0), 1);
+        assert_eq!(picker_columns(1), 1);
+        assert_eq!(picker_columns(2), 2);
+        assert_eq!(picker_columns(3), 3);
+        assert_eq!(picker_columns(4), 2);
+        assert_eq!(picker_columns(5), 3);
+        assert_eq!(picker_columns(6), 3);
+        assert_eq!(picker_columns(7), 4);
+        assert_eq!(picker_columns(8), 4);
+        assert_eq!(picker_columns(9), 3);
+        assert_eq!(picker_columns(12), 4);
+    }
 
     fn dummy_probe() -> crate::video::ProbeResult {
         crate::video::ProbeResult::Single(crate::video::VideoInfo {

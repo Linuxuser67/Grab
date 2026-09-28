@@ -473,6 +473,59 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
     })
 }
 
+/// Pops up a details dialog when a download fails: the error log in a
+/// scrollable monospace view with a Copy button in the header (HIG:
+/// dialog actions live in the header bar).
+fn show_failure_dialog(parent: &gtk4::Widget, item: &crate::download::DownloadItem) {
+    let dialog = adw::Dialog::new();
+    dialog.set_title(&gettext("Download Failed"));
+    dialog.set_content_width(480);
+    dialog.set_content_height(360);
+
+    let toolbar = adw::ToolbarView::new();
+    let hb = adw::HeaderBar::new();
+    hb.set_show_start_title_buttons(false);
+    hb.set_show_end_title_buttons(true);
+    hb.set_title_widget(Some(&adw::WindowTitle::new(
+        &gettext("Download Failed"),
+        Some(&item.filename()),
+    )));
+    let copy_btn = gtk4::Button::builder()
+        .icon_name("edit-copy-symbolic")
+        .tooltip_text(gettext("Copy error details"))
+        .build();
+    hb.pack_end(&copy_btn);
+    toolbar.add_top_bar(&hb);
+
+    let scrolled = gtk4::ScrolledWindow::builder()
+        .vexpand(true)
+        .hexpand(true)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    let text = gtk4::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .monospace(true)
+        .wrap_mode(gtk4::WrapMode::WordChar)
+        .build();
+    text.buffer().set_text(&item.detail());
+    scrolled.set_child(Some(&text));
+    toolbar.set_content(Some(&scrolled));
+    dialog.set_child(Some(&toolbar));
+
+    {
+        let detail = item.detail();
+        copy_btn.connect_clicked(move |btn| {
+            btn.clipboard().set_text(&detail);
+        });
+    }
+
+    dialog.present(Some(parent));
+}
+
 pub(crate) fn build_row(
     item: &crate::download::DownloadItem,
     manager: &Rc<DownloadManager>,
@@ -908,6 +961,18 @@ pub(crate) fn build_row(
                 m2.unremove(snapshot.clone());
             });
             t.add_toast(toast);
+        });
+    }
+    // Pop the failure dialog on the transition to Failed (not on every
+    // refresh: the notify fires once per status change).
+    {
+        let row_weak = row.downgrade();
+        item.connect_notify(Some("status"), move |item, _| {
+            if item.status() == DownloadStatus::Failed {
+                if let Some(row) = row_weak.upgrade() {
+                    show_failure_dialog(&row, item);
+                }
+            }
         });
     }
     row

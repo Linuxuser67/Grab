@@ -295,20 +295,9 @@ pub fn filename_from_url(url_str: &str) -> String {
         .unwrap_or_else(|| "index.html".to_string())
 }
 
-/// Human-readable byte size (base-1024, English units).
+/// Human-readable byte size via GLib's `g_format_size` (SI base-1000, localized).
 pub(crate) fn fmt_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut v = n as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < 4 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", UNITS[u])
-    }
+    glib::format_size(n).to_string()
 }
 
 /// On-disk size via GIO's `measure_disk_usage` (apparent size, no symlink

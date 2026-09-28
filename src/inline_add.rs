@@ -590,8 +590,10 @@ fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
     let factory = gtk4::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
         let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-        // Compact card cell: title over a dimmed subtitle. Bound in
-        // `connect_bind` below via the fixed child order.
+        // Flat cell: title over a dimmed subtitle, no card chrome — HIG
+        // grid items (Nautilus, Loupe) don't card every cell. Selection
+        // highlight comes from the view. Bound in `connect_bind` below
+        // via the fixed child order.
         let title = gtk4::Label::builder()
             .halign(gtk4::Align::Start)
             .ellipsize(gtk4::pango::EllipsizeMode::End)
@@ -606,7 +608,10 @@ fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
         let cell = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
             .spacing(2)
-            .css_classes(["card"])
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(6)
+            .margin_end(6)
             .build();
         cell.append(&title);
         cell.append(&subtitle);

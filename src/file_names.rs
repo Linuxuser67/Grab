@@ -547,31 +547,36 @@ mod tests {
 
     #[test]
     fn path_size_tolerates_symlinks() {
-        // GIO's measure_disk_usage follows symlinks (unlike the old std::fs
-        // walk which never descended them). Pin the contract: symlinks to
-        // outside, dangling links, and leaf symlinks must not fail.
+        // GIO's measure_disk_usage uses AT_SYMLINK_NOFOLLOW: symlinks are
+        // counted as themselves (apparent size = target path length), never
+        // traversed. This matches the old std::fs walk which never descended
+        // links. Pin the contract: symlinks to outside, dangling links, and
+        // leaf symlinks must not fail, and outside targets are NOT included.
         let base = unique_dir("pathsize");
         std::fs::create_dir_all(&base).unwrap();
-        std::fs::write(base.join("file.txt"), b"hello").unwrap();
-        // Symlink to a file outside the measured tree.
+        std::fs::write(base.join("file.txt"), vec![b'x'; 100]).unwrap();
+        // Symlink to a 1000-byte file outside the measured tree.
         let outside = unique_dir("pathsize-outside");
         std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("target.txt"), b"world!").unwrap(); // 6 bytes
-        std::os::unix::fs::symlink(outside.join("target.txt"), base.join("link-outside")).unwrap();
+        std::fs::write(outside.join("big.bin"), vec![b'y'; 1000]).unwrap();
+        let link_target = outside.join("big.bin");
+        std::os::unix::fs::symlink(&link_target, base.join("link-outside")).unwrap();
         // Dangling symlink.
         std::os::unix::fs::symlink(base.join("nonexistent"), base.join("dangling")).unwrap();
-        // Leaf symlink to a file inside the tree.
-        std::os::unix::fs::symlink(base.join("file.txt"), base.join("link-leaf")).unwrap();
 
-        // Must not return None (tolerates all symlink cases).
         let size = path_size(&base);
         assert!(size.is_some(), "path_size must tolerate symlinks");
-        // The outside target is followed (6 bytes included), unlike the old walk.
-        // Exact total is GIO-version-dependent; assert it's at least the known files.
+        let total = size.unwrap();
+        // The 1000-byte outside target is NOT traversed (NOFOLLOW).
         assert!(
-            size.unwrap() >= 11,
-            "should include file.txt (5) + target.txt (6)"
+            total < 100 + 1000,
+            "outside target must not be included, got {total}"
         );
+        // The symlink itself IS counted (apparent size = target path length).
+        let expected = 100
+            + link_target.to_str().unwrap().len() as u64
+            + base.join("nonexistent").to_str().unwrap().len() as u64;
+        assert_eq!(total, expected, "symlinks counted as themselves (NOFOLLOW)");
 
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&outside).ok();

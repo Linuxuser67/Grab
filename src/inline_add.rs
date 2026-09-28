@@ -528,7 +528,6 @@ fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
             let row = item.child().and_downcast::<adw::ActionRow>().unwrap();
             row.set_title(title);
             row.set_subtitle(subtitle);
-            row.update_property(&[gtk4::accessible::Property::Label(title)]);
         });
     }
 

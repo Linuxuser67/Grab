@@ -480,10 +480,7 @@ pub(crate) fn build_row(
             })
         ),
         crate::torrent::is_torrent(&item.url()),
-        matches!(
-            source,
-            Some(crate::media_types::VideoSource::Page { .. })
-        ),
+        matches!(source, Some(crate::media_types::VideoSource::Page { .. })),
     );
     let media_icon = gtk4::Image::builder()
         .icon_name(media.icon_name())

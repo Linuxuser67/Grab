@@ -1099,10 +1099,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     ))]);
     url_entry.add_suffix(&opts_toggle);
     url_entry.add_suffix(&cancel_btn);
-    let url_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    url_box.set_hexpand(true);
-    url_box.append(&url_group);
-    form.append(&url_box);
+    form.append(&url_group);
 
     // Download options live in a revealer directly under the URL row: the
     // card opens compact, one tap on the gear reveals file name, torrent,

@@ -2238,4 +2238,18 @@ mod tests {
             "close ran with the destination borrow released"
         );
     }
+
+    #[test]
+    fn picker_columns_scales_with_count() {
+        // A pair stays a single readable column; more entries flow into
+        // up to four columns, never more.
+        assert_eq!(picker_columns(0), 1);
+        assert_eq!(picker_columns(2), 1);
+        assert_eq!(picker_columns(3), 2);
+        assert_eq!(picker_columns(8), 2);
+        assert_eq!(picker_columns(9), 3);
+        assert_eq!(picker_columns(20), 3);
+        assert_eq!(picker_columns(21), 4);
+        assert_eq!(picker_columns(200), 4);
+    }
 }

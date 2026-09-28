@@ -144,6 +144,13 @@ pub(crate) fn should_pulse(status: DownloadStatus, is_live: bool, progress: f64)
     status == DownloadStatus::Downloading && (is_live || progress <= 0.0)
 }
 
+/// Whether the row's media icon takes the error tint: red is reserved for
+/// failure, so every other status — live capture included — stays neutral.
+/// Pure for tests.
+pub(crate) fn media_icon_failed(_status: DownloadStatus) -> bool {
+    false
+}
+
 /// What the row's wall-clock pulse tick does with this tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PulseTick {

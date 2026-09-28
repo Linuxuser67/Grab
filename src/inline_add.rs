@@ -1041,6 +1041,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     card.set_margin_start(12);
     card.set_margin_end(12);
     card.add_css_class("card");
+    // Clamp the card width (HIG): a form card should not stretch full-width.
+    // AdwClamp centers the card and caps its width for comfortable density.
+    let clamp = adw::Clamp::builder()
+        .maximum_size(600)
+        .tightening_threshold(400)
+        .child(&card)
+        .build();
 
     // No in-card title: the card only opens from explicit "New Download"
     // affordances (+, Ctrl+N, the empty-state pill), so restating it is
@@ -1051,12 +1058,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .icon_name("window-close-symbolic")
         .css_classes(["flat", "circular"])
         .tooltip_text(gettext("Cancel"))
+        .valign(gtk4::Align::Center)
         .build();
     cancel_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Cancel"))]);
 
     let nav = adw::NavigationView::new();
     card.append(&nav);
-    revealer.set_child(Some(&card));
+    revealer.set_child(Some(&clamp));
 
     // Form page: URL row (entry + Add), the video preview block, then the
     // file / torrent / destination rows.
@@ -1082,16 +1090,19 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // no separate status line for the transient loading state.
     let url_spinner = adw::Spinner::new();
     url_spinner.set_visible(false);
+    url_spinner.set_valign(gtk4::Align::Center);
     let add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
         .use_underline(true)
         .css_classes(["suggested-action"])
+        .valign(gtk4::Align::Center)
         .build();
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
     let opts_toggle = gtk4::ToggleButton::builder()
         .icon_name("emblem-system-symbolic")
         .tooltip_text(gettext("Download options"))
+        .valign(gtk4::Align::Center)
         .build();
     opts_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Download options",

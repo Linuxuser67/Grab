@@ -498,7 +498,9 @@ fn picker_columns(count: usize) -> u32 {
         if count.is_multiple_of(c) {
             let rows = count / c;
             // Most square wins; ties prefer more columns (fewer rows).
-            let score = rows.abs_diff(c) * 100 - c;
+            // Saturating: a perfect square has diff 0, and 0 - c would
+            // underflow (e.g. count=1).
+            let score = rows.abs_diff(c).saturating_mul(100).saturating_sub(c);
             if score < best_score {
                 best_score = score;
                 best = c;

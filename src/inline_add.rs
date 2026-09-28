@@ -728,7 +728,7 @@ fn push_playlist_items_page(
     if crate::video_probe::playlist_truncated(&playlist) {
         let notice = gtk4::Label::builder()
             .label(
-                &gettext("Showing the first {n} of {total}")
+                gettext("Showing the first {n} of {total}")
                     .replace("{n}", &count.to_string())
                     .replace("{total}", &playlist.total.to_string()),
             )

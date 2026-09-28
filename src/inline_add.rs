@@ -235,7 +235,7 @@ fn show_video_error(v: &VideoStep, message: &str) {
 
 /// Desensitize the form's Add button while a lookup is in flight (a dead
 /// button says so upfront). Every terminal state re-enables it.
-fn set_lookup_add(cell: &Rc<RefCell<Option<gtk4::Button>>>, enabled: bool) {
+fn set_lookup_add(cell: &Rc<RefCell<Option<adw::EntryRow>>>, enabled: bool) {
     if let Some(b) = cell.borrow().as_ref() {
         b.set_sensitive(enabled);
     }
@@ -274,7 +274,7 @@ fn submit_probed_single(
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
     step: &Rc<VideoStep>,
-    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
+    lookup_add: &Rc<RefCell<Option<adw::EntryRow>>>,
     v: &crate::video::VideoInfo,
 ) {
     let typed = step.name.text().trim().to_string();
@@ -340,7 +340,7 @@ fn submit_probe(
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
     step: &Rc<VideoStep>,
-    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
+    lookup_add: &Rc<RefCell<Option<adw::EntryRow>>>,
     nav: &adw::NavigationView,
     probe: crate::video::ProbeResult,
 ) {
@@ -369,7 +369,7 @@ fn submit_probe(
 fn fallback_plain_failed(
     probe: &Rc<RefCell<ProbeState>>,
     step: &Rc<VideoStep>,
-    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
+    lookup_add: &Rc<RefCell<Option<adw::EntryRow>>>,
     url: &str,
     error: &str,
 ) {
@@ -1062,13 +1062,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // the spacing from the window.
     let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
 
-    // URL form: HIG AdwPreferencesGroup → AdwEntryRow (no Page wrapper —
-    // the Page adds dialog margins). The Group spans the width; Add,
-    // gear, and close sit in a Box beside it for the 4.4.4 layout.
+    // URL form: HIG AdwPreferencesGroup → AdwEntryRow with apply button
+    // (no Page wrapper — the Page adds dialog margins). The apply
+    // button is the Add action; spinner, gear, close in the suffix.
     let url_group = adw::PreferencesGroup::new();
     url_group.set_hexpand(true);
     let url_entry = adw::EntryRow::builder()
         .title(gettext("Paste a download link"))
+        .show_apply_button(true)
         .activates_default(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
@@ -1076,11 +1077,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     url_spinner.set_visible(false);
     url_entry.add_suffix(&url_spinner);
     url_group.add(&url_entry);
-    let add_btn = gtk4::Button::builder()
-        .label(gettext("_Add Download"))
-        .use_underline(true)
-        .css_classes(["suggested-action"])
-        .build();
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
     let opts_toggle = gtk4::ToggleButton::builder()
@@ -1091,12 +1087,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     opts_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Download options",
     ))]);
+    url_entry.add_suffix(&opts_toggle);
+    url_entry.add_suffix(&cancel_btn);
     let url_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     url_box.set_hexpand(true);
     url_box.append(&url_group);
-    url_box.append(&add_btn);
-    url_box.append(&opts_toggle);
-    url_box.append(&cancel_btn);
     form.append(&url_box);
 
     // Download options live in a revealer directly under the URL row: the
@@ -1254,8 +1249,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let probe = Rc::new(RefCell::new(ProbeState::default()));
     // The form's Add button, desensitized while a lookup is in flight (a
     // dead button says so upfront). Every terminal state re-enables it.
-    let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
-    lookup_add.replace(Some(add_btn.clone()));
+    let lookup_add: Rc<RefCell<Option<adw::EntryRow>>> = Rc::new(RefCell::new(None));
+    lookup_add.replace(Some(url_entry.clone()));
     let dest_dir = Rc::new(RefCell::new(manager.effective_download_dir()));
 
     // Collapse the card and reset the form to a fresh state, like closing the
@@ -1710,7 +1705,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     };
     {
         let s = submit.clone();
-        add_btn.connect_clicked(move |_| s(false));
+        url_entry.connect_apply(move |_| s(false));
     }
     {
         let s = submit.clone();

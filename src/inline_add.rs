@@ -497,7 +497,7 @@ fn picker_columns(count: usize) -> u32 {
             // Largest divisor ≤3; fallback to 1 (no empty cells).
             let mut cols = 1;
             for c in 2..=3 {
-                if count % c == 0 {
+                if count.is_multiple_of(c) {
                     cols = c;
                 }
             }

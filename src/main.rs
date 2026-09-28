@@ -2,7 +2,6 @@ mod application;
 mod attempt_gate;
 mod cookies;
 mod download;
-mod download_details;
 mod download_fetch;
 mod download_intake;
 mod download_net;

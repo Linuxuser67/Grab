@@ -2081,7 +2081,6 @@ fn video_format_options_lists_best_per_height() {
         ["v1080-vp9", "v720-av01", "v360-vp9"]
     );
     assert_eq!(opts[0].label, "1080p · vp9 · 200.0 MB");
-    assert_eq!(opts[0].detail, "vp9 · 200.0 MB");
     assert_eq!(opts[0].height, 1080);
     assert_eq!(opts[1].label, "720p · av01 · 60.0 MB");
 }
@@ -3705,7 +3704,6 @@ fn test_options() -> Vec<VideoFormatOption> {
         .map(|h| VideoFormatOption {
             id: format!("v{h}"),
             label: format!("{h}p"),
-            detail: String::new(),
             height: *h,
         })
         .collect()
@@ -3731,7 +3729,6 @@ fn default_quality_index_preselects() {
         .map(|h| VideoFormatOption {
             id: format!("v{h}"),
             label: format!("{h}p"),
-            detail: String::new(),
             height: *h,
         })
         .collect::<Vec<_>>();

@@ -21,7 +21,7 @@ use crate::window_rows::{default_name_for, selection_action_bar};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
-use gtk4::{gio, glib};
+use gtk4::{gdk, gio, glib};
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -505,6 +505,25 @@ fn picker_columns(count: usize) -> u32 {
 /// entries start selected, matching the old checked-by-default rows.
 /// Returns the view and its selection model for the caller to wire.
 fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::MultiSelection) {
+    // HIG selection outline: selected cells get an accent-colored outline.
+    // Uses the theme's @accent_color — no hardcoded colors. Installed once.
+    static INSTALL_CSS: std::sync::Once = std::sync::Once::new();
+    INSTALL_CSS.call_once(|| {
+        let css = gtk4::CssProvider::new();
+        css.load_from_data(
+            "gridview child:selected .picker-cell { \
+               outline: 2px solid @accent_color; \
+               outline-offset: -2px; \
+               border-radius: 12px; \
+             }",
+        );
+        gtk4::style_context_add_provider_for_display(
+            &gdk::Display::default().expect("no display"),
+            &css,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    });
+
     let store = gio::ListStore::new::<gtk4::StringObject>();
     for (title, _) in entries.iter() {
         store.append(&gtk4::StringObject::new(title));
@@ -516,8 +535,9 @@ fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
     factory.connect_setup(|_, item| {
         let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
         // HIG: AdwActionRow for title/subtitle — no hand-rolled Box+Labels.
-        // Selection highlight comes from the view via the MultiSelection.
+        // The picker-cell class gets an accent outline when selected (CSS).
         let row = adw::ActionRow::builder().activatable(true).build();
+        row.add_css_class("picker-cell");
         item.set_child(Some(&row));
     });
     {
@@ -1048,37 +1068,35 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     form.set_margin_start(12);
     form.set_margin_end(12);
 
-    // URL form: AdwEntryRow with hexpand in a horizontal Box — the entry
-    // takes the available width, buttons sit beside it. Only the lookup
-    // spinner lives in the entry's suffix (browser-address-bar style).
+    // URL form: HIG AdwPreferencesPage → AdwPreferencesGroup → AdwEntryRow.
+    // The apply button (show_apply_button) is the Add action; the lookup
+    // spinner, options gear, and close sit in the suffix.
+    let url_page = adw::PreferencesPage::new();
+    let url_group = adw::PreferencesGroup::new();
+    url_page.add(&url_group);
     let url_entry = adw::EntryRow::builder()
         .title(gettext("Paste a download link"))
-        .hexpand(true)
+        .show_apply_button(true)
+        .activates_default(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
     let url_spinner = adw::Spinner::new();
     url_spinner.set_visible(false);
     url_entry.add_suffix(&url_spinner);
-    let add_btn = gtk4::Button::builder()
-        .label(gettext("_Add Download"))
-        .use_underline(true)
-        .css_classes(["suggested-action"])
-        .build();
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
     let opts_toggle = gtk4::ToggleButton::builder()
         .icon_name("emblem-system-symbolic")
         .tooltip_text(gettext("Download options"))
+        .valign(gtk4::Align::Center)
         .build();
     opts_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Download options",
     ))]);
-    let url_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    url_box.append(&url_entry);
-    url_box.append(&add_btn);
-    url_box.append(&opts_toggle);
-    url_box.append(&cancel_btn);
-    form.append(&url_box);
+    url_entry.add_suffix(&opts_toggle);
+    url_entry.add_suffix(&cancel_btn);
+    url_group.add(&url_entry);
+    form.append(&url_page);
 
     // Download options live in a revealer directly under the URL row: the
     // card opens compact, one tap on the gear reveals file name, torrent,
@@ -1691,7 +1709,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     };
     {
         let s = submit.clone();
-        add_btn.connect_clicked(move |_| s(false));
+        url_entry.connect_apply(move |_| s(false));
     }
     {
         let s = submit.clone();

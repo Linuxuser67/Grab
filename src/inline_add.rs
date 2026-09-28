@@ -643,6 +643,10 @@ fn push_playlist_items_page(
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .spacing(6)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
         .build();
     if crate::video_probe::playlist_truncated(&playlist) {
         let notice = gtk4::Label::builder()
@@ -819,6 +823,10 @@ fn push_torrent_picker_page(
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .spacing(6)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
         .build();
     list_box.append(&grid);
     let error_caption = gtk4::Label::builder()

@@ -947,7 +947,7 @@ pub(crate) fn build_row(
     // refresh: the notify fires once per status change).
     {
         let row_weak = row.downgrade();
-        item.connect_notify(Some("status"), move |item, _| {
+        item.connect_notify_local(Some("status"), move |item, _| {
             if item.status() == DownloadStatus::Failed {
                 if let Some(row) = row_weak.upgrade() {
                     show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);

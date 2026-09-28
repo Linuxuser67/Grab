@@ -52,7 +52,7 @@ impl ToolRow {
         let status = gtk4::Label::new(Some(&gettext("Waiting…")));
         status.set_halign(gtk4::Align::Start);
         status.add_css_class("caption");
-        status.add_css_class("dimmed");
+        status.add_css_class("dim-label");
         let titles = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
         titles.set_hexpand(true);
         titles.append(&name_label);

@@ -482,32 +482,12 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
     header
 }
 
-/// Column count for a picker grid, from the entry count: max 4 columns,
-/// no empty cells. Picks the divisor (≤4) that makes the grid most
-/// square — 3→3×1, 4→2×2, 8→4×2, 9→3×3, 12→4×3. Ties prefer more
-/// columns (fewer rows). Fixed per picker (set via min/max-columns) —
-/// selecting never reflows.
-/// Prime counts >4 use a single column — the only way to avoid gaps.
+/// Column count for a picker grid: up to 4 columns, compact single-line
+/// cells. The last row may be partial — GridView draws no empty cells
+/// for it. Fixed per picker (set via min/max-columns) — selecting never
+/// reflows.
 fn picker_columns(count: usize) -> u32 {
-    if count == 0 {
-        return 1;
-    }
-    let mut best = 1;
-    let mut best_score = usize::MAX;
-    for c in 1..=4 {
-        if count.is_multiple_of(c) {
-            let rows = count / c;
-            // Most square wins; ties prefer more columns (fewer rows).
-            // Saturating: a perfect square has diff 0, and 0 - c would
-            // underflow (e.g. count=1).
-            let score = rows.abs_diff(c).saturating_mul(100).saturating_sub(c);
-            if score < best_score {
-                best_score = score;
-                best = c;
-            }
-        }
-    }
-    best as u32
+    count.min(4).max(1) as u32
 }
 
 /// A picker grid (HIG `GtkGridView` with `GtkMultiSelection` and
@@ -555,10 +535,10 @@ fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
         let entries = Rc::clone(&entries);
         factory.connect_bind(move |_, item| {
             let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-            let (title, subtitle) = &entries[item.position() as usize];
+            // Single-line compact cells: title only, no subtitle.
+            let (title, _) = &entries[item.position() as usize];
             let row = item.child().and_downcast::<adw::ActionRow>().unwrap();
             row.set_title(title);
-            row.set_subtitle(subtitle);
         });
     }
 
@@ -1050,7 +1030,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     card.set_margin_bottom(12);
     card.set_margin_start(12);
     card.set_margin_end(12);
-    card.add_css_class("card");
+    // No .card class: each AdwPreferencesGroup below renders as its own
+    // flush card (rows touch the group's edge), so there's no gap between
+    // the URL entry and a card outline. The 12px margins give the HIG
+    // window spacing.
 
     // No in-card title: the card only opens from explicit "New Download"
     // affordances (+, Ctrl+N, the empty-state pill), so restating it is
@@ -1070,9 +1053,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     revealer.set_child(Some(&card));
 
     // Form page: URL row (entry + Add), the video preview block, then the
-    // file / torrent / destination rows. No margins — the .card CSS class
-    // provides the HIG 12px inner padding; the card's outer margins give
-    // the spacing from the window.
+    // file / torrent / destination rows. Each AdwPreferencesGroup is its
+    // own card; the 12px form spacing separates the cards (HIG).
     let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
 
     // URL form: HIG AdwPreferencesGroup → AdwEntryRow. The Add action is
@@ -1090,11 +1072,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     url_spinner.set_visible(false);
     url_entry.add_suffix(&url_spinner);
     // Persistent Add button: stays visible so a second press confirms
-    // after the preview loads.
+    // after the preview loads. Colored rounded HIG button.
     let add_btn = gtk4::Button::builder()
         .icon_name("object-select-symbolic")
         .tooltip_text(gettext("Add download"))
-        .css_classes(["flat"])
+        .css_classes(["suggested-action", "circular"])
         .valign(gtk4::Align::Center)
         .build();
     add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
@@ -1990,23 +1972,20 @@ mod tests {
 
     #[test]
     fn picker_columns_adapts_without_empty_cells() {
-        // Max 4 columns, most-square grid, no empty cells: 3→3×1,
-        // 4→2×2, 8→4×2, 9→3×3, 12→4×3.
+        // Max 4 columns; the last row may be partial — GridView draws no
+        // empty cells for it.
         assert_eq!(picker_columns(0), 1);
         assert_eq!(picker_columns(1), 1);
         assert_eq!(picker_columns(2), 2);
         assert_eq!(picker_columns(3), 3);
-        assert_eq!(picker_columns(4), 2);
-        assert_eq!(picker_columns(5), 1); // prime: single column
-        assert_eq!(picker_columns(6), 3);
-        assert_eq!(picker_columns(7), 1); // prime: single column
-        assert_eq!(picker_columns(8), 4);
-        assert_eq!(picker_columns(9), 3);
-        assert_eq!(picker_columns(12), 4);
-        // No empty cells: count is always divisible by columns.
+        assert_eq!(picker_columns(4), 4);
+        assert_eq!(picker_columns(5), 4);
+        assert_eq!(picker_columns(31), 4);
+        // Columns never exceed 4 or the item count.
         for n in 1..=50 {
             let c = picker_columns(n) as usize;
-            assert_eq!(n % c, 0, "n={n} cols={c} leaves empty cells");
+            assert!(c <= 4, "n={n} cols={c} exceeds 4");
+            assert!(c <= n, "n={n} cols={c} exceeds count");
         }
     }
 

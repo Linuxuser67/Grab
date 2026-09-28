@@ -46,6 +46,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.1" date="2026-09-28">
+      <description>
+        <ul>
+          <li>Byte sizes now use the system locale's formatting.</li>
+          <li>Restored brotli and deflate HTTP compression support.</li>
+          <li>The "of" in progress amounts ("900 MB of 2.0 GB") is now translatable.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.20" date="2026-09-28">
       <description>
         <ul>

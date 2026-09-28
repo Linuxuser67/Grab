@@ -1026,14 +1026,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .reveal_child(false)
         .build();
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    card.set_margin_top(12);
-    card.set_margin_bottom(12);
-    card.set_margin_start(12);
-    card.set_margin_end(12);
+    card.set_margin_top(6);
+    card.set_margin_bottom(6);
+    card.set_margin_start(6);
+    card.set_margin_end(6);
     // No .card class: each AdwPreferencesGroup below renders as its own
     // flush card (rows touch the group's edge), so there's no gap between
-    // the URL entry and a card outline. The 12px margins give the HIG
-    // window spacing.
+    // the URL entry and a card outline. The 6px margins give the window
+    // spacing.
 
     // No in-card title: the card only opens from explicit "New Download"
     // affordances (+, Ctrl+N, the empty-state pill), so restating it is

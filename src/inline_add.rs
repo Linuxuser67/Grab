@@ -929,7 +929,8 @@ impl AddCard {
         (self.open)(initial_url)
     }
 
-    /// Header `+` behavior: reveal a fresh card, or focus the open one.
+    /// Header `+` behavior: reveal a fresh card, or retract the open one
+    /// (which resets it, like Cancel/Escape).
     pub fn toggle(&self) {
         (self.toggle)()
     }
@@ -1858,10 +1859,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let toggle = {
         let open = Rc::clone(&open);
         let is_open = Rc::clone(&is_open);
-        let url_entry = url_entry.clone();
+        let close_card = Rc::clone(&close_card);
         Rc::new(move || {
             if is_open.get() {
-                url_entry.grab_focus();
+                close_card();
             } else {
                 open(None);
             }

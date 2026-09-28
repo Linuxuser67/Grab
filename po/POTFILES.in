@@ -8,6 +8,7 @@ src/download_rate.rs
 src/download_store.rs
 src/install_help.rs
 src/install_progress.rs
+src/inline_add.rs
 src/preferences.rs
 src/torrent.rs
 src/video.rs
@@ -19,5 +20,4 @@ src/video_spawn.rs
 src/video_staging.rs
 src/video_tools.rs
 src/window.rs
-src/window_dialogs.rs
 src/window_rows.rs

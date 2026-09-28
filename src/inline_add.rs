@@ -528,6 +528,49 @@ fn picker_enter_confirms(page: &adw::NavigationPage, add_btn: &gtk4::Button) {
     page.add_controller(key);
 }
 
+/// Compact picker header: back + title + dimmed count on one tight row.
+/// The auto `AdwHeaderBar` left the centered title floating in 48px of
+/// chrome with nothing else in it; a picker embedded in a card earns a
+/// denser row. Back pops the navigation page (Esc still collapses the
+/// whole card); the selection actions stay in the bottom action bar.
+fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::Box {
+    let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    header.set_margin_top(6);
+    header.set_margin_bottom(6);
+    header.set_margin_start(6);
+    header.set_margin_end(12);
+    let back = gtk4::Button::builder()
+        .icon_name("go-previous-symbolic")
+        .css_classes(["flat", "circular"])
+        .tooltip_text(gettext("Back"))
+        .valign(gtk4::Align::Center)
+        .build();
+    back.update_property(&[gtk4::accessible::Property::Label(&gettext("Back"))]);
+    {
+        let nav = nav.clone();
+        back.connect_clicked(move |_| {
+            nav.pop();
+        });
+    }
+    let title_label = gtk4::Label::builder()
+        .label(title)
+        .css_classes(["heading"])
+        .halign(gtk4::Align::Start)
+        .valign(gtk4::Align::Center)
+        .hexpand(true)
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
+        .build();
+    let count_label = gtk4::Label::builder()
+        .label(count)
+        .css_classes(["dimmed", "caption"])
+        .valign(gtk4::Align::Center)
+        .build();
+    header.append(&back);
+    header.append(&title_label);
+    header.append(&count_label);
+    header
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_playlist_items_page(
     nav: &adw::NavigationView,
@@ -545,9 +588,9 @@ fn push_playlist_items_page(
 
     let page = adw::PreferencesPage::new();
     let count = playlist.items.len();
-    let group = adw::PreferencesGroup::builder()
-        .title(playlist_count_label(playlist.kind, count))
-        .build();
+    // No group title: the count lives in the compact header above, so one
+    // title level suffices. The truncation notice stays as the description.
+    let group = adw::PreferencesGroup::new();
     if crate::video_probe::playlist_truncated(&playlist) {
         group.set_description(Some(
             &gettext("Showing the first {n} of {total}")
@@ -598,12 +641,13 @@ fn push_playlist_items_page(
         .build();
 
     let toolbar = adw::ToolbarView::new();
-    let hb = adw::HeaderBar::new();
-    // No WM title buttons either end and no explicit Cancel: the nav header's
-    // Back button (and Esc) close the picker, selection actions live per HIG.
-    hb.set_show_start_title_buttons(false);
-    hb.set_show_end_title_buttons(false);
-    toolbar.add_top_bar(&hb);
+    // Compact header instead of the auto AdwHeaderBar: back + title + count
+    // on one tight row, no 48px of empty chrome around a centered title.
+    toolbar.add_top_bar(&picker_header(
+        nav,
+        &playlist.title,
+        &playlist_count_label(playlist.kind, count),
+    ));
     toolbar.set_content(Some(&scrolled));
     let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();
     toolbar.add_bottom_bar(&action_bar);
@@ -711,13 +755,10 @@ fn push_torrent_picker_page(
     }
 
     let page = adw::PreferencesPage::new();
-    let group = adw::PreferencesGroup::builder()
-        .title(gettext("Files"))
-        .description(
-            ngettext("{} file", "{} files", entries.len() as u32)
-                .replace("{}", &entries.len().to_string()),
-        )
-        .build();
+    // The file count lives in the compact header; the group needs no title.
+    let file_count = ngettext("{} file", "{} files", entries.len() as u32)
+        .replace("{}", &entries.len().to_string());
+    let group = adw::PreferencesGroup::new();
     page.add(&group);
 
     // HIG selection, not settings: a switch means "a setting is on", a checkbox
@@ -760,10 +801,8 @@ fn push_torrent_picker_page(
         .build();
 
     let toolbar = adw::ToolbarView::new();
-    let hb = adw::HeaderBar::new();
-    hb.set_show_start_title_buttons(false);
-    hb.set_show_end_title_buttons(false);
-    toolbar.add_top_bar(&hb);
+    // Same compact header as the playlist picker: back + file name + count.
+    toolbar.add_top_bar(&picker_header(nav, &file_name, &file_count));
     toolbar.set_content(Some(&scrolled));
     // HIG selection mode: the selection's actions live in a bottom
     // action bar, not the header. Back pops the page (cancels).

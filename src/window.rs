@@ -312,6 +312,7 @@ pub fn build_window(
     let sidebar_page = adw::NavigationPage::builder()
         .child(&sidebar_toolbar)
         .tag("sidebar")
+        .title(gettext("New Download"))
         .build();
     split.set_sidebar(Some(&sidebar_page));
     // Narrow windows navigate between the sidebar and the content instead of
@@ -745,6 +746,7 @@ pub fn build_window(
     let content_page = adw::NavigationPage::builder()
         .child(&toolbar)
         .tag("content")
+        .title(gettext("Downloads"))
         .build();
     split.set_content(Some(&content_page));
     toasts.set_child(Some(&split));

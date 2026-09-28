@@ -266,7 +266,7 @@ pub fn build_window(
     empty.set_child(Some(&empty_add));
     {
         let card = add_card.clone();
-        empty_add.connect_clicked(move |_| card.open(None));
+        empty_add.connect_clicked(move |_| card.toggle());
     }
     stack.add_named(&empty, Some("empty"));
 

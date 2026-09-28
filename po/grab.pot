@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: grab\n"
 "Report-Msgid-Bugs-To: https://github.com/houssemko/Grab/issues\n"
-"POT-Creation-Date: 2026-09-28 07:40+0100\n"
+"POT-Creation-Date: 2026-09-28 11:25+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -18,70 +18,71 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
 
-#: src/application.rs:114 src/window_dialogs.rs:328
+#: src/application.rs:117 src/inline_add.rs:894
 msgid "Could not read that .torrent file"
 msgstr ""
 
-#: src/application.rs:145
+#: src/application.rs:144
 msgid "Only .torrent files can be opened directly"
 msgstr ""
 
-#: src/application.rs:177 src/window_rows.rs:231 src/window_rows.rs:435
+#: src/application.rs:176 src/inline_add.rs:1014 src/inline_add.rs:1016
+#: src/window_rows.rs:294 src/window_rows.rs:538
 msgid "Cancel"
 msgstr ""
 
-#: src/application.rs:233
+#: src/application.rs:232
 msgid "Cancel All Downloads?"
 msgstr ""
 
 #. Plain items: these actions have no accelerators,
 #. and from_action would imply a keybinding.
-#: src/application.rs:235 src/application.rs:386 src/window.rs:211
+#: src/application.rs:234 src/application.rs:385 src/window.rs:215
 msgid "Cancel All"
 msgstr ""
 
-#: src/application.rs:291
+#: src/application.rs:290
 msgid "Clear Finished Downloads?"
 msgstr ""
 
-#: src/application.rs:293 src/window.rs:213
+#: src/application.rs:292 src/window.rs:217
 msgid "Clear Finished"
 msgstr ""
 
-#: src/application.rs:305 src/window_rows.rs:797
+#: src/application.rs:304 src/window_rows.rs:905
 msgid "Undo"
 msgstr ""
 
-#: src/application.rs:378 src/preferences.rs:120
+#: src/application.rs:377 src/preferences.rs:120
 msgid "Downloads"
 msgstr ""
 
-#: src/application.rs:380 src/window.rs:209 src/window.rs:244 src/window.rs:258
-#: src/window_dialogs.rs:365 src/window_dialogs.rs:1032
+#: src/application.rs:379 src/inline_add.rs:1211 src/window.rs:213
+#: src/window.rs:248 src/window.rs:262
 msgid "New Download"
 msgstr ""
 
-#: src/application.rs:383
+#: src/application.rs:382
 msgid "Rename"
 msgstr ""
 
-#: src/application.rs:387 src/window.rs:212 src/window.rs:508
+#: src/application.rs:386 src/window.rs:216 src/window.rs:534
 msgid "Retry Failed"
 msgstr ""
 
-#: src/application.rs:389 src/window.rs:236
+#: src/application.rs:388 src/window.rs:240
 msgid "Search"
 msgstr ""
 
-#: src/application.rs:394 src/preferences.rs:114
+#: src/application.rs:393 src/preferences.rs:114
 msgid "General"
 msgstr ""
 
-#: src/application.rs:396 src/preferences.rs:104 src/window.rs:220
+#: src/application.rs:395 src/preferences.rs:104 src/window.rs:224
 msgid "Preferences"
 msgstr ""
 
-#: src/application.rs:399
+#: src/application.rs:398
 msgid "Quit"
 msgstr ""
 
@@ -323,27 +324,27 @@ msgid_plural "{n} seconds"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/download_store.rs:27 src/window.rs:285 src/window.rs:331
+#: src/download_store.rs:27 src/window.rs:289 src/window.rs:345
 msgid "Queued"
 msgstr ""
 
-#: src/download_store.rs:28 src/window.rs:329
+#: src/download_store.rs:28
 msgid "Downloading"
 msgstr ""
 
-#: src/download_store.rs:29 src/window.rs:330
+#: src/download_store.rs:29
 msgid "Paused"
 msgstr ""
 
-#: src/download_store.rs:30 src/window.rs:332
+#: src/download_store.rs:30
 msgid "Done"
 msgstr ""
 
-#: src/download_store.rs:31 src/install_progress.rs:119 src/window.rs:333
+#: src/download_store.rs:31 src/install_progress.rs:125
 msgid "Failed"
 msgstr ""
 
-#: src/download_store.rs:32 src/window.rs:334
+#: src/download_store.rs:32
 msgid "Cancelled"
 msgstr ""
 
@@ -389,28 +390,202 @@ msgstr ""
 msgid "Waiting…"
 msgstr ""
 
-#: src/install_progress.rs:97
+#: src/install_progress.rs:99
 msgid "Downloading…"
 msgstr ""
 
-#: src/install_progress.rs:107
+#: src/install_progress.rs:111
 msgid "Installed • {version}"
 msgstr ""
 
-#: src/install_progress.rs:108
+#: src/install_progress.rs:112
 msgid "Installed"
 msgstr ""
 
-#: src/install_progress.rs:155
+#: src/install_progress.rs:161
 msgid "yt-dlp install progress"
 msgstr ""
 
-#: src/install_progress.rs:156
+#: src/install_progress.rs:162
 msgid "ffmpeg install progress"
 msgstr ""
 
-#: src/install_progress.rs:157
+#: src/install_progress.rs:163
 msgid "quickjs install progress"
+msgstr ""
+
+#: src/inline_add.rs:125
+msgid "{} story"
+msgid_plural "{} stories"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/inline_add.rs:128
+msgid "{} highlight"
+msgid_plural "{} highlights"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/inline_add.rs:130
+msgid "{} item"
+msgid_plural "{} items"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/inline_add.rs:333
+msgid "Automatic"
+msgstr ""
+
+#: src/inline_add.rs:545 src/inline_add.rs:548
+msgid "Back"
+msgstr ""
+
+#: src/inline_add.rs:596 src/inline_add.rs:937
+msgid "Showing the first {n} of {total}"
+msgstr ""
+
+#: src/inline_add.rs:663
+msgid "_Queue {} item"
+msgid_plural "_Queue {} items"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/inline_add.rs:676
+msgid "Select at least one item"
+msgstr ""
+
+#. The file count lives in the compact header; the group needs no title.
+#: src/inline_add.rs:759
+msgid "{} file"
+msgid_plural "{} files"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/inline_add.rs:820
+msgid "_Add {} file"
+msgid_plural "_Add {} files"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/inline_add.rs:833
+msgid "Select at least one file"
+msgstr ""
+
+#: src/inline_add.rs:871
+msgid "Torrent files"
+msgstr ""
+
+#: src/inline_add.rs:877
+msgid "Choose torrent file"
+msgstr ""
+
+#: src/inline_add.rs:878
+msgid "Add Torrent"
+msgstr ""
+
+#: src/inline_add.rs:1031
+msgid "Paste a download link"
+msgstr ""
+
+#: src/inline_add.rs:1036
+msgid "_Add Download"
+msgstr ""
+
+#: src/inline_add.rs:1044 src/inline_add.rs:1047 src/inline_add.rs:1159
+msgid "Download options"
+msgstr ""
+
+#: src/inline_add.rs:1074
+msgid "Looking up…"
+msgstr ""
+
+#: src/inline_add.rs:1081 src/window_rows.rs:933
+msgid "File name"
+msgstr ""
+
+#: src/inline_add.rs:1087 src/inline_add.rs:1091
+msgid "Revert to Title"
+msgstr ""
+
+#: src/inline_add.rs:1101
+msgid "Media format"
+msgstr ""
+
+#: src/inline_add.rs:1102
+msgid "Uses your preferred quality"
+msgstr ""
+
+#: src/inline_add.rs:1107
+msgid "Audio only"
+msgstr ""
+
+#: src/inline_add.rs:1108
+msgid "Skip the video track"
+msgstr ""
+
+#: src/inline_add.rs:1112 src/preferences.rs:817
+msgid "Support tools"
+msgstr ""
+
+#: src/inline_add.rs:1115 src/preferences.rs:592
+msgid "Install"
+msgstr ""
+
+#: src/inline_add.rs:1116
+msgid "Download the yt-dlp support tools"
+msgstr ""
+
+#: src/inline_add.rs:1124
+msgid "Couldn't load the media preview"
+msgstr ""
+
+#: src/inline_add.rs:1127 src/window_rows.rs:540
+msgid "Retry"
+msgstr ""
+
+#: src/inline_add.rs:1161
+msgid "File name (optional)"
+msgstr ""
+
+#: src/inline_add.rs:1169 src/inline_add.rs:1188 src/preferences.rs:141
+msgid "Choose…"
+msgstr ""
+
+#: src/inline_add.rs:1170
+msgid "Choose a .torrent file"
+msgstr ""
+
+#: src/inline_add.rs:1174
+msgid "Torrent file"
+msgstr ""
+
+#: src/inline_add.rs:1189 src/inline_add.rs:1733 src/preferences.rs:142
+#: src/preferences.rs:182
+msgid "Choose download folder"
+msgstr ""
+
+#: src/inline_add.rs:1192
+msgid "Save to"
+msgstr ""
+
+#: src/inline_add.rs:1520
+msgid "No items found in this playlist"
+msgstr ""
+
+#: src/inline_add.rs:1588 src/inline_add.rs:1614
+msgid "Still looking up the media — wait for the preview, then add."
+msgstr ""
+
+#: src/inline_add.rs:1734 src/preferences.rs:183
+msgid "Select Folder"
+msgstr ""
+
+#: src/inline_add.rs:1768 src/preferences.rs:868
+msgid "How to Install"
+msgstr ""
+
+#: src/inline_add.rs:1769 src/preferences.rs:869
+msgid "Show terminal install instructions"
 msgstr ""
 
 #: src/preferences.rs:37
@@ -433,15 +608,6 @@ msgstr ""
 msgid "(System Downloads folder)"
 msgstr ""
 
-#: src/preferences.rs:141 src/window_dialogs.rs:480 src/window_dialogs.rs:499
-msgid "Choose…"
-msgstr ""
-
-#: src/preferences.rs:142 src/preferences.rs:182 src/window_dialogs.rs:500
-#: src/window_dialogs.rs:514
-msgid "Choose download folder"
-msgstr ""
-
 #: src/preferences.rs:148 src/preferences.rs:152
 msgid "Use system default"
 msgstr ""
@@ -460,10 +626,6 @@ msgstr ""
 
 #: src/preferences.rs:166
 msgid "Avoids broken names on USB drives, network shares and older systems"
-msgstr ""
-
-#: src/preferences.rs:183 src/window_dialogs.rs:515
-msgid "Select Folder"
 msgstr ""
 
 #: src/preferences.rs:213
@@ -562,7 +724,7 @@ msgstr ""
 msgid "Keep the computer awake while downloads are active"
 msgstr ""
 
-#: src/preferences.rs:386 src/window_rows.rs:496
+#: src/preferences.rs:386 src/window_rows.rs:517
 msgid "Torrent"
 msgstr ""
 
@@ -660,10 +822,6 @@ msgstr ""
 
 #: src/preferences.rs:591
 msgid "Not installed"
-msgstr ""
-
-#: src/preferences.rs:592 src/window_dialogs.rs:437
-msgid "Install"
 msgstr ""
 
 #: src/preferences.rs:611
@@ -814,10 +972,6 @@ msgid ""
 "edge"
 msgstr ""
 
-#: src/preferences.rs:817 src/window_dialogs.rs:434
-msgid "Support tools"
-msgstr ""
-
 #: src/preferences.rs:818
 msgid "yt-dlp and ffmpeg resolve media pages"
 msgstr ""
@@ -828,14 +982,6 @@ msgstr ""
 
 #: src/preferences.rs:841
 msgid "Checking…"
-msgstr ""
-
-#: src/preferences.rs:868 src/window_dialogs.rs:916
-msgid "How to Install"
-msgstr ""
-
-#: src/preferences.rs:869 src/window_dialogs.rs:917
-msgid "Show terminal install instructions"
 msgstr ""
 
 #: src/preferences.rs:893
@@ -1002,25 +1148,25 @@ msgstr ""
 msgid "480p"
 msgstr ""
 
-#: src/video_runner.rs:398 src/video_runner.rs:1452
+#: src/video_runner.rs:398 src/video_runner.rs:1462
 msgid "Merging…"
 msgstr ""
 
-#: src/video_runner.rs:745
+#: src/video_runner.rs:750
 msgid "(recording kept in {dir})"
 msgstr ""
 
-#: src/video_runner.rs:966 src/video_runner.rs:1074
+#: src/video_runner.rs:976 src/video_runner.rs:1084
 msgid "Recording…"
 msgstr ""
 
-#: src/video_runner.rs:1129 src/video_runner.rs:1241
+#: src/video_runner.rs:1139 src/video_runner.rs:1251
 msgid ""
 "\"Live from start\" isn't available for this stream — recording from the "
 "live edge…"
 msgstr ""
 
-#: src/video_runner.rs:1273
+#: src/video_runner.rs:1283
 msgid "Finalizing…"
 msgstr ""
 
@@ -1104,233 +1250,80 @@ msgstr ""
 msgid "Video tools are too old — update them to continue"
 msgstr ""
 
-#: src/window.rs:61
+#: src/window.rs:58
 msgid "Downloading files"
 msgstr ""
 
-#: src/window.rs:158
+#: src/window.rs:155
 msgid "Downloads continue in the background after the window is closed"
 msgstr ""
 
-#: src/window.rs:204
+#: src/window.rs:208
 msgid "Grab"
 msgstr ""
 
-#: src/window.rs:205
+#: src/window.rs:209
 msgid "Download Manager"
 msgstr ""
 
-#: src/window.rs:215
+#: src/window.rs:219
 msgid "Open Download Folder"
 msgstr ""
 
-#: src/window.rs:221
+#: src/window.rs:225
 msgid "Keyboard Shortcuts"
 msgstr ""
 
-#: src/window.rs:222
+#: src/window.rs:226
 msgid "About"
 msgstr ""
 
-#: src/window.rs:227 src/window.rs:229
+#: src/window.rs:231 src/window.rs:233
 msgid "Main Menu"
 msgstr ""
 
-#: src/window.rs:234
+#: src/window.rs:238
 msgid "Search (Ctrl+F)"
 msgstr ""
 
-#: src/window.rs:242
+#: src/window.rs:246
 msgid "New Download (Ctrl+N)"
 msgstr ""
 
-#: src/window.rs:254
+#: src/window.rs:258
 msgid "No Downloads Yet"
 msgstr ""
 
-#: src/window.rs:255
+#: src/window.rs:259
 msgid "Add a download to get started"
 msgstr ""
 
-#: src/window.rs:284
+#: src/window.rs:288 src/window.rs:344
 msgid "Active"
 msgstr ""
 
-#: src/window.rs:286
+#: src/window.rs:290 src/window.rs:346
 msgid "Downloaded"
 msgstr ""
 
-#: src/window.rs:323
+#: src/window.rs:328
 msgid "Search downloads"
 msgstr ""
 
-#: src/window.rs:328
-msgid "All"
-msgstr ""
-
-#: src/window.rs:344
+#: src/window.rs:339
 msgid "Filter by status"
 msgstr ""
 
-#: src/window.rs:492
+#: src/window.rs:343
+msgid "All"
+msgstr ""
+
+#: src/window.rs:518
 msgid "Downloads continue in the background"
 msgstr ""
 
-#: src/window.rs:507
+#: src/window.rs:533
 msgid "Some downloads failed"
-msgstr ""
-
-#: src/window_dialogs.rs:255
-msgid "{} story"
-msgid_plural "{} stories"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/window_dialogs.rs:258
-msgid "{} highlight"
-msgid_plural "{} highlights"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/window_dialogs.rs:260
-msgid "{} item"
-msgid_plural "{} items"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/window_dialogs.rs:280 src/window_dialogs.rs:1359
-msgid "Showing the first {n} of {total}"
-msgstr ""
-
-#: src/window_dialogs.rs:305
-msgid "Torrent files"
-msgstr ""
-
-#: src/window_dialogs.rs:311
-msgid "Choose torrent file"
-msgstr ""
-
-#: src/window_dialogs.rs:312
-msgid "Add Torrent"
-msgstr ""
-
-#: src/window_dialogs.rs:375
-msgid "URL"
-msgstr ""
-
-#: src/window_dialogs.rs:384
-msgid "File name (optional)"
-msgstr ""
-
-#: src/window_dialogs.rs:394
-msgid "Looking up media…"
-msgstr ""
-
-#: src/window_dialogs.rs:401 src/window_rows.rs:825
-msgid "File name"
-msgstr ""
-
-#: src/window_dialogs.rs:407 src/window_dialogs.rs:411
-msgid "Revert to Title"
-msgstr ""
-
-#: src/window_dialogs.rs:421
-msgid "Media format"
-msgstr ""
-
-#: src/window_dialogs.rs:422
-msgid "Uses your preferred quality"
-msgstr ""
-
-#: src/window_dialogs.rs:423 src/window_dialogs.rs:822
-msgid "Automatic"
-msgstr ""
-
-#: src/window_dialogs.rs:428
-msgid "Audio only"
-msgstr ""
-
-#: src/window_dialogs.rs:429
-msgid "Skip the video track"
-msgstr ""
-
-#: src/window_dialogs.rs:438
-msgid "Download the yt-dlp support tools"
-msgstr ""
-
-#: src/window_dialogs.rs:447
-msgid "Couldn't load the media preview"
-msgstr ""
-
-#: src/window_dialogs.rs:450 src/window_rows.rs:437
-msgid "Retry"
-msgstr ""
-
-#: src/window_dialogs.rs:481
-msgid "Choose a .torrent file"
-msgstr ""
-
-#: src/window_dialogs.rs:485
-msgid "Torrent file"
-msgstr ""
-
-#: src/window_dialogs.rs:503
-msgid "Save to"
-msgstr ""
-
-#: src/window_dialogs.rs:845
-msgid "No items found in this playlist"
-msgstr ""
-
-#: src/window_dialogs.rs:996 src/window_dialogs.rs:1562 src/window_rows.rs:838
-msgid "_Cancel"
-msgstr ""
-
-#: src/window_dialogs.rs:1000 src/window_dialogs.rs:1020
-#: src/window_dialogs.rs:1236
-msgid "_Add Download"
-msgstr ""
-
-#: src/window_dialogs.rs:1038
-msgid "Media Details"
-msgstr ""
-
-#: src/window_dialogs.rs:1125 src/window_dialogs.rs:1151
-msgid "Still looking up the media — wait for the preview, then add."
-msgstr ""
-
-#: src/window_dialogs.rs:1234
-msgid "_Continue"
-msgstr ""
-
-#: src/window_dialogs.rs:1416
-msgid "_Queue {} item"
-msgid_plural "_Queue {} items"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/window_dialogs.rs:1429
-msgid "Select at least one item"
-msgstr ""
-
-#: src/window_dialogs.rs:1526
-msgid "Files"
-msgstr ""
-
-#: src/window_dialogs.rs:1528
-msgid "{} file"
-msgid_plural "{} files"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/window_dialogs.rs:1577
-msgid "_Add {} file"
-msgid_plural "_Add {} files"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/window_dialogs.rs:1598
-msgid "Select at least one file"
 msgstr ""
 
 #: src/window_rows.rs:59
@@ -1357,86 +1350,90 @@ msgstr ""
 msgid "Could not {verb} {what} in the file manager: {e}"
 msgstr ""
 
-#: src/window_rows.rs:232
+#: src/window_rows.rs:295
 msgid "Stop Recording"
 msgstr ""
 
-#: src/window_rows.rs:232
+#: src/window_rows.rs:295
 msgid "Stop recording"
 msgstr ""
 
-#: src/window_rows.rs:256
+#: src/window_rows.rs:319
 msgid "Resume"
 msgstr ""
 
-#: src/window_rows.rs:258 src/window_rows.rs:434
+#: src/window_rows.rs:321 src/window_rows.rs:537
 msgid "Pause"
 msgstr ""
 
-#: src/window_rows.rs:436
-msgid "Queue for later"
-msgstr ""
-
-#: src/window_rows.rs:438
-msgid "Show in Folder"
-msgstr ""
-
-#: src/window_rows.rs:439
-msgid "Move to Trash"
-msgstr ""
-
-#: src/window_rows.rs:440
-msgid "Remove from list"
-msgstr ""
-
-#: src/window_rows.rs:471
-msgid "Downloaded blocks"
-msgstr ""
-
-#: src/window_rows.rs:494
+#: src/window_rows.rs:515
 msgid "Live recording"
 msgstr ""
 
-#: src/window_rows.rs:495
+#: src/window_rows.rs:516
 msgid "Audio"
 msgstr ""
 
-#: src/window_rows.rs:497
+#: src/window_rows.rs:518
 msgid "Video"
 msgstr ""
 
-#: src/window_rows.rs:498
+#: src/window_rows.rs:519
 msgid "Download"
 msgstr ""
 
-#: src/window_rows.rs:518
+#: src/window_rows.rs:539
+msgid "Queue for later"
+msgstr ""
+
+#: src/window_rows.rs:541
+msgid "Show in Folder"
+msgstr ""
+
+#: src/window_rows.rs:542
+msgid "Move to Trash"
+msgstr ""
+
+#: src/window_rows.rs:545
+msgid "Remove from list"
+msgstr ""
+
+#: src/window_rows.rs:577
+msgid "Downloaded blocks"
+msgstr ""
+
+#: src/window_rows.rs:624
 msgid "Rename…"
 msgstr ""
 
-#: src/window_rows.rs:732
+#: src/window_rows.rs:840
 msgid "Saving recording…"
 msgstr ""
 
-#: src/window_rows.rs:751
+#: src/window_rows.rs:859
 msgid "Queued for later"
 msgstr ""
 
-#: src/window_rows.rs:753
+#: src/window_rows.rs:861
 msgid "No other downloads waiting"
 msgstr ""
 
-#: src/window_rows.rs:773
+#: src/window_rows.rs:881
 msgid "Moved to Trash"
 msgstr ""
 
-#: src/window_rows.rs:796
+#: src/window_rows.rs:904
 msgid "Removed {name}"
 msgstr ""
 
-#: src/window_rows.rs:815
+#: src/window_rows.rs:923
 msgid "Rename Download"
 msgstr ""
 
-#: src/window_rows.rs:842
+#: src/window_rows.rs:946
+msgid "_Cancel"
+msgstr ""
+
+#: src/window_rows.rs:950
 msgid "_Rename"
 msgstr ""

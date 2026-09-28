@@ -200,7 +200,11 @@ struct FormatOption {
 /// The video preview block inside the form: exactly one state row shows at a
 /// time, driven by the probe below.
 struct VideoStep {
-    status: adw::ActionRow,
+    /// Lookup spinner, floating over the URL entry's trailing edge.
+    url_spinner: gtk4::Spinner,
+    /// The URL entry the spinner floats over: toggles the `url-lookup`
+    /// class that reserves its trailing text space while it is visible.
+    url_entry: gtk4::Entry,
     group: adw::PreferencesGroup,
     name: adw::EntryRow,
     revert: gtk4::Button,
@@ -220,9 +224,30 @@ struct VideoStep {
     error: adw::ActionRow,
 }
 
+/// Reserve trailing text space inside the URL entry while the lookup
+/// spinner floats over it. Installed once per display; the `url-lookup`
+/// class is toggled with the spinner's visibility, and padding lives
+/// inside the entry's allocation so toggling it moves no sibling.
+fn ensure_url_lookup_css() {
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let css = gtk4::CssProvider::new();
+        css.load_from_string("entry.url-lookup { padding-inline-end: 32px; }");
+        if let Some(display) = gtk4::gdk::Display::default() {
+            gtk4::style_context_add_provider_for_display(
+                &display,
+                &css,
+                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+    });
+}
+
 fn hide_video_step(v: &VideoStep) {
     v.group.set_visible(false);
-    v.status.set_visible(false);
+    v.url_spinner.set_spinning(false);
+    v.url_spinner.set_visible(false);
+    v.url_entry.remove_css_class("url-lookup");
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
@@ -259,8 +284,9 @@ fn reset_video_step(step: &VideoStep) {
 
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
-    v.group.set_visible(true);
-    v.status.set_visible(true);
+    v.url_spinner.set_spinning(true);
+    v.url_spinner.set_visible(true);
+    v.url_entry.add_css_class("url-lookup");
 }
 
 fn show_video_ready(v: &VideoStep) {
@@ -528,6 +554,49 @@ fn picker_enter_confirms(page: &adw::NavigationPage, add_btn: &gtk4::Button) {
     page.add_controller(key);
 }
 
+/// Compact picker header: back + title + dimmed count on one tight row.
+/// The auto `AdwHeaderBar` left the centered title floating in 48px of
+/// chrome with nothing else in it; a picker embedded in a card earns a
+/// denser row. Back pops the navigation page (Esc still collapses the
+/// whole card); the selection actions stay in the bottom action bar.
+fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::Box {
+    let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    header.set_margin_top(6);
+    header.set_margin_bottom(6);
+    header.set_margin_start(6);
+    header.set_margin_end(12);
+    let back = gtk4::Button::builder()
+        .icon_name("go-previous-symbolic")
+        .css_classes(["flat", "circular"])
+        .tooltip_text(gettext("Back"))
+        .valign(gtk4::Align::Center)
+        .build();
+    back.update_property(&[gtk4::accessible::Property::Label(&gettext("Back"))]);
+    {
+        let nav = nav.clone();
+        back.connect_clicked(move |_| {
+            nav.pop();
+        });
+    }
+    let title_label = gtk4::Label::builder()
+        .label(title)
+        .css_classes(["heading"])
+        .halign(gtk4::Align::Start)
+        .valign(gtk4::Align::Center)
+        .hexpand(true)
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
+        .build();
+    let count_label = gtk4::Label::builder()
+        .label(count)
+        .css_classes(["dimmed", "caption"])
+        .valign(gtk4::Align::Center)
+        .build();
+    header.append(&back);
+    header.append(&title_label);
+    header.append(&count_label);
+    header
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_playlist_items_page(
     nav: &adw::NavigationView,
@@ -545,9 +614,9 @@ fn push_playlist_items_page(
 
     let page = adw::PreferencesPage::new();
     let count = playlist.items.len();
-    let group = adw::PreferencesGroup::builder()
-        .title(playlist_count_label(playlist.kind, count))
-        .build();
+    // No group title: the count lives in the compact header above, so one
+    // title level suffices. The truncation notice stays as the description.
+    let group = adw::PreferencesGroup::new();
     if crate::video_probe::playlist_truncated(&playlist) {
         group.set_description(Some(
             &gettext("Showing the first {n} of {total}")
@@ -598,12 +667,13 @@ fn push_playlist_items_page(
         .build();
 
     let toolbar = adw::ToolbarView::new();
-    let hb = adw::HeaderBar::new();
-    // No WM title buttons either end and no explicit Cancel: the nav header's
-    // Back button (and Esc) close the picker, selection actions live per HIG.
-    hb.set_show_start_title_buttons(false);
-    hb.set_show_end_title_buttons(false);
-    toolbar.add_top_bar(&hb);
+    // Compact header instead of the auto AdwHeaderBar: back + title + count
+    // on one tight row, no 48px of empty chrome around a centered title.
+    toolbar.add_top_bar(&picker_header(
+        nav,
+        &playlist.title,
+        &playlist_count_label(playlist.kind, count),
+    ));
     toolbar.set_content(Some(&scrolled));
     let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();
     toolbar.add_bottom_bar(&action_bar);
@@ -711,13 +781,10 @@ fn push_torrent_picker_page(
     }
 
     let page = adw::PreferencesPage::new();
-    let group = adw::PreferencesGroup::builder()
-        .title(gettext("Files"))
-        .description(
-            ngettext("{} file", "{} files", entries.len() as u32)
-                .replace("{}", &entries.len().to_string()),
-        )
-        .build();
+    // The file count lives in the compact header; the group needs no title.
+    let file_count = ngettext("{} file", "{} files", entries.len() as u32)
+        .replace("{}", &entries.len().to_string());
+    let group = adw::PreferencesGroup::new();
     page.add(&group);
 
     // HIG selection, not settings: a switch means "a setting is on", a checkbox
@@ -760,10 +827,8 @@ fn push_torrent_picker_page(
         .build();
 
     let toolbar = adw::ToolbarView::new();
-    let hb = adw::HeaderBar::new();
-    hb.set_show_start_title_buttons(false);
-    hb.set_show_end_title_buttons(false);
-    toolbar.add_top_bar(&hb);
+    // Same compact header as the playlist picker: back + file name + count.
+    toolbar.add_top_bar(&picker_header(nav, &file_name, &file_count));
     toolbar.set_content(Some(&scrolled));
     // HIG selection mode: the selection's actions live in a bottom
     // action bar, not the header. Back pops the page (cancels).
@@ -929,7 +994,9 @@ impl AddCard {
         (self.open)(initial_url)
     }
 
-    /// Header `+` behavior: reveal a fresh card, or focus the open one.
+    /// Shared toggle for every New Download affordance (header `+`,
+    /// Ctrl+N, the empty-state pill): reveal a fresh card, or retract the
+    /// open one (which resets it, like Cancel/Escape).
     pub fn toggle(&self) {
         (self.toggle)()
     }
@@ -963,24 +1030,19 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     card.set_margin_end(12);
     card.add_css_class("card");
 
-    let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    header.set_margin_top(12);
-    header.set_margin_start(12);
-    header.set_margin_end(6);
-    let title = gtk4::Label::new(Some(&gettext("New Download")));
-    title.add_css_class("heading");
-    title.set_halign(gtk4::Align::Start);
-    title.set_hexpand(true);
+    // No in-card title: the card only opens from explicit "New Download"
+    // affordances (+, Ctrl+N, the empty-state pill), so restating it is
+    // redundant. The navigation page below keeps the accessible name.
+    // Dismissal lives in the URL row with the other actions — an inline
+    // card has no window controls.
     let cancel_btn = gtk4::Button::builder()
         .icon_name("window-close-symbolic")
         .css_classes(["flat", "circular"])
         .tooltip_text(gettext("Cancel"))
         .build();
-    header.append(&title);
-    header.append(&cancel_btn);
+    cancel_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Cancel"))]);
 
     let nav = adw::NavigationView::new();
-    card.append(&header);
     card.append(&nav);
     revealer.set_child(Some(&card));
 
@@ -997,6 +1059,25 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
+    // The lookup spinner lives inside the URL entry (browser-address-bar
+    // style): no separate status line for the transient loading state, and
+    // no layout shift when a lookup starts. GtkEntry has no add_suffix, so
+    // the spinner floats over the entry's trailing edge in a GtkOverlay;
+    // the entry reserves trailing text space via the `url-lookup` class
+    // (toggled with the spinner) so text never slides underneath it. The
+    // accessible label carries the "Looking up…" text the spinner replaces
+    // visually.
+    ensure_url_lookup_css();
+    let url_spinner = gtk4::Spinner::new();
+    url_spinner.update_property(&[gtk4::accessible::Property::Label(&gettext("Looking up…"))]);
+    url_spinner.set_halign(gtk4::Align::End);
+    url_spinner.set_valign(gtk4::Align::Center);
+    url_spinner.set_margin_end(10);
+    url_spinner.set_visible(false);
+    let url_overlay = gtk4::Overlay::new();
+    url_overlay.set_hexpand(true);
+    url_overlay.set_child(Some(&url_entry));
+    url_overlay.add_overlay(&url_spinner);
     let add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
         .use_underline(true)
@@ -1012,9 +1093,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         "Download options",
     ))]);
     let url_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    url_box.append(&url_entry);
+    url_box.append(&url_overlay);
     url_box.append(&add_btn);
     url_box.append(&opts_toggle);
+    url_box.append(&cancel_btn);
     form.append(&url_box);
 
     // Download options live in a revealer directly under the URL row: the
@@ -1034,13 +1116,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // Video preview block: hidden until a lookup runs; exactly one state shows.
     let video_group = adw::PreferencesGroup::new();
     video_group.set_visible(false);
-    let video_status = adw::ActionRow::builder()
-        .title(gettext("Looking up…"))
-        .build();
-    let video_spinner = gtk4::Spinner::new();
-    video_spinner.set_spinning(true);
-    video_status.add_suffix(&video_spinner);
-    video_group.add(&video_status);
     let video_name = adw::EntryRow::builder()
         .title(gettext("File name"))
         .activates_default(false)
@@ -1094,7 +1169,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_error.add_suffix(&video_retry_btn);
     video_group.add(&video_error);
     let step = Rc::new(VideoStep {
-        status: video_status,
+        url_spinner: url_spinner.clone(),
+        url_entry: url_entry.clone(),
         group: video_group.clone(),
         name: video_name,
         revert: video_revert_btn,
@@ -1858,10 +1934,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let toggle = {
         let open = Rc::clone(&open);
         let is_open = Rc::clone(&is_open);
-        let url_entry = url_entry.clone();
+        let close_card = Rc::clone(&close_card);
         Rc::new(move || {
             if is_open.get() {
-                url_entry.grab_focus();
+                close_card();
             } else {
                 open(None);
             }

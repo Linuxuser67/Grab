@@ -2,7 +2,7 @@
 
 use crate::engine_msg::EngineMsg;
 use crate::file_names::fmt_bytes;
-use gettextrs::ngettext;
+use gettextrs::{gettext, ngettext};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -64,9 +64,12 @@ pub(crate) async fn pace_chunk(paced: &mut u64, pace_start: Instant, rate: Optio
     }
 }
 
-/// "900 MB of 2.0 GB" for progress rows (Files copy-dialog convention).
+/// "{downloaded} of {total}" for progress rows (Files copy-dialog convention).
+/// The connector word is translatable; the byte sizes come localized from GLib.
 pub(crate) fn format_amounts(downloaded: u64, total: u64) -> String {
-    format!("{} of {}", fmt_bytes(downloaded), fmt_bytes(total))
+    gettext("{downloaded} of {total}")
+        .replace("{downloaded}", &fmt_bytes(downloaded))
+        .replace("{total}", &fmt_bytes(total))
 }
 
 /// Human ETA (longest whole unit) for the HIG's "About {eta} left" phrasing. Pure for tests.

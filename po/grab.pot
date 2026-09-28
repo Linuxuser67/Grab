@@ -310,6 +310,10 @@ msgstr ""
 msgid "Unknown proxy type: {t}"
 msgstr ""
 
+#: src/download_rate.rs:68
+msgid "{downloaded} of {total}"
+msgstr ""
+
 #: src/download_rate.rs:76
 msgid "1 hour"
 msgid_plural "{n} hours"

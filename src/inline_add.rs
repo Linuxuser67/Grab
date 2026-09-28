@@ -31,21 +31,74 @@ type TorrentPickerOpener = Rc<dyn Fn(String, Vec<u8>, Vec<crate::torrent::Torren
 /// Owns the in-flight probe marker: every exit clears it for the owning
 /// generation, so a stale kick's marker never suppresses a re-kick.
 struct InflightGuard {
-    inflight: Rc<RefCell<Option<(String, u64, bool)>>>,
-    generation: Rc<Cell<u64>>,
+    probe: Rc<RefCell<ProbeState>>,
     my: u64,
 }
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        let is_current = self
-            .inflight
-            .borrow()
-            .as_ref()
-            .is_some_and(|(_, g, _)| *g == self.generation.get() && *g == self.my);
-        if is_current {
-            self.inflight.replace(None);
+        self.probe.borrow_mut().finish(self.my);
+    }
+}
+
+/// Pure resolve state for the video probe pipeline: generation counter,
+/// in-flight marker, last resolved URL and probe result. GTK-free, so it
+/// unit-tests without a display; shared behind one `Rc<RefCell<_>>`.
+#[derive(Default)]
+struct ProbeState {
+    generation: u64,
+    inflight: Option<(String, u64, bool)>,
+    last_ok: String,
+    info: Option<crate::video::ProbeResult>,
+}
+
+impl ProbeState {
+    /// Start a resolve for `url`: returns the new generation, or `None`
+    /// when a twin resolve for this exact URL is already running for the
+    /// current generation (suppressed — the twin's result would lose the
+    /// generation race anyway).
+    fn kick(&mut self, url: String, probe_unlisted: bool) -> Option<u64> {
+        if inflight_suppresses(&self.inflight, &url, self.generation, probe_unlisted) {
+            return None;
         }
+        let my = self.generation + 1;
+        self.generation = my;
+        self.inflight = Some((url, my, probe_unlisted));
+        Some(my)
+    }
+
+    /// Twin check without starting: is a resolve for this exact URL already
+    /// running for the current generation?
+    fn is_inflight(&self, url: &str, probe_unlisted: bool) -> bool {
+        inflight_suppresses(&self.inflight, url, self.generation, probe_unlisted)
+    }
+
+    /// Clear the in-flight marker when it belongs to `my` generation; a
+    /// stale generation leaves a newer kick's marker alone.
+    fn finish(&mut self, my: u64) {
+        if self
+            .inflight
+            .as_ref()
+            .is_some_and(|(_, g, _)| *g == self.generation && *g == my)
+        {
+            self.inflight = None;
+        }
+    }
+
+    /// Bump the generation so in-flight resolves go stale.
+    fn bump_generation(&mut self) -> u64 {
+        self.generation += 1;
+        self.generation
+    }
+
+    /// Collapse/close: cancel in-flight work and drop all probe state, so a
+    /// non-video add after a video leaves no dead probe state behind.
+    /// RED: `self.inflight = None;` deliberately withheld here — the new
+    /// tests must fail on this commit before the fix lands.
+    fn reset(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.last_ok.clear();
+        self.info = None;
     }
 }
 
@@ -177,6 +230,32 @@ fn hide_video_step(v: &VideoStep) {
     v.audio.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
+}
+
+/// Clear the video preview block back to a pristine state: `close_card`
+/// calls this so a non-video add after a video leaves no dead probe state
+/// in memory. Hiding alone is not enough — the name row keeps its text,
+/// the format rows keep their widgets, and the tools/error rows keep
+/// their subtitles.
+fn reset_video_step(step: &VideoStep) {
+    // Drop the format option rows (mirrors `rebuild_format_options`) and
+    // the current pick.
+    for row in step.option_rows.borrow().iter() {
+        step.format.remove(row);
+    }
+    step.option_rows.borrow_mut().clear();
+    step.option_checks.borrow_mut().clear();
+    step.options.borrow_mut().clear();
+    step.selected.set(0);
+    step.format_value.set_text("");
+    step.format.set_expanded(false);
+    step.audio.set_active(false);
+    // Name row and the tools/error subtitles keep their last text when
+    // only hidden; clear them so nothing stale survives.
+    step.name.set_text("");
+    step.tools.set_subtitle("");
+    step.error.set_subtitle("");
+    hide_video_step(step);
 }
 
 fn show_video_loading(v: &VideoStep) {
@@ -374,13 +453,13 @@ fn submit_probe(
 
 /// Report a failed plain-queue fallback on the form: drop the stale probe, log, show the error, re-enable Add.
 fn fallback_plain_failed(
-    info: &Rc<RefCell<Option<crate::video::ProbeResult>>>,
+    probe: &Rc<RefCell<ProbeState>>,
     step: &Rc<VideoStep>,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     url: &str,
     error: &str,
 ) {
-    info.borrow_mut().take();
+    probe.borrow_mut().info.take();
     tracing::warn!(
         host = %crate::video_probe::page_host(url),
         error = %error,
@@ -806,7 +885,8 @@ impl AddCard {
     }
 
     /// Reveal the card, pre-filling `initial_url` when given (drops and
-    /// Open With). Reopening focuses the existing form without resetting it.
+    /// Open With). An already-open card only gains focus — no reset;
+    /// collapse always resets, so a reopened card starts fresh.
     pub fn open(&self, initial_url: Option<String>) {
         (self.open)(initial_url)
     }
@@ -1025,15 +1105,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     nav.push(&form_page);
 
-    // Shared state.
-    let video_generation = Rc::new(Cell::new(0u64));
-    let video_last_ok = Rc::new(RefCell::new(String::new()));
-    let video_info = Rc::new(RefCell::new(None::<crate::video::ProbeResult>));
-    // URL a resolve is currently running for, if any. The submit path kicks
-    // while the debounced keystroke lookup may still be in flight; without
-    // this both spawn yt-dlp and the loser's result is discarded by the
-    // generation guard anyway.
-    let video_inflight: Rc<RefCell<Option<(String, u64, bool)>>> = Rc::new(RefCell::new(None));
+    // Shared probe state: generation counter, in-flight marker, last
+    // resolved URL and probe result. The submit path kicks while the
+    // debounced keystroke lookup may still be in flight; without the
+    // marker both spawn yt-dlp and the loser's result is discarded by
+    // the generation guard anyway.
+    let probe = Rc::new(RefCell::new(ProbeState::default()));
     // The form's Add button, desensitized while a lookup is in flight (a
     // dead button says so upfront). Every terminal state re-enables it.
     let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
@@ -1045,11 +1122,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let close_card: Rc<dyn Fn()> = {
         let revealer = revealer.clone();
         let is_open = Rc::clone(&is_open);
-        let generation = Rc::clone(&video_generation);
+        let probe = Rc::clone(&probe);
         let url_entry = url_entry.clone();
         let file_row = file_row.clone();
-        let info = Rc::clone(&video_info);
-        let last_ok = Rc::clone(&video_last_ok);
         let step = Rc::clone(&step);
         let form_error = form_error.clone();
         let lookup_add = Rc::clone(&lookup_add);
@@ -1059,15 +1134,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let default_dir = manager.effective_download_dir();
         Rc::new(move || {
             is_open.set(false);
-            // Cancel any in-flight probe; its generation check discards it.
-            generation.set(generation.get().wrapping_add(1));
+            // Cancel any in-flight probe and drop its state; the
+            // generation bump discards the stale completion.
+            probe.borrow_mut().reset();
             revealer.set_reveal_child(false);
-            info.borrow_mut().take();
-            last_ok.borrow_mut().clear();
-            hide_video_step(&step);
-            step.audio.set_active(false);
-            step.selected.set(0);
-            step.format.set_expanded(false);
+            reset_video_step(&step);
             url_entry.remove_css_class("error");
             form_error.set_visible(false);
             set_lookup_add(&lookup_add, true);
@@ -1086,12 +1157,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     };
 
     // Video resolve machinery: debounced metadata lookup that never blocks the
-    // main loop. `video_generation` drops stale completions while the user
-    // keeps typing; every async touch re-checks the generation.
+    // main loop. The probe state's generation drops stale completions while
+    // the user keeps typing; every async touch re-checks the generation.
     let kick_video = {
-        let generation = video_generation.clone();
-        let last_ok = video_last_ok.clone();
-        let info = video_info.clone();
+        let probe = Rc::clone(&probe);
         let step2 = step.clone();
         let url_entry2 = url_entry.clone();
         let file_row2 = file_row.clone();
@@ -1099,7 +1168,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let lookup_add_kick = lookup_add.clone();
         let manager_kick = manager.clone();
         let dest_kick = dest_dir.clone();
-        let inflight = video_inflight.clone();
         let close_kick = close_card.clone();
         Rc::new(move |probe_unlisted: bool| {
             // Twin suppression: a resolve for this exact URL is already
@@ -1112,16 +1180,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             // carries the kick's unlisted-probe flag: an explicit Enter kick
             // probes unlisted URLs, a different resolve from a typing kick.
             let url = url_entry2.text().trim().to_string();
-            if inflight_suppresses(&inflight.borrow(), &url, generation.get(), probe_unlisted) {
+            let Some(my) = probe.borrow_mut().kick(url, probe_unlisted) else {
                 return;
-            }
-            let my = generation.get() + 1;
-            generation.set(my);
-            inflight.replace(Some((url, my, probe_unlisted)));
+            };
             let (
-                generation_b,
-                last_b,
-                info_b,
+                probe_b,
                 step_b,
                 url_b,
                 settings_b,
@@ -1129,12 +1192,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 lookup_add_b,
                 manager_b,
                 dest_b,
-                inflight_b,
                 close_b,
             ) = (
-                generation.clone(),
-                last_ok.clone(),
-                info.clone(),
+                probe.clone(),
                 step2.clone(),
                 url_entry2.clone(),
                 settings2.clone(),
@@ -1142,15 +1202,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 lookup_add_kick.clone(),
                 manager_kick.clone(),
                 dest_kick.clone(),
-                inflight.clone(),
                 close_kick.clone(),
             );
             glib::spawn_future_local(async move {
                 // Owns the in-flight marker: every exit below clears it for
                 // this generation (a stale generation leaves a newer marker).
                 let _guard = InflightGuard {
-                    inflight: inflight_b,
-                    generation: generation_b.clone(),
+                    probe: Rc::clone(&probe_b),
                     my,
                 };
                 let url = url_b.text().trim().to_string();
@@ -1162,18 +1220,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 if url.is_empty() || (!crate::video::is_video_page(&url) && !probing) {
                     // A stale probe for another URL must not linger: editing to a fresh
                     // URL would show the old preview.
-                    if !crate::video::preview_fresh(
-                        &info_b.borrow(),
-                        last_b.borrow().as_str(),
-                        &url,
-                    ) {
+                    let stale = {
+                        let st = probe_b.borrow();
+                        !crate::video::preview_fresh(&st.info, st.last_ok.as_str(), &url)
+                    };
+                    if stale {
                         hide_video_step(&step_b);
-                        info_b.borrow_mut().take();
+                        probe_b.borrow_mut().info.take();
                         set_lookup_add(&lookup_add_b, true);
                     }
                     return;
                 }
-                if crate::video::preview_fresh(&info_b.borrow(), last_b.borrow().as_str(), &url) {
+                let fresh = {
+                    let st = probe_b.borrow();
+                    crate::video::preview_fresh(&st.info, st.last_ok.as_str(), &url)
+                };
+                if fresh {
                     show_video_ready(&step_b);
                     set_lookup_add(&lookup_add_b, true);
                     return;
@@ -1183,10 +1245,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let libs = match crate::video::resolve_libraries() {
                     Ok(libs) => libs,
                     Err(e) => {
-                        if generation_b.get() != my {
+                        if probe_b.borrow().generation != my {
                             return;
                         }
-                        info_b.borrow_mut().take();
+                        probe_b.borrow_mut().info.take();
                         show_video_tools_missing(&step_b, &e.to_string());
                         set_lookup_add(&lookup_add_b, true);
                         return;
@@ -1201,7 +1263,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 {
                     Ok(proxy) => proxy,
                     Err(e) => {
-                        if generation_b.get() != my {
+                        if probe_b.borrow().generation != my {
                             return;
                         }
                         show_video_error(&step_b, &e);
@@ -1219,7 +1281,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 .await
                 {
                     Err(e) => {
-                        if generation_b.get() != my {
+                        if probe_b.borrow().generation != my {
                             return;
                         }
                         // Probed links fall back to today's outcome (queue the file directly)
@@ -1232,7 +1294,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     fallback_plain_failed(
-                                        &info_b,
+                                        &probe_b,
                                         &step_b,
                                         &lookup_add_b,
                                         &url,
@@ -1255,7 +1317,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             match queue_plain(&manager_b, &dest_b, &close_b, &file_b, &direct) {
                                 Ok(()) => return,
                                 Err(pe) => {
-                                    info_b.borrow_mut().take();
+                                    probe_b.borrow_mut().info.take();
                                     tracing::warn!(
                                         host = %crate::video_probe::page_host(&url),
                                         error = %pe.to_string(),
@@ -1267,7 +1329,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 }
                             }
                         }
-                        info_b.borrow_mut().take();
+                        probe_b.borrow_mut().info.take();
                         tracing::warn!(
                             host = %crate::video_probe::page_host(&url),
                             error = %e.to_string(),
@@ -1277,7 +1339,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         set_lookup_add(&lookup_add_b, true);
                     }
                     Ok(probe) => {
-                        if generation_b.get() != my {
+                        if probe_b.borrow().generation != my {
                             return;
                         }
                         // Resolved but nothing playable, and not a listed video
@@ -1287,7 +1349,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     fallback_plain_failed(
-                                        &info_b,
+                                        &probe_b,
                                         &step_b,
                                         &lookup_add_b,
                                         &url,
@@ -1330,15 +1392,16 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     };
                                     step_b.name.set_text(&base);
                                 }
-                                *last_b.borrow_mut() = url;
+                                probe_b.borrow_mut().last_ok = url;
                                 rebuild_format_options(&step_b, &v, &settings_b.video_quality());
-                                *info_b.borrow_mut() = Some(crate::video::ProbeResult::Single(v));
+                                probe_b.borrow_mut().info =
+                                    Some(crate::video::ProbeResult::Single(v));
                                 show_video_ready(&step_b);
                                 set_lookup_add(&lookup_add_b, true);
                             }
                             crate::video::ProbeResult::Playlist(pl) => {
                                 if pl.items.is_empty() {
-                                    info_b.borrow_mut().take();
+                                    probe_b.borrow_mut().info.take();
                                     show_video_error(
                                         &step_b,
                                         &gettext("No items found in this playlist"),
@@ -1346,8 +1409,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     set_lookup_add(&lookup_add_b, true);
                                     return;
                                 }
-                                *last_b.borrow_mut() = url;
-                                *info_b.borrow_mut() =
+                                probe_b.borrow_mut().last_ok = url;
+                                probe_b.borrow_mut().info =
                                     Some(crate::video::ProbeResult::Playlist(pl.clone()));
                                 show_video_playlist(&step_b, &pl);
                                 set_lookup_add(&lookup_add_b, true);
@@ -1369,14 +1432,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let file_row = file_row.clone();
         let form_error = form_error.clone();
         let close_card = close_card.clone();
-        let info = video_info.clone();
-        let last_ok = video_last_ok.clone();
+        let probe = Rc::clone(&probe);
         let step2 = step.clone();
         let kick = kick_video.clone();
         let lookup_add_submit = lookup_add.clone();
         let nav2 = nav.clone();
-        let inflight2 = video_inflight.clone();
-        let generation2 = video_generation.clone();
         Rc::new(move |from_activate: bool| {
             let fail = |message: &str| {
                 form_error.set_text(message);
@@ -1387,13 +1447,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if crate::video::is_video_page(&url) {
                 // Same freshness gate as the kick skip: the stored page URL is
                 // canonicalized, so only the round-trip key (which text was resolved) decides.
-                let ready =
-                    if crate::video::preview_fresh(&info.borrow(), last_ok.borrow().as_str(), &url)
-                    {
-                        info.borrow().clone()
+                let ready = {
+                    let st = probe.borrow();
+                    if crate::video::preview_fresh(&st.info, st.last_ok.as_str(), &url) {
+                        st.info.clone()
                     } else {
                         None
-                    };
+                    }
+                };
                 match ready {
                     Some(probe) => submit_probe(
                         &m,
@@ -1407,8 +1468,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     None => {
                         // A tap while the lookup is still running: don't stack
                         // a twin resolve, say so instead.
-                        if inflight_suppresses(&inflight2.borrow(), &url, generation2.get(), false)
-                        {
+                        if probe.borrow().is_inflight(&url, false) {
                             show_video_error(
                                 &step2,
                                 &gettext(
@@ -1427,10 +1487,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             // fresh preview queues like a listed video page (canonical page, never the typed
             // link); anything else skips straight to the plain intake below.
             if crate::video::is_http_url(&url) && !crate::video::is_direct_file_url(&url) {
-                if !crate::video::preview_fresh(&info.borrow(), last_ok.borrow().as_str(), &url) {
+                let fresh = {
+                    let st = probe.borrow();
+                    crate::video::preview_fresh(&st.info, st.last_ok.as_str(), &url)
+                };
+                if !fresh {
                     // Resubmit while already probing: say so instead of
                     // stacking a twin resolve.
-                    if inflight_suppresses(&inflight2.borrow(), &url, generation2.get(), true) {
+                    if probe.borrow().is_inflight(&url, true) {
                         show_video_error(
                             &step2,
                             &gettext(
@@ -1445,7 +1509,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     // link): queue it like a listed video page — without this the press fell
                     // through to a bare return. preview_fresh implies Single or Playlist, so
                     // this is exhaustive.
-                    match info.borrow().clone() {
+                    let cached = probe.borrow().info.clone();
+                    match cached {
                         Some(crate::video::ProbeResult::Single(v)) => {
                             submit_probed_single(
                                 &m,
@@ -1503,10 +1568,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // Debounced auto-lookup while typing (600 ms idle); Enter submits
     // immediately through the path above.
     {
-        let generation = video_generation.clone();
+        let probe = Rc::clone(&probe);
         let kick = kick_video.clone();
         let step2 = step.clone();
-        let info2 = video_info.clone();
         let file_row2 = file_row.clone();
         let form_error2 = form_error.clone();
         url_entry.connect_changed(move |row| {
@@ -1516,8 +1580,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             // The direct-only file row hides in video mode (the preview has its own
             // name row); a non-empty entry is not lost — the resolve seeds the video name
             // from it. A probed preview counts as video mode while its canonical URL matches.
-            let fresh = info2
+            let fresh = probe
                 .borrow()
+                .info
                 .as_ref()
                 .is_some_and(|p| p.page_url() == text);
             file_row2.set_visible(!(crate::video::is_video_page(&text) || fresh));
@@ -1527,15 +1592,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if !crate::video::is_video_page(&text) || !fresh {
                 hide_video_step(&step2);
                 if !fresh {
-                    info2.borrow_mut().take();
+                    probe.borrow_mut().info.take();
                 }
             }
-            let my = generation.get() + 1;
-            generation.set(my);
-            let (generation_b, kick_b) = (generation.clone(), kick.clone());
+            let my = probe.borrow_mut().bump_generation();
+            let (probe_b, kick_b) = (probe.clone(), kick.clone());
             glib::spawn_future_local(async move {
                 glib::timeout_future(std::time::Duration::from_millis(600)).await;
-                if generation_b.get() != my {
+                if probe_b.borrow().generation != my {
                     return;
                 }
                 kick_b(false);
@@ -1616,10 +1680,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
     // One-click restore of the title default (audio-aware, like submit).
     {
-        let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
+        let (name, audio, probe) = (step.name.clone(), step.audio.clone(), Rc::clone(&probe));
         let settings = manager.settings().clone();
         step.revert.connect_clicked(move |_| {
-            if let Some(p) = info.borrow().as_ref() {
+            let st = probe.borrow();
+            if let Some(p) = st.info.as_ref() {
                 name.set_text(&default_name_for(&settings, p.title(), audio.is_active()));
                 name.grab_focus();
             }
@@ -1629,10 +1694,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // the other mode, so without this the row keeps a video-container name for an
     // audio download (or vice versa). An edited name is never clobbered.
     {
-        let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
+        let (name, audio, probe) = (step.name.clone(), step.audio.clone(), Rc::clone(&probe));
         let settings = manager.settings().clone();
         audio.connect_active_notify(move |sw| {
-            if let Some(p) = info.borrow().as_ref() {
+            let st = probe.borrow();
+            if let Some(p) = st.info.as_ref() {
                 let active = sw.is_active();
                 let current = name.text().to_string();
                 if current.trim().is_empty()
@@ -1756,32 +1822,97 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
 mod tests {
     use super::*;
 
+    fn dummy_probe() -> crate::video::ProbeResult {
+        crate::video::ProbeResult::Single(crate::video::VideoInfo {
+            title: "Test title".into(),
+            duration: None,
+            duration_string: None,
+            page_url: "https://youtu.be/x".into(),
+            expires_at: None,
+            formats: Box::new([]),
+            is_live: false,
+            fetchable: true,
+        })
+    }
+
     #[test]
     fn inflight_guard_clears_only_for_current_generation() {
-        let inflight: Rc<RefCell<Option<(String, u64, bool)>>> = Rc::new(RefCell::new(None));
-        let generation = Rc::new(Cell::new(1u64));
+        let probe = Rc::new(RefCell::new(ProbeState::default()));
 
         // The owning generation clears the marker on drop.
-        inflight.replace(Some(("https://youtu.be/x".to_string(), 1, false)));
+        let my = probe
+            .borrow_mut()
+            .kick("https://youtu.be/x".to_string(), false)
+            .expect("first kick runs");
         drop(InflightGuard {
-            inflight: inflight.clone(),
-            generation: generation.clone(),
-            my: 1,
+            probe: probe.clone(),
+            my,
         });
-        assert!(inflight.borrow().is_none());
+        assert!(probe.borrow().inflight.is_none());
 
         // A stale generation leaves a newer kick's marker alone.
-        inflight.replace(Some(("https://youtu.be/y".to_string(), 2, true)));
-        generation.set(2);
+        let my2 = probe
+            .borrow_mut()
+            .kick("https://youtu.be/y".to_string(), true)
+            .expect("second kick runs");
         drop(InflightGuard {
-            inflight: inflight.clone(),
-            generation: generation.clone(),
-            my: 1,
+            probe: probe.clone(),
+            my: my2 - 1,
         });
         assert_eq!(
-            inflight.borrow().clone(),
-            Some(("https://youtu.be/y".to_string(), 2, true))
+            probe.borrow().inflight.clone(),
+            Some(("https://youtu.be/y".to_string(), my2, true))
         );
+    }
+
+    #[test]
+    fn kick_suppresses_twin_for_current_generation() {
+        let mut st = ProbeState::default();
+        let my = st
+            .kick("https://youtu.be/a".to_string(), false)
+            .expect("first kick runs");
+        assert_eq!(my, 1);
+        // Twin: same URL, generation and probe mode — suppressed.
+        assert!(st.kick("https://youtu.be/a".to_string(), false).is_none());
+        // A different URL is never a twin.
+        assert!(st.kick("https://youtu.be/b".to_string(), false).is_some());
+        // Same URL but the other probe mode is a different resolve.
+        assert!(st.kick("https://youtu.be/a".to_string(), true).is_some());
+    }
+
+    #[test]
+    fn reset_clears_probe_state_and_bumps_generation() {
+        let mut st = ProbeState::default();
+        st.kick("https://youtu.be/a".to_string(), false);
+        st.last_ok = "https://youtu.be/a".to_string();
+        st.info = Some(dummy_probe());
+        let prev_gen = st.generation;
+
+        st.reset();
+
+        assert_eq!(st.generation, prev_gen.wrapping_add(1));
+        assert!(
+            st.inflight.is_none(),
+            "reset must clear the in-flight marker"
+        );
+        assert!(st.last_ok.is_empty());
+        assert!(st.info.is_none());
+    }
+
+    #[test]
+    fn reset_is_idempotent() {
+        let mut st = ProbeState::default();
+        st.kick("https://youtu.be/a".to_string(), false);
+        st.reset();
+        let prev_gen = st.generation;
+
+        // A second reset on the already-clean state keeps it clean.
+        st.reset();
+
+        assert_eq!(st.generation, prev_gen.wrapping_add(1));
+        assert!(st.inflight.is_none());
+        assert!(st.last_ok.is_empty());
+        assert!(st.info.is_none());
     }
 
     #[test]

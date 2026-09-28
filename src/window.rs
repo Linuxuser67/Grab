@@ -306,9 +306,11 @@ pub fn build_window(
     fn is_queued(it: &crate::download::DownloadItem) -> bool {
         it.status() == crate::download::DownloadStatus::Queued
     }
-    /// DropDown bucket for a status (0 = All); order must match the model:
-    /// Active covers everything in flight or stalled, Queued the waiting,
-    /// Downloaded the finished.
+    /// DropDown bucket for a status (0 = All); order must match the model.
+    /// Active deliberately covers everything in flight or stalled —
+    /// including the terminal Failed/Cancelled states, so one bucket shows
+    /// anything still needing attention. Queued is the waiting, Downloaded
+    /// the finished.
     fn status_filter_bucket(s: crate::download::DownloadStatus) -> u32 {
         use crate::download::DownloadStatus::*;
         match s {

@@ -17,7 +17,7 @@
 //! and the lookup starts when Add Download (or Enter) is pressed.
 
 use crate::download::DownloadManager;
-use crate::window_rows::{default_name_for, error_label, selection_action_bar};
+use crate::window_rows::{default_name_for, selection_action_bar};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
@@ -147,47 +147,6 @@ pub(crate) fn fmt_item_duration(secs: i64) -> String {
 /// Wire a picker's selection bar to its checkboxes: the confirm action counts
 /// the live selection (`count_label` builds its text — msgids differ per
 /// picker) and Select All/None flip every checkbox.
-fn wire_selection_bar(
-    checks: &[gtk4::CheckButton],
-    select_all_btn: &gtk4::Button,
-    select_none_btn: &gtk4::Button,
-    add_btn: &gtk4::Button,
-    count_label: impl Fn(usize) -> String + 'static,
-) {
-    {
-        let checks: Vec<gtk4::CheckButton> = checks.to_vec();
-        let add_btn = add_btn.clone();
-        let refresh = Rc::new({
-            let checks = checks.clone();
-            move || {
-                let n = checks.iter().filter(|c| c.is_active()).count();
-                add_btn.set_label(&count_label(n));
-            }
-        });
-        for check in &checks {
-            let refresh = refresh.clone();
-            check.connect_toggled(move |_| refresh());
-        }
-        refresh();
-    }
-    {
-        let checks: Vec<gtk4::CheckButton> = checks.to_vec();
-        select_all_btn.connect_clicked(move |_| {
-            for c in &checks {
-                c.set_active(true);
-            }
-        });
-    }
-    {
-        let checks: Vec<gtk4::CheckButton> = checks.to_vec();
-        select_none_btn.connect_clicked(move |_| {
-            for c in &checks {
-                c.set_active(false);
-            }
-        });
-    }
-}
-
 /// One media-format option: an exact pinnable format from the probe, or the
 /// Automatic row (the global preference, no pin) when nothing is pinnable.
 #[derive(Clone)]
@@ -233,7 +192,13 @@ fn ensure_url_lookup_css() {
     static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INSTALLED.get_or_init(|| {
         let css = gtk4::CssProvider::new();
-        css.load_from_string("entry.url-lookup { padding-inline-end: 32px; }");
+        // Logical `padding-inline-end` is not a GTK CSS property (the
+        // parser drops the rule with "No property named"), so use the
+        // physical side plus a :dir(rtl) override for the same effect.
+        css.load_from_string(
+            "entry.url-lookup { padding-right: 32px; }\n\
+             entry.url-lookup:dir(rtl) { padding-right: 0; padding-left: 32px; }",
+        );
         if let Some(display) = gtk4::gdk::Display::default() {
             gtk4::style_context_add_provider_for_display(
                 &display,
@@ -598,6 +563,132 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
     header
 }
 
+/// Column count for a picker grid, from the entry count: a pair stays a
+/// readable single column; more entries flow into up to four columns.
+/// Fixed per picker (set via min/max-columns) — selecting never reflows.
+fn picker_columns(count: usize) -> u32 {
+    match count {
+        0..=2 => 1,
+        3..=8 => 2,
+        9..=20 => 3,
+        _ => 4,
+    }
+}
+
+/// A multi-column picker grid (HIG `GtkGridView` with `GtkMultiSelection`):
+/// click toggles selection, no checkboxes. All entries start selected,
+/// matching the old checked-by-default rows. Returns the view and its
+/// selection model for the caller to wire.
+fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::MultiSelection) {
+    let store = gio::ListStore::new::<gtk4::StringObject>();
+    for (title, _) in entries.iter() {
+        store.append(&gtk4::StringObject::new(title));
+    }
+    let selection = gtk4::MultiSelection::new(Some(store));
+    selection.select_all();
+
+    let factory = gtk4::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
+        // Flat cell: title over a dimmed subtitle, no card chrome — HIG
+        // grid items (Nautilus, Loupe) don't card every cell. Selection
+        // highlight comes from the view. Bound in `connect_bind` below
+        // via the fixed child order.
+        let title = gtk4::Label::builder()
+            .halign(gtk4::Align::Start)
+            .ellipsize(gtk4::pango::EllipsizeMode::End)
+            .max_width_chars(28)
+            .build();
+        let subtitle = gtk4::Label::builder()
+            .halign(gtk4::Align::Start)
+            .css_classes(["dimmed", "caption"])
+            .ellipsize(gtk4::pango::EllipsizeMode::End)
+            .max_width_chars(28)
+            .build();
+        let cell = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(2)
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(6)
+            .margin_end(6)
+            .build();
+        cell.append(&title);
+        cell.append(&subtitle);
+        item.set_child(Some(&cell));
+    });
+    {
+        let entries = Rc::clone(&entries);
+        factory.connect_bind(move |_, item| {
+            let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
+            let (title, subtitle) = &entries[item.position() as usize];
+            let cell = item.child().and_downcast::<gtk4::Box>().unwrap();
+            let title_label = cell.first_child().and_downcast::<gtk4::Label>().unwrap();
+            title_label.set_text(title);
+            let subtitle_label = title_label
+                .next_sibling()
+                .and_downcast::<gtk4::Label>()
+                .unwrap();
+            subtitle_label.set_text(subtitle);
+            cell.update_property(&[gtk4::accessible::Property::Label(title)]);
+        });
+    }
+
+    let columns = picker_columns(entries.len());
+    let grid = gtk4::GridView::builder()
+        .model(&selection)
+        .factory(&factory)
+        .min_columns(columns)
+        .max_columns(columns)
+        .build();
+    (grid, selection)
+}
+
+/// Wire the pickers' bottom action bar to a grid's multi-selection: the
+/// action counts the live selection, Select All/None drive the model.
+fn wire_grid_selection_bar(
+    selection: &gtk4::MultiSelection,
+    select_all_btn: &gtk4::Button,
+    select_none_btn: &gtk4::Button,
+    add_btn: &gtk4::Button,
+    count_label: impl Fn(usize) -> String + 'static,
+) {
+    {
+        let selection = selection.clone();
+        let add_btn = add_btn.clone();
+        let refresh = Rc::new({
+            let selection = selection.clone();
+            move || {
+                add_btn.set_label(&count_label(selection.selection().size() as usize));
+            }
+        });
+        selection.connect_selection_changed({
+            let refresh = refresh.clone();
+            move |_, _, _| refresh()
+        });
+        refresh();
+    }
+    {
+        let selection = selection.clone();
+        select_all_btn.connect_clicked(move |_| {
+            selection.select_all();
+        });
+    }
+    {
+        let selection = selection.clone();
+        select_none_btn.connect_clicked(move |_| {
+            selection.unselect_all();
+        });
+    }
+}
+
+/// Selected positions of a picker grid's multi-selection, ascending.
+fn grid_selected(selection: &gtk4::MultiSelection, item_count: usize) -> Vec<usize> {
+    (0..item_count)
+        .filter(|&i| selection.is_selected(i as u32))
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_playlist_items_page(
     nav: &adw::NavigationView,
@@ -613,55 +704,54 @@ fn push_playlist_items_page(
         return;
     }
 
-    let page = adw::PreferencesPage::new();
     let count = playlist.items.len();
-    // No group title: the count lives in the compact header above, so one
-    // title level suffices. The truncation notice stays as the description.
-    let group = adw::PreferencesGroup::new();
-    if crate::video_probe::playlist_truncated(&playlist) {
-        group.set_description(Some(
-            &gettext("Showing the first {n} of {total}")
-                .replace("{n}", &count.to_string())
-                .replace("{total}", &playlist.total.to_string()),
-        ));
-    }
-    page.add(&group);
+    // Multi-column grid: title over a dimmed duration. The truncation
+    // notice sits under the header as a dimmed caption.
+    let entries: Rc<Vec<(String, String)>> = Rc::new(
+        playlist
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.title.to_string(),
+                    item.duration.map(fmt_item_duration).unwrap_or_default(),
+                )
+            })
+            .collect(),
+    );
+    let (grid, selection) = picker_grid(Rc::clone(&entries));
 
-    let mut checks = Vec::new();
-    for item in &playlist.items {
-        let check = gtk4::CheckButton::builder().active(true).build();
-        check.update_property(&[gtk4::accessible::Property::Label(&item.title)]);
-        // Compact single-line rows: the duration sits as a dimmed suffix
-        // instead of a subtitle, so more items fit without scrolling.
-        let row = adw::ActionRow::builder()
-            .title(&*item.title)
-            .activatable(true)
+    let list_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(6)
+        .build();
+    if crate::video_probe::playlist_truncated(&playlist) {
+        let notice = gtk4::Label::builder()
+            .label(
+                gettext("Showing the first {n} of {total}")
+                    .replace("{n}", &count.to_string())
+                    .replace("{total}", &playlist.total.to_string()),
+            )
+            .css_classes(["dimmed", "caption"])
+            .halign(gtk4::Align::Start)
             .build();
-        if let Some(d) = item.duration {
-            let dur = gtk4::Label::builder()
-                .label(fmt_item_duration(d))
-                .css_classes(["dimmed", "caption"])
-                .valign(gtk4::Align::Center)
-                .build();
-            row.add_suffix(&dur);
-        }
-        row.add_prefix(&check);
-        {
-            let check = check.clone();
-            row.connect_activate(move |_| {
-                check.set_active(!check.is_active());
-            });
-        }
-        checks.push(check);
-        group.add(&row);
+        list_box.append(&notice);
     }
-    let error_label = error_label(&group);
+    list_box.append(&grid);
+    // The error caption lives under the grid, like the old row list.
+    let error_caption = gtk4::Label::builder()
+        .label("")
+        .css_classes(["error", "caption"])
+        .halign(gtk4::Align::Start)
+        .visible(false)
+        .build();
+    list_box.append(&error_caption);
 
     // Scrolled: big playlists must not size the card off-screen, but the capped
     // natural height lets it grow and shrink with the item count instead of
     // keeping the last size.
     let scrolled = gtk4::ScrolledWindow::builder()
-        .child(&page)
+        .child(&list_box)
         .vexpand(true)
         .propagate_natural_height(true)
         .max_content_height(480)
@@ -685,23 +775,29 @@ fn push_playlist_items_page(
         .build();
     picker_enter_confirms(&picker_page, &add_btn);
 
-    // The action counts the live selection (see `wire_selection_bar`).
-    wire_selection_bar(&checks, &select_all_btn, &select_none_btn, &add_btn, |n| {
-        ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
-    });
+    // The action counts the live selection (see `wire_grid_selection_bar`).
+    wire_grid_selection_bar(
+        &selection,
+        &select_all_btn,
+        &select_none_btn,
+        &add_btn,
+        |n| ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string()),
+    );
 
     {
         let close_card = close_card.clone();
+        let selection = selection.clone();
         add_btn.connect_clicked(move |_| {
+            let picked: Vec<usize> = grid_selected(&selection, count);
             let chosen: Vec<(usize, &crate::media_types::PlaylistItem)> = playlist
                 .items
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| checks[*i].is_active())
+                .filter(|(i, _)| picked.contains(i))
                 .collect();
             if chosen.is_empty() {
-                error_label.set_text(&gettext("Select at least one item"));
-                error_label.set_visible(true);
+                error_caption.set_text(&gettext("Select at least one item"));
+                error_caption.set_visible(true);
                 return;
             }
             // One persist for the whole import, not one per row.
@@ -747,13 +843,14 @@ fn push_playlist_items_page(
                     failed = Some(e);
                     break;
                 }
-                // Rows already queued stay queued on a partial failure: uncheck them so a
-                // retry submits only the remainder (dedupe is by filename).
-                checks[*i].set_active(false);
+                // Rows already queued stay queued on a partial failure: unselect
+                // them so a retry submits only the remainder (dedupe is by
+                // filename).
+                selection.unselect_item(*i as u32);
             }
             if let Some(e) = failed {
-                error_label.set_text(&e);
-                error_label.set_visible(true);
+                error_caption.set_text(&e);
+                error_caption.set_visible(true);
                 return;
             }
             // Complete success collapses the whole New Download card; a partial failure stays
@@ -781,47 +878,41 @@ fn push_torrent_picker_page(
         return;
     }
 
-    let page = adw::PreferencesPage::new();
     // The file count lives in the compact header; the group needs no title.
     let file_count = ngettext("{} file", "{} files", entries.len() as u32)
         .replace("{}", &entries.len().to_string());
-    let group = adw::PreferencesGroup::new();
-    page.add(&group);
+    // Multi-column grid like the playlist picker: path over a dimmed size.
+    let entry_count = entries.len();
+    let grid_entries: Rc<Vec<(String, String)>> = Rc::new(
+        entries
+            .iter()
+            .map(|e| {
+                (
+                    e.display_path.clone(),
+                    crate::file_names::fmt_bytes(e.length),
+                )
+            })
+            .collect(),
+    );
+    let (grid, selection) = picker_grid(grid_entries);
 
-    // HIG selection, not settings: a switch means "a setting is on", a checkbox
-    // means "this item is picked". Clicking a row toggles its checkbox.
-    let mut checks = Vec::new();
-    for e in &entries {
-        let check = gtk4::CheckButton::builder().active(true).build();
-        check.update_property(&[gtk4::accessible::Property::Label(&e.display_path)]);
-        // Same compact single-line rows as the playlist picker: the size
-        // sits as a dimmed suffix instead of a subtitle.
-        let row = adw::ActionRow::builder()
-            .title(&e.display_path)
-            .activatable(true)
-            .build();
-        let size = gtk4::Label::builder()
-            .label(crate::file_names::fmt_bytes(e.length))
-            .css_classes(["dimmed", "caption"])
-            .valign(gtk4::Align::Center)
-            .build();
-        row.add_suffix(&size);
-        row.add_prefix(&check);
-        {
-            let check = check.clone();
-            row.connect_activate(move |_| {
-                check.set_active(!check.is_active());
-            });
-        }
-        checks.push(check);
-        group.add(&row);
-    }
-    let error_label = error_label(&group);
+    let list_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(6)
+        .build();
+    list_box.append(&grid);
+    let error_caption = gtk4::Label::builder()
+        .label("")
+        .css_classes(["error", "caption"])
+        .halign(gtk4::Align::Start)
+        .visible(false)
+        .build();
+    list_box.append(&error_caption);
 
     // Same capped scrolled window as the playlist picker: big torrents must
     // not size the card off-screen.
     let scrolled = gtk4::ScrolledWindow::builder()
-        .child(&page)
+        .child(&list_box)
         .vexpand(true)
         .propagate_natural_height(true)
         .max_content_height(480)
@@ -843,33 +934,33 @@ fn push_torrent_picker_page(
     picker_enter_confirms(&picker_page, &add_btn);
 
     // Same as the playlist picker: the action counts the live selection.
-    wire_selection_bar(&checks, &select_all_btn, &select_none_btn, &add_btn, |n| {
-        ngettext("_Add {} file", "_Add {} files", n as u32).replace("{}", &n.to_string())
-    });
+    wire_grid_selection_bar(
+        &selection,
+        &select_all_btn,
+        &select_none_btn,
+        &add_btn,
+        |n| ngettext("_Add {} file", "_Add {} files", n as u32).replace("{}", &n.to_string()),
+    );
 
     {
         let close_card = close_card.clone();
+        let selection = selection.clone();
         add_btn.connect_clicked(move |_| {
-            let selected: Vec<usize> = checks
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.is_active())
-                .map(|(i, _)| i)
-                .collect();
+            let selected: Vec<usize> = grid_selected(&selection, entry_count);
             if selected.is_empty() {
-                error_label.set_text(&gettext("Select at least one file"));
-                error_label.set_visible(true);
+                error_caption.set_text(&gettext("Select at least one file"));
+                error_caption.set_visible(true);
                 return;
             }
             // All on means no filter: pass None, not every index.
-            let only = (selected.len() < checks.len()).then_some(selected);
+            let only = (selected.len() < entry_count).then_some(selected);
             enqueue_and_close(
                 &dest_dir,
                 &close_card,
                 |d| manager.enqueue_torrent_file(bytes.clone(), &file_name, d, only),
                 |e| {
-                    error_label.set_text(e);
-                    error_label.set_visible(true);
+                    error_caption.set_text(e);
+                    error_caption.set_visible(true);
                 },
             );
         });
@@ -1051,7 +1142,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // file / torrent / destination rows.
     let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     form.set_margin_top(6);
-    form.set_margin_bottom(12);
+    // Bottom margin 6, not 12: the collapsed options revealer below is
+    // still a visible box child, so one 12px box spacing lands under the
+    // URL row while it contributes no height — 12 + 6 matches the 18px
+    // above (card 12 + form 6), keeping the gaps around the row uniform.
+    form.set_margin_bottom(6);
     form.set_margin_start(12);
     form.set_margin_end(12);
 
@@ -2154,5 +2249,19 @@ mod tests {
             "/default",
             "close ran with the destination borrow released"
         );
+    }
+
+    #[test]
+    fn picker_columns_scales_with_count() {
+        // A pair stays a single readable column; more entries flow into
+        // up to four columns, never more.
+        assert_eq!(picker_columns(0), 1);
+        assert_eq!(picker_columns(2), 1);
+        assert_eq!(picker_columns(3), 2);
+        assert_eq!(picker_columns(8), 2);
+        assert_eq!(picker_columns(9), 3);
+        assert_eq!(picker_columns(20), 3);
+        assert_eq!(picker_columns(21), 4);
+        assert_eq!(picker_columns(200), 4);
     }
 }

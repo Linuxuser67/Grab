@@ -473,6 +473,39 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
     })
 }
 
+/// Pops up a details dialog when a download fails, using AdwAlertDialog:
+/// heading + filename body, the log as extra-child, Copy as the suggested
+/// response.
+fn show_failure_dialog(parent: &gtk4::Widget, item: &crate::download::DownloadItem) {
+    let dialog = adw::AlertDialog::new(Some(&gettext("Download Failed")), Some(&item.filename()));
+
+    let text = gtk4::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .monospace(true)
+        .wrap_mode(gtk4::WrapMode::WordChar)
+        .build();
+    text.buffer().set_text(&item.detail());
+    dialog.set_extra_child(Some(&text));
+
+    dialog.add_responses(&[("copy", &gettext("Copy")), ("close", &gettext("Close"))]);
+    dialog.set_response_appearance("copy", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("copy"));
+    dialog.set_close_response("close");
+
+    {
+        let detail = item.detail();
+        let clipboard = parent.clipboard();
+        dialog.connect_response(None, move |_dialog, response| {
+            if response == "copy" {
+                clipboard.set_text(&detail);
+            }
+        });
+    }
+
+    dialog.present(Some(parent));
+}
+
 pub(crate) fn build_row(
     item: &crate::download::DownloadItem,
     manager: &Rc<DownloadManager>,
@@ -908,6 +941,18 @@ pub(crate) fn build_row(
                 m2.unremove(snapshot.clone());
             });
             t.add_toast(toast);
+        });
+    }
+    // Pop the failure dialog on the transition to Failed (not on every
+    // refresh: the notify fires once per status change).
+    {
+        let row_weak = row.downgrade();
+        item.connect_notify_local(Some("status"), move |item, _| {
+            if item.status() == DownloadStatus::Failed
+                && let Some(row) = row_weak.upgrade()
+            {
+                show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);
+            }
         });
     }
     row

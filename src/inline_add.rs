@@ -487,7 +487,7 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
 /// for it. Fixed per picker (set via min/max-columns) — selecting never
 /// reflows.
 fn picker_columns(count: usize) -> u32 {
-    count.min(4).max(1) as u32
+    count.clamp(1, 4) as u32
 }
 
 /// A picker grid (HIG `GtkGridView` with `GtkMultiSelection` and

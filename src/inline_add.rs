@@ -951,22 +951,6 @@ fn wire_torrent_picker(
 fn show_video_playlist(v: &VideoStep, pl: &crate::media_types::PlaylistInfo) {
     hide_video_step(v);
     v.group.set_visible(true);
-    v.group
-        .set_title(glib::markup_escape_text(&pl.title).as_str());
-    let mut desc = format!(
-        "{} • {}",
-        playlist_count_label(pl.kind, pl.items.len()),
-        glib::markup_escape_text(&pl.page_url)
-    );
-    if crate::video_probe::playlist_truncated(pl) {
-        desc.push_str(" • ");
-        desc.push_str(
-            &gettext("Showing the first {n} of {total}")
-                .replace("{n}", &pl.items.len().to_string())
-                .replace("{total}", &pl.total.to_string()),
-        );
-    }
-    v.group.set_description(Some(&desc));
     v.audio.set_visible(true);
 }
 
@@ -1192,10 +1176,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
     form.append(&video_group);
 
-    // Download options: HIG AdwPreferencesGroup with built-in title.
-    // Rows get the 12px internal margins natively, matching the app's cards.
+    // Download options: HIG AdwPreferencesGroup, no header — the rows
+    // speak for themselves. Rows get the 12px internal margins natively.
     let group = adw::PreferencesGroup::new();
-    group.set_title(&gettext("Download options"));
     let file_row = adw::EntryRow::builder()
         .title(gettext("File name (optional)"))
         .text("")
@@ -1519,19 +1502,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 // Group header carries the identity (title + page); rows
                                 // below carry the choices. Both sinks parse Pango markup:
                                 // URLs carry `&`, titles anything.
-                                let desc =
-                                    match v.duration_string.as_deref().filter(|s| !s.is_empty()) {
-                                        Some(d) => format!(
-                                            "{} • {}",
-                                            glib::markup_escape_text(&v.page_url),
-                                            glib::markup_escape_text(d)
-                                        ),
-                                        None => glib::markup_escape_text(&v.page_url).to_string(),
-                                    };
-                                step_b
-                                    .group
-                                    .set_title(glib::markup_escape_text(&v.title).as_str());
-                                step_b.group.set_description(Some(&desc));
                                 // Seed the file name once: an explicit name wins, else
                                 // the title default. Never clobbers an edit here.
                                 if step_b.name.text().trim().is_empty() {

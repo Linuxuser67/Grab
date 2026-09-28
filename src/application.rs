@@ -192,9 +192,17 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
             let st = Rc::clone(st);
             gio::ActionEntry::builder("add-download")
                 .activate(move |_, _, _| {
-                    if let Some(s) = st.borrow().as_ref() {
-                        s.add_card.toggle();
-                    }
+                    // Defer past the menu popover's close so the card's
+                    // slide-down doesn't collide with it and looks janky.
+                    let st = Rc::clone(&st);
+                    glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(120),
+                        move || {
+                            if let Some(s) = st.borrow().as_ref() {
+                                s.add_card.toggle();
+                            }
+                        },
+                    );
                 })
                 .build()
         },

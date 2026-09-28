@@ -160,8 +160,6 @@ struct VideoStep {
     /// Lookup spinner, in the URL entry's suffix slot (browser-address-bar
     /// style): no separate status line, no layout shift when a lookup starts.
     url_spinner: adw::Spinner,
-    /// The URL entry; the spinner lives in its suffix slot via add_suffix.
-    url_entry: adw::EntryRow,
     group: adw::PreferencesGroup,
     name: adw::EntryRow,
     revert: gtk4::Button,
@@ -1172,7 +1170,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_group.add(&video_error);
     let step = Rc::new(VideoStep {
         url_spinner: url_spinner.clone(),
-        url_entry: url_entry.clone(),
         group: video_group.clone(),
         name: video_name,
         revert: video_revert_btn,

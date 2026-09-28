@@ -397,24 +397,28 @@ fn submit_probed_single(
             .unwrap_or_else(|| manager.settings().video_quality()),
         None => manager.settings().video_quality(),
     };
-    match manager.enqueue_video(
-        &v.page_url,
-        Some(&dest.borrow()),
-        name,
-        crate::media_types::VideoChoices {
-            quality,
-            audio_only,
-            video_format_id: format_id,
-            is_live: v.is_live,
-            playlist_item_id: None,
+    enqueue_and_close(
+        dest,
+        close_card,
+        |d| {
+            manager.enqueue_video(
+                &v.page_url,
+                d,
+                name,
+                crate::media_types::VideoChoices {
+                    quality,
+                    audio_only,
+                    video_format_id: format_id,
+                    is_live: v.is_live,
+                    playlist_item_id: None,
+                },
+            )
         },
-    ) {
-        Ok(_) => close_card(),
-        Err(e) => {
-            show_video_error(step, &e);
+        |e| {
+            show_video_error(step, e);
             set_lookup_add(lookup_add, true);
-        }
-    }
+        },
+    );
 }
 
 /// Dispatch a fresh preview to its submit path: singles queue with their pinned
@@ -466,6 +470,28 @@ fn fallback_plain_failed(
     );
     show_video_error(step, error);
     set_lookup_add(lookup_add, true);
+}
+
+/// Enqueue with the card's destination, then collapse the card on success.
+///
+/// The destination borrow lives only for the enqueue call: a `dest.borrow()`
+/// temporary in a `match` scrutinee would live into the arms, and
+/// `close_card()` re-borrows the same cell mutably to reset the destination —
+/// panicking with "RefCell already borrowed" on every successful Add.
+fn enqueue_and_close<T>(
+    dest: &Rc<RefCell<String>>,
+    close_card: &Rc<dyn Fn()>,
+    enqueue: impl FnOnce(Option<&str>) -> Result<T, String>,
+    on_err: impl FnOnce(&str),
+) {
+    let result = {
+        let d = dest.borrow();
+        enqueue(Some(&d))
+    };
+    match result {
+        Ok(_) => close_card(),
+        Err(e) => on_err(&e),
+    }
 }
 
 /// Queue a probed link as a plain file and collapse the card: the fallback when
@@ -535,12 +561,19 @@ fn push_playlist_items_page(
     for item in &playlist.items {
         let check = gtk4::CheckButton::builder().active(true).build();
         check.update_property(&[gtk4::accessible::Property::Label(&item.title)]);
+        // Compact single-line rows: the duration sits as a dimmed suffix
+        // instead of a subtitle, so more items fit without scrolling.
         let row = adw::ActionRow::builder()
             .title(&*item.title)
             .activatable(true)
             .build();
         if let Some(d) = item.duration {
-            row.set_subtitle(&fmt_item_duration(d));
+            let dur = gtk4::Label::builder()
+                .label(fmt_item_duration(d))
+                .css_classes(["dimmed", "caption"])
+                .valign(gtk4::Align::Center)
+                .build();
+            row.add_suffix(&dur);
         }
         row.add_prefix(&check);
         {
@@ -693,11 +726,18 @@ fn push_torrent_picker_page(
     for e in &entries {
         let check = gtk4::CheckButton::builder().active(true).build();
         check.update_property(&[gtk4::accessible::Property::Label(&e.display_path)]);
+        // Same compact single-line rows as the playlist picker: the size
+        // sits as a dimmed suffix instead of a subtitle.
         let row = adw::ActionRow::builder()
             .title(&e.display_path)
-            .subtitle(crate::file_names::fmt_bytes(e.length))
             .activatable(true)
             .build();
+        let size = gtk4::Label::builder()
+            .label(crate::file_names::fmt_bytes(e.length))
+            .css_classes(["dimmed", "caption"])
+            .valign(gtk4::Align::Center)
+            .build();
+        row.add_suffix(&size);
         row.add_prefix(&check);
         {
             let check = check.clone();
@@ -757,18 +797,15 @@ fn push_torrent_picker_page(
             }
             // All on means no filter: pass None, not every index.
             let only = (selected.len() < checks.len()).then_some(selected);
-            match manager.enqueue_torrent_file(
-                bytes.clone(),
-                &file_name,
-                Some(&dest_dir.borrow()),
-                only,
-            ) {
-                Ok(_) => close_card(),
-                Err(e) => {
-                    error_label.set_text(&e);
+            enqueue_and_close(
+                &dest_dir,
+                &close_card,
+                |d| manager.enqueue_torrent_file(bytes.clone(), &file_name, d, only),
+                |e| {
+                    error_label.set_text(e);
                     error_label.set_visible(true);
-                }
-            }
+                },
+            );
         });
     }
 
@@ -829,13 +866,15 @@ fn wire_torrent_picker(
                 }
             };
             if entries.len() <= 1 {
-                match m.enqueue_torrent_file(bytes, &name, Some(&dd.borrow()), None) {
-                    Ok(_) => close_card(),
-                    Err(e) => {
-                        error_label.set_text(&e);
+                enqueue_and_close(
+                    &dd,
+                    &close_card,
+                    |d| m.enqueue_torrent_file(bytes, &name, d, None),
+                    |e| {
+                        error_label.set_text(e);
                         error_label.set_visible(true);
-                    }
-                }
+                    },
+                );
                 return;
             }
             push_torrent_picker_page(&nav, m, dd, close_card, name, bytes, entries);
@@ -963,10 +1002,34 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .use_underline(true)
         .css_classes(["suggested-action"])
         .build();
+    // Gear toggle for the download options: the HIG settings icon
+    // (emblem-system-symbolic), bound to the options revealer below.
+    let opts_toggle = gtk4::ToggleButton::builder()
+        .icon_name("emblem-system-symbolic")
+        .tooltip_text(gettext("Download options"))
+        .build();
+    opts_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Download options",
+    ))]);
     let url_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     url_box.append(&url_entry);
     url_box.append(&add_btn);
+    url_box.append(&opts_toggle);
     form.append(&url_box);
+
+    // Download options live in a revealer directly under the URL row: the
+    // card opens compact, one tap on the gear reveals file name, torrent,
+    // and destination inline.
+    let opts_revealer = gtk4::Revealer::builder()
+        .transition_type(gtk4::RevealerTransitionType::SlideDown)
+        .reveal_child(false)
+        .build();
+    opts_toggle
+        .bind_property("active", &opts_revealer, "reveal-child")
+        .bidirectional()
+        .sync_create()
+        .build();
+    form.append(&opts_revealer);
 
     // Video preview block: hidden until a lookup runs; exactly one state shows.
     let video_group = adw::PreferencesGroup::new();
@@ -1057,12 +1120,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     form.append(&video_group);
 
     let group = adw::PreferencesGroup::new();
+    group.set_title(&gettext("Download options"));
     let file_row = adw::EntryRow::builder()
         .title(gettext("File name (optional)"))
         .text("")
         .build();
     group.add(&file_row);
 
+    // Torrent and save location sit behind the gear toggle: the common
+    // case is a URL plus an optional file name, so the card opens compact.
     let torrent_btn = gtk4::Button::builder()
         .label(gettext("Choose…"))
         .tooltip_text(gettext("Choose a .torrent file"))
@@ -1092,9 +1158,17 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     dest_row.add_suffix(&dest_btn);
     dest_row.set_activatable_widget(Some(&dest_btn));
     group.add(&dest_row);
-    form.append(&group);
+    opts_revealer.set_child(Some(&group));
 
-    let form_error = error_label(&group);
+    // Form-level error caption sits outside the options revealer so a failed
+    // Add stays visible while the options are collapsed.
+    let form_error = gtk4::Label::builder()
+        .label("")
+        .css_classes(["error", "caption"])
+        .halign(gtk4::Align::Start)
+        .visible(false)
+        .build();
+    form.append(&form_error);
 
     let form_page = adw::NavigationPage::builder()
         .tag("form")
@@ -1130,6 +1204,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let nav = nav.clone();
         let dest_dir = Rc::clone(&dest_dir);
         let dest_label = dest_label.clone();
+        let opts_revealer = opts_revealer.clone();
         let default_dir = manager.effective_download_dir();
         Rc::new(move || {
             is_open.set(false);
@@ -1144,6 +1219,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             file_row.set_text("");
             dest_dir.replace(default_dir.clone());
             dest_label.set_text(&default_dir);
+            // The options reopen collapsed with the default destination,
+            // like every other row of the fresh form.
+            opts_revealer.set_reveal_child(false);
             // Clearing the URL fires the changed handler: it hides the step
             // again and spawns a stale debounce the generation bump discards.
             url_entry.set_text("");
@@ -1541,18 +1619,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 return;
             }
             let fname = file_row.text().trim().to_string();
-            match m.enqueue(
-                &url,
-                Some(&dd.borrow()),
-                if fname.is_empty() {
-                    None
-                } else {
-                    Some(fname.as_str())
+            enqueue_and_close(
+                &dd,
+                &close_card,
+                |d| {
+                    m.enqueue(
+                        &url,
+                        d,
+                        if fname.is_empty() {
+                            None
+                        } else {
+                            Some(fname.as_str())
+                        },
+                    )
                 },
-            ) {
-                Ok(_) => close_card(),
-                Err(e) => fail(&e),
-            }
+                fail,
+            );
         })
     };
     {
@@ -1962,5 +2044,41 @@ mod tests {
             generation,
             false
         ));
+    }
+
+    #[test]
+    fn enqueue_and_close_releases_dest_borrow_before_close() {
+        // Regression: every Add path used to run
+        // `match enqueue(..., Some(&dest.borrow())) { Ok(_) => close_card(), ... }`.
+        // The borrow temporary in a match scrutinee lives into the arms, so
+        // close_card()'s mutable re-borrow (it resets the destination) panicked
+        // with "RefCell already borrowed" and aborted the app on every
+        // successful video, plain, and torrent Add.
+        let dest = Rc::new(RefCell::new("/dl".to_string()));
+        let closed = Rc::new(std::cell::Cell::new(false));
+        let closed2 = Rc::clone(&closed);
+        let dest2 = Rc::clone(&dest);
+        let close: Rc<dyn Fn()> = Rc::new(move || {
+            dest2.replace("/default".to_string());
+            closed2.set(true);
+        });
+        let seen = Rc::new(RefCell::new(String::new()));
+        let seen2 = Rc::clone(&seen);
+        enqueue_and_close(
+            &dest,
+            &close,
+            |d| {
+                seen2.replace(d.unwrap_or("?").to_string());
+                Ok::<(), String>(())
+            },
+            |_| panic!("enqueue reported success"),
+        );
+        assert!(closed.get(), "card closes after a successful enqueue");
+        assert_eq!(seen.borrow().as_str(), "/dl");
+        assert_eq!(
+            dest.borrow().as_str(),
+            "/default",
+            "close ran with the destination borrow released"
+        );
     }
 }

@@ -948,10 +948,10 @@ pub(crate) fn build_row(
     {
         let row_weak = row.downgrade();
         item.connect_notify_local(Some("status"), move |item, _| {
-            if item.status() == DownloadStatus::Failed {
-                if let Some(row) = row_weak.upgrade() {
-                    show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);
-                }
+            if item.status() == DownloadStatus::Failed
+                && let Some(row) = row_weak.upgrade()
+            {
+                show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);
             }
         });
     }

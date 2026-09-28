@@ -213,18 +213,30 @@ impl RowMedia {
     /// Symbolic icon name; every name verified against the Adwaita theme so a
     /// row can never render a broken-image icon.
     pub(crate) fn icon_name(self) -> &'static str {
-        // RED: withheld; the table lands in the GREEN commit.
-        let _ = self;
-        ""
+        match self {
+            RowMedia::Live => "media-record-symbolic",
+            RowMedia::Audio => "audio-x-generic-symbolic",
+            RowMedia::Torrent => "emblem-shared-symbolic",
+            RowMedia::Video => "video-x-generic-symbolic",
+            RowMedia::File => "document-save-symbolic",
+        }
     }
 }
 
 /// Classify a row's media from manager lookups. Pure over the lookups so the
 /// mapping is unit-testable; `build_row` does the GTK and the gettext.
 pub(crate) fn row_media(live: bool, audio_only: bool, torrent: bool, page: bool) -> RowMedia {
-    // RED: withheld; the mapping lands in the GREEN commit.
-    let _ = (live, audio_only, torrent, page);
-    unimplemented!("row_media mapping lands in the GREEN commit")
+    if live {
+        RowMedia::Live
+    } else if audio_only {
+        RowMedia::Audio
+    } else if torrent {
+        RowMedia::Torrent
+    } else if page {
+        RowMedia::Video
+    } else {
+        RowMedia::File
+    }
 }
 
 /// Set a row button's icon, tooltip, and screen-reader label from one verb so
@@ -451,6 +463,44 @@ pub(crate) fn build_row(
 
     let top = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
 
+    // Leading media icon: identity, not state — the status label, spinner,
+    // progress bar and buttons already carry state, so this never refreshes.
+    let source = manager.video_source(item.id());
+    let media = row_media(
+        manager.is_live_video(item.id())
+            || matches!(
+                source,
+                Some(crate::media_types::VideoSource::Page { is_live: true, .. })
+            ),
+        matches!(
+            source,
+            Some(crate::media_types::VideoSource::Page {
+                audio_only: true,
+                ..
+            })
+        ),
+        crate::torrent::is_torrent(&item.url()),
+        matches!(
+            source,
+            Some(crate::media_types::VideoSource::Page { .. })
+        ),
+    );
+    let media_icon = gtk4::Image::builder()
+        .icon_name(media.icon_name())
+        .pixel_size(32)
+        .valign(gtk4::Align::Center)
+        .build();
+    if matches!(media, RowMedia::Live) {
+        media_icon.add_css_class("error");
+    }
+    media_icon.update_property(&[gtk4::accessible::Property::Label(&match media {
+        RowMedia::Live => gettext("Live recording"),
+        RowMedia::Audio => gettext("Audio"),
+        RowMedia::Torrent => gettext("Torrent"),
+        RowMedia::Video => gettext("Video"),
+        RowMedia::File => gettext("Download"),
+    })]);
+
     let name = gtk4::Label::builder()
         .label(item.filename())
         .halign(gtk4::Align::Start)
@@ -474,6 +524,7 @@ pub(crate) fn build_row(
     let delete_btn = icon_button("user-trash-symbolic", &gettext("Move to Trash"));
     let remove_btn = icon_button("list-remove-symbolic", &gettext("Remove from list"));
 
+    top.append(&media_icon);
     top.append(&name);
     top.append(&status);
     top.append(&spinner);

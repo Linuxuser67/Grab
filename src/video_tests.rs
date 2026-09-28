@@ -1443,17 +1443,17 @@ fn parse_playlist_reads_flat_entries() {
     let pl =
         parse_playlist_json(&value, "https://www.youtube.com/playlist?list=PL1").expect("playlist");
     assert_eq!(pl.kind, PlaylistKind::Playlist);
-    assert_eq!(pl.title, "My List");
+    assert_eq!(&*pl.title, "My List");
     assert_eq!(pl.total, 4);
     // Null, empty and unusable-URL entries are dropped.
     assert_eq!(pl.items.len(), 2);
-    assert_eq!(pl.items[0].title, "First");
+    assert_eq!(&*pl.items[0].title, "First");
     assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
     // Float durations truncate like the video path.
     assert_eq!(pl.items[0].duration, Some(61));
     assert_eq!(pl.items[0].index, 1);
     // Empty title falls back to id; missing index falls back to position.
-    assert_eq!(pl.items[1].title, "b2");
+    assert_eq!(&*pl.items[1].title, "b2");
     assert_eq!(pl.items[1].page_url, "https://example.com/v/b2");
     assert_eq!(pl.items[1].index, 3);
     assert_eq!(pl.items[1].duration, None);
@@ -2100,12 +2100,12 @@ fn video_format_options_lists_best_per_height() {
     let opts = video_format_options(&video, true);
     // Newest codec wins each height; audio-only, HLS, DRM and muxed never list; tallest first.
     assert_eq!(
-        opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        opts.iter().map(|o| &*o.id).collect::<Vec<_>>(),
         ["v1080-vp9", "v720-av01", "v360-vp9"]
     );
-    assert_eq!(opts[0].label, "1080p · vp9 · 200.0 MB");
+    assert_eq!(&*opts[0].label, "1080p · vp9 · 200.0 MB");
     assert_eq!(opts[0].height, 1080);
-    assert_eq!(opts[1].label, "720p · av01 · 60.0 MB");
+    assert_eq!(&*opts[1].label, "720p · av01 · 60.0 MB");
 }
 
 #[test]
@@ -2360,10 +2360,10 @@ fn picker_lists_hls_gap_heights() {
     ]));
     let opts = video_format_options(&video, true);
     assert_eq!(
-        opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        opts.iter().map(|o| &*o.id).collect::<Vec<_>>(),
         ["h1080", "v720"]
     );
-    assert_eq!(opts[0].label, "1080p · HLS");
+    assert_eq!(&*opts[0].label, "1080p · HLS");
 }
 
 #[test]
@@ -6279,7 +6279,7 @@ fn picker_label_sanitizes_remote_codec() {
     ),]));
     let opts = video_format_options(&video, true);
     assert_eq!(opts.len(), 1);
-    assert_eq!(opts[0].label, "720p · avc1gnp8001FREE");
+    assert_eq!(&*opts[0].label, "720p · avc1gnp8001FREE");
     // Empty-after-filter degrades to the placeholder.
     let video = test_video(serde_json::json!([test_format_full(
         "weird",
@@ -6291,7 +6291,7 @@ fn picker_label_sanitizes_remote_codec() {
         false
     ),]));
     let opts = video_format_options(&video, true);
-    assert_eq!(opts[0].label, "720p · ?");
+    assert_eq!(&*opts[0].label, "720p · ?");
 }
 
 #[test]
@@ -6427,7 +6427,7 @@ fn plan_stale_pin_to_unlisted_id_resolves_as_split() {
     ]));
     let listed: Vec<String> = video_format_options(&video, true)
         .iter()
-        .map(|o| o.id.clone())
+        .map(|o| o.id.to_string())
         .collect();
     assert!(
         !listed.contains(&"v1080-avc".to_string()),

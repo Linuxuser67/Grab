@@ -1368,7 +1368,7 @@ fn push_playlist_items_page(
         let check = gtk4::CheckButton::builder().active(true).build();
         check.update_property(&[gtk4::accessible::Property::Label(&item.title)]);
         let row = adw::ActionRow::builder()
-            .title(&item.title)
+            .title(&*item.title)
             .activatable(true)
             .build();
         if let Some(d) = item.duration {
@@ -1407,7 +1407,7 @@ fn push_playlist_items_page(
     toolbar.add_bottom_bar(&action_bar);
     let picker_page = adw::NavigationPage::builder()
         .tag("playlist")
-        .title(&playlist.title)
+        .title(&*playlist.title)
         .child(&toolbar)
         .build();
 

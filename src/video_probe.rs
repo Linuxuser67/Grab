@@ -467,8 +467,8 @@ fn parse_playlist_item(
         .unwrap_or(position + 1);
     Some(crate::media_types::PlaylistItem {
         index,
-        id,
-        title,
+        id: id.into_boxed_str(),
+        title: title.into_boxed_str(),
         page_url: page_url.to_string(),
         duration: entry.get("duration").and_then(json_i64),
     })
@@ -500,12 +500,12 @@ pub(crate) fn parse_playlist_json(
         .take(MAX_PLAYLIST_ITEMS)
         .collect();
     Some(crate::media_types::PlaylistInfo {
-        id: json_str(value, "id").unwrap_or("").to_string(),
-        title: json_str(value, "title").unwrap_or(url).to_string(),
-        page_url: json_str(value, "webpage_url").unwrap_or(url).to_string(),
+        id: json_str(value, "id").unwrap_or("").into(),
+        title: json_str(value, "title").unwrap_or(url).into(),
+        page_url: json_str(value, "webpage_url").unwrap_or(url).into(),
         kind: crate::media_types::PlaylistKind::classify(url, extractor_key),
         total,
-        items,
+        items: items.into_boxed_slice(),
     })
 }
 

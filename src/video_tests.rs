@@ -1350,12 +1350,15 @@ fn clean_staging_in_keeps_nonempty_root() {
     let root = dest_staging_root(&dest_dir);
     let item_a = staging_dir_for(&dest_dir, 7);
     let item_b = staging_dir_for(&dest_dir, 8);
+    let cookie = root.join("grab-cookies-7-1.txt");
     std::fs::create_dir_all(&item_a).unwrap();
     std::fs::create_dir_all(&item_b).unwrap();
+    std::fs::write(&cookie, "x").unwrap();
     clean_staging_in(&root, &item_a);
     assert!(!item_a.exists());
     assert!(root.exists(), "root with remaining items must stay");
     assert!(item_b.exists());
+    assert!(cookie.exists(), "cookie files must survive");
     let _ = std::fs::remove_dir_all(&dest_dir);
 }
 
@@ -1368,7 +1371,7 @@ fn test_video_info(page_url: &str) -> ProbeResult {
         duration_string: None,
         page_url: page_url.into(),
         expires_at: None,
-        formats: vec![],
+        formats: Box::default(),
         is_live: false,
         fetchable: false,
     })
@@ -1440,17 +1443,17 @@ fn parse_playlist_reads_flat_entries() {
     let pl =
         parse_playlist_json(&value, "https://www.youtube.com/playlist?list=PL1").expect("playlist");
     assert_eq!(pl.kind, PlaylistKind::Playlist);
-    assert_eq!(pl.title, "My List");
+    assert_eq!(&*pl.title, "My List");
     assert_eq!(pl.total, 4);
     // Null, empty and unusable-URL entries are dropped.
     assert_eq!(pl.items.len(), 2);
-    assert_eq!(pl.items[0].title, "First");
+    assert_eq!(&*pl.items[0].title, "First");
     assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
     // Float durations truncate like the video path.
     assert_eq!(pl.items[0].duration, Some(61));
     assert_eq!(pl.items[0].index, 1);
     // Empty title falls back to id; missing index falls back to position.
-    assert_eq!(pl.items[1].title, "b2");
+    assert_eq!(&*pl.items[1].title, "b2");
     assert_eq!(pl.items[1].page_url, "https://example.com/v/b2");
     assert_eq!(pl.items[1].index, 3);
     assert_eq!(pl.items[1].duration, None);
@@ -1755,7 +1758,8 @@ fn probe_result_helpers_cover_both_variants() {
         title: "First".into(),
         page_url: "https://www.youtube.com/watch?v=a1".into(),
         duration: None,
-    }];
+    }]
+    .into_boxed_slice();
     let list = ProbeResult::Playlist(PlaylistInfo {
         id: "PL1".into(),
         title: "My List".into(),
@@ -1774,9 +1778,28 @@ fn probe_result_helpers_cover_both_variants() {
         page_url: "https://www.youtube.com/playlist?list=PL1".into(),
         kind: PlaylistKind::Playlist,
         total: 0,
-        items: vec![],
+        items: Box::default(),
     });
     assert!(!empty.fetchable());
+}
+
+// ── per-row footprint budget ─────────────────────────────────────────
+
+// Cache-lesson guard: the probe structs are built once and live as long as
+// their rows, so every wasted byte is paid per row. These budgets pin the
+// Box<str>/Box<[T]>/boxed-variant layout; adding a field must update the
+// budget consciously, not silently.
+#[test]
+fn probe_struct_footprint_budget() {
+    use std::mem::size_of;
+    assert_eq!(size_of::<VideoFormatOption>(), 40, "VideoFormatOption");
+    assert_eq!(size_of::<VideoInfo>(), 104, "VideoInfo");
+    assert_eq!(size_of::<PlaylistItem>(), 80, "PlaylistItem");
+    assert_eq!(size_of::<PlaylistInfo>(), 80, "PlaylistInfo");
+    assert_eq!(size_of::<ProbeResult>(), 104, "ProbeResult");
+    // Rare large variants stay boxed so the common values stay small.
+    assert_eq!(size_of::<VideoOutcome>(), 16, "VideoOutcome");
+    assert_eq!(size_of::<crate::engine_msg::EngineMsg>(), 40, "EngineMsg");
 }
 
 // ── tool versions ────────────────────────────────────────────────────
@@ -2077,12 +2100,12 @@ fn video_format_options_lists_best_per_height() {
     let opts = video_format_options(&video, true);
     // Newest codec wins each height; audio-only, HLS, DRM and muxed never list; tallest first.
     assert_eq!(
-        opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        opts.iter().map(|o| &*o.id).collect::<Vec<_>>(),
         ["v1080-vp9", "v720-av01", "v360-vp9"]
     );
-    assert_eq!(opts[0].label, "1080p · vp9 · 200.0 MB");
+    assert_eq!(&*opts[0].label, "1080p · vp9 · 200.0 MB");
     assert_eq!(opts[0].height, 1080);
-    assert_eq!(opts[1].label, "720p · av01 · 60.0 MB");
+    assert_eq!(&*opts[1].label, "720p · av01 · 60.0 MB");
 }
 
 #[test]
@@ -2337,10 +2360,10 @@ fn picker_lists_hls_gap_heights() {
     ]));
     let opts = video_format_options(&video, true);
     assert_eq!(
-        opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        opts.iter().map(|o| &*o.id).collect::<Vec<_>>(),
         ["h1080", "v720"]
     );
-    assert_eq!(opts[0].label, "1080p · HLS");
+    assert_eq!(&*opts[0].label, "1080p · HLS");
 }
 
 #[test]
@@ -3698,12 +3721,12 @@ fn plan_tie_keeps_direct_muxed() {
 
 // ── default combo selection ──────────────────────────────────────────
 
-fn test_options() -> Vec<VideoFormatOption> {
+fn test_options() -> Box<[VideoFormatOption]> {
     [1080u32, 720, 480]
         .iter()
         .map(|h| VideoFormatOption {
-            id: format!("v{h}"),
-            label: format!("{h}p"),
+            id: format!("v{h}").into_boxed_str(),
+            label: format!("{h}p").into_boxed_str(),
             height: *h,
         })
         .collect()
@@ -3727,8 +3750,8 @@ fn default_quality_index_preselects() {
     let odd = [840u32, 600]
         .iter()
         .map(|h| VideoFormatOption {
-            id: format!("v{h}"),
-            label: format!("{h}p"),
+            id: format!("v{h}").into_boxed_str(),
+            label: format!("{h}p").into_boxed_str(),
             height: *h,
         })
         .collect::<Vec<_>>();
@@ -6256,7 +6279,7 @@ fn picker_label_sanitizes_remote_codec() {
     ),]));
     let opts = video_format_options(&video, true);
     assert_eq!(opts.len(), 1);
-    assert_eq!(opts[0].label, "720p · avc1gnp8001FREE");
+    assert_eq!(&*opts[0].label, "720p · avc1gnp8001FREE");
     // Empty-after-filter degrades to the placeholder.
     let video = test_video(serde_json::json!([test_format_full(
         "weird",
@@ -6268,7 +6291,7 @@ fn picker_label_sanitizes_remote_codec() {
         false
     ),]));
     let opts = video_format_options(&video, true);
-    assert_eq!(opts[0].label, "720p · ?");
+    assert_eq!(&*opts[0].label, "720p · ?");
 }
 
 #[test]
@@ -6404,7 +6427,7 @@ fn plan_stale_pin_to_unlisted_id_resolves_as_split() {
     ]));
     let listed: Vec<String> = video_format_options(&video, true)
         .iter()
-        .map(|o| o.id.clone())
+        .map(|o| o.id.to_string())
         .collect();
     assert!(
         !listed.contains(&"v1080-avc".to_string()),
@@ -6548,8 +6571,8 @@ fn expand_child_target_routes_entries() {
     fn item(id: &str, page_url: &str) -> PlaylistItem {
         PlaylistItem {
             index: 1,
-            id: id.to_string(),
-            title: "t".to_string(),
+            id: id.into(),
+            title: "t".into(),
             page_url: page_url.to_string(),
             duration: None,
         }

@@ -14,7 +14,9 @@ pub(crate) enum EngineMsg {
         size: u64,
     },
     /// Playlist-shaped video row with no pick: pump queues one row per item and retires the carrier.
-    ExpandPlaylist(crate::media_types::PlaylistInfo),
+    /// Boxed: this variant is rare but would otherwise inflate every message
+    /// on this hot channel (progress ticks) to the largest variant's size.
+    ExpandPlaylist(Box<crate::media_types::PlaylistInfo>),
     Failed(String),
     /// A multi worker finished one piece; the UI thread records it for resume.
     PieceDone(u64),

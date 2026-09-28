@@ -1,0 +1,6 @@
+# Explicit gitleaks configuration: pin the default ruleset in the repo so a
+# scanner upgrade can't silently change what counts as a leak. The scanner
+# binary version is pinned in .github/workflows/ci.yml — bump both together
+# (see the version-bump note there).
+[extend]
+useDefault = true

@@ -115,22 +115,23 @@ pub fn has_fetchable_media(video: &Video) -> bool {
 
 /// Extraction result, kept deliberately small: the queue row needs the
 /// title/duration and the *page URL* for expiry-safe re-resolve.
+/// Strings are boxed: every field is written once at probe time, never mutated.
 #[derive(Clone, Debug)]
 pub struct VideoInfo {
-    pub title: String,
+    pub title: Box<str>,
     /// Duration in seconds; read only in tests today.
     #[allow(dead_code)]
     pub duration: Option<i64>,
     /// Preformatted duration from the extractor (e.g. "41:21").
-    pub duration_string: Option<String>,
+    pub duration_string: Option<Box<str>>,
     /// Canonical page URL — the identity persisted across restarts.
-    pub page_url: String,
+    pub page_url: Box<str>,
     /// Unix time after which every resolved format URL is stale; written at
     /// probe time for expiry-safe re-resolve, no reader yet.
     #[allow(dead_code)]
     pub expires_at: Option<i64>,
     /// Pinnable video-only formats, tallest first. Computed once at resolve.
-    pub formats: Vec<VideoFormatOption>,
+    pub formats: Box<[VideoFormatOption]>,
     /// Whether the page is currently live. Decides stop-and-keep behavior
     /// for HLS captures; refreshed on every resolve.
     pub is_live: bool,
@@ -155,10 +156,10 @@ impl VideoInfo {
             .min()
             .map(|t| t + FORMAT_URL_LIFETIME);
         Self {
-            title: v.title.clone(),
+            title: v.title.clone().into_boxed_str(),
             duration: v.duration,
-            duration_string: v.duration_string.clone(),
-            page_url,
+            duration_string: v.duration_string.clone().map(String::into_boxed_str),
+            page_url: page_url.into_boxed_str(),
             expires_at,
             formats: video_format_options(v, newest_first),
             is_live: v.is_live.unwrap_or(false),
@@ -208,7 +209,9 @@ pub enum VideoOutcome {
     Finished(u64),
     /// The page resolved playlist-shaped with no picked entry: queue
     /// one row per item (see `expand_child_target`) instead of failing.
-    Expand(crate::media_types::PlaylistInfo),
+    /// Boxed: the enum would otherwise pay for the largest variant on every
+    /// value, including the common `Finished(u64)`.
+    Expand(Box<crate::media_types::PlaylistInfo>),
     /// Stopped before finishing; the canceller owns the row state.
     Aborted,
 }
@@ -229,10 +232,11 @@ pub(crate) enum FetchedVideo {
 }
 
 /// One video-only format, deduplicated and labeled for the dialog combo.
+/// `Box<str>`/slices: the list is built once at resolve and never mutated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoFormatOption {
-    pub id: String,
-    pub label: String,
+    pub id: Box<str>,
+    pub label: Box<str>,
     pub height: u32,
 }
 
@@ -375,7 +379,7 @@ pub(crate) fn filesize_of(f: &Format) -> Option<u64> {
 /// Listable video-only formats for one video: best per height (codec rank, then
 /// filesize), tallest first. HLS variants fill heights with no direct stream
 /// (the worker pulls those via ffmpeg); muxed files stay on the automatic path.
-pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoFormatOption> {
+pub fn video_format_options(video: &Video, newest_first: bool) -> Box<[VideoFormatOption]> {
     let mut best = best_direct_by_height(&video.formats, newest_first);
     // HLS gap-fill: heights with no direct stream still list, so the worker
     // can route them to ffmpeg.
@@ -397,14 +401,14 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoForma
                 None => format!("{height}p · {short}"),
             };
             VideoFormatOption {
-                id: f.format_id.clone(),
-                label,
+                id: f.format_id.clone().into_boxed_str(),
+                label: label.into_boxed_str(),
                 height,
             }
         })
         .collect();
     out.sort_by_key(|a| std::cmp::Reverse(a.height));
-    out
+    out.into_boxed_slice()
 }
 
 /// Human size for format labels. Decimal units, one fraction digit.

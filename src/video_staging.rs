@@ -608,3 +608,36 @@ pub(crate) fn discover_unified_output(staging: &Path, after_move: Option<&str>) 
         })
         .max_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Unique scratch dir per test (never a shared staging parent).
+    fn unique_dir(tag: &str) -> PathBuf {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("grab-staging-{tag}-{}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn success_path_leaves_no_empty_staging_root() {
+        // Mirrors the run_unified_ytdlp success tail: sweep the item scratch,
+        // then the empty `.grab-video` root must be gone too.
+        let base = unique_dir("success-root");
+        let root = base.join(".grab-video");
+        let staging = root.join("42");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("chunk.part"), b"scratch").unwrap();
+        // Current production sequence (video_runner.rs run_unified_ytdlp):
+        sweep_staging_preserving_recordings(&staging);
+        assert!(!staging.exists(), "item staging dir is swept on success");
+        assert!(
+            !root.exists(),
+            "empty staging root must be dropped on success"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}

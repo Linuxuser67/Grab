@@ -1,9 +1,9 @@
-//! Add-panel flow: the new-download side panel, video probe steps, playlist
+//! Add-dialog flow: the new-download dialog, video probe steps, playlist
 //! display and submit paths. UI module (gtk/adw + leaves + engines): the
-//! window builder owns the panel, the playlist picker reuses the count label.
+//! window builder opens it, the playlist picker reuses the count label.
 
 use crate::download::DownloadManager;
-use crate::window_rows::{default_name_for, error_label, ngettext_count, selection_action_bar};
+use crate::window_rows::{default_name_for, error_label, selection_action_bar};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
@@ -50,6 +50,14 @@ fn inflight_suppresses(
     matches!(inflight, Some((u, g, p)) if u.as_str() == url && *g == generation && *p == probe_unlisted)
 }
 
+/// Present on the active window when there is one, standalone otherwise.
+fn present_dialog(dialog: &adw::Dialog) {
+    let win = gio::Application::default()
+        .and_downcast::<adw::Application>()
+        .and_then(|app| app.active_window());
+    dialog.present(win.as_ref());
+}
+
 /// Widgets of the New Download dialog's video step (details page), managed as
 /// one unit: exactly one state visible at a time. The group header itself
 /// carries the video identity (title + page URL).
@@ -58,188 +66,10 @@ struct VideoStep {
     group: adw::PreferencesGroup,
     name: adw::EntryRow,
     revert: gtk4::Button,
-    /// Single-video format choice set (Automatic / pins / audio-only). The
-    /// audio switch below serves playlist mode, where pins don't apply.
-    format: Rc<FormatPicker>,
+    quality: adw::ComboRow,
     audio: adw::SwitchRow,
     tools: adw::ActionRow,
     error: adw::ActionRow,
-}
-
-/// The details page's media-format choice: the preference-driven automatic
-/// path, one exact pinned format (index into [`MediaState::pins`]), or
-/// audio-only. One decision, one control — no separate switch.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) enum MediaPick {
-    #[default]
-    Automatic,
-    Pin(usize),
-    AudioOnly,
-}
-
-/// Dialog-local media-format state for the details page: the pinnable formats
-/// of the current resolve and the user's pick. Rebuilt per lookup; the pick
-/// resets so a pin never carries over.
-#[derive(Default)]
-pub(crate) struct MediaState {
-    pub(crate) pins: RefCell<Vec<crate::video_types::VideoFormatOption>>,
-    pub(crate) pick: Cell<MediaPick>,
-}
-
-/// Enqueue parameters for a media pick: the exact pinned format id (none for
-/// Automatic — the global preference applies — and for audio-only) and the
-/// audio-only flag. A stale pin index degrades to no pin, never a panic.
-pub(crate) fn media_pick_params(
-    pick: MediaPick,
-    pins: &[crate::video_types::VideoFormatOption],
-) -> (Option<String>, bool) {
-    match pick {
-        MediaPick::Pin(i) => (pins.get(i).map(|opt| opt.id.clone()), false),
-        MediaPick::Automatic => (None, false),
-        MediaPick::AudioOnly => (None, true),
-    }
-}
-
-/// Preselect for a fresh resolve: the preference-closest pin, or Automatic
-/// when nothing is pinnable. Audio-only never preselects — it stays off by
-/// design until the user picks it.
-pub(crate) fn initial_media_pick(
-    pins: &[crate::video_types::VideoFormatOption],
-    quality_pref: &str,
-) -> MediaPick {
-    if pins.is_empty() {
-        MediaPick::Automatic
-    } else {
-        MediaPick::Pin(crate::video::default_quality_index(pins, quality_pref))
-    }
-}
-
-/// One activatable row inside the media-format picker.
-struct FormatRow {
-    pick: MediaPick,
-    row: adw::ActionRow,
-    check: gtk4::Image,
-}
-
-/// Media-format picker for the details page: an `AdwExpanderRow` holding the
-/// whole choice set as activatable rows — Automatic first (the preference
-/// default), one row per pinnable format tallest-first, then Audio only. The
-/// checkmark marks the pick and the expander subtitle echoes it, so the panel
-/// keeps one primary action instead of a per-row button stack.
-struct FormatPicker {
-    expander: adw::ExpanderRow,
-    rows: RefCell<Vec<FormatRow>>,
-}
-
-impl FormatPicker {
-    fn new() -> Rc<Self> {
-        let expander = adw::ExpanderRow::builder()
-            .title(gettext("Media format"))
-            .subtitle(gettext("Automatic"))
-            .build();
-        expander.set_visible(false);
-        Rc::new(Self {
-            expander,
-            rows: RefCell::new(Vec::new()),
-        })
-    }
-
-    fn widget(&self) -> adw::ExpanderRow {
-        self.expander.clone()
-    }
-
-    fn set_visible(&self, visible: bool) {
-        self.expander.set_visible(visible);
-    }
-
-    /// Rebuild the rows for a fresh resolve and apply `media`'s pick. The
-    /// pick hook fires only on user row clicks, never here: the resolve seeds
-    /// dependent state (file name) itself.
-    fn rebuild(
-        self: &Rc<Self>,
-        media: &Rc<MediaState>,
-        on_pick: &Rc<dyn Fn(MediaPick, MediaPick)>,
-    ) {
-        for r in self.rows.borrow().iter() {
-            r.row.unparent();
-        }
-        self.rows.borrow_mut().clear();
-        let pins = media.pins.borrow();
-        self.add_row(
-            MediaPick::Automatic,
-            &gettext("Automatic"),
-            &gettext("Uses your preferred quality"),
-            media,
-            on_pick,
-        );
-        for (i, opt) in pins.iter().enumerate() {
-            self.add_row(
-                MediaPick::Pin(i),
-                &format!("{}p", opt.height),
-                &opt.detail,
-                media,
-                on_pick,
-            );
-        }
-        self.add_row(
-            MediaPick::AudioOnly,
-            &gettext("Audio only"),
-            &gettext("Skip the video track"),
-            media,
-            on_pick,
-        );
-        self.refresh(media.pick.get(), &pins);
-    }
-
-    fn add_row(
-        self: &Rc<Self>,
-        pick: MediaPick,
-        title: &str,
-        subtitle: &str,
-        media: &Rc<MediaState>,
-        on_pick: &Rc<dyn Fn(MediaPick, MediaPick)>,
-    ) {
-        let check = gtk4::Image::from_icon_name("object-select-symbolic");
-        check.set_valign(gtk4::Align::Center);
-        let row = adw::ActionRow::builder()
-            .title(title)
-            .subtitle(subtitle)
-            .activatable(true)
-            .build();
-        row.add_prefix(&check);
-        {
-            let this = self.clone();
-            let media = media.clone();
-            let on_pick = on_pick.clone();
-            row.connect_activated(move |_| {
-                let old = media.pick.get();
-                if old == pick {
-                    return;
-                }
-                media.pick.set(pick);
-                this.refresh(pick, &media.pins.borrow());
-                on_pick(old, pick);
-            });
-        }
-        self.expander.add_row(&row);
-        self.rows.borrow_mut().push(FormatRow { pick, row, check });
-    }
-
-    /// Mark the pick with the checkmark and echo it in the expander subtitle.
-    fn refresh(&self, pick: MediaPick, pins: &[crate::video_types::VideoFormatOption]) {
-        for r in self.rows.borrow().iter() {
-            r.check.set_visible(r.pick == pick);
-        }
-        let subtitle = match pick {
-            MediaPick::Automatic => gettext("Automatic"),
-            MediaPick::AudioOnly => gettext("Audio only"),
-            MediaPick::Pin(i) => pins
-                .get(i)
-                .map(|opt| opt.label.clone())
-                .unwrap_or_else(|| gettext("Automatic")),
-        };
-        self.expander.set_subtitle(&subtitle);
-    }
 }
 
 /// Queue one probed video from the Add dialog and close it. Shared by the
@@ -250,15 +80,14 @@ impl FormatPicker {
 fn submit_probed_single(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
-    ctl: &SessionCtl,
+    dialog: &glib::WeakRef<adw::Dialog>,
     step: &Rc<VideoStep>,
-    media: &Rc<MediaState>,
+    formats: &Rc<RefCell<Vec<Option<String>>>>,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     v: &crate::video::VideoInfo,
 ) {
     let typed = step.name.text().trim().to_string();
-    let pick = media.pick.get();
-    let (format_id, audio_only) = media_pick_params(pick, &media.pins.borrow());
+    let audio_only = step.audio.is_active();
     // Default name from the video title and id; the intake sanitizes it.
     let settings = manager.settings();
     let auto = typed
@@ -271,7 +100,10 @@ fn submit_probed_single(
     };
     // Exact picks pin the format with its height as fallback, so a dropped pin still
     // degrades to the chosen height; audio-only rows drop the pin, and Automatic (no
-    // pin) falls back to the global preference.
+    // pin) falls back to the global preference. Combo rows and formats share one order.
+    let selected = step.quality.selected() as usize;
+    let format_id = formats.borrow().get(selected).cloned().flatten();
+    let format_id = if audio_only { None } else { format_id };
     let quality = match format_id.clone() {
         Some(id) => v
             .formats
@@ -294,7 +126,9 @@ fn submit_probed_single(
         },
     ) {
         Ok(_) => {
-            ctl.succeed(&gettext("Download added"));
+            if let Some(d) = dialog.upgrade() {
+                d.close();
+            }
         }
         Err(e) => {
             show_video_error(step, &e);
@@ -309,16 +143,16 @@ fn submit_probed_single(
 fn submit_probe(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
-    ctl: &SessionCtl,
+    dialog: &glib::WeakRef<adw::Dialog>,
     step: &Rc<VideoStep>,
-    media: &Rc<MediaState>,
+    formats: &Rc<RefCell<Vec<Option<String>>>>,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     nav: &adw::NavigationView,
     probe: crate::video::ProbeResult,
 ) {
     match probe {
         crate::video::ProbeResult::Single(v) => {
-            submit_probed_single(manager, dest, ctl, step, media, lookup_add, &v);
+            submit_probed_single(manager, dest, dialog, step, formats, lookup_add, &v);
         }
         crate::video::ProbeResult::Playlist(pl) => {
             // Collections queue through the item picker: one row per chosen
@@ -327,7 +161,7 @@ fn submit_probe(
                 nav,
                 manager.clone(),
                 dest.clone(),
-                ctl.clone(),
+                dialog.clone(),
                 pl,
                 step.audio.is_active(),
             );
@@ -353,19 +187,21 @@ fn fallback_plain_failed(
     set_lookup_add(lookup_add, true);
 }
 
-/// Queue a probed link as a plain file and close the panel: the fallback when
+/// Queue a probed link as a plain file and close the dialog: the fallback when
 /// extraction finds no playable media on an unlisted page. `Err` when plain intake rejects the URL.
 fn queue_plain(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
-    ctl: &SessionCtl,
+    dialog: &glib::WeakRef<adw::Dialog>,
     file_row: &adw::EntryRow,
     url: &str,
 ) -> Result<(), String> {
     let typed = file_row.text().trim().to_string();
     let name = (!typed.is_empty()).then_some(typed);
     manager.enqueue(url, Some(&dest.borrow()), name.as_deref())?;
-    ctl.succeed(&gettext("Download added"));
+    if let Some(d) = dialog.upgrade() {
+        d.close();
+    }
     Ok(())
 }
 
@@ -381,7 +217,7 @@ fn hide_video_step(v: &VideoStep) {
     v.status.set_visible(false);
     v.name.set_visible(false);
     v.revert.set_visible(false);
-    v.format.set_visible(false);
+    v.quality.set_visible(false);
     v.audio.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
@@ -396,7 +232,8 @@ fn show_video_ready(v: &VideoStep) {
     hide_video_step(v);
     v.name.set_visible(true);
     v.revert.set_visible(true);
-    v.format.set_visible(true);
+    v.quality.set_visible(true);
+    v.audio.set_visible(true);
 }
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
@@ -455,13 +292,13 @@ fn wire_torrent_picker(
     torrent_btn: &gtk4::Button,
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
-    session: SessionCtl,
+    dialog: glib::WeakRef<adw::Dialog>,
     error_label: gtk4::Label,
 ) {
     torrent_btn.connect_clicked(move |_| {
         let m = manager.clone();
         let dd = dest_dir.clone();
-        let session = session.clone();
+        let dialog = dialog.clone();
         let error_label = error_label.clone();
         glib::spawn_future_local(async move {
             let filter = gtk4::FileFilter::new();
@@ -504,7 +341,9 @@ fn wire_torrent_picker(
             if entries.len() <= 1 {
                 match m.enqueue_torrent_file(bytes, &name, Some(&dd.borrow()), None) {
                     Ok(_) => {
-                        session.succeed(&gettext("Torrent added"));
+                        if let Some(d) = dialog.upgrade() {
+                            d.close();
+                        }
                     }
                     Err(e) => {
                         error_label.set_text(&e);
@@ -513,168 +352,23 @@ fn wire_torrent_picker(
                 }
                 return;
             }
-            show_torrent_files_dialog(m, dd, Some(session), name, bytes, entries);
+            show_torrent_files_dialog(m, dd, Some(dialog), name, bytes, entries);
         });
     });
 }
 
-/// Controls for one add-form session. The form is persistent now — the
-/// session lives for the window lifetime and each successful add resets it
-/// via `reset` — so there is no hide/close path anymore. `alive` stays true
-/// for the window lifetime; the async lookup guards keep reading it the way
-/// they did when sessions could close.
-#[derive(Clone)]
-pub struct SessionCtl {
-    /// Shared across clones: the session installs the real reset *after*
-    /// `build_add_session` hands out clones to the submit paths, so a plain
-    /// `RefCell` here would leave every clone holding the initial no-op.
-    reset: Rc<RefCell<Rc<dyn Fn()>>>,
-    toast: Rc<dyn Fn(&str)>,
-    alive: Rc<Cell<bool>>,
-    window: glib::WeakRef<adw::ApplicationWindow>,
-    /// Runs after a successful submit, post-reset and post-toast.
-    on_succeed: Rc<dyn Fn()>,
-}
-
-impl SessionCtl {
-    fn is_open(&self) -> bool {
-        self.alive.get()
-    }
-
-    /// Successful submit: reset the entry page for the next add and confirm
-    /// with a toast. On wide windows the sidebar form stays put for rapid
-    /// multi-add, the way Varia's quick-add box clears for the next URL
-    /// instead of dismissing; on narrow windows the sidebar is a temporary
-    /// panel, so `on_succeed` returns to the download list.
-    pub(crate) fn succeed(&self, message: &str) {
-        (self.reset.borrow())();
-        (self.toast)(message);
-        (self.on_succeed)();
-    }
-
-    pub(crate) fn set_reset(&self, reset: Rc<dyn Fn()>) {
-        *self.reset.borrow_mut() = reset;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_ctl() -> Self {
-        Self {
-            reset: Rc::new(RefCell::new(Rc::new(|| {}))),
-            toast: Rc::new(|_| {}),
-            alive: Rc::new(Cell::new(true)),
-            window: glib::WeakRef::new(),
-            on_succeed: Rc::new(|| {}),
-        }
-    }
-}
-
-/// The persistent add-download sidebar: an `AdwNavigationSplitView` sidebar
-/// hosting the add form, so adding a download is always one step away and no
-/// dialog covers the list. Owned by the window; the session is
-/// built once and each successful add resets the form. The header and
-/// empty-state buttons, the app action, and Open With / drag-and-drop focus
-/// the form via [`focus_form`].
-pub struct AddPanel {
-    split: adw::NavigationSplitView,
-    url_row: adw::EntryRow,
-    mode_group: adw::ToggleGroup,
-    torrent_choose: gtk4::Button,
-}
-
-/// Widget handles the sidebar form needs after building: focusing,
-/// pre-filling, and mode-aware focus targets.
-struct FormWidgets {
-    url_row: adw::EntryRow,
-    mode_group: adw::ToggleGroup,
-    torrent_choose: gtk4::Button,
-}
-
-impl AddPanel {
-    /// Builds the form session eagerly and returns the panel plus the form
-    /// widget for the caller to place in the split's sidebar.
-    pub fn new(
-        manager: Rc<DownloadManager>,
-        window: &adw::ApplicationWindow,
-        split: &adw::NavigationSplitView,
-        toasts: &adw::ToastOverlay,
-    ) -> (Rc<Self>, adw::NavigationView) {
-        let toasts = toasts.clone();
-        let toast: Rc<dyn Fn(&str)> = Rc::new(move |message| {
-            toasts.add_toast(adw::Toast::new(message));
-        });
-        let split_for_succeed = split.clone();
-        let ctl = SessionCtl {
-            reset: Rc::new(RefCell::new(Rc::new(|| {}))),
-            toast,
-            alive: Rc::new(Cell::new(true)),
-            window: window.downgrade(),
-            // A successful add returns to the download list when the split is
-            // collapsed on the sidebar page.
-            on_succeed: Rc::new(move || {
-                if split_for_succeed.is_collapsed() {
-                    split_for_succeed.set_show_content(true);
-                }
-            }),
-        };
-        let (nav, reset, widgets) = build_add_session(&manager, &ctl, window);
-        ctl.set_reset(reset);
-        let panel = Rc::new(Self {
-            split: split.clone(),
-            url_row: widgets.url_row,
-            mode_group: widgets.mode_group,
-            torrent_choose: widgets.torrent_choose,
-        });
-        (panel, nav)
-    }
-
-    /// Focus the form: reveal the sidebar page when the split is collapsed and
-    /// put the cursor in the right input. A handed-in URL (Open With /
-    /// drag-and-drop) is always a link: it leaves torrent mode and lands
-    /// pre-filled, firing the same changed → debounce → lookup chain as
-    /// typing, so video pages resolve through the media pipeline.
-    pub fn focus_form(&self, initial_url: Option<&str>) {
-        if self.split.is_collapsed() {
-            self.split.set_show_content(false);
-        }
-        if let Some(url) = initial_url.map(str::trim).filter(|u| !u.is_empty())
-            && let Ok(normalized) = crate::download::normalize_url(url)
-        {
-            self.mode_group.set_active(0);
-            self.url_row.set_text(&normalized);
-            self.url_row.grab_focus();
-            return;
-        }
-        if self.mode_group.active() == 1 {
-            self.torrent_choose.grab_focus();
-        } else {
-            self.url_row.grab_focus();
-        }
-    }
-}
-
-/// New-download flow for the persistent sidebar. Builds one session's page
-/// stack; [`AddPanel`] hosts it in the sidebar for the window lifetime and
-/// owns its reset through `ctl`. Returns the page stack, the post-add reset,
-/// and the form widget handles.
-fn build_add_session(
-    manager: &Rc<DownloadManager>,
-    ctl: &SessionCtl,
-    window: &adw::ApplicationWindow,
-) -> (adw::NavigationView, Rc<dyn Fn()>, FormWidgets) {
-    let page = adw::PreferencesPage::new();
-
-    // Link / torrent mode switch: the URL rows and the torrent row are
-    // mutually exclusive inputs sharing one form. Lives in the group header,
-    // the designed spot for a mode switch.
-    let mode_group = adw::ToggleGroup::new();
-    let mode_link = adw::Toggle::builder().label(gettext("Link")).build();
-    let mode_torrent = adw::Toggle::builder().label(gettext("Torrent")).build();
-    mode_group.add(mode_link);
-    mode_group.add(mode_torrent);
-    mode_group.set_active(0);
-    let group = adw::PreferencesGroup::builder()
-        .header_suffix(&mode_group)
+/// New-download dialog, optionally pre-filled (drag-and-drop / Open With hands a
+/// URL in; the normal lookup flow then takes over, so drops never bypass the
+/// media pipeline).
+pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) {
+    let dialog = adw::Dialog::builder()
+        .title(gettext("New Download"))
         .build();
+    dialog.set_follows_content_size(true);
+    dialog.set_content_width(420);
+
+    let page = adw::PreferencesPage::new();
+    let group = adw::PreferencesGroup::new();
     page.add(&group);
 
     let url_row = adw::EntryRow::builder()
@@ -720,12 +414,16 @@ fn build_add_session(
     video_name.set_visible(false);
     video_revert_btn.set_visible(false);
     video_group.add(&video_name);
-    // Format picker, rebuilt per resolve: Automatic first (the preference
-    // default), one row per pinnable format tallest-first, then Audio only.
-    // One decision, one control — no separate switch. The audio switch below
-    // serves playlist mode only, where pins don't apply across items.
-    let video_format = FormatPicker::new();
-    video_group.add(&video_format.widget());
+    // Format picker, filled per video on resolve: exact pinnable formats,
+    // tallest first (the preference preselects the closest row). Starts with
+    // and returns to a single Automatic row — global preference, no pin.
+    let video_quality = adw::ComboRow::builder()
+        .title(gettext("Media format"))
+        .subtitle(gettext("Uses your preferred quality"))
+        .model(&gtk4::StringList::new(&[gettext("Automatic").as_str()]))
+        .build();
+    video_quality.set_visible(false);
+    video_group.add(&video_quality);
     let video_audio = adw::SwitchRow::builder()
         .title(gettext("Audio only"))
         .subtitle(gettext("Skip the video track"))
@@ -760,11 +458,23 @@ fn build_add_session(
         group: video_group,
         name: video_name,
         revert: video_revert_btn,
-        format: video_format,
+        quality: video_quality,
         audio: video_audio,
         tools: video_tools,
         error: video_error,
     });
+    // Dialog-local choices: quality is initialized from Preferences (not
+    // bound); audio-only is always off by design — no global preference
+    // exists. Exact picks are per lookup, so nothing persists here.
+    step.quality.set_selected(0);
+    // Audio-only is per-download only (see above); the quality row is moot while on.
+    step.audio.set_active(false);
+    {
+        let q = step.quality.clone();
+        step.audio.connect_active_notify(move |sw| {
+            q.set_sensitive(!sw.is_active());
+        });
+    }
 
     let torrent_btn = gtk4::Button::builder()
         .label(gettext("Choose…"))
@@ -776,8 +486,6 @@ fn build_add_session(
         .activatable_widget(&torrent_btn)
         .build();
     torrent_row.add_suffix(&torrent_btn);
-    // Link mode is the default; the torrent row shows only in torrent mode.
-    torrent_row.set_visible(false);
     group.add(&torrent_row);
 
     let dest_label = gtk4::Label::builder()
@@ -837,34 +545,9 @@ fn build_add_session(
     let video_generation = Rc::new(Cell::new(0u64));
     let video_last_ok = Rc::new(RefCell::new(String::new()));
     let video_info = Rc::new(RefCell::new(None::<crate::video::ProbeResult>));
-    // Dialog-local media-format state: the current resolve's pinnable formats
-    // and the user's pick. Rebuilt on every resolve; the pick resets so a pin
-    // never carries over (audio-only persists — it is a mode, not a pin).
-    let media_state: Rc<MediaState> = Rc::new(MediaState::default());
-    // Picking into or out of audio-only re-seeds an untouched name: the
-    // resolve-time seed ran under the other mode, so without this the row keeps
-    // a video-container name for an audio download (or vice versa). An edited
-    // name is never clobbered.
-    let on_media_pick: Rc<dyn Fn(MediaPick, MediaPick)> = {
-        let name = step.name.clone();
-        let info = video_info.clone();
-        let settings = manager.settings().clone();
-        Rc::new(move |old, new| {
-            let was_audio = old == MediaPick::AudioOnly;
-            let is_audio = new == MediaPick::AudioOnly;
-            if was_audio == is_audio {
-                return;
-            }
-            if let Some(p) = info.borrow().as_ref() {
-                let current = name.text().to_string();
-                if current.trim().is_empty()
-                    || current == default_name_for(&settings, p.title(), was_audio)
-                {
-                    name.set_text(&default_name_for(&settings, p.title(), is_audio));
-                }
-            }
-        })
-    };
+    // Index-aligned with the format combo rows: exact format ids, or a
+    // single `None` for the Automatic row. Reset on every resolve.
+    let format_ids: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
     // Set while the submit path re-arms the apply tick: the changed handler must
     // ignore that synthetic edit, or every failed Enter-submit would re-resolve.
     let video_quiet = Rc::new(Cell::new(false));
@@ -883,9 +566,8 @@ fn build_add_session(
         let step2 = step.clone();
         let url_row2 = url_row.clone();
         let file_row2 = file_row.clone();
-        let session = ctl.clone();
-        let media_kick = media_state.clone();
-        let on_pick_kick = on_media_pick.clone();
+        let dialog_weak = dialog.downgrade();
+        let formats_kick = format_ids.clone();
         let settings2 = manager.settings().clone();
         let lookup_add_kick = lookup_add.clone();
         let manager_kick = manager.clone();
@@ -914,11 +596,10 @@ fn build_add_session(
                 info_b,
                 step_b,
                 url_b,
-                session_b,
+                dialog_b,
                 settings_b,
                 file_b,
-                media_b,
-                on_pick_b,
+                formats_b,
                 lookup_add_b,
                 manager_b,
                 dest_b,
@@ -929,11 +610,10 @@ fn build_add_session(
                 info.clone(),
                 step2.clone(),
                 url_row2.clone(),
-                session.clone(),
+                dialog_weak.clone(),
                 settings2.clone(),
                 file_row2.clone(),
-                media_kick.clone(),
-                on_pick_kick.clone(),
+                formats_kick.clone(),
                 lookup_add_kick.clone(),
                 manager_kick.clone(),
                 dest_kick.clone(),
@@ -947,7 +627,7 @@ fn build_add_session(
                     generation: generation_b.clone(),
                     my,
                 };
-                if !session_b.is_open() {
+                if dialog_b.upgrade().is_none() {
                     return;
                 }
                 let url = url_b.text().trim().to_string();
@@ -980,7 +660,7 @@ fn build_add_session(
                 let libs = match crate::video::resolve_libraries() {
                     Ok(libs) => libs,
                     Err(e) => {
-                        if !session_b.is_open() || generation_b.get() != my {
+                        if dialog_b.upgrade().is_none() || generation_b.get() != my {
                             return;
                         }
                         info_b.borrow_mut().take();
@@ -998,7 +678,7 @@ fn build_add_session(
                 {
                     Ok(proxy) => proxy,
                     Err(e) => {
-                        if !session_b.is_open() || generation_b.get() != my {
+                        if dialog_b.upgrade().is_none() || generation_b.get() != my {
                             return;
                         }
                         show_video_error(&step_b, &e);
@@ -1016,7 +696,7 @@ fn build_add_session(
                 .await
                 {
                     Err(e) => {
-                        if !session_b.is_open() || generation_b.get() != my {
+                        if dialog_b.upgrade().is_none() || generation_b.get() != my {
                             return;
                         }
                         // Probed links fall back to today's outcome (queue the file directly)
@@ -1025,7 +705,7 @@ fn build_add_session(
                         if !crate::video::is_video_page(&url)
                             && e.to_string().to_lowercase().contains("unsupported url")
                         {
-                            match queue_plain(&manager_b, &dest_b, &session_b, &file_b, &url) {
+                            match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &url) {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     fallback_plain_failed(
@@ -1049,7 +729,7 @@ fn build_add_session(
                                 msg.contains("400") || msg.contains("bad request")
                             }
                         {
-                            match queue_plain(&manager_b, &dest_b, &session_b, &file_b, &direct) {
+                            match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &direct) {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     info_b.borrow_mut().take();
@@ -1074,13 +754,13 @@ fn build_add_session(
                         set_lookup_add(&lookup_add_b, true);
                     }
                     Ok(probe) => {
-                        if !session_b.is_open() || generation_b.get() != my {
+                        if dialog_b.upgrade().is_none() || generation_b.get() != my {
                             return;
                         }
                         // Resolved but nothing playable, and not a listed video
                         // page: same plain fallback as above.
                         if !probe.fetchable() && !crate::video::is_video_page(&url) {
-                            match queue_plain(&manager_b, &dest_b, &session_b, &file_b, &url) {
+                            match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &url) {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     fallback_plain_failed(
@@ -1120,7 +800,7 @@ fn build_add_session(
                                         default_name_for(
                                             &settings_b,
                                             &v.title,
-                                            media_b.pick.get() == MediaPick::AudioOnly,
+                                            step_b.audio.is_active(),
                                         )
                                     } else {
                                         typed
@@ -1129,19 +809,30 @@ fn build_add_session(
                                 }
                                 *last_b.borrow_mut() = url;
                                 // Rebuild the format picker from this resolve (tallest first,
-                                // preference preselects the closest pin) or just Automatic
-                                // plus Audio only when nothing is pinnable. A pin never
-                                // carries over; audio-only persists — it is a mode, not a
-                                // pin.
-                                let pins = v.formats.clone();
-                                let pick = if media_b.pick.get() == MediaPick::AudioOnly {
-                                    MediaPick::AudioOnly
-                                } else {
-                                    initial_media_pick(&pins, &settings_b.video_quality())
-                                };
-                                media_b.pins.replace(pins);
-                                media_b.pick.set(pick);
-                                step_b.format.rebuild(&media_b, &on_pick_b);
+                                // preference preselects the closest row) or a single Automatic
+                                // row when nothing is pinnable. Selection resets — a pin must
+                                // never carry over.
+                                let mut labels = Vec::new();
+                                let mut ids: Vec<Option<String>> = Vec::new();
+                                for opt in &v.formats {
+                                    labels.push(opt.label.clone());
+                                    ids.push(Some(opt.id.clone()));
+                                }
+                                if labels.is_empty() {
+                                    labels.push(gettext("Automatic"));
+                                    ids.push(None);
+                                }
+                                let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                                step_b
+                                    .quality
+                                    .set_model(Some(&gtk4::StringList::new(&refs)));
+                                *formats_b.borrow_mut() = ids;
+                                step_b
+                                    .quality
+                                    .set_selected(crate::video::default_quality_index(
+                                        &v.formats,
+                                        &settings_b.video_quality(),
+                                    ) as u32);
                                 *info_b.borrow_mut() = Some(crate::video::ProbeResult::Single(v));
                                 show_video_ready(&step_b);
                                 set_lookup_add(&lookup_add_b, true);
@@ -1173,7 +864,7 @@ fn build_add_session(
     {
         let generation = video_generation.clone();
         let kick = kick_video.clone();
-        let session = ctl.clone();
+        let dialog_weak = dialog.downgrade();
         let step2 = step.clone();
         let info2 = video_info.clone();
         let quiet = video_quiet.clone();
@@ -1203,11 +894,11 @@ fn build_add_session(
             }
             let my = generation.get() + 1;
             generation.set(my);
-            let (generation_b, kick_b, session_b) =
-                (generation.clone(), kick.clone(), session.clone());
+            let (generation_b, kick_b, dialog_b) =
+                (generation.clone(), kick.clone(), dialog_weak.clone());
             glib::spawn_future_local(async move {
                 glib::timeout_future(std::time::Duration::from_millis(600)).await;
-                if !session_b.is_open() || generation_b.get() != my {
+                if dialog_b.upgrade().is_none() || generation_b.get() != my {
                     return;
                 }
                 kick_b(false);
@@ -1217,7 +908,7 @@ fn build_add_session(
     {
         let step2 = step.clone();
         let kick = kick_video.clone();
-        let session = ctl.clone();
+        let dialog_weak = dialog.downgrade();
         let btn = video_install_btn.clone();
         // Outside Flatpak there is no bundled binary and host packages can't
         // be installed from here: guide through self-install instead.
@@ -1235,17 +926,17 @@ fn build_add_session(
             // the button (HIG: feedback lives with its control; stages stand in for the
             // percentages that don't exist).
             let (step_b, kick_b) = (step2.clone(), kick.clone());
-            let (sess_err, sess_ok) = (session.clone(), session.clone());
+            let (dialog_err, dialog_ok) = (dialog_weak.clone(), dialog_weak.clone());
             crate::install_progress::run(
                 &btn,
                 move |err| {
-                    if !sess_err.is_open() {
+                    if dialog_err.upgrade().is_none() {
                         return;
                     }
                     step_b.tools.set_subtitle(&err);
                 },
                 move || {
-                    if !sess_ok.is_open() {
+                    if dialog_ok.upgrade().is_none() {
                         return;
                     }
                     // Re-probe, don't just refresh: an unlisted URL that led
@@ -1261,43 +952,59 @@ fn build_add_session(
     }
     // One-click restore of the title default (audio-aware, like submit).
     {
-        let (name, media, info) = (step.name.clone(), media_state.clone(), video_info.clone());
+        let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
         let settings = manager.settings().clone();
         step.revert.connect_clicked(move |_| {
             if let Some(p) = info.borrow().as_ref() {
-                let audio = media.pick.get() == MediaPick::AudioOnly;
-                name.set_text(&default_name_for(&settings, p.title(), audio));
+                name.set_text(&default_name_for(&settings, p.title(), audio.is_active()));
                 name.grab_focus();
             }
         });
     }
-    // Picking into or out of audio-only re-seeds an untouched name; wired
-    // through the picker's hook above (on_media_pick).
+    // Toggling the mode re-seeds an untouched name: the resolve-time seed ran under
+    // the other mode, so without this the row keeps a video-container name for an
+    // audio download (or vice versa). An edited name is never clobbered.
+    {
+        let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
+        let settings = manager.settings().clone();
+        audio.connect_active_notify(move |sw| {
+            if let Some(p) = info.borrow().as_ref() {
+                let active = sw.is_active();
+                let current = name.text().to_string();
+                if current.trim().is_empty()
+                    || current == default_name_for(&settings, p.title(), !active)
+                {
+                    name.set_text(&default_name_for(&settings, p.title(), active));
+                }
+            }
+        });
+    }
 
     wire_torrent_picker(
         &torrent_btn,
         manager.clone(),
         dest_dir.clone(),
-        ctl.clone(),
+        dialog.downgrade(),
         error_label.clone(),
     );
 
-    // Persistent sidebar: no header bar and no Cancel — the form is always
-    // there. The Add button sits full-width under the form, Varia-style.
+    let toolbar = adw::ToolbarView::new();
+    let hb = adw::HeaderBar::new();
+    hb.set_show_start_title_buttons(false);
+    hb.set_show_end_title_buttons(false);
+    let cancel_btn = gtk4::Button::builder()
+        .label(gettext("_Cancel"))
+        .use_underline(true)
+        .build();
     let add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
         .use_underline(true)
         .css_classes(["suggested-action"])
-        .hexpand(true)
         .build();
-    let entry_box = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    entry_box.set_margin_top(12);
-    entry_box.set_margin_start(12);
-    entry_box.set_margin_end(12);
-    entry_box.set_margin_bottom(12);
-    page.set_vexpand(true);
-    entry_box.append(&page);
-    entry_box.append(&add_btn);
+    hb.pack_start(&cancel_btn);
+    hb.pack_end(&add_btn);
+    toolbar.add_top_bar(&hb);
+    toolbar.set_content(Some(&page));
 
     // Details page: the video step lives here behind an explicit Continue, so the final
     // Add is unreachable without a resolved preview. The back button is the nav view's.
@@ -1324,7 +1031,7 @@ fn build_add_session(
         .tag("entry")
         .title(gettext("New Download"))
         .can_pop(false)
-        .child(&entry_box)
+        .child(&toolbar)
         .build();
     let video_nav_page = adw::NavigationPage::builder()
         .tag("video")
@@ -1334,23 +1041,10 @@ fn build_add_session(
     let nav = adw::NavigationView::new();
     nav.push(&entry_nav_page);
 
-    // The default widget follows the mode — Link: the Add button submits on
-    // Enter; torrent: none, the row's own activatable (Choose…) handles it.
-    // Owned by the mode switch below.
-    // Escape pops back to the entry page from the details page; on the entry
-    // page there is nothing to dismiss anymore.
-    {
-        let nav_esc = nav.clone();
-        let shortcuts = gtk4::ShortcutController::new();
-        shortcuts.add_shortcut(gtk4::Shortcut::new(
-            gtk4::ShortcutTrigger::parse_string("Escape"),
-            Some(gtk4::CallbackAction::new(move |_, _| {
-                nav_esc.pop_to_tag("entry");
-                glib::Propagation::Stop
-            })),
-        ));
-        nav.add_controller(shortcuts);
-    }
+    dialog.set_child(Some(&nav));
+    dialog.set_default_widget(Some(&add_btn));
+
+    crate::ui_util::close_on_click(&cancel_btn, &dialog);
     // One submit path for the Add button and URL apply: video pages go through the Page
     // intake (a matching preview is required so the row stores the resolved page, not a
     // stale URL); everything else keeps the direct enqueue.
@@ -1360,7 +1054,7 @@ fn build_add_session(
         let url_row = url_row.clone();
         let file_row = file_row.clone();
         let error_label = error_label.clone();
-        let session = ctl.clone();
+        let dialog_weak = dialog.downgrade();
         let info = video_info.clone();
         let last_ok = video_last_ok.clone();
         let step2 = step.clone();
@@ -1368,7 +1062,7 @@ fn build_add_session(
         let quiet = video_quiet.clone();
         let nav2 = nav.clone();
         let video_nav_page2 = video_nav_page.clone();
-        let media = media_state.clone();
+        let formats = format_ids.clone();
         let lookup_add_submit = lookup_add.clone();
         move |rearm_apply: bool| {
             let fail = |message: &str| {
@@ -1385,6 +1079,11 @@ fn build_add_session(
                     url_row.set_text("");
                     url_row.set_text(&current);
                     quiet.set(false);
+                }
+            };
+            let close = || {
+                if let Some(d) = dialog_weak.upgrade() {
+                    d.close();
                 }
             };
             let url = url_row.text().trim().to_string();
@@ -1411,9 +1110,9 @@ fn build_add_session(
                     Some(probe) => submit_probe(
                         &m,
                         &dd,
-                        &session,
+                        &dialog_weak,
                         &step2,
-                        &media,
+                        &formats,
                         &lookup_add_submit,
                         &nav2,
                         probe,
@@ -1461,9 +1160,9 @@ fn build_add_session(
                             submit_probed_single(
                                 &m,
                                 &dd,
-                                &session,
+                                &dialog_weak,
                                 &step2,
-                                &media,
+                                &formats,
                                 &lookup_add_submit,
                                 &v,
                             );
@@ -1473,7 +1172,7 @@ fn build_add_session(
                                 &nav2,
                                 m.clone(),
                                 dd.clone(),
-                                session.clone(),
+                                dialog_weak.clone(),
                                 pl,
                                 step2.audio.is_active(),
                             );
@@ -1498,7 +1197,7 @@ fn build_add_session(
                     Some(fname.as_str())
                 },
             ) {
-                Ok(_) => session.succeed(&gettext("Download added")),
+                Ok(_) => close(),
                 Err(e) => fail(&e),
             }
         }
@@ -1539,81 +1238,31 @@ fn build_add_session(
         });
     }
 
-    // The entry-page Add button is a dead click with no URL typed: desensitize
-    // it until the row is non-empty, the way Varia gates its quick-add buttons.
+    present_dialog(&dialog);
+
+    // Dropped/opened URLs land here pre-filled: setting the text fires the same changed →
+    // debounce → lookup chain as typing, so video pages resolve through the media pipeline.
+    if let Some(url) = initial_url.map(str::trim).filter(|u| !u.is_empty())
+        && let Ok(normalized) = crate::download::normalize_url(url)
     {
-        let b = add_btn.clone();
-        let ur = url_row.clone();
-        ur.connect_changed(move |row| {
-            b.set_sensitive(!row.text().trim().is_empty());
-        });
-        add_btn.set_sensitive(!url_row.text().trim().is_empty());
+        url_row.set_text(&normalized);
     }
 
-    // Link / torrent mode: mutually exclusive inputs. Torrent mode hides the
-    // URL rows and the Add button (torrents submit through Choose…); coming
-    // back to Link restores the video-mode rule for the file row. Enter
-    // submits from the Link rows via the default widget; in torrent mode the
-    // row's own activatable handles it, so there is no default widget.
-    {
-        let mode = mode_group.clone();
-        let ur = url_row.clone();
-        let fr = file_row.clone();
-        let tr = torrent_row.clone();
-        let ab = add_btn.clone();
-        let win_w = window.downgrade();
-        let info = video_info.clone();
-        let apply = Rc::new(move || {
-            let torrent_mode = mode.active() == 1;
-            ur.set_visible(!torrent_mode);
-            tr.set_visible(torrent_mode);
-            ab.set_visible(!torrent_mode);
-            if let Some(win) = win_w.upgrade() {
-                if torrent_mode {
-                    win.set_default_widget(Option::<&gtk4::Widget>::None);
-                } else {
-                    win.set_default_widget(Some(&ab));
-                }
-            }
-            if torrent_mode {
-                fr.set_visible(false);
-            } else {
-                let text = ur.text().trim().to_string();
-                let fresh = info.borrow().as_ref().is_some_and(|p| p.page_url() == text);
-                fr.set_visible(!(crate::video::is_video_page(&text) || fresh));
-            }
-        });
-        let apply2 = Rc::clone(&apply);
-        mode_group.connect_active_notify(move |_| apply2());
-        apply();
-    }
-
-    // The sidebar hosts the returned page stack persistently.
     // Keyboard-first: focus lands in the URL field so typing starts a
     // download with no tab stops (same pattern as the rename dialog).
-    // Deferred: the form isn't attached to the window until the caller
-    // places it in the sidebar, and grab_focus fails on a rootless widget.
-    {
-        let url_row = url_row.clone();
-        let session = ctl.clone();
-        glib::idle_add_local_once(move || {
-            if session.is_open() {
-                url_row.grab_focus();
-            }
-        });
-    }
+    url_row.grab_focus();
 
-    // Single clipboard read per window open; no watch, no polling.
+    // single clipboard read per dialog open; no watch, no polling.
     {
         let url_row = url_row.clone();
-        let session = ctl.clone();
+        let dialog_weak = dialog.downgrade();
         glib::spawn_future_local(async move {
             let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
             let Some(clipboard) = clipboard else { return };
             let Ok(Some(text)) = clipboard.read_text_future().await else {
                 return;
             };
-            if !session.is_open() {
+            if dialog_weak.upgrade().is_none() {
                 return;
             }
             if !url_row.text().trim().is_empty() {
@@ -1625,61 +1274,6 @@ fn build_add_session(
             }
         });
     }
-
-    // Reset for rapid multi-add: after a successful add the entry page goes
-    // back to its fresh state, the way Varia's quick-add box clears for the
-    // next URL. Installed on the session by the panel; `succeed` runs it
-    // before the toast.
-    let reset: Rc<dyn Fn()> = {
-        let mode = mode_group.clone();
-        let url_row = url_row.clone();
-        let file_row = file_row.clone();
-        let error_label = error_label.clone();
-        let step = step.clone();
-        let generation = video_generation.clone();
-        let info = video_info.clone();
-        let last_ok = video_last_ok.clone();
-        let media = media_state.clone();
-        let on_pick = on_media_pick.clone();
-        let inflight = video_inflight.clone();
-        let nav = nav.clone();
-        Rc::new(move || {
-            // Drop any in-flight lookup for the submitted URL.
-            generation.set(generation.get() + 1);
-            inflight.replace(None);
-            info.borrow_mut().take();
-            last_ok.borrow_mut().clear();
-            // Back to the idle pick: Automatic, no pins. The hook can't fire
-            // meaningfully here — info is already taken, so the name re-seed
-            // is a no-op.
-            media.pick.set(MediaPick::Automatic);
-            media.pins.borrow_mut().clear();
-            step.format.rebuild(&media, &on_pick);
-            step.audio.set_active(false);
-            hide_video_step(&step);
-            error_label.set_visible(false);
-            url_row.remove_css_class("error");
-            file_row.set_text("");
-            // set_text fires changed: the video kick exits early on empty and
-            // the file row's video-mode hiding is undone by the same handler.
-            url_row.set_text("");
-            // Back to Link mode (fires the mode switch when it was torrent).
-            mode.set_active(0);
-            // Back to the entry page when the add came from a pushed page.
-            nav.pop_to_tag("entry");
-            url_row.grab_focus();
-        })
-    };
-
-    (
-        nav,
-        reset,
-        FormWidgets {
-            url_row,
-            mode_group,
-            torrent_choose: torrent_btn,
-        },
-    )
 }
 /// Seconds as M:SS / H:MM:SS for picker subtitles.
 pub(crate) fn fmt_item_duration(secs: i64) -> String {
@@ -1745,7 +1339,7 @@ fn push_playlist_items_page(
     nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
-    parent: SessionCtl,
+    parent: glib::WeakRef<adw::Dialog>,
     playlist: crate::media_types::PlaylistInfo,
     audio_only: bool,
 ) {
@@ -1823,7 +1417,7 @@ fn push_playlist_items_page(
     });
 
     {
-        let parent = parent.clone();
+        let parent_weak = parent.clone();
         add_btn.connect_clicked(move |_| {
             let chosen: Vec<(usize, &crate::media_types::PlaylistItem)> = playlist
                 .items
@@ -1888,27 +1482,25 @@ fn push_playlist_items_page(
                 error_label.set_visible(true);
                 return;
             }
-            // Complete success resets the panel for the next add; a partial failure
-            // stays on the picker so the remaining rows (unchecked above) can be retried.
-            parent.succeed(&ngettext_count(
-                "1 download added",
-                "{n} downloads added",
-                chosen.len(),
-            ));
+            // Complete success closes the whole New Download dialog; a partial failure stays
+            // on the picker so the remaining rows (unchecked above) can be retried.
+            if let Some(p) = parent_weak.upgrade() {
+                p.close();
+            }
         });
     }
 
-    // Enter queues the selection while the picker is up; the window's previous
+    // Enter queues the selection while the picker is up; the dialog's previous
     // default widget is restored when the page is popped.
-    if let Some(win) = parent.window.upgrade() {
-        let prev_default = win.default_widget();
-        win.set_default_widget(Some(&add_btn));
-        let parent = parent.clone();
+    if let Some(p) = parent.upgrade() {
+        let prev_default = p.default_widget();
+        p.set_default_widget(Some(&add_btn));
+        let parent_weak = parent.clone();
         nav.connect_popped(move |_, popped| {
             if popped.tag().as_deref() == Some("playlist")
-                && let Some(win) = parent.window.upgrade()
+                && let Some(p) = parent_weak.upgrade()
             {
-                win.set_default_widget(prev_default.as_ref());
+                p.set_default_widget(prev_default.as_ref());
             }
         });
     }
@@ -1920,7 +1512,7 @@ fn push_playlist_items_page(
 pub fn show_torrent_files_dialog(
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
-    parent: Option<SessionCtl>,
+    parent: Option<glib::WeakRef<adw::Dialog>>,
     file_name: String,
     bytes: Vec<u8>,
     entries: Vec<crate::torrent::TorrentFileEntry>,
@@ -1995,7 +1587,6 @@ pub fn show_torrent_files_dialog(
     }
     {
         let dialog_weak = dialog.downgrade();
-        let parent_close = parent.clone();
         add_btn.connect_clicked(move |_| {
             let selected: Vec<usize> = checks
                 .iter()
@@ -2020,8 +1611,8 @@ pub fn show_torrent_files_dialog(
                     if let Some(d) = dialog_weak.upgrade() {
                         d.close();
                     }
-                    if let Some(p) = parent_close.as_ref() {
-                        p.succeed(&gettext("Torrent added"));
+                    if let Some(p) = parent.as_ref().and_then(|w| w.upgrade()) {
+                        p.close();
                     }
                 }
                 Err(e) => {
@@ -2032,9 +1623,9 @@ pub fn show_torrent_files_dialog(
         });
     }
 
-    // Parent the modal on the window when opened from the add panel; the
-    // standalone open path (no parent) keeps the no-window fallback.
-    dialog.present(parent.as_ref().and_then(|p| p.window.upgrade()).as_ref());
+    // No gtk Window parent exists here (invoked from an adw::Dialog): present
+    // standalone like the no-window fallback above.
+    dialog.present(None::<&gtk4::Window>);
 }
 
 #[cfg(test)]

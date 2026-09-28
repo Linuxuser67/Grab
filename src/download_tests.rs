@@ -1347,10 +1347,10 @@ fn error_banner_ignores_cancelled() {
 
 #[test]
 fn formats_amounts() {
-    assert_eq!(format_amounts(0, 1024), "0 B of 1.0 KB");
+    assert_eq!(format_amounts(0, 1024), "0 bytes of 1.0\u{a0}kB");
     assert_eq!(
         format_amounts(5 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
-        "5.0 MB of 2.0 GB"
+        "5.2\u{a0}MB of 2.1\u{a0}GB"
     );
 }
 

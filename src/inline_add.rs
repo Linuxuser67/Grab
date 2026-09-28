@@ -1059,6 +1059,25 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
+    // The lookup spinner lives inside the URL entry (browser-address-bar
+    // style): no separate status line for the transient loading state, and
+    // no layout shift when a lookup starts. GtkEntry has no add_suffix, so
+    // the spinner floats over the entry's trailing edge in a GtkOverlay;
+    // the entry reserves trailing text space via the `url-lookup` class
+    // (toggled with the spinner) so text never slides underneath it. The
+    // accessible label carries the "Looking up…" text the spinner replaces
+    // visually.
+    ensure_url_lookup_css();
+    let url_spinner = gtk4::Spinner::new();
+    url_spinner.update_property(&[gtk4::accessible::Property::Label(&gettext("Looking up…"))]);
+    url_spinner.set_halign(gtk4::Align::End);
+    url_spinner.set_valign(gtk4::Align::Center);
+    url_spinner.set_margin_end(10);
+    url_spinner.set_visible(false);
+    let url_overlay = gtk4::Overlay::new();
+    url_overlay.set_hexpand(true);
+    url_overlay.set_child(Some(&url_entry));
+    url_overlay.add_overlay(&url_spinner);
     let add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
         .use_underline(true)
@@ -1097,25 +1116,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // Video preview block: hidden until a lookup runs; exactly one state shows.
     let video_group = adw::PreferencesGroup::new();
     video_group.set_visible(false);
-    // The lookup spinner lives inside the URL entry (browser-address-bar
-    // style): no separate status line for the transient loading state, and
-    // no layout shift when a lookup starts. GtkEntry has no add_suffix, so
-    // the spinner floats over the entry's trailing edge in a GtkOverlay;
-    // the entry reserves trailing text space via the `url-lookup` class
-    // (toggled with the spinner) so text never slides underneath it. The
-    // accessible label carries the "Looking up…" text the spinner replaces
-    // visually.
-    ensure_url_lookup_css();
-    let url_spinner = gtk4::Spinner::new();
-    url_spinner.update_property(&[gtk4::accessible::Property::Label(&gettext("Looking up…"))]);
-    url_spinner.set_halign(gtk4::Align::End);
-    url_spinner.set_valign(gtk4::Align::Center);
-    url_spinner.set_margin_end(10);
-    url_spinner.set_visible(false);
-    let url_overlay = gtk4::Overlay::new();
-    url_overlay.set_hexpand(true);
-    url_overlay.set_child(Some(&url_entry));
-    url_overlay.add_overlay(&url_spinner);
     let video_name = adw::EntryRow::builder()
         .title(gettext("File name"))
         .activates_default(false)

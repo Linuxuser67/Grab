@@ -1107,10 +1107,17 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let opts_revealer = gtk4::Revealer::builder()
         .transition_type(gtk4::RevealerTransitionType::SlideDown)
         .reveal_child(false)
+        .visible(false)
         .build();
     opts_toggle
         .bind_property("active", &opts_revealer, "reveal-child")
         .bidirectional()
+        .sync_create()
+        .build();
+    // Hidden when collapsed so the form's Box spacing doesn't leave a
+    // gap under the URL row.
+    opts_toggle
+        .bind_property("active", &opts_revealer, "visible")
         .sync_create()
         .build();
     form.append(&opts_revealer);

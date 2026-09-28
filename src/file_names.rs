@@ -534,6 +534,18 @@ mod tests {
     }
 
     #[test]
+    fn percent_decode_nul_escape_falls_back_to_literal() {
+        // GLib rejects %00 (escaped NUL) as an error; we fall back to the
+        // original string rather than producing a NUL byte. The literal
+        // "%00" is harmless in a filename (no NUL, no traversal).
+        let got = percent_decode("foo%00bar.mp4");
+        assert_eq!(got, "foo%00bar.mp4");
+        assert!(!got.contains('\0'));
+        // Normal escapes still decode.
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+    }
+
+    #[test]
     fn path_size_tolerates_symlinks() {
         // GIO's measure_disk_usage follows symlinks (unlike the old std::fs
         // walk which never descended them). Pin the contract: symlinks to

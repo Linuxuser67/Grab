@@ -1350,12 +1350,15 @@ fn clean_staging_in_keeps_nonempty_root() {
     let root = dest_staging_root(&dest_dir);
     let item_a = staging_dir_for(&dest_dir, 7);
     let item_b = staging_dir_for(&dest_dir, 8);
+    let cookie = root.join("grab-cookies-7-1.txt");
     std::fs::create_dir_all(&item_a).unwrap();
     std::fs::create_dir_all(&item_b).unwrap();
+    std::fs::write(&cookie, "x").unwrap();
     clean_staging_in(&root, &item_a);
     assert!(!item_a.exists());
     assert!(root.exists(), "root with remaining items must stay");
     assert!(item_b.exists());
+    assert!(cookie.exists(), "cookie files must survive");
     let _ = std::fs::remove_dir_all(&dest_dir);
 }
 
@@ -1368,7 +1371,7 @@ fn test_video_info(page_url: &str) -> ProbeResult {
         duration_string: None,
         page_url: page_url.into(),
         expires_at: None,
-        formats: vec![],
+        formats: Box::default(),
         is_live: false,
         fetchable: false,
     })
@@ -1755,7 +1758,8 @@ fn probe_result_helpers_cover_both_variants() {
         title: "First".into(),
         page_url: "https://www.youtube.com/watch?v=a1".into(),
         duration: None,
-    }];
+    }]
+    .into_boxed_slice();
     let list = ProbeResult::Playlist(PlaylistInfo {
         id: "PL1".into(),
         title: "My List".into(),
@@ -1774,9 +1778,28 @@ fn probe_result_helpers_cover_both_variants() {
         page_url: "https://www.youtube.com/playlist?list=PL1".into(),
         kind: PlaylistKind::Playlist,
         total: 0,
-        items: vec![],
+        items: Box::default(),
     });
     assert!(!empty.fetchable());
+}
+
+// ── per-row footprint budget ─────────────────────────────────────────
+
+// Cache-lesson guard: the probe structs are built once and live as long as
+// their rows, so every wasted byte is paid per row. These budgets pin the
+// Box<str>/Box<[T]>/boxed-variant layout; adding a field must update the
+// budget consciously, not silently.
+#[test]
+fn probe_struct_footprint_budget() {
+    use std::mem::size_of;
+    assert_eq!(size_of::<VideoFormatOption>(), 40, "VideoFormatOption");
+    assert_eq!(size_of::<VideoInfo>(), 104, "VideoInfo");
+    assert_eq!(size_of::<PlaylistItem>(), 80, "PlaylistItem");
+    assert_eq!(size_of::<PlaylistInfo>(), 80, "PlaylistInfo");
+    assert_eq!(size_of::<ProbeResult>(), 104, "ProbeResult");
+    // Rare large variants stay boxed so the common values stay small.
+    assert_eq!(size_of::<VideoOutcome>(), 16, "VideoOutcome");
+    assert_eq!(size_of::<crate::engine_msg::EngineMsg>(), 40, "EngineMsg");
 }
 
 // ── tool versions ────────────────────────────────────────────────────
@@ -3698,12 +3721,12 @@ fn plan_tie_keeps_direct_muxed() {
 
 // ── default combo selection ──────────────────────────────────────────
 
-fn test_options() -> Vec<VideoFormatOption> {
+fn test_options() -> Box<[VideoFormatOption]> {
     [1080u32, 720, 480]
         .iter()
         .map(|h| VideoFormatOption {
-            id: format!("v{h}"),
-            label: format!("{h}p"),
+            id: format!("v{h}").into_boxed_str(),
+            label: format!("{h}p").into_boxed_str(),
             height: *h,
         })
         .collect()
@@ -3727,8 +3750,8 @@ fn default_quality_index_preselects() {
     let odd = [840u32, 600]
         .iter()
         .map(|h| VideoFormatOption {
-            id: format!("v{h}"),
-            label: format!("{h}p"),
+            id: format!("v{h}").into_boxed_str(),
+            label: format!("{h}p").into_boxed_str(),
             height: *h,
         })
         .collect::<Vec<_>>();
@@ -6548,8 +6571,8 @@ fn expand_child_target_routes_entries() {
     fn item(id: &str, page_url: &str) -> PlaylistItem {
         PlaylistItem {
             index: 1,
-            id: id.to_string(),
-            title: "t".to_string(),
+            id: id.into(),
+            title: "t".into(),
             page_url: page_url.to_string(),
             duration: None,
         }

@@ -118,7 +118,7 @@ pub async fn run_video_download(
                 break;
             }
             // No picked entry: the spawner expands the collection into per-item rows instead of failing it.
-            Ok(FetchedVideo::Playlist(pl)) => return Ok(VideoOutcome::Expand(pl)),
+            Ok(FetchedVideo::Playlist(pl)) => return Ok(VideoOutcome::Expand(pl.into())),
             Err(e) if attempt + 1 < 3 => {
                 tracing::debug!("video resolve failed, retrying: {e}");
                 tokio::time::sleep(Duration::from_secs(u64::from(attempt) + 1)).await;

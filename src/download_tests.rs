@@ -2274,27 +2274,28 @@ fn expand_playlist_rows_use_titled_subfolder() {
         },
     );
     let pl = crate::media_types::PlaylistInfo {
-        id: "PLx".to_string(),
-        title: "My Mix: Vol. 1".to_string(),
-        page_url: "https://www.youtube.com/playlist?list=PLx".to_string(),
+        id: "PLx".into(),
+        title: "My Mix: Vol. 1".into(),
+        page_url: "https://www.youtube.com/playlist?list=PLx".into(),
         kind: crate::media_types::PlaylistKind::Playlist,
         total: 2,
         items: vec![
             crate::media_types::PlaylistItem {
                 index: 1,
-                id: "a".to_string(),
-                title: "First".to_string(),
+                id: "a".into(),
+                title: "First".into(),
                 page_url: "https://www.youtube.com/watch?v=aaa".to_string(),
                 duration: None,
             },
             crate::media_types::PlaylistItem {
                 index: 2,
-                id: "b".to_string(),
-                title: "Second".to_string(),
+                id: "b".into(),
+                title: "Second".into(),
                 page_url: "https://www.youtube.com/watch?v=bbb".to_string(),
                 duration: None,
             },
-        ],
+        ]
+        .into_boxed_slice(),
     };
     let (added, total) = manager.expand_playlist_rows(parent.id(), &parent, &pl);
     assert_eq!((added, total), (2, 2));

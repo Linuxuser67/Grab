@@ -27,6 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # No job pushes or fetches; don't persist the token in git config.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt
@@ -41,6 +44,9 @@ jobs:
       - name: Install system dependencies
         run: dnf install -y git gcc pkg-config gtk4-devel libadwaita-devel python3
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # No job pushes or fetches; don't persist the token in git config.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy
@@ -60,6 +66,9 @@ jobs:
       - name: Install system dependencies
         run: dnf install -y curl gtk3
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # No job pushes or fetches; don't persist the token in git config.
+          persist-credentials: false
       - name: Install sentrux
         run: |
           curl -sSL --fail https://github.com/sentrux/sentrux/releases/download/v0.5.7/sentrux-linux-x86_64 -o /usr/local/bin/sentrux
@@ -74,6 +83,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # No job pushes or fetches; don't persist the token in git config.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       # --locked fails when the lock would need re-resolution; read-only otherwise.
       - run: cargo metadata --locked --format-version 1 >/dev/null
@@ -91,8 +103,14 @@ jobs:
           # gitleaks scans history; the default shallow checkout would
           # hide every commit but the last.
           fetch-depth: 0
+          # Don't persist the token in git config: least privilege for a
+          # read-only scan job.
+          persist-credentials: false
       - name: Install gitleaks
         run: |
+          # Scanner pins are NOT Dependabot-tracked: bump the version, URL and
+          # sha256 together when a new gitleaks release lands (and the
+          # [extend] useDefault pin in .gitleaks.toml if the ruleset changed).
           curl -sSL --fail https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o /tmp/gitleaks.tgz
           # Pinned hash, cross-checked against the vendor-published
           # gitleaks_8.30.1_checksums.txt: a swapped release asset fails here.
@@ -103,6 +121,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Install cargo-audit
         run: |
+          # Scanner pins are NOT Dependabot-tracked: bump the version, URL and
+          # sha256 together when a new cargo-audit release lands.
           curl -sSL --fail https://github.com/RustSec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz -o /tmp/cargo-audit.tgz
           # Pinned hash (no vendor checksums published for this asset; the
           # extracted binary was verified to report 0.22.2): a swapped

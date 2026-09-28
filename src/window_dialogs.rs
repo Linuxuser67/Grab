@@ -108,7 +108,7 @@ fn submit_probed_single(
         Some(id) => v
             .formats
             .iter()
-            .find(|opt| opt.id == id)
+            .find(|opt| id.as_str() == &*opt.id)
             .map(|opt| crate::video::quality_for_height(opt.height).to_string())
             .unwrap_or_else(|| manager.settings().video_quality()),
         None => manager.settings().video_quality(),
@@ -815,8 +815,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                 let mut labels = Vec::new();
                                 let mut ids: Vec<Option<String>> = Vec::new();
                                 for opt in &v.formats {
-                                    labels.push(opt.label.clone());
-                                    ids.push(Some(opt.id.clone()));
+                                    labels.push(opt.label.to_string());
+                                    ids.push(Some(opt.id.to_string()));
                                 }
                                 if labels.is_empty() {
                                     labels.push(gettext("Automatic"));
@@ -1466,7 +1466,7 @@ fn push_playlist_items_page(
                         // Remember the picked entry as fallback: story rows normally carry
                         // segment pages and never need it, but highlights — and anything
                         // unparseable at pick time — re-resolve the tray by this id.
-                        playlist_item_id: Some(item.id.clone()),
+                        playlist_item_id: Some(item.id.to_string()),
                     },
                     &existing,
                 ) {

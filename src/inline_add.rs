@@ -1077,7 +1077,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
     // The lookup spinner lives in the entry's suffix slot
     // (browser-address-bar style): no separate status line for the
-    // transient loading state, and no layout shift when a lookup starts.
+    // transient loading state. The suffix is unmapped when hidden, so
+    // showing it reserves space (minor shift, not a new row).
     let url_spinner = adw::Spinner::new();
     url_spinner.set_visible(false);
     url_entry.add_suffix(&url_spinner);

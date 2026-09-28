@@ -475,8 +475,9 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
 }
 
 /// Pops up a details dialog when a download fails, using AdwAlertDialog:
-/// heading + filename body, the log as extra-child, Copy as the suggested
-/// response. Returns the dialog so callers can track it via WeakRef.
+/// heading + filename body, the log as extra-child, Copy with the suggested
+/// appearance (Close is the default/Enter response). Returns the dialog so
+/// callers can track it via WeakRef.
 fn show_failure_dialog(
     parent: &gtk4::Widget,
     item: &crate::download::DownloadItem,

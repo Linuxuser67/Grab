@@ -521,10 +521,11 @@ pub(crate) fn build_row(
     manager: &Rc<DownloadManager>,
     toasts: &Rc<adw::ToastOverlay>,
 ) -> gtk4::ListBoxRow {
-    // No margins: the boxed-list's .card already provides the 12px inner
-    // padding (plus the theme's 2px row padding). Extra margins here would
-    // stack on top of it.
     let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    outer.set_margin_top(12);
+    outer.set_margin_bottom(12);
+    outer.set_margin_start(12);
+    outer.set_margin_end(12);
 
     let top = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
 

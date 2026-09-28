@@ -474,17 +474,21 @@ fn fallback_plain_failed(
 
 /// Enqueue with the card's destination, then collapse the card on success.
 ///
-/// RED: this keeps the pre-fix shape — a `dest.borrow()` temporary in the
-/// `match` scrutinee, which lives into the arms. `close_card()` re-borrows
-/// the same cell mutably (it resets the destination), so every successful
-/// Add panics with "RefCell already borrowed" and aborts the app.
+/// The destination borrow lives only for the enqueue call: a `dest.borrow()`
+/// temporary in a `match` scrutinee would live into the arms, and
+/// `close_card()` re-borrows the same cell mutably to reset the destination —
+/// panicking with "RefCell already borrowed" on every successful Add.
 fn enqueue_and_close<T>(
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
     enqueue: impl FnOnce(Option<&str>) -> Result<T, String>,
     on_err: impl FnOnce(&str),
 ) {
-    match enqueue(Some(&dest.borrow())) {
+    let result = {
+        let d = dest.borrow();
+        enqueue(Some(&d))
+    };
+    match result {
         Ok(_) => close_card(),
         Err(e) => on_err(&e),
     }
@@ -1576,7 +1580,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         },
                     )
                 },
-                |e| fail(e),
+                fail,
             );
         })
     };

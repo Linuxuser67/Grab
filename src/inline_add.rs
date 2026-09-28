@@ -1049,6 +1049,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .icon_name("window-close-symbolic")
         .css_classes(["flat", "circular"])
         .tooltip_text(gettext("Cancel"))
+        .valign(gtk4::Align::Center)
         .build();
     cancel_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Cancel"))]);
 

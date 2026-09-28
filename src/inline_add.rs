@@ -21,7 +21,7 @@ use crate::window_rows::{default_name_for, selection_action_bar};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
-use gtk4::{gio, glib};
+use gtk4::{gdk, gio, glib};
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -488,6 +488,18 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
 /// All entries start selected, matching the old checked-by-default rows.
 /// Returns the view and its selection model for the caller to wire.
 fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::MultiSelection) {
+    // Compact density: single-line rows with tightened padding. Installed once.
+    static INSTALL_CSS: std::sync::Once = std::sync::Once::new();
+    INSTALL_CSS.call_once(|| {
+        let css = gtk4::CssProvider::new();
+        css.load_from_string(".picker-compact { padding-top: 3px; padding-bottom: 3px; }");
+        gtk4::style_context_add_provider_for_display(
+            &gtk4::gdk::Display::default().expect("no display"),
+            &css,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    });
+
     let store = gio::ListStore::new::<gtk4::StringObject>();
     for (title, _) in entries.iter() {
         store.append(&gtk4::StringObject::new(title));
@@ -498,20 +510,19 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::Mul
     let factory = gtk4::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
         let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-        // HIG: AdwActionRow for title/subtitle — no hand-rolled Box+Labels.
+        // HIG: AdwActionRow, single-line title only — the subtitle would
+        // double the row height. Duration/size is redundant for picking.
         let row = adw::ActionRow::builder().activatable(true).build();
+        row.add_css_class("picker-compact");
         item.set_child(Some(&row));
     });
     {
         let entries = Rc::clone(&entries);
         factory.connect_bind(move |_, item| {
             let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-            let (title, subtitle) = &entries[item.position() as usize];
+            let (title, _) = &entries[item.position() as usize];
             let row = item.child().and_downcast::<adw::ActionRow>().unwrap();
             row.set_title(title);
-            if !subtitle.is_empty() {
-                row.set_subtitle(subtitle);
-            }
         });
     }
 

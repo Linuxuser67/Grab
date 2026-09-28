@@ -46,6 +46,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.19" date="2026-09-28">
+      <description>
+        <ul>
+          <li>Download rows now show a media-type icon (video, audio, playlist, torrent, or file), and the status filter is a segmented control that appears only when there are downloads to filter.</li>
+          <li>File name, torrent file, and save location moved behind a gear toggle that reveals them inline under the URL field.</li>
+          <li>Fixed a crash when adding a download, and empty <code>.grab-video</code> staging folders are now removed once their downloads finish.</li>
+          <li>Red is now reserved for failure: the live-capture icon is no longer red, while failed downloads and install errors tint their icons red.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.18" date="2026-09-28">
       <description>
         <ul>

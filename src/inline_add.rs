@@ -25,6 +25,9 @@ use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+/// Multi-file torrent picker opener: file name, raw bytes, parsed entries.
+type TorrentPickerOpener = Rc<dyn Fn(String, Vec<u8>, Vec<crate::torrent::TorrentFileEntry>)>;
+
 /// Owns the in-flight probe marker: every exit clears it for the owning
 /// generation, so a stale kick's marker never suppresses a re-kick.
 struct InflightGuard {
@@ -766,7 +769,7 @@ fn show_video_playlist(v: &VideoStep, pl: &crate::media_types::PlaylistInfo) {
     hide_video_step(v);
     v.group.set_visible(true);
     v.group
-        .set_title(glib::markup_escape_text(&*pl.title).as_str());
+        .set_title(glib::markup_escape_text(&pl.title).as_str());
     let mut desc = format!(
         "{} • {}",
         playlist_count_label(pl.kind, pl.items.len()),
@@ -793,7 +796,7 @@ pub struct AddCard {
     widget: gtk4::Widget,
     open: Rc<dyn Fn(Option<String>)>,
     toggle: Rc<dyn Fn()>,
-    open_torrent_picker: Rc<dyn Fn(String, Vec<u8>, Vec<crate::torrent::TorrentFileEntry>)>,
+    open_torrent_picker: TorrentPickerOpener,
 }
 
 impl AddCard {
@@ -1310,7 +1313,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     };
                                 step_b
                                     .group
-                                    .set_title(glib::markup_escape_text(&*v.title).as_str());
+                                    .set_title(glib::markup_escape_text(&v.title).as_str());
                                 step_b.group.set_description(Some(&desc));
                                 // Seed the file name once: an explicit name wins, else
                                 // the title default. Never clobbers an edit here.

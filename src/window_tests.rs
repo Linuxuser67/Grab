@@ -1,6 +1,6 @@
 use crate::download::DownloadStatus;
+use crate::inline_add::{fmt_item_duration, playlist_count_label};
 use crate::media_types::PlaylistKind;
-use crate::window_dialogs::{fmt_item_duration, playlist_count_label};
 use crate::window_rows::{PulseTick, StopCopy, pulse_tick, should_pulse, stop_copy};
 
 #[test]

@@ -3,7 +3,7 @@
 
 use crate::download::DownloadManager;
 use crate::settings::AppSettings;
-use crate::window::{self, show_add_dialog};
+use crate::window;
 use crate::window_rows::ngettext_count;
 use crate::{APP_ID, preferences};
 use adw::prelude::*;
@@ -21,6 +21,7 @@ struct State {
     toasts: Rc<adw::ToastOverlay>,
     window: adw::ApplicationWindow,
     search_bar: gtk4::SearchBar,
+    add_card: crate::inline_add::AddCard,
 }
 
 pub fn setup(app: &adw::Application) {
@@ -43,6 +44,7 @@ pub fn setup(app: &adw::Application) {
                 toasts,
                 window: win.0,
                 search_bar: win.1,
+                add_card: win.2,
             }));
 
             app.set_accels_for_action("app.add-download", &["<Control>n"]);
@@ -76,10 +78,10 @@ pub fn setup(app: &adw::Application) {
                 if let Ok(uri) = f.uri().parse::<url::Url>()
                     && matches!(uri.scheme(), "http" | "https" | "magnet")
                 {
-                    // Video pages take the dialog path (pre-filled): plain
+                    // Video pages take the inline card path (pre-filled): plain
                     // enqueue would save the raw HTML page as a file.
                     if crate::video::is_video_page(uri.as_str()) {
-                        show_add_dialog(s.manager.clone(), Some(uri.as_str()));
+                        s.add_card.open(Some(uri.as_str().to_string()));
                         continue;
                     }
                     if let Err(e) = s.manager.enqueue(uri.as_str(), None, None) {
@@ -93,7 +95,8 @@ pub fn setup(app: &adw::Application) {
                         .extension()
                         .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
                     {
-                        let (manager, toasts) = (s.manager.clone(), s.toasts.clone());
+                        let (manager, toasts, add_card) =
+                            (s.manager.clone(), s.toasts.clone(), s.add_card.clone());
                         let stem = path
                             .file_stem()
                             .map(|s| s.to_string_lossy().into_owned())
@@ -115,15 +118,11 @@ pub fn setup(app: &adw::Application) {
                                 )));
                                 return;
                             };
-                            // Same file picker as the add dialog: multi-file
-                            // torrents offer per-file switches.
+                            // Multi-file torrents offer per-file switches in the
+                            // inline picker's right-sliding page.
                             match crate::torrent::torrent_file_list(&bytes) {
                                 Ok((_, entries)) if entries.len() > 1 => {
-                                    let dest =
-                                        Rc::new(RefCell::new(manager.effective_download_dir()));
-                                    window::show_torrent_files_dialog(
-                                        manager, dest, None, file_name, bytes, entries,
-                                    );
+                                    add_card.open_torrent_picker(file_name, bytes, entries);
                                 }
                                 Ok(_) => {
                                     if let Err(e) =
@@ -194,7 +193,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
             gio::ActionEntry::builder("add-download")
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
-                        show_add_dialog(s.manager.clone(), None);
+                        s.add_card.toggle();
                     }
                 })
                 .build()

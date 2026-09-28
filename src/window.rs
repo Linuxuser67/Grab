@@ -8,9 +8,6 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Facade: the dialog flow lives in [`window_dialogs`](crate::window_dialogs)
-/// now; these re-exports keep the in-tree `crate::window::X` paths working.
-pub use crate::window_dialogs::{show_add_dialog, show_torrent_files_dialog};
 /// Facade: row widgets live in [`window_rows`](crate::window_rows) now.
 use crate::window_rows::build_row;
 pub use crate::window_rows::launch_path;
@@ -180,7 +177,11 @@ pub fn build_window(
     manager: Rc<DownloadManager>,
     settings: crate::settings::AppSettings,
     toasts: Rc<adw::ToastOverlay>,
-) -> (adw::ApplicationWindow, gtk4::SearchBar) {
+) -> (
+    adw::ApplicationWindow,
+    gtk4::SearchBar,
+    crate::inline_add::AddCard,
+) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Grab")
@@ -200,6 +201,9 @@ pub fn build_window(
         .build();
 
     let header = adw::HeaderBar::new();
+    // Inline New Download card, pinned under the header above the list (and
+    // the empty state). The queue stays usable underneath it.
+    let add_card = crate::inline_add::build_add_card(Rc::clone(&manager));
     header.set_title_widget(Some(&adw::WindowTitle::new(
         &gettext("Grab"),
         &gettext("Download Manager"),
@@ -243,8 +247,8 @@ pub fn build_window(
         .build();
     add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("New Download"))]);
     {
-        let m = Rc::clone(&manager);
-        add_btn.connect_clicked(move |_| show_add_dialog(m.clone(), None));
+        let card = add_card.clone();
+        add_btn.connect_clicked(move |_| card.toggle());
     }
     header.pack_end(&add_btn);
 
@@ -261,8 +265,8 @@ pub fn build_window(
         .build();
     empty.set_child(Some(&empty_add));
     {
-        let m = Rc::clone(&manager);
-        empty_add.connect_clicked(move |_| show_add_dialog(m.clone(), None));
+        let card = add_card.clone();
+        empty_add.connect_clicked(move |_| card.open(None));
     }
     stack.add_named(&empty, Some("empty"));
 
@@ -302,16 +306,15 @@ pub fn build_window(
     fn is_queued(it: &crate::download::DownloadItem) -> bool {
         it.status() == crate::download::DownloadStatus::Queued
     }
-    /// DropDown position for a status (0 = All); order must match the model.
-    fn status_filter_index(s: crate::download::DownloadStatus) -> u32 {
+    /// DropDown bucket for a status (0 = All); order must match the model:
+    /// Active covers everything in flight or stalled, Queued the waiting,
+    /// Downloaded the finished.
+    fn status_filter_bucket(s: crate::download::DownloadStatus) -> u32 {
         use crate::download::DownloadStatus::*;
         match s {
-            Downloading => 1,
-            Paused => 2,
-            Queued => 3,
-            Done => 4,
-            Failed => 5,
-            Cancelled => 6,
+            Downloading | Paused | Failed | Cancelled => 1,
+            Queued => 2,
+            Done => 3,
         }
     }
 
@@ -326,12 +329,9 @@ pub fn build_window(
     let status_names = gtk4::StringList::new(&[]);
     for name in [
         gettext("All"),
-        gettext("Downloading"),
-        gettext("Paused"),
+        gettext("Active"),
         gettext("Queued"),
-        gettext("Done"),
-        gettext("Failed"),
-        gettext("Cancelled"),
+        gettext("Downloaded"),
     ] {
         status_names.append(&name);
     }
@@ -391,7 +391,7 @@ pub fn build_window(
                     .and_downcast::<crate::download::DownloadItem>()
                 {
                     present.insert(it.id());
-                    let mut shown = sel == 0 || status_filter_index(it.status()) == sel;
+                    let mut shown = sel == 0 || status_filter_bucket(it.status()) == sel;
                     if shown && !q.is_empty() && !it.filename().to_lowercase().contains(q.as_str())
                     {
                         shown = false;
@@ -582,6 +582,7 @@ pub fn build_window(
     toolbar.add_top_bar(&header);
     toolbar.add_top_bar(&search_bar);
     toolbar.add_top_bar(&banner);
+    toolbar.add_top_bar(add_card.widget());
     toolbar.set_content(Some(&stack));
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(toasts.as_ref()));
@@ -626,7 +627,7 @@ pub fn build_window(
         hook();
     }
 
-    (window, search_bar)
+    (window, search_bar, add_card)
 }
 
 #[cfg(test)]

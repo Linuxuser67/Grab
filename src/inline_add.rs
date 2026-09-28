@@ -1048,7 +1048,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     card.set_margin_top(12);
-    card.set_margin_bottom(12);
     card.set_margin_start(12);
     card.set_margin_end(12);
     card.add_css_class("card");

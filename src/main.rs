@@ -11,6 +11,7 @@ mod download_row;
 mod download_store;
 mod engine_msg;
 mod file_names;
+mod inline_add;
 mod install_help;
 mod install_progress;
 mod media_types;
@@ -20,7 +21,7 @@ mod runtime;
 mod settings;
 mod torrent;
 mod ui_util;
-// Video-page extraction + resolver worker: dialog, prefs, queue and engine entry.
+// Video-page extraction + resolver worker: card, prefs, queue and engine entry.
 mod video;
 mod video_argv;
 mod video_plan;
@@ -34,7 +35,6 @@ mod video_staging;
 mod video_tools;
 mod video_types;
 mod window;
-mod window_dialogs;
 mod window_rows;
 
 use gtk4::gio::prelude::*;

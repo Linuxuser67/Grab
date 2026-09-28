@@ -532,4 +532,16 @@ mod tests {
         assert!(std::fs::read_dir(&target).unwrap().next().is_none());
         std::fs::remove_dir_all(&base).ok();
     }
+
+    #[test]
+    fn percent_decode_nul_escape_falls_back_to_literal() {
+        // GLib rejects %00 (escaped NUL) as an error; we fall back to the
+        // original string rather than producing a NUL byte. The literal
+        // "%00" is harmless in a filename (no NUL, no traversal).
+        let got = percent_decode("foo%00bar.mp4");
+        assert_eq!(got, "foo%00bar.mp4");
+        assert!(!got.contains('\0'));
+        // Normal escapes still decode.
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+    }
 }

@@ -270,20 +270,15 @@ pub fn build_window(
     }
     stack.add_named(&empty, Some("empty"));
 
-    fn section_list(title: &str) -> (gtk4::Box, gtk4::ListBox) {
-        let label = gtk4::Label::builder()
-            .label(title)
-            .halign(gtk4::Align::Start)
-            .css_classes(["heading"])
-            .build();
+    fn section_list(title: &str) -> (adw::PreferencesGroup, gtk4::ListBox) {
+        // HIG: AdwPreferencesGroup provides the card (title + grouped rows)
+        // natively — no manual label, no .boxed-list, no margin values.
         let list = gtk4::ListBox::builder()
             .selection_mode(gtk4::SelectionMode::None)
-            .css_classes(["boxed-list"])
             .build();
-        let section = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-        section.append(&label);
-        section.append(&list);
-        (section, list)
+        let group = adw::PreferencesGroup::builder().title(title).build();
+        group.add(&list);
+        (group, list)
     }
     let (active_section, active_list) = section_list(&gettext("Active"));
     let (queued_section, queued_list) = section_list(&gettext("Queued"));

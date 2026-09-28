@@ -233,7 +233,13 @@ fn ensure_url_lookup_css() {
     static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INSTALLED.get_or_init(|| {
         let css = gtk4::CssProvider::new();
-        css.load_from_string("entry.url-lookup { padding-inline-end: 32px; }");
+        // Logical `padding-inline-end` is not a GTK CSS property (the
+        // parser drops the rule with "No property named"), so use the
+        // physical side plus a :dir(rtl) override for the same effect.
+        css.load_from_string(
+            "entry.url-lookup { padding-right: 32px; }\n\
+             entry.url-lookup:dir(rtl) { padding-right: 0; padding-left: 32px; }",
+        );
         if let Some(display) = gtk4::gdk::Display::default() {
             gtk4::style_context_add_provider_for_display(
                 &display,

@@ -1049,11 +1049,17 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     form.set_margin_end(12);
 
     // URL form: AdwEntryRow MUST live in a PreferencesGroup (HIG) — outside
-    // one it loses its list styling and stretches. Only the lookup
-    // spinner lives in the entry's suffix (browser-address-bar style);
-    // the Add/options/close actions sit in their own row below so the
-    // entry doesn't stretch to fit four suffix widgets.
+    // one it loses its list styling and stretches. The entry group takes
+    // the available width (hexpand); the Add/options/close buttons sit
+    // beside it in a GtkBox with HIG spacing — not in the row's suffix,
+    // which stretched the entry to fit four widgets.
+    let url_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(12)
+        .hexpand(true)
+        .build();
     let url_group = adw::PreferencesGroup::new();
+    url_group.set_hexpand(true);
     let url_entry = adw::EntryRow::builder()
         .title(gettext("Paste a download link"))
         .build();
@@ -1062,14 +1068,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     url_spinner.set_visible(false);
     url_entry.add_suffix(&url_spinner);
     url_group.add(&url_entry);
-    form.append(&url_group);
+    url_box.append(&url_group);
 
-    // Card actions: Add, download options (gear), close — centered in
-    // their own row under the URL field, HIG button-row pattern.
+    // Card actions beside the URL field: Add, download options (gear),
+    // close — HIG 6px spacing, vertically centered.
     let actions_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
         .spacing(6)
-        .halign(gtk4::Align::Center)
+        .valign(gtk4::Align::Center)
         .build();
     let add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
@@ -1088,7 +1094,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     ))]);
     actions_box.append(&opts_toggle);
     actions_box.append(&cancel_btn);
-    form.append(&actions_box);
+    url_box.append(&actions_box);
+    form.append(&url_box);
 
     // Download options live in a revealer directly under the URL row: the
     // card opens compact, one tap on the gear reveals file name, torrent,

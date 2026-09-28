@@ -1120,17 +1120,17 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .reveal_child(false)
         .visible(false)
         .build();
-    opts_toggle
-        .bind_property("active", &opts_revealer, "reveal-child")
-        .bidirectional()
-        .sync_create()
-        .build();
-    // Hidden when collapsed so the form's Box spacing doesn't leave a
-    // gap under the URL row.
-    opts_toggle
-        .bind_property("active", &opts_revealer, "visible")
-        .sync_create()
-        .build();
+    // Explicit handler (not a property binding): reveal-child drives the
+    // slide animation, visible removes the collapsed revealer from the
+    // form's Box layout so no gap lands under the URL row.
+    {
+        let revealer = opts_revealer.clone();
+        opts_toggle.connect_toggled(move |toggle| {
+            let active = toggle.is_active();
+            revealer.set_reveal_child(active);
+            revealer.set_visible(active);
+        });
+    }
     form.append(&opts_revealer);
 
     // Video preview block: hidden until a lookup runs; exactly one state shows.

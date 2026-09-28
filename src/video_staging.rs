@@ -200,12 +200,25 @@ pub(crate) fn clean_staging_in(root: &Path, dir: &Path) {
     if let Some(canon) = guarded_staging_dir(root, dir) {
         let _ = std::fs::remove_dir_all(canon);
     }
-    // Drop the root itself when the last item dir is gone. remove_dir only
-    // succeeds on an empty dir, and the symlink guard above already refused
-    // a planted link, so a concurrent download's staging is safe.
-    if staging_root_is_real(root) {
-        let _ = std::fs::remove_dir(root);
+    drop_empty_staging_root(root);
+}
+
+/// Drop the staging root when the last item dir is gone. `remove_dir` only
+/// succeeds on an empty dir, so a sibling item still staging (or a kept
+/// recording) keeps the root; a planted symlink at the root is refused by
+/// the guards, never followed.
+pub(crate) fn drop_empty_staging_root(root: &Path) {
+    // Same guards as the item-dir removal above: refuse a symlinked root
+    // before canonicalizing (canonicalizing the link would make the
+    // containment check self-validating), then remove through the canonical
+    // path so a link swapped in mid-call cannot divert the removal.
+    if !staging_root_is_real(root) {
+        return;
     }
+    let Some(canon) = guarded_staging_dir(root, root) else {
+        return;
+    };
+    let _ = std::fs::remove_dir(canon);
 }
 
 /// Reclaim one orphan staging dir: the scratch goes, completed `final.*`
@@ -624,19 +637,105 @@ mod tests {
 
     #[test]
     fn success_path_leaves_no_empty_staging_root() {
-        // Mirrors the run_unified_ytdlp success tail: sweep the item scratch,
-        // then the empty `.grab-video` root must be gone too.
+        // The run_unified_ytdlp success tail: sweep the item scratch, then
+        // drop the root when the last item dir is gone.
         let base = unique_dir("success-root");
         let root = base.join(".grab-video");
         let staging = root.join("42");
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join("chunk.part"), b"scratch").unwrap();
-        // Current production sequence (video_runner.rs run_unified_ytdlp):
         sweep_staging_preserving_recordings(&staging);
+        if let Some(root) = staging.parent() {
+            drop_empty_staging_root(root);
+        }
         assert!(!staging.exists(), "item staging dir is swept on success");
         assert!(
             !root.exists(),
             "empty staging root must be dropped on success"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn success_path_keeps_root_while_recording_remains() {
+        // `final.*` preservation is untouched: the item dir stays non-empty,
+        // so the root correctly stays too.
+        let base = unique_dir("success-keep");
+        let root = base.join(".grab-video");
+        let staging = root.join("44");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("final.recording.mp4"), b"only copy").unwrap();
+        std::fs::write(staging.join("chunk.part"), b"scratch").unwrap();
+        sweep_staging_preserving_recordings(&staging);
+        if let Some(root) = staging.parent() {
+            drop_empty_staging_root(root);
+        }
+        assert!(
+            staging.join("final.recording.mp4").exists(),
+            "completed recording is preserved"
+        );
+        assert!(
+            !staging.join("chunk.part").exists(),
+            "scratch is swept around the recording"
+        );
+        assert!(root.exists(), "root stays while a recording remains");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn drop_empty_staging_root_removes_empty_root() {
+        let base = unique_dir("drop-empty");
+        let root = base.join(".grab-video");
+        std::fs::create_dir_all(&root).unwrap();
+        drop_empty_staging_root(&root);
+        assert!(!root.exists(), "empty root is dropped");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn drop_empty_staging_root_keeps_root_with_live_sibling() {
+        // A sibling item still staging (e.g. another playlist item
+        // mid-download) keeps the root: remove_dir only succeeds when empty.
+        let base = unique_dir("drop-sibling");
+        let root = base.join(".grab-video");
+        let sibling = root.join("43");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("chunk.part"), b"in-flight").unwrap();
+        drop_empty_staging_root(&root);
+        assert!(root.exists(), "root with a live sibling item is kept");
+        assert!(
+            sibling.join("chunk.part").exists(),
+            "sibling scratch is untouched"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn drop_empty_staging_root_ignores_missing_root() {
+        let base = unique_dir("drop-missing");
+        // Never created: must be a no-op, never an error or a panic.
+        drop_empty_staging_root(&base.join(".grab-video"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_empty_staging_root_refuses_symlink_root() {
+        // A planted symlink at the root is refused by the guards, never
+        // followed: the link and its target stay untouched.
+        let base = unique_dir("drop-symlink");
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("real-target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("precious"), b"do not touch").unwrap();
+        let link = base.join(".grab-video");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        drop_empty_staging_root(&link);
+        assert!(link.is_symlink(), "planted symlink root is refused");
+        assert_eq!(
+            std::fs::read(target.join("precious")).unwrap(),
+            b"do not touch",
+            "link target is untouched"
         );
         let _ = std::fs::remove_dir_all(&base);
     }

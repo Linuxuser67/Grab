@@ -22,8 +22,8 @@ use crate::video_spawn::{
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, collect_sidecar, dest_part_path,
-    discover_unified_output, ensure_staging_dir_in, file_len, part_path, read_manifest,
-    release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
+    discover_unified_output, drop_empty_staging_root, ensure_staging_dir_in, file_len, part_path,
+    read_manifest, release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
     staging_location_for_dest, sweep_partial_remuxes, sweep_staging_preserving_recordings,
 };
 use crate::video_tools::{
@@ -448,6 +448,11 @@ pub(crate) async fn run_unified_ytdlp(
         let _ = write_manifest(staging, &m).await;
     }
     sweep_staging_preserving_recordings(staging);
+    // Drop the root when the last item dir is gone: no stray `.grab-video`
+    // beside the finished files. No-op while a sibling item still stages.
+    if let Some(root) = staging.parent() {
+        drop_empty_staging_root(root);
+    }
     Ok(Some(final_bytes.unwrap_or(0)))
 }
 
@@ -772,6 +777,11 @@ async fn sweep_live_capture(
     }
     // Non-recursive: succeeds only when nothing else is in there, so a sibling attempt's remux is never collateral.
     let _ = tokio::fs::remove_dir(staging).await;
+    // Drop the root when the last item dir is gone; no-op while siblings
+    // remain or a salvage exit kept the shell.
+    if let Some(root) = staging.parent() {
+        drop_empty_staging_root(root);
+    }
 }
 
 /// Reap the recorder, and *only then* reclaim its scratch. The order is the contract: sweeping first could delete a file the recorder is still writing. Pinned by controlled futures in `video_runner_tests.rs`; the sweep is a closure so it cannot even be constructed before the reap completes.
@@ -1521,6 +1531,9 @@ pub(crate) async fn run_hls_ytdlp(
                 progress.abort();
                 logs.abort();
                 sweep_staging_preserving_recordings(staging);
+                if let Some(root) = staging.parent() {
+                    drop_empty_staging_root(root);
+                }
                 return Ok(None);
             }
             waited = await_child(&mut child, merging_snapshot, remaining, MERGE_WALL_CLOCK) => match waited {
@@ -1627,6 +1640,9 @@ pub(crate) async fn run_hls_ytdlp(
             tokio::fs::remove_file(dest_part_path(&job.dest, "hls", &format!("{lang}.srt"))).await;
     }
     sweep_staging_preserving_recordings(staging);
+    if let Some(root) = staging.parent() {
+        drop_empty_staging_root(root);
+    }
     Ok(file_len(&job.dest))
 }
 

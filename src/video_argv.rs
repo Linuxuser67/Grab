@@ -399,6 +399,16 @@ pub(crate) fn live_from_start_unsupported(log: &str) -> bool {
     })
 }
 
+/// Whether yt-dlp's stderr carries its "requested format is not available"
+/// rejection: the pinned format id was valid at resolve time but the site
+/// rotated its variants before capture started (common on live streams —
+/// nothing is ever recorded, the failure happens during format selection).
+/// Pure; matched on yt-dlp's wording, not the exit code.
+pub(crate) fn stale_live_format(log: &str) -> bool {
+    log.lines()
+        .any(|l| l.contains("Requested format is not available"))
+}
+
 /// yt-dlp argv for one VOD HLS capture (planner-pinned variant id, merge/extract, proxy/identity). Pure.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hls_download_argv(

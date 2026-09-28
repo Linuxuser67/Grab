@@ -6,8 +6,8 @@ use crate::file_names::is_url_derived_name;
 use crate::video_argv::{
     VideoJob, apply_proxy_env, container_truth_name, fallback_to_live_edge, hls_download_argv,
     live_capture_argv, live_from_start_unsupported, live_remux_argv, merge_output_ext,
-    playlist_scope_args, proxy_cli_args, unified_download_argv, unified_format_spec,
-    unified_output_template, write_manifest,
+    playlist_scope_args, proxy_cli_args, stale_live_format, unified_download_argv,
+    unified_format_spec, unified_output_template, write_manifest,
 };
 use crate::video_plan::{StreamPlan, plan_streams};
 use crate::video_probe::page_host;
@@ -751,6 +751,45 @@ fn salvage_note(staging: &Path) -> String {
     )
 }
 
+/// Whether a live capture attempt left any bytes in its output shell or
+/// `.part` file. Pure over the two lengths so the salvage-note decision
+/// stays unit-testable without touching the filesystem.
+pub(crate) fn live_recorded_bytes(out_len: Option<u64>, part_len: Option<u64>) -> bool {
+    out_len.is_some_and(|n| n > 0) || part_len.is_some_and(|n| n > 0)
+}
+
+/// Fresh resolve for a live capture whose pinned HLS variant id went stale
+/// ("Requested format is not available"): the new variant id, or `None`
+/// when the stream no longer offers one — or the re-resolve itself failed.
+/// `None` lets the caller fall through to the recorder's own error line,
+/// which stays the more informative failure.
+async fn reresolve_live_format(youtube_bin: &Path, job: &VideoJob) -> Option<String> {
+    let video = match fetch_video_page(
+        youtube_bin,
+        &job.page_url,
+        &job.cookies_browser,
+        Duration::from_secs(300),
+        job.proxy.as_ref(),
+        job.playlist_item_id.as_deref(),
+    )
+    .await
+    {
+        Ok(FetchedVideo::Single { video, .. }) => *video,
+        // Playlist rows never reach live capture, and a failed re-resolve
+        // has nothing to retry with.
+        _ => return None,
+    };
+    let StreamPlan { hls_sel, .. } = plan_streams(
+        &video,
+        &job.quality,
+        job.audio_only,
+        job.video_format_id.as_deref(),
+        job.newest_codecs,
+        job.item_id,
+    );
+    hls_sel.map(|hls| hls.format_id)
+}
+
 /// Reclaim one live capture's scratch on any terminal exit. The `.ytdl` state file is always removed: a killed capture never cleans it, and a stale one would resume fragment N against a wiped shell (corrupt recording). Staging is never swept recursively: a sibling temp is an earlier attempt's completed recording. Best-effort throughout: a sweep racing a vanished file is a no-op, never worth failing a row over.
 async fn sweep_live_capture(
     out: &Path,
@@ -1040,8 +1079,13 @@ pub(crate) async fn run_live_ytdlp(
     // Covers the await windows a shutdown can cancel, so the state file does not outlive the app. Held purely for its `Drop`.
     let _scratch = LiveScratchGuard::new(&state);
     let mut downgraded: Option<VideoJob> = None;
+    // Fresh HLS variant id after one stale-format re-resolve (`None` until
+    // the pinned id proves stale mid-attempt).
+    let mut fresh_format: Option<String> = None;
     let src = loop {
         let attempt: &VideoJob = downgraded.as_ref().unwrap_or(job);
+        // A re-resolved variant id wins over the resolve-time pin.
+        let format_id: &str = fresh_format.as_deref().unwrap_or(hls_format_id);
         // Fresh shell per attempt: a stale output or state file must never survive into a retry, or yt-dlp resumes fragment N against a deleted shell (corrupt recording).
         let _ = tokio::fs::remove_file(&out).await;
         let _ = tokio::fs::remove_file(&part).await;
@@ -1049,12 +1093,7 @@ pub(crate) async fn run_live_ytdlp(
         let mut cmd = ytdlp_command(youtube_bin);
         // The builder argv ends with `-- <page URL>`: nothing may be appended
         // after it — anything past `--` becomes a positional URL.
-        cmd.args(live_capture_argv(
-            attempt,
-            hls_format_id,
-            &out,
-            playlist_index,
-        ));
+        cmd.args(live_capture_argv(attempt, format_id, &out, playlist_index));
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
         let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
         // Without this guard a shutdown orphans the recorder (and the ffmpeg it may have started) still writing to the capture.
@@ -1144,14 +1183,51 @@ pub(crate) async fn run_live_ytdlp(
                                 downgraded = Some(edge);
                                 continue;
                             }
+                            // A live HLS variant id can go stale between resolve
+                            // and capture (the site rotates its variants):
+                            // with nothing recorded, re-resolve once and
+                            // retry with the fresh id instead of failing the
+                            // row. A mid-capture failure keeps its error, so
+                            // partial recordings are never discarded.
+                            let recorded = live_recorded_bytes(
+                                file_len(&out),
+                                file_len(&part),
+                            );
+                            if stale_live_format(&log_tail)
+                                && fresh_format.is_none()
+                                && !recorded
+                            {
+                                // A failed re-resolve — or a stream with no
+                                // live variant left (it ended) — yields
+                                // nothing to retry with: fall through and
+                                // fail with the recorder's own error line,
+                                // which stays the more informative failure.
+                                if let Some(id) =
+                                    reresolve_live_format(youtube_bin, job).await
+                                {
+                                    tx.send(EngineMsg::Phase(gettext(
+                                        "Live formats changed — retrying with fresh formats…",
+                                    )))
+                                    .ok();
+                                    fresh_format = Some(id);
+                                    continue;
+                                }
+                            }
                             // The recorder exited on its own with a failure: adopting
                             // its partial as Finished would claim a capture that never
                             // really ran (e.g. ffmpeg choking on the playlist seconds
                             // in). Fail loudly with yt-dlp's own error line instead;
                             // the raw shell is kept for salvage, only scratch is swept.
                             let detail = last_error_line(&log_tail, "recorder failed");
-                            let detail =
-                                format!("{detail}{}", salvage_note(staging));
+                            // Name the staging dir only when a shell actually
+                            // landed: a format-selection failure records
+                            // nothing, and claiming a kept recording sends the
+                            // user hunting for a file that doesn't exist.
+                            let detail = if recorded {
+                                format!("{detail}{}", salvage_note(staging))
+                            } else {
+                                detail
+                            };
                             sweep_live_capture(
                                 &out,
                                 &part,

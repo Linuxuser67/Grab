@@ -101,9 +101,12 @@ fn wire_selection_bar(
     {
         let checks: Vec<gtk4::CheckButton> = checks.to_vec();
         let add_btn = add_btn.clone();
-        let refresh = Rc::new(move || {
-            let n = checks.iter().filter(|c| c.is_active()).count();
-            add_btn.set_label(&count_label(n));
+        let refresh = Rc::new({
+            let checks = checks.clone();
+            move || {
+                let n = checks.iter().filter(|c| c.is_active()).count();
+                add_btn.set_label(&count_label(n));
+            }
         });
         for check in &checks {
             let refresh = refresh.clone();

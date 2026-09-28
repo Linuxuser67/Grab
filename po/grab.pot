@@ -1166,10 +1166,6 @@ msgid ""
 "live edge…"
 msgstr ""
 
-#: src/video_runner.rs:1209
-msgid "Live formats changed — retrying with fresh formats…"
-msgstr ""
-
 #: src/video_runner.rs:1283
 msgid "Finalizing…"
 msgstr ""

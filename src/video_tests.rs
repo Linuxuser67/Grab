@@ -9,7 +9,7 @@ use crate::video_argv::{
     YTDLP_PROGRESS_TEMPLATE, apply_proxy_env, container_truth_name, fallback_to_live_edge,
     hls_download_argv, hls_format_spec, live_capture_argv, live_from_start_unsupported,
     live_remux_argv, merge_output_ext, part_fallback_spec, playlist_scope_args, proxy_cli_args,
-    stale_live_format, unified_download_argv, unified_format_spec,
+    unified_download_argv, unified_format_spec,
 };
 use crate::video_plan::{
     StreamSel, find_hls_format, find_usable_format, plan_streams, select_audio_original_first,
@@ -34,8 +34,8 @@ use crate::video_progress::{
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_runner::{
-    RecordingWatcherGuard, await_child, live_recorded_bytes, pick_subtitle_lang,
-    remux_live_capture, resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp,
+    RecordingWatcherGuard, await_child, pick_subtitle_lang, remux_live_capture,
+    resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp,
     spawn_recording_watcher,
 };
 use crate::video_spawn::{
@@ -8055,49 +8055,6 @@ fn live_from_start_unsupported_ignores_other_errors() {
         "ERROR: no formats that can be downloaded from the start were listed\n"
     ));
     assert!(!live_from_start_unsupported(""));
-}
-
-#[test]
-fn stale_live_format_matches_ytdlp_rejection() {
-    // yt-dlp's exact wording when the pinned format id no longer exists:
-    // live HLS variants rotate between resolve and capture.
-    let log = "ERROR: [youtube] 6IWidS7Uj1I: Requested format is not available. \
-         Use --list-formats for a list of available formats\n";
-    assert!(stale_live_format(log));
-}
-
-#[test]
-fn stale_live_format_ignores_other_errors() {
-    // The live-from-start rejection is a different recovery path.
-    assert!(!stale_live_format(
-        "ERROR: [youtube] abc123: --live-from-start is passed, but there are no formats \
-         that can be downloaded from the start\n"
-    ));
-    // A generic download error must not trigger a re-resolve.
-    assert!(!stale_live_format(
-        "ERROR: [youtube] abc123: Video unavailable\n"
-    ));
-    assert!(!stale_live_format(""));
-}
-
-#[test]
-fn live_recorded_bytes_needs_bytes_in_either_shell() {
-    // Bytes in the output shell count, even with no .part file.
-    assert!(live_recorded_bytes(Some(128), None));
-    // Bytes in the .part shell count: yt-dlp records into .part first and
-    // only renames at the end.
-    assert!(live_recorded_bytes(None, Some(1)));
-    assert!(live_recorded_bytes(Some(64), Some(64)));
-}
-
-#[test]
-fn live_recorded_bytes_rejects_empty_and_missing() {
-    // Zero-length shells are not a recording: the salvage note must not
-    // claim one was kept.
-    assert!(!live_recorded_bytes(Some(0), Some(0)));
-    assert!(!live_recorded_bytes(None, None));
-    assert!(!live_recorded_bytes(Some(0), None));
-    assert!(!live_recorded_bytes(None, Some(0)));
 }
 
 #[test]

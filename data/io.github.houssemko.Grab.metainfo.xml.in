@@ -46,6 +46,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.7" date="2026-09-28">
+      <description>
+        <ul>
+          <li>New Download card: the Add (✓) button stays visible after the lookup, so a second press adds the download.</li>
+          <li>Playlist picker uses up to 4 columns in a most-square grid with no empty cells (3→3×1, 4→2×2, 8→4×2).</li>
+          <li>Media format and Audio only preview rows are single-line.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.6" date="2026-09-28">
       <description>
         <ul>

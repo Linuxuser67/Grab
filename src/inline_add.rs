@@ -26,10 +26,6 @@ use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// HIG spacing values (GNOME Human Interface Guidelines).
-const HIG_SPACING_TIGHT: i32 = 6; // Between related items (buttons in a row)
-const HIG_SPACING_DEFAULT: i32 = 12; // Between groups
-
 /// Multi-file torrent picker opener: file name, raw bytes, parsed entries.
 type TorrentPickerOpener = Rc<dyn Fn(String, Vec<u8>, Vec<crate::torrent::TorrentFileEntry>)>;
 
@@ -624,7 +620,7 @@ fn push_playlist_items_page(
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
-        .spacing(HIG_SPACING_TIGHT)
+        .spacing(6)
         .build();
     if crate::video_probe::playlist_truncated(&playlist) {
         let notice = gtk4::Label::builder()
@@ -800,7 +796,7 @@ fn push_torrent_picker_page(
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
-        .spacing(HIG_SPACING_TIGHT)
+        .spacing(6)
         .build();
     list_box.append(&grid);
     let error_caption = gtk4::Label::builder()
@@ -1052,41 +1048,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     form.set_margin_start(12);
     form.set_margin_end(12);
 
-    // URL form: AdwEntryRow MUST live in a PreferencesGroup (HIG) — outside
-    // one it loses its list styling and stretches. The entry group takes
-    // the available width (hexpand); the Add/options/close buttons sit
-    // beside it in a GtkBox with HIG spacing — not in the row's suffix,
-    // which stretched the entry to fit four widgets.
-    let url_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .spacing(HIG_SPACING_DEFAULT)
-        .hexpand(true)
-        .build();
-    let url_group = adw::PreferencesGroup::new();
-    url_group.set_hexpand(true);
+    // URL form: AdwEntryRow with hexpand in a horizontal Box — the entry
+    // takes the available width, buttons sit beside it. Only the lookup
+    // spinner lives in the entry's suffix (browser-address-bar style).
     let url_entry = adw::EntryRow::builder()
         .title(gettext("Paste a download link"))
+        .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
     let url_spinner = adw::Spinner::new();
     url_spinner.set_visible(false);
     url_entry.add_suffix(&url_spinner);
-    url_group.add(&url_entry);
-    url_box.append(&url_group);
-
-    // Card actions beside the URL field: Add, download options (gear),
-    // close — HIG 6px spacing, vertically centered.
-    let actions_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .spacing(HIG_SPACING_TIGHT)
-        .valign(gtk4::Align::Center)
-        .build();
     let add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
         .use_underline(true)
         .css_classes(["suggested-action"])
         .build();
-    actions_box.append(&add_btn);
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
     let opts_toggle = gtk4::ToggleButton::builder()
@@ -1096,9 +1073,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     opts_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Download options",
     ))]);
-    actions_box.append(&opts_toggle);
-    actions_box.append(&cancel_btn);
-    url_box.append(&actions_box);
+    let url_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    url_box.append(&url_entry);
+    url_box.append(&add_btn);
+    url_box.append(&opts_toggle);
+    url_box.append(&cancel_btn);
     form.append(&url_box);
 
     // Download options live in a revealer directly under the URL row: the

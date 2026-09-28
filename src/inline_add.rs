@@ -1062,18 +1062,20 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // the spacing from the window.
     let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
 
-    // URL form: AdwEntryRow with hexpand in a horizontal Box — spans the
-    // card width, Add/gear/close buttons beside it. The 4.4.4 pattern
-    // that wasn't stretched.
+    // URL form: HIG AdwPreferencesGroup → AdwEntryRow (no Page wrapper —
+    // the Page adds dialog margins). The Group spans the width; Add,
+    // gear, and close sit in a Box beside it for the 4.4.4 layout.
+    let url_group = adw::PreferencesGroup::new();
+    url_group.set_hexpand(true);
     let url_entry = adw::EntryRow::builder()
         .title(gettext("Paste a download link"))
         .activates_default(true)
-        .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
     let url_spinner = adw::Spinner::new();
     url_spinner.set_visible(false);
     url_entry.add_suffix(&url_spinner);
+    url_group.add(&url_entry);
     let add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
         .use_underline(true)
@@ -1091,7 +1093,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     ))]);
     let url_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     url_box.set_hexpand(true);
-    url_box.append(&url_entry);
+    url_box.append(&url_group);
     url_box.append(&add_btn);
     url_box.append(&opts_toggle);
     url_box.append(&cancel_btn);

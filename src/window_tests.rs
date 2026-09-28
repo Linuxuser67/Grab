@@ -1,7 +1,9 @@
 use crate::download::DownloadStatus;
 use crate::inline_add::{fmt_item_duration, playlist_count_label};
 use crate::media_types::PlaylistKind;
-use crate::window_rows::{PulseTick, RowMedia, StopCopy, pulse_tick, row_media, should_pulse, stop_copy};
+use crate::window_rows::{
+    PulseTick, RowMedia, StopCopy, pulse_tick, row_media, should_pulse, stop_copy,
+};
 
 #[test]
 fn stop_copy_distinguishes_a_live_capture_from_a_discard() {

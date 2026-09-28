@@ -320,38 +320,50 @@ pub fn build_window(
         }
     }
 
-    // Search + status filter above the sections: non-matching rows are hidden
-    // in sync(), and empty sections collapse as usual.
+    // Search above the sections: non-matching rows are hidden in sync(), and
+    // empty sections collapse as usual.
     let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     let status_sel: Rc<Cell<u32>> = Rc::new(Cell::new(0));
     let search = gtk4::SearchEntry::builder()
         .placeholder_text(gettext("Search downloads"))
         .hexpand(true)
         .build();
-    let status_names = gtk4::StringList::new(&[]);
-    for name in [
+    // Status filter as a segmented control pinned above the sections: one
+    // mutually-exclusive choice, always visible. (The pinned libadwaita
+    // bindings have no AdwSegmentedButton, so this is the classic
+    // linked-ToggleButton segmented pattern.) Order must match
+    // status_filter_bucket: 0 = All, 1 = Active, 2 = Queued, 3 = Downloaded.
+    let seg = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    seg.add_css_class("linked");
+    seg.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Filter by status",
+    ))]);
+    let mut seg_btns: Vec<gtk4::ToggleButton> = Vec::new();
+    for (i, label) in [
         gettext("All"),
         gettext("Active"),
         gettext("Queued"),
         gettext("Downloaded"),
-    ] {
-        status_names.append(&name);
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let btn = gtk4::ToggleButton::builder()
+            .label(&label)
+            .hexpand(true)
+            .build();
+        if i == 0 {
+            btn.set_active(true);
+        } else {
+            btn.set_group(Some(&seg_btns[0]));
+        }
+        seg.append(&btn);
+        seg_btns.push(btn);
     }
-    let status_drop = gtk4::DropDown::builder()
-        .model(&status_names)
-        .selected(0)
-        .valign(gtk4::Align::Center)
-        .build();
-    status_drop.update_property(&[gtk4::accessible::Property::Label(&gettext(
-        "Filter by status",
-    ))]);
-    // HIG search pattern: a header toggle reveals a GtkSearchBar that may also
-    // hold extra widgets like the status filter.
+    content.prepend(&seg);
+    // HIG search pattern: a header toggle reveals a GtkSearchBar.
     let search_bar = gtk4::SearchBar::builder().show_close_button(true).build();
-    let filter_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    filter_box.append(&search);
-    filter_box.append(&status_drop);
-    search_bar.set_child(Some(&filter_box));
+    search_bar.set_child(Some(&search));
     search_bar.connect_entry(&search);
     search_bar.set_key_capture_widget(Some(&window));
     search_toggle
@@ -470,10 +482,19 @@ pub fn build_window(
     {
         let sync = Rc::clone(&sync);
         let sel = Rc::clone(&status_sel);
-        status_drop.connect_selected_notify(move |d| {
-            sel.set(d.selected());
-            sync();
-        });
+        for (i, btn) in seg_btns.iter().enumerate() {
+            let sync = Rc::clone(&sync);
+            let sel = Rc::clone(&sel);
+            let idx = i as u32;
+            btn.connect_toggled(move |b| {
+                // Grouped toggles fire for both the deactivating and the
+                // activating button; only the newly-active one moves the filter.
+                if b.is_active() {
+                    sel.set(idx);
+                    sync();
+                }
+            });
+        }
     }
 
     // hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.

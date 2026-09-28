@@ -200,7 +200,8 @@ struct FormatOption {
 /// The video preview block inside the form: exactly one state row shows at a
 /// time, driven by the probe below.
 struct VideoStep {
-    loading: gtk4::Box,
+    /// Lookup spinner, shown as a suffix inside the URL entry.
+    url_spinner: gtk4::Spinner,
     group: adw::PreferencesGroup,
     name: adw::EntryRow,
     revert: gtk4::Button,
@@ -222,7 +223,8 @@ struct VideoStep {
 
 fn hide_video_step(v: &VideoStep) {
     v.group.set_visible(false);
-    v.loading.set_visible(false);
+    v.url_spinner.set_spinning(false);
+    v.url_spinner.set_visible(false);
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
@@ -259,7 +261,8 @@ fn reset_video_step(step: &VideoStep) {
 
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
-    v.loading.set_visible(true);
+    v.url_spinner.set_spinning(true);
+    v.url_spinner.set_visible(true);
 }
 
 fn show_video_ready(v: &VideoStep) {
@@ -1070,23 +1073,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // Video preview block: hidden until a lookup runs; exactly one state shows.
     let video_group = adw::PreferencesGroup::new();
     video_group.set_visible(false);
-    // The loading state is a bare spinner + label, not a group row: the
-    // card chrome is disproportionate for a transient status line.
-    let video_loading = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-    video_loading.set_margin_top(6);
-    video_loading.set_margin_bottom(6);
-    video_loading.set_margin_start(4);
-    let video_spinner = gtk4::Spinner::new();
-    video_spinner.set_spinning(true);
-    let video_loading_label = gtk4::Label::builder()
-        .label(gettext("Looking up…"))
-        .css_classes(["dimmed"])
-        .halign(gtk4::Align::Start)
-        .valign(gtk4::Align::Center)
-        .build();
-    video_loading.append(&video_spinner);
-    video_loading.append(&video_loading_label);
-    video_loading.set_visible(false);
+    // The lookup spinner lives inside the URL entry (browser-address-bar
+    // style): no separate status line for the transient loading state, and
+    // no layout shift when a lookup starts. The accessible label carries
+    // the "Looking up…" text the spinner replaces visually.
+    let url_spinner = gtk4::Spinner::new();
+    url_spinner.update_property(&[gtk4::accessible::Property::Label(&gettext("Looking up…"))]);
+    url_spinner.set_visible(false);
+    url_entry.add_suffix(&url_spinner);
     let video_name = adw::EntryRow::builder()
         .title(gettext("File name"))
         .activates_default(false)
@@ -1140,7 +1134,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_error.add_suffix(&video_retry_btn);
     video_group.add(&video_error);
     let step = Rc::new(VideoStep {
-        loading: video_loading.clone(),
+        url_spinner: url_spinner.clone(),
         group: video_group.clone(),
         name: video_name,
         revert: video_revert_btn,
@@ -1163,7 +1157,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             format.set_sensitive(!sw.is_active());
         });
     }
-    form.append(&video_loading);
     form.append(&video_group);
 
     let group = adw::PreferencesGroup::new();

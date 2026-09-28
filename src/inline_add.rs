@@ -485,20 +485,11 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
 /// Column count for a picker grid, from the entry count: a pair stays a
 /// readable single column; more entries flow into up to four columns.
 /// Fixed per picker (set via min/max-columns) — selecting never reflows.
-fn picker_columns(count: usize) -> u32 {
-    match count {
-        0..=2 => 1,
-        3..=8 => 2,
-        9..=20 => 3,
-        _ => 4,
-    }
-}
-
-/// A multi-column picker grid (HIG `GtkGridView` with `GtkMultiSelection`):
-/// click toggles selection, no checkboxes. All entries start selected,
-/// matching the old checked-by-default rows. Returns the view and its
-/// selection model for the caller to wire.
-fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::MultiSelection) {
+/// A picker list (HIG `GtkListView` with `GtkMultiSelection` and
+/// `AdwActionRow`): click toggles selection, no checkboxes. All entries
+/// start selected, matching the old checked-by-default rows. Returns the
+/// view and its selection model for the caller to wire.
+fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::MultiSelection) {
     let store = gio::ListStore::new::<gtk4::StringObject>();
     for (title, _) in entries.iter() {
         store.append(&gtk4::StringObject::new(title));
@@ -509,58 +500,28 @@ fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
     let factory = gtk4::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
         let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-        // Flat cell: title over a dimmed subtitle, no card chrome — HIG
-        // grid items (Nautilus, Loupe) don't card every cell. Selection
-        // highlight comes from the view. Bound in `connect_bind` below
-        // via the fixed child order.
-        let title = gtk4::Label::builder()
-            .halign(gtk4::Align::Start)
-            .ellipsize(gtk4::pango::EllipsizeMode::End)
-            .max_width_chars(28)
-            .build();
-        let subtitle = gtk4::Label::builder()
-            .halign(gtk4::Align::Start)
-            .css_classes(["dim-label", "caption"])
-            .ellipsize(gtk4::pango::EllipsizeMode::End)
-            .max_width_chars(28)
-            .build();
-        let cell = gtk4::Box::builder()
-            .orientation(gtk4::Orientation::Vertical)
-            .spacing(2)
-            .margin_top(6)
-            .margin_bottom(6)
-            .margin_start(6)
-            .margin_end(6)
-            .build();
-        cell.append(&title);
-        cell.append(&subtitle);
-        item.set_child(Some(&cell));
+        // HIG: AdwActionRow for title/subtitle — no hand-rolled Box+Labels.
+        // Selection highlight comes from the view via the MultiSelection.
+        let row = adw::ActionRow::builder().activatable(true).build();
+        item.set_child(Some(&row));
     });
     {
         let entries = Rc::clone(&entries);
         factory.connect_bind(move |_, item| {
             let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
             let (title, subtitle) = &entries[item.position() as usize];
-            let cell = item.child().and_downcast::<gtk4::Box>().unwrap();
-            let title_label = cell.first_child().and_downcast::<gtk4::Label>().unwrap();
-            title_label.set_text(title);
-            let subtitle_label = title_label
-                .next_sibling()
-                .and_downcast::<gtk4::Label>()
-                .unwrap();
-            subtitle_label.set_text(subtitle);
-            cell.update_property(&[gtk4::accessible::Property::Label(title)]);
+            let row = item.child().and_downcast::<adw::ActionRow>().unwrap();
+            row.set_title(title);
+            row.set_subtitle(subtitle);
+            row.update_property(&[gtk4::accessible::Property::Label(title)]);
         });
     }
 
-    let columns = picker_columns(entries.len());
-    let grid = gtk4::GridView::builder()
+    let list = gtk4::ListView::builder()
         .model(&selection)
         .factory(&factory)
-        .min_columns(columns)
-        .max_columns(columns)
         .build();
-    (grid, selection)
+    (list, selection)
 }
 
 /// Wire the pickers' bottom action bar to a grid's multi-selection: the
@@ -638,7 +599,7 @@ fn push_playlist_items_page(
             })
             .collect(),
     );
-    let (grid, selection) = picker_grid(Rc::clone(&entries));
+    let (list, selection) = picker_list(Rc::clone(&entries));
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -656,7 +617,7 @@ fn push_playlist_items_page(
             .build();
         list_box.append(&notice);
     }
-    list_box.append(&grid);
+    list_box.append(&list);
     // The error caption lives under the grid, like the old row list.
     let error_caption = gtk4::Label::builder()
         .label("")
@@ -814,13 +775,13 @@ fn push_torrent_picker_page(
             })
             .collect(),
     );
-    let (grid, selection) = picker_grid(grid_entries);
+    let (list, selection) = picker_list(grid_entries);
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .spacing(6)
         .build();
-    list_box.append(&grid);
+    list_box.append(&list);
     let error_caption = gtk4::Label::builder()
         .label("")
         .css_classes(["error", "caption"])
@@ -1070,15 +1031,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     form.set_margin_start(12);
     form.set_margin_end(12);
 
+    // URL form: AdwEntryRow MUST live in a PreferencesGroup (HIG) — outside
+    // one it loses its list styling and stretches. The actions (spinner,
+    // Add, gear, close) go in the row's suffix, keeping the horizontal
+    // layout without a hand-rolled Box.
+    let url_group = adw::PreferencesGroup::new();
     let url_entry = adw::EntryRow::builder()
         .title(gettext("Paste a download link"))
-        .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
     // The lookup spinner lives in the entry's suffix slot
     // (browser-address-bar style): no separate status line for the
-    // transient loading state. The suffix is unmapped when hidden, so
-    // showing it reserves space (minor shift, not a new row).
+    // transient loading state.
     let url_spinner = adw::Spinner::new();
     url_spinner.set_visible(false);
     url_entry.add_suffix(&url_spinner);
@@ -1087,6 +1051,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .use_underline(true)
         .css_classes(["suggested-action"])
         .build();
+    url_entry.add_suffix(&add_btn);
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
     let opts_toggle = gtk4::ToggleButton::builder()
@@ -1096,12 +1061,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     opts_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Download options",
     ))]);
-    let url_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    url_box.append(&url_entry);
-    url_box.append(&add_btn);
-    url_box.append(&opts_toggle);
-    url_box.append(&cancel_btn);
-    form.append(&url_box);
+    url_entry.add_suffix(&opts_toggle);
+    url_entry.add_suffix(&cancel_btn);
+    url_group.add(&url_entry);
+    form.append(&url_group);
 
     // Download options live in a revealer directly under the URL row: the
     // card opens compact, one tap on the gear reveals file name, torrent,
@@ -2149,19 +2112,5 @@ mod tests {
             "/default",
             "close ran with the destination borrow released"
         );
-    }
-
-    #[test]
-    fn picker_columns_scales_with_count() {
-        // A pair stays a single readable column; more entries flow into
-        // up to four columns, never more.
-        assert_eq!(picker_columns(0), 1);
-        assert_eq!(picker_columns(2), 1);
-        assert_eq!(picker_columns(3), 2);
-        assert_eq!(picker_columns(8), 2);
-        assert_eq!(picker_columns(9), 3);
-        assert_eq!(picker_columns(20), 3);
-        assert_eq!(picker_columns(21), 4);
-        assert_eq!(picker_columns(200), 4);
     }
 }

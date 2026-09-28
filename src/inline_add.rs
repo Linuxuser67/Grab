@@ -9,11 +9,12 @@
 //! multi-file torrent picker pages. Cancel, Escape, or a successful enqueue
 //! collapses the card and resets the form, so reopening always starts fresh.
 //!
-//! Intake behavior is unchanged from the old dialog: debounced probing with
-//! generation freshness and twin suppression, the unlisted-URL and
-//! direct-file fallbacks, the Drive fallback, clipboard prefill, probe
-//! cancellation on close, preferred-quality preselection, and the
-//! select-all/none pickers.
+//! Intake behavior is unchanged from the old dialog: probing with generation
+//! freshness and twin suppression, the unlisted-URL and direct-file
+//! fallbacks, the Drive fallback, clipboard prefill, probe cancellation on
+//! close, preferred-quality preselection, and the select-all/none pickers.
+//! The probe never fires on its own: pasting or typing only syncs the form,
+//! and the lookup starts when Add Download (or Enter) is pressed.
 
 use crate::download::DownloadManager;
 use crate::window_rows::{default_name_for, error_label, selection_action_bar};
@@ -102,9 +103,9 @@ impl ProbeState {
 }
 
 /// Twin suppression: a resolve for this exact URL is already running for the
-/// current generation (Enter while the debounced lookup is still in flight is
+/// current generation (Add pressed twice while the lookup is in flight is
 /// the usual trigger). The marker carries the kick's unlisted-probe flag: an
-/// explicit Enter kick probes unlisted URLs, a different resolve from a typing
+/// explicit Add/Enter kick probes unlisted URLs, a different resolve from
 /// kick, so it is never suppressed by one.
 fn inflight_suppresses(
     marker: &Option<(String, u64, bool)>,
@@ -1255,10 +1256,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     nav.push(&form_page);
 
     // Shared probe state: generation counter, in-flight marker, last
-    // resolved URL and probe result. The submit path kicks while the
-    // debounced keystroke lookup may still be in flight; without the
-    // marker both spawn yt-dlp and the loser's result is discarded by
-    // the generation guard anyway.
+    // resolved URL and probe result. A second Add press while a lookup is
+    // still in flight is suppressed by the marker; without it both would
+    // spawn yt-dlp and the loser's result would be discarded by the
+    // generation guard anyway.
     let probe = Rc::new(RefCell::new(ProbeState::default()));
     // The form's Add button, desensitized while a lookup is in flight (a
     // dead button says so upfront). Every terminal state re-enables it.
@@ -1298,8 +1299,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             // The options reopen collapsed with the default destination,
             // like every other row of the fresh form.
             opts_revealer.set_reveal_child(false);
-            // Clearing the URL fires the changed handler: it hides the step
-            // again and spawns a stale debounce the generation bump discards.
+            // Clearing the URL fires the changed handler, which hides the
+            // step again; the generation bump keeps it from touching probe
+            // state.
             url_entry.set_text("");
             while nav.visible_page_tag().as_deref() != Some("form") {
                 if !nav.pop() {
@@ -1309,9 +1311,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         })
     };
 
-    // Video resolve machinery: debounced metadata lookup that never blocks the
-    // main loop. The probe state's generation drops stale completions while
-    // the user keeps typing; every async touch re-checks the generation.
+    // Video resolve machinery: metadata lookup that never blocks the main
+    // loop, started only by an explicit Add/Enter press. The probe state's
+    // generation drops stale completions; every async touch re-checks the
+    // generation.
     let kick_video = {
         let probe = Rc::clone(&probe);
         let step2 = step.clone();
@@ -1324,14 +1327,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let close_kick = close_card.clone();
         Rc::new(move |probe_unlisted: bool| {
             // Twin suppression: a resolve for this exact URL is already
-            // running for the current generation (Enter while the debounced
-            // lookup is still in flight is the usual trigger). The twin's
+            // running for the current generation (Add pressed twice while
+            // the lookup is still in flight is the usual trigger). The twin's
             // result would lose the generation race anyway — don't spawn a
             // second yt-dlp. The marker carries the owning kick's generation
             // so a stale marker — its resolve already doomed by a generation
             // bump — never suppresses a re-kick for the same URL. It also
-            // carries the kick's unlisted-probe flag: an explicit Enter kick
-            // probes unlisted URLs, a different resolve from a typing kick.
+            // carries the kick's unlisted-probe flag: an explicit Add/Enter
+            // kick probes unlisted URLs.
             let url = url_entry2.text().trim().to_string();
             let Some(my) = probe.borrow_mut().kick(url, probe_unlisted) else {
                 return;
@@ -1365,8 +1368,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     my,
                 };
                 let url = url_b.text().trim().to_string();
-                // Unlisted links probe only on explicit kicks (submit, retry), never while
-                // typing. Non-HTTP schemes never probe: magnets have their own flows.
+                // Unlisted links probe only on explicit kicks (Add/Enter,
+                // retry). Non-HTTP schemes never probe: magnets have their
+                // own flows.
                 let probing = probe_unlisted
                     && !crate::video::is_video_page(&url)
                     && crate::video::is_http_url(&url);
@@ -1722,11 +1726,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         url_entry.connect_activate(move |_| s(true));
     }
 
-    // Debounced auto-lookup while typing (600 ms idle); Enter submits
-    // immediately through the path above.
+    // Sync the form skeleton while typing. The lookup itself never fires
+    // on its own: pasting or editing only updates the form, and the resolve
+    // starts when Add Download (or Enter) is pressed.
     {
         let probe = Rc::clone(&probe);
-        let kick = kick_video.clone();
         let step2 = step.clone();
         let file_row2 = file_row.clone();
         let form_error2 = form_error.clone();
@@ -1743,24 +1747,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 .as_ref()
                 .is_some_and(|p| p.page_url() == text);
             file_row2.set_visible(!(crate::video::is_video_page(&text) || fresh));
-            // Sync skeleton: leaving video-land (or editing a resolved URL) hides the stale
-            // step at once; the debounced kick refills it. `fresh` is deliberately the
-            // stricter canonical compare: a mismatch is always safe to hide.
+            // Leaving video-land (or editing a resolved URL) hides the stale
+            // step at once; `fresh` is deliberately the stricter canonical
+            // compare: a mismatch is always safe to hide.
             if !crate::video::is_video_page(&text) || !fresh {
                 hide_video_step(&step2);
                 if !fresh {
                     probe.borrow_mut().info.take();
                 }
             }
-            let my = probe.borrow_mut().bump_generation();
-            let (probe_b, kick_b) = (probe.clone(), kick.clone());
-            glib::spawn_future_local(async move {
-                glib::timeout_future(std::time::Duration::from_millis(600)).await;
-                if probe_b.borrow().generation != my {
-                    return;
-                }
-                kick_b(false);
-            });
+            // Editing mid-lookup stales the in-flight resolve so its
+            // completion is discarded.
+            probe.borrow_mut().bump_generation();
         });
     }
 
@@ -1902,8 +1900,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         Rc::new(move |initial_url: Option<String>| {
             let already = is_open.get();
             reveal();
-            // Dropped/opened URLs land here pre-filled: setting the text fires the same changed →
-            // debounce → lookup chain as typing, so video pages resolve through the media pipeline.
+            // Dropped/opened URLs land here pre-filled: setting the text syncs the form, and the
+            // lookup itself starts on Add/Enter like any other entry.
             if let Some(raw) = initial_url {
                 if let Ok(normalized) = crate::download::normalize_url(raw.trim()) {
                     url_entry.set_text(&normalized);
@@ -2088,10 +2086,10 @@ mod tests {
     }
 
     #[test]
-    fn explicit_unlisted_kick_is_not_suppressed_by_typing_kick() {
-        // A debounced typing kick (probe_unlisted=false) in flight must not
-        // suppress an explicit Enter/retry kick (probe_unlisted=true) for the
-        // same URL: the explicit kick's unlisted probe is a different
+    fn explicit_unlisted_kick_is_not_suppressed_by_plain_kick() {
+        // A plain kick (probe_unlisted=false) in flight must not suppress an
+        // explicit unlisted Add/Enter/retry kick (probe_unlisted=true) for
+        // the same URL: the explicit kick's unlisted probe is a different
         // resolve, and suppressing it would show a preview without the
         // unlisted formats the user explicitly asked for.
         let marker = Some(("https://youtu.be/a".to_string(), 2, false));
@@ -2109,11 +2107,11 @@ mod tests {
         // still spawn — suppressing on the URL alone would wedge the card
         // with no preview and every retry suppressed.
         let mut generation = 0u64;
-        generation += 1; // typed A
+        generation += 1; // edited to A
         generation += 1; // kicked A
         let marker = Some(("https://youtu.be/a".to_string(), generation, false));
-        generation += 1; // typed B (debounced kick skipped)
-        generation += 1; // typed A again
+        generation += 1; // edited to B (no kick on edit)
+        generation += 1; // edited back to A
         assert!(!inflight_suppresses(
             &marker,
             "https://youtu.be/a",

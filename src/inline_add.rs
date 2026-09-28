@@ -968,8 +968,9 @@ impl AddCard {
         (self.open)(initial_url)
     }
 
-    /// Header `+` behavior: reveal a fresh card, or retract the open one
-    /// (which resets it, like Cancel/Escape).
+    /// Shared toggle for every New Download affordance (header `+`,
+    /// Ctrl+N, the empty-state pill): reveal a fresh card, or retract the
+    /// open one (which resets it, like Cancel/Escape).
     pub fn toggle(&self) {
         (self.toggle)()
     }

@@ -982,6 +982,32 @@ pub(crate) fn spawn_recording_watcher(
     })
 }
 
+/// Stall signal for live captures: the recorder can go quiet on stdout for
+/// long stretches while still writing, so file growth also resets the stall
+/// budget. Polls the `.part` shell and the final output; any growth proves
+/// the capture is alive. Runs until aborted — owned by a guard per attempt,
+/// like the recording watcher.
+fn spawn_growth_watcher(
+    last_progress: std::sync::Arc<std::sync::Mutex<std::time::Instant>>,
+    shell: std::path::PathBuf,
+    out: std::path::PathBuf,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut max = 0u64;
+        loop {
+            let mut bytes = 0u64;
+            for p in [&shell, &out] {
+                bytes = bytes.max(tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0));
+            }
+            if bytes > max {
+                max = bytes;
+                *last_progress.lock().unwrap() = std::time::Instant::now();
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    })
+}
+
 /// Owns a recording watcher's `JoinHandle` and aborts it on drop: the live
 /// retry loop must never leave a watcher behind — a surviving watcher keeps
 /// polling for up to ~10 min and double-announces "Recording…" into the
@@ -1002,7 +1028,7 @@ impl Drop for RecordingWatcherGuard {
     }
 }
 
-/// One live capture through the yt-dlp binary. The MPEG-TS container keeps every kill point playable, so Stop is kill, adopt and remux. Stalled captures yield their partial; an empty capture fails.
+/// One live capture through the yt-dlp binary. The MPEG-TS container keeps every kill point playable, so Stop is kill, adopt and remux. Stalled captures yield their partial; an empty capture fails. `timeout` is a stall budget, not a wall clock: any stdout line or output-file growth resets it, so a healthy multi-hour stream never trips it — only silence kills the capture.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_live_ytdlp(
     youtube_bin: &Path,
@@ -1040,7 +1066,7 @@ pub(crate) async fn run_live_ytdlp(
     // Covers the await windows a shutdown can cancel, so the state file does not outlive the app. Held purely for its `Drop`.
     let _scratch = LiveScratchGuard::new(&state);
     let mut downgraded: Option<VideoJob> = None;
-    let src = loop {
+    let src = 'attempt: loop {
         let attempt: &VideoJob = downgraded.as_ref().unwrap_or(job);
         // Fresh shell per attempt: a stale output or state file must never survive into a retry, or yt-dlp resumes fragment N against a deleted shell (corrupt recording).
         let _ = tokio::fs::remove_file(&out).await;
@@ -1072,12 +1098,25 @@ pub(crate) async fn run_live_ytdlp(
             part.clone(),
             out.clone(),
         ));
+        // Stall watchdog, not a wall clock (VOD parity): the budget measures
+        // silence, not capture age. Reset by any stdout line below and by
+        // output-file growth from the watcher; only a truly silent capture
+        // trips it.
+        let last_progress = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let last_progress_p = last_progress.clone();
+        let _growth = RecordingWatcherGuard::new(spawn_growth_watcher(
+            last_progress.clone(),
+            part.clone(),
+            out.clone(),
+        ));
         let progress = tokio::spawn(async move {
             let mut lines = tokio::io::BufReader::new(stdout).lines();
             let mut have = 0u64;
             // Announce once recording is confirmed (same "Recording…" the file watcher sends, so whichever fires first wins).
             let mut announced = false;
             while let Ok(Some(line)) = lines.next_line().await {
+                // Any stdout line proves the recorder is alive.
+                *last_progress_p.lock().unwrap() = std::time::Instant::now();
                 if let Some(p) = parse_ytdlp_template(&line) {
                     if !announced {
                         announced = true;
@@ -1101,78 +1140,63 @@ pub(crate) async fn run_live_ytdlp(
         // Numeric group id for the quiescence wait on the discard path: `reap_child` disarms the guard, so read it while still armed.
         let pgid = group.pgid();
         // `aborted` gates the live-edge retry below; `&mut abort` keeps the receiver usable for the second attempt.
-        let (aborted, discarded) = tokio::select! {
-            biased;
-            intent = &mut abort => {
-                reap_child(&mut child, &mut group).await;
-                match intent {
-                    Ok(StopIntent::Preserve) => (true, false),
-                    Ok(StopIntent::Discard) => (true, true),
-                    Err(_) => {
-                        // No sender remains to authorise anything: fail closed. Claim the gate so the pre-rename commit below cannot deliver either.
-                        let _ = gate.discard();
-                        (true, true)
-                    }
-                }
-            }
-            waited = tokio::time::timeout(timeout, child.wait()) => {
-                match waited {
-                    Ok(Ok(status)) => {
-                        group.disarm();
-                        if !status.success() {
-                            progress.abort();
-                            let log_tail = join_drain(logs).await.unwrap_or_default();
-                            // A from-start attempt the site can't honor fails
-                            // fast with a distinctive error and nothing
-                            // recorded: retry once from the live edge instead
-                            // of failing the row (same fallback as the
-                            // startup miss below).
-                            if live_from_start_unsupported(&log_tail)
-                                && fallback_to_live_edge(
-                                    attempt.is_live,
-                                    attempt.live_from_start,
-                                    false,
-                                    downgraded.is_some(),
-                                )
-                            {
-                                tx.send(EngineMsg::Phase(gettext(
-                                    "\"Live from start\" isn't available for this stream — recording from the live edge…",
-                                )))
-                                .ok();
-                                let mut edge = job.clone();
-                                edge.live_from_start = false;
-                                downgraded = Some(edge);
-                                continue;
-                            }
-                            // The recorder exited on its own with a failure: adopting
-                            // its partial as Finished would claim a capture that never
-                            // really ran (e.g. ffmpeg choking on the playlist seconds
-                            // in). Fail loudly with yt-dlp's own error line instead;
-                            // the raw shell is kept for salvage, only scratch is swept.
-                            let detail = last_error_line(&log_tail, "recorder failed");
-                            let detail =
-                                format!("{detail}{}", salvage_note(staging));
-                            sweep_live_capture(
-                                &out,
-                                &part,
-                                &state,
-                                staging,
-                                None,
-                                Staging::Sweep,
-                                Exit::RecorderFailed,
-                            )
-                            .await;
-                            return Err(VideoError::part_failed(detail));
+        // Stall watchdog, not a wall clock: each wait runs only until the
+        // stall deadline; a stdout line or output growth pushes the deadline
+        // out, so a progressing capture is never killed. Only true silence
+        // trips it, and the partial is still adopted below.
+        let (aborted, discarded) = 'wait: loop {
+            let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
+            tokio::select! {
+                biased;
+                intent = &mut abort => {
+                    reap_child(&mut child, &mut group).await;
+                    break match intent {
+                        Ok(StopIntent::Preserve) => (true, false),
+                        Ok(StopIntent::Discard) => (true, true),
+                        Err(_) => {
+                            // No sender remains to authorise anything: fail closed. Claim the gate so the pre-rename commit below cannot deliver either.
+                            let _ = gate.discard();
+                            (true, true)
                         }
-                    }
-                    Ok(Err(e)) => {
-                        // Reap, then reclaim — never the other way round. The
-                        // sweep keeps a finished recording, taking only scratch.
-                        progress.abort();
-                        logs.abort();
-                        reap_then_sweep(
-                            reap_child(&mut child, &mut group),
-                            || {
+                    };
+                }
+                waited = tokio::time::timeout(remaining, child.wait()) => {
+                    match waited {
+                        Ok(Ok(status)) => {
+                            group.disarm();
+                            if !status.success() {
+                                progress.abort();
+                                let log_tail = join_drain(logs).await.unwrap_or_default();
+                                // A from-start attempt the site can't honor fails
+                                // fast with a distinctive error and nothing
+                                // recorded: retry once from the live edge instead
+                                // of failing the row (same fallback as the
+                                // startup miss below).
+                                if live_from_start_unsupported(&log_tail)
+                                    && fallback_to_live_edge(
+                                        attempt.is_live,
+                                        attempt.live_from_start,
+                                        false,
+                                        downgraded.is_some(),
+                                    )
+                                {
+                                    tx.send(EngineMsg::Phase(gettext(
+                                        "\"Live from start\" isn't available for this stream — recording from the live edge…",
+                                    )))
+                                    .ok();
+                                    let mut edge = job.clone();
+                                    edge.live_from_start = false;
+                                    downgraded = Some(edge);
+                                    continue 'attempt;
+                                }
+                                // The recorder exited on its own with a failure: adopting
+                                // its partial as Finished would claim a capture that never
+                                // really ran (e.g. ffmpeg choking on the playlist seconds
+                                // in). Fail loudly with yt-dlp's own error line instead;
+                                // the raw shell is kept for salvage, only scratch is swept.
+                                let detail = last_error_line(&log_tail, "recorder failed");
+                                let detail =
+                                    format!("{detail}{}", salvage_note(staging));
                                 sweep_live_capture(
                                     &out,
                                     &part,
@@ -1180,22 +1204,49 @@ pub(crate) async fn run_live_ytdlp(
                                     staging,
                                     None,
                                     Staging::Sweep,
-                                    Exit::CaptureWaitFailed,
+                                    Exit::RecorderFailed,
                                 )
-                            },
-                        )
-                        .await;
-                        return Err(VideoError::runtime(format!(
-                            "{e}{}",
-                            salvage_note(staging)
-                        )));
-                    }
-                    Err(_) => {
-                        // A stalled live capture still yields what it got.
-                        reap_child(&mut child, &mut group).await;
+                                .await;
+                                return Err(VideoError::part_failed(detail));
+                            }
+                            break (false, false);
+                        }
+                        Ok(Err(e)) => {
+                            // Reap, then reclaim — never the other way round. The
+                            // sweep keeps a finished recording, taking only scratch.
+                            progress.abort();
+                            logs.abort();
+                            reap_then_sweep(
+                                reap_child(&mut child, &mut group),
+                                || {
+                                    sweep_live_capture(
+                                        &out,
+                                        &part,
+                                        &state,
+                                        staging,
+                                        None,
+                                        Staging::Sweep,
+                                        Exit::CaptureWaitFailed,
+                                    )
+                                },
+                            )
+                            .await;
+                            return Err(VideoError::runtime(format!(
+                                "{e}{}",
+                                salvage_note(staging)
+                            )));
+                        }
+                        // The deadline fired but progress landed during the
+                        // wait: the budget resets, so wait again instead of
+                        // killing a live capture on a race.
+                        Err(_) if stall_elapsed(&last_progress) < timeout => {}
+                        Err(_) => {
+                            // A stalled live capture still yields what it got.
+                            reap_child(&mut child, &mut group).await;
+                            break (false, false);
+                        }
                     }
                 }
-                (false, false)
             }
         };
         let _ = join_drain(progress).await;

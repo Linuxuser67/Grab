@@ -46,6 +46,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.18" date="2026-09-28">
+      <description>
+        <ul>
+          <li>The New Download dialog is now an inline card pinned under the header bar. It opens in place, so the download queue stays visible and usable while it is open.</li>
+          <li>Closing the card now fully resets it — media format picker, audio switch, and lookup state — so reopening it always starts fresh.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.17" date="2026-09-27">
       <description>
         <ul>

@@ -926,8 +926,8 @@ impl DownloadManager {
                 ),
             };
             if let Some(detail) = blocked {
-                item.set_status(DownloadStatus::Failed);
                 item.set_detail(detail.clone());
+                item.set_status(DownloadStatus::Failed);
                 self.changed();
                 self.notify_finished(&item, Err(detail));
                 return;
@@ -936,8 +936,8 @@ impl DownloadManager {
         // Fail fast on junk; later edits apply without re-queueing.
         let limit = opts.limit_rate.trim();
         if !limit.is_empty() && limit != "0" && parse_rate(limit).is_none() {
-            item.set_status(DownloadStatus::Failed);
             item.set_detail(gettext("Invalid speed limit: {limit}").replace("{limit}", limit));
+            item.set_status(DownloadStatus::Failed);
             self.changed();
             return;
         }
@@ -992,8 +992,8 @@ impl DownloadManager {
                 // partials below (progress alone can't tell: a crash before
                 // the first tick restores at 0.0 with bytes on disk).
                 _ if !self.started.borrow().contains(&item.id()) => {
-                    item.set_status(DownloadStatus::Failed);
                     item.set_detail(DEST_EXISTS.to_string());
+                    item.set_status(DownloadStatus::Failed);
                     self.changed();
                     self.notify_finished(&item, Err(DEST_EXISTS.to_string()));
                     return;
@@ -1008,8 +1008,8 @@ impl DownloadManager {
         let proxy = match opts.proxy_config() {
             Ok(proxy) => proxy,
             Err(e) => {
-                item.set_status(DownloadStatus::Failed);
                 item.set_detail(e);
+                item.set_status(DownloadStatus::Failed);
                 self.changed();
                 return;
             }
@@ -1240,8 +1240,8 @@ impl DownloadManager {
                             if item.status() != DownloadStatus::Cancelled
                                 && item.status() != DownloadStatus::Paused
                             {
-                                item.set_status(DownloadStatus::Failed);
                                 item.set_detail(e.to_string());
+                                item.set_status(DownloadStatus::Failed);
                                 this.torrent_pieces.borrow_mut().remove(&id);
                                 this.notify_finished(&item, Err(e.to_string()));
                             }
@@ -1277,8 +1277,10 @@ impl DownloadManager {
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
-                            item.set_status(DownloadStatus::Failed);
+                            // Set detail BEFORE status: the status notify
+                            // pops the failure dialog, which reads detail.
                             item.set_detail(e.clone());
+                            item.set_status(DownloadStatus::Failed);
                             this.torrent_pieces.borrow_mut().remove(&id);
                             this.notify_finished(&item, Err(e));
                         }
@@ -1292,8 +1294,10 @@ impl DownloadManager {
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
-                            item.set_status(DownloadStatus::Failed);
+                            // Set detail BEFORE status: the status notify
+                            // pops the failure dialog, which reads detail.
                             item.set_detail(e.clone());
+                            item.set_status(DownloadStatus::Failed);
                             this.notify_finished(&item, Err(e));
                         }
                         done = true;
@@ -1392,8 +1396,8 @@ impl DownloadManager {
                 return;
             }
             if !done && item.status() == DownloadStatus::Downloading {
-                item.set_status(DownloadStatus::Failed);
                 item.set_detail(gettext("Download interrupted"));
+                item.set_status(DownloadStatus::Failed);
                 this.notify_finished(&item, Err(gettext("Download interrupted")));
             }
             this.persist_queue();
@@ -1437,8 +1441,10 @@ impl DownloadManager {
             match crate::torrent::blocklist_url_of(&settings.torrent_blocklist_url()) {
                 Ok(url) => url,
                 Err(e) => {
-                    item.set_status(DownloadStatus::Failed);
+                    // Set detail BEFORE status: the status notify pops the
+                    // failure dialog, which reads detail.
                     item.set_detail(e);
+                    item.set_status(DownloadStatus::Failed);
                     self.changed();
                     return;
                 }
@@ -1447,8 +1453,8 @@ impl DownloadManager {
         let proxy = match DownloadOptions::from_settings(settings).proxy_config() {
             Ok(proxy) => proxy,
             Err(e) => {
-                item.set_status(DownloadStatus::Failed);
                 item.set_detail(e);
+                item.set_status(DownloadStatus::Failed);
                 self.changed();
                 return;
             }
@@ -1471,8 +1477,8 @@ impl DownloadManager {
             match crate::torrent::archive_path_for_url(&magnet) {
                 Some(path) => crate::torrent::TorrentSource::File(path),
                 None => {
-                    item.set_status(DownloadStatus::Failed);
                     item.set_detail(gettext("Torrent file is missing from the archive"));
+                    item.set_status(DownloadStatus::Failed);
                     self.changed();
                     return;
                 }
@@ -1559,8 +1565,8 @@ impl DownloadManager {
         let proxy = match opts.proxy_config() {
             Ok(proxy) => proxy,
             Err(e) => {
-                item.set_status(DownloadStatus::Failed);
                 item.set_detail(e);
+                item.set_status(DownloadStatus::Failed);
                 self.changed();
                 return;
             }

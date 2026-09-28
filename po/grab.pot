@@ -562,7 +562,7 @@ msgstr ""
 msgid "Keep the computer awake while downloads are active"
 msgstr ""
 
-#: src/preferences.rs:386
+#: src/preferences.rs:386 src/window_rows.rs:496
 msgid "Torrent"
 msgstr ""
 
@@ -1391,6 +1391,22 @@ msgstr ""
 
 #: src/window_rows.rs:471
 msgid "Downloaded blocks"
+msgstr ""
+
+#: src/window_rows.rs:494
+msgid "Live recording"
+msgstr ""
+
+#: src/window_rows.rs:495
+msgid "Audio"
+msgstr ""
+
+#: src/window_rows.rs:497
+msgid "Video"
+msgstr ""
+
+#: src/window_rows.rs:498
+msgid "Download"
 msgstr ""
 
 #: src/window_rows.rs:518

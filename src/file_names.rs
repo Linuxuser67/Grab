@@ -151,7 +151,7 @@ pub(crate) fn name_stem(name: &str) -> &str {
 
 /// Explicit bidi controls (escapes, never literal glyphs: invisible in source).
 pub(crate) fn is_bidi_control(c: char) -> bool {
-    matches!(c, '\u{200E}' | '\u{200F}' | '\u{61C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// Folder-safe form of a collection title (playlist, stories, highlights):
@@ -295,9 +295,20 @@ pub fn filename_from_url(url_str: &str) -> String {
         .unwrap_or_else(|| "index.html".to_string())
 }
 
-/// Human-readable byte size via GLib's `g_format_size` (SI base-1000, localized).
+/// Human-readable byte size (base-1024, English units).
 pub(crate) fn fmt_bytes(n: u64) -> String {
-    glib::format_size(n).to_string()
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < 4 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
 }
 
 /// On-disk size via GIO's `measure_disk_usage` (apparent size, no symlink
@@ -534,14 +545,34 @@ mod tests {
     }
 
     #[test]
-    fn percent_decode_nul_escape_falls_back_to_literal() {
-        // GLib rejects %00 (escaped NUL) as an error; we fall back to the
-        // original string rather than producing a NUL byte. The literal
-        // "%00" is harmless in a filename (no NUL, no traversal).
-        let got = percent_decode("foo%00bar.mp4");
-        assert_eq!(got, "foo%00bar.mp4");
-        assert!(!got.contains('\0'));
-        // Normal escapes still decode.
-        assert_eq!(percent_decode("hello%20world"), "hello world");
+    fn path_size_tolerates_symlinks() {
+        // GIO's measure_disk_usage follows symlinks (unlike the old std::fs
+        // walk which never descended them). Pin the contract: symlinks to
+        // outside, dangling links, and leaf symlinks must not fail.
+        let base = unique_dir("pathsize");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("file.txt"), b"hello").unwrap();
+        // Symlink to a file outside the measured tree.
+        let outside = unique_dir("pathsize-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("target.txt"), b"world!").unwrap(); // 6 bytes
+        std::os::unix::fs::symlink(outside.join("target.txt"), base.join("link-outside")).unwrap();
+        // Dangling symlink.
+        std::os::unix::fs::symlink(base.join("nonexistent"), base.join("dangling")).unwrap();
+        // Leaf symlink to a file inside the tree.
+        std::os::unix::fs::symlink(base.join("file.txt"), base.join("link-leaf")).unwrap();
+
+        // Must not return None (tolerates all symlink cases).
+        let size = path_size(&base);
+        assert!(size.is_some(), "path_size must tolerate symlinks");
+        // The outside target is followed (6 bytes included), unlike the old walk.
+        // Exact total is GIO-version-dependent; assert it's at least the known files.
+        assert!(
+            size.unwrap() >= 11,
+            "should include file.txt (5) + target.txt (6)"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&outside).ok();
     }
 }

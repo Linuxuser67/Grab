@@ -411,9 +411,18 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Box<[VideoForm
     out.into_boxed_slice()
 }
 
-/// Human size for format labels via GLib's `g_format_size` (SI base-1000, localized).
+/// Human size for format labels. Decimal units, one fraction digit.
 fn fmt_video_bytes(n: u64) -> String {
-    glib::format_size(n).to_string()
+    const GB: f64 = 1_000_000_000.0;
+    const MB: f64 = 1_000_000.0;
+    let f = n as f64;
+    if f >= GB {
+        format!("{:.1} GB", f / GB)
+    } else if f >= MB {
+        format!("{:.1} MB", f / MB)
+    } else {
+        format!("{n} B")
+    }
 }
 
 /// One HLS manifest variant selected by the planner: the exact

@@ -391,6 +391,7 @@ pub fn build_window(
         let sec_downloaded = downloaded_section.clone();
         let query = Rc::clone(&query);
         let status_sel = Rc::clone(&status_sel);
+        let seg = seg.clone();
         Rc::new(move || {
             let store = m.store();
             let q = query.borrow();
@@ -463,6 +464,8 @@ pub fn build_window(
             // Header + duplicates the empty-state pill, so show it only with the list.
             add.set_visible(has_items);
             search_btn.set_visible(has_items);
+            // The categories only make sense once there are entries to filter.
+            seg.set_visible(has_items);
             if !has_items {
                 // List is gone, so nothing to search.
                 search_btn.set_active(false);

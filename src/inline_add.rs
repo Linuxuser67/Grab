@@ -160,7 +160,10 @@ struct VideoStep {
     /// Lookup spinner, in the URL entry's suffix slot (browser-address-bar
     /// style): no separate status line, no layout shift when a lookup starts.
     url_spinner: adw::Spinner,
-    group: adw::PreferencesGroup,
+    group: gtk4::Box,
+    title: gtk4::Label,
+    description: gtk4::Label,
+    list: gtk4::ListBox,
     name: adw::EntryRow,
     revert: gtk4::Button,
     /// Media-format selector, filled per video on resolve: exact pinnable
@@ -966,7 +969,7 @@ fn show_video_playlist(v: &VideoStep, pl: &crate::media_types::PlaylistInfo) {
                 .replace("{total}", &pl.total.to_string()),
         );
     }
-    v.group.set_description(Some(&desc));
+    v.description.set_label(&desc);
     v.audio.set_visible(true);
 }
 
@@ -1030,8 +1033,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     card.set_margin_bottom(6);
     card.set_margin_start(6);
     card.set_margin_end(6);
-    // No .card class: each AdwPreferencesGroup below renders as its own
-    // flush card (rows touch the group's edge), so there's no gap between
+    // No .card class: each GtkListBox with .boxed-list-separate below
+    // renders its rows as individual cards, so there's no gap between
     // the URL entry and a card outline. The 6px margins give the window
     // spacing.
 
@@ -1053,15 +1056,19 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     revealer.set_child(Some(&card));
 
     // Form page: URL row (entry + Add), the video preview block, then the
-    // file / torrent / destination rows. Each AdwPreferencesGroup is its
-    // own card; the 12px form spacing separates the cards (HIG).
+    // file / torrent / destination rows. Each GtkListBox with
+    // .boxed-list-separate renders its rows as cards; the 12px form spacing
+    // separates the blocks (HIG).
     let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
 
-    // URL form: HIG AdwPreferencesGroup → AdwEntryRow. The Add action is
-    // a persistent ✓ suffix button (not the built-in apply button, which
-    // hides when the text hasn't changed); spinner, gear, close follow.
-    // (No Page wrapper — the Page adds dialog margins.)
-    let url_group = adw::PreferencesGroup::new();
+    // URL form: HIG GtkListBox + .boxed-list-separate (same API as the
+    // download entries). The Add action is a persistent ✓ suffix button
+    // (not the built-in apply button, which hides when the text hasn't
+    // changed); spinner, gear, close follow.
+    let url_group = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .css_classes(["boxed-list-separate"])
+        .build();
     url_group.set_hexpand(true);
     let url_entry = adw::EntryRow::builder()
         .title(gettext("Paste a download link"))
@@ -1081,7 +1088,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
     url_entry.add_suffix(&add_btn);
-    url_group.add(&url_entry);
+    url_group.append(&url_entry);
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
     let opts_toggle = gtk4::ToggleButton::builder()
@@ -1118,8 +1125,25 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     form.append(&opts_revealer);
 
     // Video preview block: hidden until a lookup runs; exactly one state shows.
-    let video_group = adw::PreferencesGroup::new();
+    // Same API as the download entries: GtkListBox + .boxed-list-separate.
+    // Title/description are separate labels (ListBox has no built-in ones).
+    let video_group = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
     video_group.set_visible(false);
+    let video_title = gtk4::Label::builder()
+        .halign(gtk4::Align::Start)
+        .css_classes(["heading"])
+        .build();
+    let video_desc = gtk4::Label::builder()
+        .halign(gtk4::Align::Start)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    let video_list = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .css_classes(["boxed-list-separate"])
+        .build();
+    video_group.append(&video_title);
+    video_group.append(&video_desc);
+    video_group.append(&video_list);
     let video_name = adw::EntryRow::builder()
         .title(gettext("File name"))
         .activates_default(false)
@@ -1134,18 +1158,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         "Revert to Title",
     ))]);
     video_name.add_suffix(&video_revert_btn);
-    video_group.add(&video_name);
+    video_list.append(&video_name);
     // Media-format selector, filled per video on resolve: exact pinnable
     // formats, tallest first (the preference preselects the closest row), or a
     // single Automatic row when nothing is pinnable.
     let video_format = adw::ComboRow::builder()
         .title(gettext("Media format"))
         .build();
-    video_group.add(&video_format);
+    video_list.append(&video_format);
     let video_audio = adw::SwitchRow::builder()
         .title(gettext("Audio only"))
         .build();
-    video_group.add(&video_audio);
+    video_list.append(&video_audio);
     let video_tools = adw::ActionRow::builder()
         .title(gettext("Support tools"))
         .build();
@@ -1157,7 +1181,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // Whole-row click hits Install (same pattern as the torrent row below).
     video_tools.set_activatable_widget(Some(&video_install_btn));
     video_tools.add_suffix(&video_install_btn);
-    video_group.add(&video_tools);
+    video_list.append(&video_tools);
     let video_error = adw::ActionRow::builder()
         .title(gettext("Couldn't load the media preview"))
         .build();
@@ -1166,10 +1190,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .valign(gtk4::Align::Center)
         .build();
     video_error.add_suffix(&video_retry_btn);
-    video_group.add(&video_error);
+    video_list.append(&video_error);
     let step = Rc::new(VideoStep {
         url_spinner: url_spinner.clone(),
         group: video_group.clone(),
+        title: video_title,
+        description: video_desc,
+        list: video_list,
         name: video_name,
         revert: video_revert_btn,
         format: video_format,
@@ -1189,13 +1216,25 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
     form.append(&video_group);
 
-    let group = adw::PreferencesGroup::new();
-    group.set_title(&gettext("Download options"));
+    // Download options: same API as the download entries (GtkListBox +
+    // .boxed-list-separate). Title is a label above the list.
+    let opts_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    let opts_title = gtk4::Label::builder()
+        .label(gettext("Download options"))
+        .halign(gtk4::Align::Start)
+        .css_classes(["heading"])
+        .build();
+    let opts_list = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .css_classes(["boxed-list-separate"])
+        .build();
+    opts_box.append(&opts_title);
+    opts_box.append(&opts_list);
     let file_row = adw::EntryRow::builder()
         .title(gettext("File name (optional)"))
         .text("")
         .build();
-    group.add(&file_row);
+    opts_list.append(&file_row);
 
     // Torrent and save location sit behind the gear toggle: the common
     // case is a URL plus an optional file name, so the card opens compact.
@@ -1209,7 +1248,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .activatable_widget(&torrent_btn)
         .build();
     torrent_row.add_suffix(&torrent_btn);
-    group.add(&torrent_row);
+    opts_list.append(&torrent_row);
 
     let dest_label = gtk4::Label::builder()
         .label(manager.effective_download_dir())
@@ -1227,8 +1266,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     dest_row.add_suffix(&dest_label);
     dest_row.add_suffix(&dest_btn);
     dest_row.set_activatable_widget(Some(&dest_btn));
-    group.add(&dest_row);
-    opts_revealer.set_child(Some(&group));
+    opts_list.append(&dest_row);
+    opts_revealer.set_child(Some(&opts_box));
 
     // Form-level error caption sits outside the options revealer so a failed
     // Add stays visible while the options are collapsed.
@@ -1524,9 +1563,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                         None => glib::markup_escape_text(&v.page_url).to_string(),
                                     };
                                 step_b
-                                    .group
-                                    .set_title(glib::markup_escape_text(&v.title).as_str());
-                                step_b.group.set_description(Some(&desc));
+                                    .title
+                                    .set_label(glib::markup_escape_text(&v.title).as_str());
+                                step_b.description.set_label(&desc);
                                 // Seed the file name once: an explicit name wins, else
                                 // the title default. Never clobbers an edit here.
                                 if step_b.name.text().trim().is_empty() {

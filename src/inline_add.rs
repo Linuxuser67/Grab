@@ -1070,18 +1070,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     form.set_margin_start(12);
     form.set_margin_end(12);
 
-    let url_entry = adw::EntryRow::builder()
-        .title(gettext("Paste a download link"))
+    // gtk4::Entry (not adw::EntryRow): the row lives directly in a Box,
+    // not in a PreferencesGroup, so EntryRow loses its list styling and
+    // stretches wrong. A plain Entry is the correct inline widget.
+    let url_entry = gtk4::Entry::builder()
+        .placeholder_text(gettext("Paste a download link"))
         .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
-    // The lookup spinner lives in the entry's suffix slot
-    // (browser-address-bar style): no separate status line for the
-    // transient loading state. The suffix is unmapped when hidden, so
-    // showing it reserves space (minor shift, not a new row).
+    // The lookup spinner sits beside the entry (browser-address-bar style):
+    // no separate status line for the transient loading state.
     let url_spinner = adw::Spinner::new();
     url_spinner.set_visible(false);
-    url_entry.add_suffix(&url_spinner);
     let add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
         .use_underline(true)
@@ -1098,6 +1098,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     ))]);
     let url_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     url_box.append(&url_entry);
+    url_box.append(&url_spinner);
     url_box.append(&add_btn);
     url_box.append(&opts_toggle);
     url_box.append(&cancel_btn);

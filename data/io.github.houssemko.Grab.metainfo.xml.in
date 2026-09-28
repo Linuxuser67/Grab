@@ -46,6 +46,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.2" date="2026-09-28">
+      <description>
+        <ul>
+          <li>The New Download card no longer stretches full-width; it is centered with proper spacing, and its URL field and buttons are vertically aligned.</li>
+          <li>Playlist and torrent pickers have proper spacing around their grids.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.1" date="2026-09-28">
       <description>
         <ul>

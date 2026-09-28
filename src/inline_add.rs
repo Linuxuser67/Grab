@@ -179,8 +179,12 @@ struct VideoStep {
 /// Reserve trailing text space inside the URL entry while the lookup
 fn hide_video_step(v: &VideoStep) {
     v.group.set_visible(false);
-    v.url_spinner.set_spinning(false);
+    // adw::Spinner animates while mapped; hiding stops it (no set_spinning).
     v.url_spinner.set_visible(false);
+    // Clear the lookup announcement (adw::Spinner is not Accessible, so the
+    // EntryRow carries it as a description while the spinner is visible).
+    v.url_entry
+        .update_property(&[gtk4::accessible::Property::Description("")]);
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
@@ -209,8 +213,11 @@ fn reset_video_step(step: &VideoStep) {
 
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
-    v.url_spinner.set_spinning(true);
     v.url_spinner.set_visible(true);
+    v.url_entry
+        .update_property(&[gtk4::accessible::Property::Description(&gettext(
+            "Looking up…",
+        ))]);
 }
 
 fn show_video_ready(v: &VideoStep) {
@@ -1081,10 +1088,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // The lookup spinner lives in the entry's suffix slot
     // (browser-address-bar style): no separate status line for the
     // transient loading state, and no layout shift when a lookup starts.
-    // The accessible label carries the "Looking up…" text the spinner
-    // replaces visually.
     let url_spinner = adw::Spinner::new();
-    url_spinner.update_property(&[gtk4::accessible::Property::Label(&gettext("Looking up…"))]);
     url_spinner.set_visible(false);
     url_entry.add_suffix(&url_spinner);
     let add_btn = gtk4::Button::builder()

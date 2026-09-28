@@ -144,9 +144,6 @@ pub(crate) fn fmt_item_duration(secs: i64) -> String {
     }
 }
 
-/// Wire a picker's selection bar to its checkboxes: the confirm action counts
-/// the live selection (`count_label` builds its text — msgids differ per
-/// picker) and Select All/None flip every checkbox.
 /// One media-format option: an exact pinnable format from the probe, or the
 /// Automatic row (the global preference, no pin) when nothing is pinnable.
 #[derive(Clone)]
@@ -789,11 +786,12 @@ fn push_playlist_items_page(
         let selection = selection.clone();
         add_btn.connect_clicked(move |_| {
             let picked: Vec<usize> = grid_selected(&selection, count);
+            let picked_set: std::collections::HashSet<usize> = picked.into_iter().collect();
             let chosen: Vec<(usize, &crate::media_types::PlaylistItem)> = playlist
                 .items
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| picked.contains(i))
+                .filter(|(i, _)| picked_set.contains(i))
                 .collect();
             if chosen.is_empty() {
                 error_caption.set_text(&gettext("Select at least one item"));

@@ -475,8 +475,12 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
 
 /// Pops up a details dialog when a download fails, using AdwAlertDialog:
 /// heading + filename body, the log as extra-child, Copy as the suggested
-/// response.
-fn show_failure_dialog(parent: &gtk4::Widget, item: &crate::download::DownloadItem) {
+/// response. `on_close` fires when the dialog dismisses (any response).
+fn show_failure_dialog(
+    parent: &gtk4::Widget,
+    item: &crate::download::DownloadItem,
+    on_close: impl Fn() + 'static,
+) {
     let dialog = adw::AlertDialog::new(Some(&gettext("Download Failed")), Some(&item.filename()));
 
     let text = gtk4::TextView::builder()
@@ -486,11 +490,15 @@ fn show_failure_dialog(parent: &gtk4::Widget, item: &crate::download::DownloadIt
         .wrap_mode(gtk4::WrapMode::WordChar)
         .build();
     text.buffer().set_text(&item.detail());
-    dialog.set_extra_child(Some(&text));
+    let scrolled = gtk4::ScrolledWindow::builder()
+        .min_content_height(240)
+        .child(&text)
+        .build();
+    dialog.set_extra_child(Some(&scrolled));
 
     dialog.add_responses(&[("copy", &gettext("Copy")), ("close", &gettext("Close"))]);
     dialog.set_response_appearance("copy", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("copy"));
+    dialog.set_default_response(Some("close"));
     dialog.set_close_response("close");
 
     {
@@ -500,6 +508,7 @@ fn show_failure_dialog(parent: &gtk4::Widget, item: &crate::download::DownloadIt
             if response == "copy" {
                 clipboard.set_text(&detail);
             }
+            on_close();
         });
     }
 
@@ -943,15 +952,46 @@ pub(crate) fn build_row(
             t.add_toast(toast);
         });
     }
-    // Pop the failure dialog on the transition to Failed (not on every
-    // refresh: the notify fires once per status change).
+    // Pop the failure dialog on the first transition to Failed per attempt
+    // (not on every refresh: the notify fires once per status change).
+    // Subsequent failures of the same attempt show a toast instead; a dialog
+    // already open suppresses new ones (bulk-failure coalescing); hidden or
+    // inactive windows get a toast, never a focus-stealing present().
     {
         let row_weak = row.downgrade();
+        let toasts = Rc::clone(toasts);
+        let notified = Rc::new(std::cell::Cell::new(false));
+        // Global: is any failure dialog currently open?
+        static DIALOG_OPEN: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         item.connect_notify_local(Some("status"), move |item, _| {
-            if item.status() == DownloadStatus::Failed
-                && let Some(row) = row_weak.upgrade()
-            {
-                show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);
+            use std::sync::atomic::Ordering;
+            if item.status() == DownloadStatus::Failed {
+                let first = !notified.replace(true);
+                let window_active = row_weak
+                    .upgrade()
+                    .and_then(|r| r.root())
+                    .and_then(|root| root.downcast::<gtk4::Window>().ok())
+                    .map(|w| w.is_visible() && w.is_active())
+                    .unwrap_or(false);
+                if first && window_active && !DIALOG_OPEN.swap(true, Ordering::SeqCst) {
+                    if let Some(row) = row_weak.upgrade() {
+                        let dialog_open = &DIALOG_OPEN;
+                        show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item, move || {
+                            dialog_open.store(false, Ordering::SeqCst);
+                        });
+                    } else {
+                        DIALOG_OPEN.store(false, Ordering::SeqCst);
+                    }
+                } else {
+                    // Repeat failure, backgrounded window, or dialog already
+                    // open: toast instead of stacking presents.
+                    toasts.add_toast(adw::Toast::new(
+                        &gettext("Download failed: {name}").replace("{name}", &item.filename()),
+                    ));
+                }
+            } else {
+                notified.set(false);
             }
         });
     }

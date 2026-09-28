@@ -1057,16 +1057,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     revealer.set_child(Some(&card));
 
     // Form page: URL row (entry + Add), the video preview block, then the
-    // file / torrent / destination rows.
+    // file / torrent / destination rows. No margins — the .card CSS class
+    // provides the HIG 12px inner padding; the card's outer margins give
+    // the spacing from the window.
     let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    form.set_margin_top(6);
-    // Bottom margin 6, not 12: the collapsed options revealer below is
-    // still a visible box child, so one 12px box spacing lands under the
-    // URL row while it contributes no height — 12 + 6 matches the 18px
-    // above (card 12 + form 6), keeping the gaps around the row uniform.
-    form.set_margin_bottom(6);
-    form.set_margin_start(12);
-    form.set_margin_end(12);
 
     // URL form: AdwEntryRow with hexpand in a horizontal Box — spans the
     // card width, Add/gear/close buttons beside it. The 4.4.4 pattern

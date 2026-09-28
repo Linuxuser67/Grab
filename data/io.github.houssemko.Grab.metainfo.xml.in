@@ -46,6 +46,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.8" date="2026-09-28">
+      <description>
+        <ul>
+          <li>Inline New Download UI uses HIG AdwPreferencesGroup with native row padding; download entries use GtkListBox with .boxed-list-separate.</li>
+          <li>Window margins unified at 12px for the inline card and the download list.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.7" date="2026-09-28">
       <description>
         <ul>

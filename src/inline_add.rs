@@ -482,28 +482,30 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
     header
 }
 
-/// Column count for a picker grid, from the entry count: 1-3 fill one
-/// row; 4 splits 2x2; larger counts use the largest divisor (max 3
-/// columns) so no cell is ever empty. Fixed per picker (set via
-/// min/max-columns) — selecting never reflows.
-/// Uses the largest divisor of the count (up to 3 columns) so every
-/// cell is filled: 3→3 (1 row), 4→2 (2x2), 6→3 (2 rows), 9→3 (3x3).
-/// Prime counts >3 use a single column — the only way to avoid gaps.
+/// Column count for a picker grid, from the entry count: max 4 columns,
+/// no empty cells. Picks the divisor (≤4) that makes the grid most
+/// square — 3→3×1, 4→2×2, 8→4×2, 9→3×3, 12→4×3. Ties prefer more
+/// columns (fewer rows). Fixed per picker (set via min/max-columns) —
+/// selecting never reflows.
+/// Prime counts >4 use a single column — the only way to avoid gaps.
 fn picker_columns(count: usize) -> u32 {
-    match count {
-        0..=3 => count.max(1) as u32,
-        4 => 2,
-        _ => {
-            // Largest divisor ≤3; fallback to 1 (no empty cells).
-            let mut cols = 1;
-            for c in 2..=3 {
-                if count.is_multiple_of(c) {
-                    cols = c;
-                }
+    if count == 0 {
+        return 1;
+    }
+    let mut best = 1;
+    let mut best_score = usize::MAX;
+    for c in 1..=4 {
+        if count.is_multiple_of(c) {
+            let rows = count / c;
+            // Most square wins; ties prefer more columns (fewer rows).
+            let score = rows.abs_diff(c) * 100 - c;
+            if score < best_score {
+                best_score = score;
+                best = c;
             }
-            cols as u32
         }
     }
+    best as u32
 }
 
 /// A picker grid (HIG `GtkGridView` with `GtkMultiSelection` and
@@ -1973,8 +1975,8 @@ mod tests {
 
     #[test]
     fn picker_columns_adapts_without_empty_cells() {
-        // 1-3 fill a single row; 4 splits 2x2; larger counts use the
-        // largest divisor ≤3 so no cell is ever empty.
+        // Max 4 columns, most-square grid, no empty cells: 3→3×1,
+        // 4→2×2, 8→4×2, 9→3×3, 12→4×3.
         assert_eq!(picker_columns(0), 1);
         assert_eq!(picker_columns(1), 1);
         assert_eq!(picker_columns(2), 2);
@@ -1983,9 +1985,9 @@ mod tests {
         assert_eq!(picker_columns(5), 1); // prime: single column
         assert_eq!(picker_columns(6), 3);
         assert_eq!(picker_columns(7), 1); // prime: single column
-        assert_eq!(picker_columns(8), 2);
+        assert_eq!(picker_columns(8), 4);
         assert_eq!(picker_columns(9), 3);
-        assert_eq!(picker_columns(12), 3);
+        assert_eq!(picker_columns(12), 4);
         // No empty cells: count is always divisible by columns.
         for n in 1..=50 {
             let c = picker_columns(n) as usize;

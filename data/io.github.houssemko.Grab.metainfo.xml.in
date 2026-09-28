@@ -46,6 +46,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.20" date="2026-09-28">
+      <description>
+        <ul>
+          <li>The New Download card now toggles open and closed from the + button, Ctrl+N, or the empty-state button, and its header is one compact row: URL field, Add Download, options gear, and close.</li>
+          <li>The lookup indicator is now a spinner inside the URL field, with no layout shift while a link resolves.</li>
+          <li>Live recordings recover when the stream's formats change during setup: Grab re-resolves once and retries with fresh formats, and no longer claims a recording was kept when nothing was recorded.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.19" date="2026-09-28">
       <description>
         <ul>

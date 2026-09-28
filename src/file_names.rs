@@ -1,6 +1,6 @@
 //! File-name primitives: sanitize, split, dedupe, derive, atomic rename, piece sizing, byte formatting.
 
-use gio::prelude::FileExtManual as _;
+use gio::prelude::FileExt as _;
 
 /// Split stem and extension (last dot only; leading dot is stem). Pure.
 fn split_stem_ext(name: &str) -> (&str, Option<&str>) {

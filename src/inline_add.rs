@@ -200,8 +200,11 @@ struct FormatOption {
 /// The video preview block inside the form: exactly one state row shows at a
 /// time, driven by the probe below.
 struct VideoStep {
-    /// Lookup spinner, shown as a suffix inside the URL entry.
+    /// Lookup spinner, floating over the URL entry's trailing edge.
     url_spinner: gtk4::Spinner,
+    /// The URL entry the spinner floats over: toggles the `url-lookup`
+    /// class that reserves its trailing text space while it is visible.
+    url_entry: gtk4::Entry,
     group: adw::PreferencesGroup,
     name: adw::EntryRow,
     revert: gtk4::Button,
@@ -221,10 +224,30 @@ struct VideoStep {
     error: adw::ActionRow,
 }
 
+/// Reserve trailing text space inside the URL entry while the lookup
+/// spinner floats over it. Installed once per display; the `url-lookup`
+/// class is toggled with the spinner's visibility, and padding lives
+/// inside the entry's allocation so toggling it moves no sibling.
+fn ensure_url_lookup_css() {
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let css = gtk4::CssProvider::new();
+        css.load_from_string("entry.url-lookup { padding-inline-end: 32px; }");
+        if let Some(display) = gtk4::gdk::Display::default() {
+            gtk4::style_context_add_provider_for_display(
+                &display,
+                &css,
+                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+    });
+}
+
 fn hide_video_step(v: &VideoStep) {
     v.group.set_visible(false);
     v.url_spinner.set_spinning(false);
     v.url_spinner.set_visible(false);
+    v.url_entry.remove_css_class("url-lookup");
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
@@ -263,6 +286,7 @@ fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
     v.url_spinner.set_spinning(true);
     v.url_spinner.set_visible(true);
+    v.url_entry.add_css_class("url-lookup");
 }
 
 fn show_video_ready(v: &VideoStep) {
@@ -1050,7 +1074,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         "Download options",
     ))]);
     let url_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    url_box.append(&url_entry);
+    url_box.append(&url_overlay);
     url_box.append(&add_btn);
     url_box.append(&opts_toggle);
     url_box.append(&cancel_btn);
@@ -1075,12 +1099,23 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_group.set_visible(false);
     // The lookup spinner lives inside the URL entry (browser-address-bar
     // style): no separate status line for the transient loading state, and
-    // no layout shift when a lookup starts. The accessible label carries
-    // the "Looking up…" text the spinner replaces visually.
+    // no layout shift when a lookup starts. GtkEntry has no add_suffix, so
+    // the spinner floats over the entry's trailing edge in a GtkOverlay;
+    // the entry reserves trailing text space via the `url-lookup` class
+    // (toggled with the spinner) so text never slides underneath it. The
+    // accessible label carries the "Looking up…" text the spinner replaces
+    // visually.
+    ensure_url_lookup_css();
     let url_spinner = gtk4::Spinner::new();
     url_spinner.update_property(&[gtk4::accessible::Property::Label(&gettext("Looking up…"))]);
+    url_spinner.set_halign(gtk4::Align::End);
+    url_spinner.set_valign(gtk4::Align::Center);
+    url_spinner.set_margin_end(10);
     url_spinner.set_visible(false);
-    url_entry.add_suffix(&url_spinner);
+    let url_overlay = gtk4::Overlay::new();
+    url_overlay.set_hexpand(true);
+    url_overlay.set_child(Some(&url_entry));
+    url_overlay.add_overlay(&url_spinner);
     let video_name = adw::EntryRow::builder()
         .title(gettext("File name"))
         .activates_default(false)
@@ -1135,6 +1170,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_group.add(&video_error);
     let step = Rc::new(VideoStep {
         url_spinner: url_spinner.clone(),
+        url_entry: url_entry.clone(),
         group: video_group.clone(),
         name: video_name,
         revert: video_revert_btn,

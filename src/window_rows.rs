@@ -220,13 +220,14 @@ pub(crate) enum RowMedia {
 
 impl RowMedia {
     /// Symbolic icon name; every name verified against the Adwaita theme so a
-    /// row can never render a broken-image icon.
+    /// row can never render a broken-image icon. HIG minimal: geometric
+    /// device icons over detailed MIME-type glyphs.
     pub(crate) fn icon_name(self) -> &'static str {
         match self {
             RowMedia::Live => "media-record-symbolic",
-            RowMedia::Audio => "audio-x-generic-symbolic",
+            RowMedia::Audio => "audio-headphones-symbolic",
             RowMedia::Torrent => "emblem-shared-symbolic",
-            RowMedia::Video => "video-x-generic-symbolic",
+            RowMedia::Video => "video-display-symbolic",
             RowMedia::File => "document-save-symbolic",
         }
     }
@@ -475,8 +476,11 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
 
 /// Pops up a details dialog when a download fails, using AdwAlertDialog:
 /// heading + filename body, the log as extra-child, Copy as the suggested
-/// response.
-fn show_failure_dialog(parent: &gtk4::Widget, item: &crate::download::DownloadItem) {
+/// response. Returns the dialog so callers can track it via WeakRef.
+fn show_failure_dialog(
+    parent: &gtk4::Widget,
+    item: &crate::download::DownloadItem,
+) -> adw::AlertDialog {
     let dialog = adw::AlertDialog::new(Some(&gettext("Download Failed")), Some(&item.filename()));
 
     let text = gtk4::TextView::builder()
@@ -486,11 +490,15 @@ fn show_failure_dialog(parent: &gtk4::Widget, item: &crate::download::DownloadIt
         .wrap_mode(gtk4::WrapMode::WordChar)
         .build();
     text.buffer().set_text(&item.detail());
-    dialog.set_extra_child(Some(&text));
+    let scrolled = gtk4::ScrolledWindow::builder()
+        .min_content_height(240)
+        .child(&text)
+        .build();
+    dialog.set_extra_child(Some(&scrolled));
 
     dialog.add_responses(&[("copy", &gettext("Copy")), ("close", &gettext("Close"))]);
     dialog.set_response_appearance("copy", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("copy"));
+    dialog.set_default_response(Some("close"));
     dialog.set_close_response("close");
 
     {
@@ -504,6 +512,7 @@ fn show_failure_dialog(parent: &gtk4::Widget, item: &crate::download::DownloadIt
     }
 
     dialog.present(Some(parent));
+    dialog
 }
 
 pub(crate) fn build_row(
@@ -541,7 +550,7 @@ pub(crate) fn build_row(
     );
     let media_icon = gtk4::Image::builder()
         .icon_name(media.icon_name())
-        .pixel_size(32)
+        .pixel_size(16)
         .valign(gtk4::Align::Center)
         .build();
     media_icon.update_property(&[gtk4::accessible::Property::Label(&match media {
@@ -561,7 +570,7 @@ pub(crate) fn build_row(
         .build();
     let status = gtk4::Label::builder()
         .label(item.status().label())
-        .css_classes(["dimmed", "caption"])
+        .css_classes(["dim-label", "caption"])
         .valign(gtk4::Align::Center)
         .build();
     let spinner = adw::Spinner::new();
@@ -592,7 +601,7 @@ pub(crate) fn build_row(
     let detail = gtk4::Label::builder()
         .label(item.detail())
         .halign(gtk4::Align::Start)
-        .css_classes(["dimmed", "caption"])
+        .css_classes(["dim-label", "caption"])
         .ellipsize(gtk4::pango::EllipsizeMode::End)
         .build();
     let progress = gtk4::ProgressBar::new();
@@ -943,15 +952,52 @@ pub(crate) fn build_row(
             t.add_toast(toast);
         });
     }
-    // Pop the failure dialog on the transition to Failed (not on every
-    // refresh: the notify fires once per status change).
+    // Pop the failure dialog on the first transition to Failed per attempt
+    // (not on every refresh: the notify fires once per status change).
+    // Subsequent failures of the same attempt show a toast instead; a dialog
+    // already open suppresses new ones (bulk-failure coalescing); hidden or
+    // inactive windows get a toast, never a focus-stealing present().
+    // Dialog liveness via glib::WeakRef (closed dialogs stop upgrading);
+    // main-thread-only state in thread_local (connect_notify_local).
     {
         let row_weak = row.downgrade();
+        let toasts = Rc::clone(toasts);
+        let notified = Rc::new(std::cell::Cell::new(false));
+        thread_local! {
+            static FAILURE_DIALOG: std::cell::RefCell<Option<glib::WeakRef<adw::AlertDialog>>> =
+                const { std::cell::RefCell::new(None) };
+        }
         item.connect_notify_local(Some("status"), move |item, _| {
-            if item.status() == DownloadStatus::Failed
-                && let Some(row) = row_weak.upgrade()
-            {
-                show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);
+            if item.status() == DownloadStatus::Failed {
+                let first = !notified.replace(true);
+                let window_active = row_weak
+                    .upgrade()
+                    .and_then(|r| r.root())
+                    .and_then(|root| root.downcast::<gtk4::Window>().ok())
+                    .map(|w| w.is_visible() && w.is_active())
+                    .unwrap_or(false);
+                let dialog_open = FAILURE_DIALOG.with(|d| {
+                    d.borrow()
+                        .as_ref()
+                        .and_then(|weak| weak.upgrade())
+                        .is_some()
+                });
+                if first && window_active && !dialog_open {
+                    if let Some(row) = row_weak.upgrade() {
+                        let dialog = show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);
+                        FAILURE_DIALOG.with(|d| {
+                            *d.borrow_mut() = Some(dialog.downgrade());
+                        });
+                    }
+                } else {
+                    // Repeat failure, backgrounded window, or dialog already
+                    // open: toast instead of stacking presents.
+                    toasts.add_toast(adw::Toast::new(
+                        &gettext("Download failed: {name}").replace("{name}", &item.filename()),
+                    ));
+                }
+            } else {
+                notified.set(false);
             }
         });
     }

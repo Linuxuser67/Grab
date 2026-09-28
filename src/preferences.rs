@@ -132,7 +132,7 @@ pub fn show(
     };
     let dest_label = gtk4::Label::builder()
         .label(&shown)
-        .css_classes(["dimmed", "caption"])
+        .css_classes(["dim-label", "caption"])
         .ellipsize(gtk4::pango::EllipsizeMode::Middle)
         .hexpand(true)
         .halign(gtk4::Align::Start)
@@ -605,7 +605,7 @@ pub fn show(
     }
     let video_page = adw::PreferencesPage::builder()
         .title(gettext("Media"))
-        .icon_name("video-x-generic-symbolic")
+        .icon_name("video-display-symbolic")
         .build();
     let video_quality_group = adw::PreferencesGroup::builder()
         .title(gettext("Quality"))

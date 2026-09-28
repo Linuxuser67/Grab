@@ -173,6 +173,10 @@ msgstr ""
 msgid "Download failed"
 msgstr ""
 
+#: src/window_rows.rs:996
+msgid "Download failed: {name}"
+msgstr ""
+
 #: src/download.rs:1677
 msgid "Paused • {pct}%"
 msgstr ""
@@ -493,10 +497,6 @@ msgstr ""
 
 #: src/inline_add.rs:1044 src/inline_add.rs:1047 src/inline_add.rs:1159
 msgid "Download options"
-msgstr ""
-
-#: src/inline_add.rs:1074
-msgid "Looking up…"
 msgstr ""
 
 #: src/inline_add.rs:1081 src/window_rows.rs:933

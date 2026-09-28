@@ -343,7 +343,14 @@ pub fn build_window(
     }
     seg.set_active_name(Some("all"));
     seg.set_hexpand(true);
-    content.prepend(&seg);
+    // AdwToggleGroup doesn't implement GtkAccessible; the label goes on a
+    // wrapper so screen readers announce the filter's purpose.
+    let seg_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    seg_wrap.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Filter by status",
+    ))]);
+    seg_wrap.append(&seg);
+    content.prepend(&seg_wrap);
     // HIG search pattern: a header toggle reveals a GtkSearchBar.
     let search_bar = gtk4::SearchBar::builder().show_close_button(true).build();
     search_bar.set_child(Some(&search));

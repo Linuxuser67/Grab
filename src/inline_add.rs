@@ -144,9 +144,6 @@ pub(crate) fn fmt_item_duration(secs: i64) -> String {
     }
 }
 
-/// Wire a picker's selection bar to its checkboxes: the confirm action counts
-/// the live selection (`count_label` builds its text — msgids differ per
-/// picker) and Select All/None flip every checkbox.
 /// One media-format option: an exact pinnable format from the probe, or the
 /// Automatic row (the global preference, no pin) when nothing is pinnable.
 #[derive(Clone)]
@@ -160,60 +157,28 @@ struct FormatOption {
 /// The video preview block inside the form: exactly one state row shows at a
 /// time, driven by the probe below.
 struct VideoStep {
-    /// Lookup spinner, floating over the URL entry's trailing edge.
-    url_spinner: gtk4::Spinner,
-    /// The URL entry the spinner floats over: toggles the `url-lookup`
-    /// class that reserves its trailing text space while it is visible.
-    url_entry: gtk4::Entry,
+    /// Lookup spinner, in the URL entry's suffix slot (browser-address-bar
+    /// style): no separate status line, no layout shift when a lookup starts.
+    url_spinner: adw::Spinner,
     group: adw::PreferencesGroup,
     name: adw::EntryRow,
     revert: gtk4::Button,
-    /// ComboRow-looking media-format selector: title/subtitle on the left, the
-    /// current pick on the right; opens in-flow and pushes the rows below down.
-    format: adw::ExpanderRow,
-    format_value: gtk4::Label,
-    /// Index-aligned with the expander's option rows. Reset on every resolve.
+    /// Media-format selector, filled per video on resolve: exact pinnable
+    /// formats, tallest first (the preference preselects the closest row), or a
+    /// single Automatic row when nothing is pinnable.
+    format: adw::ComboRow,
+    /// Index-aligned with the combo's model. Reset on every resolve.
     options: Rc<RefCell<Vec<FormatOption>>>,
-    /// Index into `options` of the current pick.
-    selected: Rc<Cell<usize>>,
-    /// Option rows and their checkmarks, index-aligned with `options`.
-    option_rows: Rc<RefCell<Vec<adw::ActionRow>>>,
-    option_checks: Rc<RefCell<Vec<gtk4::Image>>>,
     audio: adw::SwitchRow,
     tools: adw::ActionRow,
     error: adw::ActionRow,
 }
 
 /// Reserve trailing text space inside the URL entry while the lookup
-/// spinner floats over it. Installed once per display; the `url-lookup`
-/// class is toggled with the spinner's visibility, and padding lives
-/// inside the entry's allocation so toggling it moves no sibling.
-fn ensure_url_lookup_css() {
-    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    INSTALLED.get_or_init(|| {
-        let css = gtk4::CssProvider::new();
-        // Logical `padding-inline-end` is not a GTK CSS property (the
-        // parser drops the rule with "No property named"), so use the
-        // physical side plus a :dir(rtl) override for the same effect.
-        css.load_from_string(
-            "entry.url-lookup { padding-right: 32px; }\n\
-             entry.url-lookup:dir(rtl) { padding-right: 0; padding-left: 32px; }",
-        );
-        if let Some(display) = gtk4::gdk::Display::default() {
-            gtk4::style_context_add_provider_for_display(
-                &display,
-                &css,
-                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
-        }
-    });
-}
-
 fn hide_video_step(v: &VideoStep) {
     v.group.set_visible(false);
-    v.url_spinner.set_spinning(false);
+    // adw::Spinner animates while mapped; hiding stops it (no set_spinning).
     v.url_spinner.set_visible(false);
-    v.url_entry.remove_css_class("url-lookup");
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
@@ -228,17 +193,9 @@ fn hide_video_step(v: &VideoStep) {
 /// the format rows keep their widgets, and the tools/error rows keep
 /// their subtitles.
 fn reset_video_step(step: &VideoStep) {
-    // Drop the format option rows (mirrors `rebuild_format_options`) and
-    // the current pick.
-    for row in step.option_rows.borrow().iter() {
-        step.format.remove(row);
-    }
-    step.option_rows.borrow_mut().clear();
-    step.option_checks.borrow_mut().clear();
+    // Drop the format options and the current pick.
     step.options.borrow_mut().clear();
-    step.selected.set(0);
-    step.format_value.set_text("");
-    step.format.set_expanded(false);
+    step.format.set_model(Some(&gtk4::StringList::new(&[])));
     step.audio.set_active(false);
     // Name row and the tools/error subtitles keep their last text when
     // only hidden; clear them so nothing stale survives.
@@ -250,9 +207,7 @@ fn reset_video_step(step: &VideoStep) {
 
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
-    v.url_spinner.set_spinning(true);
     v.url_spinner.set_visible(true);
-    v.url_entry.add_css_class("url-lookup");
 }
 
 fn show_video_ready(v: &VideoStep) {
@@ -286,67 +241,31 @@ fn set_lookup_add(cell: &Rc<RefCell<Option<gtk4::Button>>>, enabled: bool) {
     }
 }
 
-/// Apply the picked format: move the checkmark, show the pick on the
-/// ComboRow-looking row, collapse the options (combo behavior).
-fn select_format(step: &VideoStep, index: usize) {
-    let options = step.options.borrow();
-    let Some(pick) = options.get(index) else {
-        return;
-    };
-    step.selected.set(index);
-    for (i, check) in step.option_checks.borrow().iter().enumerate() {
-        check.set_visible(i == index);
-    }
-    step.format_value.set_text(&pick.label);
-    step.format.set_expanded(false);
-}
-
 /// Rebuild the format options from a fresh resolve (tallest first, the
 /// preference preselects the closest row) or a single Automatic row when
 /// nothing is pinnable. Selection resets — a pin must never carry over.
 fn rebuild_format_options(step: &Rc<VideoStep>, info: &crate::video::VideoInfo, preferred: &str) {
-    {
-        let mut rows = step.option_rows.borrow_mut();
-        let mut checks = step.option_checks.borrow_mut();
-        for row in rows.iter() {
-            step.format.remove(row);
-        }
-        rows.clear();
-        checks.clear();
-        let mut options = Vec::new();
-        for opt in &info.formats {
-            options.push(FormatOption {
-                label: opt.label.to_string(),
-                format_id: Some(opt.id.to_string()),
-            });
-        }
-        if options.is_empty() {
-            options.push(FormatOption {
-                label: gettext("Automatic"),
-                format_id: None,
-            });
-        }
-        for (i, opt) in options.iter().enumerate() {
-            let check = gtk4::Image::from_icon_name("object-select-symbolic");
-            let row = adw::ActionRow::builder()
-                .title(&*opt.label)
-                .activatable(true)
-                .build();
-            row.add_suffix(&check);
-            {
-                let step = Rc::clone(step);
-                row.connect_activate(move |_| select_format(&step, i));
-            }
-            step.format.add_row(&row);
-            rows.push(row);
-            checks.push(check);
-        }
-        *step.options.borrow_mut() = options;
+    let mut options = Vec::new();
+    for opt in &info.formats {
+        options.push(FormatOption {
+            label: opt.label.to_string(),
+            format_id: Some(opt.id.to_string()),
+        });
     }
-    select_format(
-        step,
-        crate::video::default_quality_index(&info.formats, preferred),
-    );
+    if options.is_empty() {
+        options.push(FormatOption {
+            label: gettext("Automatic"),
+            format_id: None,
+        });
+    }
+    let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
+    step.format.set_model(Some(&gtk4::StringList::new(&labels)));
+    // default_quality_index is over info.formats; options may be just
+    // [Automatic] when nothing is pinnable, so clamp.
+    let index = crate::video::default_quality_index(&info.formats, preferred)
+        .min(options.len().saturating_sub(1));
+    step.format.set_selected(index as u32);
+    *step.options.borrow_mut() = options;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -373,7 +292,7 @@ fn submit_probed_single(
     // Exact picks pin the format with its height as fallback, so a dropped pin still
     // degrades to the chosen height; audio-only rows drop the pin, and Automatic (no
     // pin) falls back to the global preference. Options and rows share one order.
-    let selected = step.selected.get();
+    let selected = step.format.selected() as usize;
     let format_id = step
         .options
         .borrow()
@@ -554,7 +473,7 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
         .build();
     let count_label = gtk4::Label::builder()
         .label(count)
-        .css_classes(["dimmed", "caption"])
+        .css_classes(["dim-label", "caption"])
         .valign(gtk4::Align::Center)
         .build();
     header.append(&back);
@@ -601,7 +520,7 @@ fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
             .build();
         let subtitle = gtk4::Label::builder()
             .halign(gtk4::Align::Start)
-            .css_classes(["dimmed", "caption"])
+            .css_classes(["dim-label", "caption"])
             .ellipsize(gtk4::pango::EllipsizeMode::End)
             .max_width_chars(28)
             .build();
@@ -732,7 +651,7 @@ fn push_playlist_items_page(
                     .replace("{n}", &count.to_string())
                     .replace("{total}", &playlist.total.to_string()),
             )
-            .css_classes(["dimmed", "caption"])
+            .css_classes(["dim-label", "caption"])
             .halign(gtk4::Align::Start)
             .build();
         list_box.append(&notice);
@@ -789,11 +708,12 @@ fn push_playlist_items_page(
         let selection = selection.clone();
         add_btn.connect_clicked(move |_| {
             let picked: Vec<usize> = grid_selected(&selection, count);
+            let picked_set: std::collections::HashSet<usize> = picked.into_iter().collect();
             let chosen: Vec<(usize, &crate::media_types::PlaylistItem)> = playlist
                 .items
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| picked.contains(i))
+                .filter(|(i, _)| picked_set.contains(i))
                 .collect();
             if chosen.is_empty() {
                 error_caption.set_text(&gettext("Select at least one item"));
@@ -1150,30 +1070,17 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     form.set_margin_start(12);
     form.set_margin_end(12);
 
-    let url_entry = gtk4::Entry::builder()
-        .placeholder_text(gettext("Paste a download link"))
+    let url_entry = adw::EntryRow::builder()
+        .title(gettext("Paste a download link"))
         .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
-    // The lookup spinner lives inside the URL entry (browser-address-bar
-    // style): no separate status line for the transient loading state, and
-    // no layout shift when a lookup starts. GtkEntry has no add_suffix, so
-    // the spinner floats over the entry's trailing edge in a GtkOverlay;
-    // the entry reserves trailing text space via the `url-lookup` class
-    // (toggled with the spinner) so text never slides underneath it. The
-    // accessible label carries the "Looking up…" text the spinner replaces
-    // visually.
-    ensure_url_lookup_css();
-    let url_spinner = gtk4::Spinner::new();
-    url_spinner.update_property(&[gtk4::accessible::Property::Label(&gettext("Looking up…"))]);
-    url_spinner.set_halign(gtk4::Align::End);
-    url_spinner.set_valign(gtk4::Align::Center);
-    url_spinner.set_margin_end(10);
+    // The lookup spinner lives in the entry's suffix slot
+    // (browser-address-bar style): no separate status line for the
+    // transient loading state, and no layout shift when a lookup starts.
+    let url_spinner = adw::Spinner::new();
     url_spinner.set_visible(false);
-    let url_overlay = gtk4::Overlay::new();
-    url_overlay.set_hexpand(true);
-    url_overlay.set_child(Some(&url_entry));
-    url_overlay.add_overlay(&url_spinner);
+    url_entry.add_suffix(&url_spinner);
     let add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
         .use_underline(true)
@@ -1189,7 +1096,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         "Download options",
     ))]);
     let url_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    url_box.append(&url_overlay);
+    url_box.append(&url_entry);
     url_box.append(&add_btn);
     url_box.append(&opts_toggle);
     url_box.append(&cancel_btn);
@@ -1229,14 +1136,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_group.add(&video_name);
     // Media-format selector, filled per video on resolve: exact pinnable
     // formats, tallest first (the preference preselects the closest row), or a
-    // single Automatic row when nothing is pinnable. ComboRow-looking: the
-    // title/subtitle on the left, the current pick on the right.
-    let format_value = gtk4::Label::new(None);
-    let video_format = adw::ExpanderRow::builder()
+    // single Automatic row when nothing is pinnable.
+    let video_format = adw::ComboRow::builder()
         .title(gettext("Media format"))
         .subtitle(gettext("Uses your preferred quality"))
         .build();
-    video_format.add_suffix(&format_value);
     video_group.add(&video_format);
     let video_audio = adw::SwitchRow::builder()
         .title(gettext("Audio only"))
@@ -1266,16 +1170,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_group.add(&video_error);
     let step = Rc::new(VideoStep {
         url_spinner: url_spinner.clone(),
-        url_entry: url_entry.clone(),
         group: video_group.clone(),
         name: video_name,
         revert: video_revert_btn,
         format: video_format,
-        format_value,
         options: Rc::new(RefCell::new(Vec::new())),
-        selected: Rc::new(Cell::new(0)),
-        option_rows: Rc::new(RefCell::new(Vec::new())),
-        option_checks: Rc::new(RefCell::new(Vec::new())),
         audio: video_audio,
         tools: video_tools,
         error: video_error,
@@ -1317,7 +1216,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .label(manager.effective_download_dir())
         .halign(gtk4::Align::Start)
         .ellipsize(gtk4::pango::EllipsizeMode::Middle)
-        .css_classes(["dimmed", "caption"])
+        .css_classes(["dim-label", "caption"])
         .hexpand(true)
         .build();
     let dest_btn = gtk4::Button::builder()

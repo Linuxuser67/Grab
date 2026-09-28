@@ -477,10 +477,7 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
 /// heading + filename body, the log as extra-child, Copy as the suggested
 /// response.
 fn show_failure_dialog(parent: &gtk4::Widget, item: &crate::download::DownloadItem) {
-    let dialog = adw::AlertDialog::new(
-        Some(&gettext("Download Failed")),
-        Some(&item.filename()),
-    );
+    let dialog = adw::AlertDialog::new(Some(&gettext("Download Failed")), Some(&item.filename()));
 
     let text = gtk4::TextView::builder()
         .editable(false)

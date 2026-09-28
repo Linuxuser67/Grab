@@ -17,7 +17,7 @@
 //! and the lookup starts when Add Download (or Enter) is pressed.
 
 use crate::download::DownloadManager;
-use crate::window_rows::{default_name_for, error_label, selection_action_bar};
+use crate::window_rows::{default_name_for, selection_action_bar};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
@@ -656,8 +656,11 @@ fn wire_grid_selection_bar(
     {
         let selection = selection.clone();
         let add_btn = add_btn.clone();
-        let refresh = Rc::new(move || {
-            add_btn.set_label(&count_label(selection.selection().size() as usize));
+        let refresh = Rc::new({
+            let selection = selection.clone();
+            move || {
+                add_btn.set_label(&count_label(selection.selection().size() as usize));
+            }
         });
         selection.connect_selection_changed({
             let refresh = refresh.clone();

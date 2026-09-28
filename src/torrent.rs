@@ -212,7 +212,7 @@ fn sanitize_display_path(path: &str) -> String {
     const MAX_CHARS: usize = 120;
     let mut out: String = path
         .chars()
-        .filter(|c| !c.is_control() && !crate::file_names::is_bidi_control(c))
+        .filter(|c| !c.is_control() && !crate::file_names::is_bidi_control(*c))
         .take(MAX_CHARS + 1)
         .collect();
     if out.chars().count() > MAX_CHARS {

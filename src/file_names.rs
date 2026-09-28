@@ -1,5 +1,7 @@
 //! File-name primitives: sanitize, split, dedupe, derive, atomic rename, piece sizing, byte formatting.
 
+use gio::prelude::FileExtManual as _;
+
 /// Split stem and extension (last dot only; leading dot is stem). Pure.
 fn split_stem_ext(name: &str) -> (&str, Option<&str>) {
     match name.rfind('.') {
@@ -276,7 +278,7 @@ pub(crate) fn sane_filename(s: &str) -> bool {
 /// Best-effort filename from URL path via GLib's `g_uri_unescape_string`
 /// (single-pass `%XX` decode, leaves `+`); falls back to `index.html`.
 pub(crate) fn percent_decode(s: &str) -> String {
-    glib::uri_unescape_string(s, None)
+    glib::uri_unescape_string(s, None::<&str>)
         .map(|g| g.to_string())
         .unwrap_or_else(|| s.to_owned())
 }
@@ -301,7 +303,6 @@ pub(crate) fn fmt_bytes(n: u64) -> String {
 /// On-disk size via GIO's `measure_disk_usage` (apparent size, no symlink
 /// descent); `None` when unreadable.
 pub(crate) fn path_size(path: &std::path::Path) -> Option<u64> {
-    use gio::prelude::FileExtManual as _;
     let file = gio::File::for_path(path);
     file.measure_disk_usage(
         gio::FileMeasureFlags::APPARENT_SIZE,

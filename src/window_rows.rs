@@ -965,7 +965,7 @@ pub(crate) fn build_row(
         let notified = Rc::new(std::cell::Cell::new(false));
         thread_local! {
             static FAILURE_DIALOG: std::cell::RefCell<Option<glib::WeakRef<adw::AlertDialog>>> =
-                std::cell::RefCell::new(None);
+                const { std::cell::RefCell::new(None) };
         }
         item.connect_notify_local(Some("status"), move |item, _| {
             if item.status() == DownloadStatus::Failed {

@@ -1073,20 +1073,30 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // the spacing from the window.
     let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
 
-    // URL form: HIG AdwPreferencesGroup → AdwEntryRow with apply button
-    // (no Page wrapper — the Page adds dialog margins). The apply
-    // button is the Add action; spinner, gear, close in the suffix.
+    // URL form: HIG AdwPreferencesGroup → AdwEntryRow. The Add action is
+    // a persistent ✓ suffix button (not the built-in apply button, which
+    // hides when the text hasn't changed); spinner, gear, close follow.
+    // (No Page wrapper — the Page adds dialog margins.)
     let url_group = adw::PreferencesGroup::new();
     url_group.set_hexpand(true);
     let url_entry = adw::EntryRow::builder()
         .title(gettext("Paste a download link"))
-        .show_apply_button(true)
         .activates_default(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
     let url_spinner = adw::Spinner::new();
     url_spinner.set_visible(false);
     url_entry.add_suffix(&url_spinner);
+    // Persistent Add button: stays visible so a second press confirms
+    // after the preview loads.
+    let add_btn = gtk4::Button::builder()
+        .icon_name("object-select-symbolic")
+        .tooltip_text(gettext("Add download"))
+        .css_classes(["flat"])
+        .valign(gtk4::Align::Center)
+        .build();
+    add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
+    url_entry.add_suffix(&add_btn);
     url_group.add(&url_entry);
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
@@ -1720,7 +1730,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     };
     {
         let s = submit.clone();
-        url_entry.connect_apply(move |_| s(false));
+        add_btn.connect_clicked(move |_| s(false));
     }
     {
         let s = submit.clone();

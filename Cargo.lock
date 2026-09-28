@@ -1323,6 +1323,8 @@ version = "4.4.4-beta.20"
 dependencies = [
  "futures-util",
  "gettext-rs",
+ "gio",
+ "glib",
  "gtk4",
  "httpdate",
  "libadwaita",

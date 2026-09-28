@@ -120,7 +120,7 @@ pub(crate) fn trace_format_lines(pending: &mut String, chunk: &[u8]) {
         let line: String = pending.drain(..=pos).collect();
         let line = line.trim_end();
         if is_format_selection_line(line) {
-            tracing::info!("{line}");
+            tracing::debug!("{line}");
         }
     }
 }

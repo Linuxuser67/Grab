@@ -210,12 +210,9 @@ pub(crate) fn read_archive_bytes(url: &str) -> Option<Vec<u8>> {
 /// Parse `.torrent` bytes into a display list for the file picker (display strips bidi/controls and caps length; selection is index-based).
 fn sanitize_display_path(path: &str) -> String {
     const MAX_CHARS: usize = 120;
-    fn bidi(c: char) -> bool {
-        matches!(c, '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-    }
     let mut out: String = path
         .chars()
-        .filter(|c| !c.is_control() && !bidi(*c))
+        .filter(|c| !c.is_control() && !crate::file_names::is_bidi_control(c))
         .take(MAX_CHARS + 1)
         .collect();
     if out.chars().count() > MAX_CHARS {

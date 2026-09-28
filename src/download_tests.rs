@@ -1356,12 +1356,13 @@ fn formats_amounts() {
 
 #[test]
 fn formats_bytes() {
-    assert_eq!(fmt_bytes(0), "0 B");
-    assert_eq!(fmt_bytes(999), "999 B");
-    assert_eq!(fmt_bytes(1024), "1.0 KB");
-    assert_eq!(fmt_bytes(1536), "1.5 KB");
-    assert_eq!(fmt_bytes(5 * 1024 * 1024), "5.0 MB");
-    assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    // glib::format_size: SI base-1000, "bytes" for sub-kB, NBSP before unit.
+    assert_eq!(fmt_bytes(0), "0 bytes");
+    assert_eq!(fmt_bytes(999), "999 bytes");
+    assert_eq!(fmt_bytes(1024), "1.0\u{a0}kB");
+    assert_eq!(fmt_bytes(1536), "1.5\u{a0}kB");
+    assert_eq!(fmt_bytes(5 * 1024 * 1024), "5.2\u{a0}MB");
+    assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.2\u{a0}GB");
 }
 
 #[test]

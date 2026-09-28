@@ -562,10 +562,7 @@ async fn verify_quickjs_hash(part: &Path) -> Result<(), VideoError> {
         .await
         .map_err(|e| VideoError::install(format!("couldn't read {}: {e}", part.display())))?;
     use sha2::Digest as _;
-    let actual: String = sha2::Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let actual: String = format!("{:x}", sha2::Sha256::digest(bytes));
     if actual != expected {
         return Err(VideoError::install(
             "quickjs download failed its integrity check and was discarded",

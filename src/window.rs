@@ -339,10 +339,10 @@ pub fn build_window(
         ("downloaded", gettext("Downloaded")),
     ] {
         let toggle = adw::Toggle::builder().name(name).label(&label).build();
-        toggle.set_hexpand(true);
-        seg.add(&toggle);
+        seg.add(toggle);
     }
     seg.set_active_name(Some("all"));
+    seg.set_hexpand(true);
     content.prepend(&seg);
     // HIG search pattern: a header toggle reveals a GtkSearchBar.
     let search_bar = gtk4::SearchBar::builder().show_close_button(true).build();

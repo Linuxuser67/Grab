@@ -26,6 +26,10 @@ use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+/// HIG spacing values (GNOME Human Interface Guidelines).
+const HIG_SPACING_TIGHT: i32 = 6; // Between related items (buttons in a row)
+const HIG_SPACING_DEFAULT: i32 = 12; // Between groups
+
 /// Multi-file torrent picker opener: file name, raw bytes, parsed entries.
 type TorrentPickerOpener = Rc<dyn Fn(String, Vec<u8>, Vec<crate::torrent::TorrentFileEntry>)>;
 
@@ -620,7 +624,7 @@ fn push_playlist_items_page(
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
-        .spacing(6)
+        .spacing(HIG_SPACING_TIGHT)
         .build();
     if crate::video_probe::playlist_truncated(&playlist) {
         let notice = gtk4::Label::builder()
@@ -796,7 +800,7 @@ fn push_torrent_picker_page(
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
-        .spacing(6)
+        .spacing(HIG_SPACING_TIGHT)
         .build();
     list_box.append(&grid);
     let error_caption = gtk4::Label::builder()
@@ -1055,7 +1059,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // which stretched the entry to fit four widgets.
     let url_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
-        .spacing(12)
+        .spacing(HIG_SPACING_DEFAULT)
         .hexpand(true)
         .build();
     let url_group = adw::PreferencesGroup::new();
@@ -1074,7 +1078,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // close — HIG 6px spacing, vertically centered.
     let actions_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
-        .spacing(6)
+        .spacing(HIG_SPACING_TIGHT)
         .valign(gtk4::Align::Center)
         .build();
     let add_btn = gtk4::Button::builder()

@@ -657,7 +657,7 @@ fn wire_grid_selection_bar(
         let selection = selection.clone();
         let add_btn = add_btn.clone();
         let refresh = Rc::new(move || {
-            add_btn.set_label(&count_label(selection.n_selected() as usize));
+            add_btn.set_label(&count_label(selection.selection().size() as usize));
         });
         selection.connect_selection_changed({
             let refresh = refresh.clone();
@@ -667,11 +667,15 @@ fn wire_grid_selection_bar(
     }
     {
         let selection = selection.clone();
-        select_all_btn.connect_clicked(move |_| selection.select_all());
+        select_all_btn.connect_clicked(move |_| {
+            selection.select_all();
+        });
     }
     {
         let selection = selection.clone();
-        select_none_btn.connect_clicked(move |_| selection.unselect_all());
+        select_none_btn.connect_clicked(move |_| {
+            selection.unselect_all();
+        });
     }
 }
 

@@ -957,41 +957,37 @@ pub(crate) fn build_row(
     // Subsequent failures of the same attempt show a toast instead; a dialog
     // already open suppresses new ones (bulk-failure coalescing); hidden or
     // inactive windows get a toast, never a focus-stealing present().
-    // State lives on GTK widgets: a WeakRef to the live dialog on the window
-    // (no manual bool) and GObject data on the row for the per-attempt flag.
+    // Dialog liveness via glib::WeakRef (closed dialogs stop upgrading);
+    // main-thread-only state in thread_local (connect_notify_local).
     {
         let row_weak = row.downgrade();
         let toasts = Rc::clone(toasts);
-        // Per-row "already notified for this failure" flag, stored as GObject
-        // data so it rides the widget's lifecycle.
-        row.set_data("grab-failure-notified", std::cell::Cell::new(false));
+        let notified = Rc::new(std::cell::Cell::new(false));
+        thread_local! {
+            static FAILURE_DIALOG: std::cell::RefCell<Option<glib::WeakRef<adw::AlertDialog>>> =
+                std::cell::RefCell::new(None);
+        }
         item.connect_notify_local(Some("status"), move |item, _| {
             if item.status() == DownloadStatus::Failed {
-                let row = row_weak.upgrade();
-                let first = row
-                    .as_ref()
-                    .and_then(|r| r.data::<std::cell::Cell<bool>>("grab-failure-notified"))
-                    .map(|flag| !flag.replace(true))
-                    .unwrap_or(true);
-                // The live dialog, if any, is tracked as a WeakRef on the
-                // toplevel window: closed dialogs stop upgrading.
-                let window = row
-                    .as_ref()
+                let first = !notified.replace(true);
+                let window_active = row_weak
+                    .upgrade()
                     .and_then(|r| r.root())
-                    .and_then(|root| root.downcast::<gtk4::Window>().ok());
-                let window_active = window
-                    .as_ref()
+                    .and_then(|root| root.downcast::<gtk4::Window>().ok())
                     .map(|w| w.is_visible() && w.is_active())
                     .unwrap_or(false);
-                let dialog_open = window
-                    .as_ref()
-                    .and_then(|w| w.data::<glib::WeakRef<adw::AlertDialog>>("grab-failure-dialog"))
-                    .and_then(|weak| weak.upgrade())
-                    .is_some();
+                let dialog_open = FAILURE_DIALOG.with(|d| {
+                    d.borrow()
+                        .as_ref()
+                        .and_then(|weak| weak.upgrade())
+                        .is_some()
+                });
                 if first && window_active && !dialog_open {
-                    if let (Some(row), Some(window)) = (row, window) {
+                    if let Some(row) = row_weak.upgrade() {
                         let dialog = show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);
-                        window.set_data("grab-failure-dialog", dialog.downgrade());
+                        FAILURE_DIALOG.with(|d| {
+                            *d.borrow_mut() = Some(dialog.downgrade());
+                        });
                     }
                 } else {
                     // Repeat failure, backgrounded window, or dialog already
@@ -1001,12 +997,7 @@ pub(crate) fn build_row(
                     ));
                 }
             } else {
-                // Status left Failed: reset the per-attempt notified flag.
-                if let Some(row) = row_weak.upgrade() {
-                    if let Some(flag) = row.data::<std::cell::Cell<bool>>("grab-failure-notified") {
-                        flag.set(false);
-                    }
-                }
+                notified.set(false);
             }
         });
     }

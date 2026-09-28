@@ -332,22 +332,15 @@ pub fn build_window(
     // mutually-exclusive choice, always visible. Order must match
     // status_filter_bucket: 0 = All, 1 = Active, 2 = Queued, 3 = Downloaded.
     let seg = adw::ToggleGroup::new();
-    seg.update_property(&[gtk4::accessible::Property::Label(&gettext(
-        "Filter by status",
-    ))]);
     for (name, label) in [
         ("all", gettext("All")),
         ("active", gettext("Active")),
         ("queued", gettext("Queued")),
         ("downloaded", gettext("Downloaded")),
     ] {
-        seg.add(
-            &adw::Toggle::builder()
-                .name(name)
-                .label(&label)
-                .hexpand(true)
-                .build(),
-        );
+        let toggle = adw::Toggle::builder().name(name).label(&label).build();
+        toggle.set_hexpand(true);
+        seg.add(&toggle);
     }
     seg.set_active_name(Some("all"));
     content.prepend(&seg);

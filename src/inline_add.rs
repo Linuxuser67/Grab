@@ -157,9 +157,6 @@ struct FormatOption {
 /// The video preview block inside the form: exactly one state row shows at a
 /// time, driven by the probe below.
 struct VideoStep {
-    /// The URL entry itself, for the transient "Looking up…" subtitle
-    /// (screen-reader announcement during lookup).
-    url_entry: adw::EntryRow,
     /// Lookup spinner, in the URL entry's suffix slot (browser-address-bar
     /// style): no separate status line, no layout shift when a lookup starts.
     url_spinner: adw::Spinner,
@@ -182,8 +179,6 @@ fn hide_video_step(v: &VideoStep) {
     v.group.set_visible(false);
     // adw::Spinner animates while mapped; hiding stops it (no set_spinning).
     v.url_spinner.set_visible(false);
-    // Clear the transient lookup announcement.
-    v.url_entry.set_subtitle("");
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
@@ -213,8 +208,6 @@ fn reset_video_step(step: &VideoStep) {
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
     v.url_spinner.set_visible(true);
-    // Screen-reader announcement for the lookup (the spinner alone is silent).
-    v.url_entry.set_subtitle(gettext("Looking up…"));
 }
 
 fn show_video_ready(v: &VideoStep) {
@@ -1177,7 +1170,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_error.add_suffix(&video_retry_btn);
     video_group.add(&video_error);
     let step = Rc::new(VideoStep {
-        url_entry: url_entry.clone(),
         url_spinner: url_spinner.clone(),
         group: video_group.clone(),
         name: video_name,

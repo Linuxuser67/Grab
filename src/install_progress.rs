@@ -94,6 +94,8 @@ impl ToolRow {
     /// Mark the row active: spinner runs and its bar becomes the pulse target.
     fn set_downloading(&self) {
         self.stack.set_visible_child_name("spinner");
+        // A new attempt clears the previous failure's tint.
+        self.icon.remove_css_class("error");
         self.status.set_text(&gettext("Downloading…"));
         *self.active.borrow_mut() = Some(self.bar.clone());
     }
@@ -102,6 +104,8 @@ impl ToolRow {
     fn set_installed(&self, version: Option<String>) {
         *self.active.borrow_mut() = None;
         self.stack.set_visible_child_name("icon");
+        // Success is never red, even after a retried failure.
+        self.icon.remove_css_class("error");
         self.bar.set_fraction(1.0);
         let text = match version {
             Some(v) => gettext("Installed • {version}").replace("{version}", &v),
@@ -114,6 +118,8 @@ impl ToolRow {
     fn set_failed(&self, message: &str) {
         *self.active.borrow_mut() = None;
         self.icon.set_icon_name(Some("dialog-error-symbolic"));
+        // Red is the failure signal; the "Failed" text keeps color from being the only signal.
+        self.icon.add_css_class("error");
         self.stack.set_visible_child_name("icon");
         self.bar.set_visible(false);
         self.status.set_text(&gettext("Failed"));

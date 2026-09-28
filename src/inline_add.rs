@@ -93,10 +93,9 @@ impl ProbeState {
 
     /// Collapse/close: cancel in-flight work and drop all probe state, so a
     /// non-video add after a video leaves no dead probe state behind.
-    /// RED: `self.inflight = None;` deliberately withheld here — the new
-    /// tests must fail on this commit before the fix lands.
     fn reset(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.inflight = None;
         self.last_ok.clear();
         self.info = None;
     }

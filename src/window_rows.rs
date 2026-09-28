@@ -476,10 +476,7 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
 /// Pops up a details dialog when a download fails, using AdwAlertDialog:
 /// heading + filename body, the log as extra-child, Copy as the suggested
 /// response.
-fn show_failure_dialog(
-    parent: &impl gtk4::glib::object::IsA<gtk4::Widget>,
-    item: &crate::download::DownloadItem,
-) {
+fn show_failure_dialog(parent: &gtk4::Widget, item: &crate::download::DownloadItem) {
     let dialog = adw::AlertDialog::new(Some(&gettext("Download Failed")), Some(&item.filename()));
 
     let text = gtk4::TextView::builder()
@@ -953,7 +950,7 @@ pub(crate) fn build_row(
         item.connect_notify(Some("status"), move |item, _| {
             if item.status() == DownloadStatus::Failed {
                 if let Some(row) = row_weak.upgrade() {
-                    show_failure_dialog(&row, item);
+                    show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);
                 }
             }
         });

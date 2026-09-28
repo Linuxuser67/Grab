@@ -1051,7 +1051,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // file / torrent / destination rows.
     let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     form.set_margin_top(6);
-    form.set_margin_bottom(12);
+    // Bottom margin 6, not 12: the collapsed options revealer below is
+    // still a visible box child, so one 12px box spacing lands under the
+    // URL row while it contributes no height — 12 + 6 matches the 18px
+    // above (card 12 + form 6), keeping the gaps around the row uniform.
+    form.set_margin_bottom(6);
     form.set_margin_start(12);
     form.set_margin_end(12);
 

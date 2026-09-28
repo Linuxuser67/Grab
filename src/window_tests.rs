@@ -2,7 +2,8 @@ use crate::download::DownloadStatus;
 use crate::inline_add::{fmt_item_duration, playlist_count_label};
 use crate::media_types::PlaylistKind;
 use crate::window_rows::{
-    PulseTick, RowMedia, StopCopy, pulse_tick, row_media, should_pulse, stop_copy,
+    PulseTick, RowMedia, StopCopy, media_icon_failed, pulse_tick, row_media, should_pulse,
+    stop_copy,
 };
 
 #[test]
@@ -159,4 +160,15 @@ fn row_media_icon_names_are_real_adwaita_symbolic_names() {
     assert_eq!(RowMedia::Torrent.icon_name(), "emblem-shared-symbolic");
     assert_eq!(RowMedia::Video.icon_name(), "video-x-generic-symbolic");
     assert_eq!(RowMedia::File.icon_name(), "document-save-symbolic");
+}
+
+#[test]
+fn media_icon_failed_reserves_red_for_failure() {
+    use DownloadStatus::*;
+    // Red is the failure signal: only a failed download tints its icon.
+    assert!(media_icon_failed(Failed));
+    // Every other state — live capture included — stays neutral.
+    for s in [Queued, Downloading, Paused, Done, Cancelled] {
+        assert!(!media_icon_failed(s), "{s:?} must not take the error tint");
+    }
 }

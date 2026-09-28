@@ -1156,12 +1156,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // single Automatic row when nothing is pinnable.
     let video_format = adw::ComboRow::builder()
         .title(gettext("Media format"))
-        .subtitle(gettext("Uses your preferred quality"))
         .build();
     video_group.add(&video_format);
     let video_audio = adw::SwitchRow::builder()
         .title(gettext("Audio only"))
-        .subtitle(gettext("Skip the video track"))
         .build();
     video_group.add(&video_audio);
     let video_tools = adw::ActionRow::builder()

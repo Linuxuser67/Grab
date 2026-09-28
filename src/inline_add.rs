@@ -1049,26 +1049,34 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     form.set_margin_end(12);
 
     // URL form: AdwEntryRow MUST live in a PreferencesGroup (HIG) — outside
-    // one it loses its list styling and stretches. The actions (spinner,
-    // Add, gear, close) go in the row's suffix, keeping the horizontal
-    // layout without a hand-rolled Box.
+    // one it loses its list styling and stretches. Only the lookup
+    // spinner lives in the entry's suffix (browser-address-bar style);
+    // the Add/options/close actions sit in their own row below so the
+    // entry doesn't stretch to fit four suffix widgets.
     let url_group = adw::PreferencesGroup::new();
     let url_entry = adw::EntryRow::builder()
         .title(gettext("Paste a download link"))
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
-    // The lookup spinner lives in the entry's suffix slot
-    // (browser-address-bar style): no separate status line for the
-    // transient loading state.
     let url_spinner = adw::Spinner::new();
     url_spinner.set_visible(false);
     url_entry.add_suffix(&url_spinner);
+    url_group.add(&url_entry);
+    form.append(&url_group);
+
+    // Card actions: Add, download options (gear), close — centered in
+    // their own row under the URL field, HIG button-row pattern.
+    let actions_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(6)
+        .halign(gtk4::Align::Center)
+        .build();
     let add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
         .use_underline(true)
         .css_classes(["suggested-action"])
         .build();
-    url_entry.add_suffix(&add_btn);
+    actions_box.append(&add_btn);
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
     let opts_toggle = gtk4::ToggleButton::builder()
@@ -1078,10 +1086,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     opts_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Download options",
     ))]);
-    url_entry.add_suffix(&opts_toggle);
-    url_entry.add_suffix(&cancel_btn);
-    url_group.add(&url_entry);
-    form.append(&url_group);
+    actions_box.append(&opts_toggle);
+    actions_box.append(&cancel_btn);
+    form.append(&actions_box);
 
     // Download options live in a revealer directly under the URL row: the
     // card opens compact, one tap on the gear reveals file name, torrent,

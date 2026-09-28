@@ -21,7 +21,7 @@ use crate::window_rows::{default_name_for, selection_action_bar};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
-use gtk4::{gdk, gio, glib};
+use gtk4::{gio, glib};
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -482,39 +482,12 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
     header
 }
 
-/// Column count for a picker grid: up to 4 columns, compact single-line
-/// cells. The last row may be partial — GridView draws no empty cells
-/// for it. Fixed per picker (set via min/max-columns) — selecting never
-/// reflows.
-fn picker_columns(count: usize) -> u32 {
-    count.clamp(1, 4) as u32
-}
-
-/// A picker grid (HIG `GtkGridView` with `GtkMultiSelection` and
-/// `AdwActionRow` cells): click toggles selection, no checkboxes. Columns
-/// adapt to the item count so there are no empty trailing cells. All
-/// entries start selected, matching the old checked-by-default rows.
+/// A picker list (HIG `GtkListView` with `GtkMultiSelection` and
+/// `AdwActionRow` rows): click toggles selection, no checkboxes. The
+/// selection model renders selected rows natively — no custom CSS.
+/// All entries start selected, matching the old checked-by-default rows.
 /// Returns the view and its selection model for the caller to wire.
-fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::MultiSelection) {
-    // HIG selection outline: selected cells get an accent-colored outline.
-    // Uses the theme's @accent_color — no hardcoded colors. Installed once.
-    static INSTALL_CSS: std::sync::Once = std::sync::Once::new();
-    INSTALL_CSS.call_once(|| {
-        let css = gtk4::CssProvider::new();
-        css.load_from_string(
-            "gridview child:selected .picker-cell { \
-               outline: 2px solid @accent_color; \
-               outline-offset: -2px; \
-               border-radius: 12px; \
-             }",
-        );
-        gtk4::style_context_add_provider_for_display(
-            &gdk::Display::default().expect("no display"),
-            &css,
-            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    });
-
+fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::MultiSelection) {
     let store = gio::ListStore::new::<gtk4::StringObject>();
     for (title, _) in entries.iter() {
         store.append(&gtk4::StringObject::new(title));
@@ -526,35 +499,32 @@ fn picker_grid(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
     factory.connect_setup(|_, item| {
         let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
         // HIG: AdwActionRow for title/subtitle — no hand-rolled Box+Labels.
-        // The picker-cell class gets an accent outline when selected (CSS).
         let row = adw::ActionRow::builder().activatable(true).build();
-        row.add_css_class("picker-cell");
         item.set_child(Some(&row));
     });
     {
         let entries = Rc::clone(&entries);
         factory.connect_bind(move |_, item| {
             let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-            // Single-line compact cells: title only, no subtitle.
-            let (title, _) = &entries[item.position() as usize];
+            let (title, subtitle) = &entries[item.position() as usize];
             let row = item.child().and_downcast::<adw::ActionRow>().unwrap();
             row.set_title(title);
+            if !subtitle.is_empty() {
+                row.set_subtitle(subtitle);
+            }
         });
     }
 
-    let columns = picker_columns(entries.len());
-    let grid = gtk4::GridView::builder()
+    let list = gtk4::ListView::builder()
         .model(&selection)
         .factory(&factory)
-        .min_columns(columns)
-        .max_columns(columns)
         .build();
-    (grid, selection)
+    (list, selection)
 }
 
-/// Wire the pickers' bottom action bar to a grid's multi-selection: the
+/// Wire the pickers' bottom action bar to a list's multi-selection: the
 /// action counts the live selection, Select All/None drive the model.
-fn wire_grid_selection_bar(
+fn wire_list_selection_bar(
     selection: &gtk4::MultiSelection,
     select_all_btn: &gtk4::Button,
     select_none_btn: &gtk4::Button,
@@ -590,8 +560,8 @@ fn wire_grid_selection_bar(
     }
 }
 
-/// Selected positions of a picker grid's multi-selection, ascending.
-fn grid_selected(selection: &gtk4::MultiSelection, item_count: usize) -> Vec<usize> {
+/// Selected positions of a picker list's multi-selection, ascending.
+fn list_selected(selection: &gtk4::MultiSelection, item_count: usize) -> Vec<usize> {
     (0..item_count)
         .filter(|&i| selection.is_selected(i as u32))
         .collect()
@@ -613,7 +583,7 @@ fn push_playlist_items_page(
     }
 
     let count = playlist.items.len();
-    // Multi-column grid: title over a dimmed duration. The truncation
+    // Title over a dimmed duration. The truncation
     // notice sits under the header as a dimmed caption.
     let entries: Rc<Vec<(String, String)>> = Rc::new(
         playlist
@@ -627,7 +597,7 @@ fn push_playlist_items_page(
             })
             .collect(),
     );
-    let (grid, selection) = picker_grid(Rc::clone(&entries));
+    let (list, selection) = picker_list(Rc::clone(&entries));
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -645,8 +615,8 @@ fn push_playlist_items_page(
             .build();
         list_box.append(&notice);
     }
-    list_box.append(&grid);
-    // The error caption lives under the grid, like the old row list.
+    list_box.append(&list);
+    // The error caption lives under the list, like the old row list.
     let error_caption = gtk4::Label::builder()
         .label("")
         .css_classes(["error", "caption"])
@@ -683,8 +653,8 @@ fn push_playlist_items_page(
         .build();
     picker_enter_confirms(&picker_page, &add_btn);
 
-    // The action counts the live selection (see `wire_grid_selection_bar`).
-    wire_grid_selection_bar(
+    // The action counts the live selection (see `wire_list_selection_bar`).
+    wire_list_selection_bar(
         &selection,
         &select_all_btn,
         &select_none_btn,
@@ -696,7 +666,7 @@ fn push_playlist_items_page(
         let close_card = close_card.clone();
         let selection = selection.clone();
         add_btn.connect_clicked(move |_| {
-            let picked: Vec<usize> = grid_selected(&selection, count);
+            let picked: Vec<usize> = list_selected(&selection, count);
             let picked_set: std::collections::HashSet<usize> = picked.into_iter().collect();
             let chosen: Vec<(usize, &crate::media_types::PlaylistItem)> = playlist
                 .items
@@ -790,9 +760,9 @@ fn push_torrent_picker_page(
     // The file count lives in the compact header; the group needs no title.
     let file_count = ngettext("{} file", "{} files", entries.len() as u32)
         .replace("{}", &entries.len().to_string());
-    // Multi-column grid like the playlist picker: path over a dimmed size.
+    // Like the playlist picker: path over a dimmed size.
     let entry_count = entries.len();
-    let grid_entries: Rc<Vec<(String, String)>> = Rc::new(
+    let list_entries: Rc<Vec<(String, String)>> = Rc::new(
         entries
             .iter()
             .map(|e| {
@@ -803,13 +773,13 @@ fn push_torrent_picker_page(
             })
             .collect(),
     );
-    let (grid, selection) = picker_grid(grid_entries);
+    let (list, selection) = picker_list(list_entries);
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .spacing(6)
         .build();
-    list_box.append(&grid);
+    list_box.append(&list);
     let error_caption = gtk4::Label::builder()
         .label("")
         .css_classes(["error", "caption"])
@@ -843,7 +813,7 @@ fn push_torrent_picker_page(
     picker_enter_confirms(&picker_page, &add_btn);
 
     // Same as the playlist picker: the action counts the live selection.
-    wire_grid_selection_bar(
+    wire_list_selection_bar(
         &selection,
         &select_all_btn,
         &select_none_btn,
@@ -855,7 +825,7 @@ fn push_torrent_picker_page(
         let close_card = close_card.clone();
         let selection = selection.clone();
         add_btn.connect_clicked(move |_| {
-            let selected: Vec<usize> = grid_selected(&selection, entry_count);
+            let selected: Vec<usize> = list_selected(&selection, entry_count);
             if selected.is_empty() {
                 error_caption.set_text(&gettext("Select at least one file"));
                 error_caption.set_visible(true);
@@ -1944,25 +1914,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn picker_columns_adapts_without_empty_cells() {
-        // Max 4 columns; the last row may be partial — GridView draws no
-        // empty cells for it.
-        assert_eq!(picker_columns(0), 1);
-        assert_eq!(picker_columns(1), 1);
-        assert_eq!(picker_columns(2), 2);
-        assert_eq!(picker_columns(3), 3);
-        assert_eq!(picker_columns(4), 4);
-        assert_eq!(picker_columns(5), 4);
-        assert_eq!(picker_columns(31), 4);
-        // Columns never exceed 4 or the item count.
-        for n in 1..=50 {
-            let c = picker_columns(n) as usize;
-            assert!(c <= 4, "n={n} cols={c} exceeds 4");
-            assert!(c <= n, "n={n} cols={c} exceeds count");
-        }
-    }
 
     fn dummy_probe() -> crate::video::ProbeResult {
         crate::video::ProbeResult::Single(crate::video::VideoInfo {

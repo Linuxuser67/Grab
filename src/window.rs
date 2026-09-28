@@ -292,10 +292,12 @@ pub fn build_window(
     let (queued_section, queued_list) = section_list(&gettext("Queued"));
     let (downloaded_section, downloaded_list) = section_list(&gettext("Downloaded"));
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    content.set_margin_top(6);
-    content.set_margin_bottom(6);
-    content.set_margin_start(6);
-    content.set_margin_end(6);
+    // 9px: midpoint between the 6px base and 12px — matches the inline
+    // card's effective padding (6px + AdwToolbarView top-bar padding).
+    content.set_margin_top(9);
+    content.set_margin_bottom(9);
+    content.set_margin_start(9);
+    content.set_margin_end(9);
     let scroll = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .vexpand(true)

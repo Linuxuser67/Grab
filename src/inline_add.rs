@@ -964,24 +964,19 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     card.set_margin_end(12);
     card.add_css_class("card");
 
-    let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    header.set_margin_top(12);
-    header.set_margin_start(12);
-    header.set_margin_end(6);
-    let title = gtk4::Label::new(Some(&gettext("New Download")));
-    title.add_css_class("heading");
-    title.set_halign(gtk4::Align::Start);
-    title.set_hexpand(true);
+    // No in-card title: the card only opens from explicit "New Download"
+    // affordances (+, Ctrl+N, the empty-state pill), so restating it is
+    // redundant. The navigation page below keeps the accessible name.
+    // Dismissal lives in the URL row with the other actions — an inline
+    // card has no window controls.
     let cancel_btn = gtk4::Button::builder()
         .icon_name("window-close-symbolic")
         .css_classes(["flat", "circular"])
         .tooltip_text(gettext("Cancel"))
         .build();
-    header.append(&title);
-    header.append(&cancel_btn);
+    cancel_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Cancel"))]);
 
     let nav = adw::NavigationView::new();
-    card.append(&header);
     card.append(&nav);
     revealer.set_child(Some(&card));
 
@@ -1016,6 +1011,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     url_box.append(&url_entry);
     url_box.append(&add_btn);
     url_box.append(&opts_toggle);
+    url_box.append(&cancel_btn);
     form.append(&url_box);
 
     // Download options live in a revealer directly under the URL row: the

@@ -1,5 +1,7 @@
 //! File-name primitives: sanitize, split, dedupe, derive, atomic rename, piece sizing, byte formatting.
 
+use gio::prelude::FileExt as _;
+
 /// Split stem and extension (last dot only; leading dot is stem). Pure.
 fn split_stem_ext(name: &str) -> (&str, Option<&str>) {
     match name.rfind('.') {
@@ -148,7 +150,7 @@ pub(crate) fn name_stem(name: &str) -> &str {
 }
 
 /// Explicit bidi controls (escapes, never literal glyphs: invisible in source).
-fn is_bidi_control(c: char) -> bool {
+pub(crate) fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{200E}' | '\u{200F}' | '\u{61C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
@@ -273,28 +275,12 @@ pub(crate) fn sane_filename(s: &str) -> bool {
         && !s.chars().any(|c| c.is_control() || is_bidi_control(c))
 }
 
-/// Best-effort filename from URL path (decodes `%XX`, leaves `+`); falls back to `index.html`.
+/// Best-effort filename from URL path via GLib's `g_uri_unescape_string`
+/// (single-pass `%XX` decode, leaves `+`); falls back to `index.html`.
 pub(crate) fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let mut decoded = None;
-        if bytes[i] == b'%'
-            && let (Some(&h), Some(&l)) = (bytes.get(i + 1), bytes.get(i + 2))
-            && let (Some(h), Some(l)) = ((h as char).to_digit(16), (l as char).to_digit(16))
-        {
-            decoded = Some((h << 4 | l) as u8);
-        }
-        if let Some(b) = decoded {
-            out.push(b);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    glib::uri_unescape_string(s, None::<&str>)
+        .map(|g| g.to_string())
+        .unwrap_or_else(|| s.to_owned())
 }
 
 pub fn filename_from_url(url_str: &str) -> String {
@@ -309,48 +295,22 @@ pub fn filename_from_url(url_str: &str) -> String {
         .unwrap_or_else(|| "index.html".to_string())
 }
 
+/// Human-readable byte size via GLib's `g_format_size` (SI base-1000, localized).
 pub(crate) fn fmt_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut v = n as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < 4 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", UNITS[u])
-    }
+    glib::format_size(n).to_string()
 }
 
-/// On-disk size: files report length, folders sum contents (no symlink descent); `None` when unreadable.
+/// On-disk size via GIO's `measure_disk_usage` (apparent size, no symlink
+/// descent); `None` when unreadable.
 pub(crate) fn path_size(path: &std::path::Path) -> Option<u64> {
-    let meta = std::fs::metadata(path).ok()?;
-    if meta.is_file() {
-        return Some(meta.len());
-    }
-    if !meta.is_dir() {
-        return None;
-    }
-    let mut total = 0u64;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(ft) = entry.file_type() else {
-                continue;
-            };
-            if ft.is_dir() {
-                stack.push(entry.path());
-            } else if ft.is_file() {
-                total = total.saturating_add(entry.metadata().map(|m| m.len()).unwrap_or(0));
-            }
-        }
-    }
-    Some(total)
+    let file = gio::File::for_path(path);
+    file.measure_disk_usage(
+        gio::FileMeasureFlags::APPARENT_SIZE,
+        None::<&gio::Cancellable>,
+        None,
+    )
+    .map(|(size, _, _)| size)
+    .ok()
 }
 
 /// Smallest piece: <=~4GB splits into 1MB pieces so one slow connection delays only the tail.

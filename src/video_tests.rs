@@ -2103,9 +2103,9 @@ fn video_format_options_lists_best_per_height() {
         opts.iter().map(|o| &*o.id).collect::<Vec<_>>(),
         ["v1080-vp9", "v720-av01", "v360-vp9"]
     );
-    assert_eq!(&*opts[0].label, "1080p · vp9 · 200.0 MB");
+    assert_eq!(&*opts[0].label, "1080p · vp9 · 200.0\u{a0}MB");
     assert_eq!(opts[0].height, 1080);
-    assert_eq!(&*opts[1].label, "720p · av01 · 60.0 MB");
+    assert_eq!(&*opts[1].label, "720p · av01 · 60.0\u{a0}MB");
 }
 
 #[test]

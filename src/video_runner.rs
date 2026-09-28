@@ -71,7 +71,7 @@ pub async fn run_video_download(
     // quickjs-ng is the JS runtime Grab pins for YouTube; make sure it's
     // installed before a YouTube spawn that may need to solve JS challenges.
     crate::video_tools::ensure_quickjs(&job.page_url).await?;
-    tracing::info!(
+    tracing::debug!(
         item_id = job.item_id,
         host = %page_host(&job.page_url),
         quality = %job.quality,
@@ -120,7 +120,7 @@ pub async fn run_video_download(
             // No picked entry: the spawner expands the collection into per-item rows instead of failing it.
             Ok(FetchedVideo::Playlist(pl)) => return Ok(VideoOutcome::Expand(pl.into())),
             Err(e) if attempt + 1 < 3 => {
-                tracing::debug!("video resolve failed, retrying: {e}");
+                tracing::info!("video resolve failed, retrying: {e}");
                 tokio::time::sleep(Duration::from_secs(u64::from(attempt) + 1)).await;
             }
             Err(e) => return Err(e),
@@ -170,7 +170,7 @@ pub async fn run_video_download(
         if job.is_live && abort.try_recv().is_ok() {
             return Err(VideoError::interrupted());
         }
-        tracing::info!(
+        tracing::debug!(
             item_id = job.item_id,
             page_host = %page_host(&job.page_url),
             height = ?hls.height,
@@ -219,7 +219,7 @@ pub async fn run_video_download(
         return Err(VideoError::unavailable_detail(&video.formats));
     };
 
-    tracing::info!(
+    tracing::debug!(
         item_id = job.item_id,
         video = ?video_sel.as_ref().map(|s| s.format_id.as_str()),
         audio = %audio_sel.format_id,
@@ -702,7 +702,7 @@ pub(crate) async fn remux_live_capture(
         }
         let detail = last_log_line(&log_tail, "ffmpeg reported failure");
         if with_bsf {
-            tracing::info!(error = %detail, "live remux without bsf, retrying bare");
+            tracing::debug!(error = %detail, "live remux without bsf, retrying bare");
             continue;
         }
         let _ = tokio::fs::remove_file(&partial).await;
@@ -952,7 +952,7 @@ pub(crate) async fn resolve_subtitle_lang(
     let available = available_subtitle_langs(&info);
     let lang = pick_subtitle_lang(&available, &[&pref, "en"]);
     if lang.is_none() {
-        tracing::info!("video offers no subtitles in the preferred language or English");
+        tracing::debug!("video offers no subtitles in the preferred language or English");
     }
     Ok(lang)
 }

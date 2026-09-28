@@ -291,6 +291,9 @@ fn display_path_strips_spoof_chars() {
     assert_eq!(sanitize_display_path("a\u{202E}exe.pdf"), "aexe.pdf");
     assert_eq!(sanitize_display_path("a\nb\tc"), "abc");
     assert_eq!(sanitize_display_path("v\u{2066}ideo"), "video");
+    // U+200E/U+200F (LTR/RTL marks) were missing from the old local predicate;
+    // the shared is_bidi_control must strip them too.
+    assert_eq!(sanitize_display_path("a\u{200E}b\u{200F}c"), "abc");
     let long = "x".repeat(200);
     let shown = sanitize_display_path(&long);
     assert_eq!(shown.chars().count(), 121);

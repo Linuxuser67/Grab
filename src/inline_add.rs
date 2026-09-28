@@ -482,20 +482,27 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
     header
 }
 
-/// Column count for a picker grid, from the entry count: a pair stays a
-/// readable single column; more entries flow into up to four columns.
-/// Fixed per picker (set via min/max-columns) — selecting never reflows.
-/// Adaptive columns for the picker grid: no empty trailing cells.
-/// 1-3 items fill one row; 4 splits 2x2; larger counts use the widest
-/// grid (up to 4 columns) with minimal empty spaces.
+/// Column count for a picker grid, from the entry count: 1-3 fill one
+/// row; 4 splits 2x2; larger counts use the largest divisor (max 3
+/// columns) so no cell is ever empty. Fixed per picker (set via
+/// min/max-columns) — selecting never reflows.
+/// Uses the largest divisor of the count (up to 3 columns) so every
+/// cell is filled: 3→3 (1 row), 4→2 (2x2), 6→3 (2 rows), 9→3 (3x3).
+/// Prime counts >3 use a single column — the only way to avoid gaps.
 fn picker_columns(count: usize) -> u32 {
     match count {
         0..=3 => count.max(1) as u32,
         4 => 2,
-        5..=6 => 3,
-        7..=8 => 4,
-        9 => 3, // 3x3 perfect
-        _ => 4, // Cap at 4; larger sets scroll
+        _ => {
+            // Largest divisor ≤3; fallback to 1 (no empty cells).
+            let mut cols = 1;
+            for c in 2..=3 {
+                if count % c == 0 {
+                    cols = c;
+                }
+            }
+            cols as u32
+        }
     }
 }
 
@@ -1966,19 +1973,24 @@ mod tests {
 
     #[test]
     fn picker_columns_adapts_without_empty_cells() {
-        // 1-3 items fill a single row; 4 splits 2x2; larger counts use
-        // the widest grid with minimal trailing empty cells.
+        // 1-3 fill a single row; 4 splits 2x2; larger counts use the
+        // largest divisor ≤3 so no cell is ever empty.
         assert_eq!(picker_columns(0), 1);
         assert_eq!(picker_columns(1), 1);
         assert_eq!(picker_columns(2), 2);
         assert_eq!(picker_columns(3), 3);
         assert_eq!(picker_columns(4), 2);
-        assert_eq!(picker_columns(5), 3);
+        assert_eq!(picker_columns(5), 1); // prime: single column
         assert_eq!(picker_columns(6), 3);
-        assert_eq!(picker_columns(7), 4);
-        assert_eq!(picker_columns(8), 4);
+        assert_eq!(picker_columns(7), 1); // prime: single column
+        assert_eq!(picker_columns(8), 2);
         assert_eq!(picker_columns(9), 3);
-        assert_eq!(picker_columns(12), 4);
+        assert_eq!(picker_columns(12), 3);
+        // No empty cells: count is always divisible by columns.
+        for n in 1..=50 {
+            let c = picker_columns(n) as usize;
+            assert_eq!(n % c, 0, "n={n} cols={c} leaves empty cells");
+        }
     }
 
     fn dummy_probe() -> crate::video::ProbeResult {

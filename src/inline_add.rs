@@ -483,25 +483,12 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
 }
 
 /// A picker list (HIG `GtkListView` with `GtkMultiSelection` and
-/// `AdwActionRow` rows): click toggles selection, no checkboxes. The
-/// selection model renders selected rows natively — no custom CSS.
-/// All entries start selected, matching the old checked-by-default rows.
+/// `AdwActionRow` rows): click toggles selection, no checkboxes. Pure
+/// theme defaults — no custom CSS; the selection model and Adwaita render
+/// selected rows natively. All entries start selected, matching the old
+/// checked-by-default rows.
 /// Returns the view and its selection model for the caller to wire.
 fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::MultiSelection) {
-    // Compact density: single-line rows with tightened padding. Installed once.
-    static INSTALL_CSS: std::sync::Once = std::sync::Once::new();
-    INSTALL_CSS.call_once(|| {
-        let css = gtk4::CssProvider::new();
-        css.load_from_string(
-            ".picker-compact { padding-top: 3px; padding-bottom: 3px; margin-bottom: 4px; }",
-        );
-        gtk4::style_context_add_provider_for_display(
-            &gtk4::gdk::Display::default().expect("no display"),
-            &css,
-            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    });
-
     let store = gio::ListStore::new::<gtk4::StringObject>();
     for (title, _) in entries.iter() {
         store.append(&gtk4::StringObject::new(title));
@@ -514,8 +501,8 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::Mul
         let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
         // HIG: AdwActionRow, single-line title only — the subtitle would
         // double the row height. Duration/size is redundant for picking.
-        let row = adw::ActionRow::builder().activatable(true).build();
-        row.add_css_class("picker-compact");
+        // Not activatable: the ListView's selection model owns interaction.
+        let row = adw::ActionRow::builder().build();
         item.set_child(Some(&row));
     });
     {

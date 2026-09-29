@@ -524,6 +524,12 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::FlowBox, Vec<gtk4::
         // is plain text, never markup.
         let btn = gtk4::ToggleButton::with_label(title);
         btn.set_active(true);
+        // Overlong titles ellipsize instead of forcing the FlowBox into
+        // degenerate width measurements (gtk_widget_measure for_size
+        // criticals): the pill keeps a sane minimum width.
+        if let Some(label) = btn.child().and_downcast::<gtk4::Label>() {
+            label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        }
         flowbox.append(&btn);
         buttons.push(btn);
     }

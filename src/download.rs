@@ -554,33 +554,6 @@ impl DownloadManager {
         Ok(self.insert(item))
     }
 
-    /// Enqueue a download to start at a future Unix timestamp. The item gets
-    /// `Scheduled` status (skipped by `start_next`) until the scheduler queues it.
-    ///
-    /// # Errors
-    /// Returns a display-ready message when the URL is invalid or the timestamp is not in the future.
-    pub fn enqueue_scheduled(
-        self: &Rc<Self>,
-        url: &str,
-        dest_dir: Option<&str>,
-        filename: Option<&str>,
-        scheduled_at: i64,
-    ) -> Result<DownloadItem, String> {
-        let now = glib::DateTime::now_local()
-            .map(|dt| dt.to_unix())
-            .unwrap_or(0);
-        if scheduled_at <= now {
-            return Err(gettext("Scheduled time must be in the future"));
-        }
-        // Batch guard defers start_next until the status is Scheduled:
-        // without it, insert() would spawn the still-Queued item.
-        let _guard = self.batch_guard();
-        let item = self.enqueue(url, dest_dir, filename)?;
-        item.set_scheduled_at(scheduled_at);
-        item.set_status(DownloadStatus::Scheduled);
-        Ok(item)
-    }
-
     /// Intake for .torrent files: archive the bytes, then enqueue the
     /// pseudo-URL like any other download (stub from the file stem, real
     /// name arrives with metadata via SuggestName).

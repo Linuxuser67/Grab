@@ -343,7 +343,7 @@ fn submit_probed_single(
         None => manager.settings().video_quality(),
     };
     enqueue_and_close(
-        &manager,
+        manager,
         dest,
         close_card,
         scheduled_at,
@@ -788,6 +788,7 @@ fn push_playlist_items_page(
 /// Multi-file .torrent intake as a right-sliding card page: one switch per
 /// file, all on by default. The selection feeds rqbit's `only_files` at add
 /// time (no live setter), so it must be chosen here.
+#[allow(clippy::too_many_arguments)]
 fn push_torrent_picker_page(
     nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,

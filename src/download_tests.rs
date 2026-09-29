@@ -6057,8 +6057,21 @@ fn ensure_contained_parent_reports_mkdir_failure_distinctly() {
     let _ = std::fs::remove_dir_all(&outside);
 }
 
+/// Build a scheduled item the way the New Download card does: enqueue under a
+/// batch guard (so `insert` doesn't spawn the still-Queued item), then stamp
+/// the time and flip the status to Scheduled.
+fn schedule_test_item(m: &Rc<DownloadManager>, at: i64) -> DownloadItem {
+    let _guard = m.batch_guard();
+    let item = m
+        .enqueue("https://example.com/file.zip", None, None)
+        .expect("enqueue should succeed");
+    item.set_scheduled_at(at);
+    item.set_status(DownloadStatus::Scheduled);
+    item
+}
+
 #[test]
-fn enqueue_scheduled_creates_scheduled_item() {
+fn scheduled_item_starts_with_timestamp_and_status() {
     let settings = test_settings();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     let future = glib::DateTime::now_local()
@@ -6066,24 +6079,9 @@ fn enqueue_scheduled_creates_scheduled_item() {
         .add_hours(1)
         .unwrap()
         .to_unix();
-    let item = m
-        .enqueue_scheduled("https://example.com/file.zip", None, None, future)
-        .expect("enqueue_scheduled should succeed");
+    let item = schedule_test_item(&m, future);
     assert_eq!(item.status(), DownloadStatus::Scheduled);
     assert_eq!(item.scheduled_at(), future);
-}
-
-#[test]
-fn enqueue_scheduled_rejects_past_time() {
-    let settings = test_settings();
-    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    let past = glib::DateTime::now_local()
-        .unwrap()
-        .add_hours(-1)
-        .unwrap()
-        .to_unix();
-    let result = m.enqueue_scheduled("https://example.com/file.zip", None, None, past);
-    assert!(result.is_err(), "past scheduled time must be rejected");
 }
 
 #[test]
@@ -6096,9 +6094,7 @@ fn check_scheduled_queues_due_items() {
         .add_hours(1)
         .unwrap()
         .to_unix();
-    let item = m
-        .enqueue_scheduled("https://example.com/file.zip", None, None, future)
-        .unwrap();
+    let item = schedule_test_item(&m, future);
     assert_eq!(item.status(), DownloadStatus::Scheduled);
     // Simulate the scheduled time arriving.
     item.set_scheduled_at(
@@ -6126,9 +6122,7 @@ fn check_scheduled_leaves_future_items_alone() {
         .add_hours(2)
         .unwrap()
         .to_unix();
-    let item = m
-        .enqueue_scheduled("https://example.com/file.zip", None, None, future)
-        .unwrap();
+    let item = schedule_test_item(&m, future);
     m.check_scheduled();
     assert_eq!(item.status(), DownloadStatus::Scheduled);
     assert_eq!(item.scheduled_at(), future);

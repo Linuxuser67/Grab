@@ -493,7 +493,7 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::Mul
     INSTALL_CSS.call_once(|| {
         let css = gtk4::CssProvider::new();
         css.load_from_string(
-            ".picker-compact { padding-top: 3px; padding-bottom: 3px; margin-bottom: 4px; border-radius: 12px; }",
+            ".picker-compact { padding-top: 3px; padding-bottom: 3px; margin-bottom: 4px; }",
         );
         gtk4::style_context_add_provider_for_display(
             &gtk4::gdk::Display::default().expect("no display"),

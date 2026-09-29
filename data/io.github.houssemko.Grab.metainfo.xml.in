@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.12" date="2026-09-29">
+      <description>
+        <ul>
+          <li>Fix a build failure in the probe-error card.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.11" date="2026-09-29">
       <description>
         <ul>

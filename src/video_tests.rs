@@ -1792,7 +1792,7 @@ fn probe_result_helpers_cover_both_variants() {
 fn probe_struct_footprint_budget() {
     use std::mem::size_of;
     assert_eq!(size_of::<VideoFormatOption>(), 40, "VideoFormatOption");
-    assert_eq!(size_of::<VideoInfo>(), 104, "VideoInfo");
+    assert_eq!(size_of::<VideoInfo>(), 88, "VideoInfo");
     assert_eq!(size_of::<PlaylistItem>(), 80, "PlaylistItem");
     assert_eq!(size_of::<PlaylistInfo>(), 80, "PlaylistInfo");
     assert_eq!(size_of::<ProbeResult>(), 104, "ProbeResult");

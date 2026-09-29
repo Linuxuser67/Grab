@@ -484,11 +484,12 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
 }
 
 /// A picker list (HIG `GtkListView` with `GtkMultiSelection`): single-column
-/// rows that match the app's list UI — click toggles selection. Pure theme
-/// defaults, no custom CSS; the selection model and Adwaita render selected
-/// rows natively via `:selected`. All entries start selected, matching the
-/// old checked-by-default rows. Returns the view and its selection model
-/// for the caller to wire.
+/// rows that match the app's list UI — click toggles selection. The
+/// `.boxed-list-separate` style (same as the queue) gives each row its own
+/// rounded card with spacing. Pure theme defaults, no custom CSS; the
+/// selection model and Adwaita render selected rows natively via `:selected`.
+/// All entries start selected, matching the old checked-by-default rows.
+/// Returns the view and its selection model for the caller to wire.
 fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::MultiSelection) {
     let store = gio::ListStore::new::<gtk4::StringObject>();
     for (title, _) in entries.iter() {
@@ -521,6 +522,9 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::Mul
     let list = gtk4::ListView::builder()
         .model(&selection)
         .factory(&factory)
+        // Match the queue's .boxed-list-separate: each row is its own
+        // rounded card with spacing, not a flat full-width bar.
+        .css_classes(["boxed-list-separate"])
         .build();
     (list, selection)
 }

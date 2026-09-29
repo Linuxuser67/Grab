@@ -21,7 +21,7 @@ use crate::window_rows::{default_name_for, selection_action_bar};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
-use gtk4::{gdk, gio, glib};
+use gtk4::{gio, glib};
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

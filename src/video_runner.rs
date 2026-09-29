@@ -1527,8 +1527,13 @@ pub(crate) async fn run_hls_ytdlp(
                         // Same file, revised total: rebuild the grid on
                         // growth (refined-up estimate) or on a sharp drop
                         // (an estimate spike collapsed — the sticky max was
-                        // phantom; see `estimate_collapsed`).
-                        let collapsed = estimate_collapsed(max_total, t);
+                        // phantom; see `estimate_collapsed`). The collapse is
+                        // only adopted when the new total can still contain
+                        // what we've downloaded: adopting a total below the
+                        // downloaded bytes would flood the grid to a false
+                        // 100% (see hls_map_survives_estimate_wobble).
+                        let collapsed = estimate_collapsed(max_total, t)
+                            && p.downloaded.is_some_and(|d| t >= d);
                         if grid_needs_rebuild(grid_total, t) || collapsed {
                             tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
                             grid_total = Some(t);

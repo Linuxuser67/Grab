@@ -551,7 +551,10 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
 /// Falls back to a single column when the count is prime (or 1).
 fn picker_columns(count: usize) -> u32 {
     let max = 4.min(count).max(1);
-    (1..=max).rev().find(|c| count % c == 0).unwrap_or(1) as u32
+    (1..=max)
+        .rev()
+        .find(|c| count.is_multiple_of(*c))
+        .unwrap_or(1) as u32
 }
 
 /// Wire the pickers' bottom action bar to a list's multi-selection: the

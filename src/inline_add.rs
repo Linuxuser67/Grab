@@ -494,89 +494,80 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
     header
 }
 
-/// A picker grid (HIG `GtkFlowBox` with multi-selection): cells are Adwaita
-/// `.card`s that hug their content — the grid equivalent of the list's
-/// `.boxed-list-separate` rows — with HIG spacing between them. Click toggles
-/// selection; selected cells render natively via `:selected`. All entries
-/// start selected, matching the old checked-by-default rows. Returns the
-/// box for the caller to wire.
-fn picker_list(entries: Rc<Vec<(String, String)>>) -> gtk4::FlowBox {
+/// A picker grid: `GtkFlowBox` as the wrapping container, cells as toggle
+/// pills with the simple Button API. All entries start active, matching the
+/// old checked-by-default rows. Returns the box and the pills for the caller
+/// to wire.
+fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::FlowBox, Vec<gtk4::ToggleButton>) {
+    // Flowing grid of toggle pills: the simple Button API
+    // (set_active/is_active/toggled), native selected styling, no selection
+    // model. FlowBox is only the wrapping container.
     let flowbox = gtk4::FlowBox::builder()
-        .selection_mode(gtk4::SelectionMode::Multiple)
+        .selection_mode(gtk4::SelectionMode::None)
         .column_spacing(12)
         .row_spacing(12)
         .build();
+    let mut buttons = Vec::with_capacity(entries.len());
     for (title, _) in entries.iter() {
-        // .card: native rounded-card look (background + radius, no padding of
-        // its own). 12px inner padding matches the app's card margins;
-        // hug the content (don't stretch to fill the grid cell). Titles are
-        // untrusted (video titles carry `&`, `<`, …): plain text via
-        // set_text, never markup.
-        let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        card.add_css_class("card");
-        let label = gtk4::Label::builder()
-            .halign(gtk4::Align::Start)
-            .wrap(true)
-            .build();
-        label.set_text(title);
-        label.set_margin_top(12);
-        label.set_margin_bottom(12);
-        label.set_margin_start(12);
-        label.set_margin_end(12);
-        card.append(&label);
-        flowbox.append(&card);
+        // Titles are untrusted (video titles carry `&`, `<`, …): Button label
+        // is plain text, never markup.
+        let btn = gtk4::ToggleButton::with_label(title);
+        btn.set_active(true);
+        flowbox.append(&btn);
+        buttons.push(btn);
     }
-    flowbox.select_all();
-    flowbox
+    (flowbox, buttons)
 }
 
-/// Wire the pickers' bottom action bar to a flowbox's multi-selection: the
-/// action counts the live selection, Select All/None drive the box.
+/// Wire the pickers' bottom action bar to the toggle pills: the action counts
+/// the live selection, Select All/None drive the buttons.
 fn wire_list_selection_bar(
-    flowbox: &gtk4::FlowBox,
+    buttons: &[gtk4::ToggleButton],
     select_all_btn: &gtk4::Button,
     select_none_btn: &gtk4::Button,
     add_btn: &gtk4::Button,
     count_label: impl Fn(usize) -> String + 'static,
 ) {
-    {
-        let flowbox = flowbox.clone();
+    let buttons = buttons.to_vec();
+    let refresh = Rc::new({
+        let buttons = buttons.clone();
         let add_btn = add_btn.clone();
-        let refresh = Rc::new({
-            let flowbox = flowbox.clone();
-            move || {
-                add_btn.set_label(&count_label(flowbox.selected_children().len()));
+        move || {
+            let n = buttons.iter().filter(|b| b.is_active()).count();
+            add_btn.set_label(&count_label(n));
+        }
+    });
+    for btn in &buttons {
+        let refresh = Rc::clone(&refresh);
+        btn.connect_toggled(move |_| refresh());
+    }
+    refresh();
+    {
+        let buttons = buttons.clone();
+        select_all_btn.connect_clicked(move |_| {
+            for b in &buttons {
+                b.set_active(true);
             }
         });
-        flowbox.connect_selected_children_changed({
-            let refresh = refresh.clone();
-            move |_| refresh()
-        });
-        refresh();
     }
     {
-        let flowbox = flowbox.clone();
-        select_all_btn.connect_clicked(move |_| {
-            flowbox.select_all();
-        });
-    }
-    {
-        let flowbox = flowbox.clone();
+        let buttons = buttons.clone();
         select_none_btn.connect_clicked(move |_| {
-            flowbox.unselect_all();
+            for b in &buttons {
+                b.set_active(false);
+            }
         });
     }
 }
 
-/// Selected indices of a picker flowbox, ascending.
-fn list_selected(flowbox: &gtk4::FlowBox) -> Vec<usize> {
-    let mut indices: Vec<usize> = flowbox
-        .selected_children()
+/// Selected indices of picker toggle pills, ascending.
+fn list_selected(buttons: &[gtk4::ToggleButton]) -> Vec<usize> {
+    buttons
         .iter()
-        .map(|c| c.index() as usize)
-        .collect();
-    indices.sort_unstable();
-    indices
+        .enumerate()
+        .filter(|(_, b)| b.is_active())
+        .map(|(i, _)| i)
+        .collect()
 }
 
 fn push_playlist_items_page(
@@ -607,7 +598,7 @@ fn push_playlist_items_page(
             })
             .collect(),
     );
-    let list = picker_list(Rc::clone(&entries));
+    let (flowbox, picks) = picker_list(Rc::clone(&entries));
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -630,7 +621,7 @@ fn push_playlist_items_page(
             .build();
         list_box.append(&notice);
     }
-    list_box.append(&list);
+    list_box.append(&flowbox);
     // The error caption lives under the list, like the old row list.
     let error_caption = gtk4::Label::builder()
         .label("")
@@ -669,15 +660,15 @@ fn push_playlist_items_page(
     picker_enter_confirms(&picker_page, &add_btn);
 
     // The action counts the live selection (see `wire_list_selection_bar`).
-    wire_list_selection_bar(&list, &select_all_btn, &select_none_btn, &add_btn, |n| {
+    wire_list_selection_bar(&picks, &select_all_btn, &select_none_btn, &add_btn, |n| {
         ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
     });
 
     {
         let close_card = close_card.clone();
-        let list = list.clone();
+        let picks = picks.clone();
         add_btn.connect_clicked(move |_| {
-            let picked: Vec<usize> = list_selected(&list);
+            let picked: Vec<usize> = list_selected(&picks);
             let picked_set: std::collections::HashSet<usize> = picked.into_iter().collect();
             let chosen: Vec<(usize, &crate::media_types::PlaylistItem)> = playlist
                 .items
@@ -736,9 +727,7 @@ fn push_playlist_items_page(
                 // Rows already queued stay queued on a partial failure: unselect
                 // them so a retry submits only the remainder (dedupe is by
                 // filename).
-                if let Some(child) = list.child_at_index(*i as i32) {
-                    list.unselect_child(&child);
-                }
+                picks[*i].set_active(false);
             }
             if let Some(e) = failed {
                 error_caption.set_text(&e);
@@ -786,7 +775,7 @@ fn push_torrent_picker_page(
             })
             .collect(),
     );
-    let list = picker_list(list_entries);
+    let (flowbox, picks) = picker_list(list_entries);
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -797,7 +786,7 @@ fn push_torrent_picker_page(
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
-    list_box.append(&list);
+    list_box.append(&flowbox);
     let error_caption = gtk4::Label::builder()
         .label("")
         .css_classes(["error", "caption"])
@@ -832,15 +821,15 @@ fn push_torrent_picker_page(
     picker_enter_confirms(&picker_page, &add_btn);
 
     // Same as the playlist picker: the action counts the live selection.
-    wire_list_selection_bar(&list, &select_all_btn, &select_none_btn, &add_btn, |n| {
+    wire_list_selection_bar(&picks, &select_all_btn, &select_none_btn, &add_btn, |n| {
         ngettext("_Add {} file", "_Add {} files", n as u32).replace("{}", &n.to_string())
     });
 
     {
         let close_card = close_card.clone();
-        let list = list.clone();
+        let picks = picks.clone();
         add_btn.connect_clicked(move |_| {
-            let selected: Vec<usize> = list_selected(&list);
+            let selected: Vec<usize> = list_selected(&picks);
             if selected.is_empty() {
                 error_caption.set_text(&gettext("Select at least one file"));
                 error_caption.set_visible(true);

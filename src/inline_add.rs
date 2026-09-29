@@ -725,7 +725,9 @@ fn push_playlist_items_page(
                 // Rows already queued stay queued on a partial failure: unselect
                 // them so a retry submits only the remainder (dedupe is by
                 // filename).
-                selection.unselect_item(*i as u32);
+                if let Some(child) = list.get_child_at_index(*i as i32) {
+                    list.unselect_child(&child);
+                }
             }
             if let Some(e) = failed {
                 error_caption.set_text(&e);
@@ -1760,7 +1762,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
     // One-click restore of the title default (audio-aware, like submit).
     {
-        let (name, step_c, probe) = (step.name.clone(), Rc::clone(step), Rc::clone(&probe));
+        let (name, step_c, probe) = (step.name.clone(), Rc::clone(&step), Rc::clone(&probe));
         let settings = manager.settings().clone();
         step.revert.connect_clicked(move |_| {
             let st = probe.borrow();
@@ -1779,7 +1781,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // video-container name for an audio download (or vice versa). An edited
     // name is never clobbered.
     {
-        let (name, step_c, probe) = (step.name.clone(), Rc::clone(step), Rc::clone(&probe));
+        let (name, step_c, probe) = (step.name.clone(), Rc::clone(&step), Rc::clone(&probe));
         let settings = manager.settings().clone();
         step.format.connect_selected_notify(move |_| {
             let st = probe.borrow();

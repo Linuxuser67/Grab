@@ -180,10 +180,6 @@ pub struct DownloadManager {
     gates: RefCell<HashMap<u64, std::sync::Arc<AttemptGate>>>,
     /// Destinations with a discard in flight (exact path + stem key). Consulted by intake *and* `unremove`, which bypasses intake.
     reservations: std::sync::Arc<std::sync::Mutex<Reservations>>,
-    /// Queue wakeups from worker threads: the discard finalizer sends here after releasing a reservation; the idle source in `new()` re-runs `start_next()`.
-    wake_tx: std::sync::mpsc::Sender<()>,
-    /// Idle source draining `wake_tx`. A `SourceId` (not a `spawn_future_local` task) so `Drop` can remove it synchronously: a task is only reaped on the next context poll, and a stale one polled on another thread trips glib's thread guard.
-    wake_source: RefCell<Option<glib::SourceId>>,
     /// Finalizers reclaiming a removed row's scratch, by row. Each keeps the worker abort handle: aborting the finalizer would detach the worker, leaving yt-dlp unsupervised (#180).
     discards: RefCell<HashMap<u64, PendingDiscard>>,
     /// Rows currently capturing a live stream. Pause/cancel/park only signal these; the worker finalizes and its message drives the row.
@@ -236,11 +232,10 @@ struct PendingRestore {
 
 impl Drop for DownloadManager {
     fn drop(&mut self) {
-        // Remove the wakeup idle source synchronously: unlike a `spawn_future_local` task (reaped only on the next context poll), a `SourceId::remove()` destroys it now, so no stale source can be dispatched on another thread's context iteration.
-        if let Some(id) = self.wake_source.borrow_mut().take() {
-            id.remove();
-        }
-        // Remove all pump sources synchronously for the same reason.
+        // Abort any pump tasks: they're `spawn_future_local`, so a stale one
+        // reaped on another thread trips glib's thread guard. Tests wait for
+        // pump completion via `drain_engine` (which checks `pump_handles`),
+        // so in practice none are pending here; this is a backstop.
         for (_, handle) in self.pump_handles.borrow_mut().drain() {
             handle.abort();
         }
@@ -249,6 +244,10 @@ impl Drop for DownloadManager {
         // source dispatched by a later context iteration on another thread
         // panics ("Value accessed from different thread...").
         self.stop_scheduler();
+        // Clear the thread-local so a stale `wake_queue()` source finds no manager.
+        // (The one-shot `idle_add` sources hold no `!Send` values, so even a source
+        // reaped on another thread can't trip glib's thread guard.)
+        MANAGER_WEAK.with(|w| *w.borrow_mut() = None);
     }
 }
 
@@ -267,11 +266,40 @@ impl Drop for BatchGuard {
     }
 }
 
+/// Wake the queue from any thread: schedules a one-shot `start_next()` on the
+/// main loop. Uses `idle_add` (thread-safe) with a `Send` closure that captures
+/// nothing — it finds the manager via a thread-local set in `new()`. The source
+/// returns `Break` after firing once, so it never spins the main loop (tests'
+/// `quiesce()` needs the context to go idle). No `!Send` values are held, so a
+/// source reaped on another thread can't trip glib's thread guard.
+fn wake_queue() {
+    glib::idle_add(|| {
+        MANAGER_WEAK.with(|w| {
+            if let Some(weak) = w.borrow().as_ref() {
+                if let Some(m) = weak.upgrade() {
+                    // Never start rows while tearing down: shutdown awaits discard finalizers, each of which wakes the queue.
+                    if !m.draining.get() {
+                        m.start_next();
+                    }
+                }
+            }
+        });
+        glib::ControlFlow::Break
+    });
+}
+
+thread_local! {
+    /// The current thread's DownloadManager, for `wake_queue()`'s `Send` closure.
+    /// The closure runs on the main thread via `idle_add`, so reading the
+    /// thread-local there yields the manager created on that thread.
+    static MANAGER_WEAK: RefCell<Option<std::rc::Weak<DownloadManager>>> =
+        RefCell::new(None);
+}
+
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
     /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
     pub fn new(store: gio::ListStore, settings: crate::settings::AppSettings) -> Rc<Self> {
-        let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
         let this = Rc::new(Self {
             store,
             settings,
@@ -291,33 +319,13 @@ impl DownloadManager {
             video_abort: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
             reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),
-            wake_tx,
-            wake_source: RefCell::new(None),
             discards: RefCell::new(HashMap::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
             scheduler_source: RefCell::new(None),
         });
-        // Drain wakeups from worker threads via an idle source (see `wake_tx`). Weak ref: the source must not keep the manager alive. A `SourceId` (not a task) so `Drop` removes it synchronously.
-        {
-            let weak = Rc::downgrade(&this);
-            let id = glib::idle_add_local(move || {
-                // Drain all pending wakeups; each is just a "run start_next()" signal.
-                while wake_rx.try_recv().is_ok() {
-                    if let Some(m) = weak.upgrade() {
-                        // Never start rows while tearing down: shutdown awaits discard finalizers, each of which sends a wakeup.
-                        if !m.draining.get() {
-                            m.start_next();
-                        }
-                    } else {
-                        // Manager gone: remove the source, nothing left to wake.
-                        return glib::ControlFlow::Break;
-                    }
-                }
-                glib::ControlFlow::Continue
-            });
-            this.wake_source.replace(Some(id));
-        }
+        // Publish the Weak for `wake_queue()`'s `Send` closure (see `MANAGER_WEAK`).
+        MANAGER_WEAK.with(|w| *w.borrow_mut() = Some(Rc::downgrade(&this)));
         // Live preferences: raising the limit wakes queued rows now; lowering it parks the newest running rows. Weak ref: settings must not keep the manager alive.
         // Owner-thread guard: queue actions run only where the manager was created (production writes are main-thread; foreign-thread writes only via the test backend).
         let owner = std::thread::current().id();
@@ -1907,9 +1915,9 @@ impl DownloadManager {
         // Resolved against the destination: current staging lives beside it,
         // legacy tmp dirs for rows staged before the move resolve the same way.
         let staging = crate::video::staging_location_for_dest(&dest, id);
-        // `self` (Rc, !Send) cannot go to the tokio runtime: carry reservations as an `Arc` clone and wake the queue through the `Send` channel.
+        // `self` (Rc, !Send) cannot go to the tokio runtime: carry reservations as an `Arc` clone.
+        // Queue wakeups go through `wake_queue()` (thread-safe, no manager handle needed).
         let reservations = std::sync::Arc::clone(&self.reservations);
-        let wake_tx = self.wake_tx.clone();
         match self.running.borrow_mut().remove(&id) {
             Some(handle) => {
                 let worker_abort = handle.abort_handle();
@@ -1927,9 +1935,7 @@ impl DownloadManager {
                     // The destination is free: wake the queue on the main
                     // thread so a row parked by `unremove()` starts now
                     // instead of waiting for an unrelated `start_next()`.
-                    // `Sender` is `Send`; `wakeup()` prompts the idle source to fire.
-                    wake_tx.send(()).ok();
-                    glib::MainContext::default().wakeup();
+                    wake_queue();
                 });
                 // Retain the worker's abort beside the finalizer: aborting the finalizer would detach the worker instead of stopping it.
                 self.discards.borrow_mut().insert(
@@ -1945,8 +1951,8 @@ impl DownloadManager {
                 crate::video::clean_staging_in(&staging.root, &staging.dir);
                 crate::video::clean_dest_parts(&dest);
                 self.release_dest(&dest);
-                // Same wakeup as the async finalizer above; already on the main thread, so the idle source fires on the next iteration.
-                self.wake_tx.send(()).ok();
+                // Same wakeup as the async finalizer above; already on the main thread.
+                wake_queue();
             }
         }
     }

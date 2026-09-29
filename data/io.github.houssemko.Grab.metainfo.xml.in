@@ -46,6 +46,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.10" date="2026-09-29">
+      <description>
+        <ul>
+          <li>Playlist and torrent pickers redesigned: native single-column list with compact single-line rows.</li>
+          <li>Download progress bars now expose screen-reader labels.</li>
+          <li>URL lookup desensitizes the Add button instead of freezing the whole URL row.</li>
+          <li>Install popover padding corrected and generic file icon fixed.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.9" date="2026-09-28">
       <description>
         <ul>

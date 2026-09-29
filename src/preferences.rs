@@ -819,6 +819,8 @@ pub fn show(
         .build();
     let video_tools_row = adw::ActionRow::builder()
         .title(gettext("Media support tools"))
+        // Subtitles carry version strings and raw install errors: plain text.
+        .use_markup(false)
         .build();
     let video_tools_btn = gtk4::Button::builder().valign(gtk4::Align::Center).build();
     video_tools_row.set_activatable_widget(Some(&video_tools_btn));

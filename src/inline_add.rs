@@ -502,7 +502,8 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::Mul
         // HIG: AdwActionRow, single-line title only — the subtitle would
         // double the row height. Duration/size is redundant for picking.
         // Not activatable: the ListView's selection model owns interaction.
-        let row = adw::ActionRow::builder().build();
+        // Titles are untrusted (video titles carry `&`, `<`, …): plain text.
+        let row = adw::ActionRow::builder().use_markup(false).build();
         item.set_child(Some(&row));
     });
     {
@@ -1105,6 +1106,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_group.add(&video_audio);
     let video_tools = adw::ActionRow::builder()
         .title(gettext("Support tools"))
+        // Subtitles carry raw tool errors: never parse them as Pango markup.
+        .use_markup(false)
         .build();
     let video_install_btn = gtk4::Button::builder()
         .label(gettext("Install"))
@@ -1117,6 +1120,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_group.add(&video_tools);
     let video_error = adw::ActionRow::builder()
         .title(gettext("Couldn't load the media preview"))
+        // Subtitles carry raw probe errors (`<HTTPError …>` etc.): never
+        // parse them as Pango markup, or the error never renders.
+        .use_markup(false)
         .build();
     let video_retry_btn = gtk4::Button::builder()
         .label(gettext("Retry"))

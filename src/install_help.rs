@@ -82,6 +82,8 @@ pub(crate) fn command_row(
     let row = adw::ActionRow::builder()
         .title(title)
         .subtitle(command)
+        // Commands carry `&`, `<`, `>`: never parse them as Pango markup.
+        .use_markup(false)
         .build();
     let copy = gtk4::Button::builder()
         .icon_name("edit-copy-symbolic")

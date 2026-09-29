@@ -512,14 +512,6 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::FlowBox, Vec<gtk4::
         // Titles are untrusted (video titles carry `&`, `<`, …): Button label
         // is plain text, never markup.
         let btn = gtk4::ToggleButton::with_label(title);
-        // Button labels don't wrap by default: a long title would make a
-        // full-width pill (one per row, text ellipsized). Wrap the label so
-        // pills stay narrow and share rows.
-        if let Some(label) = btn.child().and_downcast::<gtk4::Label>() {
-            label.set_wrap(true);
-            label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
-            label.set_max_width_chars(32);
-        }
         btn.set_active(true);
         flowbox.append(&btn);
         buttons.push(btn);

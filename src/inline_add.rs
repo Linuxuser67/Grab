@@ -144,14 +144,17 @@ pub(crate) fn fmt_item_duration(secs: i64) -> String {
     }
 }
 
-/// One media-format option: an exact pinnable format from the probe, or the
-/// Automatic row (the global preference, no pin) when nothing is pinnable.
+/// One media-format option: an exact pinnable format from the probe, the
+/// Automatic row (the global preference, no pin) when nothing is pinnable,
+/// or the Audio only row (no pin, audio-only download).
 #[derive(Clone)]
 struct FormatOption {
-    /// Row title: the pin label ("1080p") or "Automatic".
+    /// Row title: the pin label ("1080p"), "Automatic", or "Audio only".
     label: String,
-    /// Resolved yt-dlp format id; `None` for the Automatic row.
+    /// Resolved yt-dlp format id; `None` for the Automatic and Audio only rows.
     format_id: Option<String>,
+    /// True for the Audio only row.
+    audio_only: bool,
 }
 
 /// The video preview block inside the form: exactly one state shows at a
@@ -165,12 +168,12 @@ struct VideoStep {
     name: adw::EntryRow,
     revert: gtk4::Button,
     /// Media-format selector, filled per video on resolve: exact pinnable
-    /// formats, tallest first (the preference preselects the closest row), or a
-    /// single Automatic row when nothing is pinnable.
+    /// formats, tallest first (the preference preselects the closest row),
+    /// a single Automatic row when nothing is pinnable, and always an
+    /// Audio only row — the whole format decision lives in this one row.
     format: adw::ComboRow,
     /// Index-aligned with the combo's model. Reset on every resolve.
     options: Rc<RefCell<Vec<FormatOption>>>,
-    audio: adw::SwitchRow,
     tools: adw::ActionRow,
     error: adw::ActionRow,
 }
@@ -183,7 +186,6 @@ fn hide_video_step(v: &VideoStep) {
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
-    v.audio.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
 }
@@ -197,7 +199,6 @@ fn reset_video_step(step: &VideoStep) {
     // Drop the format options and the current pick.
     step.options.borrow_mut().clear();
     step.format.set_model(Some(&gtk4::StringList::new(&[])));
-    step.audio.set_active(false);
     // Name row and the tools/error subtitles keep their last text when
     // only hidden; clear them so nothing stale survives.
     step.name.set_text("");
@@ -217,7 +218,6 @@ fn show_video_ready(v: &VideoStep) {
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
-    v.audio.set_visible(true);
 }
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
@@ -251,22 +251,41 @@ fn rebuild_format_options(step: &Rc<VideoStep>, info: &crate::video::VideoInfo, 
         options.push(FormatOption {
             label: opt.label.to_string(),
             format_id: Some(opt.id.to_string()),
+            audio_only: false,
         });
     }
     if options.is_empty() {
         options.push(FormatOption {
             label: gettext("Automatic"),
             format_id: None,
+            audio_only: false,
         });
     }
+    options.push(FormatOption {
+        label: gettext("Audio only"),
+        format_id: None,
+        audio_only: true,
+    });
     let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
     step.format.set_model(Some(&gtk4::StringList::new(&labels)));
+    // Options before selection: set_selected fires notify::selected, and the
+    // handler reads the options vec.
+    *step.options.borrow_mut() = options;
     // default_quality_index is over info.formats; options may be just
     // [Automatic] when nothing is pinnable, so clamp.
     let index = crate::video::default_quality_index(&info.formats, preferred)
-        .min(options.len().saturating_sub(1));
+        .min(step.options.borrow().len().saturating_sub(1));
     step.format.set_selected(index as u32);
-    *step.options.borrow_mut() = options;
+}
+
+/// Whether the combo's current pick is the Audio only row.
+fn selected_audio_only(step: &VideoStep) -> bool {
+    let selected = step.format.selected() as usize;
+    step.options
+        .borrow()
+        .get(selected)
+        .map(|o| o.audio_only)
+        .unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -279,7 +298,7 @@ fn submit_probed_single(
     v: &crate::video::VideoInfo,
 ) {
     let typed = step.name.text().trim().to_string();
-    let audio_only = step.audio.is_active();
+    let audio_only = selected_audio_only(step);
     // Default name from the video title and id; the intake sanitizes it.
     let settings = manager.settings();
     let auto = typed
@@ -351,17 +370,9 @@ fn submit_probe(
         }
         crate::video::ProbeResult::Playlist(pl) => {
             // Collections queue through the item picker: one row per chosen
-            // entry, each re-resolving its own page at download time. Pins
-            // don't apply across items, so the form's Audio only switch is
-            // the quality control here.
-            push_playlist_items_page(
-                nav,
-                manager.clone(),
-                dest.clone(),
-                close_card.clone(),
-                pl,
-                step.audio.is_active(),
-            );
+            // entry, each re-resolving its own page at download time. No
+            // format choice here — pins don't apply across items.
+            push_playlist_items_page(nav, manager.clone(), dest.clone(), close_card.clone(), pl);
         }
     }
 }
@@ -483,116 +494,92 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
     header
 }
 
-/// A picker grid (HIG `GtkGridView` with `GtkMultiSelection`): cells are
-/// Adwaita `.card`s — the grid equivalent of the list's `.boxed-list-separate`
-/// rows — with margins for spacing. Click toggles selection; selected cells
-/// render natively via `:selected` on the `child` CSS node (see
-/// https://docs.gtk.org/gtk4/class.GridView.html#css-nodes). All entries
+/// A picker grid (HIG `GtkFlowBox` with multi-selection): cells are Adwaita
+/// `.card`s that hug their content — the grid equivalent of the list's
+/// `.boxed-list-separate` rows — with HIG spacing between them. Click toggles
+/// selection; selected cells render natively via `:selected`. All entries
 /// start selected, matching the old checked-by-default rows. Returns the
-/// view and its selection model for the caller to wire.
-fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::MultiSelection) {
-    let store = gio::ListStore::new::<gtk4::StringObject>();
+/// box for the caller to wire.
+fn picker_list(entries: Rc<Vec<(String, String)>>) -> gtk4::FlowBox {
+    let flowbox = gtk4::FlowBox::builder()
+        .selection_mode(gtk4::SelectionMode::Multiple)
+        .column_spacing(12)
+        .row_spacing(12)
+        .build();
     for (title, _) in entries.iter() {
-        store.append(&gtk4::StringObject::new(title));
-    }
-    let selection = gtk4::MultiSelection::new(Some(store));
-    selection.select_all();
-
-    let factory = gtk4::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
-        let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
         // .card: native rounded-card look, its own default padding. Hug the
         // content (don't stretch to fill the grid cell). Titles are
         // untrusted (video titles carry `&`, `<`, …): plain text via
         // set_text, never markup.
         let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         card.add_css_class("card");
-        card.set_halign(gtk4::Align::Center);
-        card.set_valign(gtk4::Align::Center);
-        card.set_margin_top(6);
-        card.set_margin_bottom(6);
-        card.set_margin_start(6);
-        card.set_margin_end(6);
         let label = gtk4::Label::builder()
             .halign(gtk4::Align::Start)
             .wrap(true)
             .build();
+        label.set_text(title);
         card.append(&label);
-        item.set_child(Some(&card));
-    });
-    {
-        let entries = Rc::clone(&entries);
-        factory.connect_bind(move |_, item| {
-            let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-            let (title, _) = &entries[item.position() as usize];
-            let card = item.child().and_downcast::<gtk4::Box>().unwrap();
-            let label = card.first_child().and_downcast::<gtk4::Label>().unwrap();
-            label.set_text(title);
-        });
+        flowbox.append(&card);
     }
-
-    let grid = gtk4::GridView::builder()
-        .model(&selection)
-        .factory(&factory)
-        .max_columns(3)
-        .min_columns(2)
-        .build();
-    (grid, selection)
+    flowbox.select_all();
+    flowbox
 }
 
-/// Wire the pickers' bottom action bar to a list's multi-selection: the
-/// action counts the live selection, Select All/None drive the model.
+/// Wire the pickers' bottom action bar to a flowbox's multi-selection: the
+/// action counts the live selection, Select All/None drive the box.
 fn wire_list_selection_bar(
-    selection: &gtk4::MultiSelection,
+    flowbox: &gtk4::FlowBox,
     select_all_btn: &gtk4::Button,
     select_none_btn: &gtk4::Button,
     add_btn: &gtk4::Button,
     count_label: impl Fn(usize) -> String + 'static,
 ) {
     {
-        let selection = selection.clone();
+        let flowbox = flowbox.clone();
         let add_btn = add_btn.clone();
         let refresh = Rc::new({
-            let selection = selection.clone();
+            let flowbox = flowbox.clone();
             move || {
-                add_btn.set_label(&count_label(selection.selection().size() as usize));
+                add_btn.set_label(&count_label(flowbox.selected_children().len()));
             }
         });
-        selection.connect_selection_changed({
+        flowbox.connect_selected_children_changed({
             let refresh = refresh.clone();
-            move |_, _, _| refresh()
+            move |_| refresh()
         });
         refresh();
     }
     {
-        let selection = selection.clone();
+        let flowbox = flowbox.clone();
         select_all_btn.connect_clicked(move |_| {
-            selection.select_all();
+            flowbox.select_all();
         });
     }
     {
-        let selection = selection.clone();
+        let flowbox = flowbox.clone();
         select_none_btn.connect_clicked(move |_| {
-            selection.unselect_all();
+            flowbox.unselect_all();
         });
     }
 }
 
-/// Selected positions of a picker list's multi-selection, ascending.
-fn list_selected(selection: &gtk4::MultiSelection, item_count: usize) -> Vec<usize> {
-    (0..item_count)
-        .filter(|&i| selection.is_selected(i as u32))
-        .collect()
+/// Selected indices of a picker flowbox, ascending.
+fn list_selected(flowbox: &gtk4::FlowBox) -> Vec<usize> {
+    let mut indices: Vec<usize> = flowbox
+        .selected_children()
+        .iter()
+        .map(|c| c.index() as usize)
+        .collect();
+    indices.sort_unstable();
+    indices
 }
 
-#[allow(clippy::too_many_arguments)]
 fn push_playlist_items_page(
     nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
     close_card: Rc<dyn Fn()>,
     playlist: crate::media_types::PlaylistInfo,
-    audio_only: bool,
 ) {
     // Same guard as the video step: don't stack a second picker while one is
     // already visible.
@@ -615,7 +602,7 @@ fn push_playlist_items_page(
             })
             .collect(),
     );
-    let (list, selection) = picker_list(Rc::clone(&entries));
+    let list = picker_list(Rc::clone(&entries));
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -671,19 +658,15 @@ fn push_playlist_items_page(
     picker_enter_confirms(&picker_page, &add_btn);
 
     // The action counts the live selection (see `wire_list_selection_bar`).
-    wire_list_selection_bar(
-        &selection,
-        &select_all_btn,
-        &select_none_btn,
-        &add_btn,
-        |n| ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string()),
-    );
+    wire_list_selection_bar(&list, &select_all_btn, &select_none_btn, &add_btn, |n| {
+        ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
+    });
 
     {
         let close_card = close_card.clone();
-        let selection = selection.clone();
+        let list = list.clone();
         add_btn.connect_clicked(move |_| {
-            let picked: Vec<usize> = list_selected(&selection, count);
+            let picked: Vec<usize> = list_selected(&list);
             let picked_set: std::collections::HashSet<usize> = picked.into_iter().collect();
             let chosen: Vec<(usize, &crate::media_types::PlaylistItem)> = playlist
                 .items
@@ -717,14 +700,14 @@ fn push_playlist_items_page(
                 let page_url = crate::video_probe::story_segment_url(&playlist.page_url, &item.id)
                     .unwrap_or_else(|| item.page_url.clone());
                 let settings = manager.settings();
-                let name = default_name_for(settings, &item.title, audio_only);
+                let name = default_name_for(settings, &item.title, false);
                 if let Err(e) = manager.enqueue_video_staged(
                     &page_url,
                     &dir,
                     Some(&name),
                     crate::media_types::VideoChoices {
                         quality: manager.settings().video_quality(),
-                        audio_only,
+                        audio_only: false,
                         video_format_id: None,
                         // Live streams queued from a playlist take the VOD
                         // path; the worker re-resolves each item page anyway.
@@ -742,7 +725,9 @@ fn push_playlist_items_page(
                 // Rows already queued stay queued on a partial failure: unselect
                 // them so a retry submits only the remainder (dedupe is by
                 // filename).
-                selection.unselect_item(*i as u32);
+                if let Some(child) = list.child_at_index(*i as i32) {
+                    list.unselect_child(&child);
+                }
             }
             if let Some(e) = failed {
                 error_caption.set_text(&e);
@@ -790,7 +775,7 @@ fn push_torrent_picker_page(
             })
             .collect(),
     );
-    let (list, selection) = picker_list(list_entries);
+    let list = picker_list(list_entries);
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -830,19 +815,15 @@ fn push_torrent_picker_page(
     picker_enter_confirms(&picker_page, &add_btn);
 
     // Same as the playlist picker: the action counts the live selection.
-    wire_list_selection_bar(
-        &selection,
-        &select_all_btn,
-        &select_none_btn,
-        &add_btn,
-        |n| ngettext("_Add {} file", "_Add {} files", n as u32).replace("{}", &n.to_string()),
-    );
+    wire_list_selection_bar(&list, &select_all_btn, &select_none_btn, &add_btn, |n| {
+        ngettext("_Add {} file", "_Add {} files", n as u32).replace("{}", &n.to_string())
+    });
 
     {
         let close_card = close_card.clone();
-        let selection = selection.clone();
+        let list = list.clone();
         add_btn.connect_clicked(move |_| {
-            let selected: Vec<usize> = list_selected(&selection, entry_count);
+            let selected: Vec<usize> = list_selected(&list);
             if selected.is_empty() {
                 error_caption.set_text(&gettext("Select at least one file"));
                 error_caption.set_visible(true);
@@ -936,9 +917,9 @@ fn wire_torrent_picker(
 }
 
 fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
+    // Playlists carry no format choice (pins don't apply across items), so
+    // the preview block stays hidden — Add opens the title picker directly.
     hide_video_step(v);
-    v.group.set_visible(true);
-    v.audio.set_visible(true);
 }
 
 /// Handle for the inline New Download card: the widget to pin under the
@@ -1116,10 +1097,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .title(gettext("Media format"))
         .build();
     video_group.add(&video_format);
-    let video_audio = adw::SwitchRow::builder()
-        .title(gettext("Audio only"))
-        .build();
-    video_group.add(&video_audio);
     let video_tools = adw::ActionRow::builder()
         .title(gettext("Support tools"))
         // Subtitles carry raw tool errors: never parse them as Pango markup.
@@ -1153,19 +1130,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         revert: video_revert_btn,
         format: video_format,
         options: Rc::new(RefCell::new(Vec::new())),
-        audio: video_audio,
         tools: video_tools,
         error: video_error,
     });
     // Card-local choices: the format is initialized from Preferences (not
-    // bound); audio-only is always off by design — no global preference
-    // exists. Exact picks are per lookup, so nothing persists here.
-    {
-        let format = step.format.clone();
-        step.audio.connect_active_notify(move |sw| {
-            format.set_sensitive(!sw.is_active());
-        });
-    }
+    // bound). Exact picks are per lookup, so nothing persists here.
     form.append(&video_group);
 
     // Download options: HIG AdwPreferencesGroup, no header — the rows
@@ -1499,11 +1468,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 if step_b.name.text().trim().is_empty() {
                                     let typed = file_b.text().trim().to_string();
                                     let base = if typed.is_empty() {
-                                        default_name_for(
-                                            &settings_b,
-                                            &v.title,
-                                            step_b.audio.is_active(),
-                                        )
+                                        // Seeded before the format rebuild;
+                                        // audio-only is always off by design
+                                        // at seed time.
+                                        default_name_for(&settings_b, &v.title, false)
                                     } else {
                                         typed
                                     };
@@ -1645,7 +1613,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 dd.clone(),
                                 close_card.clone(),
                                 pl,
-                                step2.audio.is_active(),
                             );
                         }
                         None => {}
@@ -1795,26 +1762,31 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
     // One-click restore of the title default (audio-aware, like submit).
     {
-        let (name, audio, probe) = (step.name.clone(), step.audio.clone(), Rc::clone(&probe));
+        let (name, step_c, probe) = (step.name.clone(), Rc::clone(&step), Rc::clone(&probe));
         let settings = manager.settings().clone();
         step.revert.connect_clicked(move |_| {
             let st = probe.borrow();
             if let Some(p) = st.info.as_ref() {
-                name.set_text(&default_name_for(&settings, p.title(), audio.is_active()));
+                name.set_text(&default_name_for(
+                    &settings,
+                    p.title(),
+                    selected_audio_only(&step_c),
+                ));
                 name.grab_focus();
             }
         });
     }
-    // Toggling the mode re-seeds an untouched name: the resolve-time seed ran under
-    // the other mode, so without this the row keeps a video-container name for an
-    // audio download (or vice versa). An edited name is never clobbered.
+    // Changing the format pick re-seeds an untouched name: the resolve-time
+    // seed ran under the other mode, so without this the row keeps a
+    // video-container name for an audio download (or vice versa). An edited
+    // name is never clobbered.
     {
-        let (name, audio, probe) = (step.name.clone(), step.audio.clone(), Rc::clone(&probe));
+        let (name, step_c, probe) = (step.name.clone(), Rc::clone(&step), Rc::clone(&probe));
         let settings = manager.settings().clone();
-        audio.connect_active_notify(move |sw| {
+        step.format.connect_selected_notify(move |_| {
             let st = probe.borrow();
             if let Some(p) = st.info.as_ref() {
-                let active = sw.is_active();
+                let active = selected_audio_only(&step_c);
                 let current = name.text().to_string();
                 if current.trim().is_empty()
                     || current == default_name_for(&settings, p.title(), !active)

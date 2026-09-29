@@ -46,6 +46,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.2-beta.1" date="2026-09-29">
+      <description>
+        <ul>
+          <li>Schedule downloads for a later time: pick a date and time when adding, or let overdue items start on launch.</li>
+          <li>Download rows now show file-type icons, and the status filter is a segmented control.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.1" date="2026-09-29">
       <description>
         <ul>

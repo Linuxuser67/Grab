@@ -483,14 +483,13 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
     header
 }
 
-/// A picker grid (HIG `GtkGridView` with `GtkMultiSelection` and
-/// `AdwActionRow` rows): click toggles selection, no checkboxes. Pure
-/// theme defaults — no custom CSS; the selection model and Adwaita render
-/// selected cells natively via `:selected`. The column count is chosen so
-/// every row is full (see [`picker_columns`]); cells get HIG 6px margins.
-/// All entries start selected, matching the old checked-by-default rows.
-/// Returns the view and its selection model for the caller to wire.
-fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::MultiSelection) {
+/// A picker list (HIG `GtkListView` with `GtkMultiSelection`): single-column
+/// rows that match the app's list UI — click toggles selection. Pure theme
+/// defaults, no custom CSS; the selection model and Adwaita render selected
+/// rows natively via `:selected`. All entries start selected, matching the
+/// old checked-by-default rows. Returns the view and its selection model
+/// for the caller to wire.
+fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::MultiSelection) {
     let store = gio::ListStore::new::<gtk4::StringObject>();
     for (title, _) in entries.iter() {
         store.append(&gtk4::StringObject::new(title));
@@ -503,15 +502,10 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
         let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
         // HIG: AdwActionRow, single-line title only — the subtitle would
         // double the row height. Duration/size is redundant for picking.
-        // Not activatable: the ListView's selection model owns interaction.
         // Titles are untrusted (video titles carry `&`, `<`, …): plain text.
         // Selection is shown natively via Adwaita's `:selected` styling —
-        // no custom indicator. 6px margins give HIG spacing between cells.
+        // no custom indicator.
         let row = adw::ActionRow::builder().use_markup(false).build();
-        row.set_margin_top(6);
-        row.set_margin_bottom(6);
-        row.set_margin_start(6);
-        row.set_margin_end(6);
         item.set_child(Some(&row));
     });
     {
@@ -524,27 +518,11 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
         });
     }
 
-    // Lock the column count: `picker_columns` divides the item count evenly,
-    // so no row ever has an empty slot.
-    let columns = picker_columns(entries.len());
-    let list = gtk4::GridView::builder()
+    let list = gtk4::ListView::builder()
         .model(&selection)
         .factory(&factory)
-        .max_columns(columns)
-        .min_columns(columns)
         .build();
     (list, selection)
-}
-
-/// Column count for the picker grid: the largest number (up to 4) that divides
-/// the item count evenly, so every row is full and no empty slot appears.
-/// Falls back to a single column when the count is prime (or 1).
-fn picker_columns(count: usize) -> u32 {
-    let max = 4.min(count).max(1);
-    (1..=max)
-        .rev()
-        .find(|c| count.is_multiple_of(*c))
-        .unwrap_or(1) as u32
 }
 
 /// Wire the pickers' bottom action bar to a list's multi-selection: the

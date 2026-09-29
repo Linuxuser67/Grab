@@ -46,6 +46,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.17" date="2026-09-29">
+      <description>
+        <ul>
+          <li>Audio-only is now an option inside the Media format picker instead of a separate switch; playlists no longer show a format row and always queue video.</li>
+          <li>Playlist and torrent pickers: entries are hug-sized cards that flow automatically — no fixed column count, sized to their text.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.16" date="2026-09-29">
       <description>
         <ul>

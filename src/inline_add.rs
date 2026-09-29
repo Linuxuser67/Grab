@@ -176,6 +176,9 @@ struct VideoStep {
     options: Rc<RefCell<Vec<FormatOption>>>,
     tools: adw::ActionRow,
     error: adw::ActionRow,
+    /// The form's Add button: icon-only until a format is picked, then a
+    /// labeled "Add" pill (HIG: primary actions carry a text label).
+    add_btn: gtk4::Button,
 }
 
 /// Reserve trailing text space inside the URL entry while the lookup
@@ -188,6 +191,10 @@ fn hide_video_step(v: &VideoStep) {
     v.format.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
+    // No format picked in these states: back to the icon-only button.
+    v.add_btn.set_label(None);
+    v.add_btn.set_icon_name(Some("object-select-symbolic"));
+    v.add_btn.add_css_class("circular");
 }
 
 /// Clear the video preview block back to a pristine state: `close_card`
@@ -218,6 +225,10 @@ fn show_video_ready(v: &VideoStep) {
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
+    // Format picked: the Add button earns its text label.
+    v.add_btn.set_icon_name(None);
+    v.add_btn.remove_css_class("circular");
+    v.add_btn.set_label(Some(&gettext("Add")));
 }
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
@@ -1138,6 +1149,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
         error: video_error,
+        add_btn: add_btn.clone(),
     });
     // Card-local choices: the format is initialized from Preferences (not
     // bound). Exact picks are per lookup, so nothing persists here.

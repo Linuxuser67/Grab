@@ -314,7 +314,9 @@ pub(crate) fn row_media(
 pub(crate) fn row_status_label(item: &crate::download_row::DownloadItem) -> String {
     if item.status() == DownloadStatus::Scheduled {
         let ts = item.scheduled_at();
-        if ts > 0 && let Ok(dt) = glib::DateTime::from_unix_local(ts) {
+        if ts > 0
+            && let Ok(dt) = glib::DateTime::from_unix_local(ts)
+        {
             // Same-day: "14:30". Otherwise: "Sep 30, 14:30".
             let now = glib::DateTime::now_local().ok();
             let same_day = now

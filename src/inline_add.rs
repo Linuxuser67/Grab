@@ -571,6 +571,7 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::FlowBox, Vec<gtk4::
         .selection_mode(gtk4::SelectionMode::None)
         .column_spacing(12)
         .row_spacing(12)
+        .valign(gtk4::Align::Start)
         .build();
     let mut buttons = Vec::with_capacity(entries.len());
     for (title, _) in entries.iter() {
@@ -704,12 +705,16 @@ fn push_playlist_items_page(
     list_box.append(&error_caption);
 
     // Scrolled: big playlists must not size the card off-screen, but the capped
-    // natural height lets it grow and shrink with the item count. No vexpand:
-    // the window must not gain scrollable empty space below a short list.
+    // natural height lets it grow and shrink with the item count. valign=Start
+    // (not the Fill default): the ToolbarView would otherwise stretch the
+    // scrolled window to the full content height, leaving empty space below
+    // a short list.
     let scrolled = gtk4::ScrolledWindow::builder()
         .child(&list_box)
         .propagate_natural_height(true)
         .max_content_height(480)
+        .vexpand(false)
+        .valign(gtk4::Align::Start)
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .build();
 
@@ -873,12 +878,15 @@ fn push_torrent_picker_page(
     list_box.append(&error_caption);
 
     // Same capped scrolled window as the playlist picker: big torrents must
-    // not size the card off-screen. No vexpand: no scrollable empty space
-    // below a short list.
+    // not size the card off-screen. valign=Start (not the Fill default): the
+    // ToolbarView would otherwise stretch the scrolled window to the full
+    // content height, leaving empty space below a short list.
     let scrolled = gtk4::ScrolledWindow::builder()
         .child(&list_box)
         .propagate_natural_height(true)
         .max_content_height(480)
+        .vexpand(false)
+        .valign(gtk4::Align::Start)
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .build();
 

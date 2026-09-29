@@ -507,8 +507,9 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> gtk4::FlowBox {
         .row_spacing(12)
         .build();
     for (title, _) in entries.iter() {
-        // .card: native rounded-card look, its own default padding. Hug the
-        // content (don't stretch to fill the grid cell). Titles are
+        // .card: native rounded-card look (background + radius, no padding of
+        // its own). 12px inner padding matches the app's card margins;
+        // hug the content (don't stretch to fill the grid cell). Titles are
         // untrusted (video titles carry `&`, `<`, …): plain text via
         // set_text, never markup.
         let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -518,6 +519,10 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> gtk4::FlowBox {
             .wrap(true)
             .build();
         label.set_text(title);
+        label.set_margin_top(12);
+        label.set_margin_bottom(12);
+        label.set_margin_start(12);
+        label.set_margin_end(12);
         card.append(&label);
         flowbox.append(&card);
     }
@@ -608,6 +613,11 @@ fn push_playlist_items_page(
         .orientation(gtk4::Orientation::Vertical)
         .spacing(6)
         .build();
+    // HIG padding between the grid and the scrolled viewport edges.
+    list_box.set_margin_top(12);
+    list_box.set_margin_bottom(12);
+    list_box.set_margin_start(12);
+    list_box.set_margin_end(12);
     if crate::video_probe::playlist_truncated(&playlist) {
         let notice = gtk4::Label::builder()
             .label(
@@ -637,6 +647,7 @@ fn push_playlist_items_page(
         .child(&list_box)
         .propagate_natural_height(true)
         .max_content_height(480)
+        .hscrollbar_policy(gtk4::PolicyType::Never)
         .build();
 
     let toolbar = adw::ToolbarView::new();
@@ -781,6 +792,11 @@ fn push_torrent_picker_page(
         .orientation(gtk4::Orientation::Vertical)
         .spacing(6)
         .build();
+    // HIG padding between the grid and the scrolled viewport edges.
+    list_box.set_margin_top(12);
+    list_box.set_margin_bottom(12);
+    list_box.set_margin_start(12);
+    list_box.set_margin_end(12);
     list_box.append(&list);
     let error_caption = gtk4::Label::builder()
         .label("")
@@ -797,6 +813,7 @@ fn push_torrent_picker_page(
         .child(&list_box)
         .propagate_natural_height(true)
         .max_content_height(480)
+        .hscrollbar_policy(gtk4::PolicyType::Never)
         .build();
 
     let toolbar = adw::ToolbarView::new();

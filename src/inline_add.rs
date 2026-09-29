@@ -172,16 +172,7 @@ struct VideoStep {
     options: Rc<RefCell<Vec<FormatOption>>>,
     audio: adw::SwitchRow,
     tools: adw::ActionRow,
-    error: VideoError,
-}
-
-/// Centered probe-error state: a plain card (not a PreferencesRow — error
-/// states center, rows don't) holding the message, the raw detail, and the
-/// retry button, left-aligned and vertically centered.
-struct VideoError {
-    card: gtk4::Box,
-    detail: gtk4::Label,
-    retry: gtk4::Button,
+    error: adw::ActionRow,
 }
 
 /// Reserve trailing text space inside the URL entry while the lookup
@@ -194,7 +185,7 @@ fn hide_video_step(v: &VideoStep) {
     v.format.set_visible(false);
     v.audio.set_visible(false);
     v.tools.set_visible(false);
-    v.error.card.set_visible(false);
+    v.error.set_visible(false);
 }
 
 /// Clear the video preview block back to a pristine state: `close_card`
@@ -211,7 +202,7 @@ fn reset_video_step(step: &VideoStep) {
     // only hidden; clear them so nothing stale survives.
     step.name.set_text("");
     step.tools.set_subtitle("");
-    step.error.detail.set_text("");
+    step.error.set_subtitle("");
     hide_video_step(step);
 }
 
@@ -238,10 +229,9 @@ fn show_video_tools_missing(v: &VideoStep, message: &str) {
 
 fn show_video_error(v: &VideoStep, message: &str) {
     hide_video_step(v);
-    // Plain-text label: the detail carries raw probe errors (`<HTTPError …>`
-    // etc.), never parsed as markup.
-    v.error.detail.set_text(message);
-    v.error.card.set_visible(true);
+    v.group.set_visible(true);
+    v.error.set_subtitle(message);
+    v.error.set_visible(true);
 }
 
 /// Desensitize the form's Add button while a lookup is in flight (a dead
@@ -1151,41 +1141,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_tools.set_activatable_widget(Some(&video_install_btn));
     video_tools.add_suffix(&video_install_btn);
     video_group.add(&video_tools);
-    // Probe-error state: a card, not a row — the message, the raw detail,
-    // and retry, left-aligned and vertically centered like an empty state.
-    let video_error = {
-        let card = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-        card.add_css_class("card");
-        card.set_margin_top(24);
-        card.set_margin_bottom(24);
-        card.set_margin_start(12);
-        card.set_margin_end(12);
-        let title = gtk4::Label::builder()
-            .label(gettext("Couldn't load the media preview"))
-            .css_classes(["title-4"])
-            .halign(gtk4::Align::Start)
-            .build();
-        let detail = gtk4::Label::builder()
-            .css_classes(["dim-label"])
-            .halign(gtk4::Align::Start)
-            .wrap(true)
-            .wrap_mode(gtk4::pango::WrapMode::WordChar)
-            .selectable(true)
-            .build();
-        let retry = gtk4::Button::builder()
-            .label(gettext("Retry"))
-            .halign(gtk4::Align::Start)
-            .build();
-        card.append(&title);
-        card.append(&detail);
-        card.append(&retry);
-        card.set_visible(false);
-        VideoError {
-            card,
-            detail,
-            retry,
-        }
-    };
+    // Probe-error state: an ActionRow in the group (4.4.4 pattern) — the
+    // message goes in the subtitle, Retry is a suffix.
+    let video_error = adw::ActionRow::builder()
+        .title(gettext("Couldn't load the media preview"))
+        .build();
+    let video_retry_btn = gtk4::Button::builder()
+        .label(gettext("Retry"))
+        .valign(gtk4::Align::Center)
+        .build();
+    video_error.add_suffix(&video_retry_btn);
+    video_error.set_visible(false);
+    video_group.add(&video_error);
     let step = Rc::new(VideoStep {
         url_spinner: url_spinner.clone(),
         group: video_group.clone(),
@@ -1207,7 +1174,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         });
     }
     form.append(&video_group);
-    form.append(&step.error.card);
 
     // Download options: HIG AdwPreferencesGroup, no header — the rows
     // speak for themselves. Rows get the 12px internal margins natively.
@@ -1832,7 +1798,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
     {
         let kick = kick_video.clone();
-        step.error.retry.connect_clicked(move |_| kick(true));
+        video_retry_btn.connect_clicked(move |_| kick(true));
     }
     // One-click restore of the title default (audio-aware, like submit).
     {

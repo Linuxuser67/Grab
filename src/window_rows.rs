@@ -12,10 +12,10 @@ use libadwaita as adw;
 use std::cell::Cell;
 use std::rc::Rc;
 
-/// Process-wide guard against stacked failure dialogs: bulk failures must
-/// coalesce into one dialog, so the live dialog (if any) is tracked here.
-/// Main-thread-only state (connect_notify_local); a closed dialog stops
-/// upgrading its WeakRef and the next failure opens a fresh one.
+// Process-wide guard against stacked failure dialogs: bulk failures must
+// coalesce into one dialog, so the live dialog (if any) is tracked here.
+// Main-thread-only state (connect_notify_local); a closed dialog stops
+// upgrading its WeakRef and the next failure opens a fresh one.
 thread_local! {
     static FAILURE_DIALOG: std::cell::RefCell<Option<glib::WeakRef<adw::AlertDialog>>> =
         const { std::cell::RefCell::new(None) };

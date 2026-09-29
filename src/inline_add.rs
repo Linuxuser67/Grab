@@ -219,6 +219,12 @@ fn reset_video_step(step: &VideoStep) {
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
     v.url_spinner.set_visible(true);
+    // Screen-reader announcement: the spinner alone is silent.
+    // `adw::Spinner` doesn't expose `update_property` directly; upcast to Widget.
+    use glib::object::Cast;
+    v.url_spinner
+        .upcast_ref::<gtk4::Widget>()
+        .update_property(&[gtk4::accessible::Property::Label(&gettext("Looking up…"))]);
 }
 
 fn show_video_ready(v: &VideoStep) {
@@ -397,7 +403,14 @@ fn submit_probe(
             // Collections queue through the item picker: one row per chosen
             // entry, each re-resolving its own page at download time. No
             // format choice here — pins don't apply across items.
-            push_playlist_items_page(nav, manager.clone(), dest.clone(), close_card.clone(), pl);
+            push_playlist_items_page(
+                nav,
+                manager.clone(),
+                dest.clone(),
+                close_card.clone(),
+                pl,
+                scheduled_at,
+            );
         }
     }
 }
@@ -422,6 +435,21 @@ fn fallback_plain_failed(
 
 /// Enqueue with the card's destination, then collapse the card on success.
 ///
+/// Apply a scheduled timestamp to a freshly enqueued item. Future timestamps
+/// become Scheduled; past ones (the 12:00 default is often stale by Add time)
+/// queue immediately, mirroring restore_existing's overdue handling.
+fn apply_scheduled_at(item: &DownloadItem, scheduled_at: Option<i64>) {
+    if let Some(ts) = scheduled_at {
+        let now = glib::DateTime::now_local()
+            .map(|dt| dt.to_unix())
+            .unwrap_or(0);
+        if ts > now {
+            item.set_scheduled_at(ts);
+            item.set_status(DownloadStatus::Scheduled);
+        }
+    }
+}
+
 /// The destination borrow lives only for the enqueue call: a `dest.borrow()`
 /// temporary in a `match` scrutinee would live into the arms, and
 /// `close_card()` re-borrows the same cell mutably to reset the destination —
@@ -443,10 +471,7 @@ fn enqueue_and_close(
     };
     match result {
         Ok(item) => {
-            if let Some(ts) = scheduled_at {
-                item.set_scheduled_at(ts);
-                item.set_status(DownloadStatus::Scheduled);
-            }
+            apply_scheduled_at(&item, scheduled_at);
             close_card()
         }
         Err(e) => on_err(&e),
@@ -461,10 +486,14 @@ fn queue_plain(
     close_card: &Rc<dyn Fn()>,
     file_row: &adw::EntryRow,
     url: &str,
+    scheduled_at: Option<i64>,
 ) -> Result<(), String> {
+    // Batch guard defers start_next until the Scheduled status is set.
+    let _guard = manager.batch_guard();
     let typed = file_row.text().trim().to_string();
     let name = (!typed.is_empty()).then_some(typed);
-    manager.enqueue(url, Some(&dest.borrow()), name.as_deref())?;
+    let item = manager.enqueue(url, Some(&dest.borrow()), name.as_deref())?;
+    apply_scheduled_at(&item, scheduled_at);
     close_card();
     Ok(())
 }
@@ -618,6 +647,7 @@ fn push_playlist_items_page(
     dest_dir: Rc<RefCell<String>>,
     close_card: Rc<dyn Fn()>,
     playlist: crate::media_types::PlaylistInfo,
+    scheduled_at: Option<i64>,
 ) {
     // Same guard as the video step: don't stack a second picker while one is
     // already visible.
@@ -745,7 +775,7 @@ fn push_playlist_items_page(
                     .unwrap_or_else(|| item.page_url.clone());
                 let settings = manager.settings();
                 let name = default_name_for(settings, &item.title, false);
-                if let Err(e) = manager.enqueue_video_staged(
+                match manager.enqueue_video_staged(
                     &page_url,
                     &dir,
                     Some(&name),
@@ -763,8 +793,11 @@ fn push_playlist_items_page(
                     },
                     &existing,
                 ) {
-                    failed = Some(e);
-                    break;
+                    Ok(enqueued) => apply_scheduled_at(&enqueued, scheduled_at),
+                    Err(e) => {
+                        failed = Some(e);
+                        break;
+                    }
                 }
                 // Rows already queued stay queued on a partial failure: unselect
                 // them so a retry submits only the remainder (dedupe is by
@@ -1310,7 +1343,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             ) {
                 let ts = scheduled.to_unix();
                 scheduled_at_c.set(Some(ts));
-                date_btn_c.set_label(&scheduled.format(&gettext("%Y-%m-%d")).unwrap_or_default());
+                // Untranslated format: translators must not touch `%` verbs,
+                // and the label must show the picked time, not just the date.
+                date_btn_c.set_label(&scheduled.format("%Y-%m-%d %H:%M").unwrap_or_default());
             }
         });
         {
@@ -1461,6 +1496,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let manager_kick = manager.clone();
         let dest_kick = dest_dir.clone();
         let close_kick = close_card.clone();
+        let scheduled_at_kick = Rc::clone(&scheduled_at);
         Rc::new(move |probe_unlisted: bool| {
             // Twin suppression: a resolve for this exact URL is already
             // running for the current generation (Add pressed twice while
@@ -1485,6 +1521,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 manager_b,
                 dest_b,
                 close_b,
+                scheduled_at_b,
             ) = (
                 probe.clone(),
                 step2.clone(),
@@ -1495,6 +1532,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 manager_kick.clone(),
                 dest_kick.clone(),
                 close_kick.clone(),
+                scheduled_at_kick.clone(),
             );
             glib::spawn_future_local(async move {
                 // Owns the in-flight marker: every exit below clears it for
@@ -1590,7 +1628,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         if !crate::video::is_video_page(&url)
                             && e.to_string().to_lowercase().contains("unsupported url")
                         {
-                            match queue_plain(&manager_b, &dest_b, &close_b, &file_b, &url) {
+                            match queue_plain(
+                                &manager_b,
+                                &dest_b,
+                                &close_b,
+                                &file_b,
+                                &url,
+                                scheduled_at_b.get(),
+                            ) {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     fallback_plain_failed(
@@ -1614,7 +1659,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 msg.contains("400") || msg.contains("bad request")
                             }
                         {
-                            match queue_plain(&manager_b, &dest_b, &close_b, &file_b, &direct) {
+                            match queue_plain(
+                                &manager_b,
+                                &dest_b,
+                                &close_b,
+                                &file_b,
+                                &direct,
+                                scheduled_at_b.get(),
+                            ) {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     probe_b.borrow_mut().info.take();
@@ -1645,7 +1697,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         // Resolved but nothing playable, and not a listed video
                         // page: same plain fallback as above.
                         if !probe.fetchable() && !crate::video::is_video_page(&url) {
-                            match queue_plain(&manager_b, &dest_b, &close_b, &file_b, &url) {
+                            match queue_plain(
+                                &manager_b,
+                                &dest_b,
+                                &close_b,
+                                &file_b,
+                                &url,
+                                scheduled_at_b.get(),
+                            ) {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     fallback_plain_failed(
@@ -1817,6 +1876,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 dd.clone(),
                                 close_card.clone(),
                                 pl,
+                                scheduled_at.get(),
                             );
                         }
                         None => {}

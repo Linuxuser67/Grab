@@ -496,9 +496,9 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
 /// A picker grid (HIG `GtkGridView` with `GtkMultiSelection` and
 /// `AdwActionRow` rows): click toggles selection, no checkboxes. Pure
 /// theme defaults — no custom CSS; the selection model and Adwaita render
-/// selected cells natively via `:selected`. Up to 4 columns; short rows simply
-/// hold fewer cells, so no row is ever left with empty holes. All entries
-/// start selected, matching the old checked-by-default rows.
+/// selected cells natively via `:selected`. The column count is chosen so
+/// every row is full (see [`picker_columns`]); cells get HIG 6px margins.
+/// All entries start selected, matching the old checked-by-default rows.
 /// Returns the view and its selection model for the caller to wire.
 fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::MultiSelection) {
     let store = gio::ListStore::new::<gtk4::StringObject>();
@@ -516,8 +516,12 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
         // Not activatable: the ListView's selection model owns interaction.
         // Titles are untrusted (video titles carry `&`, `<`, …): plain text.
         // Selection is shown natively via Adwaita's `:selected` styling —
-        // no custom indicator.
+        // no custom indicator. 6px margins give HIG spacing between cells.
         let row = adw::ActionRow::builder().use_markup(false).build();
+        row.set_margin_top(6);
+        row.set_margin_bottom(6);
+        row.set_margin_start(6);
+        row.set_margin_end(6);
         item.set_child(Some(&row));
     });
     {
@@ -530,13 +534,24 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
         });
     }
 
+    // Lock the column count: `picker_columns` divides the item count evenly,
+    // so no row ever has an empty slot.
+    let columns = picker_columns(entries.len());
     let list = gtk4::GridView::builder()
         .model(&selection)
         .factory(&factory)
-        .max_columns(4)
-        .min_columns(1)
+        .max_columns(columns)
+        .min_columns(columns)
         .build();
     (list, selection)
+}
+
+/// Column count for the picker grid: the largest number (up to 4) that divides
+/// the item count evenly, so every row is full and no empty slot appears.
+/// Falls back to a single column when the count is prime (or 1).
+fn picker_columns(count: usize) -> u32 {
+    let max = 4.min(count).max(1);
+    (1..=max).rev().find(|c| count % c == 0).unwrap_or(1) as u32
 }
 
 /// Wire the pickers' bottom action bar to a list's multi-selection: the
@@ -643,11 +658,10 @@ fn push_playlist_items_page(
     list_box.append(&error_caption);
 
     // Scrolled: big playlists must not size the card off-screen, but the capped
-    // natural height lets it grow and shrink with the item count instead of
-    // keeping the last size.
+    // natural height lets it grow and shrink with the item count. No vexpand:
+    // the window must not gain scrollable empty space below a short list.
     let scrolled = gtk4::ScrolledWindow::builder()
         .child(&list_box)
-        .vexpand(true)
         .propagate_natural_height(true)
         .max_content_height(480)
         .build();
@@ -806,10 +820,10 @@ fn push_torrent_picker_page(
     list_box.append(&error_caption);
 
     // Same capped scrolled window as the playlist picker: big torrents must
-    // not size the card off-screen.
+    // not size the card off-screen. No vexpand: no scrollable empty space
+    // below a short list.
     let scrolled = gtk4::ScrolledWindow::builder()
         .child(&list_box)
-        .vexpand(true)
         .propagate_natural_height(true)
         .max_content_height(480)
         .build();

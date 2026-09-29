@@ -192,8 +192,8 @@ fn hide_video_step(v: &VideoStep) {
     v.tools.set_visible(false);
     v.error.set_visible(false);
     // No format picked in these states: back to the icon-only button.
-    v.add_btn.set_label(None);
-    v.add_btn.set_icon_name(Some("object-select-symbolic"));
+    v.add_btn.set_label("");
+    v.add_btn.set_icon_name("object-select-symbolic");
     v.add_btn.add_css_class("circular");
 }
 
@@ -226,9 +226,9 @@ fn show_video_ready(v: &VideoStep) {
     v.revert.set_visible(true);
     v.format.set_visible(true);
     // Format picked: the Add button earns its text label.
-    v.add_btn.set_icon_name(None);
+    v.add_btn.set_icon_name("");
     v.add_btn.remove_css_class("circular");
-    v.add_btn.set_label(Some(&gettext("Add")));
+    v.add_btn.set_label(&gettext("Add"));
 }
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {

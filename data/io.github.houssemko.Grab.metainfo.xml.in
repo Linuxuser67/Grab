@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.15" date="2026-09-29">
+      <description>
+        <ul>
+          <li>Playlist and torrent pickers: grid columns adapt to the item count so no row is left with an empty slot, with HIG spacing between cells.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.14" date="2026-09-29">
       <description>
         <ul>

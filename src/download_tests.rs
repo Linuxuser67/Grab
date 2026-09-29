@@ -54,6 +54,7 @@ fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus)
         output_dir: None,
         video_source: None,
         started: None,
+        scheduled_at: None,
     }
 }
 
@@ -428,6 +429,7 @@ fn overcap_queue_keeps_active_first() {
             output_dir: None,
             video_source: None,
             started: None,
+            scheduled_at: None,
         },
         StoredItem {
             id: None,
@@ -441,6 +443,7 @@ fn overcap_queue_keeps_active_first() {
             output_dir: None,
             video_source: None,
             started: None,
+            scheduled_at: None,
         },
     ];
     for i in 0..1000 {
@@ -456,6 +459,7 @@ fn overcap_queue_keeps_active_first() {
             output_dir: None,
             video_source: None,
             started: None,
+            scheduled_at: None,
         });
     }
     let queue = StoredQueue {
@@ -996,6 +1000,7 @@ fn a_pre_upgrade_row_never_lands_on_a_leftover_staging_dir() {
                 output_dir: None,
                 video_source: None,
                 started: None,
+                scheduled_at: None,
             }],
         })
         .unwrap(),
@@ -1057,6 +1062,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             output_dir: None,
             video_source: None,
             started: None,
+            scheduled_at: None,
         },
         StoredItem {
             id: None,
@@ -1070,6 +1076,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             output_dir: None,
             video_source: None,
             started: None,
+            scheduled_at: None,
         },
     ];
     std::fs::write(
@@ -1183,6 +1190,7 @@ fn mismatched_video_source_dropped_on_restore() {
                 playlist_item_id: None,
             }),
             started: None,
+            scheduled_at: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -1231,6 +1239,7 @@ fn done_video_keeps_page_source_on_restore() {
                 playlist_item_id: None,
             }),
             started: None,
+            scheduled_at: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -2467,6 +2476,7 @@ fn queue_roundtrip_and_mapping() {
                 output_dir: None,
                 video_source: None,
                 started: None,
+                scheduled_at: None,
             },
             StoredItem {
                 id: None,
@@ -2480,6 +2490,7 @@ fn queue_roundtrip_and_mapping() {
                 output_dir: None,
                 video_source: None,
                 started: None,
+                scheduled_at: None,
             },
         ],
     };
@@ -2628,6 +2639,7 @@ fn batch_restore_hundred_done() {
             output_dir: None,
             video_source: None,
             started: None,
+            scheduled_at: None,
         })
         .collect();
     let queue = StoredQueue {
@@ -2831,6 +2843,7 @@ fn restore_preserves_intent() {
         video_source: None,
         // None: this round-trips a legacy queue file through restore.
         started: None,
+        scheduled_at: None,
     })
     .collect();
     let queue = StoredQueue {
@@ -3535,6 +3548,7 @@ fn killed_segmented_resume_starts_over() {
                 output_dir: None,
                 video_source: None,
                 started: None,
+                scheduled_at: None,
             }],
         })
         .unwrap(),
@@ -6041,4 +6055,81 @@ fn ensure_contained_parent_reports_mkdir_failure_distinctly() {
 
     let _ = std::fs::remove_dir_all(&base);
     let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[test]
+fn enqueue_scheduled_creates_scheduled_item() {
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let future = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(1)
+        .unwrap()
+        .to_unix();
+    let item = m
+        .enqueue_scheduled("https://example.com/file.zip", None, None, future)
+        .expect("enqueue_scheduled should succeed");
+    assert_eq!(item.status(), DownloadStatus::Scheduled);
+    assert_eq!(item.scheduled_at(), future);
+}
+
+#[test]
+fn enqueue_scheduled_rejects_past_time() {
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let past = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(-1)
+        .unwrap()
+        .to_unix();
+    let result = m.enqueue_scheduled("https://example.com/file.zip", None, None, past);
+    assert!(result.is_err(), "past scheduled time must be rejected");
+}
+
+#[test]
+fn check_scheduled_queues_due_items() {
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    // Schedule 1 hour out, then manually backdate to simulate time passing.
+    let future = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(1)
+        .unwrap()
+        .to_unix();
+    let item = m
+        .enqueue_scheduled("https://example.com/file.zip", None, None, future)
+        .unwrap();
+    assert_eq!(item.status(), DownloadStatus::Scheduled);
+    // Simulate the scheduled time arriving.
+    item.set_scheduled_at(
+        glib::DateTime::now_local()
+            .unwrap()
+            .add_seconds(-10.0)
+            .unwrap()
+            .to_unix(),
+    );
+    m.check_scheduled();
+    // Due items leave Scheduled; with a free slot start_next picks them up immediately.
+    assert!(matches!(
+        item.status(),
+        DownloadStatus::Queued | DownloadStatus::Downloading
+    ));
+    assert_eq!(item.scheduled_at(), 0);
+}
+
+#[test]
+fn check_scheduled_leaves_future_items_alone() {
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let future = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(2)
+        .unwrap()
+        .to_unix();
+    let item = m
+        .enqueue_scheduled("https://example.com/file.zip", None, None, future)
+        .unwrap();
+    m.check_scheduled();
+    assert_eq!(item.status(), DownloadStatus::Scheduled);
+    assert_eq!(item.scheduled_at(), future);
 }

@@ -554,6 +554,33 @@ impl DownloadManager {
         Ok(self.insert(item))
     }
 
+    /// Enqueue a download to start at a future Unix timestamp. The item gets
+    /// `Scheduled` status (skipped by `start_next`) until the scheduler queues it.
+    ///
+    /// # Errors
+    /// Returns a display-ready message when the URL is invalid or the timestamp is not in the future.
+    pub fn enqueue_scheduled(
+        self: &Rc<Self>,
+        url: &str,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+        scheduled_at: i64,
+    ) -> Result<DownloadItem, String> {
+        let now = glib::DateTime::now_local()
+            .map(|dt| dt.to_unix())
+            .unwrap_or(0);
+        if scheduled_at <= now {
+            return Err(gettext("Scheduled time must be in the future"));
+        }
+        // Batch guard defers start_next until the status is Scheduled:
+        // without it, insert() would spawn the still-Queued item.
+        let _guard = self.batch_guard();
+        let item = self.enqueue(url, dest_dir, filename)?;
+        item.set_scheduled_at(scheduled_at);
+        item.set_status(DownloadStatus::Scheduled);
+        Ok(item)
+    }
+
     /// Intake for .torrent files: archive the bytes, then enqueue the
     /// pseudo-URL like any other download (stub from the file stem, real
     /// name arrives with metadata via SuggestName).
@@ -768,8 +795,15 @@ impl DownloadManager {
             dest_dir,
         );
         // Resumed rows requeue; only settled rows keep their status.
+        // Scheduled rows keep their status and timestamp; overdue ones queue immediately.
+        let now = glib::DateTime::now_local()
+            .map(|dt| dt.to_unix())
+            .unwrap_or(0);
+        let scheduled_at = stored.scheduled_at.unwrap_or(0);
+        item.set_scheduled_at(scheduled_at);
         item.set_status(match status {
             DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Done => *status,
+            DownloadStatus::Scheduled if scheduled_at > now => DownloadStatus::Scheduled,
             _ => DownloadStatus::Queued,
         });
         if let Some(st) = segments {
@@ -1722,7 +1756,7 @@ impl DownloadManager {
             return Err(gettext("Renaming torrent downloads isn't supported"));
         }
         match item.status() {
-            DownloadStatus::Done | DownloadStatus::Queued => {}
+            DownloadStatus::Done | DownloadStatus::Queued | DownloadStatus::Scheduled => {}
             DownloadStatus::Downloading => {
                 return Err(gettext("Pause or wait for the download to finish first"));
             }
@@ -2348,6 +2382,10 @@ impl DownloadManager {
                     output_dir,
                     video_source,
                     started: Some(self.started.borrow().contains(&it.id())),
+                    scheduled_at: {
+                        let ts = it.scheduled_at();
+                        (ts > 0).then_some(ts)
+                    },
                 });
             }
         }
@@ -2565,6 +2603,36 @@ impl DownloadManager {
                     crate::torrent::sweep_session_orphans(&keep).await;
                 });
             }
+        }
+    }
+
+    /// Start the schedule checker: every 30s, queue any scheduled downloads whose time has arrived.
+    /// Uses `timeout_add_seconds_local` (main thread, no worker needed — the check is a cheap store scan).
+    pub fn start_scheduler(self: &Rc<Self>) {
+        let manager = Rc::clone(self);
+        glib::timeout_add_seconds_local(30, move || {
+            manager.check_scheduled();
+            glib::ControlFlow::Continue
+        });
+    }
+
+    /// Queue scheduled downloads whose time has arrived. Called by the scheduler timer.
+    pub(crate) fn check_scheduled(self: &Rc<Self>) {
+        let now = glib::DateTime::now_local()
+            .map(|dt| dt.to_unix())
+            .unwrap_or(0);
+        let mut due = false;
+        for item in self.items() {
+            if item.status() == DownloadStatus::Scheduled && item.scheduled_at() <= now {
+                item.set_status(DownloadStatus::Queued);
+                item.set_scheduled_at(0);
+                due = true;
+            }
+        }
+        if due {
+            self.changed();
+            self.persist_queue();
+            self.start_next();
         }
     }
 

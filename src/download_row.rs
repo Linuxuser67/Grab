@@ -30,6 +30,9 @@ mod imp {
         /// Engine's real output folder for torrents; empty means unknown, use `file_path()`.
         #[property(get, set)]
         pub output_dir: RefCell<String>,
+        /// Unix timestamp when a scheduled download should start; 0 = not scheduled.
+        #[property(get, set)]
+        pub scheduled_at: Cell<i64>,
     }
 
     #[glib::object_subclass]

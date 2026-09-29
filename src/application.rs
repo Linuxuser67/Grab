@@ -34,6 +34,7 @@ pub fn setup(app: &adw::Application) {
             let store = gio::ListStore::new::<crate::download::DownloadItem>();
             let manager = DownloadManager::new(store, settings.clone());
             manager.restore_queue();
+            manager.start_scheduler();
 
             let toasts = Rc::new(adw::ToastOverlay::new());
             register_actions(app, &st);

@@ -223,6 +223,16 @@ pub(crate) enum RowMedia {
     Torrent,
     /// Ordinary video page.
     Video,
+    /// Direct image download (gif, png, jpg, …).
+    Image,
+    /// Direct video file download (mp4, webm, mkv, …).
+    VideoFile,
+    /// Direct audio file download (mp3, ogg, flac, …).
+    AudioFile,
+    /// Document download (pdf, …).
+    Document,
+    /// Archive download (zip, tar, 7z, …).
+    Archive,
     /// Plain direct file of unknown type.
     File,
 }
@@ -237,14 +247,55 @@ impl RowMedia {
             RowMedia::Audio => "audio-headphones-symbolic",
             RowMedia::Torrent => "emblem-shared-symbolic",
             RowMedia::Video => "video-display-symbolic",
+            RowMedia::Image => "image-x-generic-symbolic",
+            RowMedia::VideoFile => "video-x-generic-symbolic",
+            RowMedia::AudioFile => "audio-x-generic-symbolic",
+            RowMedia::Document => "application-pdf-symbolic",
+            RowMedia::Archive => "package-x-generic-symbolic",
             RowMedia::File => "application-octet-stream-symbolic",
         }
     }
 }
 
+/// Classify a plain file by extension. Case-insensitive; unknown → None.
+fn file_media_for_extension(filename: &str) -> Option<RowMedia> {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        // Images
+        "gif" | "png" | "jpg" | "jpeg" | "webp" | "svg" | "bmp" | "ico" | "tiff" | "tif"
+        | "avif" | "heic" | "heif" => Some(RowMedia::Image),
+        // Video files
+        "mp4" | "webm" | "mkv" | "avi" | "mov" | "m4v" | "ogv" | "wmv" | "flv" | "3gp" => {
+            Some(RowMedia::VideoFile)
+        }
+        // Audio files
+        "mp3" | "ogg" | "oga" | "flac" | "wav" | "m4a" | "opus" | "aac" | "wma" | "aiff" => {
+            Some(RowMedia::AudioFile)
+        }
+        // Documents
+        "pdf" | "epub" | "djvu" | "xps" => Some(RowMedia::Document),
+        // Archives
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "tgz" | "tbz2" | "txz" => {
+            Some(RowMedia::Archive)
+        }
+        _ => None,
+    }
+}
+
 /// Classify a row's media from manager lookups. Pure over the lookups so the
 /// mapping is unit-testable; `build_row` does the GTK and the gettext.
-pub(crate) fn row_media(live: bool, audio_only: bool, torrent: bool, page: bool) -> RowMedia {
+/// `filename` classifies plain direct files by extension (gif → image, …).
+pub(crate) fn row_media(
+    live: bool,
+    audio_only: bool,
+    torrent: bool,
+    page: bool,
+    filename: &str,
+) -> RowMedia {
     if live {
         RowMedia::Live
     } else if audio_only {
@@ -254,8 +305,35 @@ pub(crate) fn row_media(live: bool, audio_only: bool, torrent: bool, page: bool)
     } else if page {
         RowMedia::Video
     } else {
-        RowMedia::File
+        file_media_for_extension(filename).unwrap_or(RowMedia::File)
     }
+}
+
+/// Status label for a row: scheduled downloads show their start time
+/// ("Scheduled for 14:30"), everything else uses the status label.
+pub(crate) fn row_status_label(item: &crate::download_row::DownloadItem) -> String {
+    if item.status() == DownloadStatus::Scheduled {
+        let ts = item.scheduled_at();
+        if ts > 0 {
+            if let Ok(dt) = glib::DateTime::from_unix_local(ts) {
+                // Same-day: "14:30". Otherwise: "Sep 30, 14:30".
+                let now = glib::DateTime::now_local().ok();
+                let same_day = now
+                    .as_ref()
+                    .map(|n| {
+                        n.year() == dt.year()
+                            && n.month() == dt.month()
+                            && n.day_of_month() == dt.day_of_month()
+                    })
+                    .unwrap_or(false);
+                let fmt = if same_day { "%H:%M" } else { "%b %d, %H:%M" };
+                if let Ok(time) = dt.format(fmt) {
+                    return gettext("Scheduled for {time}").replace("{time}", &time);
+                }
+            }
+        }
+    }
+    item.status().label()
 }
 
 /// Set a row button's icon, tooltip, and screen-reader label from one verb so
@@ -567,6 +645,7 @@ pub(crate) fn build_row(
         ),
         crate::torrent::is_torrent(&item.url()),
         matches!(source, Some(crate::media_types::VideoSource::Page { .. })),
+        &item.filename(),
     );
     let media_icon = gtk4::Image::builder()
         .icon_name(media.icon_name())
@@ -578,6 +657,11 @@ pub(crate) fn build_row(
         RowMedia::Audio => gettext("Audio"),
         RowMedia::Torrent => gettext("Torrent"),
         RowMedia::Video => gettext("Video"),
+        RowMedia::Image => gettext("Image"),
+        RowMedia::VideoFile => gettext("Video file"),
+        RowMedia::AudioFile => gettext("Audio file"),
+        RowMedia::Document => gettext("Document"),
+        RowMedia::Archive => gettext("Archive"),
         RowMedia::File => gettext("Download"),
     })]);
 
@@ -589,7 +673,7 @@ pub(crate) fn build_row(
         .css_classes(["heading"])
         .build();
     let status = gtk4::Label::builder()
-        .label(item.status().label())
+        .label(row_status_label(item))
         .css_classes(["dim-label", "caption"])
         .valign(gtk4::Align::Center)
         .build();
@@ -818,7 +902,7 @@ pub(crate) fn build_row(
             return;
         };
         row.name.set_text(&it.filename());
-        row.status.set_text(&it.status().label());
+        row.status.set_text(&row_status_label(it));
         refresh_row(
             it,
             &row.widgets,

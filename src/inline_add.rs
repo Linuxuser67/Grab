@@ -496,8 +496,7 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
 /// A picker grid (HIG `GtkGridView` with `GtkMultiSelection` and
 /// `AdwActionRow` rows): click toggles selection, no checkboxes. Pure
 /// theme defaults — no custom CSS; the selection model and Adwaita render
-/// selected rows natively, and a `object-select-symbolic` tick bound to the
-/// list item's `selected` marks the pick. Up to 4 columns; short rows simply
+/// selected cells natively via `:selected`. Up to 4 columns; short rows simply
 /// hold fewer cells, so no row is ever left with empty holes. All entries
 /// start selected, matching the old checked-by-default rows.
 /// Returns the view and its selection model for the caller to wire.
@@ -516,14 +515,9 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::Mul
         // double the row height. Duration/size is redundant for picking.
         // Not activatable: the ListView's selection model owns interaction.
         // Titles are untrusted (video titles carry `&`, `<`, …): plain text.
-        // Selection tick: a plain GTK property binding shows the check on
-        // selected rows — no CSS, no manual state tracking.
+        // Selection is shown natively via Adwaita's `:selected` styling —
+        // no custom indicator.
         let row = adw::ActionRow::builder().use_markup(false).build();
-        let check = gtk4::Image::from_icon_name("object-select-symbolic");
-        row.add_suffix(&check);
-        item.bind_property("selected", &check, "visible")
-            .sync_create()
-            .build();
         item.set_child(Some(&row));
     });
     {

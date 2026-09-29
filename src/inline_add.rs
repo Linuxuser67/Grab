@@ -1293,14 +1293,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     group.add(&schedule_switch);
 
-    let schedule_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-    schedule_box.set_margin_top(6);
-    schedule_box.set_margin_bottom(6);
+    // Revealed schedule rows live in their own PreferencesGroup: AdwActionRow
+    // and AdwSpinRow must be placed in a GtkListBox (which PreferencesGroup
+    // provides), not a plain GtkBox — Adwaita warns otherwise.
+    let schedule_group = adw::PreferencesGroup::new();
     let schedule_revealer = gtk4::Revealer::builder()
         .transition_type(gtk4::RevealerTransitionType::SlideDown)
         .reveal_child(false)
         .build();
-    schedule_revealer.set_child(Some(&schedule_box));
+    schedule_revealer.set_child(Some(&schedule_group));
 
     // Date picker: MenuButton opens a popover with GtkCalendar (HIG: no text
     // entry for dates). GTK/libadwaita provide no stock date picker, so this
@@ -1315,7 +1316,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let date_row = adw::ActionRow::builder().title(gettext("Date")).build();
     date_row.add_suffix(&date_btn);
     date_row.set_activatable_widget(Some(&date_btn));
-    schedule_box.append(&date_row);
+    schedule_group.add(&date_row);
 
     // Time pickers: hour/minute spin rows (HIG: SpinRow for numbers).
     let hour_spin = adw::SpinRow::builder()
@@ -1326,8 +1327,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .title(gettext("Minute"))
         .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 59.0, 1.0, 5.0, 0.0))
         .build();
-    schedule_box.append(&hour_spin);
-    schedule_box.append(&minute_spin);
+    schedule_group.add(&hour_spin);
+    schedule_group.add(&minute_spin);
 
     // Update the shared timestamp when date/time changes or the switch toggles.
     {

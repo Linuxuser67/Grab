@@ -28,8 +28,8 @@ use crate::video_probe::{
     retarget_story_items, sanitize_video_json, story_segment_url, story_tray_url,
 };
 use crate::video_progress::{
-    grid_needs_rebuild, is_format_selection_line, is_ytdlp_merge_line, leg_changed,
-    parse_ytdlp_after_move, parse_ytdlp_template, piece_marks, trace_format_lines,
+    estimate_collapsed, grid_needs_rebuild, is_format_selection_line, is_ytdlp_merge_line,
+    leg_changed, parse_ytdlp_after_move, parse_ytdlp_template, piece_marks, trace_format_lines,
 };
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
@@ -2263,6 +2263,22 @@ fn grid_needs_rebuild_on_any_growth() {
     assert!(!grid_needs_rebuild(Some(1_100_000_000), 640_000_000));
     assert!(!grid_needs_rebuild(Some(640_000_000), 0));
     assert!(!grid_needs_rebuild(None, 0));
+}
+
+#[test]
+fn estimate_collapsed_detects_spike_correction() {
+    // Real HLS capture: the estimate spiked to 1013792256 then revised to
+    // 533418666 (a 47% drop) — the sticky max was phantom.
+    assert!(estimate_collapsed(Some(1_013_792_256), 533_418_666));
+    assert!(estimate_collapsed(Some(1_000), 700));
+    // Wobble within the 25% band keeps the sticky max; growth, flat, zero
+    // and unknown never collapse.
+    assert!(!estimate_collapsed(Some(1_000), 800));
+    assert!(!estimate_collapsed(Some(1_000), 1_000));
+    assert!(!estimate_collapsed(Some(1_000), 1_200));
+    assert!(!estimate_collapsed(Some(1_000), 0));
+    assert!(!estimate_collapsed(None, 500));
+    assert!(!estimate_collapsed(Some(0), 500));
 }
 
 #[test]
@@ -5873,6 +5889,100 @@ fn hls_map_rebuilds_on_upward_wobble() {
     assert!(
         (0.5..0.65).contains(&frac),
         "map fraction {frac} ({} marks), expected ~0.58",
+        marked.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fake yt-dlp modeling an HLS estimate spike that collapses: the estimate
+/// runs 640 MB -> 1.01 GB (spike) -> 533 MB (sharp downward revision, the
+/// real shape captured from yt-dlp 2026.08.19). The sticky max must adopt
+/// the correction instead of sizing the grid for the phantom 1 GB peak.
+fn fake_ytdlp_hls_spike_collapse(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-hls-spikecollapse");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+echo '[Grab];downloading;1000000;NA;640000000;NA;NA'
+echo '[Grab];downloading;18000000;NA;1013792256;NA;NA'
+echo '[Grab];downloading;18500000;NA;533418666;NA;NA'
+echo '[Grab];downloading;400000000;NA;533418666;NA;NA'
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+printf 'hlsbytes' > "$out"
+printf '%s\n' "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn hls_map_adopts_estimate_collapse() {
+    // Spike-collapse regression: after the 1.01 GB -> 533 MB revision the
+    // grid must rebuild for 533 MB; the map must track ~75% (400/533 MB),
+    // not stall at ~40% on the phantom 1 GB grid.
+    use crate::engine_msg::EngineMsg;
+    let dir =
+        std::env::temp_dir().join(format!("grab-fakehls-spikecollapse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls_spike_collapse(&dir);
+    let staging = dir.join("staging");
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &AttemptGate::new(),
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+        None,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    let mut inits = Vec::new();
+    let mut marked = std::collections::HashSet::new();
+    while let Ok(msg) = rx.try_recv() {
+        match msg {
+            EngineMsg::SegmentsInit { total } => {
+                inits.push(total);
+                marked.clear();
+            }
+            EngineMsg::PieceDone(idx) => {
+                marked.insert(idx);
+            }
+            _ => {}
+        }
+    }
+    // Initial, spike, then the collapse correction.
+    assert_eq!(
+        inits,
+        vec![640_000_000u64, 1_013_792_256u64, 533_418_666u64],
+        "{inits:?}"
+    );
+    // 400 MB of 533 MB over the live grid: ~0.75, never ~0.40.
+    let cells = 533_418_666u64.div_ceil(crate::file_names::piece_len(533_418_666)) as f64;
+    let frac = marked.len() as f64 / cells;
+    assert!(
+        (0.7..0.8).contains(&frac),
+        "map fraction {frac} ({} marks), expected ~0.75",
         marked.len()
     );
     let _ = std::fs::remove_dir_all(&dir);

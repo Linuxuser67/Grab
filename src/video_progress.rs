@@ -96,6 +96,21 @@ pub(crate) fn grid_needs_rebuild(grid_total: Option<u64>, total: u64) -> bool {
     total > 0 && grid_total.is_none_or(|g| total > g)
 }
 
+/// Whether a collapsed HLS estimate invalidates the sticky max.
+/// `total_bytes_estimate` can spike to ~2x the true total mid-download and
+/// then revise sharply down; a sticky max locks in the spike, sizing the
+/// grid for a phantom total it can never fill (the map stalls half-lit
+/// while the download runs to completion). A downward revision beyond
+/// wobble adopts the correction: the max was wrong, the new estimate is
+/// yt-dlp's best current guess. Checked after `leg_changed`, so a genuine
+/// new leg (total moves *and* downloaded resets) still wins.
+pub(crate) fn estimate_collapsed(max_total: Option<u64>, total: u64) -> bool {
+    match max_total {
+        Some(m) if m > 0 => total > 0 && total.saturating_mul(4) < m.saturating_mul(3),
+        _ => false,
+    }
+}
+
 /// Newly completed piece indices as byte progress grows against a
 /// known total. Shared by the HLS progress tasks so the byte→cell
 /// math stays unit-tested in one place.

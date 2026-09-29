@@ -241,6 +241,11 @@ impl Drop for DownloadManager {
         if let Some(handle) = self.wake_task.take() {
             handle.abort();
         }
+        // Remove the scheduler tick: `timeout_add_seconds_local` binds its
+        // closure to the creating thread via glib's thread guard, so a leaked
+        // source dispatched by a later context iteration on another thread
+        // panics ("Value accessed from different thread...").
+        self.stop_scheduler();
     }
 }
 
@@ -1099,7 +1104,12 @@ impl DownloadManager {
         generation: u64,
         mut rx: tokio::sync::mpsc::UnboundedReceiver<EngineMsg>,
     ) {
-        let this = Rc::clone(self);
+        // Weak ref: a strong Rc here would keep the manager alive past its
+        // owner's drop, leaving a thread-bound `spawn_future_local` task to be
+        // polled on a later thread's context iteration — tripping glib's
+        // thread guard. When the manager is gone the pump has nothing to
+        // update, so it exits.
+        let weak = Rc::downgrade(self);
         // Speed baseline: resumes seed `downloaded` with pre-existing bytes, which lifetime-average math would report as fantasy GB/s.
         let mut base: Option<(u64, Instant)> = None;
         // Set on Finished/Failed. If the channel closes first the engine died without reporting: fail the row instead of stranding it.
@@ -1112,6 +1122,9 @@ impl DownloadManager {
         };
         glib::spawn_future_local(async move {
             while let Some(msg) = rx.recv().await {
+                let Some(this) = weak.upgrade() else {
+                    break;
+                };
                 // Stale spawn: its reports would drag the bar backwards and its tail would fail the row or steal the new engine's handle.
                 if !this.is_current(id, generation) {
                     break;
@@ -1419,24 +1432,28 @@ impl DownloadManager {
                     }
                 }
             }
-            // Superseded pump future: touch nothing, especially not the new engine's handle in `running`.
-            if !this.is_current(id, generation) {
-                return;
+            // Post-loop cleanup: the manager may have been dropped while the
+            // pump was pending; only clean up if it's still alive.
+            if let Some(this) = weak.upgrade() {
+                // Superseded pump future: touch nothing, especially not the new engine's handle in `running`.
+                if !this.is_current(id, generation) {
+                    return;
+                }
+                this.running.borrow_mut().remove(&id);
+                this.video_abort.borrow_mut().remove(&id);
+                this.live_rows.borrow_mut().remove(&id);
+                if this.draining.get() {
+                    return;
+                }
+                if !done && item.status() == DownloadStatus::Downloading {
+                    item.set_detail(gettext("Download interrupted"));
+                    item.set_status(DownloadStatus::Failed);
+                    this.notify_finished(&item, Err(gettext("Download interrupted")));
+                }
+                this.persist_queue();
+                this.changed();
+                this.start_next();
             }
-            this.running.borrow_mut().remove(&id);
-            this.video_abort.borrow_mut().remove(&id);
-            this.live_rows.borrow_mut().remove(&id);
-            if this.draining.get() {
-                return;
-            }
-            if !done && item.status() == DownloadStatus::Downloading {
-                item.set_detail(gettext("Download interrupted"));
-                item.set_status(DownloadStatus::Failed);
-                this.notify_finished(&item, Err(gettext("Download interrupted")));
-            }
-            this.persist_queue();
-            this.changed();
-            this.start_next();
         });
     }
 

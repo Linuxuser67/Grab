@@ -6181,3 +6181,28 @@ fn toggling_preference_stops_and_restarts_scheduler() {
     assert!(m.scheduler_source.borrow().is_some());
     m.stop_scheduler();
 }
+
+#[test]
+fn dropping_manager_removes_scheduler_source() {
+    let settings = test_settings();
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
+        .unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.start_scheduler();
+    // Grab the live Source object before dropping the manager.
+    let source = {
+        let borrow = m.scheduler_source.borrow();
+        let id = borrow.as_ref().expect("scheduler source installed");
+        glib::MainContext::default()
+            .find_source_by_id(id)
+            .expect("source present in context")
+    };
+    drop(m);
+    // Drop must remove the 30s tick; a leaked source would survive in the
+    // context and trip a later test's thread guard when dispatched.
+    assert!(
+        source.is_destroyed(),
+        "dropping the manager removes the scheduler source"
+    );
+}

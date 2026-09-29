@@ -493,14 +493,15 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
     header
 }
 
-/// A picker list (HIG `GtkListView` with `GtkMultiSelection` and
+/// A picker grid (HIG `GtkGridView` with `GtkMultiSelection` and
 /// `AdwActionRow` rows): click toggles selection, no checkboxes. Pure
 /// theme defaults — no custom CSS; the selection model and Adwaita render
 /// selected rows natively, and a `object-select-symbolic` tick bound to the
-/// list item's `selected` marks the pick. All entries start selected,
-/// matching the old checked-by-default rows.
+/// list item's `selected` marks the pick. Up to 4 columns; short rows simply
+/// hold fewer cells, so no row is ever left with empty holes. All entries
+/// start selected, matching the old checked-by-default rows.
 /// Returns the view and its selection model for the caller to wire.
-fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::MultiSelection) {
+fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::MultiSelection) {
     let store = gio::ListStore::new::<gtk4::StringObject>();
     for (title, _) in entries.iter() {
         store.append(&gtk4::StringObject::new(title));
@@ -535,9 +536,11 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::Mul
         });
     }
 
-    let list = gtk4::ListView::builder()
+    let list = gtk4::GridView::builder()
         .model(&selection)
         .factory(&factory)
+        .max_columns(4)
+        .min_columns(1)
         .build();
     (list, selection)
 }

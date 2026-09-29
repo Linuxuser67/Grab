@@ -154,8 +154,9 @@ struct FormatOption {
     format_id: Option<String>,
 }
 
-/// The video preview block inside the form: exactly one state row shows at a
-/// time, driven by the probe below.
+/// The video preview block inside the form: exactly one state shows at a
+/// time (ready rows, tools row, or the centered error card), driven by the
+/// probe below.
 struct VideoStep {
     /// Lookup spinner, in the URL entry's suffix slot (browser-address-bar
     /// style): no separate status line, no layout shift when a lookup starts.
@@ -171,7 +172,16 @@ struct VideoStep {
     options: Rc<RefCell<Vec<FormatOption>>>,
     audio: adw::SwitchRow,
     tools: adw::ActionRow,
-    error: adw::ActionRow,
+    error: VideoError,
+}
+
+/// Centered probe-error state: a plain card (not a PreferencesRow — error
+/// states center, rows don't) holding the message, the raw detail, and the
+/// retry button, all centered.
+struct VideoError {
+    card: gtk4::Box,
+    detail: gtk4::Label,
+    retry: gtk4::Button,
 }
 
 /// Reserve trailing text space inside the URL entry while the lookup
@@ -184,7 +194,7 @@ fn hide_video_step(v: &VideoStep) {
     v.format.set_visible(false);
     v.audio.set_visible(false);
     v.tools.set_visible(false);
-    v.error.set_visible(false);
+    v.error.card.set_visible(false);
 }
 
 /// Clear the video preview block back to a pristine state: `close_card`
@@ -201,7 +211,7 @@ fn reset_video_step(step: &VideoStep) {
     // only hidden; clear them so nothing stale survives.
     step.name.set_text("");
     step.tools.set_subtitle("");
-    step.error.set_subtitle("");
+    step.error.detail.set_text("");
     hide_video_step(step);
 }
 
@@ -228,9 +238,10 @@ fn show_video_tools_missing(v: &VideoStep, message: &str) {
 
 fn show_video_error(v: &VideoStep, message: &str) {
     hide_video_step(v);
-    v.group.set_visible(true);
-    v.error.set_subtitle(message);
-    v.error.set_visible(true);
+    // Plain-text label: the detail carries raw probe errors (`<HTTPError …>`
+    // etc.), never parsed as markup.
+    v.error.detail.set_text(message);
+    v.error.card.set_visible(true);
 }
 
 /// Desensitize the form's Add button while a lookup is in flight (a dead
@@ -1118,18 +1129,41 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_tools.set_activatable_widget(Some(&video_install_btn));
     video_tools.add_suffix(&video_install_btn);
     video_group.add(&video_tools);
-    let video_error = adw::ActionRow::builder()
-        .title(gettext("Couldn't load the media preview"))
-        // Subtitles carry raw probe errors (`<HTTPError …>` etc.): never
-        // parse them as Pango markup, or the error never renders.
-        .use_markup(false)
-        .build();
-    let video_retry_btn = gtk4::Button::builder()
-        .label(gettext("Retry"))
-        .valign(gtk4::Align::Center)
-        .build();
-    video_error.add_suffix(&video_retry_btn);
-    video_group.add(&video_error);
+    // Probe-error state: a centered card, not a row — the message, the raw
+    // detail, and retry, all centered like an empty state.
+    let video_error = {
+        let card = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+        card.add_css_class("card");
+        card.set_margin_top(24);
+        card.set_margin_bottom(24);
+        card.set_margin_start(12);
+        card.set_margin_end(12);
+        let title = gtk4::Label::builder()
+            .label(gettext("Couldn't load the media preview"))
+            .css_classes(["title-4"])
+            .halign(gtk4::Align::Center)
+            .build();
+        let detail = gtk4::Label::builder()
+            .css_classes(["dim-label"])
+            .halign(gtk4::Align::Center)
+            .wrap(true)
+            .wrap_mode(gtk4::WrapMode::WordChar)
+            .selectable(true)
+            .build();
+        let retry = gtk4::Button::builder()
+            .label(gettext("Retry"))
+            .halign(gtk4::Align::Center)
+            .build();
+        card.append(&title);
+        card.append(&detail);
+        card.append(&retry);
+        card.set_visible(false);
+        VideoError {
+            card,
+            detail,
+            retry,
+        }
+    };
     let step = Rc::new(VideoStep {
         url_spinner: url_spinner.clone(),
         group: video_group.clone(),
@@ -1151,6 +1185,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         });
     }
     form.append(&video_group);
+    form.append(&step.error.card);
 
     // Download options: HIG AdwPreferencesGroup, no header — the rows
     // speak for themselves. Rows get the 12px internal margins natively.
@@ -1775,7 +1810,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
     {
         let kick = kick_video.clone();
-        video_retry_btn.connect_clicked(move |_| kick(true));
+        step.error.retry.connect_clicked(move |_| kick(true));
     }
     // One-click restore of the title default (audio-aware, like submit).
     {

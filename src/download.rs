@@ -822,6 +822,7 @@ impl DownloadManager {
         name: String,
         progress: f64,
         output_dir: Option<String>,
+        video_source: Option<crate::media_types::VideoSource>,
     ) {
         let Ok(url) = normalize_url(&url) else {
             tracing::warn!("skipping history entry with bad URL");
@@ -856,6 +857,14 @@ impl DownloadManager {
         });
         // Restored duplicates collapse too: the last Done row per URL wins.
         self.drop_finished_duplicates(&url, item.id());
+        // Keep the row's media identity: a restored video page must not fall
+        // back to the generic file icon (same page-URL guard as
+        // `restore_existing`).
+        if let Some(src) = video_source
+            && matches!(src, crate::media_types::VideoSource::Page { ref page_url, .. } if *page_url == url)
+        {
+            self.video_sources.borrow_mut().insert(item.id(), src);
+        }
         self.insert(item);
     }
 
@@ -2485,12 +2494,14 @@ impl DownloadManager {
                 for p in pending {
                     match p.item.status {
                         DownloadStatus::Done => {
+                            let video_source = p.item.video_source.clone();
                             self.insert_history(
                                 p.item.url,
                                 p.item.dest_dir,
                                 p.item.filename,
                                 p.item.progress,
                                 p.output_dir,
+                                video_source,
                             );
                         }
                         status => {

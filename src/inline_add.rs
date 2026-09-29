@@ -941,8 +941,12 @@ fn wire_torrent_picker(
 
 fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
     // Playlists carry no format choice (pins don't apply across items), so
-    // the preview block stays hidden — Add opens the title picker directly.
+    // the preview block stays hidden — but the probe resolved, so Add earns
+    // its label like a single video; tapping it opens the title picker.
     hide_video_step(v);
+    v.add_btn.set_icon_name("");
+    v.add_btn.remove_css_class("circular");
+    v.add_btn.set_label(&gettext("Add"));
 }
 
 /// Handle for the inline New Download card: the widget to pin under the
@@ -1359,7 +1363,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     crate::video::preview_fresh(&st.info, st.last_ok.as_str(), &url)
                 };
                 if fresh {
-                    show_video_ready(&step_b);
+                    // A fresh playlist resolve hides the format picker (pins
+                    // don't apply across items); a single shows it.
+                    match probe_b.borrow().info.as_ref() {
+                        Some(crate::video::ProbeResult::Playlist(pl)) => {
+                            show_video_playlist(&step_b, pl)
+                        }
+                        _ => show_video_ready(&step_b),
+                    }
                     set_lookup_add(&lookup_add_b, true);
                     return;
                 }

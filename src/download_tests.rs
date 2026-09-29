@@ -1200,6 +1200,60 @@ fn mismatched_video_source_dropped_on_restore() {
     let _ = std::fs::remove_file(&qf);
 }
 
+/// A finished video restored from the queue file used to lose its Page
+/// source: `insert_history` rebuilt the Done row without staging the
+/// video source, so the row fell back to the generic file icon instead of
+/// the video icon.
+#[test]
+fn done_video_keeps_page_source_on_restore() {
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let qf = test_queue_file("video-done-restore");
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items: vec![StoredItem {
+            id: None,
+            url: "https://vimeo.com/123456".into(),
+            dest_dir: "/tmp/dl".into(),
+            filename: "Clip.mp4".into(),
+            status: DownloadStatus::Done,
+            progress: 1.0,
+            segments: None,
+            selected_files: None,
+            output_dir: None,
+            video_source: Some(crate::media_types::VideoSource::Page {
+                page_url: "https://vimeo.com/123456".into(),
+                media_url: None,
+                expires_at: None,
+                quality: "720p".into(),
+                audio_only: false,
+                is_live: false,
+                video_format_id: None,
+                playlist_item_id: None,
+            }),
+            started: None,
+        }],
+    };
+    std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    // Done rows rebuild through insert_history: no spawn, no network.
+    manager.restore_queue();
+    assert_eq!(manager.store().n_items(), 1);
+    let item = manager
+        .store()
+        .item(0)
+        .and_downcast::<DownloadItem>()
+        .unwrap();
+    assert_eq!(item.status(), DownloadStatus::Done);
+    let stored = manager
+        .video_source(item.id())
+        .expect("restored Done row keeps its Page source");
+    assert!(
+        matches!(stored, crate::media_types::VideoSource::Page { ref quality, .. } if quality == "720p")
+    );
+    let _ = std::fs::remove_file(&qf);
+}
+
 #[test]
 fn unremove_restores_video_source() {
     let (_q, _l) = test_locks();

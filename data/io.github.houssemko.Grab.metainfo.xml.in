@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.1-beta.1" date="2026-09-29">
+      <description>
+        <ul>
+          <li>Filenames, paths, URLs, and error messages containing &amp;, &lt;, or &gt; no longer break toast and dialog labels.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.20" date="2026-09-29">
       <description>
         <ul>

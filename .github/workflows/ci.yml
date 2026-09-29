@@ -26,7 +26,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No job pushes or fetches; don't persist the token in git config.
           persist-credentials: false
@@ -43,7 +43,7 @@ jobs:
     steps:
       - name: Install system dependencies
         run: dnf install -y git gcc pkg-config gtk4-devel libadwaita-devel python3
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No job pushes or fetches; don't persist the token in git config.
           persist-credentials: false
@@ -65,7 +65,7 @@ jobs:
     steps:
       - name: Install system dependencies
         run: dnf install -y curl gtk3
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No job pushes or fetches; don't persist the token in git config.
           persist-credentials: false
@@ -82,7 +82,7 @@ jobs:
   vendor-sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No job pushes or fetches; don't persist the token in git config.
           persist-credentials: false
@@ -98,7 +98,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # gitleaks scans history; the default shallow checkout would
           # hide every commit but the last.

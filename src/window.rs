@@ -1,6 +1,7 @@
 use crate::download::DownloadManager;
 use adw::prelude::*;
 use gettextrs::gettext;
+use glib::variant::ToVariant;
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
@@ -57,9 +58,15 @@ async fn request_inhibit(
     options.insert("handle_token", token);
     options.insert("reason", gettext("Downloading files"));
     // Flags ride positionally (sua{sv}), not in the options dict: the portal
-    // rejects the call otherwise.
-    let params = glib::variant::ToVariant::to_variant(&(String::new(), SUSPEND, options.end()));
-    let Ok(reply) = conn
+    // rejects the call otherwise. Build the tuple explicitly: the
+    // tuple-ToVariant impl can wrap the dict's Variant in an extra
+    // variant layer, producing (suv) instead of (sua{sv}).
+    let params = glib::Variant::tuple_from_iter([
+        String::new().to_variant(),
+        SUSPEND.to_variant(),
+        options.end(),
+    ]);
+    let reply = match conn
         .call_future(
             Some(PORTAL),
             DESKTOP_PATH,
@@ -71,10 +78,13 @@ async fn request_inhibit(
             -1,
         )
         .await
-    else {
-        clear_pending(&state);
-        tracing::warn!("suspend block request failed");
-        return;
+    {
+        Ok(reply) => reply,
+        Err(e) => {
+            clear_pending(&state);
+            tracing::warn!("suspend block request failed: {e}");
+            return;
+        }
     };
     let path = (reply.n_children() == 1)
         .then(|| reply.child_value(0))
@@ -156,7 +166,9 @@ fn request_background() {
         );
         options.insert("autostart", false);
         options.insert("background", true);
-        let params = glib::variant::ToVariant::to_variant(&(String::new(), options.end()));
+        // Build explicitly (see Inhibit above): tuple-ToVariant can wrap
+        // the dict's Variant in an extra layer.
+        let params = glib::Variant::tuple_from_iter([String::new().to_variant(), options.end()]);
         let _ = conn
             .call_future(
                 Some("org.freedesktop.portal.Desktop"),

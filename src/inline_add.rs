@@ -177,7 +177,7 @@ struct VideoStep {
 
 /// Centered probe-error state: a plain card (not a PreferencesRow — error
 /// states center, rows don't) holding the message, the raw detail, and the
-/// retry button, all centered.
+/// retry button, left-aligned and vertically centered.
 struct VideoError {
     card: gtk4::Box,
     detail: gtk4::Label,
@@ -1129,8 +1129,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_tools.set_activatable_widget(Some(&video_install_btn));
     video_tools.add_suffix(&video_install_btn);
     video_group.add(&video_tools);
-    // Probe-error state: a centered card, not a row — the message, the raw
-    // detail, and retry, all centered like an empty state.
+    // Probe-error state: a card, not a row — the message, the raw detail,
+    // and retry, left-aligned and vertically centered like an empty state.
     let video_error = {
         let card = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
         card.add_css_class("card");
@@ -1141,18 +1141,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let title = gtk4::Label::builder()
             .label(gettext("Couldn't load the media preview"))
             .css_classes(["title-4"])
-            .halign(gtk4::Align::Center)
+            .halign(gtk4::Align::Start)
             .build();
         let detail = gtk4::Label::builder()
             .css_classes(["dim-label"])
-            .halign(gtk4::Align::Center)
+            .halign(gtk4::Align::Start)
             .wrap(true)
             .wrap_mode(gtk4::WrapMode::WordChar)
             .selectable(true)
             .build();
         let retry = gtk4::Button::builder()
             .label(gettext("Retry"))
-            .halign(gtk4::Align::Center)
+            .halign(gtk4::Align::Start)
             .build();
         card.append(&title);
         card.append(&detail);

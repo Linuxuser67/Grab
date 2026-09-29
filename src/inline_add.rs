@@ -483,14 +483,14 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
     header
 }
 
-/// A picker list (HIG `GtkListView` with `GtkMultiSelection`): single-column
-/// rows that match the app's list UI — click toggles selection. The
-/// `.boxed-list-separate` style (same as the queue) gives each row its own
-/// rounded card with spacing. Pure theme defaults, no custom CSS; the
-/// selection model and Adwaita render selected rows natively via `:selected`.
-/// All entries start selected, matching the old checked-by-default rows.
-/// Returns the view and its selection model for the caller to wire.
-fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::MultiSelection) {
+/// A picker grid (HIG `GtkGridView` with `GtkMultiSelection`): cells are
+/// Adwaita `.card`s — the grid equivalent of the list's `.boxed-list-separate`
+/// rows — with margins for spacing. Click toggles selection; selected cells
+/// render natively via `:selected` on the `child` CSS node (see
+/// https://docs.gtk.org/gtk4/class.GridView.html#css-nodes). All entries
+/// start selected, matching the old checked-by-default rows. Returns the
+/// view and its selection model for the caller to wire.
+fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::GridView, gtk4::MultiSelection) {
     let store = gio::ListStore::new::<gtk4::StringObject>();
     for (title, _) in entries.iter() {
         store.append(&gtk4::StringObject::new(title));
@@ -501,32 +501,43 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::ListView, gtk4::Mul
     let factory = gtk4::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
         let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-        // HIG: AdwActionRow, single-line title only — the subtitle would
-        // double the row height. Duration/size is redundant for picking.
-        // Titles are untrusted (video titles carry `&`, `<`, …): plain text.
-        // Selection is shown natively via Adwaita's `:selected` styling —
-        // no custom indicator.
-        let row = adw::ActionRow::builder().use_markup(false).build();
-        item.set_child(Some(&row));
+        // .card: native rounded-card look, its own default padding. Hug the
+        // content (don't stretch to fill the grid cell). Titles are
+        // untrusted (video titles carry `&`, `<`, …): plain text via
+        // set_text, never markup.
+        let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        card.add_css_class("card");
+        card.set_halign(gtk4::Align::Center);
+        card.set_valign(gtk4::Align::Center);
+        card.set_margin_top(6);
+        card.set_margin_bottom(6);
+        card.set_margin_start(6);
+        card.set_margin_end(6);
+        let label = gtk4::Label::builder()
+            .halign(gtk4::Align::Start)
+            .wrap(true)
+            .build();
+        card.append(&label);
+        item.set_child(Some(&card));
     });
     {
         let entries = Rc::clone(&entries);
         factory.connect_bind(move |_, item| {
             let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
             let (title, _) = &entries[item.position() as usize];
-            let row = item.child().and_downcast::<adw::ActionRow>().unwrap();
-            row.set_title(title);
+            let card = item.child().and_downcast::<gtk4::Box>().unwrap();
+            let label = card.first_child().and_downcast::<gtk4::Label>().unwrap();
+            label.set_text(title);
         });
     }
 
-    let list = gtk4::ListView::builder()
+    let grid = gtk4::GridView::builder()
         .model(&selection)
         .factory(&factory)
-        // Match the queue's .boxed-list-separate: each row is its own
-        // rounded card with spacing, not a flat full-width bar.
-        .css_classes(["boxed-list-separate"])
+        .max_columns(3)
+        .min_columns(2)
         .build();
-    (list, selection)
+    (grid, selection)
 }
 
 /// Wire the pickers' bottom action bar to a list's multi-selection: the

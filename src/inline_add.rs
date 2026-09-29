@@ -725,7 +725,7 @@ fn push_playlist_items_page(
                 // Rows already queued stay queued on a partial failure: unselect
                 // them so a retry submits only the remainder (dedupe is by
                 // filename).
-                if let Some(child) = list.get_child_at_index(*i as i32) {
+                if let Some(child) = list.child_at_index(*i as i32) {
                     list.unselect_child(&child);
                 }
             }

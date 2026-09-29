@@ -46,6 +46,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.13" date="2026-09-29">
+      <description>
+        <ul>
+          <li>Playlist and torrent pickers now lay out in a grid (up to 4 columns), with a tick marking selected items.</li>
+          <li>HLS downloads: the progress grid follows sharp downward revisions of the size estimate instead of stalling on a phantom spike.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.12" date="2026-09-29">
       <description>
         <ul>

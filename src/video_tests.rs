@@ -1795,7 +1795,7 @@ fn probe_struct_footprint_budget() {
     assert_eq!(size_of::<VideoInfo>(), 88, "VideoInfo");
     assert_eq!(size_of::<PlaylistItem>(), 80, "PlaylistItem");
     assert_eq!(size_of::<PlaylistInfo>(), 80, "PlaylistInfo");
-    assert_eq!(size_of::<ProbeResult>(), 104, "ProbeResult");
+    assert_eq!(size_of::<ProbeResult>(), 88, "ProbeResult");
     // Rare large variants stay boxed so the common values stay small.
     assert_eq!(size_of::<VideoOutcome>(), 16, "VideoOutcome");
     assert_eq!(size_of::<crate::engine_msg::EngineMsg>(), 40, "EngineMsg");

@@ -168,8 +168,7 @@ fn request_background() {
         options.insert("background", true);
         // Build explicitly (see Inhibit above): tuple-ToVariant can wrap
         // the dict's Variant in an extra layer.
-        let params =
-            glib::Variant::tuple_from_iter([String::new().to_variant(), options.end()]);
+        let params = glib::Variant::tuple_from_iter([String::new().to_variant(), options.end()]);
         let _ = conn
             .call_future(
                 Some("org.freedesktop.portal.Desktop"),

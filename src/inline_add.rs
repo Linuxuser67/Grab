@@ -144,14 +144,17 @@ pub(crate) fn fmt_item_duration(secs: i64) -> String {
     }
 }
 
-/// One media-format option: an exact pinnable format from the probe, or the
-/// Automatic row (the global preference, no pin) when nothing is pinnable.
+/// One media-format option: an exact pinnable format from the probe, the
+/// Automatic row (the global preference, no pin) when nothing is pinnable,
+/// or the Audio only row (no pin, audio-only download).
 #[derive(Clone)]
 struct FormatOption {
-    /// Row title: the pin label ("1080p") or "Automatic".
+    /// Row title: the pin label ("1080p"), "Automatic", or "Audio only".
     label: String,
-    /// Resolved yt-dlp format id; `None` for the Automatic row.
+    /// Resolved yt-dlp format id; `None` for the Automatic and Audio only rows.
     format_id: Option<String>,
+    /// True for the Audio only row.
+    audio_only: bool,
 }
 
 /// The video preview block inside the form: exactly one state shows at a
@@ -165,12 +168,12 @@ struct VideoStep {
     name: adw::EntryRow,
     revert: gtk4::Button,
     /// Media-format selector, filled per video on resolve: exact pinnable
-    /// formats, tallest first (the preference preselects the closest row), or a
-    /// single Automatic row when nothing is pinnable.
+    /// formats, tallest first (the preference preselects the closest row),
+    /// a single Automatic row when nothing is pinnable, and always an
+    /// Audio only row — the whole format decision lives in this one row.
     format: adw::ComboRow,
     /// Index-aligned with the combo's model. Reset on every resolve.
     options: Rc<RefCell<Vec<FormatOption>>>,
-    audio: adw::SwitchRow,
     tools: adw::ActionRow,
     error: adw::ActionRow,
 }
@@ -183,7 +186,6 @@ fn hide_video_step(v: &VideoStep) {
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
-    v.audio.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
 }
@@ -197,7 +199,6 @@ fn reset_video_step(step: &VideoStep) {
     // Drop the format options and the current pick.
     step.options.borrow_mut().clear();
     step.format.set_model(Some(&gtk4::StringList::new(&[])));
-    step.audio.set_active(false);
     // Name row and the tools/error subtitles keep their last text when
     // only hidden; clear them so nothing stale survives.
     step.name.set_text("");
@@ -217,7 +218,6 @@ fn show_video_ready(v: &VideoStep) {
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
-    v.audio.set_visible(true);
 }
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
@@ -251,22 +251,64 @@ fn rebuild_format_options(step: &Rc<VideoStep>, info: &crate::video::VideoInfo, 
         options.push(FormatOption {
             label: opt.label.to_string(),
             format_id: Some(opt.id.to_string()),
+            audio_only: false,
         });
     }
     if options.is_empty() {
         options.push(FormatOption {
             label: gettext("Automatic"),
             format_id: None,
+            audio_only: false,
         });
     }
+    options.push(FormatOption {
+        label: gettext("Audio only"),
+        format_id: None,
+        audio_only: true,
+    });
     let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
     step.format.set_model(Some(&gtk4::StringList::new(&labels)));
+    // Options before selection: set_selected fires notify::selected, and the
+    // handler reads the options vec.
+    *step.options.borrow_mut() = options;
     // default_quality_index is over info.formats; options may be just
     // [Automatic] when nothing is pinnable, so clamp.
     let index = crate::video::default_quality_index(&info.formats, preferred)
-        .min(options.len().saturating_sub(1));
+        .min(step.options.borrow().len().saturating_sub(1));
     step.format.set_selected(index as u32);
+}
+
+/// Playlist format options: pins don't apply across items, so the combo
+/// carries just the Automatic row and the Audio only row.
+fn rebuild_playlist_format_options(step: &Rc<VideoStep>) {
+    let options = vec![
+        FormatOption {
+            label: gettext("Automatic"),
+            format_id: None,
+            audio_only: false,
+        },
+        FormatOption {
+            label: gettext("Audio only"),
+            format_id: None,
+            audio_only: true,
+        },
+    ];
+    let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
+    step.format.set_model(Some(&gtk4::StringList::new(&labels)));
+    // Options before selection: set_selected fires notify::selected, and the
+    // handler reads the options vec.
     *step.options.borrow_mut() = options;
+    step.format.set_selected(0);
+}
+
+/// Whether the combo's current pick is the Audio only row.
+fn selected_audio_only(step: &VideoStep) -> bool {
+    let selected = step.format.selected() as usize;
+    step.options
+        .borrow()
+        .get(selected)
+        .map(|o| o.audio_only)
+        .unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -279,7 +321,7 @@ fn submit_probed_single(
     v: &crate::video::VideoInfo,
 ) {
     let typed = step.name.text().trim().to_string();
-    let audio_only = step.audio.is_active();
+    let audio_only = selected_audio_only(step);
     // Default name from the video title and id; the intake sanitizes it.
     let settings = manager.settings();
     let auto = typed
@@ -352,15 +394,15 @@ fn submit_probe(
         crate::video::ProbeResult::Playlist(pl) => {
             // Collections queue through the item picker: one row per chosen
             // entry, each re-resolving its own page at download time. Pins
-            // don't apply across items, so the form's Audio only switch is
-            // the quality control here.
+            // don't apply across items, so the format combo's Automatic /
+            // Audio only pick is the quality control here.
             push_playlist_items_page(
                 nav,
                 manager.clone(),
                 dest.clone(),
                 close_card.clone(),
                 pl,
-                step.audio.is_active(),
+                selected_audio_only(step),
             );
         }
     }
@@ -938,7 +980,7 @@ fn wire_torrent_picker(
 fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
     hide_video_step(v);
     v.group.set_visible(true);
-    v.audio.set_visible(true);
+    v.format.set_visible(true);
 }
 
 /// Handle for the inline New Download card: the widget to pin under the
@@ -1116,10 +1158,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .title(gettext("Media format"))
         .build();
     video_group.add(&video_format);
-    let video_audio = adw::SwitchRow::builder()
-        .title(gettext("Audio only"))
-        .build();
-    video_group.add(&video_audio);
     let video_tools = adw::ActionRow::builder()
         .title(gettext("Support tools"))
         // Subtitles carry raw tool errors: never parse them as Pango markup.
@@ -1153,19 +1191,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         revert: video_revert_btn,
         format: video_format,
         options: Rc::new(RefCell::new(Vec::new())),
-        audio: video_audio,
         tools: video_tools,
         error: video_error,
     });
     // Card-local choices: the format is initialized from Preferences (not
-    // bound); audio-only is always off by design — no global preference
-    // exists. Exact picks are per lookup, so nothing persists here.
-    {
-        let format = step.format.clone();
-        step.audio.connect_active_notify(move |sw| {
-            format.set_sensitive(!sw.is_active());
-        });
-    }
+    // bound). Exact picks are per lookup, so nothing persists here.
     form.append(&video_group);
 
     // Download options: HIG AdwPreferencesGroup, no header — the rows
@@ -1499,11 +1529,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 if step_b.name.text().trim().is_empty() {
                                     let typed = file_b.text().trim().to_string();
                                     let base = if typed.is_empty() {
-                                        default_name_for(
-                                            &settings_b,
-                                            &v.title,
-                                            step_b.audio.is_active(),
-                                        )
+                                        // Seeded before the format rebuild;
+                                        // audio-only is always off by design
+                                        // at seed time.
+                                        default_name_for(&settings_b, &v.title, false)
                                     } else {
                                         typed
                                     };
@@ -1529,6 +1558,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 probe_b.borrow_mut().last_ok = url;
                                 probe_b.borrow_mut().info =
                                     Some(crate::video::ProbeResult::Playlist(pl.clone()));
+                                rebuild_playlist_format_options(&step_b);
                                 show_video_playlist(&step_b, &pl);
                                 set_lookup_add(&lookup_add_b, true);
                             }
@@ -1645,7 +1675,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 dd.clone(),
                                 close_card.clone(),
                                 pl,
-                                step2.audio.is_active(),
+                                selected_audio_only(&step2),
                             );
                         }
                         None => {}
@@ -1795,26 +1825,31 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
     // One-click restore of the title default (audio-aware, like submit).
     {
-        let (name, audio, probe) = (step.name.clone(), step.audio.clone(), Rc::clone(&probe));
+        let (name, step_c, probe) = (step.name.clone(), Rc::clone(step), Rc::clone(&probe));
         let settings = manager.settings().clone();
         step.revert.connect_clicked(move |_| {
             let st = probe.borrow();
             if let Some(p) = st.info.as_ref() {
-                name.set_text(&default_name_for(&settings, p.title(), audio.is_active()));
+                name.set_text(&default_name_for(
+                    &settings,
+                    p.title(),
+                    selected_audio_only(&step_c),
+                ));
                 name.grab_focus();
             }
         });
     }
-    // Toggling the mode re-seeds an untouched name: the resolve-time seed ran under
-    // the other mode, so without this the row keeps a video-container name for an
-    // audio download (or vice versa). An edited name is never clobbered.
+    // Changing the format pick re-seeds an untouched name: the resolve-time
+    // seed ran under the other mode, so without this the row keeps a
+    // video-container name for an audio download (or vice versa). An edited
+    // name is never clobbered.
     {
-        let (name, audio, probe) = (step.name.clone(), step.audio.clone(), Rc::clone(&probe));
+        let (name, step_c, probe) = (step.name.clone(), Rc::clone(step), Rc::clone(&probe));
         let settings = manager.settings().clone();
-        audio.connect_active_notify(move |sw| {
+        step.format.connect_selected_notify(move |_| {
             let st = probe.borrow();
             if let Some(p) = st.info.as_ref() {
-                let active = sw.is_active();
+                let active = selected_audio_only(&step_c);
                 let current = name.text().to_string();
                 if current.trim().is_empty()
                     || current == default_name_for(&settings, p.title(), !active)

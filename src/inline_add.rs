@@ -1147,7 +1147,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             .css_classes(["dim-label"])
             .halign(gtk4::Align::Start)
             .wrap(true)
-            .wrap_mode(gtk4::WrapMode::WordChar)
+            .wrap_mode(gtk4::pango::WrapMode::WordChar)
             .selectable(true)
             .build();
         let retry = gtk4::Button::builder()

@@ -275,13 +275,12 @@ impl Drop for BatchGuard {
 fn wake_queue() {
     glib::idle_add(|| {
         MANAGER_WEAK.with(|w| {
-            if let Some(weak) = w.borrow().as_ref() {
-                if let Some(m) = weak.upgrade() {
-                    // Never start rows while tearing down: shutdown awaits discard finalizers, each of which wakes the queue.
-                    if !m.draining.get() {
-                        m.start_next();
-                    }
-                }
+            if let Some(weak) = w.borrow().as_ref()
+                && let Some(m) = weak.upgrade()
+                // Never start rows while tearing down: shutdown awaits discard finalizers, each of which wakes the queue.
+                && !m.draining.get()
+            {
+                m.start_next();
             }
         });
         glib::ControlFlow::Break
@@ -293,7 +292,7 @@ thread_local! {
     /// The closure runs on the main thread via `idle_add`, so reading the
     /// thread-local there yields the manager created on that thread.
     static MANAGER_WEAK: RefCell<Option<std::rc::Weak<DownloadManager>>> =
-        RefCell::new(None);
+        const { RefCell::new(None) };
 }
 
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.

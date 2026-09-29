@@ -163,10 +163,11 @@ pub fn run(
     let js = ToolRow::new("quickjs", &gettext("quickjs install progress"), &active);
 
     let rows = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    rows.set_margin_top(18);
-    rows.set_margin_bottom(18);
-    rows.set_margin_start(18);
-    rows.set_margin_end(18);
+    // HIG card padding: 12, matching the rest of the app (not 18).
+    rows.set_margin_top(12);
+    rows.set_margin_bottom(12);
+    rows.set_margin_start(12);
+    rows.set_margin_end(12);
     rows.append(&yt.widget());
     rows.append(&ff.widget());
     rows.append(&js.widget());

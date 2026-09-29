@@ -235,7 +235,7 @@ fn show_video_error(v: &VideoStep, message: &str) {
 
 /// Desensitize the form's Add button while a lookup is in flight (a dead
 /// button says so upfront). Every terminal state re-enables it.
-fn set_lookup_add(cell: &Rc<RefCell<Option<adw::EntryRow>>>, enabled: bool) {
+fn set_lookup_add(cell: &Rc<RefCell<Option<gtk4::Button>>>, enabled: bool) {
     if let Some(b) = cell.borrow().as_ref() {
         b.set_sensitive(enabled);
     }
@@ -274,7 +274,7 @@ fn submit_probed_single(
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
     step: &Rc<VideoStep>,
-    lookup_add: &Rc<RefCell<Option<adw::EntryRow>>>,
+    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     v: &crate::video::VideoInfo,
 ) {
     let typed = step.name.text().trim().to_string();
@@ -340,7 +340,7 @@ fn submit_probe(
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
     step: &Rc<VideoStep>,
-    lookup_add: &Rc<RefCell<Option<adw::EntryRow>>>,
+    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     nav: &adw::NavigationView,
     probe: crate::video::ProbeResult,
 ) {
@@ -369,7 +369,7 @@ fn submit_probe(
 fn fallback_plain_failed(
     probe: &Rc<RefCell<ProbeState>>,
     step: &Rc<VideoStep>,
-    lookup_add: &Rc<RefCell<Option<adw::EntryRow>>>,
+    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     url: &str,
     error: &str,
 ) {
@@ -1225,8 +1225,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let probe = Rc::new(RefCell::new(ProbeState::default()));
     // The form's Add button, desensitized while a lookup is in flight (a
     // dead button says so upfront). Every terminal state re-enables it.
-    let lookup_add: Rc<RefCell<Option<adw::EntryRow>>> = Rc::new(RefCell::new(None));
-    lookup_add.replace(Some(url_entry.clone()));
+    let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
+    lookup_add.replace(Some(add_btn.clone()));
     let dest_dir = Rc::new(RefCell::new(manager.effective_download_dir()));
 
     // Collapse the card and reset the form to a fresh state, like closing the

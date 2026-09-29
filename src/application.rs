@@ -85,7 +85,8 @@ pub fn setup(app: &adw::Application) {
                         continue;
                     }
                     if let Err(e) = s.manager.enqueue(uri.as_str(), None, None) {
-                        s.toasts.add_toast(adw::Toast::new(&e));
+                        s.toasts
+                            .add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
                     }
                     continue;
                 }
@@ -128,11 +129,15 @@ pub fn setup(app: &adw::Application) {
                                     if let Err(e) =
                                         manager.enqueue_torrent_file(bytes, &stem, None, None)
                                     {
-                                        toasts.add_toast(adw::Toast::new(&e));
+                                        toasts.add_toast(adw::Toast::new(
+                                            &crate::ui_util::esc_markup(&e),
+                                        ));
                                     }
                                 }
                                 Err(e) => {
-                                    toasts.add_toast(adw::Toast::new(&e));
+                                    toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(
+                                        &e,
+                                    )));
                                 }
                             }
                         });

@@ -88,8 +88,8 @@ fn open_with_default_app(path: &std::path::Path, toasts: &adw::ToastOverlay) {
         if let Err(e) = launcher.launch_future(None::<&gtk4::Window>).await {
             t.add_toast(adw::Toast::new(
                 &gettext("Could not open {what} with its default application: {e}")
-                    .replace("{what}", &what)
-                    .replace("{e}", &e.to_string()),
+                    .replace("{what}", &crate::ui_util::esc_markup(&what))
+                    .replace("{e}", &crate::ui_util::esc_markup(&e.to_string())),
             ));
         }
     });
@@ -118,8 +118,8 @@ pub fn launch_path(path: &std::path::Path, toasts: &adw::ToastOverlay, reveal: b
             t.add_toast(adw::Toast::new(
                 &gettext("Could not {verb} {what} in the file manager: {e}")
                     .replace("{verb}", &verb)
-                    .replace("{what}", &what)
-                    .replace("{e}", &e.to_string()),
+                    .replace("{what}", &crate::ui_util::esc_markup(&what))
+                    .replace("{e}", &crate::ui_util::esc_markup(&e.to_string())),
             ));
         }
     });
@@ -498,7 +498,10 @@ fn show_failure_dialog(
     parent: &gtk4::Widget,
     item: &crate::download::DownloadItem,
 ) -> adw::AlertDialog {
-    let dialog = adw::AlertDialog::new(Some(&gettext("Download Failed")), Some(&item.filename()));
+    let dialog = adw::AlertDialog::new(
+        Some(&gettext("Download Failed")),
+        Some(&crate::ui_util::esc_markup(&item.filename())),
+    );
 
     let text = gtk4::TextView::builder()
         .editable(false)
@@ -965,7 +968,9 @@ pub(crate) fn build_row(
             };
             let name = snapshot.filename.clone();
             m.remove(id);
-            let toast = adw::Toast::new(&gettext("Removed {name}").replace("{name}", &name));
+            let toast = adw::Toast::new(
+                &gettext("Removed {name}").replace("{name}", &crate::ui_util::esc_markup(&name)),
+            );
             toast.set_button_label(Some(&gettext("Undo")));
             let m2 = Rc::clone(&m);
             toast.connect_button_clicked(move |_| {
@@ -1011,7 +1016,8 @@ pub(crate) fn build_row(
                     // Repeat failure, backgrounded window, or dialog already
                     // open: toast instead of stacking presents.
                     toasts.add_toast(adw::Toast::new(
-                        &gettext("Download failed: {name}").replace("{name}", &item.filename()),
+                        &gettext("Download failed: {name}")
+                            .replace("{name}", &crate::ui_util::esc_markup(&item.filename())),
                     ));
                 }
             } else {

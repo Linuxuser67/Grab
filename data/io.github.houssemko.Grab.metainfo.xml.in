@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.1" date="2026-09-29">
+      <description>
+        <ul>
+          <li>Suspend inhibition now works in the Flatpak: the D-Bus parameters are built explicitly.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.1-beta.1" date="2026-09-29">
       <description>
         <ul>

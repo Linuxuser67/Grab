@@ -11,6 +11,11 @@
       <summary>Restrict filenames to ASCII</summary>
       <description>Sanitize download filenames to ASCII-only characters, also avoiding ampersands and spaces.</description>
     </key>
+    <key name="enable-scheduled-downloads" type="b">
+      <default>true</default>
+      <summary>Enable scheduled downloads</summary>
+      <description>When off, the scheduler never runs and the schedule option is hidden from the New Download card.</description>
+    </key>
     <key name="max-concurrent" type="i">
       <default>3</default>
       <range min="1" max="10"/>

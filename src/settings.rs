@@ -6,6 +6,7 @@ use gtk4::prelude::SettingsExt as _;
 pub mod key {
     pub const DOWNLOAD_DIR: &str = "download-dir";
     pub const RESTRICT_FILENAMES: &str = "restrict-filenames";
+    pub const ENABLE_SCHEDULED_DOWNLOADS: &str = "enable-scheduled-downloads";
     pub const MAX_CONCURRENT: &str = "max-concurrent";
     pub const CONNECTIONS: &str = "connections";
     pub const SPEED_LIMIT: &str = "speed-limit";
@@ -52,6 +53,10 @@ impl AppSettings {
     /// Fold download filenames to ASCII-only.
     pub fn restrict_filenames(&self) -> bool {
         self.0.boolean(key::RESTRICT_FILENAMES)
+    }
+    /// Master toggle for scheduled downloads; off stops the scheduler timer entirely.
+    pub fn scheduled_downloads_enabled(&self) -> bool {
+        self.0.boolean(key::ENABLE_SCHEDULED_DOWNLOADS)
     }
     pub fn max_concurrent(&self) -> i32 {
         self.0.int(key::MAX_CONCURRENT)

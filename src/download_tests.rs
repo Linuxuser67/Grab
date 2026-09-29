@@ -6127,3 +6127,57 @@ fn check_scheduled_leaves_future_items_alone() {
     assert_eq!(item.status(), DownloadStatus::Scheduled);
     assert_eq!(item.scheduled_at(), future);
 }
+
+#[test]
+fn scheduler_does_not_start_when_preference_off() {
+    let settings = test_settings();
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, false)
+        .unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.start_scheduler();
+    assert!(
+        m.scheduler_source.borrow().is_none(),
+        "no 30s timer while the scheduling preference is off"
+    );
+}
+
+#[test]
+fn scheduler_starts_and_stops() {
+    let settings = test_settings();
+    // The memory backend is process-global: pin the value instead of relying on the schema default.
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
+        .unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.start_scheduler();
+    assert!(m.scheduler_source.borrow().is_some());
+    // Idempotent: a second start must not install a second timer.
+    m.start_scheduler();
+    m.stop_scheduler();
+    assert!(m.scheduler_source.borrow().is_none());
+}
+
+#[test]
+fn toggling_preference_stops_and_restarts_scheduler() {
+    let settings = test_settings();
+    // The memory backend is process-global: pin the starting value.
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
+        .unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+    m.start_scheduler();
+    assert!(m.scheduler_source.borrow().is_some());
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, false)
+        .unwrap();
+    assert!(
+        m.scheduler_source.borrow().is_none(),
+        "disabling the preference removes the 30s timer"
+    );
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
+        .unwrap();
+    assert!(m.scheduler_source.borrow().is_some());
+    m.stop_scheduler();
+}

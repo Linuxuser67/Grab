@@ -1338,6 +1338,33 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         });
     }
     group.add(&schedule_revealer);
+    // The whole schedule section hides when the preference is off: a hidden
+    // switch can't be toggled, so no new scheduled downloads can be created
+    // while the scheduler is disabled. Weak settings ref: settings must not
+    // keep the card alive.
+    {
+        let settings_w = manager.settings().downgrade();
+        let switch_c = schedule_switch.clone();
+        let revealer_c = schedule_revealer.clone();
+        let scheduled_at_c = Rc::clone(&scheduled_at);
+        let sync = Rc::new(move || {
+            if let Some(s) = settings_w.upgrade() {
+                let enabled = crate::settings::AppSettings::from(s).scheduled_downloads_enabled();
+                switch_c.set_visible(enabled);
+                revealer_c.set_visible(enabled);
+                if !enabled {
+                    scheduled_at_c.set(None);
+                    switch_c.set_active(false);
+                }
+            }
+        });
+        sync();
+        let sync_c = Rc::clone(&sync);
+        manager.settings().connect_changed(
+            Some(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS),
+            move |_, _| sync_c(),
+        );
+    }
     opts_revealer.set_child(Some(&group));
 
     // Form-level error caption sits outside the options revealer so a failed

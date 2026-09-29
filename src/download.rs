@@ -193,6 +193,9 @@ pub struct DownloadManager {
     /// Set by shutdown(): stale engine futures must not re-persist or
     /// re-mark rows once the authoritative shutdown persist has run.
     draining: Cell<bool>,
+    /// The 30s schedule checker's source, if running. Kept so the
+    /// scheduling preference can stop the timer entirely.
+    scheduler_source: RefCell<Option<glib::SourceId>>,
 }
 
 /// What a stop means for the worker and the bytes it has written (manager policy; distinct from the worker's `StopIntent`).
@@ -284,6 +287,7 @@ impl DownloadManager {
             discards: RefCell::new(HashMap::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
+            scheduler_source: RefCell::new(None),
         });
         // Queue wakeups from worker threads (see `wake_tx`). Weak ref: the loop must not keep the manager alive.
         {
@@ -334,6 +338,20 @@ impl DownloadManager {
                 if let Some(s) = settings_weak.upgrade() {
                     let s = crate::settings::AppSettings::from(s);
                     apply_torrent_limits(&s);
+                }
+            },
+        );
+        // Scheduling preference: toggling it off stops the 30s timer entirely;
+        // toggling it on restarts it. Weak ref: settings must not keep the manager alive.
+        let sched_weak = Rc::downgrade(&this);
+        this.settings.connect_changed(
+            Some(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS),
+            move |_, _| {
+                if std::thread::current().id() != owner {
+                    return;
+                }
+                if let Some(m) = sched_weak.upgrade() {
+                    m.sync_scheduler();
                 }
             },
         );
@@ -2581,12 +2599,40 @@ impl DownloadManager {
 
     /// Start the schedule checker: every 30s, queue any scheduled downloads whose time has arrived.
     /// Uses `timeout_add_seconds_local` (main thread, no worker needed — the check is a cheap store scan).
+    /// No-op when the scheduling preference is off or the checker is already running.
     pub fn start_scheduler(self: &Rc<Self>) {
-        let manager = Rc::clone(self);
-        glib::timeout_add_seconds_local(30, move || {
-            manager.check_scheduled();
-            glib::ControlFlow::Continue
+        if !self.settings.scheduled_downloads_enabled() || self.scheduler_source.borrow().is_some()
+        {
+            return;
+        }
+        // Weak ref: the timer must die with the manager (see `Drop`).
+        let weak = Rc::downgrade(self);
+        let id = glib::timeout_add_seconds_local(30, move || {
+            if let Some(m) = weak.upgrade() {
+                m.check_scheduled();
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
         });
+        self.scheduler_source.replace(Some(id));
+    }
+
+    /// Stop the schedule checker entirely: the source is removed, so no 30s
+    /// wakeups happen while the scheduling preference is off.
+    pub fn stop_scheduler(&self) {
+        if let Some(id) = self.scheduler_source.take() {
+            id.remove();
+        }
+    }
+
+    /// Start or stop the scheduler to match the scheduling preference.
+    pub fn sync_scheduler(self: &Rc<Self>) {
+        if self.settings.scheduled_downloads_enabled() {
+            self.start_scheduler();
+        } else {
+            self.stop_scheduler();
+        }
     }
 
     /// Queue scheduled downloads whose time has arrived. Called by the scheduler timer.

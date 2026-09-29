@@ -376,6 +376,22 @@ pub fn show(
     power_group.add(&inhibit);
 
     page.add(&dest_group);
+    let sched_group = adw::PreferencesGroup::builder()
+        .title(gettext("Scheduling"))
+        .build();
+    let sched = adw::SwitchRow::builder()
+        .title(gettext("Scheduled downloads"))
+        .subtitle(gettext("Allow downloads to start at a specific time"))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS,
+            &sched,
+            "active",
+        )
+        .build();
+    sched_group.add(&sched);
+    page.add(&sched_group);
     page.add(&power_group);
     page.add(&notif_group);
     dialog.add(&page);

@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.14" date="2026-09-29">
+      <description>
+        <ul>
+          <li>Playlist and torrent pickers: dropped the custom selection tick; selected items now use the native highlight only.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.13" date="2026-09-29">
       <description>
         <ul>

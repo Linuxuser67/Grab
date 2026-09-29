@@ -444,8 +444,15 @@ fn enqueue_and_close(
     match result {
         Ok(item) => {
             if let Some(ts) = scheduled_at {
-                item.set_scheduled_at(ts);
-                item.set_status(DownloadStatus::Scheduled);
+                // Overdue timestamps queue immediately (mirrors restore_existing):
+                // a past pick is almost always the 12:00 default being stale.
+                let now = glib::DateTime::now_local()
+                    .map(|dt| dt.to_unix())
+                    .unwrap_or(0);
+                if ts > now {
+                    item.set_scheduled_at(ts);
+                    item.set_status(DownloadStatus::Scheduled);
+                }
             }
             close_card()
         }
@@ -1310,7 +1317,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             ) {
                 let ts = scheduled.to_unix();
                 scheduled_at_c.set(Some(ts));
-                date_btn_c.set_label(&scheduled.format(&gettext("%Y-%m-%d")).unwrap_or_default());
+                // Untranslated format: translators must not touch `%` verbs,
+                // and the label must show the picked time, not just the date.
+                date_btn_c.set_label(&scheduled.format("%Y-%m-%d %H:%M").unwrap_or_default());
             }
         });
         {

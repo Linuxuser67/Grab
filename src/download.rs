@@ -244,10 +244,22 @@ impl Drop for DownloadManager {
         // source dispatched by a later context iteration on another thread
         // panics ("Value accessed from different thread...").
         self.stop_scheduler();
-        // Clear the thread-local so a stale `wake_queue()` source finds no manager.
-        // (The one-shot `idle_add` sources hold no `!Send` values, so even a source
-        // reaped on another thread can't trip glib's thread guard.)
-        MANAGER_WEAK.with(|w| *w.borrow_mut() = None);
+        // Clear the thread-local only if it holds THIS manager's Weak.
+        // A second manager created on this thread overwrites the slot; an
+        // unconditional clear here would break the survivor's wakeups.
+        // (Managers must not overlap on the same thread: `wake_queue()` routes
+        // to whichever manager last published its Weak.)
+        let self_ptr = self as *const Self;
+        MANAGER_WEAK.with(|w| {
+            let mut slot = w.borrow_mut();
+            let is_mine = slot.as_ref().is_some_and(|weak| {
+                weak.upgrade()
+                    .is_some_and(|m| std::rc::Rc::as_ptr(&m) == self_ptr)
+            });
+            if is_mine {
+                *slot = None;
+            }
+        });
     }
 }
 
@@ -291,6 +303,8 @@ thread_local! {
     /// The current thread's DownloadManager, for `wake_queue()`'s `Send` closure.
     /// The closure runs on the main thread via `idle_add`, so reading the
     /// thread-local there yields the manager created on that thread.
+    /// Managers must not overlap on the same thread: a second `new()` overwrites
+    /// the slot, and `Drop` only clears its own entry (see the identity check).
     static MANAGER_WEAK: RefCell<Option<std::rc::Weak<DownloadManager>>> =
         const { RefCell::new(None) };
 }
@@ -1457,6 +1471,10 @@ impl DownloadManager {
                 this.video_abort.borrow_mut().remove(&id);
                 this.live_rows.borrow_mut().remove(&id);
                 if this.draining.get() {
+                    // Draining: this is the current pump (not superseded), so
+                    // remove its handle before returning — otherwise
+                    // `drain_engine` spins to its 15 s timeout after shutdown.
+                    this.pump_handles.borrow_mut().remove(&id);
                     return;
                 }
                 if !done && item.status() == DownloadStatus::Downloading {
@@ -1469,11 +1487,19 @@ impl DownloadManager {
                 this.start_next();
             }
             // Pump exiting: remove the handle so `drain_engine` knows it's done.
+            // (Stale pumps return early above without removing: a stale pump
+            // implies a successor overwrote the entry, so removing by id would
+            // delete the successor's handle.)
             if let Some(this) = weak.upgrade() {
                 this.pump_handles.borrow_mut().remove(&id);
             }
         });
-        self.pump_handles.borrow_mut().insert(id, handle);
+        // Abort-after-insert: a superseded handle lingers until its next message
+        // if merely dropped. Abort AFTER insert so the stale-tail `is_current`
+        // skip still protects the new entry from the old pump's cleanup.
+        if let Some(old) = self.pump_handles.borrow_mut().insert(id, handle) {
+            old.abort();
+        }
     }
 
     /// Spawn the torrent engine for a magnet row. Mirrors `spawn`'s contract so pause/cancel/retry and the stale-pump guard keep working.

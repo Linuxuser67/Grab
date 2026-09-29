@@ -503,8 +503,6 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
 fn picker_list(entries: Rc<Vec<(String, String)>>) -> gtk4::FlowBox {
     let flowbox = gtk4::FlowBox::builder()
         .selection_mode(gtk4::SelectionMode::Multiple)
-        .max_children_per_line(3)
-        .min_children_per_line(2)
         .column_spacing(12)
         .row_spacing(12)
         .build();

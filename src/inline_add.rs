@@ -278,29 +278,6 @@ fn rebuild_format_options(step: &Rc<VideoStep>, info: &crate::video::VideoInfo, 
     step.format.set_selected(index as u32);
 }
 
-/// Playlist format options: pins don't apply across items, so the combo
-/// carries just the Automatic row and the Audio only row.
-fn rebuild_playlist_format_options(step: &Rc<VideoStep>) {
-    let options = vec![
-        FormatOption {
-            label: gettext("Automatic"),
-            format_id: None,
-            audio_only: false,
-        },
-        FormatOption {
-            label: gettext("Audio only"),
-            format_id: None,
-            audio_only: true,
-        },
-    ];
-    let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
-    step.format.set_model(Some(&gtk4::StringList::new(&labels)));
-    // Options before selection: set_selected fires notify::selected, and the
-    // handler reads the options vec.
-    *step.options.borrow_mut() = options;
-    step.format.set_selected(0);
-}
-
 /// Whether the combo's current pick is the Audio only row.
 fn selected_audio_only(step: &VideoStep) -> bool {
     let selected = step.format.selected() as usize;
@@ -393,17 +370,9 @@ fn submit_probe(
         }
         crate::video::ProbeResult::Playlist(pl) => {
             // Collections queue through the item picker: one row per chosen
-            // entry, each re-resolving its own page at download time. Pins
-            // don't apply across items, so the format combo's Automatic /
-            // Audio only pick is the quality control here.
-            push_playlist_items_page(
-                nav,
-                manager.clone(),
-                dest.clone(),
-                close_card.clone(),
-                pl,
-                selected_audio_only(step),
-            );
+            // entry, each re-resolving its own page at download time. No
+            // format choice here — pins don't apply across items.
+            push_playlist_items_page(nav, manager.clone(), dest.clone(), close_card.clone(), pl);
         }
     }
 }
@@ -627,14 +596,12 @@ fn list_selected(selection: &gtk4::MultiSelection, item_count: usize) -> Vec<usi
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn push_playlist_items_page(
     nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
     close_card: Rc<dyn Fn()>,
     playlist: crate::media_types::PlaylistInfo,
-    audio_only: bool,
 ) {
     // Same guard as the video step: don't stack a second picker while one is
     // already visible.
@@ -759,14 +726,14 @@ fn push_playlist_items_page(
                 let page_url = crate::video_probe::story_segment_url(&playlist.page_url, &item.id)
                     .unwrap_or_else(|| item.page_url.clone());
                 let settings = manager.settings();
-                let name = default_name_for(settings, &item.title, audio_only);
+                let name = default_name_for(settings, &item.title, false);
                 if let Err(e) = manager.enqueue_video_staged(
                     &page_url,
                     &dir,
                     Some(&name),
                     crate::media_types::VideoChoices {
                         quality: manager.settings().video_quality(),
-                        audio_only,
+                        audio_only: false,
                         video_format_id: None,
                         // Live streams queued from a playlist take the VOD
                         // path; the worker re-resolves each item page anyway.
@@ -978,9 +945,9 @@ fn wire_torrent_picker(
 }
 
 fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
+    // Playlists carry no format choice (pins don't apply across items), so
+    // the preview block stays hidden — Add opens the title picker directly.
     hide_video_step(v);
-    v.group.set_visible(true);
-    v.format.set_visible(true);
 }
 
 /// Handle for the inline New Download card: the widget to pin under the
@@ -1558,7 +1525,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 probe_b.borrow_mut().last_ok = url;
                                 probe_b.borrow_mut().info =
                                     Some(crate::video::ProbeResult::Playlist(pl.clone()));
-                                rebuild_playlist_format_options(&step_b);
                                 show_video_playlist(&step_b, &pl);
                                 set_lookup_add(&lookup_add_b, true);
                             }
@@ -1675,7 +1641,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 dd.clone(),
                                 close_card.clone(),
                                 pl,
-                                selected_audio_only(&step2),
                             );
                         }
                         None => {}

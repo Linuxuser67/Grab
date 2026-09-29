@@ -12,6 +12,7 @@ use gtk4::glib;
 pub enum DownloadStatus {
     #[default]
     Queued,
+    Scheduled,
     Downloading,
     Paused,
     Done,
@@ -25,6 +26,7 @@ impl DownloadStatus {
         // gettext() here (not call sites) so xgettext extracts every msgid.
         match self {
             DownloadStatus::Queued => gettext("Queued"),
+            DownloadStatus::Scheduled => gettext("Scheduled"),
             DownloadStatus::Downloading => gettext("Downloading"),
             DownloadStatus::Paused => gettext("Paused"),
             DownloadStatus::Done => gettext("Done"),
@@ -65,6 +67,10 @@ pub(crate) struct StoredItem {
     /// rather than refusing a partial the old version was downloading.
     #[serde(default)]
     pub(crate) started: Option<bool>,
+    /// Unix timestamp for scheduled downloads (additive, no version bump).
+    /// `None` or 0 = not scheduled.
+    #[serde(default)]
+    pub(crate) scheduled_at: Option<i64>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

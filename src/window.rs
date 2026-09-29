@@ -330,7 +330,7 @@ pub fn build_window(
         use crate::download::DownloadStatus::*;
         match s {
             Downloading | Paused | Failed | Cancelled => 1,
-            Queued => 2,
+            Queued | Scheduled => 2,
             Done => 3,
         }
     }

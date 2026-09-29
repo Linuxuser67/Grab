@@ -152,6 +152,8 @@ pub struct DownloadManager {
     store: gio::ListStore,
     settings: crate::settings::AppSettings,
     running: RefCell<HashMap<u64, tokio::task::JoinHandle<()>>>,
+    /// Pump task handles by download ID, so tests can wait for pump completion (a `spawn_future_local` task reaped on another thread trips glib's thread guard).
+    pub(crate) pump_handles: RefCell<HashMap<u64, glib::JoinHandle<()>>>,
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
     batch: Cell<u32>,
@@ -178,10 +180,6 @@ pub struct DownloadManager {
     gates: RefCell<HashMap<u64, std::sync::Arc<AttemptGate>>>,
     /// Destinations with a discard in flight (exact path + stem key). Consulted by intake *and* `unremove`, which bypasses intake.
     reservations: std::sync::Arc<std::sync::Mutex<Reservations>>,
-    /// Queue wakeups from worker threads: the discard finalizer sends here after releasing a reservation; `new()` re-runs `start_next()`.
-    wake_tx: tokio::sync::mpsc::UnboundedSender<()>,
-    /// Handle of the `wake_tx` receiver task. Kept so `Drop` can abort it (a task reaped on another thread trips glib's thread guard).
-    wake_task: Cell<Option<glib::JoinHandle<()>>>,
     /// Finalizers reclaiming a removed row's scratch, by row. Each keeps the worker abort handle: aborting the finalizer would detach the worker, leaving yt-dlp unsupervised (#180).
     discards: RefCell<HashMap<u64, PendingDiscard>>,
     /// Rows currently capturing a live stream. Pause/cancel/park only signal these; the worker finalizes and its message drives the row.
@@ -193,6 +191,9 @@ pub struct DownloadManager {
     /// Set by shutdown(): stale engine futures must not re-persist or
     /// re-mark rows once the authoritative shutdown persist has run.
     draining: Cell<bool>,
+    /// The 30s schedule checker's source, if running. Kept so the
+    /// scheduling preference can stop the timer entirely.
+    scheduler_source: RefCell<Option<glib::SourceId>>,
 }
 
 /// What a stop means for the worker and the bytes it has written (manager policy; distinct from the worker's `StopIntent`).
@@ -231,13 +232,22 @@ struct PendingRestore {
 
 impl Drop for DownloadManager {
     fn drop(&mut self) {
-        // Destroy the discard-wakeup task now: a `spawn_future_local` task is
-        // only reaped when the main loop next polls it, so a stale one would be
-        // dispatched by a later test's main-loop iteration running on another
-        // thread, tripping glib's thread guard.
-        if let Some(handle) = self.wake_task.take() {
+        // Abort any pump tasks: they're `spawn_future_local`, so a stale one
+        // reaped on another thread trips glib's thread guard. Tests wait for
+        // pump completion via `drain_engine` (which checks `pump_handles`),
+        // so in practice none are pending here; this is a backstop.
+        for (_, handle) in self.pump_handles.borrow_mut().drain() {
             handle.abort();
         }
+        // Remove the scheduler tick: `timeout_add_seconds_local` binds its
+        // closure to the creating thread via glib's thread guard, so a leaked
+        // source dispatched by a later context iteration on another thread
+        // panics ("Value accessed from different thread...").
+        self.stop_scheduler();
+        // Clear the thread-local so a stale `wake_queue()` source finds no manager.
+        // (The one-shot `idle_add` sources hold no `!Send` values, so even a source
+        // reaped on another thread can't trip glib's thread guard.)
+        MANAGER_WEAK.with(|w| *w.borrow_mut() = None);
     }
 }
 
@@ -256,15 +266,44 @@ impl Drop for BatchGuard {
     }
 }
 
+/// Wake the queue from any thread: schedules a one-shot `start_next()` on the
+/// main loop. Uses `idle_add` (thread-safe) with a `Send` closure that captures
+/// nothing — it finds the manager via a thread-local set in `new()`. The source
+/// returns `Break` after firing once, so it never spins the main loop (tests'
+/// `quiesce()` needs the context to go idle). No `!Send` values are held, so a
+/// source reaped on another thread can't trip glib's thread guard.
+fn wake_queue() {
+    glib::idle_add(|| {
+        MANAGER_WEAK.with(|w| {
+            if let Some(weak) = w.borrow().as_ref()
+                && let Some(m) = weak.upgrade()
+                // Never start rows while tearing down: shutdown awaits discard finalizers, each of which wakes the queue.
+                && !m.draining.get()
+            {
+                m.start_next();
+            }
+        });
+        glib::ControlFlow::Break
+    });
+}
+
+thread_local! {
+    /// The current thread's DownloadManager, for `wake_queue()`'s `Send` closure.
+    /// The closure runs on the main thread via `idle_add`, so reading the
+    /// thread-local there yields the manager created on that thread.
+    static MANAGER_WEAK: RefCell<Option<std::rc::Weak<DownloadManager>>> =
+        const { RefCell::new(None) };
+}
+
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
     /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
     pub fn new(store: gio::ListStore, settings: crate::settings::AppSettings) -> Rc<Self> {
-        let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let this = Rc::new(Self {
             store,
             settings,
             running: RefCell::new(HashMap::new()),
+            pump_handles: RefCell::new(HashMap::new()),
             next_id: Cell::new(1),
             on_change: RefCell::new(None),
             batch: Cell::new(0),
@@ -279,30 +318,13 @@ impl DownloadManager {
             video_abort: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
             reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),
-            wake_tx,
-            wake_task: Cell::new(None),
             discards: RefCell::new(HashMap::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
+            scheduler_source: RefCell::new(None),
         });
-        // Queue wakeups from worker threads (see `wake_tx`). Weak ref: the loop must not keep the manager alive.
-        {
-            let weak = Rc::downgrade(&this);
-            let handle = glib::spawn_future_local(async move {
-                while wake_rx.recv().await.is_some() {
-                    if let Some(m) = weak.upgrade() {
-                        // Never start rows while tearing down: shutdown awaits discard finalizers, each of which sends a wakeup.
-                        if !m.draining.get() {
-                            m.start_next();
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            });
-            // The task must die with the manager (see `Drop`): a stale local task reaped on another thread trips glib's thread guard.
-            this.wake_task.set(Some(handle));
-        }
+        // Publish the Weak for `wake_queue()`'s `Send` closure (see `MANAGER_WEAK`).
+        MANAGER_WEAK.with(|w| *w.borrow_mut() = Some(Rc::downgrade(&this)));
         // Live preferences: raising the limit wakes queued rows now; lowering it parks the newest running rows. Weak ref: settings must not keep the manager alive.
         // Owner-thread guard: queue actions run only where the manager was created (production writes are main-thread; foreign-thread writes only via the test backend).
         let owner = std::thread::current().id();
@@ -334,6 +356,20 @@ impl DownloadManager {
                 if let Some(s) = settings_weak.upgrade() {
                     let s = crate::settings::AppSettings::from(s);
                     apply_torrent_limits(&s);
+                }
+            },
+        );
+        // Scheduling preference: toggling it off stops the 30s timer entirely;
+        // toggling it on restarts it. Weak ref: settings must not keep the manager alive.
+        let sched_weak = Rc::downgrade(&this);
+        this.settings.connect_changed(
+            Some(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS),
+            move |_, _| {
+                if std::thread::current().id() != owner {
+                    return;
+                }
+                if let Some(m) = sched_weak.upgrade() {
+                    m.sync_scheduler();
                 }
             },
         );
@@ -768,8 +804,15 @@ impl DownloadManager {
             dest_dir,
         );
         // Resumed rows requeue; only settled rows keep their status.
+        // Scheduled rows keep their status and timestamp; overdue ones queue immediately.
+        let now = glib::DateTime::now_local()
+            .map(|dt| dt.to_unix())
+            .unwrap_or(0);
+        let scheduled_at = stored.scheduled_at.unwrap_or(0);
+        item.set_scheduled_at(scheduled_at);
         item.set_status(match status {
             DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Done => *status,
+            DownloadStatus::Scheduled if scheduled_at > now => DownloadStatus::Scheduled,
             _ => DownloadStatus::Queued,
         });
         if let Some(st) = segments {
@@ -1074,7 +1117,12 @@ impl DownloadManager {
         generation: u64,
         mut rx: tokio::sync::mpsc::UnboundedReceiver<EngineMsg>,
     ) {
-        let this = Rc::clone(self);
+        // Weak ref: a strong Rc here would keep the manager alive past its
+        // owner's drop, leaving a thread-bound `spawn_future_local` task to be
+        // polled on a later thread's context iteration — tripping glib's
+        // thread guard. When the manager is gone the pump has nothing to
+        // update, so it exits.
+        let weak = Rc::downgrade(self);
         // Speed baseline: resumes seed `downloaded` with pre-existing bytes, which lifetime-average math would report as fantasy GB/s.
         let mut base: Option<(u64, Instant)> = None;
         // Set on Finished/Failed. If the channel closes first the engine died without reporting: fail the row instead of stranding it.
@@ -1085,8 +1133,12 @@ impl DownloadManager {
             Some(sel) => format!(" • {} files", sel.len()),
             None => String::new(),
         };
-        glib::spawn_future_local(async move {
+        // Track the pump handle so tests can wait for pump completion: a `spawn_future_local` task reaped on another thread trips glib's thread guard.
+        let handle = glib::spawn_future_local(async move {
             while let Some(msg) = rx.recv().await {
+                let Some(this) = weak.upgrade() else {
+                    break;
+                };
                 // Stale spawn: its reports would drag the bar backwards and its tail would fail the row or steal the new engine's handle.
                 if !this.is_current(id, generation) {
                     break;
@@ -1394,25 +1446,34 @@ impl DownloadManager {
                     }
                 }
             }
-            // Superseded pump future: touch nothing, especially not the new engine's handle in `running`.
-            if !this.is_current(id, generation) {
-                return;
+            // Post-loop cleanup: the manager may have been dropped while the
+            // pump was pending; only clean up if it's still alive.
+            if let Some(this) = weak.upgrade() {
+                // Superseded pump future: touch nothing, especially not the new engine's handle in `running`.
+                if !this.is_current(id, generation) {
+                    return;
+                }
+                this.running.borrow_mut().remove(&id);
+                this.video_abort.borrow_mut().remove(&id);
+                this.live_rows.borrow_mut().remove(&id);
+                if this.draining.get() {
+                    return;
+                }
+                if !done && item.status() == DownloadStatus::Downloading {
+                    item.set_detail(gettext("Download interrupted"));
+                    item.set_status(DownloadStatus::Failed);
+                    this.notify_finished(&item, Err(gettext("Download interrupted")));
+                }
+                this.persist_queue();
+                this.changed();
+                this.start_next();
             }
-            this.running.borrow_mut().remove(&id);
-            this.video_abort.borrow_mut().remove(&id);
-            this.live_rows.borrow_mut().remove(&id);
-            if this.draining.get() {
-                return;
+            // Pump exiting: remove the handle so `drain_engine` knows it's done.
+            if let Some(this) = weak.upgrade() {
+                this.pump_handles.borrow_mut().remove(&id);
             }
-            if !done && item.status() == DownloadStatus::Downloading {
-                item.set_detail(gettext("Download interrupted"));
-                item.set_status(DownloadStatus::Failed);
-                this.notify_finished(&item, Err(gettext("Download interrupted")));
-            }
-            this.persist_queue();
-            this.changed();
-            this.start_next();
         });
+        self.pump_handles.borrow_mut().insert(id, handle);
     }
 
     /// Spawn the torrent engine for a magnet row. Mirrors `spawn`'s contract so pause/cancel/retry and the stale-pump guard keep working.
@@ -1722,7 +1783,7 @@ impl DownloadManager {
             return Err(gettext("Renaming torrent downloads isn't supported"));
         }
         match item.status() {
-            DownloadStatus::Done | DownloadStatus::Queued => {}
+            DownloadStatus::Done | DownloadStatus::Queued | DownloadStatus::Scheduled => {}
             DownloadStatus::Downloading => {
                 return Err(gettext("Pause or wait for the download to finish first"));
             }
@@ -1853,9 +1914,9 @@ impl DownloadManager {
         // Resolved against the destination: current staging lives beside it,
         // legacy tmp dirs for rows staged before the move resolve the same way.
         let staging = crate::video::staging_location_for_dest(&dest, id);
-        // `self` (Rc, !Send) cannot go to the tokio runtime: carry reservations as an `Arc` clone and wake the queue through the `Send` channel.
+        // `self` (Rc, !Send) cannot go to the tokio runtime: carry reservations as an `Arc` clone.
+        // Queue wakeups go through `wake_queue()` (thread-safe, no manager handle needed).
         let reservations = std::sync::Arc::clone(&self.reservations);
-        let wake_tx = self.wake_tx.clone();
         match self.running.borrow_mut().remove(&id) {
             Some(handle) => {
                 let worker_abort = handle.abort_handle();
@@ -1873,7 +1934,7 @@ impl DownloadManager {
                     // The destination is free: wake the queue on the main
                     // thread so a row parked by `unremove()` starts now
                     // instead of waiting for an unrelated `start_next()`.
-                    wake_tx.send(()).ok();
+                    wake_queue();
                 });
                 // Retain the worker's abort beside the finalizer: aborting the finalizer would detach the worker instead of stopping it.
                 self.discards.borrow_mut().insert(
@@ -1890,7 +1951,7 @@ impl DownloadManager {
                 crate::video::clean_dest_parts(&dest);
                 self.release_dest(&dest);
                 // Same wakeup as the async finalizer above; already on the main thread.
-                self.wake_tx.send(()).ok();
+                wake_queue();
             }
         }
     }
@@ -2348,6 +2409,10 @@ impl DownloadManager {
                     output_dir,
                     video_source,
                     started: Some(self.started.borrow().contains(&it.id())),
+                    scheduled_at: {
+                        let ts = it.scheduled_at();
+                        (ts > 0).then_some(ts)
+                    },
                 });
             }
         }
@@ -2565,6 +2630,64 @@ impl DownloadManager {
                     crate::torrent::sweep_session_orphans(&keep).await;
                 });
             }
+        }
+    }
+
+    /// Start the schedule checker: every 30s, queue any scheduled downloads whose time has arrived.
+    /// Uses `timeout_add_seconds_local` (main thread, no worker needed — the check is a cheap store scan).
+    /// No-op when the scheduling preference is off or the checker is already running.
+    pub fn start_scheduler(self: &Rc<Self>) {
+        if !self.settings.scheduled_downloads_enabled() || self.scheduler_source.borrow().is_some()
+        {
+            return;
+        }
+        // Weak ref: the timer must die with the manager (see `Drop`).
+        let weak = Rc::downgrade(self);
+        let id = glib::timeout_add_seconds_local(30, move || {
+            if let Some(m) = weak.upgrade() {
+                m.check_scheduled();
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
+        });
+        self.scheduler_source.replace(Some(id));
+    }
+
+    /// Stop the schedule checker entirely: the source is removed, so no 30s
+    /// wakeups happen while the scheduling preference is off.
+    pub fn stop_scheduler(&self) {
+        if let Some(id) = self.scheduler_source.take() {
+            id.remove();
+        }
+    }
+
+    /// Start or stop the scheduler to match the scheduling preference.
+    pub fn sync_scheduler(self: &Rc<Self>) {
+        if self.settings.scheduled_downloads_enabled() {
+            self.start_scheduler();
+        } else {
+            self.stop_scheduler();
+        }
+    }
+
+    /// Queue scheduled downloads whose time has arrived. Called by the scheduler timer.
+    pub(crate) fn check_scheduled(self: &Rc<Self>) {
+        let now = glib::DateTime::now_local()
+            .map(|dt| dt.to_unix())
+            .unwrap_or(0);
+        let mut due = false;
+        for item in self.items() {
+            if item.status() == DownloadStatus::Scheduled && item.scheduled_at() <= now {
+                item.set_status(DownloadStatus::Queued);
+                item.set_scheduled_at(0);
+                due = true;
+            }
+        }
+        if due {
+            self.changed();
+            self.persist_queue();
+            self.start_next();
         }
     }
 

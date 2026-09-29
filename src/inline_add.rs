@@ -17,6 +17,8 @@
 //! and the lookup starts when Add Download (or Enter) is pressed.
 
 use crate::download::DownloadManager;
+use crate::download_row::DownloadItem;
+use crate::download_store::DownloadStatus;
 use crate::window_rows::{default_name_for, selection_action_bar};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
@@ -307,6 +309,7 @@ fn submit_probed_single(
     step: &Rc<VideoStep>,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     v: &crate::video::VideoInfo,
+    scheduled_at: Option<i64>,
 ) {
     let typed = step.name.text().trim().to_string();
     let audio_only = selected_audio_only(step);
@@ -340,8 +343,10 @@ fn submit_probed_single(
         None => manager.settings().video_quality(),
     };
     enqueue_and_close(
+        manager,
         dest,
         close_card,
+        scheduled_at,
         |d| {
             manager.enqueue_video(
                 &v.page_url,
@@ -374,10 +379,19 @@ fn submit_probe(
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     nav: &adw::NavigationView,
     probe: crate::video::ProbeResult,
+    scheduled_at: Option<i64>,
 ) {
     match probe {
         crate::video::ProbeResult::Single(v) => {
-            submit_probed_single(manager, dest, close_card, step, lookup_add, &v);
+            submit_probed_single(
+                manager,
+                dest,
+                close_card,
+                step,
+                lookup_add,
+                &v,
+                scheduled_at,
+            );
         }
         crate::video::ProbeResult::Playlist(pl) => {
             // Collections queue through the item picker: one row per chosen
@@ -412,18 +426,29 @@ fn fallback_plain_failed(
 /// temporary in a `match` scrutinee would live into the arms, and
 /// `close_card()` re-borrows the same cell mutably to reset the destination —
 /// panicking with "RefCell already borrowed" on every successful Add.
-fn enqueue_and_close<T>(
+fn enqueue_and_close(
+    manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
-    enqueue: impl FnOnce(Option<&str>) -> Result<T, String>,
+    scheduled_at: Option<i64>,
+    enqueue: impl FnOnce(Option<&str>) -> Result<DownloadItem, String>,
     on_err: impl FnOnce(&str),
 ) {
+    // Batch guard defers start_next until the Scheduled status is set:
+    // without it, the still-Queued item would spawn immediately.
+    let _guard = manager.batch_guard();
     let result = {
         let d = dest.borrow();
         enqueue(Some(&d))
     };
     match result {
-        Ok(_) => close_card(),
+        Ok(item) => {
+            if let Some(ts) = scheduled_at {
+                item.set_scheduled_at(ts);
+                item.set_status(DownloadStatus::Scheduled);
+            }
+            close_card()
+        }
         Err(e) => on_err(&e),
     }
 }
@@ -763,6 +788,7 @@ fn push_playlist_items_page(
 /// Multi-file .torrent intake as a right-sliding card page: one switch per
 /// file, all on by default. The selection feeds rqbit's `only_files` at add
 /// time (no live setter), so it must be chosen here.
+#[allow(clippy::too_many_arguments)]
 fn push_torrent_picker_page(
     nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,
@@ -771,6 +797,7 @@ fn push_torrent_picker_page(
     file_name: String,
     bytes: Vec<u8>,
     entries: Vec<crate::torrent::TorrentFileEntry>,
+    scheduled_at: Rc<Cell<Option<i64>>>,
 ) {
     if nav.visible_page_tag().as_deref() == Some("torrent") {
         return;
@@ -855,8 +882,10 @@ fn push_torrent_picker_page(
             // All on means no filter: pass None, not every index.
             let only = (selected.len() < entry_count).then_some(selected);
             enqueue_and_close(
+                &manager,
                 &dest_dir,
                 &close_card,
+                scheduled_at.get(),
                 |d| manager.enqueue_torrent_file(bytes.clone(), &file_name, d, only),
                 |e| {
                     error_caption.set_text(e);
@@ -876,14 +905,17 @@ fn wire_torrent_picker(
     close_card: Rc<dyn Fn()>,
     nav: &adw::NavigationView,
     error_label: gtk4::Label,
+    scheduled_at: Rc<Cell<Option<i64>>>,
 ) {
     let nav = nav.clone();
+    let scheduled_at_c = Rc::clone(&scheduled_at);
     torrent_btn.connect_clicked(move |_| {
         let m = manager.clone();
         let dd = dest_dir.clone();
         let close_card = close_card.clone();
         let nav = nav.clone();
         let error_label = error_label.clone();
+        let scheduled_at = Rc::clone(&scheduled_at_c);
         glib::spawn_future_local(async move {
             let filter = gtk4::FileFilter::new();
             filter.set_name(Some(&gettext("Torrent files")));
@@ -924,8 +956,10 @@ fn wire_torrent_picker(
             };
             if entries.len() <= 1 {
                 enqueue_and_close(
+                    &m,
                     &dd,
                     &close_card,
+                    scheduled_at.get(),
                     |d| m.enqueue_torrent_file(bytes, &name, d, None),
                     |e| {
                         error_label.set_text(e);
@@ -934,7 +968,7 @@ fn wire_torrent_picker(
                 );
                 return;
             }
-            push_torrent_picker_page(&nav, m, dd, close_card, name, bytes, entries);
+            push_torrent_picker_page(&nav, m, dd, close_card, name, bytes, entries, scheduled_at);
         });
     });
 }
@@ -997,6 +1031,9 @@ impl AddCard {
 /// widget and the open/toggle entry points; the card starts collapsed.
 pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let is_open = Rc::new(Cell::new(false));
+    // Shared scheduled-download timestamp: set by the schedule picker UI,
+    // read by every enqueue path. None = start immediately.
+    let scheduled_at: Rc<Cell<Option<i64>>> = Rc::new(Cell::new(None));
 
     // Card chrome: a slide-down revealer so the card animates in under the
     // header; collapsed it takes no space.
@@ -1205,6 +1242,129 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     dest_row.add_suffix(&dest_btn);
     dest_row.set_activatable_widget(Some(&dest_btn));
     group.add(&dest_row);
+
+    // Schedule: switch row reveals date/time pickers. The timestamp is shared
+    // with the enqueue paths via the `scheduled_at` cell defined at the top
+    // of `build_add_card`.
+    let schedule_switch = adw::SwitchRow::builder()
+        .title(gettext("Schedule download"))
+        .subtitle(gettext("Start at a specific time"))
+        .build();
+    group.add(&schedule_switch);
+
+    let schedule_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    schedule_box.set_margin_top(6);
+    schedule_box.set_margin_bottom(6);
+    let schedule_revealer = gtk4::Revealer::builder()
+        .transition_type(gtk4::RevealerTransitionType::SlideDown)
+        .reveal_child(false)
+        .build();
+    schedule_revealer.set_child(Some(&schedule_box));
+
+    // Date picker: MenuButton opens a popover with GtkCalendar (HIG: no text
+    // entry for dates). GTK/libadwaita provide no stock date picker, so this
+    // composes native primitives — MenuButton, not a hand-wired Button+Popover.
+    let calendar = gtk4::Calendar::new();
+    let date_popover = gtk4::Popover::new();
+    date_popover.set_child(Some(&calendar));
+    let date_btn = gtk4::MenuButton::builder()
+        .label(gettext("Choose date…"))
+        .popover(&date_popover)
+        .build();
+    let date_row = adw::ActionRow::builder().title(gettext("Date")).build();
+    date_row.add_suffix(&date_btn);
+    date_row.set_activatable_widget(Some(&date_btn));
+    schedule_box.append(&date_row);
+
+    // Time pickers: hour/minute spin rows (HIG: SpinRow for numbers).
+    let hour_spin = adw::SpinRow::builder()
+        .title(gettext("Hour"))
+        .adjustment(&gtk4::Adjustment::new(12.0, 0.0, 23.0, 1.0, 5.0, 0.0))
+        .build();
+    let minute_spin = adw::SpinRow::builder()
+        .title(gettext("Minute"))
+        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 59.0, 1.0, 5.0, 0.0))
+        .build();
+    schedule_box.append(&hour_spin);
+    schedule_box.append(&minute_spin);
+
+    // Update the shared timestamp when date/time changes or the switch toggles.
+    {
+        let calendar_c = calendar.clone();
+        let hour_spin_c = hour_spin.clone();
+        let minute_spin_c = minute_spin.clone();
+        let date_btn_c = date_btn.clone();
+        let scheduled_at_c = Rc::clone(&scheduled_at);
+        let update: Rc<dyn Fn()> = Rc::new(move || {
+            let dt = calendar_c.date();
+            let hour = hour_spin_c.value() as i32;
+            let minute = minute_spin_c.value() as i32;
+            // Build a local DateTime from the calendar date + spin time.
+            if let Ok(scheduled) = glib::DateTime::from_local(
+                dt.year(),
+                dt.month(),
+                dt.day_of_month(),
+                hour,
+                minute,
+                0.0,
+            ) {
+                let ts = scheduled.to_unix();
+                scheduled_at_c.set(Some(ts));
+                date_btn_c.set_label(&scheduled.format(&gettext("%Y-%m-%d")).unwrap_or_default());
+            }
+        });
+        {
+            let update = Rc::clone(&update);
+            calendar.connect_day_selected(move |_| update());
+        }
+        {
+            let update = Rc::clone(&update);
+            hour_spin.connect_changed(move |_| update());
+        }
+        {
+            let update = Rc::clone(&update);
+            minute_spin.connect_changed(move |_| update());
+        }
+        let scheduled_at_c2 = Rc::clone(&scheduled_at);
+        let schedule_revealer_c = schedule_revealer.clone();
+        schedule_switch.connect_active_notify(move |sw| {
+            let active = sw.is_active();
+            schedule_revealer_c.set_reveal_child(active);
+            if active {
+                update();
+            } else {
+                scheduled_at_c2.set(None);
+            }
+        });
+    }
+    group.add(&schedule_revealer);
+    // The whole schedule section hides when the preference is off: a hidden
+    // switch can't be toggled, so no new scheduled downloads can be created
+    // while the scheduler is disabled. Weak settings ref: settings must not
+    // keep the card alive.
+    {
+        let settings_w = manager.settings().downgrade();
+        let switch_c = schedule_switch.clone();
+        let revealer_c = schedule_revealer.clone();
+        let scheduled_at_c = Rc::clone(&scheduled_at);
+        let sync = Rc::new(move || {
+            if let Some(s) = settings_w.upgrade() {
+                let enabled = crate::settings::AppSettings::from(s).scheduled_downloads_enabled();
+                switch_c.set_visible(enabled);
+                revealer_c.set_visible(enabled);
+                if !enabled {
+                    scheduled_at_c.set(None);
+                    switch_c.set_active(false);
+                }
+            }
+        });
+        sync();
+        let sync_c = Rc::clone(&sync);
+        manager.settings().connect_changed(
+            Some(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS),
+            move |_, _| sync_c(),
+        );
+    }
     opts_revealer.set_child(Some(&group));
 
     // Form-level error caption sits outside the options revealer so a failed
@@ -1253,6 +1413,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let dest_label = dest_label.clone();
         let opts_revealer = opts_revealer.clone();
         let default_dir = manager.effective_download_dir();
+        let scheduled_at = Rc::clone(&scheduled_at);
+        let schedule_switch = schedule_switch.clone();
         Rc::new(move || {
             is_open.set(false);
             // Cancel any in-flight probe and drop its state; the
@@ -1269,6 +1431,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             // The options reopen collapsed with the default destination,
             // like every other row of the fresh form.
             opts_revealer.set_reveal_child(false);
+            // Reset the schedule picker: a stale timestamp must not leak
+            // into the next download.
+            scheduled_at.set(None);
+            schedule_switch.set_active(false);
             // Clearing the URL fires the changed handler, which hides the
             // step again; the generation bump keeps it from touching probe
             // state.
@@ -1557,6 +1723,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let kick = kick_video.clone();
         let lookup_add_submit = lookup_add.clone();
         let nav2 = nav.clone();
+        let scheduled_at = Rc::clone(&scheduled_at);
         Rc::new(move |from_activate: bool| {
             let fail = |message: &str| {
                 form_error.set_text(message);
@@ -1584,6 +1751,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         &lookup_add_submit,
                         &nav2,
                         probe,
+                        scheduled_at.get(),
                     ),
                     None => {
                         // A tap while the lookup is still running: don't stack
@@ -1639,6 +1807,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 &step2,
                                 &lookup_add_submit,
                                 &v,
+                                scheduled_at.get(),
                             );
                         }
                         Some(crate::video::ProbeResult::Playlist(pl)) => {
@@ -1662,8 +1831,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             }
             let fname = file_row.text().trim().to_string();
             enqueue_and_close(
+                &m,
                 &dd,
                 &close_card,
+                scheduled_at.get(),
                 |d| {
                     m.enqueue(
                         &url,
@@ -1755,6 +1926,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         close_card.clone(),
         &nav,
         form_error.clone(),
+        Rc::clone(&scheduled_at),
     );
 
     // Install / retry / revert / audio-mode wiring.
@@ -1914,6 +2086,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let manager = manager.clone();
         let dest_dir = Rc::clone(&dest_dir);
         let close_card = Rc::clone(&close_card);
+        let scheduled_at = Rc::clone(&scheduled_at);
         Rc::new(
             move |file_name: String,
                   bytes: Vec<u8>,
@@ -1927,6 +2100,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     file_name,
                     bytes,
                     entries,
+                    Rc::clone(&scheduled_at),
                 );
             },
         )
@@ -2094,6 +2268,16 @@ mod tests {
         // close_card()'s mutable re-borrow (it resets the destination) panicked
         // with "RefCell already borrowed" and aborted the app on every
         // successful video, plain, and torrent Add.
+        //
+        // SAFETY: single-threaded setup phase (cargo runs with --test-threads=1).
+        unsafe {
+            std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+            std::env::set_var("GSETTINGS_BACKEND", "memory");
+        }
+        let manager = Rc::new(DownloadManager::new(
+            gio::ListStore::new::<DownloadItem>(),
+            crate::settings::AppSettings::new(),
+        ));
         let dest = Rc::new(RefCell::new("/dl".to_string()));
         let closed = Rc::new(std::cell::Cell::new(false));
         let closed2 = Rc::clone(&closed);
@@ -2105,11 +2289,18 @@ mod tests {
         let seen = Rc::new(RefCell::new(String::new()));
         let seen2 = Rc::clone(&seen);
         enqueue_and_close(
+            &manager,
             &dest,
             &close,
+            None,
             |d| {
                 seen2.replace(d.unwrap_or("?").to_string());
-                Ok::<(), String>(())
+                Ok::<DownloadItem, String>(DownloadItem::new(
+                    1,
+                    "https://example.com/f",
+                    "f",
+                    "/dl",
+                ))
             },
             |_| panic!("enqueue reported success"),
         );

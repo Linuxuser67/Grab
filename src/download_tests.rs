@@ -54,6 +54,7 @@ fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus)
         output_dir: None,
         video_source: None,
         started: None,
+        scheduled_at: None,
     }
 }
 
@@ -73,7 +74,11 @@ fn test_queue_file(tag: &str) -> std::path::PathBuf {
 fn drain_engine(manager: &DownloadManager, id: u64) {
     let ctx = glib::MainContext::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    while manager.running.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
+    // Wait for both the engine AND the pump: the pump is a `spawn_future_local` task, and if it's still pending when the test ends, the next test (on another thread) will trip glib's thread guard when reaping it.
+    while (manager.running.borrow().contains_key(&id)
+        || manager.pump_handles.borrow().contains_key(&id))
+        && std::time::Instant::now() < deadline
+    {
         ctx.iteration(false);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
@@ -428,6 +433,7 @@ fn overcap_queue_keeps_active_first() {
             output_dir: None,
             video_source: None,
             started: None,
+            scheduled_at: None,
         },
         StoredItem {
             id: None,
@@ -441,6 +447,7 @@ fn overcap_queue_keeps_active_first() {
             output_dir: None,
             video_source: None,
             started: None,
+            scheduled_at: None,
         },
     ];
     for i in 0..1000 {
@@ -456,6 +463,7 @@ fn overcap_queue_keeps_active_first() {
             output_dir: None,
             video_source: None,
             started: None,
+            scheduled_at: None,
         });
     }
     let queue = StoredQueue {
@@ -996,6 +1004,7 @@ fn a_pre_upgrade_row_never_lands_on_a_leftover_staging_dir() {
                 output_dir: None,
                 video_source: None,
                 started: None,
+                scheduled_at: None,
             }],
         })
         .unwrap(),
@@ -1057,6 +1066,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             output_dir: None,
             video_source: None,
             started: None,
+            scheduled_at: None,
         },
         StoredItem {
             id: None,
@@ -1070,6 +1080,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             output_dir: None,
             video_source: None,
             started: None,
+            scheduled_at: None,
         },
     ];
     std::fs::write(
@@ -1183,6 +1194,7 @@ fn mismatched_video_source_dropped_on_restore() {
                 playlist_item_id: None,
             }),
             started: None,
+            scheduled_at: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -1231,6 +1243,7 @@ fn done_video_keeps_page_source_on_restore() {
                 playlist_item_id: None,
             }),
             started: None,
+            scheduled_at: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -2467,6 +2480,7 @@ fn queue_roundtrip_and_mapping() {
                 output_dir: None,
                 video_source: None,
                 started: None,
+                scheduled_at: None,
             },
             StoredItem {
                 id: None,
@@ -2480,6 +2494,7 @@ fn queue_roundtrip_and_mapping() {
                 output_dir: None,
                 video_source: None,
                 started: None,
+                scheduled_at: None,
             },
         ],
     };
@@ -2628,6 +2643,7 @@ fn batch_restore_hundred_done() {
             output_dir: None,
             video_source: None,
             started: None,
+            scheduled_at: None,
         })
         .collect();
     let queue = StoredQueue {
@@ -2831,6 +2847,7 @@ fn restore_preserves_intent() {
         video_source: None,
         // None: this round-trips a legacy queue file through restore.
         started: None,
+        scheduled_at: None,
     })
     .collect();
     let queue = StoredQueue {
@@ -3535,6 +3552,7 @@ fn killed_segmented_resume_starts_over() {
                 output_dir: None,
                 video_source: None,
                 started: None,
+                scheduled_at: None,
             }],
         })
         .unwrap(),
@@ -6041,4 +6059,154 @@ fn ensure_contained_parent_reports_mkdir_failure_distinctly() {
 
     let _ = std::fs::remove_dir_all(&base);
     let _ = std::fs::remove_dir_all(&outside);
+}
+
+/// Build a scheduled item the way the New Download card does: enqueue under a
+/// batch guard (so `insert` doesn't spawn the still-Queued item), then stamp
+/// the time and flip the status to Scheduled.
+fn schedule_test_item(m: &Rc<DownloadManager>, at: i64) -> DownloadItem {
+    let _guard = m.batch_guard();
+    let item = m
+        .enqueue("https://example.com/file.zip", None, None)
+        .expect("enqueue should succeed");
+    item.set_scheduled_at(at);
+    item.set_status(DownloadStatus::Scheduled);
+    item
+}
+
+#[test]
+fn scheduled_item_starts_with_timestamp_and_status() {
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let future = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(1)
+        .unwrap()
+        .to_unix();
+    let item = schedule_test_item(&m, future);
+    assert_eq!(item.status(), DownloadStatus::Scheduled);
+    assert_eq!(item.scheduled_at(), future);
+}
+
+#[test]
+fn check_scheduled_queues_due_items() {
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    // Schedule 1 hour out, then manually backdate to simulate time passing.
+    let future = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(1)
+        .unwrap()
+        .to_unix();
+    let item = schedule_test_item(&m, future);
+    assert_eq!(item.status(), DownloadStatus::Scheduled);
+    // Simulate the scheduled time arriving.
+    item.set_scheduled_at(
+        glib::DateTime::now_local()
+            .unwrap()
+            .add_seconds(-10.0)
+            .unwrap()
+            .to_unix(),
+    );
+    m.check_scheduled();
+    // Due items leave Scheduled; with a free slot start_next picks them up immediately.
+    assert!(matches!(
+        item.status(),
+        DownloadStatus::Queued | DownloadStatus::Downloading
+    ));
+    assert_eq!(item.scheduled_at(), 0);
+}
+
+#[test]
+fn check_scheduled_leaves_future_items_alone() {
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let future = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(2)
+        .unwrap()
+        .to_unix();
+    let item = schedule_test_item(&m, future);
+    m.check_scheduled();
+    assert_eq!(item.status(), DownloadStatus::Scheduled);
+    assert_eq!(item.scheduled_at(), future);
+}
+
+#[test]
+fn scheduler_does_not_start_when_preference_off() {
+    let settings = test_settings();
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, false)
+        .unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.start_scheduler();
+    assert!(
+        m.scheduler_source.borrow().is_none(),
+        "no 30s timer while the scheduling preference is off"
+    );
+}
+
+#[test]
+fn scheduler_starts_and_stops() {
+    let settings = test_settings();
+    // The memory backend is process-global: pin the value instead of relying on the schema default.
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
+        .unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.start_scheduler();
+    assert!(m.scheduler_source.borrow().is_some());
+    // Idempotent: a second start must not install a second timer.
+    m.start_scheduler();
+    m.stop_scheduler();
+    assert!(m.scheduler_source.borrow().is_none());
+}
+
+#[test]
+fn toggling_preference_stops_and_restarts_scheduler() {
+    let settings = test_settings();
+    // The memory backend is process-global: pin the starting value.
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
+        .unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+    m.start_scheduler();
+    assert!(m.scheduler_source.borrow().is_some());
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, false)
+        .unwrap();
+    assert!(
+        m.scheduler_source.borrow().is_none(),
+        "disabling the preference removes the 30s timer"
+    );
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
+        .unwrap();
+    assert!(m.scheduler_source.borrow().is_some());
+    m.stop_scheduler();
+}
+
+#[test]
+fn dropping_manager_removes_scheduler_source() {
+    let settings = test_settings();
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
+        .unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.start_scheduler();
+    // Grab the live Source object before dropping the manager.
+    let source = {
+        let borrow = m.scheduler_source.borrow();
+        let id = borrow.as_ref().expect("scheduler source installed");
+        glib::MainContext::default()
+            .find_source_by_id(id)
+            .expect("source present in context")
+    };
+    drop(m);
+    // Drop must remove the 30s tick; a leaked source would survive in the
+    // context and trip a later test's thread guard when dispatched.
+    assert!(
+        source.is_destroyed(),
+        "dropping the manager removes the scheduler source"
+    );
 }

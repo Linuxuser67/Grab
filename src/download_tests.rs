@@ -74,7 +74,11 @@ fn test_queue_file(tag: &str) -> std::path::PathBuf {
 fn drain_engine(manager: &DownloadManager, id: u64) {
     let ctx = glib::MainContext::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    while manager.running.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
+    // Wait for both the engine AND the pump: the pump is a `spawn_future_local` task, and if it's still pending when the test ends, the next test (on another thread) will trip glib's thread guard when reaping it.
+    while (manager.running.borrow().contains_key(&id)
+        || manager.pump_handles.borrow().contains_key(&id))
+        && std::time::Instant::now() < deadline
+    {
         ctx.iteration(false);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }

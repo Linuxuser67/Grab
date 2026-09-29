@@ -46,6 +46,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.11" date="2026-09-29">
+      <description>
+        <ul>
+          <li>Probe errors render as plain text: messages containing markup-like characters (e.g. &lt;HTTPError 403&gt;) no longer fail to display.</li>
+          <li>Media-preview error state redesigned as a left-aligned, vertically centered card.</li>
+          <li>Playlist and torrent pickers use pure Adwaita defaults with no custom styling.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.10" date="2026-09-29">
       <description>
         <ul>

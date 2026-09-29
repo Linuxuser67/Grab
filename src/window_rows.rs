@@ -12,6 +12,15 @@ use libadwaita as adw;
 use std::cell::Cell;
 use std::rc::Rc;
 
+// Process-wide guard against stacked failure dialogs: bulk failures must
+// coalesce into one dialog, so the live dialog (if any) is tracked here.
+// Main-thread-only state (connect_notify_local); a closed dialog stops
+// upgrading its WeakRef and the next failure opens a fresh one.
+thread_local! {
+    static FAILURE_DIALOG: std::cell::RefCell<Option<glib::WeakRef<adw::AlertDialog>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn icon_button(icon: &str, tooltip: &str) -> gtk4::Button {
     let b = gtk4::Button::builder()
         .icon_name(icon)
@@ -228,7 +237,7 @@ impl RowMedia {
             RowMedia::Audio => "audio-headphones-symbolic",
             RowMedia::Torrent => "emblem-shared-symbolic",
             RowMedia::Video => "video-display-symbolic",
-            RowMedia::File => "document-save-symbolic",
+            RowMedia::File => "application-octet-stream-symbolic",
         }
     }
 }
@@ -271,6 +280,13 @@ fn refresh_row(
     if !should_pulse(item.status(), is_live, frac) {
         w.progress.set_fraction(frac);
     }
+    // Keep the screen-reader label in step with the bar.
+    w.progress
+        .update_property(&[gtk4::accessible::Property::Label(&format!(
+            "{}: {}%",
+            gettext("Download progress"),
+            (frac * 100.0).round() as i32
+        ))]);
     w.spinner.set_visible(active);
     w.detail.set_text(&item.detail());
     // Red is the failure signal and nothing else: tint the identity icon
@@ -607,6 +623,11 @@ pub(crate) fn build_row(
         .build();
     let progress = gtk4::ProgressBar::new();
     progress.set_show_text(false);
+    // Screen-reader label: the adjacent detail label is text, but the bar
+    // itself needs a name; refresh_row keeps the percent current.
+    progress.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Download progress",
+    ))]);
 
     // Per-piece completion strip under the progress bar, revealed by clicking
     // the row; a DrawingArea (not hundreds of widgets) keeps thousands of
@@ -964,10 +985,6 @@ pub(crate) fn build_row(
         let row_weak = row.downgrade();
         let toasts = Rc::clone(toasts);
         let notified = Rc::new(std::cell::Cell::new(false));
-        thread_local! {
-            static FAILURE_DIALOG: std::cell::RefCell<Option<glib::WeakRef<adw::AlertDialog>>> =
-                const { std::cell::RefCell::new(None) };
-        }
         item.connect_notify_local(Some("status"), move |item, _| {
             if item.status() == DownloadStatus::Failed {
                 let first = !notified.replace(true);

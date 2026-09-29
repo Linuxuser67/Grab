@@ -159,7 +159,10 @@ fn row_media_icon_names_are_real_adwaita_symbolic_names() {
     assert_eq!(RowMedia::Audio.icon_name(), "audio-headphones-symbolic");
     assert_eq!(RowMedia::Torrent.icon_name(), "emblem-shared-symbolic");
     assert_eq!(RowMedia::Video.icon_name(), "video-display-symbolic");
-    assert_eq!(RowMedia::File.icon_name(), "document-save-symbolic");
+    assert_eq!(
+        RowMedia::File.icon_name(),
+        "application-octet-stream-symbolic"
+    );
 }
 
 #[test]

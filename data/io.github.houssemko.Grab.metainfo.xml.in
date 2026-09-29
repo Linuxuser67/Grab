@@ -46,6 +46,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.16" date="2026-09-29">
+      <description>
+        <ul>
+          <li>Playlist and torrent pickers: entries are now hug-sized cards in a grid — rounded, spaced, and sized to their text.</li>
+          <li>Media preview errors use the row layout again, with the error message as the subtitle and Retry as a suffix button.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.15" date="2026-09-29">
       <description>
         <ul>

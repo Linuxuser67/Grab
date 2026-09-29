@@ -46,6 +46,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.0-beta.19" date="2026-09-29">
+      <description>
+        <ul>
+          <li>Playlist and torrent picker entries are now toggle pills with 12px HIG padding; the grid wraps automatically with no horizontal scrolling.</li>
+          <li>The Add button becomes a labeled pill once a media format is picked.</li>
+          <li>Overlong picker titles ellipsize instead of breaking layout measurements.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.0-beta.18" date="2026-09-29">
       <description>
         <ul>

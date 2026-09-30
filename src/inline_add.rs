@@ -164,8 +164,13 @@ struct FormatOption {
 /// time (ready rows, tools row, or the centered error card), driven by the
 /// probe below.
 struct VideoStep {
-    /// Lookup spinner, beside the URL entry in the button row: no separate
-    /// status line, no layout shift when a lookup starts.
+    /// Action slot beside the URL entry: a homogeneous GtkStack holding the
+    /// Add button and the lookup spinner. Swapping pages keeps the slot at
+    /// the widest child's width, so a lookup never reallocates the URL row
+    /// (no separate status line, no layout shift when a lookup starts).
+    action_slot: gtk4::Stack,
+    /// The spinner page of the action slot: kept so the show/hide helpers
+    /// can set and clear its accessible label.
     url_spinner: adw::Spinner,
     group: adw::PreferencesGroup,
     name: adw::EntryRow,
@@ -187,8 +192,10 @@ struct VideoStep {
 /// Reserve trailing text space inside the URL entry while the lookup
 fn hide_video_step(v: &VideoStep) {
     v.group.set_visible(false);
-    // adw::Spinner animates while mapped; hiding stops it (no set_spinning).
-    v.url_spinner.set_visible(false);
+    // Back to the Add button: the action slot keeps its width, so selecting
+    // a page never reallocates the row. The spinner page is unmapped while
+    // hidden, which stops its animation (no set_spinning on adw::Spinner).
+    v.action_slot.set_visible_child_name("add");
     // Clear the accessible name so a screen reader doesn't re-read the
     // stale "Looking up…" set by show_video_loading.
     v.url_spinner
@@ -224,7 +231,8 @@ fn reset_video_step(step: &VideoStep) {
 
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
-    v.url_spinner.set_visible(true);
+    // Swap the action slot to the spinner: same reserved width, no shift.
+    v.action_slot.set_visible_child_name("spinner");
     // Screen-reader announcement: the spinner alone is silent.
     // `adw::Spinner` doesn't expose `update_property` directly; upcast to Widget.
     v.url_spinner
@@ -1135,7 +1143,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
 
     // URL bar: plain GtkEntry (entry styling, 6px corners) with the action
     // buttons beside it — AdwEntryRow would render card styling (12px).
-    // The lookup spinner joins the button row while probing.
+    // The lookup spinner swaps with the Add button in the action slot
+    // while probing.
     let url_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
     let url_entry = gtk4::Entry::builder()
         .placeholder_text(gettext("Paste a download link"))
@@ -1144,10 +1153,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
     url_bar.append(&url_entry);
+    // Action slot: a homogeneous GtkStack swapping the Add button with the
+    // lookup spinner. The slot keeps the widest child's width, so starting
+    // a lookup never reallocates the URL row. The swap is instant: a slide
+    // transition on every lookup would distract from the entry being read.
     let url_spinner = adw::Spinner::new();
-    url_spinner.set_visible(false);
     url_spinner.set_valign(gtk4::Align::Center);
-    url_bar.append(&url_spinner);
     // Persistent Add button: stays visible so a second press confirms
     // after the preview loads. Colored rounded HIG button.
     let add_btn = gtk4::Button::builder()
@@ -1157,7 +1168,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .valign(gtk4::Align::Center)
         .build();
     add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
-    url_bar.append(&add_btn);
+    let action_slot = gtk4::Stack::builder()
+        .hhomogeneous(true)
+        .transition_type(gtk4::StackTransitionType::None)
+        .valign(gtk4::Align::Center)
+        .build();
+    action_slot.add_named(&add_btn, Some("add"));
+    action_slot.add_named(&url_spinner, Some("spinner"));
+    url_bar.append(&action_slot);
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
     let opts_toggle = gtk4::ToggleButton::builder()
@@ -1247,6 +1265,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_error.set_visible(false);
     video_group.add(&video_error);
     let step = Rc::new(VideoStep {
+        action_slot,
         url_spinner: url_spinner.clone(),
         group: video_group.clone(),
         name: video_name,

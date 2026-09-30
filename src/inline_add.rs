@@ -1267,8 +1267,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_group.add(&video_tools);
     // Probe-error state: an ActionRow in the group (4.4.4 pattern) — the
     // message goes in the subtitle, Retry is a suffix.
+    // Subtitles carry raw tool errors: never parse them as Pango markup.
     let video_error = adw::ActionRow::builder()
         .title(gettext("Couldn't load the media preview"))
+        .use_markup(false)
         .build();
     let video_retry_btn = gtk4::Button::builder()
         .label(gettext("Retry"))

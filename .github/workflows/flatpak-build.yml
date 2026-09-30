@@ -48,7 +48,7 @@ jobs:
           path: |
             ~/.local/share/flatpak
             ~/.cache/flatpak
-          key: flatpak-sdk-${{ runner.os }}-${{ hashFiles('build-aux/io.github.houssemko.Grab.json') }}
+          key: flatpak-sdk-${{ runner.os }}-${{ hashFiles('build-aux/io.github.linuxuser67.Grab.json') }}
           restore-keys: |
             flatpak-sdk-${{ runner.os }}-
 
@@ -59,7 +59,7 @@ jobs:
 
       - name: Install GNOME SDK and Platform
         run: |
-          RUNTIME=$(python3 -c "import json; print(json.load(open('build-aux/io.github.houssemko.Grab.json'))['runtime-version'])")
+          RUNTIME=$(python3 -c "import json; print(json.load(open('build-aux/io.github.linuxuser67.Grab.json'))['runtime-version'])")
           flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub "org.gnome.Platform//$RUNTIME" "org.gnome.Sdk//$RUNTIME"
 
@@ -72,7 +72,7 @@ jobs:
         run: >
           flatpak-builder ${{ inputs.force-clean && '--force-clean' || '' }} --user
           --repo=flatpak-repo --install-deps-from=flathub build
-          build-aux/io.github.houssemko.Grab.json
+          build-aux/io.github.linuxuser67.Grab.json
 
       # Read back what the repo actually embeds before packing it: the
       # installed metainfo's newest release must match the tag, or a tag
@@ -92,7 +92,7 @@ jobs:
           fi
 
       - name: Bundle
-        run: flatpak build-bundle flatpak-repo Grab.flatpak io.github.houssemko.Grab
+        run: flatpak build-bundle flatpak-repo Grab.flatpak io.github.linuxuser67.Grab
 
       - name: Attach to the release
         if: inputs.release-tag != ''

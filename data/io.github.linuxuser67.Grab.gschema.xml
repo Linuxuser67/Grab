@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="io.github.linuxuser67.Grab" path="/io/github/linuxuser67/Grab/">
+    <key name="download-dir" type="s">
+      <default>''</default>
+      <summary>Download folder</summary>
+      <description>Empty means the system Downloads folder.</description>
+    </key>
+    <key name="restrict-filenames" type="b">
+      <default>false</default>
+      <summary>Restrict filenames to ASCII</summary>
+      <description>Sanitize download filenames to ASCII-only characters, also avoiding ampersands and spaces.</description>
+    </key>
+    <key name="enable-scheduled-downloads" type="b">
+      <default>false</default>
+      <summary>Enable scheduled downloads</summary>
+      <description>When off, the scheduler never runs and the schedule option is hidden from the New Download card.</description>
+    </key>
+    <key name="max-concurrent" type="i">
+      <default>3</default>
+      <range min="1" max="10"/>
+      <summary>Simultaneous downloads</summary>
+      <description>How many downloads may run at once.</description>
+    </key>
+    <key name="connections" type="i">
+      <default>4</default>
+      <range min="1" max="16"/>
+      <summary>Connections per download</summary>
+      <description>How many parallel range connections a large download may use. 1 disables segmented downloading.</description>
+    </key>
+    <key name="speed-limit" type="s">
+      <default>''</default>
+      <summary>Speed limit</summary>
+      <description>Download speed limit (e.g. 500K, 2M). Empty means unlimited.</description>
+    </key>
+    <key name="proxy-mode" type="s">
+      <default>'system'</default>
+      <summary>Proxy mode</summary>
+      <description>System honors the desktop proxy settings; manual uses the proxy below; direct disables proxying. Applies to newly started downloads; torrents always go direct.</description>
+    </key>
+    <key name="proxy-type" type="s">
+      <default>'socks5'</default>
+      <summary>Proxy type</summary>
+      <description>One of http, https or socks5. SOCKS5 resolves names remotely.</description>
+    </key>
+    <key name="proxy-host" type="s">
+      <default>'127.0.0.1'</default>
+      <summary>Proxy host</summary>
+      <description>Proxy hostname or address, e.g. 127.0.0.1 for a local Tor forwarder.</description>
+    </key>
+    <key name="proxy-port" type="i">
+      <default>9050</default>
+      <summary>Proxy port</summary>
+      <description>Proxy port, e.g. 9050 for Tor.</description>
+    </key>
+    <key name="keep-server-date" type="b">
+      <default>true</default>
+      <summary>Keep server file date</summary>
+      <description>Set each finished file's modification time from the server's Last-Modified header when present.</description>
+    </key>
+    <key name="show-notifications" type="b">
+      <default>true</default>
+      <summary>Notify on completion</summary>
+      <description>Send a desktop notification when a download finishes or fails.</description>
+    </key>
+    <key name="notify-background" type="b">
+      <default>true</default>
+      <summary>Notify for background downloads</summary>
+      <description>Send a desktop notification when closing the window while downloads keep running in the background.</description>
+    </key>
+    <key name="inhibit-suspend" type="b">
+      <default>true</default>
+      <summary>Prevent sleep during downloads</summary>
+      <description>Block system suspend while downloads are queued or running.</description>
+    </key>
+    <key name="torrent-seed-finished" type="b">
+      <default>false</default>
+      <summary>Seed finished torrents</summary>
+      <description>Keep uploading finished magnet downloads instead of pausing them.</description>
+    </key>
+    <key name="torrent-dht" type="b">
+      <default>true</default>
+      <summary>Use DHT for torrents</summary>
+      <description>Find torrent peers through the distributed hash table. Applies when the torrent engine first starts.</description>
+    </key>
+    <key name="torrent-upload-limit" type="s">
+      <default>''</default>
+      <summary>Torrent upload speed limit</summary>
+      <description>Torrent upload speed limit (e.g. 500K, 2M). Empty means unlimited.</description>
+    </key>
+    <key name="torrent-seed-ratio" type="d">
+      <default>0.0</default>
+      <range min="0.0" max="100.0"/>
+      <summary>Seed ratio limit</summary>
+      <description>Stop seeding after uploading this multiple of the download size. 0 means unlimited.</description>
+    </key>
+    <key name="torrent-seed-time" type="i">
+      <default>0</default>
+      <range min="0" max="43200"/>
+      <summary>Seed time limit in minutes</summary>
+      <description>Stop seeding this many minutes after finishing. 0 means unlimited.</description>
+    </key>
+    <key name="torrent-blocklist-url" type="s">
+      <default>""</default>
+      <summary>Torrent peer blocklist</summary>
+      <description>URL of a peer blocklist (eMule ipfilter.dat format) applied to every torrent. Empty means disabled. Applies when the torrent engine first starts.</description>
+    </key>
+    <key name="torrent-lsd" type="b">
+      <default>true</default>
+      <summary>Find torrent peers on the local network</summary>
+      <description>Discover torrent peers on the local network via Local Service Discovery. Applies when the torrent engine first starts.</description>
+    </key>
+    <key name="video-quality" type="s">
+      <default>'1080p'</default>
+      <summary>Preferred video quality</summary>
+      <description>Target height for video-page downloads: best, 2160p, 1440p, 1080p, 720p, or 480p.</description>
+    </key>
+    <key name="video-codec-priority" type="s">
+      <default>'newest'</default>
+      <summary>Preferred video codec</summary>
+      <description>Newest first prefers AV1, then VP9, HEVC and H.264; most compatible prefers H.264 first for players without newer decoders.</description>
+    </key>
+    <key name="subtitle-language" type="s">
+      <default>'off'</default>
+      <summary>Subtitle language</summary>
+      <description>Download subtitles in this language with new video downloads when the video offers it, else English when offered. 'off' disables subtitle downloads.</description>
+    </key>
+    <key name="embed-subs" type="b">
+      <default>false</default>
+      <summary>Embed subtitles</summary>
+      <description>Mux downloaded subtitle tracks into the finished video file instead of keeping sidecars only.</description>
+    </key>
+    <key name="cookies-browser" type="s">
+      <default>'none'</default>
+      <summary>Browser for video page cookies</summary>
+      <description>Read cookies straight from this browser's profile for age-gated or member-only video pages. 'none' disables it.</description>
+    </key>
+    <key name="sponsorblock-remove" type="b">
+      <default>false</default>
+      <summary>Remove sponsored segments</summary>
+      <description>Cut SponsorBlock-flagged sponsor segments out of new video downloads.</description>
+    </key>
+    <key name="sponsorblock-mark" type="b">
+      <default>false</default>
+      <summary>Mark sponsored segments</summary>
+      <description>Mark SponsorBlock-flagged sponsor segments as chapters in new video downloads.</description>
+    </key>
+    <key name="remux-video" type="s">
+      <default>'off'</default>
+      <summary>Remux video</summary>
+      <description>Remux finished video downloads into another container without re-encoding. 'off' disables remuxing.</description>
+    </key>
+    <key name="embed-chapters" type="b">
+      <default>false</default>
+      <summary>Embed chapters</summary>
+      <description>Write chapter markers into the finished file on new downloads.</description>
+    </key>
+    <key name="live-from-start" type="b">
+      <default>false</default>
+      <summary>Live from start</summary>
+      <description>Record live streams from the beginning when the site supports it.</description>
+    </key>
+    <key name="window-width" type="i">
+      <default>900</default>
+      <summary>Window width</summary>
+      <description>Last used window width.</description>
+    </key>
+    <key name="window-height" type="i">
+      <default>600</default>
+      <summary>Window height</summary>
+      <description>Last used window height.</description>
+    </key>
+  </schema>
+</schemalist>

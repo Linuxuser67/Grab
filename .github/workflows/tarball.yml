@@ -50,7 +50,7 @@ jobs:
 
       - name: Install GNOME SDK and Rust
         run: |
-          RUNTIME=$(python3 -c "import json; print(json.load(open('build-aux/io.github.houssemko.Grab.json'))['runtime-version'])")
+          RUNTIME=$(python3 -c "import json; print(json.load(open('build-aux/io.github.linuxuser67.Grab.json'))['runtime-version'])")
           echo "RUNTIME=$RUNTIME" >> "$GITHUB_ENV"
           flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           # The rust-stable extension follows freedesktop-sdk branches
@@ -69,7 +69,7 @@ jobs:
             ~/.local/share/flatpak
             ~/.cache/flatpak
             .cargo-home/registry
-          key: tarball-deps-${{ runner.os }}-${{ matrix.tarball_arch }}-${{ hashFiles('build-aux/io.github.houssemko.Grab.json', 'Cargo.lock') }}
+          key: tarball-deps-${{ runner.os }}-${{ matrix.tarball_arch }}-${{ hashFiles('build-aux/io.github.linuxuser67.Grab.json', 'Cargo.lock') }}
           restore-keys: |
             tarball-deps-${{ runner.os }}-${{ matrix.tarball_arch }}-
 

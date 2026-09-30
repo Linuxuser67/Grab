@@ -38,8 +38,8 @@ import tomllib
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CARGO_TOML = ROOT / "Cargo.toml"
 CARGO_LOCK = ROOT / "Cargo.lock"
-METAINFO = ROOT / "data" / "io.github.houssemko.Grab.metainfo.xml.in"
-APP_ID = "io.github.houssemko.Grab"
+METAINFO = ROOT / "data" / "io.github.linuxuser67.Grab.metainfo.xml.in"
+APP_ID = "io.github.linuxuser67.Grab"
 # Inside the app commit, the exported tree lives under /files (mounted at
 # /app); the flatpak metadata file sits beside it at /metadata.
 INSTALLED_METAINFO = f"/files/share/metainfo/{APP_ID}.metainfo.xml"

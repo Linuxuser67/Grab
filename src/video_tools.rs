@@ -561,11 +561,14 @@ async fn verify_quickjs_hash(part: &Path) -> Result<(), VideoError> {
     let bytes = tokio::fs::read(part)
         .await
         .map_err(|e| VideoError::install(format!("couldn't read {}: {e}", part.display())))?;
-    use sha2::Digest as _;
-    let actual: String = sha2::Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    // GLib's Checksum instead of the sha2 crate: one less direct dependency,
+    // same SHA-256, established backend API.
+    let mut checksum = glib::Checksum::new(glib::ChecksumType::Sha256)
+        .ok_or_else(|| VideoError::install("GLib has no SHA-256 checksum"))?;
+    checksum.update(&bytes);
+    let actual = checksum
+        .string()
+        .ok_or_else(|| VideoError::install("couldn't finalize the quickjs checksum"))?;
     if actual != expected {
         return Err(VideoError::install(
             "quickjs download failed its integrity check and was discarded",
@@ -749,6 +752,9 @@ pub(crate) fn ytdlp_update_available(installed: &str, tag: &str) -> bool {
 
 /// Real home dir from the passwd database, bypassing sandbox `$HOME` remapping
 /// (inside Flatpak `$HOME` is the app sandbox dir). `None` on lookup failure.
+///
+/// Do NOT "simplify" this to `glib::home_dir()`: it prefers `$HOME`, which is
+/// exactly the remapped sandbox dir this function exists to bypass.
 #[cfg(unix)]
 pub(crate) fn real_home_dir() -> Option<PathBuf> {
     // SAFETY: getpwuid returns static storage (or null); only pw_dir up to its NUL is read.

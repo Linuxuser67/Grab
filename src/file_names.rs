@@ -276,10 +276,21 @@ pub(crate) fn sane_filename(s: &str) -> bool {
 }
 
 /// Best-effort filename from URL path via GLib's `g_uri_unescape_string`
-/// (single-pass `%XX` decode, leaves `+`); falls back to `index.html`.
+/// (single-pass `%XX` decode, leaves `+`); falls back to the literal input,
+/// then `index.html` at the call sites.
 pub(crate) fn percent_decode(s: &str) -> String {
     glib::uri_unescape_string(s, None::<&str>)
-        .map(|g| g.to_string())
+        .and_then(|g| {
+            // GLib decodes invalid-UTF-8 escapes (%FF%FE) to raw bytes
+            // instead of erroring, and gtk-rs wraps the result unchecked
+            // (debug_assert only): re-validate so a hostile escape can never
+            // launder non-UTF-8 into a Rust String. Read the bytes straight
+            // off the C string — `as_str` is already tainted.
+            // SAFETY: `g` owns a valid NUL-terminated C string; we only read
+            // its bytes up to the terminator.
+            let bytes = unsafe { std::ffi::CStr::from_ptr(g.as_ptr()) }.to_bytes();
+            std::str::from_utf8(bytes).ok().map(str::to_owned)
+        })
         .unwrap_or_else(|| s.to_owned())
 }
 

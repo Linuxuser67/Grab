@@ -1447,7 +1447,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
-            use std::io::Write as _;
+            use std::io::{Read as _, Write as _};
             // A failed accept must never silently drop the listener: the
             // client's queued connection would get RST and fail with a
             // confusing request error instead of the truncation below.
@@ -1465,6 +1465,25 @@ mod tests {
                 }
             }
             let mut stream = stream.expect("test server: accept kept failing");
+            // Read the request before responding: exiting with the request
+            // still unread makes the kernel RST the connection, and if that
+            // RST lands before the client's request write the fetch fails
+            // with "error sending request" instead of the truncation below.
+            // With the request consumed, close() sends a clean FIN.
+            let mut req = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => return, // client went away
+                    Ok(n) => {
+                        req.extend_from_slice(&buf[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => return,
+                }
+            }
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n"

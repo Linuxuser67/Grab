@@ -46,6 +46,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.6" date="2026-09-30">
+      <description>
+        <ul>
+          <li>Check for Updates in Preferences now checks yt-dlp, ffmpeg, and quickjs together, with a single Update button.</li>
+          <li>On new installs, keeping original file dates is now on by default, and scheduled downloads are off by default.</li>
+          <li>Validation errors on the URL and torrent fields are now exposed to assistive technologies.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.5" date="2026-09-30">
       <description>
         <ul>

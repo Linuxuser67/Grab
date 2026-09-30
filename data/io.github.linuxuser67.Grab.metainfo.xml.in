@@ -34,18 +34,31 @@
   <screenshots>
     <screenshot type="default">
       <caption>Empty state with a New Download shortcut</caption>
-      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v2.4.1/data/screenshots/empty-state.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.7/data/screenshots/empty-state-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Active downloads with per-block progress maps</caption>
-      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v2.4.1/data/screenshots/downloads.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.7/data/screenshots/downloads-video.png</image>
     </screenshot>
     <screenshot>
-      <caption>Preferences: destination, power and notifications</caption>
-      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v2.4.1/data/screenshots/preferences.png</image>
+      <caption>New Download card with inline media format picker</caption>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.7/data/screenshots/new-download-format.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Live stream recording alongside active downloads</caption>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.7/data/screenshots/live-recording.png</image>
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.7" date="2026-09-30">
+      <description>
+        <ul>
+          <li>The application ID is now io.github.linuxuser67.Grab; settings from earlier versions start fresh under the new ID.</li>
+          <li>Dropped two Flatpak permissions rejected by the Flathub linter.</li>
+          <li>Refreshed the app screenshots.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.6" date="2026-09-30">
       <description>
         <ul>

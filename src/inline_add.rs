@@ -1309,6 +1309,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .reveal_child(false)
         .build();
     schedule_revealer.set_child(Some(&schedule_group));
+    // Starts hidden: a collapsed revealer still occupies the parent box's
+    // spacing, so it is only made visible while revealed (see the
+    // child-revealed handler below).
+    schedule_revealer.set_visible(false);
 
     // Date picker: MenuButton opens a popover with GtkCalendar (HIG: no text
     // entry for dates). GTK/libadwaita provide no stock date picker, so this
@@ -1380,6 +1384,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let schedule_revealer_c = schedule_revealer.clone();
         schedule_switch.connect_active_notify(move |sw| {
             let active = sw.is_active();
+            if active {
+                // Visible before revealing so the slide-down still animates.
+                schedule_revealer_c.set_visible(true);
+            }
             schedule_revealer_c.set_reveal_child(active);
             if active {
                 update();
@@ -1387,8 +1395,20 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 scheduled_at_c2.set(None);
             }
         });
+        // A collapsed revealer keeps occupying the parent box's spacing:
+        // hide it once the slide-up finishes so no dead gap stays under
+        // the options card.
+        schedule_revealer.connect_child_revealed_notify(|r| {
+            r.set_visible(r.is_child_revealed());
+        });
     }
-    group.add(&schedule_revealer);
+    // The schedule rows are their own card under the options: separate
+    // PreferencesGroups get the 12px box spacing instead of touching.
+    // Stays inside opts_revealer so the gear toggle collapses it together
+    // with the other options.
+    let opts_box = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    opts_box.append(&group);
+    opts_box.append(&schedule_revealer);
     // The whole schedule section hides when the preference is off: a hidden
     // switch can't be toggled, so no new scheduled downloads can be created
     // while the scheduler is disabled. Weak settings ref: settings must not
@@ -1402,7 +1422,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if let Some(s) = settings_w.upgrade() {
                 let enabled = crate::settings::AppSettings::from(s).scheduled_downloads_enabled();
                 switch_c.set_visible(enabled);
-                revealer_c.set_visible(enabled);
+                // Only visible while the switch is on: a collapsed revealer
+                // would otherwise leave a dead 12px gap under the card.
+                revealer_c.set_visible(enabled && switch_c.is_active());
                 if !enabled {
                     scheduled_at_c.set(None);
                     switch_c.set_active(false);
@@ -1416,7 +1438,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             move |_, _| sync_c(),
         );
     }
-    opts_revealer.set_child(Some(&group));
+    opts_revealer.set_child(Some(&opts_box));
 
     // Form-level error caption sits outside the options revealer so a failed
     // Add stays visible while the options are collapsed.

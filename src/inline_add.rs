@@ -971,7 +971,7 @@ fn wire_torrent_picker(
     dest_dir: Rc<RefCell<String>>,
     close_card: Rc<dyn Fn()>,
     nav: &adw::NavigationView,
-    error_label: gtk4::Label,
+    torrent_row: adw::ActionRow,
     scheduled_at: Rc<Cell<Option<i64>>>,
 ) {
     let nav = nav.clone();
@@ -981,8 +981,11 @@ fn wire_torrent_picker(
         let dd = dest_dir.clone();
         let close_card = close_card.clone();
         let nav = nav.clone();
-        let error_label = error_label.clone();
+        let torrent_row = torrent_row.clone();
         let scheduled_at = Rc::clone(&scheduled_at_c);
+        // A fresh pick clears the previous row-level error.
+        torrent_row.remove_css_class("error");
+        torrent_row.set_tooltip_text(None);
         glib::spawn_future_local(async move {
             let filter = gtk4::FileFilter::new();
             filter.set_name(Some(&gettext("Torrent files")));
@@ -1008,16 +1011,16 @@ fn wire_torrent_picker(
             {
                 Some(b) => b,
                 None => {
-                    error_label.set_text(&gettext("Could not read that .torrent file"));
-                    error_label.set_visible(true);
+                    torrent_row.set_tooltip_text(Some(&gettext("Could not read that .torrent file")));
+                    torrent_row.add_css_class("error");
                     return;
                 }
             };
             let (_tname, entries) = match crate::torrent::torrent_file_list(&bytes) {
                 Ok(v) => v,
                 Err(e) => {
-                    error_label.set_text(&e);
-                    error_label.set_visible(true);
+                    torrent_row.set_tooltip_text(Some(&e));
+                    torrent_row.add_css_class("error");
                     return;
                 }
             };
@@ -1029,8 +1032,8 @@ fn wire_torrent_picker(
                     scheduled_at.get(),
                     |d| m.enqueue_torrent_file(bytes, &name, d, None),
                     |e| {
-                        error_label.set_text(e);
-                        error_label.set_visible(true);
+                        torrent_row.set_tooltip_text(Some(e));
+                        torrent_row.add_css_class("error");
                     },
                 );
                 return;
@@ -1470,16 +1473,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
     opts_revealer.set_child(Some(&opts_box));
 
-    // Form-level error caption sits outside the options revealer so a failed
-    // Add stays visible while the options are collapsed.
-    let form_error = gtk4::Label::builder()
-        .label("")
-        .css_classes(["error", "caption"])
-        .halign(gtk4::Align::Start)
-        .visible(false)
-        .build();
-    form.append(&form_error);
-
+    // Validation errors live on the fields themselves (error class +
+    // tooltip), so there is no error caption under the URL bar: the form
+    // never shifts when an error appears or clears.
     let form_page = adw::NavigationPage::builder()
         .tag("form")
         .title(gettext("New Download"))
@@ -1509,7 +1505,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let url_entry = url_entry.clone();
         let file_row = file_row.clone();
         let step = Rc::clone(&step);
-        let form_error = form_error.clone();
+        let torrent_row = torrent_row.clone();
         let lookup_add = Rc::clone(&lookup_add);
         let nav = nav.clone();
         let dest_dir = Rc::clone(&dest_dir);
@@ -1526,7 +1522,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             revealer.set_reveal_child(false);
             reset_video_step(&step);
             url_entry.remove_css_class("error");
-            form_error.set_visible(false);
+            url_entry.set_tooltip_text(None);
+            torrent_row.remove_css_class("error");
+            torrent_row.set_tooltip_text(None);
             set_lookup_add(&lookup_add, true);
             file_row.set_text("");
             dest_dir.replace(default_dir.clone());
@@ -1843,7 +1841,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let dd = dest_dir.clone();
         let url_entry = url_entry.clone();
         let file_row = file_row.clone();
-        let form_error = form_error.clone();
         let close_card = close_card.clone();
         let probe = Rc::clone(&probe);
         let step2 = step.clone();
@@ -1853,8 +1850,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let scheduled_at = Rc::clone(&scheduled_at);
         Rc::new(move |from_activate: bool| {
             let fail = |message: &str| {
-                form_error.set_text(message);
-                form_error.set_visible(true);
+                // Form-validation pattern: the error state lives on the
+                // entry itself (error class + tooltip), not in a caption
+                // underneath it.
+                url_entry.set_tooltip_text(Some(message));
                 url_entry.add_css_class("error");
             };
             let url = url_entry.text().trim().to_string();
@@ -1994,9 +1993,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let probe = Rc::clone(&probe);
         let step2 = step.clone();
         let file_row2 = file_row.clone();
-        let form_error2 = form_error.clone();
         url_entry.connect_changed(move |row| {
-            form_error2.set_visible(false);
+            row.set_tooltip_text(None);
             row.remove_css_class("error");
             let text = row.text().trim().to_string();
             // The direct-only file row hides in video mode (the preview has its own
@@ -2053,7 +2051,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         dest_dir.clone(),
         close_card.clone(),
         &nav,
-        form_error.clone(),
+        torrent_row.clone(),
         Rc::clone(&scheduled_at),
     );
 

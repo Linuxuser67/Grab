@@ -163,8 +163,8 @@ struct FormatOption {
 /// time (ready rows, tools row, or the centered error card), driven by the
 /// probe below.
 struct VideoStep {
-    /// Lookup spinner, in the URL entry's suffix slot (browser-address-bar
-    /// style): no separate status line, no layout shift when a lookup starts.
+    /// Lookup spinner, beside the URL entry in the button row: no separate
+    /// status line, no layout shift when a lookup starts.
     url_spinner: adw::Spinner,
     group: adw::PreferencesGroup,
     name: adw::EntryRow,
@@ -1122,20 +1122,21 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // own card; the 12px form spacing separates the cards (HIG).
     let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
 
-    // URL form: HIG AdwPreferencesGroup → AdwEntryRow. The Add action is
-    // a persistent ✓ suffix button (not the built-in apply button, which
-    // hides when the text hasn't changed); spinner, gear, close follow.
-    // The rows' built-in 12px internal margins match the app's card padding.
-    let url_group = adw::PreferencesGroup::new();
-    url_group.set_hexpand(true);
-    let url_entry = adw::EntryRow::builder()
-        .title(gettext("Paste a download link"))
+    // URL bar: plain GtkEntry (entry styling, 6px corners) with the action
+    // buttons beside it — AdwEntryRow would render card styling (12px).
+    // The lookup spinner joins the button row while probing.
+    let url_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    let url_entry = gtk4::Entry::builder()
+        .placeholder_text(gettext("Paste a download link"))
         .activates_default(true)
+        .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
+    url_bar.append(&url_entry);
     let url_spinner = adw::Spinner::new();
     url_spinner.set_visible(false);
-    url_entry.add_suffix(&url_spinner);
+    url_spinner.set_valign(gtk4::Align::Center);
+    url_bar.append(&url_spinner);
     // Persistent Add button: stays visible so a second press confirms
     // after the preview loads. Colored rounded HIG button.
     let add_btn = gtk4::Button::builder()
@@ -1145,8 +1146,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .valign(gtk4::Align::Center)
         .build();
     add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
-    url_entry.add_suffix(&add_btn);
-    url_group.add(&url_entry);
+    url_bar.append(&add_btn);
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
     let opts_toggle = gtk4::ToggleButton::builder()
@@ -1157,9 +1157,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     opts_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Download options",
     ))]);
-    url_entry.add_suffix(&opts_toggle);
-    url_entry.add_suffix(&cancel_btn);
-    form.append(&url_group);
+    url_bar.append(&opts_toggle);
+    url_bar.append(&cancel_btn);
+    form.append(&url_bar);
 
     // Download options live in a revealer directly under the URL row: the
     // card opens compact, one tap on the gear reveals file name, torrent,

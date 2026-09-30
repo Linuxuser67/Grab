@@ -46,6 +46,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.4" date="2026-09-30">
+      <description>
+        <ul>
+          <li>The URL bar is now a proper text entry with the action buttons beside it.</li>
+          <li>Playlist and torrent picker pills are capped at four per row, and overlong titles are truncated so one long title no longer stretches every pill.</li>
+          <li>Fixed a crash when decoding filenames with invalid percent-encoded characters.</li>
+          <li>The lookup spinner now swaps in place of the Add button, so starting a lookup no longer shifts the layout.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.4-beta.1" date="2026-09-30">
       <description>
         <ul>

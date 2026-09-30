@@ -279,19 +279,29 @@ pub(crate) fn sane_filename(s: &str) -> bool {
 /// (single-pass `%XX` decode, leaves `+`); falls back to the literal input,
 /// then `index.html` at the call sites.
 pub(crate) fn percent_decode(s: &str) -> String {
-    glib::uri_unescape_string(s, None::<&str>)
-        .and_then(|g| {
-            // GLib decodes invalid-UTF-8 escapes (%FF%FE) to raw bytes
-            // instead of erroring, and gtk-rs wraps the result unchecked
-            // (debug_assert only): re-validate so a hostile escape can never
-            // launder non-UTF-8 into a Rust String. Read the bytes straight
-            // off the C string — `as_str` is already tainted.
-            // SAFETY: `g` owns a valid NUL-terminated C string; we only read
-            // its bytes up to the terminator.
-            let bytes = unsafe { std::ffi::CStr::from_ptr(g.as_ptr()) }.to_bytes();
-            std::str::from_utf8(bytes).ok().map(str::to_owned)
-        })
-        .unwrap_or_else(|| s.to_owned())
+    // The safe `glib::uri_unescape_string` binding can't be used here: its
+    // gtk-rs string conversion debug-asserts UTF-8 (panics in debug builds)
+    // and wraps unchecked in release (undefined behavior) when GLib passes
+    // invalid-UTF-8 escapes (%FF%FE) through as raw bytes. Call the FFI
+    // directly and validate the bytes ourselves.
+    let Ok(input) = std::ffi::CString::new(s) else {
+        // An interior NUL can't be passed to C; keep the literal.
+        return s.to_owned();
+    };
+    // SAFETY: `input` is a valid NUL-terminated C string; GLib returns a
+    // freshly allocated NUL-terminated string (or NULL), which we free
+    // after reading its bytes.
+    unsafe {
+        let ptr = glib::ffi::g_uri_unescape_string(input.as_ptr(), std::ptr::null());
+        if ptr.is_null() {
+            // GLib rejects the input (e.g. an escaped NUL): keep literal.
+            return s.to_owned();
+        }
+        let bytes = std::ffi::CStr::from_ptr(ptr).to_bytes();
+        let decoded = std::str::from_utf8(bytes).ok().map(str::to_owned);
+        glib::ffi::g_free(ptr as *mut _);
+        decoded.unwrap_or_else(|| s.to_owned())
+    }
 }
 
 pub fn filename_from_url(url_str: &str) -> String {

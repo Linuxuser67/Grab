@@ -634,6 +634,13 @@ where
             .await
             .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
     }
+    // tokio::fs::File completes writes on the blocking pool: write_all
+    // returning Ok only means the bytes were accepted, not that they hit
+    // the fd. Flush so Ok really means "everything is in the file" —
+    // without this a synchronous read right after can see a prefix.
+    tokio::io::AsyncWriteExt::flush(&mut file)
+        .await
+        .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
     Ok(())
 }
 

@@ -24,8 +24,8 @@
   <developer id="io.github.houssemko">
     <name>Grab Contributors</name>
   </developer>
-  <url type="homepage">https://github.com/houssemko/Grab</url>
-  <url type="bugtracker">https://github.com/houssemko/Grab/issues</url>
+  <url type="homepage">https://github.com/Linuxuser67/Grab</url>
+  <url type="bugtracker">https://github.com/Linuxuser67/Grab/issues</url>
   <categories>
     <category>Network</category>
     <category>Utility</category>
@@ -34,15 +34,15 @@
   <screenshots>
     <screenshot type="default">
       <caption>Empty state with a New Download shortcut</caption>
-      <image>https://raw.githubusercontent.com/houssemko/Grab/v2.4.1/data/screenshots/empty-state.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v2.4.1/data/screenshots/empty-state.png</image>
     </screenshot>
     <screenshot>
       <caption>Active downloads with per-block progress maps</caption>
-      <image>https://raw.githubusercontent.com/houssemko/Grab/v2.4.1/data/screenshots/downloads.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v2.4.1/data/screenshots/downloads.png</image>
     </screenshot>
     <screenshot>
       <caption>Preferences: destination, power and notifications</caption>
-      <image>https://raw.githubusercontent.com/houssemko/Grab/v2.4.1/data/screenshots/preferences.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v2.4.1/data/screenshots/preferences.png</image>
     </screenshot>
   </screenshots>
   <releases>

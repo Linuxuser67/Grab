@@ -64,7 +64,7 @@ flatpak remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.fla
 flatpak install flatpark io.github.houssemko.Grab
 ```
 
-Or manually from the [latest release](https://github.com/houssemko/Grab/releases):
+Or manually from the [latest release](https://github.com/Linuxuser67/Grab/releases):
 
 ```bash
 flatpak install --user Grab.flatpak

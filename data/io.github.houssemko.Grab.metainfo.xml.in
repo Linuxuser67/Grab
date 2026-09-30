@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.5" date="2026-09-30">
+      <description>
+        <ul>
+          <li>Invalid URL errors are now shown on the URL field itself, and torrent file errors on the torrent row, instead of in a caption under the URL bar.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.4" date="2026-09-30">
       <description>
         <ul>

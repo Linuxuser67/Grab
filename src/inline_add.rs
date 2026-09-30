@@ -24,6 +24,7 @@ use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
+use glib::object::Cast;
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -188,6 +189,11 @@ fn hide_video_step(v: &VideoStep) {
     v.group.set_visible(false);
     // adw::Spinner animates while mapped; hiding stops it (no set_spinning).
     v.url_spinner.set_visible(false);
+    // Clear the accessible name so a screen reader doesn't re-read the
+    // stale "Looking up…" set by show_video_loading.
+    v.url_spinner
+        .upcast_ref::<gtk4::Widget>()
+        .update_property(&[gtk4::accessible::Property::Label("")]);
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
@@ -221,7 +227,6 @@ fn show_video_loading(v: &VideoStep) {
     v.url_spinner.set_visible(true);
     // Screen-reader announcement: the spinner alone is silent.
     // `adw::Spinner` doesn't expose `update_property` directly; upcast to Widget.
-    use glib::object::Cast;
     v.url_spinner
         .upcast_ref::<gtk4::Widget>()
         .update_property(&[gtk4::accessible::Property::Label(&gettext("Looking up…"))]);
@@ -576,6 +581,9 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::FlowBox, Vec<gtk4::
     let flowbox = gtk4::FlowBox::builder()
         .selection_mode(gtk4::SelectionMode::None)
         .homogeneous(true)
+        // Four-column cap: without it homogeneous pills flow to the toolkit
+        // default on wide cards. Min stays default so narrow cards degrade.
+        .max_children_per_line(4)
         .column_spacing(12)
         .row_spacing(12)
         .valign(gtk4::Align::Start)
@@ -588,9 +596,12 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::FlowBox, Vec<gtk4::
         btn.set_active(true);
         // Overlong titles ellipsize instead of forcing the FlowBox into
         // degenerate width measurements (gtk_widget_measure for_size
-        // criticals): the pill keeps a sane minimum width.
+        // criticals): the pill keeps a sane minimum width. The char cap is
+        // what makes homogeneous sizing + ellipsis interact — without it one
+        // overlong title stretches every pill and ellipsis never fires.
         if let Some(label) = btn.child().and_downcast::<gtk4::Label>() {
             label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            label.set_max_width_chars(24);
         }
         flowbox.append(&btn);
         buttons.push(btn);

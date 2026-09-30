@@ -12,7 +12,7 @@
       <description>Sanitize download filenames to ASCII-only characters, also avoiding ampersands and spaces.</description>
     </key>
     <key name="enable-scheduled-downloads" type="b">
-      <default>true</default>
+      <default>false</default>
       <summary>Enable scheduled downloads</summary>
       <description>When off, the scheduler never runs and the schedule option is hidden from the New Download card.</description>
     </key>
@@ -54,7 +54,7 @@
       <description>Proxy port, e.g. 9050 for Tor.</description>
     </key>
     <key name="keep-server-date" type="b">
-      <default>false</default>
+      <default>true</default>
       <summary>Keep server file date</summary>
       <description>Set each finished file's modification time from the server's Last-Modified header when present.</description>
     </key>

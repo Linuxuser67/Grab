@@ -996,16 +996,16 @@ msgstr ""
 msgid "Update checks are skipped while a proxy is configured"
 msgstr ""
 
-#: src/preferences.rs:930
-msgid "Update available: yt-dlp {installed} → {latest}"
+#: src/preferences.rs:1014
+msgid "Update available: {list}"
 msgstr ""
 
 #: src/preferences.rs:934
 msgid "Update"
 msgstr ""
 
-#: src/preferences.rs:952
-msgid "Up to date • {yt} • {ff}"
+#: src/preferences.rs:1021
+msgid "Up to date • {list}"
 msgstr ""
 
 #: src/preferences.rs:960

@@ -56,9 +56,10 @@ use crate::video_tools::VideoError;
 use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_override_command_for, browser_override_dirs,
     browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
-    ensure_tool_versions, extract_ffmpeg_toolchain, find_in_dirs, is_youtube_url,
-    parse_yt_dlp_version, quickjs_download_url, quickjs_expected_sha256, toolchain_dir_in,
-    user_lib_dir, ytdlp_identity_args, ytdlp_supports_impersonation, ytdlp_update_available,
+    ensure_tool_versions, extract_ffmpeg_toolchain, ffmpeg_version_token, find_in_dirs,
+    is_youtube_url, parse_dotted_version, parse_yt_dlp_version, quickjs_arch_supported,
+    quickjs_download_url, tool_update_available, toolchain_dir_in, user_lib_dir,
+    ytdlp_identity_args, ytdlp_supports_impersonation, ytdlp_update_available,
 };
 use crate::video_types::FetchedVideo;
 use crate::video_types::codec_preference;
@@ -3084,11 +3085,11 @@ fn extract_ffmpeg_toolchain_errors_without_ffmpeg() {
 // ── quickjs provisioning (default JS runtime) ──────────────────────────
 
 #[test]
-fn quickjs_download_url_matches_pinned_release_and_arch() {
-    let url = quickjs_download_url().expect("test arch is supported");
+fn quickjs_download_url_follows_given_release_tag_and_arch() {
+    let url = quickjs_download_url("v0.17.0").expect("test arch is supported");
     let arch = std::env::consts::ARCH;
     assert!(
-        url.starts_with("https://github.com/quickjs-ng/quickjs/releases/download/"),
+        url.starts_with("https://github.com/quickjs-ng/quickjs/releases/download/v0.17.0/"),
         "unexpected url: {url}"
     );
     assert!(
@@ -3099,22 +3100,69 @@ fn quickjs_download_url_matches_pinned_release_and_arch() {
         !url.ends_with(".zip"),
         "qjs ships as a bare binary, not an archive: {url}"
     );
+    // A newer tag flows straight into the URL: the installer follows latest.
+    let newer = quickjs_download_url("v9.9.9").expect("test arch is supported");
+    assert!(
+        newer.contains("/releases/download/v9.9.9/"),
+        "tag not honored: {newer}"
+    );
 }
 
 #[test]
-fn quickjs_expected_sha256_mirrors_download_url() {
-    // The integrity pin must exist exactly where a download URL exists.
+fn quickjs_arch_supported_mirrors_download_url() {
     assert_eq!(
-        quickjs_expected_sha256().is_some(),
-        quickjs_download_url().is_some()
+        quickjs_arch_supported(),
+        quickjs_download_url("v0.17.0").is_some()
     );
-    if let Some(hash) = quickjs_expected_sha256() {
-        assert_eq!(hash.len(), 64, "SHA-256 must be 64 hex chars");
-        assert!(
-            hash.chars().all(|c| c.is_ascii_hexdigit()),
-            "non-hex char in pinned hash"
-        );
-    }
+}
+
+// ── dotted version parsing (ffmpeg / quickjs update check) ─────────────
+
+#[test]
+fn parse_dotted_version_handles_upstream_shapes() {
+    assert_eq!(parse_dotted_version("2026.08.19"), Some([2026, 8, 19]));
+    assert_eq!(parse_dotted_version("v9.0.2"), Some([9, 0, 2]));
+    assert_eq!(parse_dotted_version("0.17.0"), Some([0, 17, 0]));
+    // boul2gom binaries report an `n`-prefixed, `-static`-suffixed token.
+    assert_eq!(parse_dotted_version("n9.0.2-static"), Some([9, 0, 2]));
+    assert_eq!(parse_dotted_version("n8.0"), Some([8, 0, 0]));
+    // Distro builds carry their own suffixes.
+    assert_eq!(parse_dotted_version("9.0.2-1"), Some([9, 0, 2]));
+}
+
+#[test]
+fn parse_dotted_version_rejects_non_versions() {
+    assert_eq!(parse_dotted_version(""), None);
+    assert_eq!(parse_dotted_version("nightly"), None);
+    // `N-…` git builds carry no dotted version.
+    assert_eq!(parse_dotted_version("N-12345-gabcdef"), None);
+    assert_eq!(parse_dotted_version("abc"), None);
+}
+
+#[test]
+fn tool_update_available_compares_dotted_versions() {
+    assert!(tool_update_available("n8.0", "v9.0.2"));
+    assert!(tool_update_available("0.16.2", "v0.17.0"));
+    assert!(!tool_update_available("n9.0.2", "v9.0.2"));
+    assert!(!tool_update_available("9.0.2", "v9.0.2"));
+    assert!(!tool_update_available("n9.0.2", "v8.0"));
+    // Unparseable sides never prompt.
+    assert!(!tool_update_available("N-12345", "v9.0.2"));
+    assert!(!tool_update_available("n9.0.2", "oops"));
+}
+
+#[test]
+fn ffmpeg_version_token_extracts_third_token() {
+    assert_eq!(
+        ffmpeg_version_token("ffmpeg version n9.0.2-static Copyright (c)"),
+        Some("n9.0.2-static")
+    );
+    assert_eq!(
+        ffmpeg_version_token("ffmpeg version 9.0.2 Copyright (c)"),
+        Some("9.0.2")
+    );
+    assert_eq!(ffmpeg_version_token("ffmpeg version"), None);
+    assert_eq!(ffmpeg_version_token(""), None);
 }
 
 #[test]

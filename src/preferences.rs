@@ -536,7 +536,7 @@ pub fn show(
     torrent_page.add(&torrent_net_group);
 
     // Video pages resolve via yt-dlp tools; this page holds defaults plus tool setup.
-    fn tool_version(binary: &std::path::Path, version_arg: &str) -> Option<String> {
+    fn tool_first_line(binary: &std::path::Path, version_arg: &str) -> Option<String> {
         let out = std::process::Command::new(binary)
             .arg(version_arg)
             .output()
@@ -554,6 +554,10 @@ pub fn show(
         if first.is_empty() {
             return None;
         }
+        Some(first)
+    }
+    fn tool_version(binary: &std::path::Path, version_arg: &str) -> Option<String> {
+        let first = tool_first_line(binary, version_arg)?;
         // ffmpeg prints a whole sentence ("ffmpeg version n9.0.1 ..."):
         // keep the version token so the row stays readable.
         if binary
@@ -565,22 +569,26 @@ pub fn show(
         }
         Some(first)
     }
-    /// Installed tool versions for the tools row: `(yt-dlp, ffmpeg)`; `None` when
-    /// the tools are missing, falling back to the binary path if `--version` fails.
-    fn installed_tool_versions() -> Option<(String, String)> {
+    /// Installed tool versions for the tools row: `(yt-dlp, ffmpeg, quickjs?)`;
+    /// `None` when the core tools are missing, falling back to the binary path
+    /// if `--version` fails. quickjs is `None` when no `qjs` is on hand — it is
+    /// only provisioned for YouTube.
+    fn installed_tool_versions() -> Option<(String, String, Option<String>)> {
         crate::video::resolve_libraries().ok().map(|libs| {
             let yt = tool_version(&libs.youtube, "--version")
                 .map(|v| format!("yt-dlp {v}"))
                 .unwrap_or_else(|| libs.youtube.display().to_string());
             let ff = tool_version(&libs.ffmpeg, "-version")
                 .unwrap_or_else(|| libs.ffmpeg.display().to_string());
-            (yt, ff)
+            let qjs = crate::video_tools::find_quickjs()
+                .and_then(|p| tool_version(&p, "--version").map(|v| format!("quickjs {v}")));
+            (yt, ff, qjs)
         })
     }
     /// What the tools-row button does: Install when tools are missing, Check to
-    /// probe GitHub for a newer yt-dlp, Update once one is known. The
-    /// check-then-act shape keeps a permanent Update button off fresh installs
-    /// while leaving on-demand updates one click away.
+    /// probe each tool's upstream for a newer release, Update once one is
+    /// known. The check-then-act shape keeps a permanent Update button off
+    /// fresh installs while leaving on-demand updates one click away.
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum ToolAction {
         Install,
@@ -591,15 +599,17 @@ pub fn show(
         row: &adw::ActionRow,
         btn: &gtk4::Button,
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
-        probed: Option<(String, String)>,
+        probed: Option<(String, String, Option<String>)>,
     ) {
         match probed {
-            Some((yt, ff)) => {
-                row.set_subtitle(
-                    &gettext("Ready • {yt} • {ff}")
-                        .replace("{yt}", &yt)
-                        .replace("{ff}", &ff),
-                );
+            Some((yt, ff, qjs)) => {
+                let mut subtitle = gettext("Ready • {yt} • {ff}")
+                    .replace("{yt}", &yt)
+                    .replace("{ff}", &ff);
+                if let Some(qjs) = qjs {
+                    subtitle.push_str(&format!(" • {qjs}"));
+                }
+                row.set_subtitle(&subtitle);
                 btn.set_label(&gettext("Check for Updates"));
                 action.set(ToolAction::Check);
             }
@@ -927,58 +937,95 @@ pub fn show(
                         btn_b.set_sensitive(true);
                         return;
                     }
-                    let current = gio::spawn_blocking(|| {
-                        crate::video::resolve_libraries()
-                            .ok()
-                            .and_then(|libs| tool_version(&libs.youtube, "--version"))
+                    // Probe installed versions off-thread, then ask each tool's
+                    // upstream for its latest release tag: yt-dlp/yt-dlp,
+                    // boul2gom/ffmpeg-builds, quickjs-ng/quickjs.
+                    let installed = gio::spawn_blocking(|| {
+                        crate::video::resolve_libraries().ok().map(|libs| {
+                            let yt = tool_first_line(&libs.youtube, "--version");
+                            let ff = tool_first_line(&libs.ffmpeg, "-version");
+                            let qjs = crate::video_tools::find_quickjs()
+                                .and_then(|p| tool_first_line(&p, "--version"));
+                            (yt, ff, qjs)
+                        })
                     })
                     .await
                     .ok()
                     .flatten();
-                    let tag = crate::video::latest_ytdlp_tag().await;
+                    let yt_tag = crate::video::latest_ytdlp_tag().await;
+                    let ff_tag = crate::video::latest_ffmpeg_tag().await;
+                    let qjs_tag = crate::video::latest_quickjs_tag().await;
                     if dialog_b.upgrade().is_none() {
                         return;
                     }
                     spin_b.set_visible(false);
-                    match (current, tag) {
-                        (Some(installed), Some(tag))
-                            if crate::video_tools::ytdlp_update_available(&installed, &tag) =>
-                        {
-                            row_b.set_subtitle(
-                                &gettext("Update available: yt-dlp {installed} → {latest}")
-                                    .replace("{installed}", installed.trim())
-                                    .replace("{latest}", tag.trim()),
-                            );
-                            btn_b.set_label(&gettext("Update"));
-                            action_b.set(ToolAction::Update);
-                        }
-                        (Some(installed), Some(_)) => {
-                            let yt = format!("yt-dlp {}", installed.trim());
-                            let ff = gio::spawn_blocking(|| {
-                                crate::video::resolve_libraries()
-                                    .ok()
-                                    .and_then(|libs| tool_version(&libs.ffmpeg, "-version"))
-                            })
-                            .await
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default();
-                            if dialog_b.upgrade().is_none() {
-                                return;
+                    let mut updates: Vec<String> = Vec::new();
+                    let mut current: Vec<String> = Vec::new();
+                    let mut indeterminate = installed.is_none();
+                    if let Some((yt, ff, qjs)) = installed {
+                        match (yt.as_deref(), yt_tag.as_deref()) {
+                            (Some(installed), Some(tag))
+                                if crate::video_tools::ytdlp_update_available(installed, tag) =>
+                            {
+                                updates.push(format!(
+                                    "yt-dlp {} → {}",
+                                    installed.trim(),
+                                    tag.trim()
+                                ));
                             }
-                            row_b.set_subtitle(
-                                &gettext("Up to date • {yt} • {ff}")
-                                    .replace("{yt}", &yt)
-                                    .replace("{ff}", &ff),
-                            );
-                            btn_b.set_label(&gettext("Check for Updates"));
-                            action_b.set(ToolAction::Check);
+                            (Some(installed), Some(_)) => {
+                                current.push(format!("yt-dlp {}", installed.trim()));
+                            }
+                            _ => indeterminate = true,
                         }
-                        _ => {
-                            row_b.set_subtitle(&gettext("Couldn't check for updates"));
-                            btn_b.set_label(&gettext("Check for Updates"));
-                            action_b.set(ToolAction::Check);
+                        match (ff.as_deref(), ff_tag.as_deref()) {
+                            (Some(first_line), Some(tag)) => {
+                                let token = crate::video_tools::ffmpeg_version_token(first_line)
+                                    .unwrap_or(first_line);
+                                if crate::video_tools::tool_update_available(token, tag) {
+                                    updates.push(format!("ffmpeg {} → {}", token, tag.trim()));
+                                } else {
+                                    current.push(format!("ffmpeg {token}"));
+                                }
+                            }
+                            _ => indeterminate = true,
                         }
+                        // quickjs is optional (provisioned for YouTube only):
+                        // judged when installed, never blocks the check.
+                        match (qjs.as_deref(), qjs_tag.as_deref()) {
+                            (Some(installed), Some(tag))
+                                if crate::video_tools::tool_update_available(installed, tag) =>
+                            {
+                                updates.push(format!(
+                                    "quickjs {} → {}",
+                                    installed.trim(),
+                                    tag.trim()
+                                ));
+                            }
+                            (Some(installed), Some(_)) => {
+                                current.push(format!("quickjs {}", installed.trim()));
+                            }
+                            (None, _) => {}
+                            _ => indeterminate = true,
+                        }
+                    }
+                    if !updates.is_empty() {
+                        row_b.set_subtitle(
+                            &gettext("Update available: {list}")
+                                .replace("{list}", &updates.join(", ")),
+                        );
+                        btn_b.set_label(&gettext("Update"));
+                        action_b.set(ToolAction::Update);
+                    } else if !indeterminate {
+                        row_b.set_subtitle(
+                            &gettext("Up to date • {list}").replace("{list}", &current.join(" • ")),
+                        );
+                        btn_b.set_label(&gettext("Check for Updates"));
+                        action_b.set(ToolAction::Check);
+                    } else {
+                        row_b.set_subtitle(&gettext("Couldn't check for updates"));
+                        btn_b.set_label(&gettext("Check for Updates"));
+                        action_b.set(ToolAction::Check);
                     }
                     btn_b.set_sensitive(true);
                 });

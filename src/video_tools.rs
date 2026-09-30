@@ -441,29 +441,25 @@ pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
     }
 }
 
-/// Pinned quickjs-ng release: Grab's JS runtime for YouTube. Pinned on YouTube
-/// spawns so a system runtime (e.g. deno, which yt-dlp prefers and enables by
-/// default) can never shadow it there. quickjs-ng ships tiny (~2.5MB) official
-/// linux x86_64 and aarch64 binaries; the deno alternative is ~40x larger.
-/// Pinned for reproducibility; bump deliberately.
-pub(crate) const QUICKJS_VERSION: &str = "v0.17.0";
+/// quickjs-ng is Grab's JS runtime for YouTube. It is pinned on YouTube spawns
+/// (see `ytdlp_identity_args`) so a system runtime (e.g. deno, which yt-dlp
+/// prefers and enables by default) can never shadow it there. quickjs-ng ships
+/// tiny (~2.5MB) official linux x86_64 and aarch64 binaries; the deno
+/// alternative is ~40x larger. The installed release follows the quickjs-ng
+/// latest tag so the update check and the installer agree on the source of
+/// truth. quickjs-ng publishes no checksums, so unpinned releases carry no
+/// hash verification (yt-dlp and ffmpeg never had any).
 
 /// Hard cap on the quickjs download: the asset is ~2.5MB, so anything larger
-/// is not what was pinned. Enforced while streaming, before the bytes are
+/// is not the released binary. Enforced while streaming, before the bytes are
 /// trusted.
 const QUICKJS_MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Expected SHA-256 of the pinned quickjs-ng asset for this build's arch.
-/// quickjs-ng publishes no checksums, so these were computed from the v0.17.0
-/// assets at pinning time (trust on first use); they catch the asset being
-/// mutated or re-cut under the same URL afterwards. `None` where quickjs-ng
-/// ships no binary (mirrors `quickjs_download_url`).
-pub(crate) fn quickjs_expected_sha256() -> Option<&'static str> {
-    match std::env::consts::ARCH {
-        "x86_64" => Some("0bfc02511a9f549c28b53880d988fc7cd5d361e90c5e8afdfcd7dc6774ceace5"),
-        "aarch64" => Some("3372133484edf50a69f3c67903af41206d22a061e930e3cfb63269272ef56d2e"),
-        _ => None,
-    }
+/// Whether this build's arch has a quickjs-ng release to fetch. Gate for the
+/// update check and the installer; where false, yt-dlp keeps its own runtime
+/// discovery.
+pub(crate) fn quickjs_arch_supported() -> bool {
+    matches!(std::env::consts::ARCH, "x86_64" | "aarch64")
 }
 
 /// Whether a page URL is YouTube: the only site where Grab pins quickjs-ng as
@@ -483,16 +479,16 @@ pub(crate) fn is_youtube_url(page_url: &str) -> bool {
         || host.ends_with(".youtube-nocookie.com")
 }
 
-/// Download URL for the pinned quickjs-ng release, mapped from the build arch
+/// Download URL for a quickjs-ng release tag, mapped from the build arch
 /// to its asset names. The asset is the `qjs` binary itself, not an archive.
 /// `None` on architectures quickjs-ng doesn't ship.
-pub(crate) fn quickjs_download_url() -> Option<String> {
-    let arch = std::env::consts::ARCH;
-    if arch != "x86_64" && arch != "aarch64" {
+pub(crate) fn quickjs_download_url(version: &str) -> Option<String> {
+    if !quickjs_arch_supported() {
         return None;
     }
+    let arch = std::env::consts::ARCH;
     Some(format!(
-        "https://github.com/quickjs-ng/quickjs/releases/download/{QUICKJS_VERSION}/qjs-linux-{arch}"
+        "https://github.com/quickjs-ng/quickjs/releases/download/{version}/qjs-linux-{arch}"
     ))
 }
 
@@ -515,7 +511,10 @@ pub async fn install_quickjs() -> Result<PathBuf, VideoError> {
 }
 
 async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
-    let url = quickjs_download_url()
+    let tag = latest_quickjs_tag()
+        .await
+        .ok_or_else(|| VideoError::install("couldn't determine the latest quickjs-ng release"))?;
+    let url = quickjs_download_url(&tag)
         .ok_or_else(|| VideoError::install("quickjs has no release for this architecture"))?;
     tokio::fs::create_dir_all(&dir)
         .await
@@ -533,13 +532,12 @@ async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
     }
 }
 
-/// Fetch the `qjs` binary, verify it against the pinned checksum, mark it
-/// executable, and move it into place.
+/// Fetch the `qjs` binary, mark it executable, and move it into place.
+/// Size-capped while streaming; the asset is the released binary itself.
 async fn fetch_quickjs(url: &str, part: &Path, dest: &Path) -> Result<(), VideoError> {
     download_to_file(url, part)
         .await
         .map_err(VideoError::install)?;
-    verify_quickjs_hash(part).await?;
     use std::os::unix::fs::PermissionsExt as _;
     tokio::fs::set_permissions(part, std::fs::Permissions::from_mode(0o755))
         .await
@@ -549,32 +547,6 @@ async fn fetch_quickjs(url: &str, part: &Path, dest: &Path) -> Result<(), VideoE
     tokio::fs::rename(part, dest)
         .await
         .map_err(|e| VideoError::install(format!("couldn't install {}: {e}", dest.display())))
-}
-
-/// Reject a quickjs download whose bytes don't match the pinned SHA-256.
-/// Runs before the file is marked executable: a mismatched asset never gets
-/// +x and is never renamed into place (the caller deletes the partial).
-async fn verify_quickjs_hash(part: &Path) -> Result<(), VideoError> {
-    let expected = quickjs_expected_sha256().ok_or_else(|| {
-        VideoError::install("quickjs has no pinned checksum for this architecture")
-    })?;
-    let bytes = tokio::fs::read(part)
-        .await
-        .map_err(|e| VideoError::install(format!("couldn't read {}: {e}", part.display())))?;
-    // GLib's Checksum instead of the sha2 crate: one less direct dependency,
-    // same SHA-256, established backend API.
-    let mut checksum = glib::Checksum::new(glib::ChecksumType::Sha256)
-        .ok_or_else(|| VideoError::install("GLib has no SHA-256 checksum"))?;
-    checksum.update(&bytes);
-    let actual = checksum
-        .string()
-        .ok_or_else(|| VideoError::install("couldn't finalize the quickjs checksum"))?;
-    if actual != expected {
-        return Err(VideoError::install(
-            "quickjs download failed its integrity check and was discarded",
-        ));
-    }
-    Ok(())
 }
 
 /// Pre-create guard for tool downloads and extracts: a planted symlink at
@@ -638,7 +610,7 @@ async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
 /// architectures quickjs-ng doesn't ship: yt-dlp then falls back to its own
 /// runtime discovery.
 pub(crate) async fn ensure_quickjs(page_url: &str) -> Result<(), VideoError> {
-    if !is_youtube_url(page_url) || find_quickjs().is_some() || quickjs_download_url().is_none() {
+    if !is_youtube_url(page_url) || find_quickjs().is_some() || !quickjs_arch_supported() {
         return Ok(());
     }
     static INSTALL_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -748,6 +720,41 @@ pub(crate) fn ytdlp_update_available(installed: &str, tag: &str) -> bool {
         (Some(current), Some(latest)) => latest > current,
         _ => false,
     }
+}
+
+/// Parse a dotted version with tolerant affixes into comparable parts: a
+/// leading `v`/`n` (boul2gom tags its builds `v9.0.2`, and its binaries report
+/// `n9.0.2`) and trailing non-numeric suffixes (`9.0.2-static`) are ignored;
+/// missing parts pad with zero (`8.0` → `[8, 0, 0]`). `None` when no numeric
+/// version is present (git builds like `N-…`, garbage).
+pub(crate) fn parse_dotted_version(s: &str) -> Option<[u32; 3]> {
+    let s = s.trim().trim_start_matches(['v', 'V', 'n', 'N']);
+    let mut parts = s.split('.');
+    let mut out = [0u32; 3];
+    for slot in out.iter_mut() {
+        let Some(part) = parts.next() else { break };
+        let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            return None;
+        }
+        *slot = digits.parse().ok()?;
+    }
+    Some(out)
+}
+
+/// Whether upstream `tag` is newer than the installed version token.
+/// Unparseable sides never prompt an update.
+pub(crate) fn tool_update_available(installed: &str, tag: &str) -> bool {
+    match (parse_dotted_version(installed), parse_dotted_version(tag)) {
+        (Some(current), Some(latest)) => latest > current,
+        _ => false,
+    }
+}
+
+/// Version token from an `ffmpeg -version` first line:
+/// `ffmpeg version n9.0.2-static …` → `n9.0.2-static`.
+pub(crate) fn ffmpeg_version_token(first_line: &str) -> Option<&str> {
+    first_line.split_whitespace().nth(2)
 }
 
 /// Real home dir from the passwd database, bypassing sandbox `$HOME` remapping
@@ -1079,7 +1086,7 @@ pub(crate) fn ytdlp_identity_args(
     // Scoped to YouTube: other sites keep yt-dlp's own runtime discovery.
     // Skipped where quickjs-ng ships no release; yt-dlp then keeps its own
     // runtime discovery.
-    if is_youtube_url(page_url) && quickjs_download_url().is_some() {
+    if is_youtube_url(page_url) && quickjs_arch_supported() {
         args.push("--no-js-runtimes".to_string());
         args.push("--js-runtimes".to_string());
         args.push("quickjs".to_string());
@@ -1125,6 +1132,33 @@ pub(crate) fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
 pub async fn latest_ytdlp_tag() -> Option<String> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new("yt-dlp", "yt-dlp");
+        fetcher
+            .fetch_latest_release(None)
+            .await
+            .ok()
+            .map(|release| release.tag_name)
+    });
+    handle.await.ok().flatten()
+}
+
+/// Latest release tag of the upstream Grab downloads ffmpeg from
+/// (boul2gom/ffmpeg-builds static builds); `None` when GitHub is unreachable.
+pub async fn latest_ffmpeg_tag() -> Option<String> {
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new("boul2gom", "ffmpeg-builds");
+        fetcher
+            .fetch_latest_release(None)
+            .await
+            .ok()
+            .map(|release| release.tag_name)
+    });
+    handle.await.ok().flatten()
+}
+
+/// Latest quickjs-ng release tag; `None` when GitHub is unreachable.
+pub async fn latest_quickjs_tag() -> Option<String> {
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new("quickjs-ng", "quickjs");
         fetcher
             .fetch_latest_release(None)
             .await

@@ -598,9 +598,21 @@ async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
     let response = response
         .error_for_status()
         .map_err(|e| format!("couldn't fetch {url}: {e}"))?;
-    // Stream with a hard cap instead of buffering the whole body up front:
-    // a compromised endpoint must not be able to fill memory or disk before
-    // we notice. (Currently only the quickjs download uses this helper.)
+    write_capped_stream(Box::pin(response.bytes_stream()), dest, url).await
+}
+
+/// Stream a download body into `dest`, enforcing the size cap while
+/// streaming instead of buffering the whole body up front: a compromised
+/// endpoint must not be able to fill memory or disk before we notice.
+/// (Currently only the quickjs download uses this helper.)
+/// Split from `download_to_file` so the cap is pinnable with a synthetic
+/// stream — pushing 8 MiB through a loopback test server proved flaky.
+async fn write_capped_stream<S, B, E>(mut stream: S, dest: &Path, url: &str) -> Result<(), String>
+where
+    S: futures_util::Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
     let mut downloaded: u64 = 0;
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -608,17 +620,17 @@ async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
         .open(dest)
         .await
         .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
-    let mut stream = response.bytes_stream();
     use futures_util::StreamExt as _;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("couldn't read {url}: {e}"))?;
-        downloaded += chunk.len() as u64;
+        let bytes = chunk.as_ref();
+        downloaded += bytes.len() as u64;
         if downloaded > QUICKJS_MAX_DOWNLOAD_BYTES {
             return Err(format!(
                 "{url} exceeds the download size limit ({QUICKJS_MAX_DOWNLOAD_BYTES} bytes)"
             ));
         }
-        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+        tokio::io::AsyncWriteExt::write_all(&mut file, bytes)
             .await
             .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
     }
@@ -1385,43 +1397,20 @@ mod tests {
         );
     }
 
-    /// Serve `body_len` bytes of zeros over plain HTTP on loopback.
-    /// Returns the base URL. The server stops early if the client goes away.
-    fn serve_bytes(body_len: u64) -> String {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            use std::io::Write as _;
-            let Ok((mut stream, _)) = listener.accept() else {
-                return;
-            };
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
-            )
-            .ok();
-            let chunk = vec![0u8; 65536];
-            let mut remaining = body_len;
-            while remaining > 0 {
-                let n = remaining.min(chunk.len() as u64) as usize;
-                if stream.write_all(&chunk[..n]).is_err() {
-                    break; // client gave up: stop streaming
-                }
-                remaining -= n as u64;
-            }
-        });
-        format!("http://{addr}/qjs")
-    }
-
     #[tokio::test]
-    async fn download_to_file_enforces_size_cap() {
-        // More than the cap: the download must fail instead of buffering it.
-        let url = serve_bytes(QUICKJS_MAX_DOWNLOAD_BYTES + 1024);
-        let dir = unique_dir("dl-cap");
+    async fn write_capped_stream_enforces_size_cap() {
+        // More than the cap: the write must fail instead of buffering it.
+        // The stream is synthetic — no network round-trip — so the cap is
+        // pinned deterministically.
+        let chunks =
+            futures_util::stream::iter((0..129).map(|_| Ok::<Vec<u8>, String>(vec![0u8; 65536])));
+        let dir = unique_dir("cap-stream");
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("qjs.part");
 
-        let err = download_to_file(&url, &dest).await.unwrap_err();
+        let err = write_capped_stream(Box::pin(chunks), &dest, "http://127.0.0.1/qjs")
+            .await
+            .unwrap_err();
         assert!(
             err.contains("exceeds the download size limit"),
             "unexpected error: {err}"
@@ -1434,6 +1423,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_capped_stream_writes_small_bodies() {
+        // Under the cap everything lands on disk byte-for-byte.
+        let chunks = futures_util::stream::iter([
+            Ok::<Vec<u8>, String>(b"hello ".to_vec()),
+            Ok::<Vec<u8>, String>(b"world".to_vec()),
+        ]);
+        let dir = unique_dir("cap-stream-ok");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("qjs.part");
+
+        write_capped_stream(Box::pin(chunks), &dest, "http://127.0.0.1/qjs")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello world");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
     async fn fetch_quickjs_removes_half_written_part() {
         // The server promises a megabyte but hangs up after one chunk: the
         // download fails mid-stream with a half-written `.part` on disk.
@@ -1441,9 +1448,23 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             use std::io::Write as _;
-            let Ok((mut stream, _)) = listener.accept() else {
-                return;
-            };
+            // A failed accept must never silently drop the listener: the
+            // client's queued connection would get RST and fail with a
+            // confusing request error instead of the truncation below.
+            let mut stream = None;
+            for _ in 0..20 {
+                match listener.accept() {
+                    Ok((s, _)) => {
+                        stream = Some(s);
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("test server: accept failed ({e}), retrying");
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
+            }
+            let mut stream = stream.expect("test server: accept kept failing");
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n"
@@ -1457,9 +1478,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let part = dir.join("qjs.part");
         let dest = dir.join("qjs");
-        fetch_quickjs(&format!("http://{addr}/qjs"), &part, &dest)
+        let err = fetch_quickjs(&format!("http://{addr}/qjs"), &part, &dest)
             .await
             .unwrap_err();
+        // The failure must be the mid-stream truncation — not a connect
+        // failure, which would pass the assertions below vacuously.
+        assert!(
+            err.to_string().contains("couldn't read"),
+            "unexpected error: {err}"
+        );
         // The half-written `.part` must not survive a failed fetch, and the
         // destination must never appear without a complete download.
         assert!(!part.exists(), "half-written .part survived a failed fetch");

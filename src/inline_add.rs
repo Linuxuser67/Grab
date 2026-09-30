@@ -1043,13 +1043,15 @@ fn wire_torrent_picker(
 /// tooltip for sighted users, and an accessible description so screen readers
 /// announce it too (tooltips are never announced). Set and cleared together —
 /// a stale description must never outlive the visible error.
-fn set_field_error(field: &gtk4::Widget, message: &str) {
+fn set_field_error(field: &impl IsA<gtk4::Widget>, message: &str) {
+    let field = field.upcast_ref::<gtk4::Widget>();
     field.add_css_class("error");
     field.set_tooltip_text(Some(message));
     field.update_property(&[gtk4::accessible::Property::Description(message)]);
 }
 
-fn clear_field_error(field: &gtk4::Widget) {
+fn clear_field_error(field: &impl IsA<gtk4::Widget>) {
+    let field = field.upcast_ref::<gtk4::Widget>();
     field.remove_css_class("error");
     field.set_tooltip_text(None);
     field.update_property(&[gtk4::accessible::Property::Description("")]);

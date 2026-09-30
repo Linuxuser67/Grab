@@ -491,6 +491,19 @@ pub(crate) fn quickjs_download_url(version: &str) -> Option<String> {
     ))
 }
 
+/// Release tags are interpolated into the quickjs download URL, so reject
+/// anything outside the tag character set (`A-Za-z0-9._+-`) before it can
+/// shape a request.
+pub(crate) fn valid_release_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.bytes().all(|b| {
+            matches!(
+                b,
+                b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'.' | b'-' | b'+' | b'_'
+            )
+        })
+}
+
 /// Locate a `qjs` binary: user lib dir first (Grab-installed), then `/app/bin`,
 /// then PATH for a system copy. `None` when no JS runtime is on hand.
 pub(crate) fn find_quickjs() -> Option<PathBuf> {
@@ -513,6 +526,11 @@ async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
     let tag = latest_quickjs_tag()
         .await
         .ok_or_else(|| VideoError::install("couldn't determine the latest quickjs-ng release"))?;
+    if !valid_release_tag(&tag) {
+        return Err(VideoError::install(format!(
+            "quickjs-ng published an unexpected release tag: {tag}"
+        )));
+    }
     let url = quickjs_download_url(&tag)
         .ok_or_else(|| VideoError::install("quickjs has no release for this architecture"))?;
     tokio::fs::create_dir_all(&dir)
@@ -522,18 +540,22 @@ async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
     // half-written `qjs` behind for `find_quickjs` to mistake as installed.
     let dest = dir.join("qjs");
     let part = dir.join("qjs.part");
-    match fetch_quickjs(&url, &part, &dest).await {
-        Ok(()) => Ok(dest),
-        Err(e) => {
-            std::fs::remove_file(&part).ok();
-            Err(e)
-        }
-    }
+    fetch_quickjs(&url, &part, &dest).await.map(|_| dest)
 }
 
 /// Fetch the `qjs` binary, mark it executable, and move it into place.
 /// Size-capped while streaming; the asset is the released binary itself.
+/// Cleans up the `.part` file on any failure, so a half-written binary is
+/// never left behind for a later run to mistake as usable.
 async fn fetch_quickjs(url: &str, part: &Path, dest: &Path) -> Result<(), VideoError> {
+    let result = fetch_quickjs_inner(url, part, dest).await;
+    if result.is_err() {
+        std::fs::remove_file(part).ok();
+    }
+    result
+}
+
+async fn fetch_quickjs_inner(url: &str, part: &Path, dest: &Path) -> Result<(), VideoError> {
     download_to_file(url, part)
         .await
         .map_err(VideoError::install)?;
@@ -576,9 +598,21 @@ async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
     let response = response
         .error_for_status()
         .map_err(|e| format!("couldn't fetch {url}: {e}"))?;
-    // Stream with a hard cap instead of buffering the whole body up front:
-    // a compromised endpoint must not be able to fill memory or disk before
-    // we notice. (Currently only the quickjs download uses this helper.)
+    write_capped_stream(Box::pin(response.bytes_stream()), dest, url).await
+}
+
+/// Stream a download body into `dest`, enforcing the size cap while
+/// streaming instead of buffering the whole body up front: a compromised
+/// endpoint must not be able to fill memory or disk before we notice.
+/// (Currently only the quickjs download uses this helper.)
+/// Split from `download_to_file` so the cap is pinnable with a synthetic
+/// stream — pushing 8 MiB through a loopback test server proved flaky.
+async fn write_capped_stream<S, B, E>(mut stream: S, dest: &Path, url: &str) -> Result<(), String>
+where
+    S: futures_util::Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
     let mut downloaded: u64 = 0;
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -586,20 +620,27 @@ async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
         .open(dest)
         .await
         .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
-    let mut stream = response.bytes_stream();
     use futures_util::StreamExt as _;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("couldn't read {url}: {e}"))?;
-        downloaded += chunk.len() as u64;
+        let bytes = chunk.as_ref();
+        downloaded += bytes.len() as u64;
         if downloaded > QUICKJS_MAX_DOWNLOAD_BYTES {
             return Err(format!(
                 "{url} exceeds the download size limit ({QUICKJS_MAX_DOWNLOAD_BYTES} bytes)"
             ));
         }
-        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+        tokio::io::AsyncWriteExt::write_all(&mut file, bytes)
             .await
             .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
     }
+    // tokio::fs::File completes writes on the blocking pool: write_all
+    // returning Ok only means the bytes were accepted, not that they hit
+    // the fd. Flush so Ok really means "everything is in the file" —
+    // without this a synchronous read right after can see a prefix.
+    tokio::io::AsyncWriteExt::flush(&mut file)
+        .await
+        .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
     Ok(())
 }
 
@@ -1333,6 +1374,149 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("symlink"), "unexpected error: {err}");
         assert_eq!(std::fs::read(&target).unwrap(), b"precious");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn valid_release_tag_rejects_evil_tags() {
+        for good in ["v0.17.0", "n9.0.2", "2026.08.19", "v9.0.2-static", "a+b_c"] {
+            assert!(valid_release_tag(good), "rejected good tag: {good}");
+        }
+        for evil in [
+            "",
+            "v0.17.0;touch pwned",
+            "../../etc/passwd",
+            "v0.17.0\n",
+            "tag with spaces",
+            "https://evil.example/x",
+            "v0.17.0$HOME",
+        ] {
+            assert!(!valid_release_tag(evil), "accepted evil tag: {evil:?}");
+        }
+        // The tag is interpolated into the download URL, so whatever passes
+        // here must survive URL interpolation unchanged.
+        let tag = "v0.17.0";
+        assert!(valid_release_tag(tag));
+        let url = quickjs_download_url(tag).unwrap();
+        assert!(
+            url.ends_with("/releases/download/v0.17.0/qjs-linux-x86_64")
+                || url.ends_with("/releases/download/v0.17.0/qjs-linux-aarch64")
+        );
+    }
+
+    #[tokio::test]
+    async fn write_capped_stream_enforces_size_cap() {
+        // More than the cap: the write must fail instead of buffering it.
+        // The stream is synthetic — no network round-trip — so the cap is
+        // pinned deterministically.
+        let chunks =
+            futures_util::stream::iter((0..129).map(|_| Ok::<Vec<u8>, String>(vec![0u8; 65536])));
+        let dir = unique_dir("cap-stream");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("qjs.part");
+
+        let err = write_capped_stream(Box::pin(chunks), &dest, "http://127.0.0.1/qjs")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("exceeds the download size limit"),
+            "unexpected error: {err}"
+        );
+        // The over-limit chunk is rejected before it is written: the partial
+        // never grows past the cap.
+        let written = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+        assert!(written <= QUICKJS_MAX_DOWNLOAD_BYTES);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn write_capped_stream_writes_small_bodies() {
+        // Under the cap everything lands on disk byte-for-byte.
+        let chunks = futures_util::stream::iter([
+            Ok::<Vec<u8>, String>(b"hello ".to_vec()),
+            Ok::<Vec<u8>, String>(b"world".to_vec()),
+        ]);
+        let dir = unique_dir("cap-stream-ok");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("qjs.part");
+
+        write_capped_stream(Box::pin(chunks), &dest, "http://127.0.0.1/qjs")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello world");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn fetch_quickjs_removes_half_written_part() {
+        // The server promises a megabyte but hangs up after one chunk: the
+        // download fails mid-stream with a half-written `.part` on disk.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            // A failed accept must never silently drop the listener: the
+            // client's queued connection would get RST and fail with a
+            // confusing request error instead of the truncation below.
+            let mut stream = None;
+            for _ in 0..20 {
+                match listener.accept() {
+                    Ok((s, _)) => {
+                        stream = Some(s);
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("test server: accept failed ({e}), retrying");
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
+            }
+            let mut stream = stream.expect("test server: accept kept failing");
+            // Read the request before responding: exiting with the request
+            // still unread makes the kernel RST the connection, and if that
+            // RST lands before the client's request write the fetch fails
+            // with "error sending request" instead of the truncation below.
+            // With the request consumed, close() sends a clean FIN.
+            let mut req = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => return, // client went away
+                    Ok(n) => {
+                        req.extend_from_slice(&buf[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => return,
+                }
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n"
+            )
+            .ok();
+            // One chunk, then hang up: the body is truncated mid-download.
+            stream.write_all(&[0u8; 4096]).ok();
+        });
+
+        let dir = unique_dir("qjs-truncated");
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = dir.join("qjs.part");
+        let dest = dir.join("qjs");
+        let err = fetch_quickjs(&format!("http://{addr}/qjs"), &part, &dest)
+            .await
+            .unwrap_err();
+        // The failure must be the mid-stream truncation — not a connect
+        // failure, which would pass the assertions below vacuously.
+        assert!(
+            err.to_string().contains("couldn't read"),
+            "unexpected error: {err}"
+        );
+        // The half-written `.part` must not survive a failed fetch, and the
+        // destination must never appear without a complete download.
+        assert!(!part.exists(), "half-written .part survived a failed fetch");
+        assert!(!dest.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

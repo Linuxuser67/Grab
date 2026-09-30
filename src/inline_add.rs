@@ -984,8 +984,7 @@ fn wire_torrent_picker(
         let torrent_row = torrent_row.clone();
         let scheduled_at = Rc::clone(&scheduled_at_c);
         // A fresh pick clears the previous row-level error.
-        torrent_row.remove_css_class("error");
-        torrent_row.set_tooltip_text(None);
+        clear_field_error(&torrent_row);
         glib::spawn_future_local(async move {
             let filter = gtk4::FileFilter::new();
             filter.set_name(Some(&gettext("Torrent files")));
@@ -1011,17 +1010,14 @@ fn wire_torrent_picker(
             {
                 Some(b) => b,
                 None => {
-                    torrent_row
-                        .set_tooltip_text(Some(&gettext("Could not read that .torrent file")));
-                    torrent_row.add_css_class("error");
+                    set_field_error(&torrent_row, &gettext("Could not read that .torrent file"));
                     return;
                 }
             };
             let (_tname, entries) = match crate::torrent::torrent_file_list(&bytes) {
                 Ok(v) => v,
                 Err(e) => {
-                    torrent_row.set_tooltip_text(Some(&e));
-                    torrent_row.add_css_class("error");
+                    set_field_error(&torrent_row, &e);
                     return;
                 }
             };
@@ -1033,8 +1029,7 @@ fn wire_torrent_picker(
                     scheduled_at.get(),
                     |d| m.enqueue_torrent_file(bytes, &name, d, None),
                     |e| {
-                        torrent_row.set_tooltip_text(Some(e));
-                        torrent_row.add_css_class("error");
+                        set_field_error(&torrent_row, e);
                     },
                 );
                 return;
@@ -1042,6 +1037,24 @@ fn wire_torrent_picker(
             push_torrent_picker_page(&nav, m, dd, close_card, name, bytes, entries, scheduled_at);
         });
     });
+}
+
+/// Validation error state lives on the field itself: the error class +
+/// tooltip for sighted users, and an accessible description so screen readers
+/// announce it too (tooltips are never announced). Set and cleared together —
+/// a stale description must never outlive the visible error.
+fn set_field_error(field: &impl IsA<gtk4::Widget>, message: &str) {
+    let field = field.upcast_ref::<gtk4::Widget>();
+    field.add_css_class("error");
+    field.set_tooltip_text(Some(message));
+    field.update_property(&[gtk4::accessible::Property::Description(message)]);
+}
+
+fn clear_field_error(field: &impl IsA<gtk4::Widget>) {
+    let field = field.upcast_ref::<gtk4::Widget>();
+    field.remove_css_class("error");
+    field.set_tooltip_text(None);
+    field.update_property(&[gtk4::accessible::Property::Description("")]);
 }
 
 fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
@@ -1152,7 +1165,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let url_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
     let url_entry = gtk4::Entry::builder()
         .placeholder_text(gettext("Paste a download link"))
-        .activates_default(true)
         .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
@@ -1220,10 +1232,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // 12px internal margins natively.
     let video_group = adw::PreferencesGroup::new();
     video_group.set_visible(false);
-    let video_name = adw::EntryRow::builder()
-        .title(gettext("File name"))
-        .activates_default(false)
-        .build();
+    let video_name = adw::EntryRow::builder().title(gettext("File name")).build();
     let video_revert_btn = gtk4::Button::builder()
         .icon_name("edit-undo-symbolic")
         .css_classes(["flat"])
@@ -1475,8 +1484,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     opts_revealer.set_child(Some(&opts_box));
 
     // Validation errors live on the fields themselves (error class +
-    // tooltip), so there is no error caption under the URL bar: the form
-    // never shifts when an error appears or clears.
+    // tooltip + accessible description), so there is no error caption under
+    // the URL bar: the form never shifts when an error appears or clears.
     let form_page = adw::NavigationPage::builder()
         .tag("form")
         .title(gettext("New Download"))
@@ -1522,10 +1531,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             probe.borrow_mut().reset();
             revealer.set_reveal_child(false);
             reset_video_step(&step);
-            url_entry.remove_css_class("error");
-            url_entry.set_tooltip_text(None);
-            torrent_row.remove_css_class("error");
-            torrent_row.set_tooltip_text(None);
+            clear_field_error(&url_entry);
+            clear_field_error(&torrent_row);
             set_lookup_add(&lookup_add, true);
             file_row.set_text("");
             dest_dir.replace(default_dir.clone());
@@ -1852,10 +1859,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         Rc::new(move |from_activate: bool| {
             let fail = |message: &str| {
                 // Form-validation pattern: the error state lives on the
-                // entry itself (error class + tooltip), not in a caption
-                // underneath it.
-                url_entry.set_tooltip_text(Some(message));
-                url_entry.add_css_class("error");
+                // entry itself, not in a caption underneath it.
+                set_field_error(&url_entry, message);
             };
             let url = url_entry.text().trim().to_string();
             if crate::video::is_video_page(&url) {
@@ -1995,8 +2000,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let step2 = step.clone();
         let file_row2 = file_row.clone();
         url_entry.connect_changed(move |row| {
-            row.set_tooltip_text(None);
-            row.remove_css_class("error");
+            clear_field_error(row);
             let text = row.text().trim().to_string();
             // The direct-only file row hides in video mode (the preview has its own
             // name row); a non-empty entry is not lost — the resolve seeds the video name

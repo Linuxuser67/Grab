@@ -5,36 +5,36 @@ A download manager for GNOME. Built with GTK 4 and libadwaita.
 ## Screenshots
 
 <p align="center">
-  <img src="screenshots/light-active.png" alt="Grab main window with a live capture and a torrent downloading" width="720">
+  <img src="screenshots/dark-live.png" alt="Grab main window with a live stream recording and a download resuming" width="720">
   <br>
-  <em>Active downloads: indeterminate live capture plus segmented torrent with block map</em>
+  <em>Live stream recording alongside active downloads</em>
 </p>
 
 <p align="center">
-  <img src="screenshots/dark-active.png" alt="Grab main window in dark mode with active and queued sections" width="720">
+  <img src="screenshots/dark-downloads.png" alt="Grab main window with an active video download and block map" width="720">
   <br>
-  <em>Active and queued sections with expanded segment map (dark mode)</em>
+  <em>Active downloads with per-block progress maps</em>
 </p>
 
 <p align="center">
-  <img src="screenshots/light-dialog-vod.png" alt="Media details dialog for a YouTube video with quality picker" width="720">
+  <img src="screenshots/dark-torrent.png" alt="Grab main window with an active torrent download" width="720">
   <br>
-  <em>Media details: quality picker with per-format sizes</em>
+  <em>Torrent download with segmented filter (All / Active / Queued / Downloaded)</em>
 </p>
 
 <p align="center">
-  <img src="screenshots/light-dialog-live.png" alt="Media details dialog for a Twitch live stream with HLS format" width="720">
+  <img src="screenshots/dark-new-download.png" alt="New Download card with URL, file name and media format picker" width="720">
   <br>
-  <em>Media details for a live stream: HLS variant picker</em>
+  <em>New Download card with inline media format picker</em>
 </p>
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="screenshots/dark-prefs-downloads.png">
-    <img src="screenshots/light-prefs-downloads.png" alt="Grab preferences, Downloads tab" width="720">
+    <source media="(prefers-color-scheme: dark)" srcset="screenshots/dark-empty.png">
+    <img src="screenshots/light-empty.png" alt="Grab empty state" width="720">
   </picture>
   <br>
-  <em>Preferences: destination, power, and notifications</em>
+  <em>Empty state</em>
 </p>
 
 <p align="center">
@@ -47,12 +47,6 @@ A download manager for GNOME. Built with GTK 4 and libadwaita.
   <img src="screenshots/light-prefs-torrent.png" alt="Grab preferences, Torrent tab" width="720">
   <br>
   <em>Preferences: seeding, DHT, and peer limit</em>
-</p>
-
-<p align="center">
-  <img src="screenshots/dark-empty.png" alt="Grab empty state in dark mode" width="720">
-  <br>
-  <em>Empty state (dark mode)</em>
 </p>
 
 ## Install

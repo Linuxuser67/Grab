@@ -491,6 +491,19 @@ pub(crate) fn quickjs_download_url(version: &str) -> Option<String> {
     ))
 }
 
+/// Release tags are interpolated into the quickjs download URL, so reject
+/// anything outside the tag character set (`A-Za-z0-9._+-`) before it can
+/// shape a request.
+pub(crate) fn valid_release_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.bytes().all(|b| {
+            matches!(
+                b,
+                b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'.' | b'-' | b'+' | b'_'
+            )
+        })
+}
+
 /// Locate a `qjs` binary: user lib dir first (Grab-installed), then `/app/bin`,
 /// then PATH for a system copy. `None` when no JS runtime is on hand.
 pub(crate) fn find_quickjs() -> Option<PathBuf> {
@@ -513,6 +526,11 @@ async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
     let tag = latest_quickjs_tag()
         .await
         .ok_or_else(|| VideoError::install("couldn't determine the latest quickjs-ng release"))?;
+    if !valid_release_tag(&tag) {
+        return Err(VideoError::install(format!(
+            "quickjs-ng published an unexpected release tag: {tag}"
+        )));
+    }
     let url = quickjs_download_url(&tag)
         .ok_or_else(|| VideoError::install("quickjs has no release for this architecture"))?;
     tokio::fs::create_dir_all(&dir)
@@ -522,18 +540,22 @@ async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
     // half-written `qjs` behind for `find_quickjs` to mistake as installed.
     let dest = dir.join("qjs");
     let part = dir.join("qjs.part");
-    match fetch_quickjs(&url, &part, &dest).await {
-        Ok(()) => Ok(dest),
-        Err(e) => {
-            std::fs::remove_file(&part).ok();
-            Err(e)
-        }
-    }
+    fetch_quickjs(&url, &part, &dest).await.map(|_| dest)
 }
 
 /// Fetch the `qjs` binary, mark it executable, and move it into place.
 /// Size-capped while streaming; the asset is the released binary itself.
+/// Cleans up the `.part` file on any failure, so a half-written binary is
+/// never left behind for a later run to mistake as usable.
 async fn fetch_quickjs(url: &str, part: &Path, dest: &Path) -> Result<(), VideoError> {
+    let result = fetch_quickjs_inner(url, part, dest).await;
+    if result.is_err() {
+        std::fs::remove_file(part).ok();
+    }
+    result
+}
+
+async fn fetch_quickjs_inner(url: &str, part: &Path, dest: &Path) -> Result<(), VideoError> {
     download_to_file(url, part)
         .await
         .map_err(VideoError::install)?;
@@ -1333,6 +1355,115 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("symlink"), "unexpected error: {err}");
         assert_eq!(std::fs::read(&target).unwrap(), b"precious");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn valid_release_tag_rejects_evil_tags() {
+        for good in ["v0.17.0", "n9.0.2", "2026.08.19", "v9.0.2-static", "a+b_c"] {
+            assert!(valid_release_tag(good), "rejected good tag: {good}");
+        }
+        for evil in [
+            "",
+            "v0.17.0;touch pwned",
+            "../../etc/passwd",
+            "v0.17.0\n",
+            "tag with spaces",
+            "https://evil.example/x",
+            "v0.17.0$HOME",
+        ] {
+            assert!(!valid_release_tag(evil), "accepted evil tag: {evil:?}");
+        }
+        // The tag is interpolated into the download URL, so whatever passes
+        // here must survive URL interpolation unchanged.
+        let tag = "v0.17.0";
+        assert!(valid_release_tag(tag));
+        let url = quickjs_download_url(tag).unwrap();
+        assert!(
+            url.ends_with("/releases/download/v0.17.0/qjs-linux-x86_64")
+                || url.ends_with("/releases/download/v0.17.0/qjs-linux-aarch64")
+        );
+    }
+
+    /// Serve `body_len` bytes of zeros over plain HTTP on loopback.
+    /// Returns the base URL. The server stops early if the client goes away.
+    fn serve_bytes(body_len: u64) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+            )
+            .ok();
+            let chunk = vec![0u8; 65536];
+            let mut remaining = body_len;
+            while remaining > 0 {
+                let n = remaining.min(chunk.len() as u64) as usize;
+                if stream.write_all(&chunk[..n]).is_err() {
+                    break; // client gave up: stop streaming
+                }
+                remaining -= n as u64;
+            }
+        });
+        format!("http://{addr}/qjs")
+    }
+
+    #[tokio::test]
+    async fn download_to_file_enforces_size_cap() {
+        // More than the cap: the download must fail instead of buffering it.
+        let url = serve_bytes(QUICKJS_MAX_DOWNLOAD_BYTES + 1024);
+        let dir = unique_dir("dl-cap");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("qjs.part");
+
+        let err = download_to_file(&url, &dest).await.unwrap_err();
+        assert!(
+            err.contains("exceeds the download size limit"),
+            "unexpected error: {err}"
+        );
+        // The over-limit chunk is rejected before it is written: the partial
+        // never grows past the cap.
+        let written = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+        assert!(written <= QUICKJS_MAX_DOWNLOAD_BYTES);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn fetch_quickjs_removes_half_written_part() {
+        // The server promises a megabyte but hangs up after one chunk: the
+        // download fails mid-stream with a half-written `.part` on disk.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n"
+            )
+            .ok();
+            // One chunk, then hang up: the body is truncated mid-download.
+            stream.write_all(&[0u8; 4096]).ok();
+        });
+
+        let dir = unique_dir("qjs-truncated");
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = dir.join("qjs.part");
+        let dest = dir.join("qjs");
+        fetch_quickjs(&format!("http://{addr}/qjs"), &part, &dest)
+            .await
+            .unwrap_err();
+        // The half-written `.part` must not survive a failed fetch, and the
+        // destination must never appear without a complete download.
+        assert!(!part.exists(), "half-written .part survived a failed fetch");
+        assert!(!dest.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

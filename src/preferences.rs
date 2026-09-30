@@ -952,9 +952,14 @@ pub fn show(
                     .await
                     .ok()
                     .flatten();
-                    let yt_tag = crate::video::latest_ytdlp_tag().await;
-                    let ff_tag = crate::video::latest_ffmpeg_tag().await;
-                    let qjs_tag = crate::video::latest_quickjs_tag().await;
+                    // Probe the three upstreams concurrently: three sequential
+                    // round-trips would triple the wait and burn three times
+                    // the unauthenticated rate limit per click.
+                    let (yt_tag, ff_tag, qjs_tag) = tokio::join!(
+                        crate::video::latest_ytdlp_tag(),
+                        crate::video::latest_ffmpeg_tag(),
+                        crate::video::latest_quickjs_tag()
+                    );
                     if dialog_b.upgrade().is_none() {
                         return;
                     }

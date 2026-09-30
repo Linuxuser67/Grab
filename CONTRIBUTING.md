@@ -14,7 +14,7 @@ Single-binary GTK 4 / libadwaita app (`src/`):
 
 Threading rule: network I/O runs on a dedicated tokio runtime and only sends
 `EngineMsg` over a channel; every GTK touch happens in `glib::spawn_future_local`
-(main thread). GSettings keys live in `data/io.github.houssemko.Grab.gschema.xml`.
+(main thread). GSettings keys live in `data/io.github.linuxuser67.Grab.gschema.xml`.
 
 ## Commands
 
@@ -47,8 +47,8 @@ the HIG: <https://developer.gnome.org/hig/>.
 python3 build-aux/gen-cargo-sources.py
 # 3. Smoke-test locally if you like (incremental, no force-clean, no bundle):
 flatpak run org.flatpak.Builder --user --install \
-  build build-aux/io.github.houssemko.Grab.json
-flatpak run io.github.houssemko.Grab --help
+  build build-aux/io.github.linuxuser67.Grab.json
+flatpak run io.github.linuxuser67.Grab --help
 # 4. Publish the release; CI (.github/workflows/flatpak.yml) clean-builds
 #    the bundle from the tag and attaches Grab.flatpak itself:
 gh release create <tag> --title "Grab <tag>" --notes "..."

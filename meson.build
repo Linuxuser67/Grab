@@ -6,7 +6,7 @@ project('grab', 'rust',
 
 # Flathub requires each module's license under share/licenses/$APP_ID.
 install_data('LICENSE',
-  install_dir: get_option('datadir') / 'licenses' / 'io.github.houssemko.Grab',
+  install_dir: get_option('datadir') / 'licenses' / 'io.github.linuxuser67.Grab',
 )
 
 gnome = import('gnome')

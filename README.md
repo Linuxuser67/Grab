@@ -61,7 +61,7 @@ From FlatPark (recommended, gets updates via `flatpak update`):
 
 ```bash
 flatpak remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo
-flatpak install flatpark io.github.houssemko.Grab
+flatpak install flatpark io.github.linuxuser67.Grab
 ```
 
 Or manually from the [latest release](https://github.com/Linuxuser67/Grab/releases):
@@ -78,17 +78,17 @@ unreachable, Grab shows the exact `flatpak override` command to grant
 read-only access — or run the equivalent yourself:
 
 ```bash
-flatpak override --user --filesystem=~/.config/<browser-dir>:ro io.github.houssemko.Grab
+flatpak override --user --filesystem=~/.config/<browser-dir>:ro io.github.linuxuser67.Grab
 ```
 
-Undo with `flatpak override --user --reset io.github.houssemko.Grab`.
+Undo with `flatpak override --user --reset io.github.linuxuser67.Grab`.
 
 ## Notes for packagers
 
 Flatpak-only.
 
 ```bash
-flatpak-builder --user --install build build-aux/io.github.houssemko.Grab.json
+flatpak-builder --user --install build build-aux/io.github.linuxuser67.Grab.json
 ```
 
 ## License

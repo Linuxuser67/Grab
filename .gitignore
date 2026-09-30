@@ -19,3 +19,4 @@ __pycache__/
 
 # Design working notes (SPEC-*.md) live outside the repo, never in it.
 SPEC-*.md
+target-sdk/

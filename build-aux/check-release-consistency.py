@@ -28,8 +28,8 @@ import tomllib
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CARGO_TOML = ROOT / "Cargo.toml"
 CARGO_LOCK = ROOT / "Cargo.lock"
-METAINFO = ROOT / "data" / "io.github.houssemko.Grab.metainfo.xml.in"
-FLATPAK = ROOT / "build-aux" / "io.github.houssemko.Grab.json"
+METAINFO = ROOT / "data" / "io.github.linuxuser67.Grab.metainfo.xml.in"
+FLATPAK = ROOT / "build-aux" / "io.github.linuxuser67.Grab.json"
 
 RELEASE_MARKER = '<release version="'
 

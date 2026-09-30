@@ -2735,36 +2735,36 @@ fn browser_override_dirs_match_lookup_roots() {
 #[test]
 fn browser_override_command_covers_all_channels() {
     assert_eq!(
-        browser_override_command_for("chrome", "io.github.houssemko.Grab").as_deref(),
+        browser_override_command_for("chrome", "io.github.linuxuser67.Grab").as_deref(),
         Some(
             "flatpak override --user --filesystem=~/.config/google-chrome:ro \
              --filesystem=~/.config/google-chrome-beta:ro \
              --filesystem=~/.config/google-chrome-unstable:ro \
-             io.github.houssemko.Grab"
+             io.github.linuxuser67.Grab"
         )
     );
     assert_eq!(
-        browser_override_command_for("zen", "io.github.houssemko.Grab").as_deref(),
+        browser_override_command_for("zen", "io.github.linuxuser67.Grab").as_deref(),
         Some(
             "flatpak override --user --filesystem=~/.zen:ro \
-             --filesystem=~/.config/zen:ro io.github.houssemko.Grab"
+             --filesystem=~/.config/zen:ro io.github.linuxuser67.Grab"
         )
     );
     assert_eq!(
-        browser_override_command_for("firefox", "io.github.houssemko.Grab").as_deref(),
+        browser_override_command_for("firefox", "io.github.linuxuser67.Grab").as_deref(),
         Some(
             "flatpak override --user --filesystem=~/.mozilla/firefox:ro \
              --filesystem=~/.config/mozilla/firefox:ro \
              --filesystem=~/snap/firefox/common/.mozilla/firefox:ro \
-             io.github.houssemko.Grab"
+             io.github.linuxuser67.Grab"
         )
     );
     assert_eq!(
-        browser_override_command_for("none", "io.github.houssemko.Grab"),
+        browser_override_command_for("none", "io.github.linuxuser67.Grab"),
         None
     );
     assert_eq!(
-        browser_override_command_for("mystery", "io.github.houssemko.Grab"),
+        browser_override_command_for("mystery", "io.github.linuxuser67.Grab"),
         None
     );
 }

@@ -357,7 +357,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                         // from_appdata aborts on a missing resource, so only
                         // use it when the catalog is registered: About must
                         // never crash the app.
-                        const METAINFO: &str = "/io/github/houssemko/Grab/metainfo.xml";
+                        const METAINFO: &str = "/io/github/linuxuser67/Grab/metainfo.xml";
                         let registered =
                             gio::resources_lookup_data(METAINFO, gio::ResourceLookupFlags::NONE)
                                 .is_ok();
@@ -494,7 +494,7 @@ mod tests {
     /// the app version: a Cargo bump without a matching entry ships a stale one.
     #[test]
     fn metainfo_newest_release_matches_package_version() {
-        let xml = include_str!("../data/io.github.houssemko.Grab.metainfo.xml.in");
+        let xml = include_str!("../data/io.github.linuxuser67.Grab.metainfo.xml.in");
         let newest = metainfo_release_versions(xml)
             .iter()
             .max_by_key(|v| version_key(v))
@@ -507,7 +507,7 @@ mod tests {
     /// `<release>`, so an out-of-order file shows the wrong version.
     #[test]
     fn metainfo_lists_newest_release_first() {
-        let xml = include_str!("../data/io.github.houssemko.Grab.metainfo.xml.in");
+        let xml = include_str!("../data/io.github.linuxuser67.Grab.metainfo.xml.in");
         let versions = metainfo_release_versions(xml);
         assert_eq!(
             versions.first().map(String::as_str),

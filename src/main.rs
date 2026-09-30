@@ -41,7 +41,7 @@ use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
 
-pub const APP_ID: &str = "io.github.houssemko.Grab";
+pub const APP_ID: &str = "io.github.linuxuser67.Grab";
 
 /// Metainfo catalog for About, embedded: `from_appdata` reads GResource paths, and OUT_DIR is absent at runtime.
 static GRESOURCE_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/grab.gresource"));

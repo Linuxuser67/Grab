@@ -563,12 +563,19 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
 /// pills with the simple Button API. All entries start active, matching the
 /// old checked-by-default rows. Returns the box and the pills for the caller
 /// to wire.
+///
+/// `homogeneous(true)` gives every pill an equal share of the row width, so
+/// full rows fill the available space instead of leaving ragged gaps. A
+/// partial final row keeps its empty slots (stock `GtkFlowBox` behavior —
+/// its allocator reuses the same cell size for every row); stretching the
+/// leftovers would need a custom layout manager.
 fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::FlowBox, Vec<gtk4::ToggleButton>) {
     // Flowing grid of toggle pills: the simple Button API
     // (set_active/is_active/toggled), native selected styling, no selection
     // model. FlowBox is only the wrapping container.
     let flowbox = gtk4::FlowBox::builder()
         .selection_mode(gtk4::SelectionMode::None)
+        .homogeneous(true)
         .column_spacing(12)
         .row_spacing(12)
         .valign(gtk4::Align::Start)

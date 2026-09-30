@@ -449,7 +449,6 @@ pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
 /// latest tag so the update check and the installer agree on the source of
 /// truth. quickjs-ng publishes no checksums, so unpinned releases carry no
 /// hash verification (yt-dlp and ffmpeg never had any).
-
 /// Hard cap on the quickjs download: the asset is ~2.5MB, so anything larger
 /// is not the released binary. Enforced while streaming, before the bytes are
 /// trusted.

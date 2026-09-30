@@ -546,6 +546,18 @@ mod tests {
     }
 
     #[test]
+    fn percent_decode_invalid_utf8_escape_falls_back_to_literal() {
+        // GLib decodes %FF%FE to raw bytes (invalid UTF-8) instead of
+        // erroring, and gtk-rs wraps the result unchecked (debug_assert
+        // only): without re-validation that launders non-UTF-8 into a Rust
+        // String (soundness hole). We fall back to the literal text instead,
+        // and the result is always valid UTF-8.
+        let got = percent_decode("%FF%FE.bin");
+        assert_eq!(got, "%FF%FE.bin");
+        assert!(std::str::from_utf8(got.as_bytes()).is_ok());
+    }
+
+    #[test]
     fn path_size_tolerates_symlinks() {
         // GIO's measure_disk_usage uses AT_SYMLINK_NOFOLLOW: symlinks are
         // counted as themselves (apparent size = target path length), never

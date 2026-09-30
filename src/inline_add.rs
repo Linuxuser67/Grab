@@ -1011,7 +1011,8 @@ fn wire_torrent_picker(
             {
                 Some(b) => b,
                 None => {
-                    torrent_row.set_tooltip_text(Some(&gettext("Could not read that .torrent file")));
+                    torrent_row
+                        .set_tooltip_text(Some(&gettext("Could not read that .torrent file")));
                     torrent_row.add_css_class("error");
                     return;
                 }

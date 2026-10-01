@@ -2719,6 +2719,12 @@ impl DownloadManager {
 
     /// Abort running tasks and persist the queue for the next launch.
     pub fn shutdown(&self) {
+        // RED scaffolding: timeout parameter accepted but ignored — the join
+        // is unbounded, so a stuck finalizer hangs shutdown.
+        self.shutdown_with_timeout(Duration::from_secs(10));
+    }
+
+    pub(crate) fn shutdown_with_timeout(&self, _timeout: Duration) {
         self.draining.set(true);
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
         // Discard workers first through their retained abort handles: aborting a finalizer would detach its worker instead of stopping it. Finalizers are awaited (not aborted) so cleanup still runs.

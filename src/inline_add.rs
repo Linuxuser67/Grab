@@ -1072,10 +1072,13 @@ fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
 /// from Escape, a successful add, or the toggle itself — not just its own
 /// clicks. Widget-free so the notify-on-flip protocol is unit-testable
 /// (widget creation segfaults headless, so CI can't cover it there).
+/// Fired on every open-state flip with the new state.
+type OnFlip = Rc<dyn Fn(bool)>;
+
 #[derive(Default)]
 struct OpenState {
     open: Cell<bool>,
-    on_flip: RefCell<Option<Rc<dyn Fn(bool)>>>,
+    on_flip: RefCell<Option<OnFlip>>,
 }
 
 impl OpenState {
@@ -1086,11 +1089,9 @@ impl OpenState {
             return;
         }
         self.open.set(open);
-        // RED: notify withheld — the tests below must fail.
-    }
-
-    fn toggle(&self) {
-        self.set(!self.open.get());
+        if let Some(cb) = self.on_flip.borrow().as_ref() {
+            cb(open);
+        }
     }
 
     fn is_open(&self) -> bool {
@@ -2508,21 +2509,6 @@ mod tests {
         st.set(false);
         assert!(!st.is_open());
         st.set(true);
-        assert_eq!(*seen.borrow(), vec![true, false, true]);
-    }
-
-    #[test]
-    fn open_state_toggle_flips_and_notifies() {
-        let st = OpenState::default();
-        let seen = Rc::new(RefCell::new(Vec::new()));
-        {
-            let seen = Rc::clone(&seen);
-            st.set_on_flip(move |open| seen.borrow_mut().push(open));
-        }
-        st.toggle();
-        st.toggle();
-        st.toggle();
-        assert!(st.is_open());
         assert_eq!(*seen.borrow(), vec![true, false, true]);
     }
 }

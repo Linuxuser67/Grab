@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.7.1" date="2026-10-01">
+      <description>
+        <ul>
+          <li>Links sent by the browser extension now ask for confirmation before downloading: plain files, magnet links, and remote .torrent links show a confirmation dialog naming the URL.</li>
+          <li>The extension handoff now preserves http versus https instead of upgrading everything to https.</li>
+          <li>Remote .torrent links containing a username/password are rejected, and fetching them times out after 30 seconds.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.7.0" date="2026-10-01">
       <description>
         <ul>

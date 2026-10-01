@@ -923,11 +923,25 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
+            use std::io::Read as _;
             let (mut stream, _) = listener.accept().unwrap();
             read_request_headers(&mut stream);
             // Headers consumed, then silence: the client's per-request
-            // timeout must fire instead of hanging forever.
-            std::thread::sleep(std::time::Duration::from_secs(30));
+            // timeout must fire instead of hanging forever. The client
+            // drops the connection when it times out, so read until EOF
+            // instead of sleeping — the thread exits with the test
+            // instead of lingering for the old 30s sleep.
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .ok();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
         });
         let out = fetch_remote_torrent_bytes(
             &test_client(),

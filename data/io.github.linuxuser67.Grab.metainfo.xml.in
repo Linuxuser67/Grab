@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.7.0" date="2026-10-01">
+      <description>
+        <ul>
+          <li>Grab now opens links sent by the Grab browser extension: video pages and stream manifests open the New Download card, other files download directly, and magnet links go to the torrent engine.</li>
+          <li>Remote .torrent links are fetched and opened as torrents instead of downloading the .torrent file itself.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.6.1" date="2026-10-01">
       <description>
         <ul>

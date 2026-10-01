@@ -173,8 +173,7 @@ struct VideoStep {
     /// can set and clear its accessible label.
     url_spinner: adw::Spinner,
     /// Slide-down revealer wrapping the preview block's PreferencesGroup:
-    /// the block animates in/out instead of snapping (same protocol as the
-    /// options revealer).
+    /// the block animates in/out instead of snapping.
     group_revealer: gtk4::Revealer,
     name: adw::EntryRow,
     revert: gtk4::Button,
@@ -254,8 +253,7 @@ fn show_video_ready(v: &VideoStep) {
     v.revert.set_visible(true);
     v.format.set_visible(true);
     // Reveal after the rows are shown: set_visible(true) first so the
-    // SlideDown has a mapped widget to animate (same protocol as the
-    // options revealer).
+    // SlideDown has a mapped widget to animate (see slide_down_revealer).
     v.group_revealer.set_visible(true);
     v.group_revealer.set_reveal_child(true);
     // Format picked: the Add button earns its text label.
@@ -269,8 +267,7 @@ fn show_video_tools_missing(v: &VideoStep, message: &str) {
     v.tools.set_subtitle(message);
     v.tools.set_visible(true);
     // Reveal after the row is shown: set_visible(true) first so the
-    // SlideDown has a mapped widget to animate (same protocol as the
-    // options revealer).
+    // SlideDown has a mapped widget to animate (see slide_down_revealer).
     v.group_revealer.set_visible(true);
     v.group_revealer.set_reveal_child(true);
 }
@@ -280,8 +277,7 @@ fn show_video_error(v: &VideoStep, message: &str) {
     v.error.set_subtitle(message);
     v.error.set_visible(true);
     // Reveal after the row is shown: set_visible(true) first so the
-    // SlideDown has a mapped widget to animate (same protocol as the
-    // options revealer).
+    // SlideDown has a mapped widget to animate (see slide_down_revealer).
     v.group_revealer.set_visible(true);
     v.group_revealer.set_reveal_child(true);
 }
@@ -1180,6 +1176,24 @@ impl AddCard {
     }
 }
 
+/// A SlideDown revealer that owns its visibility: starts hidden, and hides
+/// itself once the slide-up finishes (a collapsed revealer keeps occupying
+/// the parent box's spacing otherwise). Callers reveal with
+/// `set_visible(true)` + `set_reveal_child(true)` and collapse with
+/// `set_reveal_child(false)`; the child-revealed handler below does the
+/// rest. Used by the options, preview-block, and schedule sections.
+fn slide_down_revealer() -> gtk4::Revealer {
+    let revealer = gtk4::Revealer::builder()
+        .transition_type(gtk4::RevealerTransitionType::SlideDown)
+        .reveal_child(false)
+        .build();
+    revealer.set_visible(false);
+    revealer.connect_child_revealed_notify(|r| {
+        r.set_visible(r.is_child_revealed());
+    });
+    revealer
+}
+
 /// Build the inline New Download card. The returned [`AddCard`] owns the
 /// widget and the open/toggle entry points; the card starts collapsed.
 pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
@@ -1276,11 +1290,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // Download options live in a revealer directly under the URL row: the
     // card opens compact, one tap on the gear reveals file name, torrent,
     // and destination inline.
-    let opts_revealer = gtk4::Revealer::builder()
-        .transition_type(gtk4::RevealerTransitionType::SlideDown)
-        .reveal_child(false)
-        .visible(false)
-        .build();
+    let opts_revealer = slide_down_revealer();
     // Explicit handler (not a property binding): visible comes first so
     // the slide-down still animates — a reveal set while hidden would
     // just snap open — and the revealer is only hidden once the slide-up
@@ -1293,12 +1303,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 revealer.set_visible(true);
             }
             revealer.set_reveal_child(active);
-        });
-        // A collapsed revealer keeps occupying the parent box's spacing:
-        // hide it once the slide-up finishes so no dead gap stays under
-        // the URL row.
-        opts_revealer.connect_child_revealed_notify(|r| {
-            r.set_visible(r.is_child_revealed());
         });
     }
     form.append(&opts_revealer);
@@ -1355,18 +1359,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_error.set_visible(false);
     video_group.add(&video_error);
     // The preview block slides down like the options section: the revealer
-    // owns show/hide (a collapsed revealer keeps the parent box's spacing,
-    // so it starts hidden and only becomes visible while revealed — see the
-    // child-revealed handler below).
-    let video_revealer = gtk4::Revealer::builder()
-        .transition_type(gtk4::RevealerTransitionType::SlideDown)
-        .reveal_child(false)
-        .build();
+    // owns show/hide.
+    let video_revealer = slide_down_revealer();
     video_revealer.set_child(Some(&video_group));
-    video_revealer.set_visible(false);
-    video_revealer.connect_child_revealed_notify(|r| {
-        r.set_visible(r.is_child_revealed());
-    });
     let step = Rc::new(VideoStep {
         action_slot,
         url_spinner: url_spinner.clone(),
@@ -1437,15 +1432,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // and AdwSpinRow must be placed in a GtkListBox (which PreferencesGroup
     // provides), not a plain GtkBox — Adwaita warns otherwise.
     let schedule_group = adw::PreferencesGroup::new();
-    let schedule_revealer = gtk4::Revealer::builder()
-        .transition_type(gtk4::RevealerTransitionType::SlideDown)
-        .reveal_child(false)
-        .build();
+    let schedule_revealer = slide_down_revealer();
     schedule_revealer.set_child(Some(&schedule_group));
-    // Starts hidden: a collapsed revealer still occupies the parent box's
-    // spacing, so it is only made visible while revealed (see the
-    // child-revealed handler below).
-    schedule_revealer.set_visible(false);
 
     // Date picker: MenuButton opens a popover with GtkCalendar (HIG: no text
     // entry for dates). GTK/libadwaita provide no stock date picker, so this
@@ -1527,12 +1515,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             } else {
                 scheduled_at_c2.set(None);
             }
-        });
-        // A collapsed revealer keeps occupying the parent box's spacing:
-        // hide it once the slide-up finishes so no dead gap stays under
-        // the options card.
-        schedule_revealer.connect_child_revealed_notify(|r| {
-            r.set_visible(r.is_child_revealed());
         });
     }
     // The schedule rows are their own card under the options: separate

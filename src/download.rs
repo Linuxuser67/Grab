@@ -191,6 +191,10 @@ pub struct DownloadManager {
     /// Set by shutdown(): stale engine futures must not re-persist or
     /// re-mark rows once the authoritative shutdown persist has run.
     draining: Cell<bool>,
+    /// In-flight finished-row disk sizings (see `set_finished_detail`): the
+    /// futures are fire-and-forget, so the test suite drains on this counter
+    /// instead of guessing how long GIO's blocking pool takes.
+    sizing_inflight: Rc<Cell<usize>>,
     /// The 30s schedule checker's source, if running. Kept so the
     /// scheduling preference can stop the timer entirely.
     scheduler_source: RefCell<Option<glib::SourceId>>,
@@ -335,6 +339,7 @@ impl DownloadManager {
             discards: RefCell::new(HashMap::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
+            sizing_inflight: Rc::new(Cell::new(0)),
             scheduler_source: RefCell::new(None),
         });
         // Publish the Weak for `wake_queue()`'s `Send` closure (see `MANAGER_WEAK`).
@@ -877,7 +882,7 @@ impl DownloadManager {
     /// large folders, so the label paints immediately with `size` (the engine's
     /// figure, 0 for plain "Finished") and is refined when the measurement lands.
     /// A row that is gone by then simply never gets the update.
-    fn set_finished_detail(item: &DownloadItem, size: u64) {
+    fn set_finished_detail(&self, item: &DownloadItem, size: u64) {
         item.set_detail(if size > 0 {
             gettext("Finished • {size}").replace("{size}", &fmt_bytes(size))
         } else {
@@ -885,10 +890,15 @@ impl DownloadManager {
         });
         let weak = item.downgrade();
         let path = item.file_path();
+        let inflight = Rc::clone(&self.sizing_inflight);
+        inflight.set(inflight.get() + 1);
         glib::spawn_future_local(async move {
             let measured = crate::file_names::path_size_async(path)
                 .await
                 .filter(|m| *m > 0);
+            // Balance the counter before any early return: the row may be
+            // gone or the path missing, but the task still finished.
+            inflight.set(inflight.get() - 1);
             let (Some(item), Some(measured)) = (weak.upgrade(), measured) else {
                 return;
             };
@@ -932,7 +942,7 @@ impl DownloadManager {
         // Size off the final path, measured off-thread: the engine measured the
         // pre-rename one, and folders sum contents. Paints "Finished" now,
         // refines with the measured size when it lands.
-        Self::set_finished_detail(&item, 0);
+        self.set_finished_detail(&item, 0);
         // Restored duplicates collapse too: the last Done row per URL wins.
         self.drop_finished_duplicates(&url, item.id());
         // Keep the row's media identity: a restored video page must not fall
@@ -1288,7 +1298,7 @@ impl DownloadManager {
                             // `set_finished_detail`): the engine measured the
                             // pre-rename one. Paints the engine's size now,
                             // refines with the measured size when it lands.
-                            Self::set_finished_detail(&item, size);
+                            this.set_finished_detail(&item, size);
                             // Server file date, when asked: best-effort, never fails the row.
                             let mtime = this.server_mtime.borrow_mut().remove(&id);
                             if this.settings.keep_server_date()

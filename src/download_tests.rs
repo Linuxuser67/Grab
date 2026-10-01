@@ -75,8 +75,11 @@ fn drain_engine(manager: &DownloadManager, id: u64) {
     let ctx = glib::MainContext::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     // Wait for both the engine AND the pump: the pump is a `spawn_future_local` task, and if it's still pending when the test ends, the next test (on another thread) will trip glib's thread guard when reaping it.
+    // Also wait for finished-row sizings: `set_finished_detail` spawns one
+    // per completion, and it outlives the engine that triggered it.
     while (manager.running.borrow().contains_key(&id)
-        || manager.pump_handles.borrow().contains_key(&id))
+        || manager.pump_handles.borrow().contains_key(&id)
+        || manager.sizing_inflight.get() > 0)
         && std::time::Instant::now() < deadline
     {
         ctx.iteration(false);
@@ -96,6 +99,24 @@ fn quiesce(ctx: &glib::MainContext) {
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
+}
+
+/// Drain finished-row sizing futures on this thread: each restored or
+/// completed Done row spawns one via `set_finished_detail`, and a later test
+/// on another thread trips glib's thread guard reaping them. The counter —
+/// not a fixed delay — waits exactly for the in-flight GIO blocking tasks.
+/// Caller must hold MAIN_LOOP_LOCK (via test_locks).
+fn drain_sizing(manager: &DownloadManager) {
+    let ctx = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while manager.sizing_inflight.get() > 0 {
+        if std::time::Instant::now() > deadline {
+            panic!("timed out draining finished-row sizing tasks");
+        }
+        ctx.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    quiesce(&ctx);
 }
 
 fn test_settings() -> crate::settings::AppSettings {
@@ -463,7 +484,7 @@ fn rename_noreplace_spans_filesystems() {
 
 #[test]
 fn overcap_queue_keeps_active_first() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let (_lock, _loop) = test_locks();
     let qf = test_queue_file("overcap");
     let settings = test_settings();
     let mut items = vec![
@@ -538,6 +559,8 @@ fn overcap_queue_keeps_active_first() {
     assert!(!names.contains(&"f0.iso".to_string()));
     assert!(!names.contains(&"f1.iso".to_string()));
     let _ = std::fs::remove_file(&qf);
+    // Drain the restored Done rows' sizing futures on this thread (see MAIN_LOOP_LOCK).
+    drain_sizing(&m);
 }
 
 #[test]
@@ -1264,7 +1287,7 @@ fn mismatched_video_source_dropped_on_restore() {
 /// the video icon.
 #[test]
 fn done_video_keeps_page_source_on_restore() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let (_lock, _loop) = test_locks();
     let qf = test_queue_file("video-done-restore");
     let queue = StoredQueue {
         version: QUEUE_VERSION,
@@ -1311,6 +1334,8 @@ fn done_video_keeps_page_source_on_restore() {
         matches!(stored, crate::media_types::VideoSource::Page { ref quality, .. } if quality == "720p")
     );
     let _ = std::fs::remove_file(&qf);
+    // Drain the restored Done row's sizing future on this thread (see MAIN_LOOP_LOCK).
+    drain_sizing(&manager);
 }
 
 #[test]
@@ -2690,7 +2715,7 @@ fn restore_rejects_bad_filenames() {
 
 #[test]
 fn batch_restore_hundred_done() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let (_lock, _loop) = test_locks();
     let qf = test_queue_file("batch");
     let settings = test_settings();
     let items: Vec<StoredItem> = (0..100)
@@ -2721,6 +2746,9 @@ fn batch_restore_hundred_done() {
     assert_eq!(it.filename(), "f99.iso");
     assert_eq!(it.status(), DownloadStatus::Done);
     let _ = std::fs::remove_file(&qf);
+    // Drain the 100 sizing futures on this thread: a later test on another
+    // thread would trip glib's thread guard reaping them (see MAIN_LOOP_LOCK).
+    drain_sizing(&m);
 }
 
 #[test]

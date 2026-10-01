@@ -9,5 +9,5 @@ Categories=Network;FileTransfer;GTK;
 Keywords=download;wget;manager;
 StartupNotify=true
 DBusActivatable=true
-MimeType=text/uri-list;x-scheme-handler/magnet;application/x-bittorrent;
+MimeType=text/uri-list;x-scheme-handler/magnet;x-scheme-handler/grab;application/x-bittorrent;
 SingleMainWindow=true

@@ -79,9 +79,12 @@ pub fn setup(app: &adw::Application) {
                 if let Ok(uri) = f.uri().parse::<url::Url>()
                     && matches!(uri.scheme(), "http" | "https" | "magnet")
                 {
-                    // Video pages take the inline card path (pre-filled): plain
-                    // enqueue would save the raw HTML page as a file.
-                    if crate::video::is_video_page(uri.as_str()) {
+                    // Video pages and stream manifests take the inline card path
+                    // (pre-filled): plain enqueue would save the raw page — or the
+                    // manifest XML — as a file. The card probes manifests for video.
+                    if crate::video::is_video_page(uri.as_str())
+                        || crate::video::is_stream_manifest_url(uri.as_str())
+                    {
                         s.add_card.open(Some(uri.as_str().to_string()));
                         continue;
                     }

@@ -23,8 +23,8 @@ use crate::video_prefs::{
 };
 use crate::video_probe::{
     DIRECT_FILE_EXTS, MAX_PLAYLIST_ITEMS, drive_direct_url, drive_file_id, expand_child_target,
-    insta_shortcode_to_pk, is_direct_file_url, is_expired, is_http_url, now_unix,
-    parse_playlist_json, parse_single_video, pick_playlist_entry, playlist_resolve_error,
+    insta_shortcode_to_pk, is_direct_file_url, is_expired, is_http_url, is_stream_manifest_url,
+    now_unix, parse_playlist_json, parse_single_video, pick_playlist_entry, playlist_resolve_error,
     retarget_story_items, sanitize_video_json, story_segment_url, story_tray_url,
 };
 use crate::video_progress::{
@@ -9723,6 +9723,39 @@ fn is_direct_file_url_matrix() {
         "",
     ] {
         assert!(!is_direct_file_url(url), "{url}");
+    }
+}
+
+#[test]
+fn is_stream_manifest_url_matrix() {
+    // DASH/HLS manifests are never plain downloads: URI activation must open
+    // the card (which probes them) instead of saving the manifest XML as a file.
+    for url in [
+        "https://example.com/video.mpd",
+        "https://example.com/V.MPD",
+        "https://example.com/video.mpd?token=abc",
+        "https://example.com/stream.m3u8",
+        "https://example.com/stream.m3u",
+        "https://example.com/list.pls",
+        "http://example.com/live.m3u8#frag",
+    ] {
+        assert!(is_stream_manifest_url(url), "{url}");
+    }
+    // Direct files, segments, pages and odd schemes are not manifests.
+    for url in [
+        "https://example.com/v.mp4",
+        "https://example.com/seg.ts",
+        "https://www.youtube.com/watch?v=x",
+        "https://example.com/article",
+        "https://example.com/",
+        "https://example.com/mpd",
+        "https://example.com/video.mpd.bak",
+        "magnet:?xt=urn:btih:abc",
+        "file:///tmp/x.mpd",
+        "not a url",
+        "",
+    ] {
+        assert!(!is_stream_manifest_url(url), "{url}");
     }
 }
 

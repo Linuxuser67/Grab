@@ -90,6 +90,17 @@ pub fn is_http_url(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
 }
 
+/// Lowercase extension of the URL's last path segment, if it has one.
+/// Query/fragment are stripped by the URL parser; a dot is required —
+/// extensionless terminal segments (`/md`) are not extensions.
+fn url_path_ext(parsed: &url::Url) -> Option<&str> {
+    parsed
+        .path_segments()
+        .and_then(|mut s| s.next_back())
+        .and_then(|last| last.rsplit_once('.').map(|(_, e)| e))
+        .filter(|e| !e.is_empty())
+}
+
 /// Whether an HTTP(S) URL is obviously a direct file (not a page): its path ends
 /// in a well-known extension. Such links skip the media probe — the plain engine
 /// downloads them better anyway. Query/fragment stripped before matching, and
@@ -101,14 +112,7 @@ pub fn is_direct_file_url(url: &str) -> bool {
     if !matches!(parsed.scheme(), "http" | "https") {
         return false;
     }
-    let Some(ext) = parsed
-        .path_segments()
-        .and_then(|mut s| s.next_back())
-        // A dot is required: extensionless terminal segments (`/md`) are not
-        // extensions and would skip the probe for page-like URLs.
-        .and_then(|last| last.rsplit_once('.').map(|(_, e)| e))
-        .filter(|e| !e.is_empty())
-    else {
+    let Some(ext) = url_path_ext(&parsed) else {
         return false;
     };
     DIRECT_FILE_EXTS
@@ -116,11 +120,32 @@ pub fn is_direct_file_url(url: &str) -> bool {
         .is_ok()
 }
 
+/// Whether an HTTP(S) URL points at a stream manifest: DASH (`mpd`) or a
+/// playlist (`m3u8`, `m3u`, `pls`). These are never plain downloads — URI
+/// activation opens the card (which probes them) instead of saving the
+/// manifest as a file. Segments (`ts`) stay plain files: a lone segment is a
+/// legitimate download.
+pub fn is_stream_manifest_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(ext) = url_path_ext(&parsed) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "mpd" | "m3u8" | "m3u" | "pls"
+    )
+}
+
 /// Extensions treated as direct files (never probed): installers, archives,
 /// documents, ebooks, fonts, images, media, torrents and other unambiguous
-/// downloads. Deliberately absent: pages and scripts, stream playlists (`m3u8`,
-/// `m3u`, `pls`) and segments (`ts`). Sorted for `binary_search` — keep it sorted;
-/// a test pins that.
+/// downloads. Deliberately absent: pages and scripts, stream manifests (DASH
+/// `mpd`; playlists `m3u8`, `m3u`, `pls`) and segments (`ts`). Sorted for
+/// `binary_search` — keep it sorted; a test pins that.
 pub(crate) const DIRECT_FILE_EXTS: &[&str] = &[
     "3g2",
     "3gp",

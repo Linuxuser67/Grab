@@ -172,7 +172,9 @@ struct VideoStep {
     /// The spinner page of the action slot: kept so the show/hide helpers
     /// can set and clear its accessible label.
     url_spinner: adw::Spinner,
-    group: adw::PreferencesGroup,
+    /// Slide-down revealer wrapping the preview block's PreferencesGroup:
+    /// the block animates in/out instead of snapping.
+    group_revealer: gtk4::Revealer,
     name: adw::EntryRow,
     revert: gtk4::Button,
     /// Media-format selector, filled per video on resolve: exact pinnable
@@ -191,7 +193,9 @@ struct VideoStep {
 
 /// Reserve trailing text space inside the URL entry while the lookup
 fn hide_video_step(v: &VideoStep) {
-    v.group.set_visible(false);
+    // Slide the preview block closed; the child-revealed handler hides the
+    // revealer once the animation finishes, so no dead spacing remains.
+    v.group_revealer.set_reveal_child(false);
     // Back to the Add button: the action slot keeps its width, so selecting
     // a page never reallocates the row. The spinner page is unmapped while
     // hidden, which stops its animation (no set_spinning on adw::Spinner).
@@ -245,10 +249,13 @@ fn show_video_loading(v: &VideoStep) {
 
 fn show_video_ready(v: &VideoStep) {
     hide_video_step(v);
-    v.group.set_visible(true);
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
+    // Reveal after the rows are shown: set_visible(true) first so the
+    // SlideDown has a mapped widget to animate (see slide_down_revealer).
+    v.group_revealer.set_visible(true);
+    v.group_revealer.set_reveal_child(true);
     // Format picked: the Add button earns its text label.
     v.add_btn.set_icon_name("");
     v.add_btn.remove_css_class("circular");
@@ -257,16 +264,22 @@ fn show_video_ready(v: &VideoStep) {
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
     hide_video_step(v);
-    v.group.set_visible(true);
     v.tools.set_subtitle(message);
     v.tools.set_visible(true);
+    // Reveal after the row is shown: set_visible(true) first so the
+    // SlideDown has a mapped widget to animate (see slide_down_revealer).
+    v.group_revealer.set_visible(true);
+    v.group_revealer.set_reveal_child(true);
 }
 
 fn show_video_error(v: &VideoStep, message: &str) {
     hide_video_step(v);
-    v.group.set_visible(true);
     v.error.set_subtitle(message);
     v.error.set_visible(true);
+    // Reveal after the row is shown: set_visible(true) first so the
+    // SlideDown has a mapped widget to animate (see slide_down_revealer).
+    v.group_revealer.set_visible(true);
+    v.group_revealer.set_reveal_child(true);
 }
 
 /// Desensitize the form's Add button while a lookup is in flight (a dead
@@ -1163,6 +1176,24 @@ impl AddCard {
     }
 }
 
+/// A SlideDown revealer that owns its visibility: starts hidden, and hides
+/// itself once the slide-up finishes (a collapsed revealer keeps occupying
+/// the parent box's spacing otherwise). Callers reveal with
+/// `set_visible(true)` + `set_reveal_child(true)` and collapse with
+/// `set_reveal_child(false)`; the child-revealed handler below does the
+/// rest. Used by the options, preview-block, and schedule sections.
+fn slide_down_revealer() -> gtk4::Revealer {
+    let revealer = gtk4::Revealer::builder()
+        .transition_type(gtk4::RevealerTransitionType::SlideDown)
+        .reveal_child(false)
+        .build();
+    revealer.set_visible(false);
+    revealer.connect_child_revealed_notify(|r| {
+        r.set_visible(r.is_child_revealed());
+    });
+    revealer
+}
+
 /// Build the inline New Download card. The returned [`AddCard`] owns the
 /// widget and the open/toggle entry points; the card starts collapsed.
 pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
@@ -1259,11 +1290,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // Download options live in a revealer directly under the URL row: the
     // card opens compact, one tap on the gear reveals file name, torrent,
     // and destination inline.
-    let opts_revealer = gtk4::Revealer::builder()
-        .transition_type(gtk4::RevealerTransitionType::SlideDown)
-        .reveal_child(false)
-        .visible(false)
-        .build();
+    let opts_revealer = slide_down_revealer();
     // Explicit handler (not a property binding): visible comes first so
     // the slide-down still animates — a reveal set while hidden would
     // just snap open — and the revealer is only hidden once the slide-up
@@ -1277,12 +1304,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             }
             revealer.set_reveal_child(active);
         });
-        // A collapsed revealer keeps occupying the parent box's spacing:
-        // hide it once the slide-up finishes so no dead gap stays under
-        // the URL row.
-        opts_revealer.connect_child_revealed_notify(|r| {
-            r.set_visible(r.is_child_revealed());
-        });
     }
     form.append(&opts_revealer);
 
@@ -1290,7 +1311,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // HIG AdwPreferencesGroup: title/description are built-in, rows get the
     // 12px internal margins natively.
     let video_group = adw::PreferencesGroup::new();
-    video_group.set_visible(false);
     let video_name = adw::EntryRow::builder().title(gettext("File name")).build();
     let video_revert_btn = gtk4::Button::builder()
         .icon_name("edit-undo-symbolic")
@@ -1338,10 +1358,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_error.add_suffix(&video_retry_btn);
     video_error.set_visible(false);
     video_group.add(&video_error);
+    // The preview block slides down like the options section: the revealer
+    // owns show/hide.
+    let video_revealer = slide_down_revealer();
+    video_revealer.set_child(Some(&video_group));
     let step = Rc::new(VideoStep {
         action_slot,
         url_spinner: url_spinner.clone(),
-        group: video_group.clone(),
+        group_revealer: video_revealer.clone(),
         name: video_name,
         revert: video_revert_btn,
         format: video_format,
@@ -1352,7 +1376,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     });
     // Card-local choices: the format is initialized from Preferences (not
     // bound). Exact picks are per lookup, so nothing persists here.
-    form.append(&video_group);
+    form.append(&video_revealer);
 
     // Download options: HIG AdwPreferencesGroup, no header — the rows
     // speak for themselves. Rows get the 12px internal margins natively.
@@ -1408,15 +1432,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // and AdwSpinRow must be placed in a GtkListBox (which PreferencesGroup
     // provides), not a plain GtkBox — Adwaita warns otherwise.
     let schedule_group = adw::PreferencesGroup::new();
-    let schedule_revealer = gtk4::Revealer::builder()
-        .transition_type(gtk4::RevealerTransitionType::SlideDown)
-        .reveal_child(false)
-        .build();
+    let schedule_revealer = slide_down_revealer();
     schedule_revealer.set_child(Some(&schedule_group));
-    // Starts hidden: a collapsed revealer still occupies the parent box's
-    // spacing, so it is only made visible while revealed (see the
-    // child-revealed handler below).
-    schedule_revealer.set_visible(false);
 
     // Date picker: MenuButton opens a popover with GtkCalendar (HIG: no text
     // entry for dates). GTK/libadwaita provide no stock date picker, so this
@@ -1498,12 +1515,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             } else {
                 scheduled_at_c2.set(None);
             }
-        });
-        // A collapsed revealer keeps occupying the parent box's spacing:
-        // hide it once the slide-up finishes so no dead gap stays under
-        // the options card.
-        schedule_revealer.connect_child_revealed_notify(|r| {
-            r.set_visible(r.is_child_revealed());
         });
     }
     // The schedule rows are their own card under the options: separate

@@ -23,7 +23,9 @@ pub use crate::video_prefs::{
 };
 /// Facade: page probing + playlist parsing lives in
 /// [`video_probe`](crate::video_probe) now.
-pub use crate::video_probe::{drive_direct_url, is_direct_file_url, is_http_url};
+pub use crate::video_probe::{
+    drive_direct_url, is_direct_file_url, is_http_url, is_stream_manifest_url,
+};
 /// Facade: quality ladder lives in [`video_quality`](crate::video_quality) now.
 pub use crate::video_quality::{
     default_quality_index, default_video_filename, quality_for_height, quality_labels,

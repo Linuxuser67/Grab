@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.6.1" date="2026-10-01">
+      <description>
+        <ul>
+          <li>The title and media-format section now slides down after a link is resolved, instead of appearing instantly.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.6.0" date="2026-10-01">
       <description>
         <ul>

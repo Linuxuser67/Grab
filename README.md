@@ -77,6 +77,14 @@ flatpak override --user --filesystem=~/.config/<browser-dir>:ro io.github.linuxu
 
 Undo with `flatpak override --user --reset io.github.linuxuser67.Grab`.
 
+## Browser extension
+
+Send browser downloads and links straight to Grab with the
+[Grab browser extension](https://github.com/Linuxuser67/Grab-browser-extension)
+(for Chromium-based browsers): automatic download interception with a
+configurable minimum size, toolbar button, `Alt+G` shortcut, and a right-click
+menu.
+
 ## Notes for packagers
 
 Flatpak-only.

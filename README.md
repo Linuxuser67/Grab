@@ -11,7 +11,6 @@ A download manager for GNOME. Built with GTK 4 and libadwaita.
 
 ## Screenshots
 
-| :--: | :--: |
 | --- | --- |
 | <img src="screenshots/dark-live.png" alt="Grab main window with a live stream recording and a download resuming" width="400"><br><em>Live stream recording alongside active downloads</em> | <img src="screenshots/dark-downloads.png" alt="Grab main window with an active video download and block map" width="400"><br><em>Active downloads with per-block progress maps</em> |
 | <img src="screenshots/dark-torrent.png" alt="Grab main window with an active torrent download" width="400"><br><em>Torrent download with segmented filter (All / Active / Queued / Downloaded)</em> | <img src="screenshots/dark-new-download.png" alt="New Download card with URL, file name and media format picker" width="400"><br><em>New Download card with inline media format picker</em> |

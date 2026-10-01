@@ -1067,6 +1067,43 @@ fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
     v.add_btn.set_label(&gettext("Add"));
 }
 
+/// The New Download card's open state, decoupled from the widgets: every
+/// flip notifies one listener, so the header `+` toggle mirrors closes
+/// from Escape, a successful add, or the toggle itself — not just its own
+/// clicks. Widget-free so the notify-on-flip protocol is unit-testable
+/// (widget creation segfaults headless, so CI can't cover it there).
+/// Fired on every open-state flip with the new state.
+type OnFlip = Rc<dyn Fn(bool)>;
+
+#[derive(Default)]
+struct OpenState {
+    open: Cell<bool>,
+    on_flip: RefCell<Option<OnFlip>>,
+}
+
+impl OpenState {
+    /// Set the state; the listener fires only on an actual flip, so a
+    /// redundant open (focus grab on an already-open card) stays silent.
+    fn set(&self, open: bool) {
+        if self.open.get() == open {
+            return;
+        }
+        self.open.set(open);
+        if let Some(cb) = self.on_flip.borrow().as_ref() {
+            cb(open);
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        self.open.get()
+    }
+
+    /// The single state mirror (the header toggle). Replaces any previous.
+    fn set_on_flip(&self, cb: impl Fn(bool) + 'static) {
+        *self.on_flip.borrow_mut() = Some(Rc::new(cb));
+    }
+}
+
 /// Handle for the inline New Download card: the widget to pin under the
 /// header plus the open/toggle entry points the header button, the
 /// empty-state button, the `add-download` action, and application-open URLs
@@ -1077,6 +1114,7 @@ pub struct AddCard {
     open: Rc<dyn Fn(Option<String>)>,
     toggle: Rc<dyn Fn()>,
     open_torrent_picker: TorrentPickerOpener,
+    state: Rc<OpenState>,
 }
 
 impl AddCard {
@@ -1094,9 +1132,20 @@ impl AddCard {
 
     /// Shared toggle for every New Download affordance (header `+`,
     /// Ctrl+N, the empty-state pill): reveal a fresh card, or retract the
-    /// open one (which resets it, like Cancel/Escape).
+    /// open one (which resets it, like the header toggle/Escape).
     pub fn toggle(&self) {
         (self.toggle)()
+    }
+
+    /// Whether the card is currently revealed.
+    pub fn is_open(&self) -> bool {
+        self.state.is_open()
+    }
+
+    /// Mirror the card's open state onto the header `+` toggle: fires on
+    /// every flip, whichever path caused it.
+    pub fn set_on_state_changed(&self, cb: impl Fn(bool) + 'static) {
+        self.state.set_on_flip(cb);
     }
 
     /// Push the multi-file torrent picker for an already-read .torrent
@@ -1114,7 +1163,7 @@ impl AddCard {
 /// Build the inline New Download card. The returned [`AddCard`] owns the
 /// widget and the open/toggle entry points; the card starts collapsed.
 pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
-    let is_open = Rc::new(Cell::new(false));
+    let open_state = Rc::new(OpenState::default());
     // Shared scheduled-download timestamp: set by the schedule picker UI,
     // read by every enqueue path. None = start immediately.
     let scheduled_at: Rc<Cell<Option<i64>>> = Rc::new(Cell::new(None));
@@ -1139,18 +1188,17 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // No in-card title: the card only opens from explicit "New Download"
     // affordances (+, Ctrl+N, the empty-state pill), so restating it is
     // redundant. The navigation page below keeps the accessible name.
-    // Dismissal lives in the URL row with the other actions — an inline
-    // card has no window controls.
-    let cancel_btn = gtk4::Button::builder()
-        .icon_name("window-close-symbolic")
-        .css_classes(["flat", "circular"])
-        .tooltip_text(gettext("Cancel"))
-        .valign(gtk4::Align::Center)
-        .build();
-    cancel_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Cancel"))]);
+    // Dismissal is the header `+` toggle (now stateful) and Escape — the
+    // card has no window controls, and a fourth URL-row action was noise
+    // next to Add/options.
 
     let nav = adw::NavigationView::new();
-    card.append(&nav);
+    // HIG form sizing: cap the card at 600px on wide windows instead of
+    // stretching the URL field with the window. AdwClamp hands the child
+    // the full width below the threshold, so narrow windows are untouched.
+    let clamp = adw::Clamp::builder().maximum_size(600).build();
+    clamp.set_child(Some(&nav));
+    card.append(&clamp);
     revealer.set_child(Some(&card));
 
     // Form page: URL row (entry + Add), the video preview block, then the
@@ -1203,7 +1251,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         "Download options",
     ))]);
     url_bar.append(&opts_toggle);
-    url_bar.append(&cancel_btn);
     form.append(&url_bar);
 
     // Download options live in a revealer directly under the URL row: the
@@ -1512,7 +1559,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // old dialog: reopening always starts clean, including the destination.
     let close_card: Rc<dyn Fn()> = {
         let revealer = revealer.clone();
-        let is_open = Rc::clone(&is_open);
+        let open_state = Rc::clone(&open_state);
         let probe = Rc::clone(&probe);
         let url_entry = url_entry.clone();
         let file_row = file_row.clone();
@@ -1527,7 +1574,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let scheduled_at = Rc::clone(&scheduled_at);
         let schedule_switch = schedule_switch.clone();
         Rc::new(move || {
-            is_open.set(false);
+            open_state.set(false);
             // Cancel any in-flight probe and drop its state; the
             // generation bump discards the stale completion.
             probe.borrow_mut().reset();
@@ -2137,7 +2184,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         });
     }
 
-    // Escape collapses the card; Cancel does the same.
+    // Escape collapses the card.
     {
         let key = gtk4::EventControllerKey::new();
         let close_card = close_card.clone();
@@ -2151,26 +2198,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         });
         card.add_controller(key);
     }
-    {
-        let close_card = close_card.clone();
-        cancel_btn.connect_clicked(move |_| close_card());
-    }
 
     // Open/toggle entry points.
     let reveal = {
         let revealer = revealer.clone();
-        let is_open = Rc::clone(&is_open);
+        let open_state = Rc::clone(&open_state);
         Rc::new(move || {
-            is_open.set(true);
+            open_state.set(true);
             revealer.set_reveal_child(true);
         })
     };
     let open = {
         let reveal = Rc::clone(&reveal);
-        let is_open = Rc::clone(&is_open);
+        let open_state = Rc::clone(&open_state);
         let url_entry = url_entry.clone();
         Rc::new(move |initial_url: Option<String>| {
-            let already = is_open.get();
+            let already = open_state.is_open();
             reveal();
             // Dropped/opened URLs land here pre-filled: setting the text syncs the form, and the
             // lookup itself starts on Add/Enter like any other entry.
@@ -2203,10 +2246,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     };
     let toggle = {
         let open = Rc::clone(&open);
-        let is_open = Rc::clone(&is_open);
+        let open_state = Rc::clone(&open_state);
         let close_card = Rc::clone(&close_card);
         Rc::new(move || {
-            if is_open.get() {
+            if open_state.is_open() {
                 close_card();
             } else {
                 open(None);
@@ -2244,6 +2287,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         open,
         toggle,
         open_torrent_picker,
+        state: Rc::clone(&open_state),
     }
 }
 
@@ -2444,5 +2488,27 @@ mod tests {
             "/default",
             "close ran with the destination borrow released"
         );
+    }
+
+    /// The header `+` toggle mirrors the card through this protocol: every
+    /// flip notifies exactly once, whatever path caused it (toggle click,
+    /// Escape, successful enqueue).
+    #[test]
+    fn open_state_notifies_only_on_flip() {
+        let st = OpenState::default();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        {
+            let seen = Rc::clone(&seen);
+            st.set_on_flip(move |open| seen.borrow_mut().push(open));
+        }
+        assert!(!st.is_open());
+        st.set(true);
+        assert!(st.is_open());
+        // Redundant set: no second notification.
+        st.set(true);
+        st.set(false);
+        assert!(!st.is_open());
+        st.set(true);
+        assert_eq!(*seen.borrow(), vec![true, false, true]);
     }
 }

@@ -252,7 +252,10 @@ pub fn build_window(
     search_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext("Search"))]);
     header.pack_end(&search_toggle);
 
-    let add_btn = gtk4::Button::builder()
+    // Stateful toggle: reflects the card's open state (set_on_state_changed
+    // mirrors Escape / successful-add / toggle closes too), so the button
+    // itself is the dismissal affordance — no separate close button needed.
+    let add_btn = gtk4::ToggleButton::builder()
         .icon_name("list-add-symbolic")
         .css_classes(["suggested-action"])
         .tooltip_text(gettext("New Download (Ctrl+N)"))
@@ -260,7 +263,22 @@ pub fn build_window(
     add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("New Download"))]);
     {
         let card = add_card.clone();
-        add_btn.connect_clicked(move |_| card.toggle());
+        add_btn.connect_toggled(move |btn| {
+            // Guard: state-changed callbacks land here via set_active, and
+            // set_active to the current value emits nothing, so this only
+            // fires on a genuine user flip — no feedback loop.
+            if btn.is_active() != card.is_open() {
+                card.toggle();
+            }
+        });
+    }
+    {
+        let weak = add_btn.downgrade();
+        add_card.set_on_state_changed(move |open| {
+            if let Some(btn) = weak.upgrade() {
+                btn.set_active(open);
+            }
+        });
     }
     header.pack_end(&add_btn);
 

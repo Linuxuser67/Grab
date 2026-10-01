@@ -15,8 +15,8 @@ use crate::download_rate::{fmt_eta, format_amounts, live_rate_limit, parse_rate}
 use crate::download_row::DownloadItem;
 use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
 use crate::file_names::{
-    PIECE_MAX, PIECE_MIN, dedupe_filename, filename_from_url, piece_len, rename_noreplace,
-    restrict_filename_ascii, shorten_filename,
+    PIECE_MAX, PIECE_MIN, dedupe_filename, filename_from_url, path_size, piece_len,
+    rename_noreplace, restrict_filename_ascii, shorten_filename,
 };
 
 use crate::video::test_support::NoVideoTools;
@@ -1507,8 +1507,7 @@ fn path_size_async_measures_off_thread() {
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::write(dir.join("a.bin"), vec![0u8; 100]).unwrap();
     std::fs::write(sub.join("b.bin"), vec![0u8; 200]).unwrap();
-    let size =
-        glib::MainContext::new().block_on(crate::file_names::path_size_async(dir.clone()));
+    let size = glib::MainContext::new().block_on(crate::file_names::path_size_async(dir.clone()));
     assert_eq!(size, Some(300));
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,7 +1,7 @@
 use crate::engine_msg::{DEST_EXISTS, EngineMsg};
 use crate::file_names::{
-    dedupe_filename, filename_from_url, fmt_bytes, name_stem, path_size, piece_len,
-    rename_noreplace, restrict_filename_ascii, sane_filename, shorten_filename,
+    dedupe_filename, filename_from_url, fmt_bytes, name_stem, piece_len, rename_noreplace,
+    restrict_filename_ascii, sane_filename, shorten_filename,
 };
 use crate::runtime::tokio_rt;
 use gettextrs::{gettext, ngettext};
@@ -872,6 +872,30 @@ impl DownloadManager {
         item
     }
 
+    /// "Finished • {size}" detail with the size measured off the GTK thread.
+    /// `measure_disk_usage` is a recursive scan that can stall the main loop on
+    /// large folders, so the label paints immediately with `size` (the engine's
+    /// figure, 0 for plain "Finished") and is refined when the measurement lands.
+    /// A row that is gone by then simply never gets the update.
+    fn set_finished_detail(item: &DownloadItem, size: u64) {
+        item.set_detail(if size > 0 {
+            gettext("Finished • {size}").replace("{size}", &fmt_bytes(size))
+        } else {
+            gettext("Finished")
+        });
+        let weak = item.downgrade();
+        let path = item.file_path();
+        glib::spawn_future_local(async move {
+            let measured = crate::file_names::path_size_async(path)
+                .await
+                .filter(|m| *m > 0);
+            let (Some(item), Some(measured)) = (weak.upgrade(), measured) else {
+                return;
+            };
+            item.set_detail(gettext("Finished • {size}").replace("{size}", &fmt_bytes(measured)));
+        });
+    }
+
     fn insert_history(
         self: &Rc<Self>,
         url: String,
@@ -905,13 +929,10 @@ impl DownloadManager {
         if let Some(folder) = output_dir {
             item.set_output_dir(folder);
         }
-        // Size off the final path: the engine measured the pre-rename one. Folders sum contents.
-        let size = path_size(&item.file_path()).unwrap_or(0);
-        item.set_detail(if size > 0 {
-            gettext("Finished • {size}").replace("{size}", &fmt_bytes(size))
-        } else {
-            gettext("Finished")
-        });
+        // Size off the final path, measured off-thread: the engine measured the
+        // pre-rename one, and folders sum contents. Paints "Finished" now,
+        // refines with the measured size when it lands.
+        Self::set_finished_detail(&item, 0);
         // Restored duplicates collapse too: the last Done row per URL wins.
         self.drop_finished_duplicates(&url, item.id());
         // Keep the row's media identity: a restored video page must not fall
@@ -1263,8 +1284,11 @@ impl DownloadManager {
                                     item.set_filename(final_name);
                                 }
                             }
-                            // Size off the final path (see `insert_history`): the engine measured the pre-rename one.
-                            let size = path_size(&item.file_path()).unwrap_or(size);
+                            // Size off the final path, measured off-thread (see
+                            // `set_finished_detail`): the engine measured the
+                            // pre-rename one. Paints the engine's size now,
+                            // refines with the measured size when it lands.
+                            Self::set_finished_detail(&item, size);
                             // Server file date, when asked: best-effort, never fails the row.
                             let mtime = this.server_mtime.borrow_mut().remove(&id);
                             if this.settings.keep_server_date()
@@ -1275,11 +1299,6 @@ impl DownloadManager {
                             }
                             item.set_progress(1.0);
                             item.set_status(DownloadStatus::Done);
-                            item.set_detail(if size > 0 {
-                                gettext("Finished • {size}").replace("{size}", &fmt_bytes(size))
-                            } else {
-                                gettext("Finished")
-                            });
                             // One finished record per URL (Parabolic parity): re-downloads replace instead of stacking.
                             this.drop_finished_duplicates(&url, id);
                             this.segment_state.borrow_mut().remove(&id);

@@ -11,11 +11,55 @@ A download manager for GNOME. Built with GTK 4 and libadwaita.
 
 ## Screenshots
 
-| --- | --- |
-| <img src="screenshots/dark-live.png" alt="Grab main window with a live stream recording and a download resuming" width="400"><br><em>Live stream recording alongside active downloads</em> | <img src="screenshots/dark-downloads.png" alt="Grab main window with an active video download and block map" width="400"><br><em>Active downloads with per-block progress maps</em> |
-| <img src="screenshots/dark-torrent.png" alt="Grab main window with an active torrent download" width="400"><br><em>Torrent download with segmented filter (All / Active / Queued / Downloaded)</em> | <img src="screenshots/dark-new-download.png" alt="New Download card with URL, file name and media format picker" width="400"><br><em>New Download card with inline media format picker</em> |
-| <picture><source media="(prefers-color-scheme: dark)" srcset="screenshots/dark-empty.png"><img src="screenshots/light-empty.png" alt="Grab empty state" width="400"></picture><br><em>Empty state</em> | <img src="screenshots/light-prefs-network.png" alt="Grab preferences, Network tab" width="400"><br><em>Preferences: simultaneous downloads, connections, retries, speed limit</em> |
-| <img src="screenshots/light-prefs-torrent.png" alt="Grab preferences, Torrent tab" width="400"><br><em>Preferences: seeding, DHT, and peer limit</em> | |
+<table>
+  <tr>
+    <td align="center">
+      <img src="screenshots/dark-live.png" alt="Grab main window with a live stream recording and a download resuming" width="400">
+      <br>
+      <em>Live stream recording alongside active downloads</em>
+    </td>
+    <td align="center">
+      <img src="screenshots/dark-downloads.png" alt="Grab main window with an active video download and block map" width="400">
+      <br>
+      <em>Active downloads with per-block progress maps</em>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="screenshots/dark-torrent.png" alt="Grab main window with an active torrent download" width="400">
+      <br>
+      <em>Torrent download with segmented filter (All / Active / Queued / Downloaded)</em>
+    </td>
+    <td align="center">
+      <img src="screenshots/dark-new-download.png" alt="New Download card with URL, file name and media format picker" width="400">
+      <br>
+      <em>New Download card with inline media format picker</em>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="screenshots/dark-empty.png">
+        <img src="screenshots/light-empty.png" alt="Grab empty state" width="400">
+      </picture>
+      <br>
+      <em>Empty state</em>
+    </td>
+    <td align="center">
+      <img src="screenshots/light-prefs-network.png" alt="Grab preferences, Network tab" width="400">
+      <br>
+      <em>Preferences: simultaneous downloads, connections, retries, speed limit</em>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="screenshots/light-prefs-torrent.png" alt="Grab preferences, Torrent tab" width="400">
+      <br>
+      <em>Preferences: seeding, DHT, and peer limit</em>
+    </td>
+    <td></td>
+  </tr>
+</table>
 
 ## Install
 

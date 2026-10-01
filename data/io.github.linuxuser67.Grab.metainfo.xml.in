@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.6.0" date="2026-10-01">
+      <description>
+        <ul>
+          <li>Stream links (.mpd, .m3u8, .m3u, .pls) now open the New Download card instead of saving the playlist as a file.</li>
+          <li>The download options panel now slides open and closed.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.9" date="2026-10-01">
       <description>
         <ul>

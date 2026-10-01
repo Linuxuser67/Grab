@@ -1496,6 +1496,24 @@ fn path_size_sums_folders() {
 }
 
 #[test]
+fn path_size_async_measures_off_thread() {
+    // The async wrapper must actually measure, not just resolve: a stub that
+    // returns None without scanning would leave finished rows unsized.
+    // MAIN_LOOP_LOCK: glib futures abort if polled from the wrong thread.
+    let _loop = MAIN_LOOP_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("grab-path-size-async-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(dir.join("a.bin"), vec![0u8; 100]).unwrap();
+    std::fs::write(sub.join("b.bin"), vec![0u8; 200]).unwrap();
+    let size =
+        glib::MainContext::new().block_on(crate::file_names::path_size_async(dir.clone()));
+    assert_eq!(size, Some(300));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn formats_eta() {
     assert_eq!(fmt_eta(0), "0 seconds");
     assert_eq!(fmt_eta(1), "1 second");

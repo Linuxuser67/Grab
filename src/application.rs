@@ -37,6 +37,59 @@ fn is_remote_torrent_url(uri: &url::Url) -> bool {
 /// Fetch a remote .torrent URL and run it through the torrent intake, mirroring
 /// the local .torrent file path: the picker for multi-file torrents, direct
 /// enqueue otherwise.
+/// How long a remote .torrent fetch may take overall (headers + body).
+/// Per-request, not on the shared client builder: a total timeout there
+/// would kill slow legitimate downloads too.
+const TORRENT_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What went wrong fetching a remote .torrent.
+#[derive(Debug, PartialEq, Eq)]
+enum TorrentFetchError {
+    Failed(String),
+    TimedOut,
+    TooLarge,
+}
+
+/// Fetch a remote .torrent's bytes with a streaming size cap. Separated from
+/// the toast/picker plumbing so the timeout and the cap are unit-testable.
+async fn fetch_remote_torrent_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, TorrentFetchError> {
+    // .torrent files are tiny; refuse absurd payloads before buffering them.
+    const MAX_TORRENT_BYTES: u64 = 10 * 1024 * 1024;
+    let failed = |e: reqwest::Error| {
+        if e.is_timeout() {
+            TorrentFetchError::TimedOut
+        } else {
+            TorrentFetchError::Failed(e.to_string())
+        }
+    };
+    let resp = client
+        .get(url)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(failed)?;
+    let resp = resp.error_for_status().map_err(failed)?;
+    // Enforce the cap while streaming: content_length is advisory, so a
+    // hostile endpoint must not be able to fill memory before we notice.
+    let mut bytes = Vec::new();
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(failed)?;
+            if (bytes.len() as u64) + (chunk.len() as u64) > MAX_TORRENT_BYTES {
+                return Err(TorrentFetchError::TooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+    }
+    Ok(bytes)
+}
+
 async fn intake_remote_torrent(
     manager: Rc<DownloadManager>,
     toasts: Rc<adw::ToastOverlay>,
@@ -45,48 +98,31 @@ async fn intake_remote_torrent(
     url: String,
     file_name: String,
 ) {
-    // .torrent files are tiny; refuse absurd payloads before buffering them.
-    const MAX_TORRENT_BYTES: u64 = 10 * 1024 * 1024;
     let fail = |msg: String| {
         toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&msg)));
     };
-    let fetch_err =
-        |e: reqwest::Error| format!("{}: {e}", gettext("Could not fetch that .torrent link"));
-    let resp = match client.get(&url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            fail(fetch_err(e));
+    let bytes = match fetch_remote_torrent_bytes(&client, &url, TORRENT_FETCH_TIMEOUT).await {
+        Ok(b) => b,
+        Err(TorrentFetchError::TooLarge) => {
+            fail(gettext("That .torrent link is too large"));
+            return;
+        }
+        Err(TorrentFetchError::TimedOut) => {
+            fail(format!(
+                "{}: {}",
+                gettext("Could not fetch that .torrent link"),
+                gettext("timed out")
+            ));
+            return;
+        }
+        Err(TorrentFetchError::Failed(e)) => {
+            fail(format!(
+                "{}: {e}",
+                gettext("Could not fetch that .torrent link")
+            ));
             return;
         }
     };
-    let resp = match resp.error_for_status() {
-        Ok(r) => r,
-        Err(e) => {
-            fail(fetch_err(e));
-            return;
-        }
-    };
-    // Enforce the cap while streaming: content_length is advisory, so a
-    // hostile endpoint must not be able to fill memory before we notice.
-    let mut bytes = Vec::new();
-    {
-        use futures_util::StreamExt as _;
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = match chunk {
-                Ok(c) => c,
-                Err(e) => {
-                    fail(fetch_err(e));
-                    return;
-                }
-            };
-            if (bytes.len() as u64) + (chunk.len() as u64) > MAX_TORRENT_BYTES {
-                fail(gettext("That .torrent link is too large"));
-                return;
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-    }
     let stem = std::path::Path::new(&file_name)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -108,20 +144,113 @@ async fn intake_remote_torrent(
 
 /// Restore the original URL from a browser-extension handoff.
 ///
-/// The extension sends `grab://<url-without-scheme>` (the `http(s)://` prefix
-/// is stripped because the custom scheme replaces it); the desktop entry
-/// registers Grab as the `x-scheme-handler/grab` handler. Anything that is
-/// not a `grab:` URI is returned unchanged.
+/// The extension sends `grab://<scheme>/<url-without-scheme>` (the `http://`
+/// or `https://` prefix is carried as the first path segment because the
+/// custom scheme replaces it); the desktop entry registers Grab as the
+/// `x-scheme-handler/grab` handler. Older extension versions sent
+/// `grab://<url-without-scheme>` with no scheme marker — those default to
+/// https, the previous behavior. `grab://magnet:...` passes through as a
+/// magnet link. Anything that is not a `grab:` URI is returned unchanged.
 fn normalize_grab_uri(raw: &str) -> String {
-    raw.parse::<url::Url>()
+    let Some(u) = raw
+        .parse::<url::Url>()
         .ok()
         .filter(|u| u.scheme() == "grab")
-        .and_then(|u| {
-            u.as_str()
-                .strip_prefix("grab://")
-                .map(|rest| format!("https://{rest}"))
-        })
-        .unwrap_or_else(|| raw.to_string())
+    else {
+        return raw.to_string();
+    };
+    // Magnet links: match the raw text, because parsing turns the ':' into
+    // a query delimiter ("grab://magnet:?xt=..." parses with host "magnet").
+    // .get(..7): byte index 7 may split a multi-byte char in a crafted URI.
+    if let Some(rest) = raw.strip_prefix("grab://")
+        && rest
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("magnet:"))
+    {
+        return format!("magnet:{}", &rest[7..]);
+    }
+    let Some(rest) = u.as_str().strip_prefix("grab://") else {
+        return raw.to_string();
+    };
+    let (scheme, rest) = match rest.split_once('/') {
+        Some(("http", r)) => ("http", r),
+        Some(("https", r)) => ("https", r),
+        _ => ("https", rest),
+    };
+    format!("{scheme}://{rest}")
+}
+
+/// True for `grab:` handoffs that would enqueue on their own: plain files,
+/// magnets, and remote `.torrent` fetches. Video pages and stream manifests
+/// land on the New Download card, whose Add button is already the user's
+/// confirmation — they skip the dialog.
+fn grab_handoff_needs_confirm(uri: &url::Url) -> bool {
+    !(crate::video::is_video_page(uri.as_str())
+        || crate::video::is_stream_manifest_url(uri.as_str()))
+}
+
+/// `grab:` handoffs bypass the intake's URL normalization, so re-apply its
+/// userinfo rejection here: credentials must never be sent to a server as
+/// Basic auth on a torrent fetch.
+fn check_remote_torrent_uri(uri: &url::Url) -> Result<(), String> {
+    if !uri.username().is_empty() || uri.password().is_some() {
+        return Err(gettext("URLs with a username/password are not supported"));
+    }
+    Ok(())
+}
+
+/// Route one opened URI: remote .torrent fetch, video card pre-fill, or plain
+/// enqueue. Extracted from `connect_open` so the extension-handoff confirm
+/// dialog can run it after the user approves.
+fn route_open_uri(
+    manager: Rc<DownloadManager>,
+    toasts: Rc<adw::ToastOverlay>,
+    add_card: crate::inline_add::AddCard,
+    settings: AppSettings,
+    uri: url::Url,
+) {
+    // Remote .torrent files: fetch the bytes and run the
+    // torrent intake instead of saving the .torrent itself.
+    if is_remote_torrent_url(&uri) {
+        if let Err(e) = check_remote_torrent_uri(&uri) {
+            toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+            return;
+        }
+        let url = uri.as_str().to_string();
+        let file_name = uri
+            .path()
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("download.torrent")
+            .to_string();
+        // The fetch honors the proxy settings like any other download.
+        let proxy =
+            match crate::download_net::DownloadOptions::from_settings(&settings).proxy_config() {
+                Ok(p) => p,
+                Err(e) => {
+                    toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+                    return;
+                }
+            };
+        let client = crate::download_net::http_client_for(proxy.as_ref());
+        glib::spawn_future_local(intake_remote_torrent(
+            manager, toasts, add_card, client, url, file_name,
+        ));
+        return;
+    }
+    // Video pages and stream manifests take the inline card path
+    // (pre-filled): plain enqueue would save the raw page — or the
+    // manifest XML — as a file. The card probes manifests for video.
+    if crate::video::is_video_page(uri.as_str())
+        || crate::video::is_stream_manifest_url(uri.as_str())
+    {
+        add_card.open(Some(uri.as_str().to_string()));
+        return;
+    }
+    if let Err(e) = manager.enqueue(uri.as_str(), None, None) {
+        toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+    }
 }
 
 pub fn setup(app: &adw::Application) {
@@ -176,57 +305,47 @@ pub fn setup(app: &adw::Application) {
             for f in files {
                 // grab: links arrive here from the browser extension; restore
                 // the original URL so the normal routing below applies.
+                let via_grab = f
+                    .uri()
+                    .parse::<url::Url>()
+                    .is_ok_and(|u| u.scheme() == "grab");
                 let uri_text = normalize_grab_uri(&f.uri());
                 // magnet: links arrive here when Grab is the system's magnet
                 // handler; enqueue validates them like pasted links.
                 if let Ok(uri) = uri_text.parse::<url::Url>()
                     && matches!(uri.scheme(), "http" | "https" | "magnet")
                 {
-                    // Remote .torrent files: fetch the bytes and run the
-                    // torrent intake instead of saving the .torrent itself.
-                    if is_remote_torrent_url(&uri) {
-                        let (manager, toasts, add_card) =
-                            (s.manager.clone(), s.toasts.clone(), s.add_card.clone());
-                        let url = uri.as_str().to_string();
-                        let file_name = uri
-                            .path()
-                            .rsplit('/')
-                            .next()
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("download.torrent")
-                            .to_string();
-                        // The fetch honors the proxy settings like any other download.
-                        let proxy =
-                            match crate::download_net::DownloadOptions::from_settings(&s.settings)
-                                .proxy_config()
-                            {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    s.toasts.add_toast(adw::Toast::new(
-                                        &crate::ui_util::esc_markup(&e),
-                                    ));
-                                    continue;
-                                }
-                            };
-                        let client = crate::download_net::http_client_for(proxy.as_ref());
-                        glib::spawn_future_local(intake_remote_torrent(
-                            manager, toasts, add_card, client, url, file_name,
-                        ));
+                    // Extension handoffs that would enqueue on their own need
+                    // an explicit OK first: any web page can fire grab: links.
+                    if via_grab && grab_handoff_needs_confirm(&uri) {
+                        let window = s.window.clone();
+                        let (manager, toasts, add_card, settings) = (
+                            s.manager.clone(),
+                            s.toasts.clone(),
+                            s.add_card.clone(),
+                            s.settings.clone(),
+                        );
+                        let shown = uri.clone();
+                        confirm_download(&window, &shown, move || {
+                            // The dialog may invoke this more than once in
+                            // theory; clone per call so the closure stays Fn.
+                            route_open_uri(
+                                manager.clone(),
+                                toasts.clone(),
+                                add_card.clone(),
+                                settings.clone(),
+                                uri.clone(),
+                            );
+                        });
                         continue;
                     }
-                    // Video pages and stream manifests take the inline card path
-                    // (pre-filled): plain enqueue would save the raw page — or the
-                    // manifest XML — as a file. The card probes manifests for video.
-                    if crate::video::is_video_page(uri.as_str())
-                        || crate::video::is_stream_manifest_url(uri.as_str())
-                    {
-                        s.add_card.open(Some(uri.as_str().to_string()));
-                        continue;
-                    }
-                    if let Err(e) = s.manager.enqueue(uri.as_str(), None, None) {
-                        s.toasts
-                            .add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
-                    }
+                    route_open_uri(
+                        s.manager.clone(),
+                        s.toasts.clone(),
+                        s.add_card.clone(),
+                        s.settings.clone(),
+                        uri,
+                    );
                     continue;
                 }
                 if let Some(path) = f.path() {
@@ -324,6 +443,34 @@ fn destructive_confirm(
     dialog.set_close_response("cancel");
     dialog.connect_response(None, move |_, response| {
         if response == "confirm" {
+            on_confirm();
+        }
+    });
+    dialog.present(Some(parent));
+}
+
+/// Confirm dialog for browser-extension handoffs. Any web page can fire
+/// `grab:` links, so handoffs that would enqueue on their own (plain files,
+/// magnets, remote `.torrent` fetches) only proceed after an explicit OK —
+/// the body shows the URL so the user sees what they are approving. Video
+/// pages and stream manifests skip this: the New Download card's Add button
+/// is already the confirmation.
+fn confirm_download(
+    parent: &impl gtk4::glib::object::IsA<gtk4::Widget>,
+    uri: &url::Url,
+    on_confirm: impl Fn() + 'static,
+) {
+    let dialog = adw::AlertDialog::builder()
+        .heading(gettext("Add this download?"))
+        .body(crate::ui_util::esc_markup(uri.as_str()))
+        .build();
+    dialog.add_response("cancel", &gettext("Cancel"));
+    dialog.add_response("download", &gettext("Download"));
+    dialog.set_response_appearance("download", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.connect_response(None, move |_, response| {
+        if response == "download" {
             on_confirm();
         }
     });
@@ -566,7 +713,11 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
 
 #[cfg(test)]
 mod tests {
-    use super::{is_remote_torrent_url, normalize_grab_uri};
+    use super::{
+        TorrentFetchError, check_remote_torrent_uri, fetch_remote_torrent_bytes,
+        grab_handoff_needs_confirm, is_remote_torrent_url, normalize_grab_uri,
+    };
+    use gettextrs::gettext;
 
     #[test]
     fn remote_torrent_url_detection() {
@@ -635,6 +786,186 @@ mod tests {
         // Produces an unparseable URL that the open handler ignores.
         let out = normalize_grab_uri("grab://");
         assert!(out.parse::<url::Url>().is_err());
+    }
+
+    #[test]
+    fn grab_uri_preserves_http_scheme() {
+        // The original scheme is irretrievably lost if the extension strips
+        // it: an http:// original must not silently become https://.
+        assert_eq!(
+            normalize_grab_uri("grab://http/example.com/file.zip"),
+            "http://example.com/file.zip"
+        );
+    }
+
+    #[test]
+    fn grab_uri_preserves_https_scheme() {
+        assert_eq!(
+            normalize_grab_uri("grab://https/example.com/file.zip"),
+            "https://example.com/file.zip"
+        );
+    }
+
+    #[test]
+    fn grab_uri_passes_magnet_through() {
+        assert_eq!(
+            normalize_grab_uri("grab://magnet:?xt=urn:btih:abc123"),
+            "magnet:?xt=urn:btih:abc123"
+        );
+        // Scheme match is case-insensitive; the rest is untouched.
+        assert_eq!(
+            normalize_grab_uri("grab://MAGNET:?xt=urn:btih:abc123"),
+            "magnet:?xt=urn:btih:abc123"
+        );
+    }
+
+    #[test]
+    fn grab_uri_unicode_prefix_never_panics() {
+        // Byte index 7 splits the multi-byte 'é': must not panic, just miss
+        // the magnet prefix and fall through to the https default.
+        let out = normalize_grab_uri("grab://xxxxxx\u{e9}yyy");
+        assert_eq!(out, "https://xxxxxx%C3%A9yyy");
+    }
+
+    #[test]
+    fn remote_torrent_rejects_userinfo() {
+        // grab: handoffs bypass the intake's normalization, so credentials
+        // must be rejected here before they reach the HTTP client.
+        for raw in [
+            "https://user:pass@example.com/x.torrent",
+            "https://:pass@example.com/x.torrent",
+        ] {
+            let uri = raw.parse::<url::Url>().unwrap();
+            assert_eq!(
+                check_remote_torrent_uri(&uri),
+                Err(gettext("URLs with a username/password are not supported")),
+                "input: {raw}"
+            );
+        }
+        let ok = "https://example.com/x.torrent".parse::<url::Url>().unwrap();
+        assert_eq!(check_remote_torrent_uri(&ok), Ok(()));
+    }
+
+    #[test]
+    fn grab_handoff_confirm_matrix() {
+        // These would enqueue on their own: the dialog must gate them.
+        for raw in [
+            "https://example.com/file.zip",
+            "http://example.com/file.zip",
+            "magnet:?xt=urn:btih:abc123",
+            "https://example.com/x.torrent",
+        ] {
+            let uri = raw.parse::<url::Url>().unwrap();
+            assert!(grab_handoff_needs_confirm(&uri), "input: {raw}");
+        }
+        // Video pages and stream manifests land on the New Download card,
+        // whose Add button is already the user's confirmation.
+        for raw in [
+            "https://www.youtube.com/watch?v=x",
+            "https://example.com/stream.m3u8",
+        ] {
+            let uri = raw.parse::<url::Url>().unwrap();
+            assert!(!grab_handoff_needs_confirm(&uri), "input: {raw}");
+        }
+    }
+
+    /// Read one HTTP request's headers, then hand the socket back. Exiting
+    /// with the request unread makes the kernel RST the connection, which
+    /// would fail the fetch with "error sending request" instead of the
+    /// intended outcome.
+    fn read_request_headers(stream: &mut std::net::TcpStream) {
+        use std::io::Read as _;
+        let mut req = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => return,
+                Ok(n) => {
+                    req.extend_from_slice(&buf[..n]);
+                    if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder().build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn torrent_fetch_returns_small_body() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request_headers(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntiny"
+            )
+            .ok();
+        });
+        let out = fetch_remote_torrent_bytes(
+            &test_client(),
+            &format!("http://{addr}/x.torrent"),
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(out, Ok(b"tiny".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn torrent_fetch_times_out_on_tarpit() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request_headers(&mut stream);
+            // Headers consumed, then silence: the client's per-request
+            // timeout must fire instead of hanging forever.
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        let out = fetch_remote_torrent_bytes(
+            &test_client(),
+            &format!("http://{addr}/x.torrent"),
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(out, Err(TorrentFetchError::TimedOut));
+    }
+
+    #[tokio::test]
+    async fn torrent_fetch_rejects_oversize_stream() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request_headers(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 11534336\r\nConnection: close\r\n\r\n"
+            )
+            .ok();
+            // 11 MiB of zeros; the client must bail at the 10 MiB cap.
+            let zeros = [0u8; 65536];
+            for _ in 0..176 {
+                if stream.write_all(&zeros).is_err() {
+                    break;
+                }
+            }
+        });
+        let out = fetch_remote_torrent_bytes(
+            &test_client(),
+            &format!("http://{addr}/x.torrent"),
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(out, Err(TorrentFetchError::TooLarge));
     }
 
     /// Every metainfo `<release version="...">` entry, in file order.

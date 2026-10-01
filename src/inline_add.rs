@@ -1264,15 +1264,24 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .reveal_child(false)
         .visible(false)
         .build();
-    // Explicit handler (not a property binding): reveal-child drives the
-    // slide animation, visible removes the collapsed revealer from the
-    // form's Box layout so no gap lands under the URL row.
+    // Explicit handler (not a property binding): visible comes first so
+    // the slide-down still animates — a reveal set while hidden would
+    // just snap open — and the revealer is only hidden once the slide-up
+    // finishes, since hiding it eagerly would kill that animation too.
     {
         let revealer = opts_revealer.clone();
         opts_toggle.connect_toggled(move |toggle| {
             let active = toggle.is_active();
+            if active {
+                revealer.set_visible(true);
+            }
             revealer.set_reveal_child(active);
-            revealer.set_visible(active);
+        });
+        // A collapsed revealer keeps occupying the parent box's spacing:
+        // hide it once the slide-up finishes so no dead gap stays under
+        // the URL row.
+        opts_revealer.connect_child_revealed_notify(|r| {
+            r.set_visible(r.is_child_revealed());
         });
     }
     form.append(&opts_revealer);

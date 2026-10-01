@@ -172,7 +172,10 @@ struct VideoStep {
     /// The spinner page of the action slot: kept so the show/hide helpers
     /// can set and clear its accessible label.
     url_spinner: adw::Spinner,
-    group: adw::PreferencesGroup,
+    /// Slide-down revealer wrapping the preview block's PreferencesGroup:
+    /// the block animates in/out instead of snapping (same protocol as the
+    /// options revealer).
+    group_revealer: gtk4::Revealer,
     name: adw::EntryRow,
     revert: gtk4::Button,
     /// Media-format selector, filled per video on resolve: exact pinnable
@@ -191,7 +194,9 @@ struct VideoStep {
 
 /// Reserve trailing text space inside the URL entry while the lookup
 fn hide_video_step(v: &VideoStep) {
-    v.group.set_visible(false);
+    // Slide the preview block closed; the child-revealed handler hides the
+    // revealer once the animation finishes, so no dead spacing remains.
+    v.group_revealer.set_reveal_child(false);
     // Back to the Add button: the action slot keeps its width, so selecting
     // a page never reallocates the row. The spinner page is unmapped while
     // hidden, which stops its animation (no set_spinning on adw::Spinner).
@@ -245,10 +250,14 @@ fn show_video_loading(v: &VideoStep) {
 
 fn show_video_ready(v: &VideoStep) {
     hide_video_step(v);
-    v.group.set_visible(true);
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
+    // Reveal after the rows are shown: set_visible(true) first so the
+    // SlideDown has a mapped widget to animate (same protocol as the
+    // options revealer).
+    v.group_revealer.set_visible(true);
+    v.group_revealer.set_reveal_child(true);
     // Format picked: the Add button earns its text label.
     v.add_btn.set_icon_name("");
     v.add_btn.remove_css_class("circular");
@@ -257,16 +266,24 @@ fn show_video_ready(v: &VideoStep) {
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
     hide_video_step(v);
-    v.group.set_visible(true);
     v.tools.set_subtitle(message);
     v.tools.set_visible(true);
+    // Reveal after the row is shown: set_visible(true) first so the
+    // SlideDown has a mapped widget to animate (same protocol as the
+    // options revealer).
+    v.group_revealer.set_visible(true);
+    v.group_revealer.set_reveal_child(true);
 }
 
 fn show_video_error(v: &VideoStep, message: &str) {
     hide_video_step(v);
-    v.group.set_visible(true);
     v.error.set_subtitle(message);
     v.error.set_visible(true);
+    // Reveal after the row is shown: set_visible(true) first so the
+    // SlideDown has a mapped widget to animate (same protocol as the
+    // options revealer).
+    v.group_revealer.set_visible(true);
+    v.group_revealer.set_reveal_child(true);
 }
 
 /// Desensitize the form's Add button while a lookup is in flight (a dead
@@ -1290,7 +1307,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // HIG AdwPreferencesGroup: title/description are built-in, rows get the
     // 12px internal margins natively.
     let video_group = adw::PreferencesGroup::new();
-    video_group.set_visible(false);
     let video_name = adw::EntryRow::builder().title(gettext("File name")).build();
     let video_revert_btn = gtk4::Button::builder()
         .icon_name("edit-undo-symbolic")
@@ -1338,10 +1354,23 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_error.add_suffix(&video_retry_btn);
     video_error.set_visible(false);
     video_group.add(&video_error);
+    // The preview block slides down like the options section: the revealer
+    // owns show/hide (a collapsed revealer keeps the parent box's spacing,
+    // so it starts hidden and only becomes visible while revealed — see the
+    // child-revealed handler below).
+    let video_revealer = gtk4::Revealer::builder()
+        .transition_type(gtk4::RevealerTransitionType::SlideDown)
+        .reveal_child(false)
+        .build();
+    video_revealer.set_child(Some(&video_group));
+    video_revealer.set_visible(false);
+    video_revealer.connect_child_revealed_notify(|r| {
+        r.set_visible(r.is_child_revealed());
+    });
     let step = Rc::new(VideoStep {
         action_slot,
         url_spinner: url_spinner.clone(),
-        group: video_group.clone(),
+        group_revealer: video_revealer.clone(),
         name: video_name,
         revert: video_revert_btn,
         format: video_format,
@@ -1352,7 +1381,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     });
     // Card-local choices: the format is initialized from Preferences (not
     // bound). Exact picks are per lookup, so nothing persists here.
-    form.append(&video_group);
+    form.append(&video_revealer);
 
     // Download options: HIG AdwPreferencesGroup, no header — the rows
     // speak for themselves. Rows get the 12px internal margins natively.

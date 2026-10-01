@@ -24,6 +24,106 @@ struct State {
     add_card: crate::inline_add::AddCard,
 }
 
+/// True for an http(s) URL pointing at a .torrent file (case-insensitive).
+fn is_remote_torrent_url(uri: &url::Url) -> bool {
+    matches!(uri.scheme(), "http" | "https")
+        && uri
+            .path()
+            .rsplit('.')
+            .next()
+            .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
+}
+
+/// Fetch a remote .torrent URL and run it through the torrent intake, mirroring
+/// the local .torrent file path: the picker for multi-file torrents, direct
+/// enqueue otherwise.
+async fn intake_remote_torrent(
+    manager: Rc<DownloadManager>,
+    toasts: Rc<adw::ToastOverlay>,
+    add_card: crate::inline_add::AddCard,
+    client: reqwest::Client,
+    url: String,
+    file_name: String,
+) {
+    // .torrent files are tiny; refuse absurd payloads before buffering them.
+    const MAX_TORRENT_BYTES: u64 = 10 * 1024 * 1024;
+    let fail = |msg: String| {
+        toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&msg)));
+    };
+    let fetch_err =
+        |e: reqwest::Error| format!("{}: {e}", gettext("Could not fetch that .torrent link"));
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            fail(fetch_err(e));
+            return;
+        }
+    };
+    let resp = match resp.error_for_status() {
+        Ok(r) => r,
+        Err(e) => {
+            fail(fetch_err(e));
+            return;
+        }
+    };
+    // Enforce the cap while streaming: content_length is advisory, so a
+    // hostile endpoint must not be able to fill memory before we notice.
+    let mut bytes = Vec::new();
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    fail(fetch_err(e));
+                    return;
+                }
+            };
+            if (bytes.len() as u64) + (chunk.len() as u64) > MAX_TORRENT_BYTES {
+                fail(gettext("That .torrent link is too large"));
+                return;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+    }
+    let stem = std::path::Path::new(&file_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".to_string());
+    // Multi-file torrents offer per-file switches in the inline picker's
+    // right-sliding page.
+    match crate::torrent::torrent_file_list(&bytes) {
+        Ok((_, entries)) if entries.len() > 1 => {
+            add_card.open_torrent_picker(file_name, bytes, entries);
+        }
+        Ok(_) => {
+            if let Err(e) = manager.enqueue_torrent_file(bytes, &stem, None, None) {
+                fail(e);
+            }
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// Restore the original URL from a browser-extension handoff.
+///
+/// The extension sends `grab://<url-without-scheme>` (the `http(s)://` prefix
+/// is stripped because the custom scheme replaces it); the desktop entry
+/// registers Grab as the `x-scheme-handler/grab` handler. Anything that is
+/// not a `grab:` URI is returned unchanged.
+fn normalize_grab_uri(raw: &str) -> String {
+    raw.parse::<url::Url>()
+        .ok()
+        .filter(|u| u.scheme() == "grab")
+        .and_then(|u| {
+            u.as_str()
+                .strip_prefix("grab://")
+                .map(|rest| format!("https://{rest}"))
+        })
+        .unwrap_or_else(|| raw.to_string())
+}
+
 pub fn setup(app: &adw::Application) {
     let state: Rc<RefCell<Option<Rc<State>>>> = Rc::new(RefCell::new(None));
 
@@ -74,11 +174,46 @@ pub fn setup(app: &adw::Application) {
                 None => return,
             };
             for f in files {
+                // grab: links arrive here from the browser extension; restore
+                // the original URL so the normal routing below applies.
+                let uri_text = normalize_grab_uri(&f.uri());
                 // magnet: links arrive here when Grab is the system's magnet
                 // handler; enqueue validates them like pasted links.
-                if let Ok(uri) = f.uri().parse::<url::Url>()
+                if let Ok(uri) = uri_text.parse::<url::Url>()
                     && matches!(uri.scheme(), "http" | "https" | "magnet")
                 {
+                    // Remote .torrent files: fetch the bytes and run the
+                    // torrent intake instead of saving the .torrent itself.
+                    if is_remote_torrent_url(&uri) {
+                        let (manager, toasts, add_card) =
+                            (s.manager.clone(), s.toasts.clone(), s.add_card.clone());
+                        let url = uri.as_str().to_string();
+                        let file_name = uri
+                            .path()
+                            .rsplit('/')
+                            .next()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("download.torrent")
+                            .to_string();
+                        // The fetch honors the proxy settings like any other download.
+                        let proxy =
+                            match crate::download_net::DownloadOptions::from_settings(&s.settings)
+                                .proxy_config()
+                            {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    s.toasts.add_toast(adw::Toast::new(
+                                        &crate::ui_util::esc_markup(&e),
+                                    ));
+                                    continue;
+                                }
+                            };
+                        let client = crate::download_net::http_client_for(proxy.as_ref());
+                        glib::spawn_future_local(intake_remote_torrent(
+                            manager, toasts, add_card, client, url, file_name,
+                        ));
+                        continue;
+                    }
                     // Video pages and stream manifests take the inline card path
                     // (pre-filled): plain enqueue would save the raw page — or the
                     // manifest XML — as a file. The card probes manifests for video.
@@ -431,6 +566,77 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
 
 #[cfg(test)]
 mod tests {
+    use super::{is_remote_torrent_url, normalize_grab_uri};
+
+    #[test]
+    fn remote_torrent_url_detection() {
+        let yes = [
+            "https://example.com/ubuntu.torrent",
+            "https://example.com/x/UBUNTU.TORRENT?a=1",
+            "http://example.com:8080/a/b.torrent",
+            "grab://example.com/x.torrent",
+        ];
+        for raw in yes {
+            let normalized = normalize_grab_uri(raw);
+            let uri = normalized.parse::<url::Url>().unwrap();
+            assert!(is_remote_torrent_url(&uri), "input: {raw}");
+        }
+        let no = [
+            "https://example.com/ubuntu.iso",
+            "https://example.com/download?file=x.torrent",
+            "https://example.com/torrent/x",
+            "magnet:?xt=urn:btih:abc",
+        ];
+        for raw in no {
+            let uri = raw.parse::<url::Url>().unwrap();
+            assert!(!is_remote_torrent_url(&uri), "input: {raw}");
+        }
+    }
+
+    #[test]
+    fn grab_uri_restores_https_scheme() {
+        assert_eq!(
+            normalize_grab_uri("grab://example.com/file.zip"),
+            "https://example.com/file.zip"
+        );
+    }
+
+    #[test]
+    fn grab_uri_keeps_query_and_fragment() {
+        assert_eq!(
+            normalize_grab_uri("grab://example.com/watch?v=abc&t=42#frag"),
+            "https://example.com/watch?v=abc&t=42#frag"
+        );
+    }
+
+    #[test]
+    fn grab_uri_keeps_port_and_path() {
+        assert_eq!(
+            normalize_grab_uri("grab://example.com:8080/a/b?x=1"),
+            "https://example.com:8080/a/b?x=1"
+        );
+    }
+
+    #[test]
+    fn non_grab_uris_pass_through_unchanged() {
+        for raw in [
+            "https://example.com/file.zip",
+            "http://example.com/file.zip",
+            "magnet:?xt=urn:btih:abc",
+            "file:///home/user/x.torrent",
+            "not a uri at all",
+        ] {
+            assert_eq!(normalize_grab_uri(raw), raw, "input: {raw}");
+        }
+    }
+
+    #[test]
+    fn bare_grab_scheme_never_panics() {
+        // Produces an unparseable URL that the open handler ignores.
+        let out = normalize_grab_uri("grab://");
+        assert!(out.parse::<url::Url>().is_err());
+    }
+
     /// Every metainfo `<release version="...">` entry, in file order.
     fn metainfo_release_versions(xml: &str) -> Vec<String> {
         let marker = "<release version=\"";

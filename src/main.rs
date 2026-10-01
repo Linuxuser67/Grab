@@ -91,7 +91,10 @@ fn ensure_schema_dir() {
         .into_iter()
         .find(|d| std::path::Path::new(&format!("{d}/gschemas.compiled")).exists())
     {
-        // SAFETY: single-threaded startup, before any GSettings use.
+        // SAFETY: no other thread can observe or mutate the environment here.
+        // The edition-2024 `set_var` contract is about thread visibility, not
+        // GSettings: the tokio runtime (the only thread spawner) is created
+        // lazily via `OnceLock` on first use, which happens after startup.
         unsafe { std::env::set_var("GSETTINGS_SCHEMA_DIR", dir) };
     }
 }

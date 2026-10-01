@@ -334,6 +334,16 @@ pub(crate) fn path_size(path: &std::path::Path) -> Option<u64> {
     .ok()
 }
 
+/// Off-thread [`path_size`]: `measure_disk_usage` is a recursive `du`-style
+/// scan that can stall the GTK main loop on large folders, so completions
+/// measure it on GIO's blocking pool and update the row when it lands.
+pub(crate) async fn path_size_async(path: std::path::PathBuf) -> Option<u64> {
+    gio::spawn_blocking(move || path_size(&path))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// Smallest piece: <=~4GB splits into 1MB pieces so one slow connection delays only the tail.
 pub(crate) const PIECE_MIN: u64 = 1024 * 1024;
 /// Largest piece: bounds per-request overhead without starving work-stealing.

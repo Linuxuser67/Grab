@@ -15,8 +15,8 @@ use crate::download_rate::{fmt_eta, format_amounts, live_rate_limit, parse_rate}
 use crate::download_row::DownloadItem;
 use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
 use crate::file_names::{
-    PIECE_MAX, PIECE_MIN, dedupe_filename, filename_from_url, piece_len, rename_noreplace,
-    restrict_filename_ascii, shorten_filename,
+    PIECE_MAX, PIECE_MIN, dedupe_filename, filename_from_url, path_size, piece_len,
+    rename_noreplace, restrict_filename_ascii, shorten_filename,
 };
 
 use crate::video::test_support::NoVideoTools;
@@ -75,8 +75,11 @@ fn drain_engine(manager: &DownloadManager, id: u64) {
     let ctx = glib::MainContext::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     // Wait for both the engine AND the pump: the pump is a `spawn_future_local` task, and if it's still pending when the test ends, the next test (on another thread) will trip glib's thread guard when reaping it.
+    // Also wait for finished-row sizings: `set_finished_detail` spawns one
+    // per completion, and it outlives the engine that triggered it.
     while (manager.running.borrow().contains_key(&id)
-        || manager.pump_handles.borrow().contains_key(&id))
+        || manager.pump_handles.borrow().contains_key(&id)
+        || manager.sizing_inflight.get() > 0)
         && std::time::Instant::now() < deadline
     {
         ctx.iteration(false);
@@ -96,6 +99,24 @@ fn quiesce(ctx: &glib::MainContext) {
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
+}
+
+/// Drain finished-row sizing futures on this thread: each restored or
+/// completed Done row spawns one via `set_finished_detail`, and a later test
+/// on another thread trips glib's thread guard reaping them. The counter —
+/// not a fixed delay — waits exactly for the in-flight GIO blocking tasks.
+/// Caller must hold MAIN_LOOP_LOCK (via test_locks).
+fn drain_sizing(manager: &DownloadManager) {
+    let ctx = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while manager.sizing_inflight.get() > 0 {
+        if std::time::Instant::now() > deadline {
+            panic!("timed out draining finished-row sizing tasks");
+        }
+        ctx.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    quiesce(&ctx);
 }
 
 fn test_settings() -> crate::settings::AppSettings {
@@ -463,7 +484,7 @@ fn rename_noreplace_spans_filesystems() {
 
 #[test]
 fn overcap_queue_keeps_active_first() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let (_lock, _loop) = test_locks();
     let qf = test_queue_file("overcap");
     let settings = test_settings();
     let mut items = vec![
@@ -538,6 +559,8 @@ fn overcap_queue_keeps_active_first() {
     assert!(!names.contains(&"f0.iso".to_string()));
     assert!(!names.contains(&"f1.iso".to_string()));
     let _ = std::fs::remove_file(&qf);
+    // Drain the restored Done rows' sizing futures on this thread (see MAIN_LOOP_LOCK).
+    drain_sizing(&m);
 }
 
 #[test]
@@ -1264,7 +1287,7 @@ fn mismatched_video_source_dropped_on_restore() {
 /// the video icon.
 #[test]
 fn done_video_keeps_page_source_on_restore() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let (_lock, _loop) = test_locks();
     let qf = test_queue_file("video-done-restore");
     let queue = StoredQueue {
         version: QUEUE_VERSION,
@@ -1311,6 +1334,8 @@ fn done_video_keeps_page_source_on_restore() {
         matches!(stored, crate::media_types::VideoSource::Page { ref quality, .. } if quality == "720p")
     );
     let _ = std::fs::remove_file(&qf);
+    // Drain the restored Done row's sizing future on this thread (see MAIN_LOOP_LOCK).
+    drain_sizing(&manager);
 }
 
 #[test]
@@ -1492,6 +1517,23 @@ fn path_size_sums_folders() {
     // Files still report their own length; missing paths read as absent.
     assert_eq!(path_size(&dir.join("a.bin")), Some(100));
     assert_eq!(path_size(&dir.join("nope")), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn path_size_async_measures_off_thread() {
+    // The async wrapper must actually measure, not just resolve: a stub that
+    // returns None without scanning would leave finished rows unsized.
+    // MAIN_LOOP_LOCK: glib futures abort if polled from the wrong thread.
+    let _loop = MAIN_LOOP_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("grab-path-size-async-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(dir.join("a.bin"), vec![0u8; 100]).unwrap();
+    std::fs::write(sub.join("b.bin"), vec![0u8; 200]).unwrap();
+    let size = glib::MainContext::new().block_on(crate::file_names::path_size_async(dir.clone()));
+    assert_eq!(size, Some(300));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2556,7 +2598,9 @@ fn queue_roundtrip_and_mapping() {
 
 #[test]
 fn history_restore_roundtrip() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    // Holds MAIN_LOOP_LOCK (via test_locks): restoring the Done row spawns a
+    // thread-bound sizing future that must be drained before this test ends.
+    let (_lock, _loop) = test_locks();
     let qf = test_queue_file("history");
     let settings = test_settings();
     let m1 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
@@ -2577,6 +2621,9 @@ fn history_restore_roundtrip() {
     assert!((it.progress() - 1.0).abs() < f64::EPSILON);
     // Atomic persist leaves no tmp debris behind.
     assert!(!qf.with_extension("json.tmp").exists());
+    // Drain the restored Done row's async sizing so no thread-bound future
+    // outlives this test (glib thread guard, serial suite shares one context).
+    drain_sizing(&m2);
     let _ = std::fs::remove_file(&qf);
 }
 
@@ -2673,7 +2720,7 @@ fn restore_rejects_bad_filenames() {
 
 #[test]
 fn batch_restore_hundred_done() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let (_lock, _loop) = test_locks();
     let qf = test_queue_file("batch");
     let settings = test_settings();
     let items: Vec<StoredItem> = (0..100)
@@ -2704,6 +2751,9 @@ fn batch_restore_hundred_done() {
     assert_eq!(it.filename(), "f99.iso");
     assert_eq!(it.status(), DownloadStatus::Done);
     let _ = std::fs::remove_file(&qf);
+    // Drain the 100 sizing futures on this thread: a later test on another
+    // thread would trip glib's thread guard reaping them (see MAIN_LOOP_LOCK).
+    drain_sizing(&m);
 }
 
 #[test]
@@ -2871,7 +2921,9 @@ fn lowering_max_concurrent_parks_newest() {
 
 #[test]
 fn restore_preserves_intent() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    // Holds MAIN_LOOP_LOCK (via test_locks): restoring the Done row spawns a
+    // thread-bound sizing future that must be drained before this test ends.
+    let (_lock, _loop) = test_locks();
     let qf = test_queue_file("intent");
     let settings = test_settings();
     let items: Vec<StoredItem> = [
@@ -2914,6 +2966,9 @@ fn restore_preserves_intent() {
     assert_eq!(status_of("p.iso"), Some(DownloadStatus::Paused));
     assert_eq!(status_of("f.iso"), Some(DownloadStatus::Failed));
     assert_eq!(status_of("d.iso"), Some(DownloadStatus::Done));
+    // Drain the restored Done row's async sizing so no thread-bound future
+    // outlives this test (glib thread guard, serial suite shares one context).
+    drain_sizing(&m);
     let _ = std::fs::remove_file(&qf);
 }
 
@@ -3630,6 +3685,17 @@ fn killed_segmented_resume_starts_over() {
         if std::fs::read(&dest).unwrap() != payload {
             abort(&server, "holey file was marked Done instead of re-fetched");
         }
+        // Drain the finished row's async disk sizing before quitting: the
+        // sizing future is thread-bound, and the serial suite shares one main
+        // context across test threads, so it must not outlive this test.
+        let mut swaited = 0;
+        while manager.sizing_inflight.get() > 0 && swaited < 150 {
+            glib::timeout_future(std::time::Duration::from_millis(100)).await;
+            swaited += 1;
+        }
+        if manager.sizing_inflight.get() > 0 {
+            abort(&server, "finished-row sizing did not drain");
+        }
         cleanup(&server, &dir);
         let _ = std::fs::remove_file(&qf);
         quit.quit();
@@ -3720,6 +3786,17 @@ fn shutdown_restart_resumes_segmented() {
         }
         if std::fs::read(dl.join("big.bin")).unwrap() != payload {
             abort(&server, "bytes differ after kill-restart-resume");
+        }
+        // Drain the finished row's async disk sizing before quitting: the
+        // sizing future is thread-bound, and the serial suite shares one main
+        // context across test threads, so it must not outlive this test.
+        let mut swaited = 0;
+        while manager2.sizing_inflight.get() > 0 && swaited < 150 {
+            glib::timeout_future(std::time::Duration::from_millis(100)).await;
+            swaited += 1;
+        }
+        if manager2.sizing_inflight.get() > 0 {
+            abort(&server, "finished-row sizing did not drain");
         }
         cleanup(&server, &dir);
         let _ = std::fs::remove_file(&qf);
@@ -4903,7 +4980,9 @@ fn clear_finished_drops_only_done() {
 #[test]
 fn restore_dedups_finished_urls() {
     // Queue files before dedup may hold several Done rows per URL; newest (last) wins.
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    // Holds MAIN_LOOP_LOCK (via test_locks): restoring the Done row spawns a
+    // thread-bound sizing future that must be drained before this test ends.
+    let (_lock, _loop) = test_locks();
     let qf = test_queue_file("history-dedup");
     let settings = test_settings();
     let m1 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
@@ -4922,6 +5001,9 @@ fn restore_dedups_finished_urls() {
     let it = m2.store().item(0).and_downcast::<DownloadItem>().unwrap();
     assert_eq!(it.filename(), "new.iso");
     assert_eq!(it.status(), DownloadStatus::Done);
+    // Drain the restored Done row's async sizing so no thread-bound future
+    // outlives this test (glib thread guard, serial suite shares one context).
+    drain_sizing(&m2);
     let _ = std::fs::remove_file(&qf);
 }
 

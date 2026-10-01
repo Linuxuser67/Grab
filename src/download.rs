@@ -1,7 +1,7 @@
 use crate::engine_msg::{DEST_EXISTS, EngineMsg};
 use crate::file_names::{
-    dedupe_filename, filename_from_url, fmt_bytes, name_stem, path_size, piece_len,
-    rename_noreplace, restrict_filename_ascii, sane_filename, shorten_filename,
+    dedupe_filename, filename_from_url, fmt_bytes, name_stem, piece_len, rename_noreplace,
+    restrict_filename_ascii, sane_filename, shorten_filename,
 };
 use crate::runtime::tokio_rt;
 use gettextrs::{gettext, ngettext};
@@ -191,6 +191,10 @@ pub struct DownloadManager {
     /// Set by shutdown(): stale engine futures must not re-persist or
     /// re-mark rows once the authoritative shutdown persist has run.
     draining: Cell<bool>,
+    /// In-flight finished-row disk sizings (see `set_finished_detail`): the
+    /// futures are fire-and-forget, so the test suite drains on this counter
+    /// instead of guessing how long GIO's blocking pool takes.
+    sizing_inflight: Rc<Cell<usize>>,
     /// The 30s schedule checker's source, if running. Kept so the
     /// scheduling preference can stop the timer entirely.
     scheduler_source: RefCell<Option<glib::SourceId>>,
@@ -335,6 +339,7 @@ impl DownloadManager {
             discards: RefCell::new(HashMap::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
+            sizing_inflight: Rc::new(Cell::new(0)),
             scheduler_source: RefCell::new(None),
         });
         // Publish the Weak for `wake_queue()`'s `Send` closure (see `MANAGER_WEAK`).
@@ -872,6 +877,35 @@ impl DownloadManager {
         item
     }
 
+    /// "Finished • {size}" detail with the size measured off the GTK thread.
+    /// `measure_disk_usage` is a recursive scan that can stall the main loop on
+    /// large folders, so the label paints immediately with `size` (the engine's
+    /// figure, 0 for plain "Finished") and is refined when the measurement lands.
+    /// A row that is gone by then simply never gets the update.
+    fn set_finished_detail(&self, item: &DownloadItem, size: u64) {
+        item.set_detail(if size > 0 {
+            gettext("Finished • {size}").replace("{size}", &fmt_bytes(size))
+        } else {
+            gettext("Finished")
+        });
+        let weak = item.downgrade();
+        let path = item.file_path();
+        let inflight = Rc::clone(&self.sizing_inflight);
+        inflight.set(inflight.get() + 1);
+        glib::spawn_future_local(async move {
+            let measured = crate::file_names::path_size_async(path)
+                .await
+                .filter(|m| *m > 0);
+            // Balance the counter before any early return: the row may be
+            // gone or the path missing, but the task still finished.
+            inflight.set(inflight.get() - 1);
+            let (Some(item), Some(measured)) = (weak.upgrade(), measured) else {
+                return;
+            };
+            item.set_detail(gettext("Finished • {size}").replace("{size}", &fmt_bytes(measured)));
+        });
+    }
+
     fn insert_history(
         self: &Rc<Self>,
         url: String,
@@ -905,13 +939,10 @@ impl DownloadManager {
         if let Some(folder) = output_dir {
             item.set_output_dir(folder);
         }
-        // Size off the final path: the engine measured the pre-rename one. Folders sum contents.
-        let size = path_size(&item.file_path()).unwrap_or(0);
-        item.set_detail(if size > 0 {
-            gettext("Finished • {size}").replace("{size}", &fmt_bytes(size))
-        } else {
-            gettext("Finished")
-        });
+        // Size off the final path, measured off-thread: the engine measured the
+        // pre-rename one, and folders sum contents. Paints "Finished" now,
+        // refines with the measured size when it lands.
+        self.set_finished_detail(&item, 0);
         // Restored duplicates collapse too: the last Done row per URL wins.
         self.drop_finished_duplicates(&url, item.id());
         // Keep the row's media identity: a restored video page must not fall
@@ -1263,8 +1294,11 @@ impl DownloadManager {
                                     item.set_filename(final_name);
                                 }
                             }
-                            // Size off the final path (see `insert_history`): the engine measured the pre-rename one.
-                            let size = path_size(&item.file_path()).unwrap_or(size);
+                            // Size off the final path, measured off-thread (see
+                            // `set_finished_detail`): the engine measured the
+                            // pre-rename one. Paints the engine's size now,
+                            // refines with the measured size when it lands.
+                            this.set_finished_detail(&item, size);
                             // Server file date, when asked: best-effort, never fails the row.
                             let mtime = this.server_mtime.borrow_mut().remove(&id);
                             if this.settings.keep_server_date()
@@ -1275,11 +1309,6 @@ impl DownloadManager {
                             }
                             item.set_progress(1.0);
                             item.set_status(DownloadStatus::Done);
-                            item.set_detail(if size > 0 {
-                                gettext("Finished • {size}").replace("{size}", &fmt_bytes(size))
-                            } else {
-                                gettext("Finished")
-                            });
                             // One finished record per URL (Parabolic parity): re-downloads replace instead of stacking.
                             this.drop_finished_duplicates(&url, id);
                             this.segment_state.borrow_mut().remove(&id);
@@ -2719,10 +2748,13 @@ impl DownloadManager {
         }
     }
 
-    /// Join bound for [`Self::shutdown`]: engine tasks only touch the tokio
-    /// runtime, so the join is normally prompt — but a wedged task must not
-    /// hang the GTK thread on quit.
-    const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+    /// Join bound for [`Self::shutdown`]: aborted engine tasks die at their next
+    /// await and discard finalizers are local file sweeps, so a healthy quit
+    /// joins in milliseconds — the bound only ever bites when something is
+    /// already wedged, and waiting longer fixes nothing. On timeout the queue
+    /// is still persisted and partial files are reconciled at the next launch,
+    /// so the only thing a longer bound buys is a longer frozen quit.
+    const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
 
     /// Abort running tasks and persist the queue for the next launch.
     pub fn shutdown(&self) {

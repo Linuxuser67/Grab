@@ -2544,6 +2544,8 @@ impl DownloadManager {
                 return;
             };
             let Ok(text) = std::fs::read_to_string(Self::queue_file()) else {
+                tracing::warn!("quarantining unreadable download queue");
+                Self::quarantine_queue();
                 return;
             };
             let Ok(queue) = serde_json::from_str::<StoredQueue>(&text) else {
@@ -2717,8 +2719,17 @@ impl DownloadManager {
         }
     }
 
+    /// Join bound for [`Self::shutdown`]: engine tasks only touch the tokio
+    /// runtime, so the join is normally prompt — but a wedged task must not
+    /// hang the GTK thread on quit.
+    const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+
     /// Abort running tasks and persist the queue for the next launch.
     pub fn shutdown(&self) {
+        self.shutdown_with_timeout(Self::SHUTDOWN_JOIN_TIMEOUT);
+    }
+
+    pub(crate) fn shutdown_with_timeout(&self, timeout: Duration) {
         self.draining.set(true);
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
         // Discard workers first through their retained abort handles: aborting a finalizer would detach its worker instead of stopping it. Finalizers are awaited (not aborted) so cleanup still runs.
@@ -2730,15 +2741,27 @@ impl DownloadManager {
         for pending in &finals {
             pending.worker_abort.abort();
         }
-        // Engine tasks touch only the tokio runtime, so joining them here is prompt and deadlock-free.
-        tokio_rt().block_on(async {
-            for handle in handles {
-                let _ = handle.await;
-            }
-            for pending in finals {
-                let _ = pending.finalizer.await;
-            }
-        });
+        // Bound the join: on timeout the remaining handles are dropped
+        // (detached) and partial files are left alone — the next launch
+        // reconciles them via the length-vs-prefix check in spawn().
+        let joined = tokio_rt()
+            .block_on(async {
+                tokio::time::timeout(timeout, async {
+                    for handle in handles {
+                        let _ = handle.await;
+                    }
+                    for pending in finals {
+                        let _ = pending.finalizer.await;
+                    }
+                })
+                .await
+            })
+            .is_ok();
+        if !joined {
+            tracing::warn!("shutdown: join timed out; persisting without truncating partial files");
+            self.persist_queue();
+            return;
+        }
         let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
         for id in ids {
             if let Some(item) = self.find(id)

@@ -674,7 +674,7 @@ pub(crate) fn build_row(
         .build();
     let status = gtk4::Label::builder()
         .label(row_status_label(item))
-        .css_classes(["dim-label", "caption"])
+        .css_classes(["dimmed", "caption"])
         .valign(gtk4::Align::Center)
         .build();
     let spinner = adw::Spinner::new();
@@ -705,7 +705,7 @@ pub(crate) fn build_row(
     let detail = gtk4::Label::builder()
         .label(item.detail())
         .halign(gtk4::Align::Start)
-        .css_classes(["dim-label", "caption"])
+        .css_classes(["dimmed", "caption"])
         .ellipsize(gtk4::pango::EllipsizeMode::End)
         .build();
     let progress = gtk4::ProgressBar::new();

@@ -374,6 +374,52 @@ fn corrupt_queue_is_quarantined() {
 }
 
 #[test]
+fn invalid_utf8_queue_is_quarantined() {
+    // read_to_string fails on invalid UTF-8: must quarantine like the other
+    // corrupt-queue branches instead of silently starting empty (a later
+    // persist would then overwrite the unreadable file).
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let qf = test_queue_file("quarantine-utf8");
+    std::fs::write(&qf, b"{\xff\xfe not utf-8").unwrap();
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.restore_queue();
+    assert_eq!(m.store().n_items(), 0);
+    let bak = qf.with_extension("json.bak");
+    assert!(bak.exists());
+    let _ = std::fs::remove_file(&bak);
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn shutdown_with_timeout_returns_promptly_with_stuck_finalizer() {
+    // A wedged finalizer must not hang the GTK thread on quit: the join is
+    // bounded, partial files are left for the next launch to reconcile.
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("shutdown-timeout");
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let worker = tokio_rt().spawn(async {});
+    let finalizer = tokio_rt().spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    });
+    m.discards.borrow_mut().insert(
+        1,
+        PendingDiscard {
+            worker_abort: worker.abort_handle(),
+            finalizer,
+        },
+    );
+    let start = std::time::Instant::now();
+    m.shutdown_with_timeout(std::time::Duration::from_millis(200));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(2),
+        "shutdown waited for a stuck finalizer"
+    );
+    let _ = std::fs::remove_file(test_queue_file("shutdown-timeout"));
+}
+
+#[test]
 fn rename_noreplace_never_clobbers() {
     let dir = std::env::temp_dir().join(format!("grab-rename-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

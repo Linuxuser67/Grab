@@ -132,7 +132,7 @@ pub fn show(
     };
     let dest_label = gtk4::Label::builder()
         .label(&shown)
-        .css_classes(["dim-label", "caption"])
+        .css_classes(["dimmed", "caption"])
         .ellipsize(gtk4::pango::EllipsizeMode::Middle)
         .hexpand(true)
         .halign(gtk4::Align::Start)

@@ -563,7 +563,7 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
         .build();
     let count_label = gtk4::Label::builder()
         .label(count)
-        .css_classes(["dim-label", "caption"])
+        .css_classes(["dimmed", "caption"])
         .valign(gtk4::Align::Center)
         .build();
     header.append(&back);
@@ -715,7 +715,7 @@ fn push_playlist_items_page(
                     .replace("{n}", &count.to_string())
                     .replace("{total}", &playlist.total.to_string()),
             )
-            .css_classes(["dim-label", "caption"])
+            .css_classes(["dimmed", "caption"])
             .halign(gtk4::Align::Start)
             .build();
         list_box.append(&notice);
@@ -1322,7 +1322,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .label(manager.effective_download_dir())
         .halign(gtk4::Align::Start)
         .ellipsize(gtk4::pango::EllipsizeMode::Middle)
-        .css_classes(["dim-label", "caption"])
+        .css_classes(["dimmed", "caption"])
         .hexpand(true)
         .build();
     let dest_btn = gtk4::Button::builder()

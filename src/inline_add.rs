@@ -235,9 +235,12 @@ fn show_video_loading(v: &VideoStep) {
     v.action_slot.set_visible_child_name("spinner");
     // Screen-reader announcement: the spinner alone is silent.
     // `adw::Spinner` doesn't expose `update_property` directly; upcast to Widget.
-    v.url_spinner
-        .upcast_ref::<gtk4::Widget>()
-        .update_property(&[gtk4::accessible::Property::Label(&gettext("Looking up…"))]);
+    // A static label alone is never spoken: `announce` voices the state change.
+    // (gtk-rs names GTK's polite tier `Medium`; there is no `Polite` variant.)
+    let spinner = v.url_spinner.upcast_ref::<gtk4::Widget>();
+    let looking_up = gettext("Looking up…");
+    spinner.update_property(&[gtk4::accessible::Property::Label(&looking_up)]);
+    spinner.announce(&looking_up, gtk4::AccessibleAnnouncementPriority::Medium);
 }
 
 fn show_video_ready(v: &VideoStep) {

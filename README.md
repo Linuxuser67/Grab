@@ -51,6 +51,8 @@ A download manager for GNOME. Built with GTK 4 and libadwaita.
 
 ## Install
 
+[![Get it on FlatPark](assets/get-it-on-flatpark.png)](https://flatpark.org/apps/io.github.linuxuser67.Grab/)
+
 From FlatPark (recommended, gets updates via `flatpak update`):
 
 ```bash

@@ -2748,10 +2748,13 @@ impl DownloadManager {
         }
     }
 
-    /// Join bound for [`Self::shutdown`]: engine tasks only touch the tokio
-    /// runtime, so the join is normally prompt — but a wedged task must not
-    /// hang the GTK thread on quit.
-    const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+    /// Join bound for [`Self::shutdown`]: aborted engine tasks die at their next
+    /// await and discard finalizers are local file sweeps, so a healthy quit
+    /// joins in milliseconds — the bound only ever bites when something is
+    /// already wedged, and waiting longer fixes nothing. On timeout the queue
+    /// is still persisted and partial files are reconciled at the next launch,
+    /// so the only thing a longer bound buys is a longer frozen quit.
+    const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
 
     /// Abort running tasks and persist the queue for the next launch.
     pub fn shutdown(&self) {

@@ -34,22 +34,31 @@
   <screenshots>
     <screenshot type="default">
       <caption>Empty state with a New Download shortcut</caption>
-      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.8/data/screenshots/empty-state-dark.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.9/data/screenshots/empty-state-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Active downloads with per-block progress maps</caption>
-      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.8/data/screenshots/downloads-video.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.9/data/screenshots/downloads-video.png</image>
     </screenshot>
     <screenshot>
       <caption>New Download card with inline media format picker</caption>
-      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.8/data/screenshots/new-download-format.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.9/data/screenshots/new-download-format.png</image>
     </screenshot>
     <screenshot>
       <caption>Live stream recording alongside active downloads</caption>
-      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.8/data/screenshots/live-recording.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.9/data/screenshots/live-recording.png</image>
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.5.9" date="2026-10-01">
+      <description>
+        <ul>
+          <li>The "Looking up…" state is now announced to screen readers.</li>
+          <li>Finished rows measure their on-disk size in the background instead of stalling the interface on large folders.</li>
+          <li>Quitting no longer waits up to 10 seconds on stuck background work; the queue is still saved.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.5.8" date="2026-10-01">
       <description>
         <ul>

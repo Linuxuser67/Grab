@@ -180,13 +180,25 @@ fn normalize_grab_uri(raw: &str) -> String {
     format!("{scheme}://{rest}")
 }
 
+/// True when an opened URI should land on the New Download card (pre-filled)
+/// instead of enqueueing directly: any http(s) URL that isn't obviously a
+/// direct file. The card probes it with yt-dlp exactly like a pasted URL, so
+/// extractor-supported pages work with no per-site list; direct files skip
+/// the probe delay. Stream manifests aren't direct files, so they land here
+/// too (enqueueing would save the manifest XML as a file).
+fn handoff_goes_to_card(uri: &url::Url) -> bool {
+    // Manifests are called out explicitly: they must keep routing to the card
+    // even if their extensions ever land in the direct-file list.
+    crate::video::is_http_url(uri.as_str())
+        && (!crate::video::is_direct_file_url(uri.as_str())
+            || crate::video::is_stream_manifest_url(uri.as_str()))
+}
+
 /// True for `grab:` handoffs that would enqueue on their own: plain files,
-/// magnets, and remote `.torrent` fetches. Video pages and stream manifests
-/// land on the New Download card, whose Add button is already the user's
-/// confirmation — they skip the dialog.
+/// magnets, and remote `.torrent` fetches. The card is its own confirmation
+/// (its Add button) — handoffs landing there skip the dialog.
 fn grab_handoff_needs_confirm(uri: &url::Url) -> bool {
-    !(crate::video::is_video_page(uri.as_str())
-        || crate::video::is_stream_manifest_url(uri.as_str()))
+    !handoff_goes_to_card(uri)
 }
 
 /// `grab:` handoffs bypass the intake's URL normalization, so re-apply its
@@ -239,12 +251,11 @@ fn route_open_uri(
         ));
         return;
     }
-    // Video pages and stream manifests take the inline card path
-    // (pre-filled): plain enqueue would save the raw page — or the
-    // manifest XML — as a file. The card probes manifests for video.
-    if crate::video::is_video_page(uri.as_str())
-        || crate::video::is_stream_manifest_url(uri.as_str())
-    {
+    // Anything over http(s) that isn't obviously a direct file takes the
+    // inline card path (pre-filled): the card probes it with yt-dlp exactly
+    // like a pasted URL. Plain enqueue would save a raw page — or a manifest
+    // — as a file.
+    if handoff_goes_to_card(&uri) {
         add_card.open(Some(uri.as_str().to_string()));
         return;
     }
@@ -863,6 +874,10 @@ mod tests {
         for raw in [
             "https://www.youtube.com/watch?v=x",
             "https://example.com/stream.m3u8",
+            // Unlisted pages take the card too: it probes them with yt-dlp
+            // exactly like a pasted URL, no per-site list involved.
+            "https://example.com/room/some_stream",
+            "https://example.com/get?id=123",
         ] {
             let uri = raw.parse::<url::Url>().unwrap();
             assert!(!grab_handoff_needs_confirm(&uri), "input: {raw}");

@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.8.2" date="2026-10-02">
+      <description>
+        <ul>
+          <li>Limit the size of extracted ffmpeg binaries to block decompression bombs.</li>
+          <li>Remove partially extracted files if the ffmpeg installation fails.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.8.1" date="2026-10-02">
       <description>
         <ul>

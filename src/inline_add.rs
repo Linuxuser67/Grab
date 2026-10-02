@@ -1282,18 +1282,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
-    // Tick icon inside the entry: only sensitive when there's text to submit.
-    // Icon-press submits like Enter; the changed handler below toggles it.
-    url_entry.set_icon_from_icon_name(
-        gtk4::EntryIconPosition::Secondary,
-        Some("object-select-symbolic"),
-    );
-    url_entry.set_icon_tooltip_text(
-        gtk4::EntryIconPosition::Secondary,
-        Some(&gettext("Look up")),
-    );
-    // Entry starts empty: tick insensitive until there's text.
-    url_entry.set_icon_sensitive(gtk4::EntryIconPosition::Secondary, false);
+    // Tick icon inside the entry: appears only when there's text to submit
+    // (the changed handler below adds/removes it). Icon-press submits like
+    // Enter. Entry starts empty, so no icon initially.
     url_bar.append(&url_entry);
     // Action slot: a homogeneous GtkStack swapping the Add button with the
     // lookup spinner, wrapped in a revealer. The slot keeps the widest
@@ -2152,8 +2143,26 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         url_entry.connect_changed(move |row| {
             clear_field_error(row);
             let text = row.text().trim().to_string();
-            // Tick icon only submits when there's text to look up.
-            row.set_icon_sensitive(gtk4::EntryIconPosition::Secondary, !text.is_empty());
+            // Tick icon appears only when there's a URL to submit: add it
+            // on first text, remove it when cleared.
+            let has_text = !text.is_empty();
+            let icon_shown = row
+                .get_icon_name(gtk4::EntryIconPosition::Secondary)
+                .is_some();
+            if has_text != icon_shown {
+                if has_text {
+                    row.set_icon_from_icon_name(
+                        gtk4::EntryIconPosition::Secondary,
+                        Some("object-select-symbolic"),
+                    );
+                    row.set_icon_tooltip_text(
+                        gtk4::EntryIconPosition::Secondary,
+                        Some(&gettext("Look up")),
+                    );
+                } else {
+                    row.set_icon_from_icon_name(gtk4::EntryIconPosition::Secondary, None);
+                }
+            }
             // The direct-only file row hides in video mode (the preview has its own
             // name row); a non-empty entry is not lost — the resolve seeds the video name
             // from it. A probed preview counts as video mode while its canonical URL matches.

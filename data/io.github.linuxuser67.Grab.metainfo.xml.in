@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.8.0" date="2026-10-02">
+      <description>
+        <ul>
+          <li>The New Download card's URL row now has the submit tick inside the entry field; the Add button slides in beside the entry after submitting, pushing the options and close buttons aside.</li>
+          <li>A round alternative app icon ships alongside the current one.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.7.2" date="2026-10-01">
       <description>
         <ul>

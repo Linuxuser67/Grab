@@ -1,8 +1,8 @@
 [package]
 name = "grab"
-version = "4.8.3"
+version = "4.8.4"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.98"
 description = "A GNOME download manager (GTK 4 / libadwaita, reqwest backend)"
 license = "GPL-3.0-only"
 

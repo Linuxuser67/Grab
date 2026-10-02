@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.8.4" date="2026-10-02">
+      <description>
+        <ul>
+          <li>Raise the minimum Rust version to 1.98, matching the Flatpak SDK.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.8.3" date="2026-10-02">
       <description>
         <ul>

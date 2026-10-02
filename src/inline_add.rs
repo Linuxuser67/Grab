@@ -2143,10 +2143,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             clear_field_error(row);
             let text = row.text().trim().to_string();
             // Tick icon only submits when there's text to look up.
-            row.set_icon_sensitive(
-                gtk4::EntryIconPosition::Secondary,
-                !text.is_empty(),
-            );
+            row.set_icon_sensitive(gtk4::EntryIconPosition::Secondary, !text.is_empty());
             // The direct-only file row hides in video mode (the preview has its own
             // name row); a non-empty entry is not lost — the resolve seeds the video name
             // from it. A probed preview counts as video mode while its canonical URL matches.

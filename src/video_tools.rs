@@ -705,6 +705,28 @@ pub(crate) fn extract_ffmpeg_toolchain_inner(
     dir: &Path,
     max_bytes: u64,
 ) -> Result<PathBuf, String> {
+    // Every file we create goes here; on ANY error the whole partial
+    // toolchain is removed, not just on the cap-trip path.
+    let mut extracted: Vec<PathBuf> = Vec::new();
+
+    let result = extract_entries(archive, dir, max_bytes, &mut extracted);
+
+    // Don't leave a half-installed toolchain behind on any failure.
+    if result.is_err() {
+        for path in extracted.drain(..) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    result
+}
+
+fn extract_entries(
+    archive: &Path,
+    dir: &Path,
+    max_bytes: u64,
+    extracted: &mut Vec<PathBuf>,
+) -> Result<PathBuf, String> {
     use std::io::Read as _;
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -713,7 +735,6 @@ pub(crate) fn extract_ffmpeg_toolchain_inner(
     let mut zip =
         zip::ZipArchive::new(file).map_err(|e| format!("couldn't read ffmpeg archive: {e}"))?;
     let mut ffmpeg_path = None;
-    let mut extracted = Vec::new();
     for i in 0..zip.len() {
         let entry = zip
             .by_index(i)
@@ -735,6 +756,9 @@ pub(crate) fn extract_ffmpeg_toolchain_inner(
             .create_new(true)
             .open(&dest)
             .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
+        // Track immediately: a failed copy or chmod must still remove the
+        // partial file.
+        extracted.push(dest.clone());
         let n = std::io::copy(&mut entry.take(max_bytes + 1), &mut out)
             .map_err(|e| format!("couldn't extract {}: {e}", dest.display()))?;
         // take() truncates silently: if we hit the cap, the entry is not the
@@ -743,12 +767,6 @@ pub(crate) fn extract_ffmpeg_toolchain_inner(
         // legitimate entry of exactly max_bytes through. `copy`'s byte count
         // is the check: no separate metadata() call that could fail open.
         if n > max_bytes {
-            // Don't leave a half-installed toolchain: drop what we extracted
-            // so far along with the partial file.
-            for path in extracted.drain(..) {
-                let _ = std::fs::remove_file(path);
-            }
-            let _ = std::fs::remove_file(&dest);
             return Err(format!(
                 "{} in the ffmpeg archive exceeds the {max_bytes}-byte limit",
                 dest.display()
@@ -756,7 +774,6 @@ pub(crate) fn extract_ffmpeg_toolchain_inner(
         }
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("couldn't mark {} executable: {e}", dest.display()))?;
-        extracted.push(dest.clone());
         if tool == "ffmpeg" {
             ffmpeg_path = Some(dest);
         }

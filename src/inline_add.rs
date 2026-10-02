@@ -249,6 +249,7 @@ fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
     // Slide the action slot in (Add button / spinner pushes gear + X right),
     // then swap to the spinner: same reserved width, no shift.
+    v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
     v.action_slot.set_visible_child_name("spinner");
     // Screen-reader announcement: the spinner alone is silent.
@@ -265,6 +266,7 @@ fn show_video_ready(v: &VideoStep) {
     hide_video_step(v);
     // Ensure the action slot is visible: the fresh-preview path reaches here
     // without a show_video_loading (no new lookup to reveal it).
+    v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
     v.name.set_visible(true);
     v.revert.set_visible(true);
@@ -281,6 +283,7 @@ fn show_video_ready(v: &VideoStep) {
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
     hide_video_step(v);
+    v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
     v.tools.set_subtitle(message);
     v.tools.set_visible(true);
@@ -292,6 +295,7 @@ fn show_video_tools_missing(v: &VideoStep, message: &str) {
 
 fn show_video_error(v: &VideoStep, message: &str) {
     hide_video_step(v);
+    v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
     v.error.set_subtitle(message);
     v.error.set_visible(true);
@@ -1097,6 +1101,7 @@ fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
     // the preview block stays hidden — but the probe resolved, so Add earns
     // its label like a single video; tapping it opens the title picker.
     hide_video_step(v);
+    v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
     v.add_btn.set_icon_name("");
     v.add_btn.remove_css_class("circular");
@@ -1197,14 +1202,15 @@ impl AddCard {
 }
 
 /// A SlideDown revealer that owns its visibility: starts hidden, and hides
-/// itself once the slide-up finishes (a collapsed revealer keeps occupying
+/// Itself once the slide-up finishes (a collapsed revealer keeps occupying
 /// the parent box's spacing otherwise). Callers reveal with
 /// `set_visible(true)` + `set_reveal_child(true)` and collapse with
 /// `set_reveal_child(false)`; the child-revealed handler below does the
-/// rest. Used by the options, preview-block, and schedule sections.
-fn slide_down_revealer() -> gtk4::Revealer {
+/// rest. Used by the options, preview-block, and schedule sections (vertical
+/// slides) and the URL-row action slot (horizontal slide).
+fn slide_revealer(transition: gtk4::RevealerTransitionType) -> gtk4::Revealer {
     let revealer = gtk4::Revealer::builder()
-        .transition_type(gtk4::RevealerTransitionType::SlideDown)
+        .transition_type(transition)
         .reveal_child(false)
         .build();
     revealer.set_visible(false);
@@ -1212,6 +1218,11 @@ fn slide_down_revealer() -> gtk4::Revealer {
         r.set_visible(r.is_child_revealed());
     });
     revealer
+}
+
+/// Slide-down variant of [`slide_revealer`] for the vertical sections.
+fn slide_down_revealer() -> gtk4::Revealer {
+    slide_revealer(gtk4::RevealerTransitionType::SlideDown)
 }
 
 /// Build the inline New Download card. The returned [`AddCard`] owns the
@@ -1310,10 +1321,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     action_slot.add_named(&add_btn, Some("add"));
     action_slot.add_named(&url_spinner, Some("spinner"));
-    let action_revealer = gtk4::Revealer::builder()
-        .transition_type(gtk4::RevealerTransitionType::SlideRight)
-        .reveal_child(false)
-        .build();
+    // The revealer uses the shared slide helper: hidden (no spacing) until
+    // revealed, and collapses back when the slide-out finishes.
+    let action_revealer = slide_revealer(gtk4::RevealerTransitionType::SlideRight);
     action_revealer.set_child(Some(&action_slot));
     url_bar.append(&action_revealer);
     // Gear toggle for the download options: the HIG settings icon

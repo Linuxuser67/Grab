@@ -4,7 +4,6 @@
 
 use gettextrs::gettext;
 use std::collections::HashMap;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
@@ -691,18 +690,23 @@ async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
 /// zips and `bin/`-style layouts both work. A missing ffprobe is not an error.
 pub(crate) fn extract_ffmpeg_toolchain(archive: &Path, dir: &Path) -> Result<PathBuf, String> {
     // Always clean up the (large) archive, even when extraction fails.
-    let result = extract_ffmpeg_toolchain_inner(archive, dir);
+    let result = extract_ffmpeg_toolchain_inner(archive, dir, MAX_EXTRACT_BYTES);
     std::fs::remove_file(archive).ok();
     result
 }
 
-fn extract_ffmpeg_toolchain_inner(archive: &Path, dir: &Path) -> Result<PathBuf, String> {
-    use std::os::unix::fs::PermissionsExt as _;
+/// Cap extracted binaries: the ffmpeg static build is ~75MB, so 200MB is
+/// generous. Enforced via take() — the zip header's size field can't be
+/// trusted against a decompression bomb.
+const MAX_EXTRACT_BYTES: u64 = 200 * 1024 * 1024;
 
-    // Cap extracted binaries: the ffmpeg static build is ~75MB, so 200MB is
-    // generous. Enforced via take() — the zip header's size field can't be
-    // trusted against a decompression bomb.
-    const MAX_EXTRACT_BYTES: u64 = 200 * 1024 * 1024;
+pub(crate) fn extract_ffmpeg_toolchain_inner(
+    archive: &Path,
+    dir: &Path,
+    max_bytes: u64,
+) -> Result<PathBuf, String> {
+    use std::io::Read as _;
+    use std::os::unix::fs::PermissionsExt as _;
 
     let file = std::fs::File::open(archive)
         .map_err(|e| format!("couldn't open ffmpeg archive {}: {e}", archive.display()))?;
@@ -730,19 +734,16 @@ fn extract_ffmpeg_toolchain_inner(archive: &Path, dir: &Path) -> Result<PathBuf,
             .create_new(true)
             .open(&dest)
             .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
-        std::io::copy(&mut entry.take(MAX_EXTRACT_BYTES), &mut out)
+        std::io::copy(&mut entry.take(max_bytes + 1), &mut out)
             .map_err(|e| format!("couldn't extract {}: {e}", dest.display()))?;
         // take() truncates silently: if we hit the cap, the entry is not the
         // released binary (or it's a bomb). A truncated executable would fail
-        // mysteriously later — refuse it here.
-        if out
-            .metadata()
-            .map(|m| m.len() >= MAX_EXTRACT_BYTES)
-            .unwrap_or(false)
-        {
+        // mysteriously later — refuse it here. Reading max_bytes + 1 lets a
+        // legitimate entry of exactly max_bytes through.
+        if out.metadata().map(|m| m.len() > max_bytes).unwrap_or(false) {
             let _ = std::fs::remove_file(&dest);
             return Err(format!(
-                "{} in the ffmpeg archive exceeds the {MAX_EXTRACT_BYTES}-byte limit",
+                "{} in the ffmpeg archive exceeds the {max_bytes}-byte limit",
                 dest.display()
             ));
         }

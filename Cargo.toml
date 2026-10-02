@@ -2,7 +2,7 @@
 name = "grab"
 version = "4.8.2"
 edition = "2024"
-rust-version = "1.99"
+rust-version = "1.92"
 description = "A GNOME download manager (GTK 4 / libadwaita, reqwest backend)"
 license = "GPL-3.0-only"
 

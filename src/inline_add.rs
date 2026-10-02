@@ -2146,9 +2146,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             // Tick icon appears only when there's a URL to submit: add it
             // on first text, remove it when cleared.
             let has_text = !text.is_empty();
-            let icon_shown = row
-                .get_icon_name(gtk4::EntryIconPosition::Secondary)
-                .is_some();
+            let icon_shown = row.icon_name(gtk4::EntryIconPosition::Secondary).is_some();
             if has_text != icon_shown {
                 if has_text {
                     row.set_icon_from_icon_name(

@@ -20,3 +20,6 @@ __pycache__/
 # Design working notes (SPEC-*.md) live outside the repo, never in it.
 SPEC-*.md
 target-sdk/
+
+# Compiled GSettings schemas are build artifacts, never committed.
+data/gschemas.compiled

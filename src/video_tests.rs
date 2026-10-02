@@ -3118,6 +3118,28 @@ fn extract_ffmpeg_toolchain_inner_accepts_entry_at_cap() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+#[test]
+fn extract_ffmpeg_toolchain_inner_cleans_up_partial_on_cap_trip() {
+    use crate::video_tools::extract_ffmpeg_toolchain_inner;
+
+    let base = std::env::temp_dir().join(format!("grab-fftools-partial-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("out");
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    // ffmpeg fits the cap but ffprobe doesn't: the trip must not leave a
+    // half-installed toolchain behind.
+    make_tool_zip(
+        &archive,
+        &[("ffmpeg", b"tiny-ffmpeg"), ("ffprobe", &vec![0x7f; 4096])],
+    );
+    let err = extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).expect_err("cap must trip");
+    assert!(err.contains("exceeds"), "unexpected error: {err}");
+    assert!(!dir.join("ffmpeg").exists(), "partial ffmpeg left behind");
+    assert!(!dir.join("ffprobe").exists(), "partial ffprobe left behind");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 // ── quickjs provisioning (default JS runtime) ──────────────────────────
 
 #[test]

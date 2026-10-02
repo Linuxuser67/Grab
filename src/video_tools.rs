@@ -713,6 +713,7 @@ pub(crate) fn extract_ffmpeg_toolchain_inner(
     let mut zip =
         zip::ZipArchive::new(file).map_err(|e| format!("couldn't read ffmpeg archive: {e}"))?;
     let mut ffmpeg_path = None;
+    let mut extracted = Vec::new();
     for i in 0..zip.len() {
         let entry = zip
             .by_index(i)
@@ -734,13 +735,19 @@ pub(crate) fn extract_ffmpeg_toolchain_inner(
             .create_new(true)
             .open(&dest)
             .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
-        std::io::copy(&mut entry.take(max_bytes + 1), &mut out)
+        let n = std::io::copy(&mut entry.take(max_bytes + 1), &mut out)
             .map_err(|e| format!("couldn't extract {}: {e}", dest.display()))?;
         // take() truncates silently: if we hit the cap, the entry is not the
         // released binary (or it's a bomb). A truncated executable would fail
         // mysteriously later — refuse it here. Reading max_bytes + 1 lets a
-        // legitimate entry of exactly max_bytes through.
-        if out.metadata().map(|m| m.len() > max_bytes).unwrap_or(false) {
+        // legitimate entry of exactly max_bytes through. `copy`'s byte count
+        // is the check: no separate metadata() call that could fail open.
+        if n > max_bytes {
+            // Don't leave a half-installed toolchain: drop what we extracted
+            // so far along with the partial file.
+            for path in extracted.drain(..) {
+                let _ = std::fs::remove_file(path);
+            }
             let _ = std::fs::remove_file(&dest);
             return Err(format!(
                 "{} in the ffmpeg archive exceeds the {max_bytes}-byte limit",
@@ -749,6 +756,7 @@ pub(crate) fn extract_ffmpeg_toolchain_inner(
         }
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("couldn't mark {} executable: {e}", dest.display()))?;
+        extracted.push(dest.clone());
         if tool == "ffmpeg" {
             ffmpeg_path = Some(dest);
         }

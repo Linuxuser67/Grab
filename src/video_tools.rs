@@ -708,52 +708,70 @@ pub(crate) fn extract_ffmpeg_toolchain_inner(
     use std::io::Read as _;
     use std::os::unix::fs::PermissionsExt as _;
 
-    let file = std::fs::File::open(archive)
-        .map_err(|e| format!("couldn't open ffmpeg archive {}: {e}", archive.display()))?;
-    let mut zip =
-        zip::ZipArchive::new(file).map_err(|e| format!("couldn't read ffmpeg archive: {e}"))?;
-    let mut ffmpeg_path = None;
-    for i in 0..zip.len() {
-        let entry = zip
-            .by_index(i)
-            .map_err(|e| format!("couldn't read ffmpeg archive entry: {e}"))?;
-        if entry.is_dir() {
-            continue;
+    // Every file we create goes here; on ANY error the whole partial
+    // toolchain is removed, not just on the cap-trip path.
+    let mut extracted: Vec<PathBuf> = Vec::new();
+
+    let result = (|| -> Result<PathBuf, String> {
+        let file = std::fs::File::open(archive)
+            .map_err(|e| format!("couldn't open ffmpeg archive {}: {e}", archive.display()))?;
+        let mut zip = zip::ZipArchive::new(file)
+            .map_err(|e| format!("couldn't read ffmpeg archive: {e}"))?;
+        let mut ffmpeg_path = None;
+        for i in 0..zip.len() {
+            let entry = zip
+                .by_index(i)
+                .map_err(|e| format!("couldn't read ffmpeg archive entry: {e}"))?;
+            if entry.is_dir() {
+                continue;
+            }
+            let tool = match Path::new(entry.name()).file_name().and_then(|n| n.to_str()) {
+                Some("ffmpeg") => "ffmpeg",
+                Some("ffprobe") => "ffprobe",
+                _ => continue,
+            };
+            let dest = dir.join(tool);
+            // A planted symlink would divert the extracted binary (and the
+            // chmod) onto an arbitrary file: refuse instead of following it.
+            refuse_symlink_target(&dest)?;
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&dest)
+                .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
+            // Track immediately: a failed copy or chmod must still remove the
+            // partial file.
+            extracted.push(dest.clone());
+            let n = std::io::copy(&mut entry.take(max_bytes + 1), &mut out)
+                .map_err(|e| format!("couldn't extract {}: {e}", dest.display()))?;
+            // take() truncates silently: if we hit the cap, the entry is not the
+            // released binary (or it's a bomb). A truncated executable would fail
+            // mysteriously later — refuse it here. Reading max_bytes + 1 lets a
+            // legitimate entry of exactly max_bytes through. `copy`'s byte count
+            // is the check: no separate metadata() call that could fail open.
+            if n > max_bytes {
+                return Err(format!(
+                    "{} in the ffmpeg archive exceeds the {max_bytes}-byte limit",
+                    dest.display()
+                ));
+            }
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("couldn't mark {} executable: {e}", dest.display()))?;
+            if tool == "ffmpeg" {
+                ffmpeg_path = Some(dest);
+            }
         }
-        let tool = match Path::new(entry.name()).file_name().and_then(|n| n.to_str()) {
-            Some("ffmpeg") => "ffmpeg",
-            Some("ffprobe") => "ffprobe",
-            _ => continue,
-        };
-        let dest = dir.join(tool);
-        // A planted symlink would divert the extracted binary (and the
-        // chmod) onto an arbitrary file: refuse instead of following it.
-        refuse_symlink_target(&dest)?;
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&dest)
-            .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
-        std::io::copy(&mut entry.take(max_bytes + 1), &mut out)
-            .map_err(|e| format!("couldn't extract {}: {e}", dest.display()))?;
-        // take() truncates silently: if we hit the cap, the entry is not the
-        // released binary (or it's a bomb). A truncated executable would fail
-        // mysteriously later — refuse it here. Reading max_bytes + 1 lets a
-        // legitimate entry of exactly max_bytes through.
-        if out.metadata().map(|m| m.len() > max_bytes).unwrap_or(false) {
-            let _ = std::fs::remove_file(&dest);
-            return Err(format!(
-                "{} in the ffmpeg archive exceeds the {max_bytes}-byte limit",
-                dest.display()
-            ));
-        }
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("couldn't mark {} executable: {e}", dest.display()))?;
-        if tool == "ffmpeg" {
-            ffmpeg_path = Some(dest);
+        ffmpeg_path.ok_or_else(|| "ffmpeg binary not found in the downloaded archive".to_string())
+    })();
+
+    // Don't leave a half-installed toolchain behind on any failure.
+    if result.is_err() {
+        for path in extracted.drain(..) {
+            let _ = std::fs::remove_file(path);
         }
     }
-    ffmpeg_path.ok_or_else(|| "ffmpeg binary not found in the downloaded archive".to_string())
+
+    result
 }
 
 /// Minimum accepted yt-dlp version by release date. Older binaries predate the

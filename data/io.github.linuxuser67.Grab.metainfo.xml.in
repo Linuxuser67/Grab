@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.7.2" date="2026-10-01">
+      <description>
+        <ul>
+          <li>Links opened in Grab from the browser extension or the command line now land on the New Download card for a yt-dlp probe whenever they aren't obvious direct files — instead of saving the raw page as a file — with no per-site list to maintain.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.7.1" date="2026-10-01">
       <description>
         <ul>

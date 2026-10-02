@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <radialGradient id="shadow" cx="50%" cy="50%" r="50%">
+      <stop offset="85%" stop-color="#000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000" stop-opacity="0.25"/>
+    </radialGradient>
+  </defs>
+  <!-- Numix Circle style: soft drop shadow under the disc -->
+  <ellipse cx="64" cy="66" rx="54" ry="52" fill="url(#shadow)"/>
+  <!-- Disc -->
+  <circle cx="64" cy="62" r="52" fill="#3584e4"/>
+  <circle cx="64" cy="62" r="52" fill="none" stroke="#1c5fa8" stroke-width="1.5" opacity="0.6"/>
+  <!-- Highlight: subtle top sheen, Numix Circle style -->
+  <path d="M64 10a52 52 0 0 1 44 24H20a52 52 0 0 1 44-24z" fill="#fff" opacity="0.12"/>
+  <!-- Download glyph: arrow + tray, white, centered -->
+  <g transform="translate(64 58)">
+    <path d="M0-26v34m0 0-14-14m14 14 14-14" stroke="#fff" stroke-width="8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="-24" y="22" width="48" height="7" rx="3.5" fill="#fff"/>
+  </g>
+</svg>

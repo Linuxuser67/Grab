@@ -169,6 +169,12 @@ struct VideoStep {
     /// the widest child's width, so a lookup never reallocates the URL row
     /// (no separate status line, no layout shift when a lookup starts).
     action_slot: gtk4::Stack,
+    /// Revealer wrapping the action slot: the Add button / spinner slides
+    /// in from the left (SlideRight) after the tick submits, pushing the
+    /// gear and X buttons aside; it slides out on enqueue or card close.
+    /// The slide uses GtkRevealer, the established API — no hand-rolled
+    /// animation.
+    action_revealer: gtk4::Revealer,
     /// The spinner page of the action slot: kept so the show/hide helpers
     /// can set and clear its accessible label.
     url_spinner: adw::Spinner,
@@ -196,6 +202,10 @@ fn hide_video_step(v: &VideoStep) {
     // Slide the preview block closed; the child-revealed handler hides the
     // revealer once the animation finishes, so no dead spacing remains.
     v.group_revealer.set_reveal_child(false);
+    // NOTE: the action revealer (Add button / spinner) is NOT touched here:
+    // its visibility is owned by the submit/lookup flow (show_video_loading
+    // reveals, close_card hides). Hiding it here would break show_video_ready,
+    // which resets the step before showing the Add button.
     // Back to the Add button: the action slot keeps its width, so selecting
     // a page never reallocates the row. The spinner page is unmapped while
     // hidden, which stops its animation (no set_spinning on adw::Spinner).
@@ -231,11 +241,15 @@ fn reset_video_step(step: &VideoStep) {
     step.tools.set_subtitle("");
     step.error.set_subtitle("");
     hide_video_step(step);
+    // Slide the action slot out: card is closing, gear + X slide back.
+    step.action_revealer.set_reveal_child(false);
 }
 
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
-    // Swap the action slot to the spinner: same reserved width, no shift.
+    // Slide the action slot in (Add button / spinner pushes gear + X right),
+    // then swap to the spinner: same reserved width, no shift.
+    v.action_revealer.set_reveal_child(true);
     v.action_slot.set_visible_child_name("spinner");
     // Screen-reader announcement: the spinner alone is silent.
     // `adw::Spinner` doesn't expose `update_property` directly; upcast to Widget.
@@ -249,6 +263,9 @@ fn show_video_loading(v: &VideoStep) {
 
 fn show_video_ready(v: &VideoStep) {
     hide_video_step(v);
+    // Ensure the action slot is visible: the fresh-preview path reaches here
+    // without a show_video_loading (no new lookup to reveal it).
+    v.action_revealer.set_reveal_child(true);
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
@@ -264,6 +281,7 @@ fn show_video_ready(v: &VideoStep) {
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
     hide_video_step(v);
+    v.action_revealer.set_reveal_child(true);
     v.tools.set_subtitle(message);
     v.tools.set_visible(true);
     // Reveal after the row is shown: set_visible(true) first so the
@@ -274,6 +292,7 @@ fn show_video_tools_missing(v: &VideoStep, message: &str) {
 
 fn show_video_error(v: &VideoStep, message: &str) {
     hide_video_step(v);
+    v.action_revealer.set_reveal_child(true);
     v.error.set_subtitle(message);
     v.error.set_visible(true);
     // Reveal after the row is shown: set_visible(true) first so the
@@ -1078,6 +1097,7 @@ fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
     // the preview block stays hidden — but the probe resolved, so Add earns
     // its label like a single video; tapping it opens the title picker.
     hide_video_step(v);
+    v.action_revealer.set_reveal_child(true);
     v.add_btn.set_icon_name("");
     v.add_btn.remove_css_class("circular");
     v.add_btn.set_label(&gettext("Add"));
@@ -1242,23 +1262,40 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
 
     // URL bar: plain GtkEntry (entry styling, 6px corners) with the action
     // buttons beside it — AdwEntryRow would render card styling (12px).
-    // The lookup spinner swaps with the Add button in the action slot
-    // while probing.
+    // The tick lives inside the entry as the secondary icon (the established
+    // GtkEntry icon API): it submits the URL for lookup. The Add button /
+    // spinner slides in beside the entry after submit, via a GtkRevealer.
     let url_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
     let url_entry = gtk4::Entry::builder()
         .placeholder_text(gettext("Paste a download link"))
         .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
+    // Tick icon inside the entry: only sensitive when there's text to submit.
+    // Icon-press submits like Enter; the changed handler below toggles it.
+    url_entry.set_icon_from_icon_name(
+        gtk4::EntryIconPosition::Secondary,
+        Some("object-select-symbolic"),
+    );
+    url_entry.set_icon_tooltip_text(
+        gtk4::EntryIconPosition::Secondary,
+        Some(&gettext("Look up")),
+    );
+    // Entry starts empty: tick insensitive until there's text.
+    url_entry.set_icon_sensitive(gtk4::EntryIconPosition::Secondary, false);
     url_bar.append(&url_entry);
     // Action slot: a homogeneous GtkStack swapping the Add button with the
-    // lookup spinner. The slot keeps the widest child's width, so starting
-    // a lookup never reallocates the URL row. The swap is instant: a slide
-    // transition on every lookup would distract from the entry being read.
+    // lookup spinner, wrapped in a revealer. The slot keeps the widest
+    // child's width, so starting a lookup never reallocates the URL row.
+    // The revealer slides the slot in from the left (SlideRight) after the
+    // tick submits, pushing the gear and X buttons aside; it slides out on
+    // enqueue or card close. The swap itself is instant: a slide transition
+    // on every lookup would distract from the entry being read.
     let url_spinner = adw::Spinner::new();
     url_spinner.set_valign(gtk4::Align::Center);
-    // Persistent Add button: stays visible so a second press confirms
-    // after the preview loads. Colored rounded HIG button.
+    // Add button: appears only after the lookup finishes (or for direct
+    // files, after the tick submits). Labeled pill once a format is picked;
+    // icon-only checkmark otherwise. Colored rounded HIG button.
     let add_btn = gtk4::Button::builder()
         .icon_name("object-select-symbolic")
         .tooltip_text(gettext("Add download"))
@@ -1273,7 +1310,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     action_slot.add_named(&add_btn, Some("add"));
     action_slot.add_named(&url_spinner, Some("spinner"));
-    url_bar.append(&action_slot);
+    let action_revealer = gtk4::Revealer::builder()
+        .transition_type(gtk4::RevealerTransitionType::SlideRight)
+        .reveal_child(false)
+        .build();
+    action_revealer.set_child(Some(&action_slot));
+    url_bar.append(&action_revealer);
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
     let opts_toggle = gtk4::ToggleButton::builder()
@@ -1285,6 +1327,16 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         "Download options",
     ))]);
     url_bar.append(&opts_toggle);
+    // Dismissal X: closes the card (the header `+` toggle and Escape do the
+    // same; the X is the in-row affordance).
+    let cancel_btn = gtk4::Button::builder()
+        .icon_name("window-close-symbolic")
+        .css_classes(["flat", "circular"])
+        .tooltip_text(gettext("Cancel"))
+        .valign(gtk4::Align::Center)
+        .build();
+    cancel_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Cancel"))]);
+    url_bar.append(&cancel_btn);
     form.append(&url_bar);
 
     // Download options live in a revealer directly under the URL row: the
@@ -1364,6 +1416,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_revealer.set_child(Some(&video_group));
     let step = Rc::new(VideoStep {
         action_slot,
+        action_revealer: action_revealer.clone(),
         url_spinner: url_spinner.clone(),
         group_revealer: video_revealer.clone(),
         name: video_name,
@@ -1627,6 +1680,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             }
         })
     };
+
+    // X button dismisses the card, like the header toggle and Escape.
+    {
+        let close = Rc::clone(&close_card);
+        cancel_btn.connect_clicked(move |_| close());
+    }
 
     // Video resolve machinery: metadata lookup that never blocks the main
     // loop, started only by an explicit Add/Enter press. The probe state's
@@ -2063,6 +2122,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let s = submit.clone();
         url_entry.connect_activate(move |_| s(true));
     }
+    // Tick icon inside the entry submits like Enter.
+    {
+        let s = submit.clone();
+        url_entry.connect_icon_press(move |_, pos| {
+            if pos == gtk4::EntryIconPosition::Secondary {
+                s(false);
+            }
+        });
+    }
 
     // Sync the form skeleton while typing. The lookup itself never fires
     // on its own: pasting or editing only updates the form, and the resolve
@@ -2074,6 +2142,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         url_entry.connect_changed(move |row| {
             clear_field_error(row);
             let text = row.text().trim().to_string();
+            // Tick icon only submits when there's text to look up.
+            row.set_icon_sensitive(
+                gtk4::EntryIconPosition::Secondary,
+                !text.is_empty(),
+            );
             // The direct-only file row hides in video mode (the preview has its own
             // name row); a non-empty entry is not lost — the resolve seeds the video name
             // from it. A probed preview counts as video mode while its canonical URL matches.
@@ -2088,6 +2161,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             // compare: a mismatch is always safe to hide.
             if !crate::video::is_video_page(&text) || !fresh {
                 hide_video_step(&step2);
+                // Editing the URL stales the preview: slide the Add button
+                // out too (the tick re-submits for a fresh lookup).
+                step2.action_revealer.set_reveal_child(false);
                 if !fresh {
                     probe.borrow_mut().info.take();
                 }

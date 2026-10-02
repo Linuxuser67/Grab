@@ -3082,6 +3082,42 @@ fn extract_ffmpeg_toolchain_errors_without_ffmpeg() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+#[test]
+fn extract_ffmpeg_toolchain_inner_rejects_entry_over_cap() {
+    use crate::video_tools::extract_ffmpeg_toolchain_inner;
+
+    let base = std::env::temp_dir().join(format!("grab-fftools-cap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("out");
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    // 4KB entry against a 1KB cap: must be refused, not silently truncated.
+    make_tool_zip(&archive, &[("ffmpeg", &vec![0x7f; 4096])]);
+    let err = extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).expect_err("cap must trip");
+    assert!(err.contains("exceeds"), "unexpected error: {err}");
+    // The partial file is removed, not left truncated on disk.
+    assert!(!dir.join("ffmpeg").exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn extract_ffmpeg_toolchain_inner_accepts_entry_at_cap() {
+    use crate::video_tools::extract_ffmpeg_toolchain_inner;
+
+    let base = std::env::temp_dir().join(format!("grab-fftools-atcap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("out");
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    // An entry of exactly the cap is legitimate: take(max + 1) reads it fully
+    // and the `> max` check lets it through.
+    make_tool_zip(&archive, &[("ffmpeg", &vec![0x7f; 1024])]);
+    let ffmpeg = extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).expect("at-cap entry ok");
+    assert_eq!(ffmpeg, dir.join("ffmpeg"));
+    assert_eq!(std::fs::read(dir.join("ffmpeg")).unwrap().len(), 1024);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 // ── quickjs provisioning (default JS runtime) ──────────────────────────
 
 #[test]

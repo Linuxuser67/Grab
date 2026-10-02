@@ -3,6 +3,7 @@
 
 use crate::attempt_gate::AttemptGate;
 use crate::file_names::is_url_derived_name;
+use crate::runtime::lock_recover;
 use crate::video_argv::{
     VideoJob, apply_proxy_env, container_truth_name, fallback_to_live_edge, hls_download_argv,
     live_capture_argv, live_from_start_unsupported, live_remux_argv, merge_output_ext,
@@ -459,7 +460,7 @@ pub(crate) async fn run_unified_ytdlp(
 
 /// Time since yt-dlp last wrote a stdout line: the stall watchdog's clock.
 fn stall_elapsed(last_progress: &std::sync::Mutex<std::time::Instant>) -> std::time::Duration {
-    last_progress.lock().unwrap().elapsed()
+    lock_recover(last_progress).elapsed()
 }
 
 /// Wait for the child: bounded by the stall deadline while downloading, and by
@@ -511,7 +512,7 @@ async fn run_ytdlp_attempt(
         let mut after_move = None::<String>;
         let mut merged = false;
         while let Ok(Some(line)) = lines.next_line().await {
-            *last_progress_p.lock().unwrap() = std::time::Instant::now();
+            *lock_recover(&last_progress_p) = std::time::Instant::now();
             if !merged && is_ytdlp_merge_line(&line) {
                 merged = true;
                 merging_p.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -650,7 +651,9 @@ pub(crate) async fn remux_live_capture(
     let mut partial = dest.as_os_str().to_os_string();
     partial.push(".part");
     let partial = PathBuf::from(partial);
-    for with_bsf in [true, false] {
+    // Two attempts: with the bsf, then bare. The loop always exits via break.
+    let mut with_bsf = true;
+    loop {
         // ffmpeg runs without `-y` and refuses an existing output, so the bare retry must not inherit the first attempt's partial.
         let _ = tokio::fs::remove_file(&partial).await;
         let mut cmd = tokio::process::Command::new(ffmpeg_bin);
@@ -693,7 +696,7 @@ pub(crate) async fn remux_live_capture(
         let log_tail = join_drain(logs).await.unwrap_or_default();
         if status.success() {
             // Only now is this a recording: a crash before this point leaves a `.part`, which no sweep has to protect.
-            return match tokio::fs::rename(&partial, dest).await {
+            break match tokio::fs::rename(&partial, dest).await {
                 Ok(()) => Ok(()),
                 Err(e) => {
                     let _ = tokio::fs::remove_file(&partial).await;
@@ -704,12 +707,12 @@ pub(crate) async fn remux_live_capture(
         let detail = last_log_line(&log_tail, "ffmpeg reported failure");
         if with_bsf {
             tracing::debug!(error = %detail, "live remux without bsf, retrying bare");
+            with_bsf = false;
             continue;
         }
         let _ = tokio::fs::remove_file(&partial).await;
-        return Err(VideoError::combine(detail));
+        break Err(VideoError::combine(detail));
     }
-    unreachable!("bsf retry always returns");
 }
 
 /// Why a live capture ended, which decides what scratch is redundant. Raw media and the staging dir are tracked separately: conflating them deletes a finished recording on the one exit where both are the user's only copy.
@@ -1002,7 +1005,7 @@ fn spawn_growth_watcher(
             }
             if bytes > max {
                 max = bytes;
-                *last_progress.lock().unwrap() = std::time::Instant::now();
+                *lock_recover(&last_progress) = std::time::Instant::now();
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
@@ -1117,7 +1120,7 @@ pub(crate) async fn run_live_ytdlp(
             let mut announced = false;
             while let Ok(Some(line)) = lines.next_line().await {
                 // Any stdout line proves the recorder is alive.
-                *last_progress_p.lock().unwrap() = std::time::Instant::now();
+                *lock_recover(&last_progress_p) = std::time::Instant::now();
                 if let Some(p) = parse_ytdlp_template(&line) {
                     if !announced {
                         announced = true;
@@ -1507,7 +1510,7 @@ pub(crate) async fn run_hls_ytdlp(
         let mut after_move = None::<String>;
         let mut merged = false;
         while let Ok(Some(line)) = lines.next_line().await {
-            *last_progress_p.lock().unwrap() = std::time::Instant::now();
+            *lock_recover(&last_progress_p) = std::time::Instant::now();
             if is_ytdlp_merge_line(&line) && !merged {
                 merged = true;
                 merging_p.store(true, std::sync::atomic::Ordering::SeqCst);

@@ -4,6 +4,7 @@
 
 use gettextrs::gettext;
 use std::collections::HashMap;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
@@ -698,13 +699,18 @@ pub(crate) fn extract_ffmpeg_toolchain(archive: &Path, dir: &Path) -> Result<Pat
 fn extract_ffmpeg_toolchain_inner(archive: &Path, dir: &Path) -> Result<PathBuf, String> {
     use std::os::unix::fs::PermissionsExt as _;
 
+    // Cap extracted binaries: the ffmpeg static build is ~75MB, so 200MB is
+    // generous. Enforced via take() — the zip header's size field can't be
+    // trusted against a decompression bomb.
+    const MAX_EXTRACT_BYTES: u64 = 200 * 1024 * 1024;
+
     let file = std::fs::File::open(archive)
         .map_err(|e| format!("couldn't open ffmpeg archive {}: {e}", archive.display()))?;
     let mut zip =
         zip::ZipArchive::new(file).map_err(|e| format!("couldn't read ffmpeg archive: {e}"))?;
     let mut ffmpeg_path = None;
     for i in 0..zip.len() {
-        let mut entry = zip
+        let entry = zip
             .by_index(i)
             .map_err(|e| format!("couldn't read ffmpeg archive entry: {e}"))?;
         if entry.is_dir() {
@@ -724,8 +730,22 @@ fn extract_ffmpeg_toolchain_inner(archive: &Path, dir: &Path) -> Result<PathBuf,
             .create_new(true)
             .open(&dest)
             .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
-        std::io::copy(&mut entry, &mut out)
+        std::io::copy(&mut entry.take(MAX_EXTRACT_BYTES), &mut out)
             .map_err(|e| format!("couldn't extract {}: {e}", dest.display()))?;
+        // take() truncates silently: if we hit the cap, the entry is not the
+        // released binary (or it's a bomb). A truncated executable would fail
+        // mysteriously later — refuse it here.
+        if out
+            .metadata()
+            .map(|m| m.len() >= MAX_EXTRACT_BYTES)
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_file(&dest);
+            return Err(format!(
+                "{} in the ffmpeg archive exceeds the {MAX_EXTRACT_BYTES}-byte limit",
+                dest.display()
+            ));
+        }
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("couldn't mark {} executable: {e}", dest.display()))?;
         if tool == "ffmpeg" {

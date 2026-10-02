@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.8.1" date="2026-10-02">
+      <description>
+        <ul>
+          <li>Fixed excess spacing in the New Download card's URL row when the Add button is hidden.</li>
+          <li>The submit tick now only appears inside the URL entry when there's text to look up.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.8.0" date="2026-10-02">
       <description>
         <ul>

@@ -1051,9 +1051,7 @@ pub(crate) async fn run_live_ytdlp(
     // user's file — refuse.
     if job.dest.exists() {
         let manifest = read_manifest(staging, job.item_id);
-        let matches = manifest.as_ref().is_some_and(|m| {
-            m.page_url == page_url
-        });
+        let matches = manifest.as_ref().is_some_and(|m| m.page_url == page_url);
         if matches {
             let _ = std::fs::remove_file(&job.dest);
             clean_dest_parts(&job.dest);
@@ -1489,9 +1487,9 @@ pub(crate) async fn run_hls_ytdlp(
     // matching manifest, dest is the user's file — refuse.
     if job.dest.exists() {
         let manifest = read_manifest(staging, job.item_id);
-        let matches = manifest.as_ref().is_some_and(|m| {
-            m.page_url == job.page_url
-        });
+        let matches = manifest
+            .as_ref()
+            .is_some_and(|m| m.page_url == job.page_url);
         if matches {
             let _ = std::fs::remove_file(&job.dest);
             clean_dest_parts(&job.dest);

@@ -529,6 +529,65 @@ async fn run_ytdlp_attempt(
                         leg_max = leg_max.max(d);
                     }
                     if let Some(t) = p.total {
+                        // Cumulative total for display and grid.
+                        let cumulative = completed_bytes + t;
+                        // New leg detection: leg_total is None after finished banking,
+                        // or the per-leg total changed significantly (wobble handled below).
+                        let is_new_leg = leg_total.is_none();
+
+                        if is_new_leg {
+                            // (Re)initialize grid for this leg, cumulatively.
+                            // completed_bytes blocks are already done.
+                            tx_p.send(EngineMsg::SegmentsInit { total: cumulative })
+                                .ok();
+                            let piece_len = crate::file_names::piece_len(cumulative);
+                            marked = completed_bytes / piece_len.max(1);
+                            // leg_have is 0 (reset on finished, or first leg).
+                            grid_total = Some(cumulative);
+                            leg_total = Some(t);
+                        } else if leg_changed(max_total, max_dl, t, p.downloaded) {
+                            // Per-leg wobble: estimate revised significantly.
+                            // Rebuild the grid cumulatively.
+                            tx_p.send(EngineMsg::SegmentsInit { total: cumulative })
+                                .ok();
+                            let piece_len = crate::file_names::piece_len(cumulative);
+                            // Preserve completed_bytes blocks, plus current leg progress.
+                            marked = (completed_bytes + leg_have) / piece_len.max(1);
+                            grid_total = Some(cumulative);
+                            leg_total = Some(t);
+                        } else {
+                            // Same leg, minor wobble: check if grid needs rebuild
+                            // (growth) or collapse (sharp drop).
+                            let collapsed = estimate_collapsed(max_total, t)
+                                && p.downloaded.is_some_and(|d| t >= d);
+                            if grid_needs_rebuild(leg_total, t) || collapsed {
+                                tx_p.send(EngineMsg::SegmentsInit { total: cumulative })
+                                    .ok();
+                                grid_total = Some(cumulative);
+                                if collapsed {
+                                    max_total = Some(t);
+                                }
+                                let len = crate::file_names::piece_len(cumulative);
+                                // Re-mark blocks for completed + current.
+                                marked = 0;
+                                let total_have = completed_bytes + leg_have;
+                                if let Some(count) = total_have.checked_div(len) {
+                                    for idx in 0..count {
+                                        tx_p.send(EngineMsg::PieceDone(idx)).ok();
+                                        marked += 1;
+                                    }
+                                }
+                            }
+                            leg_total = Some(t);
+                            // Update cumulative grid_total (t may have grown slightly).
+                            grid_total = Some(cumulative);
+                        }
+                        max_total = Some(t.max(max_total.unwrap_or(0)));
+                    }
+                    if let Some(d) = p.downloaded {
+                        leg_max = leg_max.max(d);
+                    }
+                    if let Some(t) = p.total {
                         total = total.max(t);
                     }
                     if total > 0 {
@@ -1493,10 +1552,14 @@ pub(crate) async fn run_hls_ytdlp(
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         let (mut max_dl, mut max_total, mut marked) = (0u64, None, 0u64);
-        // `grid_total` is what the live block grid was built for, `leg_have` the
-        // bytes within the current leg: `max_dl` stays monotonic across legs for
-        // the bar, while `leg_have` resets so a second leg's map starts empty.
-        let (mut grid_total, mut leg_have) = (None::<u64>, 0u64);
+        // Sum-of-legs (M1): `completed_bytes` sums finished legs' totals.
+        // `leg_total`/`leg_have` are per-leg (for wobble handling); `grid_total`
+        // is cumulative (completed + current) for the bar and block grid.
+        // On `p.finished` (yt-dlp marks each completed format leg), we bank
+        // the leg's total into `completed_bytes` and reset the per-leg state.
+        let mut completed_bytes = 0u64;
+        let (mut leg_total, mut leg_have) = (None::<u64>, 0u64);
+        let mut grid_total = None::<u64>;
         let mut after_move = None::<String>;
         let mut merged = false;
         while let Ok(Some(line)) = lines.next_line().await {
@@ -1508,41 +1571,59 @@ pub(crate) async fn run_hls_ytdlp(
             } else if let Some(path) = parse_ytdlp_after_move(&line) {
                 after_move = Some(path.to_string());
             } else if let Some(p) = parse_ytdlp_template(&line) {
+                // Bank completed leg: yt-dlp prints `finished` per completed
+                // format leg. Add its total to completed_bytes, reset per-leg
+                // state (including the wobble detectors, which are per-leg).
+                if p.finished {
+                    completed_bytes += leg_total.unwrap_or(leg_have);
+                    leg_total = None;
+                    leg_have = 0;
+                    max_total = None;
+                    max_dl = 0;
+                    // Grid will rebuild when the next leg's total arrives.
+                }
                 if let Some(t) = p.total {
-                    if leg_changed(max_total, max_dl, t, p.downloaded) {
-                        // New format leg (video→audio): fresh grid and a
-                        // leg-relative byte basis (see `leg_changed`).
-                        tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
-                        marked = 0;
-                        leg_have = 0;
-                        grid_total = Some(t);
+                    // Cumulative total: completed legs + current leg.
+                    let cumulative = completed_bytes + t;
+                    if leg_total.is_none() {
+                        // New leg (first, or after finished banking): build the
+                        // grid cumulatively. completed_bytes blocks are done.
+                        tx_p.send(EngineMsg::SegmentsInit { total: cumulative })
+                            .ok();
+                        let piece_len = crate::file_names::piece_len(cumulative);
+                        marked = completed_bytes / piece_len.max(1);
+                        grid_total = Some(cumulative);
+                    } else if grid_needs_rebuild(leg_total, t) {
+                        // Per-leg growth: rebuild cumulatively.
+                        tx_p.send(EngineMsg::SegmentsInit { total: cumulative })
+                            .ok();
+                        let piece_len = crate::file_names::piece_len(cumulative);
+                        marked = (completed_bytes + leg_have) / piece_len.max(1);
+                        grid_total = Some(cumulative);
                     } else {
-                        // Same file, revised total: rebuild the grid on
-                        // growth (refined-up estimate) or on a sharp drop
-                        // (an estimate spike collapsed — the sticky max was
-                        // phantom; see `estimate_collapsed`). The collapse is
-                        // only adopted when the new total can still contain
-                        // what we've downloaded: adopting a total below the
-                        // downloaded bytes would flood the grid to a false
-                        // 100% (see hls_map_survives_estimate_wobble).
+                        // Same leg: check for estimate collapse (sharp drop).
                         let collapsed = estimate_collapsed(max_total, t)
                             && p.downloaded.is_some_and(|d| t >= d);
-                        if grid_needs_rebuild(grid_total, t) || collapsed {
-                            tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
-                            grid_total = Some(t);
-                            if collapsed {
-                                max_total = Some(t);
-                            }
-                            let len = crate::file_names::piece_len(t);
+                        if collapsed {
+                            tx_p.send(EngineMsg::SegmentsInit { total: cumulative })
+                                .ok();
+                            grid_total = Some(cumulative);
+                            max_total = Some(t);
+                            let len = crate::file_names::piece_len(cumulative);
                             marked = 0;
-                            if let Some(count) = leg_have.checked_div(len) {
+                            let total_have = completed_bytes + leg_have;
+                            if let Some(count) = total_have.checked_div(len) {
                                 for idx in 0..count {
                                     tx_p.send(EngineMsg::PieceDone(idx)).ok();
                                     marked += 1;
                                 }
                             }
+                        } else {
+                            // Minor wobble: just update the cumulative total.
+                            grid_total = Some(cumulative);
                         }
                     }
+                    leg_total = Some(t);
                     max_total = Some(t.max(max_total.unwrap_or(0)));
                 }
                 if let Some(d) = p.downloaded
@@ -1551,18 +1632,35 @@ pub(crate) async fn run_hls_ytdlp(
                 {
                     // Marks align with the displayed grid, not the running max:
                     // the grid may lag, and past its end the row drops them.
-                    leg_have = leg_have.max(d.min(grid));
+                    // d is per-leg; cumulative for the cumulative grid.
+                    let cumulative_d = completed_bytes + d;
+                    // leg_have tracks per-leg for wobble; grid uses cumulative.
+                    leg_have = leg_have.max(d.min(leg_total.unwrap_or(u64::MAX)));
+                    let display_have = cumulative_d.min(grid);
                     let have = max_dl.max(d.min(max_total.unwrap_or(grid)));
                     max_dl = have;
-                    for idx in
-                        piece_marks(crate::file_names::piece_len(grid), &mut marked, leg_have)
-                    {
+                    // Use cumulative for piece marks.
+                    let mut cumulative_marked = marked;
+                    // Recompute marked from scratch for cumulative grid to avoid
+                    // drift: marked tracks cumulative blocks.
+                    for idx in piece_marks(
+                        crate::file_names::piece_len(grid),
+                        &mut cumulative_marked,
+                        display_have,
+                    ) {
                         tx_p.send(EngineMsg::PieceDone(idx)).ok();
                     }
+                    marked = cumulative_marked;
                 }
+                // Sum-of-legs: bar uses cumulative (completed + current).
+                // Falls back to sticky max when no total (M3 indeterminate).
+                let (send_dl, send_total) = match grid_total {
+                    Some(t) if t > 0 => (completed_bytes + leg_have, grid_total),
+                    _ => (max_dl, max_total),
+                };
                 tx_p.send(EngineMsg::Progress {
-                    downloaded: max_dl,
-                    total: max_total,
+                    downloaded: send_dl,
+                    total: send_total,
                     uploaded: 0,
                     upload_bps: 0,
                 })

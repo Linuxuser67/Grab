@@ -85,6 +85,17 @@ pub(crate) fn leg_changed(
     }
 }
 
+/// Sum-of-legs progress accounting for multi-file HLS downloads.
+///
+/// The sticky `max_dl`/`max_total` freeze the bar at ~100% when leg 2 (audio)
+/// starts: leg 2's smaller bytes can never move the monotonic max from leg 1
+/// (video). This tracks completed legs' totals so the bar accounts for all
+/// legs: `effective = (prior_totals + leg_dl) / (prior_totals + leg_total)`.
+///
+/// For Twitter HLS (11MB video + 400KB audio): leg 1 goes 0→100%, leg 2 starts
+/// at 96% (11/11.4) and climbs to 100%. The 4% dip at the boundary is honest —
+/// we learned the true total — and far less misleading than a freeze.
+#[derive(Default)]
 /// Whether a refined-up total must rebuild the block grid. A stale smaller
 /// grid saturates early: once downloaded passes the grid's total every cell
 /// reads done while the bar (which tracks the bigger total) still shows

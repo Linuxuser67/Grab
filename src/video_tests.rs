@@ -3942,7 +3942,18 @@ fn live_capture_adopts_part_and_remuxes() {
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"tsbytes");
-    assert!(!staging.exists(), "staging cleaned");
+    let prefix = format!("grab-{}-", job.item_id);
+    assert!(
+        !std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e
+                .file_name()
+                .to_str()
+                .map(|n| n.starts_with(&prefix))
+                .unwrap_or(false)),
+        "staging cleaned"
+    );
     assert!(
         !dir.join("v.live.mp4.part").exists(),
         "capture shell must not leak beside the finished file"
@@ -4139,7 +4150,18 @@ fn live_capture_refuses_existing_dest() {
         !dir.join("grab-1-live.mp4.part").exists(),
         "no capture shell: the fake must never have run"
     );
-    assert!(!staging.exists(), "staging untouched by the refusal");
+    let prefix = format!("grab-{}-", job.item_id);
+    assert!(
+        !std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e
+                .file_name()
+                .to_str()
+                .map(|n| n.starts_with(&prefix))
+                .unwrap_or(false)),
+        "staging untouched by the refusal"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -8974,7 +8996,18 @@ fn unified_runner_downloads_claims_and_collects() {
          finalizer would never know to reclaim it"
     );
     assert_eq!(std::fs::read(dir.join("v.en.srt")).unwrap(), b"subtitles");
-    assert!(!staging.exists(), "staging cleaned");
+    let prefix = format!("grab-{}-", job.item_id);
+    assert!(
+        !std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e
+                .file_name()
+                .to_str()
+                .map(|n| n.starts_with(&prefix))
+                .unwrap_or(false)),
+        "staging cleaned"
+    );
     let mut progress = false;
     let mut merging = false;
     while let Ok(msg) = rx.try_recv() {

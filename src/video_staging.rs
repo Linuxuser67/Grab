@@ -423,7 +423,14 @@ pub fn sweep_partial_remuxes(staging: &Path) {
 /// Only touches files with the item's `grab-<id>-` prefix; never the dest dir itself or other files.
 pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
     let prefix = format!("grab-{item_id}-");
+    // Hidden manifest: `.grab-<id>-manifest.json` (dot-prefixed, not matched by the prefix above).
+    let hidden_manifest = format!(".grab-{item_id}-manifest.json");
     for name in dir_file_names(staging) {
+        // Delete the hidden manifest directly.
+        if name == hidden_manifest {
+            let _ = std::fs::remove_file(staging.join(&name));
+            continue;
+        }
         let Some(suffix) = name.strip_prefix(&prefix) else {
             continue;
         };

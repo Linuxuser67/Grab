@@ -2664,7 +2664,6 @@ impl DownloadManager {
             // Legacy tmp root first, then every destination dir: `grab-<id>-*`
             // files for items no longer live are reclaimed with the keep-set
             // (ids are session-unique).
-            crate::video::sweep_orphan_staging(&live);
             let mut dest_dirs = std::collections::HashSet::new();
             for it in self.items() {
                 dest_dirs.insert(it.dest_dir());

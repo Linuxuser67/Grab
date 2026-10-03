@@ -164,7 +164,6 @@ pub fn clean_staging(dir: &Path) {
 }
 
 /// Remove all `grab-<id>-*` staging files for an item in the destination dir.
-/// Remove all `grab-<id>-*` staging files for an item in the destination dir.
 /// Only touches files with the item's prefix; never the dir itself or other files.
 pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
     let prefix = format!("grab-{item_id}-");
@@ -183,6 +182,8 @@ pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
 }
 
 /// Remove a staging dir, guarded to stay under an explicit root (never user data).
+/// Test-only: production uses `clean_staging_files` with the item's prefix.
+#[cfg(test)]
 pub(crate) fn clean_staging_in(root: &Path, dir: &Path) {
     if let Some(canon) = guarded_staging_dir(root, dir) {
         let _ = std::fs::remove_dir_all(canon);
@@ -194,6 +195,8 @@ pub(crate) fn clean_staging_in(root: &Path, dir: &Path) {
 /// succeeds on an empty dir, so a sibling item still staging (or a kept
 /// recording) keeps the root; a planted symlink at the root is refused by
 /// the guards, never followed.
+/// Test-only: production never removes dest dirs.
+#[cfg(test)]
 pub(crate) fn drop_empty_staging_root(root: &Path) {
     // Same guards as the item-dir removal above: refuse a symlinked root
     // before canonicalizing (canonicalizing the link would make the
@@ -212,31 +215,11 @@ pub(crate) fn drop_empty_staging_root(root: &Path) {
 /// recordings stay (do not delete the user's only copy). The dir itself is
 /// removed only if nothing worth keeping remains, so it stays skipped by the
 /// id allocator.
-fn reclaim_orphan_staging_in(root: &Path, dir: &Path) {
-    let Some(canon) = guarded_staging_dir(root, dir) else {
-        return;
-    };
-    // Re-verify after canonicalization: the target must still be a numeric
-    // child of the root, so a symlink swapped in mid-sweep cannot divert the
-    // removal onto the root itself or a non-item path.
-    let item_id = canon
-        .file_name()
-        .and_then(|n| n.to_str())
-        .and_then(|n| n.parse::<u64>().ok());
-    if let Some(id) = item_id {
-        sweep_staging_preserving_recordings(&canon, id);
-    }
-}
-
 /// Reclaim per-item staging dirs with no live row (crash/kill leftovers: only
 /// restored rows reuse their ids, so nothing swept can resume). Only numeric
 /// dir names are touched — the `grab-cookies-*.txt` files and anything else
 /// under the root are left alone. Runs at startup after the queue is restored,
 /// before any worker starts, so nothing live is removed.
-pub fn sweep_orphan_staging(keep: &std::collections::HashSet<u64>) {
-    sweep_orphan_staging_in(&staging_root(), keep);
-}
-
 /// Sweep one destination's staging files (`grab-<id>-*`): files for item IDs
 /// with no live row are reclaimed. A missing dest dir is a no-op.
 pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>) {
@@ -255,23 +238,6 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
             && !suffix.starts_with("final.")
         {
             let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-pub(crate) fn sweep_orphan_staging_in(root: &Path, keep: &std::collections::HashSet<u64>) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let is_orphan = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<u64>().ok())
-            .is_some_and(|id| !keep.contains(&id));
-        if is_dir && is_orphan {
-            reclaim_orphan_staging_in(root, &entry.path());
         }
     }
 }

@@ -774,9 +774,8 @@ async fn sweep_live_capture(
         let _ = tokio::fs::remove_file(path).await;
         release_remux_lease(path);
     }
-    // Non-recursive: succeeds only when nothing else is in there, so a sibling attempt's remux is never collateral.
-    let _ = tokio::fs::remove_dir(staging).await;
-    // Staging is the dest dir itself: never remove it or its parent.
+    // Staging is the dest dir itself: never remove it. The item's
+    // `grab-<id>-*` files were already swept above; the dir stays.
 }
 
 /// Reap the recorder, and *only then* reclaim its scratch. The order is the contract: sweeping first could delete a file the recorder is still writing. Pinned by controlled futures in `video_runner_tests.rs`; the sweep is a closure so it cannot even be constructed before the reap completes.

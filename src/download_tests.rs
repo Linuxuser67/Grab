@@ -4076,7 +4076,7 @@ fn remove_cleans_dest_side_video_staging() {
     std::fs::create_dir_all(&destdir).unwrap();
     // Visible staging: grab-<id>-* files live in the dest dir itself.
     std::fs::write(destdir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
-    std::fs::write(destdir.join(format!("grab-{id}-v.video.mp4")), b"x").unwrap();
+    std::fs::write(destdir.join(format!("grab-{id}-video.f137.mp4")), b"x").unwrap();
     for n in ["v.mp4", "v.srt"] {
         std::fs::write(destdir.join(n), b"x").unwrap();
     }
@@ -4107,7 +4107,7 @@ fn remove_cleans_dest_side_video_staging() {
         "dest-side staged scratch must go with the row"
     );
     assert!(
-        !destdir.join(format!("grab-{id}-v.video.mp4")).exists(),
+        !destdir.join(format!("grab-{id}-video.f137.mp4")).exists(),
         "dest parts go too"
     );
     assert!(destdir.exists(), "dest dir is never removed");
@@ -4237,7 +4237,7 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
         // a beat, then recreate scratch the way a late write would.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let staging_ok = std::fs::write(
-            dest_task.join(format!("grab-{id_task}-late-remux")),
+            dest_task.join(format!("grab-{id_task}-late-remux.mp4")),
             b"late",
         )
         .is_ok();
@@ -4284,11 +4284,11 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     };
     assert!(
         !dest_dir.join(format!("grab-{id}-manifest.json")).exists()
-            && !dest_dir.join(format!("grab-{id}-late-remux")).exists(),
+            && !dest_dir.join(format!("grab-{id}-late-remux.mp4")).exists(),
         "staging survived the row: nothing reclaims it once the row is gone"
     );
     assert!(
-        !dest_dir.join(format!("grab-{id}-late-remux")).exists(),
+        !dest_dir.join(format!("grab-{id}-late-remux.mp4")).exists(),
         "the manager swept before the worker stopped, so scratch recreated \
          during teardown outlived the row"
     );

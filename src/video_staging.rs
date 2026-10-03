@@ -174,21 +174,22 @@ fn is_grab_staging_suffix(suffix: &str) -> bool {
     if suffix.ends_with(".part") || suffix.ends_with(".ytdl") {
         return true;
     }
-    // Live capture output: live.<ext> where ext is a media extension
-    if let Some(ext) = suffix.strip_prefix("live.") {
-        return matches!(
-            ext,
-            "mp4" | "webm" | "mkv" | "m4a" | "mp3" | "ogg" | "wav" | "flac" | "opus"
-        );
-    }
     // Remux/format parts: <kind>.<ext> where kind is a known Grab kind
-    // (video, audio) and ext is media. Conservative: require the dot.
-    if let Some((kind, ext)) = suffix.split_once('.') {
-        let kind_ok = matches!(kind, "video" | "audio");
-        let ext_ok = matches!(
-            ext.split('.').next().unwrap_or(""),
-            "mp4" | "webm" | "mkv" | "m4a" | "mp3" | "ogg" | "wav" | "flac" | "opus"
-        );
+    // (video, audio, live) and ext ends with a media extension.
+    // Handles video.f137.mp4, live.mp4, etc. Conservative: require the dot.
+    if let Some((kind, _rest)) = suffix.split_once('.') {
+        let kind_ok = matches!(kind, "video" | "audio" | "live");
+        // Get the last extension (e.g., "mp4" from "video.f137.mp4")
+        let ext_ok = suffix
+            .rsplit('.')
+            .next()
+            .map(|e| {
+                matches!(
+                    e,
+                    "mp4" | "webm" | "mkv" | "m4a" | "mp3" | "ogg" | "wav" | "flac" | "opus"
+                )
+            })
+            .unwrap_or(false);
         if kind_ok && ext_ok {
             return true;
         }

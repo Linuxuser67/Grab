@@ -13,9 +13,8 @@ use crate::video_argv::{
 use crate::video_plan::{StreamPlan, plan_streams};
 use crate::video_probe::page_host;
 use crate::video_progress::{
-    PROGRESS_GRANULARITY, estimate_collapsed, grid_needs_rebuild, is_ytdlp_merge_line,
-    last_error_line, last_log_line, leg_changed, parse_ytdlp_after_move, parse_ytdlp_template,
-    piece_marks, trace_format_lines,
+    HlsProgress, PROGRESS_GRANULARITY, is_ytdlp_merge_line, last_error_line, last_log_line,
+    parse_ytdlp_after_move, parse_ytdlp_template, trace_format_lines,
 };
 use crate::video_quality::default_video_filename;
 use crate::video_spawn::{
@@ -1492,11 +1491,11 @@ pub(crate) async fn run_hls_ytdlp(
     let merging_p = merging.clone();
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
-        let (mut max_dl, mut max_total, mut marked) = (0u64, None, 0u64);
-        // `grid_total` is what the live block grid was built for, `leg_have` the
-        // bytes within the current leg: `max_dl` stays monotonic across legs for
-        // the bar, while `leg_have` resets so a second leg's map starts empty.
-        let (mut grid_total, mut leg_have) = (None::<u64>, 0u64);
+        // One canonical fraction for bar and grid: cumulative across legs.
+        // HLS rows render the fraction-derived grid (see piece_bitmap's
+        // prefix fill), so unlike segmented rows this leg sends no
+        // SegmentsInit/PieceDone — bytes alone drive both views.
+        let mut hls_progress = HlsProgress::default();
         let mut after_move = None::<String>;
         let mut merged = false;
         while let Ok(Some(line)) = lines.next_line().await {
@@ -1508,68 +1507,17 @@ pub(crate) async fn run_hls_ytdlp(
             } else if let Some(path) = parse_ytdlp_after_move(&line) {
                 after_move = Some(path.to_string());
             } else if let Some(p) = parse_ytdlp_template(&line) {
-                if let Some(t) = p.total {
-                    if leg_changed(max_total, max_dl, t, p.downloaded) {
-                        // New format leg (video→audio): fresh grid and a
-                        // leg-relative byte basis (see `leg_changed`).
-                        tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
-                        marked = 0;
-                        leg_have = 0;
-                        grid_total = Some(t);
-                    } else {
-                        // Same file, revised total: rebuild the grid on
-                        // growth (refined-up estimate) or on a sharp drop
-                        // (an estimate spike collapsed — the sticky max was
-                        // phantom; see `estimate_collapsed`). The collapse is
-                        // only adopted when the new total can still contain
-                        // what we've downloaded: adopting a total below the
-                        // downloaded bytes would flood the grid to a false
-                        // 100% (see hls_map_survives_estimate_wobble).
-                        let collapsed = estimate_collapsed(max_total, t)
-                            && p.downloaded.is_some_and(|d| t >= d);
-                        if grid_needs_rebuild(grid_total, t) || collapsed {
-                            tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
-                            grid_total = Some(t);
-                            if collapsed {
-                                max_total = Some(t);
-                            }
-                            let len = crate::file_names::piece_len(t);
-                            marked = 0;
-                            if let Some(count) = leg_have.checked_div(len) {
-                                for idx in 0..count {
-                                    tx_p.send(EngineMsg::PieceDone(idx)).ok();
-                                    marked += 1;
-                                }
-                            }
-                        }
-                    }
-                    max_total = Some(t.max(max_total.unwrap_or(0)));
-                }
-                if let Some(d) = p.downloaded
-                    && let Some(grid) = grid_total
-                    && grid > 0
-                {
-                    // Marks align with the displayed grid, not the running max:
-                    // the grid may lag, and past its end the row drops them.
-                    leg_have = leg_have.max(d.min(grid));
-                    let have = max_dl.max(d.min(max_total.unwrap_or(grid)));
-                    max_dl = have;
-                    for idx in
-                        piece_marks(crate::file_names::piece_len(grid), &mut marked, leg_have)
-                    {
-                        tx_p.send(EngineMsg::PieceDone(idx)).ok();
-                    }
-                }
+                let disp = hls_progress.update(p.downloaded, p.total);
                 tx_p.send(EngineMsg::Progress {
-                    downloaded: max_dl,
-                    total: max_total,
+                    downloaded: disp.downloaded,
+                    total: disp.total,
                     uploaded: 0,
                     upload_bps: 0,
                 })
                 .ok();
             }
         }
-        (max_dl, max_total, after_move)
+        after_move
     });
     let logs = drain_stderr_to_tail(stderr);
     // Stall watchdog, not a wall clock: `timeout` is the silence budget. Each
@@ -1643,7 +1591,7 @@ pub(crate) async fn run_hls_ytdlp(
             },
         }
     };
-    let (mut _downloaded, _total, after_move) = progress.await.unwrap_or_default();
+    let after_move = progress.await.unwrap_or_default();
     let log_tail = logs.await.unwrap_or_default();
     if !status.success() {
         let detail = last_log_line(&log_tail, "yt-dlp reported failure");

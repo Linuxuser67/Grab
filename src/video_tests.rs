@@ -4087,7 +4087,7 @@ fn live_capture_crash_fails_instead_of_adopting() {
         "raw shell kept for salvage, hidden in staging"
     );
     assert!(
-        !dir.join("live-1.mp4.part").exists(),
+        !dir.join("v.live-1.mp4.part").exists(),
         "salvaged shell must not leak beside the finished file"
     );
     let _ = std::fs::remove_dir_all(&dir);

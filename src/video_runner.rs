@@ -1050,6 +1050,10 @@ pub(crate) async fn run_live_ytdlp(
     // but never delete here — a weak match could delete a completed output from a quality/format-changed retry.
     if job.dest.exists() {
         clean_dest_parts(&job.dest);
+        // Reclaim the stale shell from the crashed run.
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(out.with_extension(format!("{ext}.part")));
+        let _ = std::fs::remove_file(out.with_extension(format!("{ext}.ytdl")));
         return Err(VideoError::exists());
     }
     // Record this attempt's manifest: proves ownership for future retries.

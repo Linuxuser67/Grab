@@ -455,6 +455,27 @@ pub fn show(
         .sync_create()
         .build();
     share_group.add(&seed_time);
+    let listen_port = adw::SpinRow::builder()
+        .title(gettext("Listen port"))
+        .subtitle(gettext(
+            "Port for incoming connections. 0 disables listening. UPnP is enabled automatically when listening. Takes effect on restart.",
+        ))
+        .adjustment(&gtk4::Adjustment::new(6881.0, 0.0, 65535.0, 1.0, 10.0, 0.0))
+        .build();
+    listen_port.set_tooltip_text(Some(&gettext(
+        "Required for effective seeding behind NAT; UPnP forwards it automatically",
+    )));
+    settings
+        .bind(
+            crate::settings::key::TORRENT_LISTEN_PORT,
+            &listen_port,
+            "value",
+        )
+        .build();
+    seed.bind_property("active", &listen_port, "sensitive")
+        .sync_create()
+        .build();
+    share_group.add(&listen_port);
 
     let torrent_net_group = adw::PreferencesGroup::builder()
         .title(gettext("Connectivity"))

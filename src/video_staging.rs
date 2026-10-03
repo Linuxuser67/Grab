@@ -247,11 +247,13 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
     for entry in entries.filter_map(|e| e.ok()) {
         let name = entry.file_name();
         let name = name.to_str().unwrap_or("");
-        // Parse `grab-<id>-*` to get the item ID
+        // Parse `grab-<id>-*` to get the item ID. Recordings (`grab-<id>-final.*`)
+        // are the user's only copy — preserve them like the old per-dir sweep did.
         if let Some(rest) = name.strip_prefix("grab-")
-            && let Some((id_str, _)) = rest.split_once('-')
+            && let Some((id_str, suffix)) = rest.split_once('-')
             && let Ok(id) = id_str.parse::<u64>()
             && !keep.contains(&id)
+            && !suffix.starts_with("final.")
         {
             let _ = std::fs::remove_file(entry.path());
         }

@@ -785,7 +785,7 @@ pub(crate) struct TorrentJob {
     pub download_bps: Option<u64>,
     pub upload_bps: Option<u64>,
     pub listen_port: i32,
-    /// Ask the router to forward the listen port via UPnP (always false today: nothing to forward with no listen port).
+    /// Ask the router to forward the listen port via UPnP (enabled automatically when a listen port is configured).
     pub upnp: bool,
     /// Extra tracker URLs from preferences (per-add, so edits apply to new downloads without restarting).
     pub trackers: Option<Vec<String>>,

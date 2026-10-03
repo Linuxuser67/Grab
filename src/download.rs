@@ -1587,11 +1587,13 @@ impl DownloadManager {
             }
         };
         // SOCKS5 takes over TCP peers + HTTP trackers; no listen port, so UPnP has nothing to forward: hardcoded off.
+        // Otherwise, use the configured listen port (0 = disabled) and enable UPnP automatically when listening.
+        let listen_port = settings.torrent_listen_port();
         let net = crate::torrent::plan_torrent_net(
             settings.torrent_dht(),
             settings.torrent_lsd(),
-            0,
-            false,
+            listen_port,
+            listen_port > 0,
             trackers,
             proxy.as_ref(),
         );

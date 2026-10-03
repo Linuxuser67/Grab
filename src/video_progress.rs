@@ -85,25 +85,26 @@ pub(crate) fn leg_changed(
     }
 }
 
-/// Whether a refined-up total must rebuild the block grid. A stale smaller
-/// grid saturates early: once downloaded passes the grid's total every cell
-/// reads done while the bar (which tracks the bigger total) still shows
-/// partial. Any growth rebuilds; the grid total only ever grows, so rebuilds
-/// are bounded by new high-water marks and can never oscillate. Downward
-/// wobble never rebuilds: the bar's total is a sticky max, so marks and bar
-/// stay consistent on a stale larger grid.
+/// Whether a refined-up total must move the current leg's denominator. A stale
+/// smaller denominator saturates early: once downloaded passes it every cell
+/// reads done while the bar still shows partial. Any growth adopts the bigger
+/// denominator; growth adoptions only ever raise it, so rebuilds are bounded
+/// by new high-water marks and can never oscillate. Downward wobble never
+/// adopts here: the bar keeps the bigger denominator, so bar and grid stay
+/// consistent on a stale larger total (sharp drops go through
+/// `estimate_collapsed` below).
 pub(crate) fn grid_needs_rebuild(grid_total: Option<u64>, total: u64) -> bool {
     total > 0 && grid_total.is_none_or(|g| total > g)
 }
 
-/// Whether a collapsed HLS estimate invalidates the sticky max.
+/// Whether a collapsed HLS estimate invalidates the current denominator.
 /// `total_bytes_estimate` can spike to ~2x the true total mid-download and
-/// then revise sharply down; a sticky max locks in the spike, sizing the
-/// grid for a phantom total it can never fill (the map stalls half-lit
-/// while the download runs to completion). A downward revision beyond
-/// wobble adopts the correction: the max was wrong, the new estimate is
-/// yt-dlp's best current guess. Checked after `leg_changed`, so a genuine
-/// new leg (total moves *and* downloaded resets) still wins.
+/// then revise sharply down; keeping the spike sizes the bar for a phantom
+/// total it can never fill (the bar stalls half-lit while the download runs
+/// to completion). A downward revision beyond wobble adopts the correction:
+/// the old denominator was wrong, the new estimate is yt-dlp's best current
+/// guess. Checked after `leg_changed`, so a genuine new leg (total moves
+/// *and* downloaded resets) still wins.
 pub(crate) fn estimate_collapsed(max_total: Option<u64>, total: u64) -> bool {
     match max_total {
         Some(m) if m > 0 => total > 0 && total.saturating_mul(4) < m.saturating_mul(3),

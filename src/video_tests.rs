@@ -3774,7 +3774,7 @@ fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
     // Dests are the `.part` remux targets production passes: ffmpeg can't guess a
     // container from that name, so `-f` must be pinned from the real extension.
     let argv = live_remux_argv(
-        std::path::Path::new("/tmp/st/grab-1.mp4.part"),
+        std::path::Path::new("/tmp/st/grab-1-part.mp4.part"),
         std::path::Path::new("/tmp/st/final.mp4.part"),
         false,
         true,
@@ -3790,7 +3790,7 @@ fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
     assert_eq!(argv[argv.len() - 1], "/tmp/st/final.mp4.part");
     // The bare retry drops the fixup.
     let argv = live_remux_argv(
-        std::path::Path::new("/tmp/st/grab-1.mp4.part"),
+        std::path::Path::new("/tmp/st/grab-1-part.mp4.part"),
         std::path::Path::new("/tmp/st/final.mp4.part"),
         false,
         false,
@@ -3814,7 +3814,7 @@ fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
 fn live_remux_argv_stamps_the_source_url_so_the_id_survives() {
     // yt-dlp can't post-process a growing capture, so Grab remuxes itself: this is the only provenance pass, set explicitly.
     let argv = live_remux_argv(
-        std::path::Path::new("/tmp/st/grab-1.mp4.part"),
+        std::path::Path::new("/tmp/st/grab-1-part.mp4.part"),
         std::path::Path::new("/tmp/st/final.mp4.part"),
         false,
         true,
@@ -3840,7 +3840,7 @@ fn live_remux_argv_stamps_the_source_url_so_the_id_survives() {
 
     // A row with no usable page URL gets no half-formed tag.
     let argv = live_remux_argv(
-        std::path::Path::new("/tmp/st/grab-1.mp4.part"),
+        std::path::Path::new("/tmp/st/grab-1-part.mp4.part"),
         std::path::Path::new("/tmp/st/final.mp4.part"),
         false,
         true,
@@ -4087,7 +4087,7 @@ fn live_capture_crash_fails_instead_of_adopting() {
         "raw shell kept for salvage, hidden in staging"
     );
     assert!(
-        !dir.join("v.live-grab-1.mp4.part").exists(),
+        !dir.join("v.live.mp4.part").exists(),
         "salvaged shell must not leak beside the finished file"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -4216,7 +4216,7 @@ fn live_capture_refusal_reclaims_stale_scratch() {
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     std::fs::write(&job.dest, b"already").unwrap();
-    std::fs::write(staging.join("grab-1.mp4.part"), b"crashed").unwrap();
+    std::fs::write(staging.join("grab-1-part.mp4.part"), b"crashed").unwrap();
     std::fs::write(staging.join("grab-1-part.mp4.ytdl"), b"fragment-3").unwrap();
     let fake_yt = fake_ytdlp_live(&dir, false);
     let fake_ff = fake_ffmpeg_copy(&dir);
@@ -4246,7 +4246,7 @@ fn live_capture_refusal_reclaims_stale_scratch() {
         "the finished file at dest must never be touched by a parts sweep"
     );
     assert!(
-        !staging.join("grab-1.mp4.part").exists(),
+        !staging.join("grab-1-part.mp4.part").exists(),
         "the crashed run's shell outlived its row"
     );
     assert!(
@@ -4433,7 +4433,7 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
     names.sort();
     assert_eq!(
         names,
-        ["grab-1.mp4.part"],
+        ["grab-1-part.mp4.part"],
         "staging must hold only the salvaged shell after a failed remux"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -4732,22 +4732,22 @@ fn a_non_live_sweep_keeps_a_live_recordings_remux() {
     std::fs::write(staging.join(".grab-42-manifest.json"), b"{}").unwrap();
     std::fs::write(staging.join("grab-42-video.f137.mp4"), b"part").unwrap();
     std::fs::write(
-        staging.join("grab-99-final.grab-1-part.mp4"),
+        staging.join("grab-99-final.1.mp4"),
         b"a live recording",
     )
     .unwrap();
-    std::fs::write(staging.join("grab-99-final.grab-1-part.mp4.lease"), b"").unwrap();
+    std::fs::write(staging.join("grab-99-final.1.mp4.lease"), b"").unwrap();
     std::fs::write(staging.join("unrelated.txt"), b"keep").unwrap();
 
     sweep_staging_preserving_recordings(&staging, 42);
 
     assert_eq!(
-        std::fs::read(staging.join("grab-99-final.grab-1-part.mp4")).unwrap(),
+        std::fs::read(staging.join("grab-99-final.1.mp4")).unwrap(),
         b"a live recording",
         "a non-live leg destroyed a live attempt's completed remux"
     );
     assert!(
-        staging.join("grab-99-final.grab-1-part.mp4.lease").exists(),
+        staging.join("grab-99-final.1.mp4.lease").exists(),
         "the lease marks a claimed remux slot and must survive with it"
     );
     assert!(
@@ -4773,7 +4773,7 @@ fn a_crashed_remux_leaves_only_a_partial_and_it_is_reclaimable() {
     let _ = std::fs::remove_dir_all(&dir);
     let staging = dir.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
-    std::fs::write(staging.join("final.grab-1.mp4.part"), b"half a remux").unwrap();
+    std::fs::write(staging.join("final.1.mp4.part"), b"half a remux").unwrap();
     std::fs::write(staging.join("final.2.mp4"), b"a completed recording").unwrap();
     std::fs::write(staging.join("final.2.mp4.lease"), b"").unwrap();
     std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
@@ -4781,7 +4781,7 @@ fn a_crashed_remux_leaves_only_a_partial_and_it_is_reclaimable() {
     sweep_partial_remuxes(&staging);
 
     assert!(
-        !staging.join("final.grab-1.mp4.part").exists(),
+        !staging.join("final.1.mp4.part").exists(),
         "a partial remux from a crashed attempt was not reclaimed"
     );
     assert_eq!(
@@ -4832,7 +4832,7 @@ fn a_successful_live_remux_is_only_named_final_once_ffmpeg_succeeds() {
         "a successful remux must land under its final name"
     );
     assert!(
-        !dir.join("final.grab-1.mp4.part").exists(),
+        !dir.join("final.1.mp4.part").exists(),
         "the partial was left behind after the rename"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -4897,7 +4897,7 @@ fn a_failed_live_remux_leaves_no_partial_behind() {
          recording would take"
     );
     assert!(
-        !dir.join("final.grab-1.mp4.part").exists(),
+        !dir.join("final.1.mp4.part").exists(),
         "a failed remux left a partial behind for a later sweep to clean"
     );
     assert_eq!(
@@ -8992,7 +8992,7 @@ fn a_unified_leg_finishing_over_a_live_recording_leaves_it_alone() {
     std::fs::create_dir_all(&staging).unwrap();
     let recording = staging.join("final.1.mp4");
     std::fs::write(&recording, b"an unplaceable live recording").unwrap();
-    std::fs::write(staging.join("final.grab-1-part.mp4.lease"), b"").unwrap();
+    std::fs::write(staging.join("final.1.mp4.lease"), b"").unwrap();
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

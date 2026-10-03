@@ -1507,14 +1507,18 @@ pub(crate) async fn run_hls_ytdlp(
             } else if let Some(path) = parse_ytdlp_after_move(&line) {
                 after_move = Some(path.to_string());
             } else if let Some(p) = parse_ytdlp_template(&line) {
-                let disp = hls_progress.update(p.downloaded, p.total, p.finished);
-                tx_p.send(EngineMsg::Progress {
-                    downloaded: disp.downloaded,
-                    total: disp.total,
-                    uploaded: 0,
-                    upload_bps: 0,
-                })
-                .ok();
+                // `finished` lines bank internally and emit nothing: the next
+                // `downloading` line publishes the new cumulative denominator.
+                // This avoids a transient 100% frame at every leg boundary.
+                if let Some(disp) = hls_progress.update(p.downloaded, p.total, p.finished) {
+                    tx_p.send(EngineMsg::Progress {
+                        downloaded: disp.downloaded,
+                        total: disp.total,
+                        uploaded: 0,
+                        upload_bps: 0,
+                    })
+                    .ok();
+                }
             }
         }
         after_move

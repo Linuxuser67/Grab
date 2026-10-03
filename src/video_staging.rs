@@ -164,8 +164,8 @@ pub fn clean_staging(dir: &Path) {
 }
 
 /// Remove all `grab-<id>-*` staging files for an item in the destination dir.
-/// Test-only cleanup for the visible staging scheme.
-#[cfg(test)]
+/// Remove all `grab-<id>-*` staging files for an item in the destination dir.
+/// Only touches files with the item's prefix; never the dir itself or other files.
 pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
     let prefix = format!("grab-{item_id}-");
     if let Ok(entries) = std::fs::read_dir(dest_dir) {
@@ -219,13 +219,12 @@ fn reclaim_orphan_staging_in(root: &Path, dir: &Path) {
     // Re-verify after canonicalization: the target must still be a numeric
     // child of the root, so a symlink swapped in mid-sweep cannot divert the
     // removal onto the root itself or a non-item path.
-    let is_item = canon
+    let item_id = canon
         .file_name()
         .and_then(|n| n.to_str())
-        .and_then(|n| n.parse::<u64>().ok())
-        .is_some();
-    if is_item {
-        sweep_staging_preserving_recordings(&canon);
+        .and_then(|n| n.parse::<u64>().ok());
+    if let Some(id) = item_id {
+        sweep_staging_preserving_recordings(&canon, id);
     }
 }
 
@@ -411,15 +410,21 @@ pub fn sweep_partial_remuxes(staging: &Path) {
     }
 }
 
-/// Remove a leg's staging scratch, preserving completed `final.*` recordings (do not delete the user's only copy).
-pub fn sweep_staging_preserving_recordings(staging: &Path) {
+/// Remove a leg's staging scratch, preserving completed `grab-<id>-final.*` recordings (do not delete the user's only copy).
+/// Only touches files with the item's `grab-<id>-` prefix; never the dest dir itself or other files.
+pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
+    let prefix = format!("grab-{item_id}-");
     for name in dir_file_names(staging) {
-        if name.starts_with("final.") {
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        // Preserve completed recordings: they may be the user's only copy.
+        if name.starts_with(&format!("{prefix}final.")) {
             continue;
         }
         let _ = std::fs::remove_file(staging.join(&name));
     }
-    let _ = std::fs::remove_dir(staging);
+    // Never remove_dir: staging is the user's dest dir, not a dedicated subfolder.
 }
 
 /// Whether `stem` already hosts Grab part files or subtitle sidecars (intake treats it as taken).
@@ -640,49 +645,44 @@ mod tests {
 
     #[test]
     fn success_path_leaves_no_empty_staging_root() {
-        // The run_unified_ytdlp success tail: sweep the item scratch, then
-        // drop the root when the last item dir is gone.
-        let base = unique_dir("success-root");
-        let root = base.join(".grab-video");
-        let staging = root.join("42");
+        // The run_unified_ytdlp success tail: sweep the item's grab-<id>-* files.
+        // The dest dir itself is never removed.
+        let staging = unique_dir("success-root");
         std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join("chunk.part"), b"scratch").unwrap();
-        sweep_staging_preserving_recordings(&staging);
-        if let Some(root) = staging.parent() {
-            drop_empty_staging_root(root);
-        }
-        assert!(!staging.exists(), "item staging dir is swept on success");
+        std::fs::write(staging.join("grab-42-chunk.part"), b"scratch").unwrap();
+        std::fs::write(staging.join("unrelated.txt"), b"keep").unwrap();
+        sweep_staging_preserving_recordings(&staging, 42);
         assert!(
-            !root.exists(),
-            "empty staging root must be dropped on success"
+            !staging.join("grab-42-chunk.part").exists(),
+            "item staging file is swept on success"
         );
-        let _ = std::fs::remove_dir_all(&base);
+        assert!(staging.exists(), "dest dir is never removed");
+        assert!(
+            staging.join("unrelated.txt").exists(),
+            "unrelated files are never touched"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
     }
 
     #[test]
     fn success_path_keeps_root_while_recording_remains() {
-        // `final.*` preservation is untouched: the item dir stays non-empty,
-        // so the root correctly stays too.
-        let base = unique_dir("success-keep");
-        let root = base.join(".grab-video");
-        let staging = root.join("44");
+        // `grab-<id>-final.*` preservation: the recording stays, scratch is swept.
+        // The dest dir itself is never removed.
+        let staging = unique_dir("success-keep");
         std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join("final.recording.mp4"), b"only copy").unwrap();
-        std::fs::write(staging.join("chunk.part"), b"scratch").unwrap();
-        sweep_staging_preserving_recordings(&staging);
-        if let Some(root) = staging.parent() {
-            drop_empty_staging_root(root);
-        }
+        std::fs::write(staging.join("grab-44-final.recording.mp4"), b"only copy").unwrap();
+        std::fs::write(staging.join("grab-44-chunk.part"), b"scratch").unwrap();
+        sweep_staging_preserving_recordings(&staging, 44);
         assert!(
-            staging.join("final.recording.mp4").exists(),
+            staging.join("grab-44-final.recording.mp4").exists(),
             "completed recording is preserved"
         );
         assert!(
-            !staging.join("chunk.part").exists(),
+            !staging.join("grab-44-chunk.part").exists(),
             "scratch is swept around the recording"
         );
-        assert!(root.exists(), "root stays while a recording remains");
-        let _ = std::fs::remove_dir_all(&base);
+        assert!(staging.exists(), "dest dir is never removed");
+        let _ = std::fs::remove_dir_all(&staging);
     }
 
     #[test]

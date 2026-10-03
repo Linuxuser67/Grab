@@ -1977,7 +1977,9 @@ impl DownloadManager {
                 let worker_abort = handle.abort_handle();
                 let finalizer = crate::runtime::tokio_rt().spawn(async move {
                     let _ = handle.await;
-                    crate::video::clean_staging_in(&staging.root, &staging.dir);
+                    if let Some(dest_dir) = dest.parent() {
+                        crate::video::clean_staging_files(dest_dir, id);
+                    }
                     crate::video::clean_dest_parts(&dest);
                     if gate.was_delivered() {
                         // The commit won the race, so this file is the attempt's own orphan and the row is gone: the one sanctioned exception to never deleting a finished file.
@@ -2002,7 +2004,9 @@ impl DownloadManager {
             }
             // No task to wait for: sweep the scratch, never the finished file (no orphan is possible without a worker in flight).
             None => {
-                crate::video::clean_staging_in(&staging.root, &staging.dir);
+                if let Some(dest_dir) = dest.parent() {
+                    crate::video::clean_staging_files(dest_dir, id);
+                }
                 crate::video::clean_dest_parts(&dest);
                 self.release_dest(&dest);
                 // Same wakeup as the async finalizer above; already on the main thread.

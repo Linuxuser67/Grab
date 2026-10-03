@@ -15,12 +15,6 @@ pub fn staging_root() -> PathBuf {
 }
 
 /// Staging files live directly in the destination dir, visible like other download managers:
-/// `<dest_dir>/grab-<id>-<name>`. No subfolder. Same filesystem as the
-/// finished file, so delivery is an atomic rename.
-pub fn staging_file(dest_dir: &Path, item_id: u64, name: &str) -> PathBuf {
-    dest_dir.join(format!("grab-{item_id}-{name}"))
-}
-
 /// A resolved per-item staging dir plus the root it is guarded under: the
 /// dest-side root for current staging, the tmp root for legacy dirs still
 /// draining from before dest-side staging.

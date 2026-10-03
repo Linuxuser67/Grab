@@ -4083,7 +4083,7 @@ fn live_capture_crash_fails_instead_of_adopting() {
     }
     assert!(!job.dest.exists(), "crashed partial must not deliver");
     assert!(
-        dir.join("grab-1-live.mp4.part").exists(),
+        dir.join("live.mp4.part").exists(),
         "raw shell kept for salvage, hidden in staging"
     );
     assert!(
@@ -4129,7 +4129,7 @@ fn live_capture_stale_staging_never_adopts() {
     let _ = std::fs::remove_dir_all(&dir);
     let staging = dir.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
-    std::fs::write(dir.join("grab-1-live.mp4"), b"stale").unwrap();
+    std::fs::write(dir.join("live.mp4.part"), b"stale").unwrap();
     let fake_yt = fake_ytdlp_live(&dir, true);
     let fake_ff = fake_ffmpeg_copy(&dir);
     let staging = dir.clone();
@@ -4187,7 +4187,7 @@ fn live_capture_refuses_existing_dest() {
         ok => panic!("expected pre-flight refusal, got {ok:?}"),
     }
     assert!(
-        !dir.join("grab-1-live.mp4.part").exists(),
+        !dir.join("live.mp4.part").exists(),
         "no capture shell: the fake must never have run"
     );
     let prefix = format!("grab-{}-", job.item_id);
@@ -4270,7 +4270,7 @@ fn live_capture_abort_adopts_partial() {
     let res = crate::runtime::tokio_rt().block_on(async {
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
         // New scheme: grab-<id>-live.mp4.ytdl in dest dir
-        let state = dir.join(format!("grab-{}-live.mp4.ytdl", job.item_id));
+        let state = dir.join("live.mp4.part.ytdl".to_string());
         let seen = dir.join("abort-saw-state");
         tokio::spawn(async move {
             // Wait for the state file before stopping: a fixed sleep would race and pass vacuously.
@@ -4314,11 +4314,11 @@ fn live_capture_abort_adopts_partial() {
     );
     // A killed yt-dlp never removes its `.ytdl` file, so the post-capture sweep owns it.
     assert!(
-        !dir.join("grab-1-live.mp4.ytdl").exists(),
+        !dir.join("live.mp4.part.ytdl").exists(),
         "killed capture left its .ytdl state file behind"
     );
     assert!(
-        !dir.join("grab-1-live.mp4.part").exists(),
+        !dir.join("live.mp4.part").exists(),
         "killed capture left its .part shell behind"
     );
     assert!(
@@ -4412,11 +4412,11 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
         "the failure must name where the salvaged recording lives"
     );
     assert!(
-        !dir.join("grab-1-live.mp4.ytdl").exists(),
+        !dir.join("live.mp4.part.ytdl").exists(),
         "failed remux left its .ytdl state file behind"
     );
     assert_eq!(
-        std::fs::read(dir.join("grab-1-live.mp4.part")).unwrap(),
+        std::fs::read(dir.join("live.mp4.part")).unwrap(),
         b"recorded",
         "the recording is the only copy: it must survive a failed remux"
     );
@@ -4433,7 +4433,7 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
     names.sort();
     assert_eq!(
         names,
-        ["grab-1-live.mp4.part"],
+        ["live.mp4.part"],
         "staging must hold only the salvaged shell after a failed remux"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -4494,7 +4494,7 @@ fn live_capture_barren_start_sweeps_state_file() {
     ));
     assert!(res.is_err(), "barren run must fail, got {res:?}");
     assert!(
-        !dir.join("grab-1-live.mp4.ytdl").exists(),
+        !dir.join("live.mp4.part.ytdl").exists(),
         "barren run left its .ytdl state file behind"
     );
     assert!(!job.dest.exists(), "no file is delivered from a barren run");
@@ -5062,7 +5062,7 @@ fn live_capture_retry_never_inherits_stale_state() {
     );
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"recorded");
     assert!(
-        !dir.join("grab-1-live.mp4.ytdl").exists(),
+        !dir.join("live.mp4.part.ytdl").exists(),
         "state must not survive"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -5306,7 +5306,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
 
     // File half: partial media is kept, scratch state must go, nothing is delivered.
     assert!(
-        !dir.join("grab-1-live.mp4.ytdl").exists(),
+        !dir.join("live.mp4.part.ytdl").exists(),
         "the abort left yt-dlp's state file behind: a later attempt would resume \
          fragment N against a shell Grab wipes first, producing a corrupt recording"
     );
@@ -5317,7 +5317,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
          parked completed remux from an earlier attempt"
     );
     assert_eq!(
-        std::fs::read(dir.join("grab-1-live.mp4.part")).unwrap(),
+        std::fs::read(dir.join("live.mp4.part")).unwrap(),
         b"partial",
         "the partial recording must not be destroyed by an involuntary shutdown"
     );
@@ -8814,7 +8814,7 @@ fn live_part_shell_announces_recording_and_is_swept() {
         "shell growth must announce Recording, phases seen: {phases:?}"
     );
     assert!(
-        !dir.join("grab-1-live.mp4.part").exists(),
+        !dir.join("live.mp4.part").exists(),
         "stopped capture must not leave its shell behind"
     );
     assert!(

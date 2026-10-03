@@ -288,12 +288,13 @@ pub async fn run_video_download(
             .await?;
         }
         ResumePlan::Resume => {
-            // If dest exists during a resume, it's stale (resume_plan would have
-            // returned Finished if it were complete). The manifest proves it's our
-            // download, so delete the stale file and resume from staging.
+            // Overwrite pre-flight, same as Fresh: anything at `dest` is foreign or complete (resume_plan returns
+            // Finished for the complete case), so refuse before a wasted download. Never delete here — the manifest
+            // is written with final_bytes: None and only updated on success, so a crash between the atomic rename
+            // and the update would delete a good file.
             if job.dest.exists() {
-                let _ = std::fs::remove_file(&job.dest);
                 clean_dest_parts(&job.dest);
+                return Err(VideoError::exists());
             }
             phase(gettext("Resuming download…"));
         }
@@ -1045,20 +1046,11 @@ pub(crate) async fn run_live_ytdlp(
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
     // recording, and the file-growth watcher announces "Recording…" off this path.
     let out = part_path(staging, job.item_id, "live", ext);
-    // Resume correctness: if dest exists but we have a matching manifest, the
-    // dest is stale (force-close left it). Delete and start a fresh recording
-    // (live streams can't resume). Without a matching manifest, dest is the
-    // user's file — refuse.
+    // Overwrite pre-flight: refuse if dest exists. The manifest proves ownership for future retries,
+    // but never delete here — a weak match could delete a completed output from a quality/format-changed retry.
     if job.dest.exists() {
-        let manifest = read_manifest(staging, job.item_id);
-        let matches = manifest.as_ref().is_some_and(|m| m.page_url == page_url);
-        if matches {
-            let _ = std::fs::remove_file(&job.dest);
-            clean_dest_parts(&job.dest);
-        } else {
-            clean_dest_parts(&job.dest);
-            return Err(VideoError::exists());
-        }
+        clean_dest_parts(&job.dest);
+        return Err(VideoError::exists());
     }
     // Record this attempt's manifest: proves ownership for future retries.
     let _ = write_manifest(
@@ -1485,17 +1477,10 @@ pub(crate) async fn run_hls_ytdlp(
     // Resume correctness: if dest exists but we have a matching manifest, the
     // dest is stale (force-close left it). Delete and proceed. Without a
     // matching manifest, dest is the user's file — refuse.
+    // Overwrite pre-flight: refuse if dest exists. The manifest proves ownership for future retries,
+    // but never delete here — a weak match could delete a completed output.
     if job.dest.exists() {
-        let manifest = read_manifest(staging, job.item_id);
-        let matches = manifest
-            .as_ref()
-            .is_some_and(|m| m.page_url == job.page_url);
-        if matches {
-            let _ = std::fs::remove_file(&job.dest);
-            clean_dest_parts(&job.dest);
-        } else {
-            return Err(VideoError::exists());
-        }
+        return Err(VideoError::exists());
     }
     // Record this attempt's manifest: proves ownership for future resumes.
     let _ = write_manifest(

@@ -90,7 +90,7 @@ pub async fn run_video_download(
     };
 
     // Resolve with retries, always fresh: no cache backend, so expired format URLs never survive a retry. A staging manifest labels the re-resolve as a resume.
-    let resuming = read_manifest(&staging).is_some();
+    let resuming = read_manifest(&staging, job.item_id).is_some();
     phase(if resuming {
         gettext("Resuming download…")
     } else if job.audio_only {
@@ -229,7 +229,7 @@ pub async fn run_video_download(
     );
 
     // Retry discipline from the sidecar. Parts live beside the finished file, so every file check builds off the destination.
-    let manifest = read_manifest(&staging);
+    let manifest = read_manifest(&staging, job.item_id);
     // Split rows merge video+audio (both sizes known or neither trusted); an adopted single's extractor size is the whole file. Anything else leaves the total unknown rather than understating it.
     let single = video_sel.is_none();
     let query = ResumeQuery {
@@ -275,6 +275,7 @@ pub async fn run_video_download(
             // Record this attempt's selection up front: a pause from here on leaves a matchable sidecar, so the next attempt resumes instead of wiping.
             write_manifest(
                 &staging,
+                job.item_id,
                 &VideoManifest {
                     page_url: job.page_url.clone(),
                     quality: job.quality.clone(),
@@ -445,9 +446,9 @@ pub(crate) async fn run_unified_ytdlp(
     clean_dest_parts(&job.dest);
     // Record the finished size so a later retry adopts the file.
     let final_bytes = file_len(&job.dest);
-    if let Some(mut m) = read_manifest(staging) {
+    if let Some(mut m) = read_manifest(staging, job.item_id) {
         m.final_bytes = final_bytes;
-        let _ = write_manifest(staging, &m).await;
+        let _ = write_manifest(staging, job.item_id, &m).await;
     }
     sweep_staging_preserving_recordings(staging);
     // Drop the root when the last item dir is gone: no stray `.grab-video`
@@ -1053,7 +1054,7 @@ pub(crate) async fn run_live_ytdlp(
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
     // recording, and the file-growth watcher announces "Recording…" off this path.
-    let out = part_path(staging, "live", ext);
+    let out = part_path(staging, job.item_id, "live", ext);
     // Overwrite pre-flight (Parabolic parity): refuse before recording; the row fails instead of requeueing. Also reclaims pre-upgrade dest-dir scratch for this stem (live parts used to sit beside the finished file); the finished file at dest is left be.
     if job.dest.exists() {
         clean_dest_parts(&job.dest);

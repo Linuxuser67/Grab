@@ -2555,12 +2555,8 @@ impl DownloadManager {
 
     /// Load the persisted queue (cap: 1000 items / 10 MB), then resume. Unusable files move to `queue.json.bak`, never deleted.
     pub fn restore_queue(self: &Rc<Self>) {
-        // Pre-persisted-id queues restore with fresh ids, which must not collide with a staging dir another row still occupies.
-        if let Some(highest) = crate::video::highest_staging_index()
-            && highest >= self.next_id.get()
-        {
-            self.next_id.set(highest + 1);
-        }
+        // Staging files are dot-prefixed in each destination dir; the
+        // `staging_occupied` check at row creation skips IDs with leftovers.
         if Self::queue_file().exists() {
             const MAX_QUEUE_BYTES: u64 = 10_000_000;
             const MAX_QUEUE_ITEMS: usize = 1000;

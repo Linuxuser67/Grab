@@ -1110,7 +1110,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
     let dest_s = dest.to_string_lossy().into_owned();
 
     // A crashed attempt's leftover: scratch plus a completed recording (the user's only copy).
-    let leftover = crate::video::staging_dir_for(&dest, 9_001);
+    let leftover = dest.clone();
     std::fs::create_dir_all(&leftover).unwrap();
     std::fs::write(leftover.join("grab-media.mp4.part"), b"scratch").unwrap();
     std::fs::write(leftover.join("final.1.mp4"), b"someone's recording").unwrap();
@@ -4128,7 +4128,7 @@ fn remove_cleans_dest_side_video_staging() {
     let destdir = std::env::temp_dir().join(format!("grab-remove-dest-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&destdir);
     std::fs::create_dir_all(&destdir).unwrap();
-    let dir = crate::video::staging_dir_for(&destdir, id);
+    let dir = destdir.clone();
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("manifest.json"), b"{}").unwrap();
     for n in ["v.mp4", "v.srt", "v.video.mp4"] {

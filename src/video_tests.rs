@@ -44,11 +44,10 @@ use crate::video_spawn::{
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
-    dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir,
-    is_grab_part, is_sparse_shell, is_ytdlp_fragment, manifest_path,
-    part_path, read_manifest, release_remux_lease, reserve_remux_temp, resume_plan,
-    sidecar_path_for, staging_dir_for, staging_root, stem_reserved_in,
-    sweep_orphan_staging_in, sweep_partial_remuxes,
+    dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
+    is_sparse_shell, is_ytdlp_fragment, manifest_path, part_path, read_manifest,
+    release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for, staging_dir_for,
+    staging_root, stem_reserved_in, sweep_orphan_staging_in, sweep_partial_remuxes,
     sweep_staging_preserving_recordings, unified_candidate, unified_temp_limit,
     ytdlp_output_template,
 };
@@ -1003,11 +1002,7 @@ fn manifest_serde_round_trip() {
     let m = test_manifest();
     let item_id = 12345u64;
     let path = manifest_path(&dir, item_id);
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&m).unwrap(),
-    )
-    .unwrap();
+    std::fs::write(&path, serde_json::to_string_pretty(&m).unwrap()).unwrap();
     assert_eq!(read_manifest(&dir, item_id).as_ref(), Some(&m));
     // Corrupt sidecars read as absent, never fatal.
     std::fs::write(&path, b"{nope").unwrap();

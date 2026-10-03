@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.0.1-beta.1" date="2026-10-03">
+      <description>
+        <ul>
+          <li>Beta release for the 5.0 series.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.8.4" date="2026-10-02">
       <description>
         <ul>

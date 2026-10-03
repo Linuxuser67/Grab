@@ -4731,11 +4731,7 @@ fn a_non_live_sweep_keeps_a_live_recordings_remux() {
     // Scratch the finishing leg owns (item 42), and a recording it does not (item 99).
     std::fs::write(staging.join(".grab-42-manifest.json"), b"{}").unwrap();
     std::fs::write(staging.join("grab-42-video.f137.mp4"), b"part").unwrap();
-    std::fs::write(
-        staging.join("grab-99-final.1.mp4"),
-        b"a live recording",
-    )
-    .unwrap();
+    std::fs::write(staging.join("grab-99-final.1.mp4"), b"a live recording").unwrap();
     std::fs::write(staging.join("grab-99-final.1.mp4.lease"), b"").unwrap();
     std::fs::write(staging.join("unrelated.txt"), b"keep").unwrap();
 

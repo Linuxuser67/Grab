@@ -1157,7 +1157,14 @@ fn show_rename_dialog(
     dialog.set_child(Some(&toolbar));
     dialog.set_default_widget(Some(&rename_btn));
 
-    crate::ui_util::close_on_click(&cancel_btn, &dialog);
+    {
+        let weak = dialog.downgrade();
+        cancel_btn.connect_clicked(move |_| {
+            if let Some(d) = weak.upgrade() {
+                d.close();
+            }
+        });
+    }
     {
         let m = manager.clone();
         let dialog = dialog.downgrade();

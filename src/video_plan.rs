@@ -11,14 +11,13 @@ use yt_dlp::model::{DrmStatus, Video};
 /// tallest. Fetchability filtering stays with the callers. Pure.
 fn pick_at_or_above<T: Clone>(mut cands: Vec<(T, u32)>, want: Option<u32>) -> Option<T> {
     cands.sort_by_key(|(_, h)| *h);
-    match want {
-        Some(cap) => cands
+    let found = want.and_then(|cap| {
+        cands
             .iter()
             .find(|(_, h)| *h >= cap)
-            .or_else(|| cands.last())
-            .map(|(item, _)| item.clone()),
-        None => cands.pop().map(|(item, _)| item),
-    }
+            .map(|(item, _)| item.clone())
+    });
+    found.or_else(|| cands.pop().map(|(item, _)| item))
 }
 
 /// Best muxed (audio+video) file for a height cap, same semantics as

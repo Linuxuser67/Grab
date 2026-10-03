@@ -1,6 +1,7 @@
 //! Probe identity: what a URL is and what a probe resolved to. Leaf module
 //! (media types + yt_dlp model + url crate), reached through the `video` facade.
 
+use crate::file_names::fmt_bytes;
 use yt_dlp::model::format::{Format, Protocol};
 use yt_dlp::model::selector::VideoCodecPreference;
 use yt_dlp::model::{DrmStatus, FORMAT_URL_LIFETIME, Video};
@@ -394,7 +395,7 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Box<[VideoForm
         .map(|(height, f)| {
             let short = format_short_label(f);
             let label = match filesize_of(f) {
-                Some(n) => format!("{height}p · {short} · {}", fmt_video_bytes(n)),
+                Some(n) => format!("{height}p · {short} · {}", fmt_bytes(n)),
                 None => format!("{height}p · {short}"),
             };
             VideoFormatOption {
@@ -406,11 +407,6 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Box<[VideoForm
         .collect();
     out.sort_by_key(|a| std::cmp::Reverse(a.height));
     out.into_boxed_slice()
-}
-
-/// Human size for format labels via GLib's `g_format_size` (SI base-1000, localized).
-fn fmt_video_bytes(n: u64) -> String {
-    glib::format_size(n).to_string()
 }
 
 /// One HLS manifest variant selected by the planner: the exact

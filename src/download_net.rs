@@ -48,11 +48,7 @@ pub const PROXY_TYPE_VALUES: &[&str] = &["http", "https", "socks5"];
 
 /// Protocol names are left untranslated, like codec labels.
 pub fn proxy_type_labels() -> Vec<String> {
-    vec![
-        "HTTP".to_string(),
-        "HTTPS".to_string(),
-        "SOCKS5".to_string(),
-    ]
+    ["HTTP", "HTTPS", "SOCKS5"].map(String::from).to_vec()
 }
 
 /// Combo index for stored type; unknown falls back to SOCKS5.

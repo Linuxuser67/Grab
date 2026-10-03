@@ -14,32 +14,17 @@ pub fn staging_root() -> PathBuf {
     std::env::temp_dir().join("grab-video")
 }
 
-/// Per-destination staging root: `<dest_dir>/.grab-video`. Dot-prefixed, so
-/// file managers hide the in-flight scratch next to the finished files.
-pub fn dest_staging_root(dest_dir: &Path) -> PathBuf {
-    dest_dir.join(".grab-video")
+/// Staging files live directly in the destination dir, dot-prefixed and hidden:
+/// `<dest_dir>/.grab-<id>-<name>`. No subfolder. Same filesystem as the
+/// finished file, so delivery is an atomic rename.
+pub fn staging_file(dest_dir: &Path, item_id: u64, name: &str) -> PathBuf {
+    dest_dir.join(format!(".grab-{item_id}-{name}"))
 }
 
-/// Per-item staging dir for a destination: `<dest_dir>/.grab-video/<id>/`.
-/// Same filesystem as the finished file, so delivery is an atomic rename and
-/// a crash leaves the scratch hidden beside the destination, not in tmpfs.
-pub fn staging_dir_for(dest_dir: &Path, item_id: u64) -> PathBuf {
-    dest_staging_root(dest_dir).join(item_id.to_string())
-}
-
-/// Legacy tmpfs location from before dest-side staging. Read fallback only:
-/// a paused row keeps its resume data across the upgrade until its staging
-/// drains through the normal completion/removal paths.
-pub fn legacy_staging_dir(item_id: u64) -> PathBuf {
-    staging_root().join(item_id.to_string())
-}
-
-/// Historic alias for the legacy tmpfs location (kept for tests probing
-/// pre-upgrade layouts). Test-only: production resolves through
-/// [`staging_location_for_dest`].
-#[cfg(test)]
-pub fn staging_dir(item_id: u64) -> PathBuf {
-    legacy_staging_dir(item_id)
+/// Per-item staging "dir" — now the destination dir itself. Files are
+/// dot-prefixed via [`staging_file`]; there is no `.grab-video/` subfolder.
+pub fn staging_dir_for(dest_dir: &Path, _item_id: u64) -> PathBuf {
+    dest_dir.to_path_buf()
 }
 
 /// A resolved per-item staging dir plus the root it is guarded under: the
@@ -51,54 +36,43 @@ pub struct StagingLocation {
     pub root: PathBuf,
 }
 
-/// Resolve the staging dir in use: the dest-side one when present, else the
-/// legacy tmp one when present, else the dest-side one (for creation).
-pub fn staging_location(dest_dir: &Path, item_id: u64) -> StagingLocation {
-    let fresh = staging_dir_for(dest_dir, item_id);
-    if fresh.exists() {
-        let root = dest_staging_root(dest_dir);
-        return StagingLocation { dir: fresh, root };
-    }
-    let legacy = legacy_staging_dir(item_id);
-    if legacy.exists() {
-        return StagingLocation {
-            dir: legacy,
-            root: staging_root(),
-        };
-    }
+/// Resolve the staging location: the destination dir itself. Staging files
+/// are dot-prefixed via [`staging_file`]; there is no subfolder and no
+/// legacy tmp fallback.
+pub fn staging_location(dest_dir: &Path, _item_id: u64) -> StagingLocation {
     StagingLocation {
-        dir: fresh,
-        root: dest_staging_root(dest_dir),
+        dir: dest_dir.to_path_buf(),
+        root: dest_dir.to_path_buf(),
     }
 }
 
 /// Resolve the staging location from a full destination *file* path (its
-/// parent anchors the dest-side root). Falls back to the legacy tmp dir when
-/// the destination has no parent.
+/// parent anchors the staging dir).
 pub fn staging_location_for_dest(dest: &Path, item_id: u64) -> StagingLocation {
     match dest.parent() {
         Some(dir) => staging_location(dir, item_id),
         None => StagingLocation {
-            dir: legacy_staging_dir(item_id),
-            root: staging_root(),
+            dir: PathBuf::new(),
+            root: PathBuf::new(),
         },
     }
 }
 
-/// Whether any staging dir already exists for this id, dest-side or legacy:
-/// the id allocator must skip it so a fresh row never lands on a leftover.
+/// Whether any staging file exists for this id: the id allocator must skip
+/// it so a fresh row never lands on a leftover.
 pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
-    staging_dir_for(dest_dir, item_id).exists() || legacy_staging_dir(item_id).exists()
-}
-
-/// Highest numeric staging dir present, if any (seeds the id allocator past leftovers).
-pub fn highest_staging_index() -> Option<u64> {
-    std::fs::read_dir(staging_root())
-        .ok()?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter_map(|name| name.parse::<u64>().ok())
-        .max()
+    let prefix = format!(".grab-{item_id}-");
+    std::fs::read_dir(dest_dir)
+        .ok()
+        .map(|entries| {
+            entries.filter_map(|e| e.ok()).any(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Create a staging dir, verifying it stays under the staging root (a pre-planted symlink must not redirect parts).
@@ -310,9 +284,10 @@ impl VideoManifest {
     }
 }
 
-/// Fixed part names inside a row's staging dir.
-pub(crate) fn part_path(dir: &Path, kind: &str, ext: &str) -> PathBuf {
-    dir.join(format!("{kind}.{ext}"))
+/// Fixed part names for a row: `<dest_dir>/.grab-<id>-<kind>.<ext>`.
+/// Dot-prefixed, hidden, directly in the destination dir (no subfolder).
+pub(crate) fn part_path(dest_dir: &Path, item_id: u64, kind: &str, ext: &str) -> PathBuf {
+    staging_file(dest_dir, item_id, &format!("{kind}.{ext}"))
 }
 
 /// Dest-dir part names (`<stem>.<kind>.<ext>`): deterministic across attempts; feed yt-dlp via `ytdlp_output_template`.
@@ -489,12 +464,12 @@ pub(crate) fn collect_sidecar(src: &Path, dest: &Path, lang: &str) {
     }
 }
 
-pub(crate) fn manifest_path(dir: &Path) -> PathBuf {
-    dir.join("manifest.json")
+pub(crate) fn manifest_path(dest_dir: &Path, item_id: u64) -> PathBuf {
+    staging_file(dest_dir, item_id, "manifest.json")
 }
 
-pub(crate) fn read_manifest(dir: &Path) -> Option<VideoManifest> {
-    std::fs::read_to_string(manifest_path(dir))
+pub(crate) fn read_manifest(dest_dir: &Path, item_id: u64) -> Option<VideoManifest> {
+    std::fs::read_to_string(manifest_path(dest_dir, item_id))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
 }

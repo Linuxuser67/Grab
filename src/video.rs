@@ -35,16 +35,14 @@ pub use crate::video_runner::{StopIntent, run_video_download};
 /// Facade: spawn plumbing + fetch resolve live in
 /// [`video_spawn`](crate::video_spawn) now.
 pub use crate::video_spawn::fetch_video_infos;
-pub(crate) use crate::video_staging::clean_staging_in;
+#[cfg(test)]
+pub use crate::video_staging::clean_staging;
+pub use crate::video_staging::clean_staging_files;
 /// Facade: staging/parts/manifest/resume lives in
 /// [`video_staging`](crate::video_staging) now.
 pub use crate::video_staging::{
-    clean_dest_parts, highest_staging_index, staging_location_for_dest, staging_occupied,
-    staging_root, sweep_dest_staging, sweep_orphan_staging,
+    clean_dest_parts, staging_occupied, staging_root, sweep_dest_staging,
 };
-/// Test-only staging helpers: the legacy tmp aliases production no longer uses.
-#[cfg(test)]
-pub use crate::video_staging::{clean_staging, dest_staging_root, staging_dir, staging_dir_for};
 /// Facade: tool provisioning lives in [`video_tools`](crate::video_tools) now.
 pub use crate::video_tools::{
     install_ffmpeg, install_quickjs, install_ytdlp, latest_ffmpeg_tag, latest_quickjs_tag,

@@ -450,7 +450,7 @@ impl DownloadManager {
     }
 
     /// Fresh id that lands on no existing staging dir: the allocator must skip
-    /// leftover `<dest>/.grab-video/<id>/` and legacy tmp dirs, or a new row
+    /// leftover `grab-<id>-*` files in dest dirs and legacy tmp dirs, or a new row
     /// would resume (or sweep) a stranger's scratch.
     fn alloc_id_for(&self, dest_dir: &std::path::Path) -> u64 {
         loop {
@@ -461,7 +461,7 @@ impl DownloadManager {
         }
     }
 
-    /// Reuse a restored row's persisted id where possible, else allocate. The id is the staging key, so a fresh number would point at the wrong `<dest>/.grab-video/<id>/` and risk colliding with a later row.
+    /// Reuse a restored row's persisted id where possible, else allocate. The id is the staging key, so a fresh number would point at the wrong `grab-<id>-*` files and risk colliding with a later row.
     fn claim_id(&self, stored: Option<u64>, dest_dir: &std::path::Path) -> u64 {
         let Some(id) = stored else {
             return self.alloc_id_for(dest_dir);
@@ -1966,9 +1966,7 @@ impl DownloadManager {
     /// Engine invariant: a finished file is never deleted. The `remove_file` below is the single exception — a commit that won the race against its row's discard, leaving an orphan no row can own.
     fn finish_discard(&self, id: u64, dest: std::path::PathBuf, gate: std::sync::Arc<AttemptGate>) {
         let _ = gate.discard();
-        // Resolved against the destination: current staging lives beside it,
-        // legacy tmp dirs for rows staged before the move resolve the same way.
-        let staging = crate::video::staging_location_for_dest(&dest, id);
+        // Staging files live visibly in the dest dir as `grab-<id>-*`; no subfolder.
         // `self` (Rc, !Send) cannot go to the tokio runtime: carry reservations as an `Arc` clone.
         // Queue wakeups go through `wake_queue()` (thread-safe, no manager handle needed).
         let reservations = std::sync::Arc::clone(&self.reservations);
@@ -1977,7 +1975,9 @@ impl DownloadManager {
                 let worker_abort = handle.abort_handle();
                 let finalizer = crate::runtime::tokio_rt().spawn(async move {
                     let _ = handle.await;
-                    crate::video::clean_staging_in(&staging.root, &staging.dir);
+                    if let Some(dest_dir) = dest.parent() {
+                        crate::video::clean_staging_files(dest_dir, id);
+                    }
                     crate::video::clean_dest_parts(&dest);
                     if gate.was_delivered() {
                         // The commit won the race, so this file is the attempt's own orphan and the row is gone: the one sanctioned exception to never deleting a finished file.
@@ -2002,7 +2002,9 @@ impl DownloadManager {
             }
             // No task to wait for: sweep the scratch, never the finished file (no orphan is possible without a worker in flight).
             None => {
-                crate::video::clean_staging_in(&staging.root, &staging.dir);
+                if let Some(dest_dir) = dest.parent() {
+                    crate::video::clean_staging_files(dest_dir, id);
+                }
                 crate::video::clean_dest_parts(&dest);
                 self.release_dest(&dest);
                 // Same wakeup as the async finalizer above; already on the main thread.
@@ -2555,12 +2557,8 @@ impl DownloadManager {
 
     /// Load the persisted queue (cap: 1000 items / 10 MB), then resume. Unusable files move to `queue.json.bak`, never deleted.
     pub fn restore_queue(self: &Rc<Self>) {
-        // Pre-persisted-id queues restore with fresh ids, which must not collide with a staging dir another row still occupies.
-        if let Some(highest) = crate::video::highest_staging_index()
-            && highest >= self.next_id.get()
-        {
-            self.next_id.set(highest + 1);
-        }
+        // Staging files are `grab-<id>-*` in each destination dir; the
+        // `staging_occupied` check at row creation skips IDs with leftovers.
         if Self::queue_file().exists() {
             const MAX_QUEUE_BYTES: u64 = 10_000_000;
             const MAX_QUEUE_ITEMS: usize = 1000;
@@ -2663,10 +2661,9 @@ impl DownloadManager {
             // here, after restore and before any worker starts; completed
             // `final.*` recordings are preserved (the user's only copy).
             let live: std::collections::HashSet<u64> = self.items().map(|it| it.id()).collect();
-            // Legacy tmp root first, then every destination's own staging root:
-            // `<dest>/.grab-video` holds one numeric dir per item that staged
-            // there, reclaimed with the same keep-set (ids are session-unique).
-            crate::video::sweep_orphan_staging(&live);
+            // Legacy tmp root first, then every destination dir: `grab-<id>-*`
+            // files for items no longer live are reclaimed with the keep-set
+            // (ids are session-unique).
             let mut dest_dirs = std::collections::HashSet::new();
             for it in self.items() {
                 dest_dirs.insert(it.dest_dir());

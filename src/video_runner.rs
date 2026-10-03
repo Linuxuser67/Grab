@@ -23,8 +23,8 @@ use crate::video_spawn::{
     fetch_video_page, join_drain, reap_child, spawn_piped_ytdlp, ytdlp_command,
 };
 use crate::video_staging::{
-    ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, collect_sidecar, dest_part_path,
-    discover_unified_output, drop_empty_staging_root, ensure_staging_dir_in, file_len, part_path,
+    ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging_files, collect_sidecar,
+    dest_part_path, discover_unified_output, ensure_staging_dir_in, file_len, part_path,
     read_manifest, release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
     staging_location_for_dest, sweep_partial_remuxes, sweep_staging_preserving_recordings,
 };
@@ -90,7 +90,7 @@ pub async fn run_video_download(
     };
 
     // Resolve with retries, always fresh: no cache backend, so expired format URLs never survive a retry. A staging manifest labels the re-resolve as a resume.
-    let resuming = read_manifest(&staging).is_some();
+    let resuming = read_manifest(&staging, job.item_id).is_some();
     phase(if resuming {
         gettext("Resuming download…")
     } else if job.audio_only {
@@ -229,7 +229,7 @@ pub async fn run_video_download(
     );
 
     // Retry discipline from the sidecar. Parts live beside the finished file, so every file check builds off the destination.
-    let manifest = read_manifest(&staging);
+    let manifest = read_manifest(&staging, job.item_id);
     // Split rows merge video+audio (both sizes known or neither trusted); an adopted single's extractor size is the whole file. Anything else leaves the total unknown rather than understating it.
     let single = video_sel.is_none();
     let query = ResumeQuery {
@@ -265,16 +265,14 @@ pub async fn run_video_download(
                 clean_dest_parts(&job.dest);
                 return Err(VideoError::exists());
             }
-            // Wipe the staging dir, not just known names: a previous attempt's detached writers may still hold old inodes, so unlink first. Only mismatches/oversize leftovers land here; same-selection resume never does.
-            let _ = tokio::fs::remove_dir_all(&staging).await;
-            tokio::fs::create_dir_all(&staging)
-                .await
-                .map_err(VideoError::staging)?;
+            // Clear this item's staging files (grab-<id>-*), not the dest dir itself: a previous attempt's detached writers may still hold old inodes, so unlink first. Only mismatches/oversize leftovers land here; same-selection resume never does.
+            crate::video::clean_staging_files(&staging, job.item_id);
             // Dest-dir parts are Grab-namespaced, so a mismatch restarts clean instead of resuming into a foreign lookalike. The finished file itself is never touched.
             clean_dest_parts(&job.dest);
             // Record this attempt's selection up front: a pause from here on leaves a matchable sidecar, so the next attempt resumes instead of wiping.
             write_manifest(
                 &staging,
+                job.item_id,
                 &VideoManifest {
                     page_url: job.page_url.clone(),
                     quality: job.quality.clone(),
@@ -422,7 +420,8 @@ pub(crate) async fn run_unified_ytdlp(
     }
     // Atomic claim into place (EXDEV-safe, no clobber). The linearization point: either this wins and the row is still here, or the removal already won.
     if !gate.try_commit() {
-        let _ = tokio::fs::remove_dir_all(staging).await;
+        // Lost the race: clear this item's staging files only, never the dest dir.
+        clean_staging_files(staging, job.item_id);
         return Ok(None);
     }
     match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
@@ -445,16 +444,12 @@ pub(crate) async fn run_unified_ytdlp(
     clean_dest_parts(&job.dest);
     // Record the finished size so a later retry adopts the file.
     let final_bytes = file_len(&job.dest);
-    if let Some(mut m) = read_manifest(staging) {
+    if let Some(mut m) = read_manifest(staging, job.item_id) {
         m.final_bytes = final_bytes;
-        let _ = write_manifest(staging, &m).await;
+        let _ = write_manifest(staging, job.item_id, &m).await;
     }
-    sweep_staging_preserving_recordings(staging);
-    // Drop the root when the last item dir is gone: no stray `.grab-video`
-    // beside the finished files. No-op while a sibling item still stages.
-    if let Some(root) = staging.parent() {
-        drop_empty_staging_root(root);
-    }
+    sweep_staging_preserving_recordings(staging, job.item_id);
+    // Staging is the dest dir itself: never remove it or its parent.
     Ok(Some(final_bytes.unwrap_or(0)))
 }
 
@@ -760,7 +755,7 @@ async fn sweep_live_capture(
     out: &Path,
     part: &Path,
     state: &Path,
-    staging: &Path,
+    _staging: &Path,
     final_tmp: Option<&Path>,
     staging_mode: Staging,
     exit: Exit,
@@ -779,13 +774,8 @@ async fn sweep_live_capture(
         let _ = tokio::fs::remove_file(path).await;
         release_remux_lease(path);
     }
-    // Non-recursive: succeeds only when nothing else is in there, so a sibling attempt's remux is never collateral.
-    let _ = tokio::fs::remove_dir(staging).await;
-    // Drop the root when the last item dir is gone; no-op while siblings
-    // remain or a salvage exit kept the shell.
-    if let Some(root) = staging.parent() {
-        drop_empty_staging_root(root);
-    }
+    // Staging is the dest dir itself: never remove it. The item's
+    // `grab-<id>-*` files were already swept above; the dir stays.
 }
 
 /// Reap the recorder, and *only then* reclaim its scratch. The order is the contract: sweeping first could delete a file the recorder is still writing. Pinned by controlled futures in `video_runner_tests.rs`; the sweep is a closure so it cannot even be constructed before the reap completes.
@@ -1053,7 +1043,7 @@ pub(crate) async fn run_live_ytdlp(
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
     // recording, and the file-growth watcher announces "Recording…" off this path.
-    let out = part_path(staging, "live", ext);
+    let out = part_path(staging, job.item_id, "live", ext);
     // Overwrite pre-flight (Parabolic parity): refuse before recording; the row fails instead of requeueing. Also reclaims pre-upgrade dest-dir scratch for this stem (live parts used to sit beside the finished file); the finished file at dest is left be.
     if job.dest.exists() {
         clean_dest_parts(&job.dest);
@@ -1596,10 +1586,8 @@ pub(crate) async fn run_hls_ytdlp(
                 reap_child(&mut child, &mut group).await;
                 progress.abort();
                 logs.abort();
-                sweep_staging_preserving_recordings(staging);
-                if let Some(root) = staging.parent() {
-                    drop_empty_staging_root(root);
-                }
+                sweep_staging_preserving_recordings(staging, job.item_id);
+                // Staging is the dest dir itself: never remove it or its parent.
                 return Ok(None);
             }
             waited = await_child(&mut child, merging_snapshot, remaining, MERGE_WALL_CLOCK) => match waited {
@@ -1676,7 +1664,8 @@ pub(crate) async fn run_hls_ytdlp(
     // ours to sweep: no rename means no delivery happened.
     if !gate.try_commit() {
         clean_dest_parts(&job.dest);
-        let _ = tokio::fs::remove_dir_all(staging).await;
+        // Lost the race: clear this item's staging files only, never the dest dir.
+        clean_staging_files(staging, job.item_id);
         return Ok(None);
     }
     match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
@@ -1705,10 +1694,8 @@ pub(crate) async fn run_hls_ytdlp(
         let _ =
             tokio::fs::remove_file(dest_part_path(&job.dest, "hls", &format!("{lang}.srt"))).await;
     }
-    sweep_staging_preserving_recordings(staging);
-    if let Some(root) = staging.parent() {
-        drop_empty_staging_root(root);
-    }
+    sweep_staging_preserving_recordings(staging, job.item_id);
+    // Staging is the dest dir itself: never remove it or its parent.
     Ok(file_len(&job.dest))
 }
 

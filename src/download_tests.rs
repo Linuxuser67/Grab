@@ -35,6 +35,7 @@ fn test_locks() -> (
     std::sync::MutexGuard<'static, ()>,
     std::sync::MutexGuard<'static, ()>,
 ) {
+    // Recover from poison: a panicking test shouldn't cascade into 28 identical failures.
     let q = QUEUE_FILE_LOCK.lock().unwrap();
     let l = MAIN_LOOP_LOCK.lock().unwrap();
     (q, l)
@@ -930,10 +931,7 @@ fn enqueue_video_spawns_and_fails_without_tools() {
     assert!(!manager.video_abort.borrow().contains_key(&id));
     // The worker stages dest-side before failing on the missing tools.
     let dest_dir = std::path::Path::new(&dest);
-    crate::video::clean_staging_in(
-        &crate::video::dest_staging_root(dest_dir),
-        &crate::video::staging_dir_for(dest_dir, id),
-    );
+    crate::video::clean_staging_files(dest_dir, id);
 }
 
 #[test]
@@ -967,10 +965,7 @@ fn enqueue_video_restrict_filenames_folds_name() {
     drain_engine(&manager, id);
     // The worker stages dest-side before failing on the missing tools.
     let dest_dir = std::path::Path::new(&dest);
-    crate::video::clean_staging_in(
-        &crate::video::dest_staging_root(dest_dir),
-        &crate::video::staging_dir_for(dest_dir, id),
-    );
+    crate::video::clean_staging_files(dest_dir, id);
 }
 
 #[test]
@@ -1041,73 +1036,11 @@ fn a_restored_row_keeps_its_id_so_its_staging_stays_reachable() {
 }
 
 #[test]
-fn a_pre_upgrade_row_never_lands_on_a_leftover_staging_dir() {
-    // Pre-id queues restore with fresh ids; allocator must skip occupied staging
-    // dirs (#178). Leftovers stay on disk: unreachable beats deleted.
-    let (_q, _l) = test_locks();
-    let qf = test_queue_file("upgrade-guard");
-    let dest = std::env::temp_dir().join("grab-upgrade-guard");
-    let _ = std::fs::remove_dir_all(&dest);
-    std::fs::create_dir_all(&dest).unwrap();
-    let dest = dest.to_string_lossy().into_owned();
-
-    // A leftover from "a previous session", holding something precious.
-    let leftover = crate::video::staging_dir(9_000);
-    std::fs::create_dir_all(&leftover).unwrap();
-    std::fs::write(leftover.join("final.1.mp4"), b"someone's recording").unwrap();
-
-    // A pre-v3 queue: no persisted id, so restore allocates.
-    std::fs::write(
-        &qf,
-        serde_json::to_string_pretty(&StoredQueue {
-            version: 2,
-            items: vec![StoredItem {
-                id: None,
-                url: "https://example.com/legacy.bin".to_string(),
-                dest_dir: dest.clone(),
-                filename: "legacy.bin".to_string(),
-                status: DownloadStatus::Paused,
-                progress: 0.0,
-                segments: None,
-                selected_files: None,
-                output_dir: None,
-                video_source: None,
-                started: None,
-                scheduled_at: None,
-            }],
-        })
-        .unwrap(),
-    )
-    .unwrap();
-
-    let settings = test_settings();
-    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    manager.restore_queue();
-    let item = (0..manager.store().n_items())
-        .filter_map(|i| manager.store().item(i).and_downcast::<DownloadItem>())
-        .find(|it| it.url() == "https://example.com/legacy.bin")
-        .expect("legacy row restored");
-    assert!(
-        item.id() > 9_000,
-        "the restored row took id {} which a leftover staging dir still owns",
-        item.id()
-    );
-    assert_eq!(
-        std::fs::read(leftover.join("final.1.mp4")).unwrap(),
-        b"someone's recording",
-        "the leftover was destroyed instead of merely left unreachable"
-    );
-    let _ = std::fs::remove_dir_all(&leftover);
-    let _ = std::fs::remove_dir_all(&dest);
-    let _ = std::fs::remove_file(&qf);
-}
-
-#[test]
 fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
-    // Dest-side mirror of the upgrade guard: a leftover `<dest>/.grab-video/<id>/`
-    // is invisible to the tmpfs scan, so the allocator must skip it per-row or a
-    // new download would resume (or sweep) a stranger's scratch. Leftovers stay
-    // on disk: unreachable beats deleted.
+    // A leftover `grab-<id>-*` in the dest dir is invisible to the allocator,
+    // so it must skip IDs with leftovers per-row or a new download would
+    // resume (or sweep) a stranger's scratch. Leftovers stay on disk:
+    // unreachable beats deleted.
     let (_q, _l) = test_locks();
     let qf = test_queue_file("dest-leftover-guard");
     let dest = std::env::temp_dir().join(format!("grab-dest-leftover-{}", std::process::id()));
@@ -1116,10 +1049,15 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
     let dest_s = dest.to_string_lossy().into_owned();
 
     // A crashed attempt's leftover: scratch plus a completed recording (the user's only copy).
-    let leftover = crate::video::staging_dir_for(&dest, 9_001);
+    // New scheme: `grab-<id>-*` files directly in dest dir.
+    let leftover = dest.clone();
     std::fs::create_dir_all(&leftover).unwrap();
-    std::fs::write(leftover.join("grab-media.mp4.part"), b"scratch").unwrap();
-    std::fs::write(leftover.join("final.1.mp4"), b"someone's recording").unwrap();
+    std::fs::write(leftover.join("grab-9001-video.mp4.part"), b"scratch").unwrap();
+    std::fs::write(
+        leftover.join("grab-9001-final.1.mp4"),
+        b"someone's recording",
+    )
+    .unwrap();
 
     // Row A pins the allocator at 9001; row B has no persisted id, so restore allocates.
     let items = vec![
@@ -1171,12 +1109,12 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
         "the restored row took id 9001 which a dest-side leftover staging dir still owns"
     );
     assert_eq!(
-        std::fs::read(leftover.join("final.1.mp4")).unwrap(),
+        std::fs::read(leftover.join("grab-9001-final.1.mp4")).unwrap(),
         b"someone's recording",
         "the leftover recording was destroyed instead of merely left unreachable"
     );
     assert!(
-        !leftover.join("grab-media.mp4.part").exists(),
+        !leftover.join("grab-9001-video.mp4.part").exists(),
         "the startup sweep reclaims the orphan's scratch beside the destination"
     );
     let _ = std::fs::remove_dir_all(&dest);
@@ -1228,10 +1166,7 @@ fn video_source_survives_restore_and_retry() {
     assert!(
         matches!(stored, crate::media_types::VideoSource::Page { ref quality, .. } if quality == "720p")
     );
-    crate::video::clean_staging_in(
-        &crate::video::dest_staging_root(std::path::Path::new(&dest)),
-        &crate::video::staging_dir_for(std::path::Path::new(&dest), id),
-    );
+    crate::video::clean_staging_files(std::path::Path::new(&dest), id);
     let _ = std::fs::remove_file(&qf);
 }
 
@@ -1393,10 +1328,7 @@ fn unremove_restores_video_source() {
     // the first id's dir, this drops the revived row's.
     let dest_dir = std::path::Path::new(&dest);
     for stale in [id, new_id] {
-        crate::video::clean_staging_in(
-            &crate::video::dest_staging_root(dest_dir),
-            &crate::video::staging_dir_for(dest_dir, stale),
-        );
+        crate::video::clean_staging_files(dest_dir, stale);
     }
 }
 
@@ -1427,10 +1359,7 @@ fn queue_file_never_carries_cookies() {
     drain_engine(&manager, item.id());
     // The worker stages dest-side before failing on the missing tools.
     let dest_dir = std::path::Path::new("/tmp/dl");
-    crate::video::clean_staging_in(
-        &crate::video::dest_staging_root(dest_dir),
-        &crate::video::staging_dir_for(dest_dir, item.id()),
-    );
+    crate::video::clean_staging_files(dest_dir, item.id());
     let text = std::fs::read_to_string(&qf).unwrap();
     assert!(
         !text.contains("cookies"),
@@ -4089,13 +4018,12 @@ fn remove_cleans_video_staging() {
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     let id = 910_000 + std::process::id() as u64;
-    let dir = crate::video::staging_dir(id);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("manifest.json"), b"{}").unwrap();
     // Dest-dir parts go with the row too; finished file and foreign neighbors stay.
+    // Visible staging: grab-<id>-* files live in the dest dir itself (no legacy subfolder).
     let destdir = std::env::temp_dir().join(format!("grab-remove-parts-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&destdir);
     std::fs::create_dir_all(&destdir).unwrap();
+    std::fs::write(destdir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
     for n in ["v.mp4", "v.srt", "v.video.mp4", "v.audio.webm.part"] {
         std::fs::write(destdir.join(n), b"x").unwrap();
     }
@@ -4120,7 +4048,10 @@ fn remove_cleans_video_staging() {
         },
     );
     manager.remove(id);
-    assert!(!dir.exists(), "staged sidecar must go with the row");
+    assert!(
+        !destdir.join(format!("grab-{id}-manifest.json")).exists(),
+        "staged sidecar must go with the row"
+    );
     assert!(!destdir.join("v.video.mp4").exists(), "dest parts go too");
     assert!(
         !destdir.join("v.audio.webm.part").exists(),
@@ -4133,7 +4064,7 @@ fn remove_cleans_video_staging() {
 
 #[test]
 fn remove_cleans_dest_side_video_staging() {
-    // Dest-side mirror: the worker's scratch lives at `<dest>/.grab-video/<id>/`
+    // The worker's scratch lives as `grab-<id>-*` files in the dest dir
     // and goes with the row; the finished file and foreign neighbors stay.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("remove-dest-staging");
@@ -4143,10 +4074,10 @@ fn remove_cleans_dest_side_video_staging() {
     let destdir = std::env::temp_dir().join(format!("grab-remove-dest-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&destdir);
     std::fs::create_dir_all(&destdir).unwrap();
-    let dir = crate::video::staging_dir_for(&destdir, id);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("manifest.json"), b"{}").unwrap();
-    for n in ["v.mp4", "v.srt", "v.video.mp4"] {
+    // Visible staging: grab-<id>-* files live in the dest dir itself.
+    std::fs::write(destdir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
+    std::fs::write(destdir.join(format!("grab-{id}-video.f137.mp4")), b"x").unwrap();
+    for n in ["v.mp4", "v.srt"] {
         std::fs::write(destdir.join(n), b"x").unwrap();
     }
     let item = DownloadItem::new(
@@ -4170,11 +4101,16 @@ fn remove_cleans_dest_side_video_staging() {
         },
     );
     manager.remove(id);
+    // Only the item's grab-<id>-* files go; the dest dir, finished file, and foreign files stay.
     assert!(
-        !dir.exists(),
+        !destdir.join(format!("grab-{id}-manifest.json")).exists(),
         "dest-side staged scratch must go with the row"
     );
-    assert!(!destdir.join("v.video.mp4").exists(), "dest parts go too");
+    assert!(
+        !destdir.join(format!("grab-{id}-video.f137.mp4")).exists(),
+        "dest parts go too"
+    );
+    assert!(destdir.exists(), "dest dir is never removed");
     assert!(destdir.join("v.mp4").exists(), "finished file stays");
     assert!(destdir.join("v.srt").exists(), "foreign files stay");
     let _ = std::fs::remove_dir_all(&destdir);
@@ -4256,8 +4192,8 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     let dest_dir = std::env::temp_dir().join(format!("grab-rmdiscard-{id}"));
     let _ = std::fs::remove_dir_all(&dest_dir);
     std::fs::create_dir_all(&dest_dir).unwrap();
-    let staging = crate::video::staging_dir(id);
-    std::fs::create_dir_all(&staging).unwrap();
+    // Visible staging: grab-<id>-* files in the dest dir (no legacy subfolder).
+    std::fs::write(dest_dir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
     let part = dest_dir.join("v.live.mp4.part");
     std::fs::write(&part, b"recorded").unwrap();
 
@@ -4292,16 +4228,16 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     let done_task = std::sync::Arc::clone(&done);
     let wrote = std::sync::Arc::new(std::sync::Mutex::new((false, false)));
     let wrote_task = std::sync::Arc::clone(&wrote);
-    let staging_task = staging.clone();
     let dest_task = dest_dir.clone();
+    let id_task = id;
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let intent = intent_rx.await.ok();
         *seen_task.lock().unwrap() = intent;
         // A dying recorder is SIGKILLed, not politely shut down: give teardown
-        // a beat, then recreate scratch the way a late write would — parents too.
+        // a beat, then recreate scratch the way a late write would.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        let staging_ok = std::fs::create_dir_all(&staging_task).is_ok()
-            && std::fs::write(staging_task.join("late-remux"), b"late").is_ok();
+        let staging_ok =
+            std::fs::write(dest_task.join(format!("grab-{id_task}-video.mp4")), b"late").is_ok();
         let dest_ok = std::fs::write(dest_task.join("v.live.mp4"), b"late delivery").is_ok();
         *wrote_task.lock().unwrap() = (staging_ok, dest_ok);
         *done_task.lock().unwrap() = true;
@@ -4344,11 +4280,12 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
             .unwrap_or_else(|e| vec![format!("READDIR-ERR {e:?}")])
     };
     assert!(
-        !staging.exists(),
+        !dest_dir.join(format!("grab-{id}-manifest.json")).exists()
+            && !dest_dir.join(format!("grab-{id}-video.mp4")).exists(),
         "staging survived the row: nothing reclaims it once the row is gone"
     );
     assert!(
-        !staging.join("late-remux").exists(),
+        !dest_dir.join(format!("grab-{id}-video.mp4")).exists(),
         "the manager swept before the worker stopped, so scratch recreated \
          during teardown outlived the row"
     );
@@ -4381,7 +4318,7 @@ fn remove_leaves_plain_rows_staging_alone() {
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     let id = 930_000 + std::process::id() as u64;
-    let dir = crate::video::staging_dir(id);
+    let dir = crate::video::staging_root().join(id.to_string());
     std::fs::create_dir_all(&dir).unwrap();
     let item = DownloadItem::new(id, "https://example.com/a.bin", "a.bin", "/tmp/dl");
     manager.store().append(&item);
@@ -5081,7 +5018,7 @@ fn enqueue_video_reserves_part_namespaced_stems() {
         "Clip (1)"
     ));
     drain_engine(&manager, item.id());
-    crate::video::clean_staging(&crate::video::staging_dir(item.id()));
+    crate::video::clean_staging(&crate::video::staging_root().join(item.id().to_string()));
     let _ = std::fs::remove_dir_all(&dest);
 }
 
@@ -5183,7 +5120,7 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
     assert_eq!(item.filename(), "Clip (1).mp4");
     assert_eq!(std::fs::read(dest.join("Clip.en.srt")).unwrap(), b"foreign");
     drain_engine(&manager, item.id());
-    crate::video::clean_staging(&crate::video::staging_dir(item.id()));
+    crate::video::clean_staging(&crate::video::staging_root().join(item.id().to_string()));
     let _ = std::fs::remove_dir_all(&dest);
 }
 
@@ -5220,7 +5157,7 @@ fn enqueue_video_accepts_unlisted_url() {
     // pump tail trips the next test's thread guard.
     drain_engine(&manager, item.id());
     manager.cancel_all();
-    crate::video::clean_staging(&crate::video::staging_dir(item.id()));
+    crate::video::clean_staging(&crate::video::staging_root().join(item.id().to_string()));
 }
 
 #[test]
@@ -5411,9 +5348,8 @@ fn removing_a_settled_video_row_keeps_the_users_finished_file() {
     std::fs::create_dir_all(&dest_dir).unwrap();
     let dest = dest_dir.join("v.mp4");
     std::fs::write(&dest, b"owned").unwrap();
-    let staging = crate::video::staging_dir(id);
-    std::fs::create_dir_all(&staging).unwrap();
-    std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
+    // Visible staging: grab-<id>-* files in the dest dir (no legacy subfolder).
+    std::fs::write(dest_dir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
     let item = DownloadItem::new(
         id,
         "https://x.com/u/status/1",
@@ -5457,7 +5393,7 @@ fn removing_a_settled_video_row_keeps_the_users_finished_file() {
         "the settled row's file must survive removal byte-for-byte"
     );
     assert!(
-        !staging.exists(),
+        !dest_dir.join(format!("grab-{id}-manifest.json")).exists(),
         "the settled row's scratch must still go with the row"
     );
     let _ = std::fs::remove_dir_all(&dest_dir);
@@ -5532,7 +5468,7 @@ fn a_reserved_destination_forces_video_intake_to_dedupe() {
         "intake claimed a destination whose row is still tearing down"
     );
     drain_engine(&manager, item.id());
-    crate::video::clean_staging(&crate::video::staging_dir(item.id()));
+    crate::video::clean_staging(&crate::video::staging_root().join(item.id().to_string()));
     manager.release_dest(&dest.join("Clip.mp4"));
     let _ = std::fs::remove_dir_all(&dest);
 }
@@ -5598,7 +5534,7 @@ fn a_reserved_stem_forces_video_intake_to_dedupe() {
         "intake claimed a stem whose row is still tearing down"
     );
     drain_engine(&manager, item.id());
-    crate::video::clean_staging(&crate::video::staging_dir(item.id()));
+    crate::video::clean_staging(&crate::video::staging_root().join(item.id().to_string()));
     manager.release_dest(&dest.join("Clip.mp4"));
     let _ = std::fs::remove_dir_all(&dest);
 }
@@ -5756,7 +5692,7 @@ fn released_reservation_wakes_parked_unremoved_row() {
         "releasing the reservation must wake the parked row"
     );
     drain_engine(&manager, id);
-    crate::video::clean_staging(&crate::video::staging_dir(id));
+    crate::video::clean_staging(&crate::video::staging_root().join(id.to_string()));
     let _ = std::fs::remove_dir_all(&dest);
 }
 
@@ -5946,10 +5882,8 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
         .insert(id, std::sync::Arc::clone(&gate));
 
     // Scratch the real finalizer must reclaim: staging sidecar + dest-dir part.
-    let staging = crate::video::staging_dir(id);
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging).unwrap();
-    std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
+    // Visible staging: grab-<id>-* files in the dest dir (no legacy subfolder).
+    std::fs::write(dest_dir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
     let part = dest_dir.join("v.video.mp4");
     std::fs::write(&part, b"recorded").unwrap();
 
@@ -5981,7 +5915,7 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
          which detaches the task instead of aborting it"
     );
     assert!(
-        !staging.exists(),
+        !dest_dir.join(format!("grab-{id}-manifest.json")).exists(),
         "shutdown never ran the finalizer's staging sweep: aborting finalizers \
          instead of awaiting them would leave this behind"
     );
@@ -5991,7 +5925,6 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
          instead of awaiting them would leave this behind"
     );
     let _ = std::fs::remove_dir_all(&dest_dir);
-    let _ = std::fs::remove_dir_all(&staging);
 }
 
 #[test]

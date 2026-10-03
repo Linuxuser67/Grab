@@ -14,32 +14,11 @@ pub fn staging_root() -> PathBuf {
     std::env::temp_dir().join("grab-video")
 }
 
-/// Per-destination staging root: `<dest_dir>/.grab-video`. Dot-prefixed, so
-/// file managers hide the in-flight scratch next to the finished files.
-pub fn dest_staging_root(dest_dir: &Path) -> PathBuf {
-    dest_dir.join(".grab-video")
-}
-
-/// Per-item staging dir for a destination: `<dest_dir>/.grab-video/<id>/`.
-/// Same filesystem as the finished file, so delivery is an atomic rename and
-/// a crash leaves the scratch hidden beside the destination, not in tmpfs.
-pub fn staging_dir_for(dest_dir: &Path, item_id: u64) -> PathBuf {
-    dest_staging_root(dest_dir).join(item_id.to_string())
-}
-
-/// Legacy tmpfs location from before dest-side staging. Read fallback only:
-/// a paused row keeps its resume data across the upgrade until its staging
-/// drains through the normal completion/removal paths.
-pub fn legacy_staging_dir(item_id: u64) -> PathBuf {
-    staging_root().join(item_id.to_string())
-}
-
-/// Historic alias for the legacy tmpfs location (kept for tests probing
-/// pre-upgrade layouts). Test-only: production resolves through
-/// [`staging_location_for_dest`].
-#[cfg(test)]
-pub fn staging_dir(item_id: u64) -> PathBuf {
-    legacy_staging_dir(item_id)
+/// Staging files live directly in the destination dir, visible like other download managers:
+/// `<dest_dir>/grab-<id>-<name>`. No subfolder. Same filesystem as the
+/// finished file, so delivery is an atomic rename.
+pub fn staging_file(dest_dir: &Path, item_id: u64, name: &str) -> PathBuf {
+    dest_dir.join(format!("grab-{item_id}-{name}"))
 }
 
 /// A resolved per-item staging dir plus the root it is guarded under: the
@@ -51,54 +30,43 @@ pub struct StagingLocation {
     pub root: PathBuf,
 }
 
-/// Resolve the staging dir in use: the dest-side one when present, else the
-/// legacy tmp one when present, else the dest-side one (for creation).
-pub fn staging_location(dest_dir: &Path, item_id: u64) -> StagingLocation {
-    let fresh = staging_dir_for(dest_dir, item_id);
-    if fresh.exists() {
-        let root = dest_staging_root(dest_dir);
-        return StagingLocation { dir: fresh, root };
-    }
-    let legacy = legacy_staging_dir(item_id);
-    if legacy.exists() {
-        return StagingLocation {
-            dir: legacy,
-            root: staging_root(),
-        };
-    }
+/// Resolve the staging location: the destination dir itself. Staging files
+/// are named via [`staging_file`]; there is no subfolder and no
+/// legacy tmp fallback.
+pub fn staging_location(dest_dir: &Path, _item_id: u64) -> StagingLocation {
     StagingLocation {
-        dir: fresh,
-        root: dest_staging_root(dest_dir),
+        dir: dest_dir.to_path_buf(),
+        root: dest_dir.to_path_buf(),
     }
 }
 
 /// Resolve the staging location from a full destination *file* path (its
-/// parent anchors the dest-side root). Falls back to the legacy tmp dir when
-/// the destination has no parent.
+/// parent anchors the staging dir).
 pub fn staging_location_for_dest(dest: &Path, item_id: u64) -> StagingLocation {
     match dest.parent() {
         Some(dir) => staging_location(dir, item_id),
         None => StagingLocation {
-            dir: legacy_staging_dir(item_id),
-            root: staging_root(),
+            dir: PathBuf::new(),
+            root: PathBuf::new(),
         },
     }
 }
 
-/// Whether any staging dir already exists for this id, dest-side or legacy:
-/// the id allocator must skip it so a fresh row never lands on a leftover.
+/// Whether any staging file exists for this id: the id allocator must skip
+/// it so a fresh row never lands on a leftover.
 pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
-    staging_dir_for(dest_dir, item_id).exists() || legacy_staging_dir(item_id).exists()
-}
-
-/// Highest numeric staging dir present, if any (seeds the id allocator past leftovers).
-pub fn highest_staging_index() -> Option<u64> {
-    std::fs::read_dir(staging_root())
-        .ok()?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter_map(|name| name.parse::<u64>().ok())
-        .max()
+    let prefix = format!("grab-{item_id}-");
+    std::fs::read_dir(dest_dir)
+        .ok()
+        .map(|entries| {
+            entries.filter_map(|e| e.ok()).any(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Create a staging dir, verifying it stays under the staging root (a pre-planted symlink must not redirect parts).
@@ -195,7 +163,61 @@ pub fn clean_staging(dir: &Path) {
     clean_staging_in(&staging_root(), dir);
 }
 
+/// Whether a `grab-<id>-<suffix>` filename is a known Grab staging file.
+/// Only these are safe to delete; a user's own `grab-<id>-notes.txt` must survive.
+fn is_grab_staging_suffix(suffix: &str) -> bool {
+    // manifest.json: exact match
+    if suffix == "manifest.json" {
+        return true;
+    }
+    // yt-dlp sidecars: *.part, *.ytdl (appended to the filenames we pass it)
+    if suffix.ends_with(".part") || suffix.ends_with(".ytdl") {
+        return true;
+    }
+    // Remux/format parts: <kind>.<ext> where kind is a known Grab kind
+    // (video, audio, live) and ext ends with a media extension.
+    // Handles video.f137.mp4, live.mp4, etc. Conservative: require the dot.
+    if let Some((kind, _rest)) = suffix.split_once('.') {
+        let kind_ok = matches!(kind, "video" | "audio" | "live");
+        // Get the last extension (e.g., "mp4" from "video.f137.mp4")
+        let ext_ok = suffix
+            .rsplit('.')
+            .next()
+            .map(|e| {
+                matches!(
+                    e,
+                    "mp4" | "webm" | "mkv" | "m4a" | "mp3" | "ogg" | "wav" | "flac" | "opus"
+                )
+            })
+            .unwrap_or(false);
+        if kind_ok && ext_ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// Remove Grab staging files for an item in the destination dir.
+/// Only deletes files matching known staging patterns; never the dir itself,
+/// other files, or a user's own `grab-<id>-*` files.
+pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
+    let prefix = format!("grab-{item_id}-");
+    if let Ok(entries) = std::fs::read_dir(dest_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name();
+            let name_str = name.to_str().unwrap_or("");
+            if let Some(suffix) = name_str.strip_prefix(&prefix)
+                && is_grab_staging_suffix(suffix)
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 /// Remove a staging dir, guarded to stay under an explicit root (never user data).
+/// Test-only: production uses `clean_staging_files` with the item's prefix.
+#[cfg(test)]
 pub(crate) fn clean_staging_in(root: &Path, dir: &Path) {
     if let Some(canon) = guarded_staging_dir(root, dir) {
         let _ = std::fs::remove_dir_all(canon);
@@ -207,6 +229,8 @@ pub(crate) fn clean_staging_in(root: &Path, dir: &Path) {
 /// succeeds on an empty dir, so a sibling item still staging (or a kept
 /// recording) keeps the root; a planted symlink at the root is refused by
 /// the guards, never followed.
+/// Test-only: production never removes dest dirs.
+#[cfg(test)]
 pub(crate) fn drop_empty_staging_root(root: &Path) {
     // Same guards as the item-dir removal above: refuse a symlinked root
     // before canonicalizing (canonicalizing the link would make the
@@ -225,52 +249,31 @@ pub(crate) fn drop_empty_staging_root(root: &Path) {
 /// recordings stay (do not delete the user's only copy). The dir itself is
 /// removed only if nothing worth keeping remains, so it stays skipped by the
 /// id allocator.
-fn reclaim_orphan_staging_in(root: &Path, dir: &Path) {
-    let Some(canon) = guarded_staging_dir(root, dir) else {
-        return;
-    };
-    // Re-verify after canonicalization: the target must still be a numeric
-    // child of the root, so a symlink swapped in mid-sweep cannot divert the
-    // removal onto the root itself or a non-item path.
-    let is_item = canon
-        .file_name()
-        .and_then(|n| n.to_str())
-        .and_then(|n| n.parse::<u64>().ok())
-        .is_some();
-    if is_item {
-        sweep_staging_preserving_recordings(&canon);
-    }
-}
-
 /// Reclaim per-item staging dirs with no live row (crash/kill leftovers: only
 /// restored rows reuse their ids, so nothing swept can resume). Only numeric
 /// dir names are touched — the `grab-cookies-*.txt` files and anything else
 /// under the root are left alone. Runs at startup after the queue is restored,
 /// before any worker starts, so nothing live is removed.
-pub fn sweep_orphan_staging(keep: &std::collections::HashSet<u64>) {
-    sweep_orphan_staging_in(&staging_root(), keep);
-}
-
-/// Sweep one destination's staging root (`<dest_dir>/.grab-video`): numeric
-/// dirs with no live row are reclaimed exactly like the legacy tmp root. A
-/// missing root (never staged here, destination deleted) is a no-op.
+/// Sweep one destination's staging files (`grab-<id>-*`): files for item IDs
+/// with no live row are reclaimed. A missing dest dir is a no-op.
 pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>) {
-    sweep_orphan_staging_in(&dest_staging_root(dest_dir), keep);
-}
-
-pub(crate) fn sweep_orphan_staging_in(root: &Path, keep: &std::collections::HashSet<u64>) {
-    let Ok(entries) = std::fs::read_dir(root) else {
+    let Ok(entries) = std::fs::read_dir(dest_dir) else {
         return;
     };
     for entry in entries.filter_map(|e| e.ok()) {
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let is_orphan = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<u64>().ok())
-            .is_some_and(|id| !keep.contains(&id));
-        if is_dir && is_orphan {
-            reclaim_orphan_staging_in(root, &entry.path());
+        let name = entry.file_name();
+        let name = name.to_str().unwrap_or("");
+        // Parse `grab-<id>-*` to get the item ID. Recordings (`grab-<id>-final.*`)
+        // are the user's only copy — preserve them. Only delete known staging
+        // file patterns; a user's own `grab-<id>-notes.txt` must survive.
+        if let Some(rest) = name.strip_prefix("grab-")
+            && let Some((id_str, suffix)) = rest.split_once('-')
+            && let Ok(id) = id_str.parse::<u64>()
+            && !keep.contains(&id)
+            && !suffix.starts_with("final.")
+            && is_grab_staging_suffix(suffix)
+        {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
@@ -310,9 +313,10 @@ impl VideoManifest {
     }
 }
 
-/// Fixed part names inside a row's staging dir.
-pub(crate) fn part_path(dir: &Path, kind: &str, ext: &str) -> PathBuf {
-    dir.join(format!("{kind}.{ext}"))
+/// Fixed part names for a row: `<dest_dir>/grab-<id>-<kind>.<ext>`.
+/// Visible, directly in the destination dir (no subfolder, no dot prefix).
+pub(crate) fn part_path(dest_dir: &Path, item_id: u64, kind: &str, ext: &str) -> PathBuf {
+    staging_file(dest_dir, item_id, &format!("{kind}.{ext}"))
 }
 
 /// Dest-dir part names (`<stem>.<kind>.<ext>`): deterministic across attempts; feed yt-dlp via `ytdlp_output_template`.
@@ -408,15 +412,25 @@ pub fn sweep_partial_remuxes(staging: &Path) {
     }
 }
 
-/// Remove a leg's staging scratch, preserving completed `final.*` recordings (do not delete the user's only copy).
-pub fn sweep_staging_preserving_recordings(staging: &Path) {
+/// Remove a leg's staging scratch, preserving completed `grab-<id>-final.*` recordings (do not delete the user's only copy).
+/// Only touches files with the item's `grab-<id>-` prefix; never the dest dir itself or other files.
+pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
+    let prefix = format!("grab-{item_id}-");
     for name in dir_file_names(staging) {
-        if name.starts_with("final.") {
+        let Some(suffix) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        // Preserve completed recordings: they may be the user's only copy.
+        if suffix.starts_with("final.") {
+            continue;
+        }
+        // Only delete known staging patterns; a user's own `grab-<id>-*` file survives.
+        if !is_grab_staging_suffix(suffix) {
             continue;
         }
         let _ = std::fs::remove_file(staging.join(&name));
     }
-    let _ = std::fs::remove_dir(staging);
+    // Never remove_dir: staging is the user's dest dir, not a dedicated subfolder.
 }
 
 /// Whether `stem` already hosts Grab part files or subtitle sidecars (intake treats it as taken).
@@ -489,12 +503,12 @@ pub(crate) fn collect_sidecar(src: &Path, dest: &Path, lang: &str) {
     }
 }
 
-pub(crate) fn manifest_path(dir: &Path) -> PathBuf {
-    dir.join("manifest.json")
+pub(crate) fn manifest_path(dest_dir: &Path, item_id: u64) -> PathBuf {
+    staging_file(dest_dir, item_id, "manifest.json")
 }
 
-pub(crate) fn read_manifest(dir: &Path) -> Option<VideoManifest> {
-    std::fs::read_to_string(manifest_path(dir))
+pub(crate) fn read_manifest(dest_dir: &Path, item_id: u64) -> Option<VideoManifest> {
+    std::fs::read_to_string(manifest_path(dest_dir, item_id))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
 }
@@ -637,48 +651,164 @@ mod tests {
 
     #[test]
     fn success_path_leaves_no_empty_staging_root() {
-        // The run_unified_ytdlp success tail: sweep the item scratch, then
-        // drop the root when the last item dir is gone.
-        let base = unique_dir("success-root");
-        let root = base.join(".grab-video");
-        let staging = root.join("42");
+        // The run_unified_ytdlp success tail: sweep the item's grab-<id>-* files.
+        // The dest dir itself is never removed.
+        let staging = unique_dir("success-root");
         std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join("chunk.part"), b"scratch").unwrap();
-        sweep_staging_preserving_recordings(&staging);
-        if let Some(root) = staging.parent() {
-            drop_empty_staging_root(root);
-        }
-        assert!(!staging.exists(), "item staging dir is swept on success");
+        std::fs::write(staging.join("grab-42-chunk.part"), b"scratch").unwrap();
+        std::fs::write(staging.join("unrelated.txt"), b"keep").unwrap();
+        sweep_staging_preserving_recordings(&staging, 42);
         assert!(
-            !root.exists(),
-            "empty staging root must be dropped on success"
+            !staging.join("grab-42-chunk.part").exists(),
+            "item staging file is swept on success"
+        );
+        assert!(staging.exists(), "dest dir is never removed");
+        assert!(
+            staging.join("unrelated.txt").exists(),
+            "unrelated files are never touched"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn success_path_keeps_root_while_recording_remains() {
+        // `grab-<id>-final.*` preservation: the recording stays, scratch is swept.
+        // The dest dir itself is never removed.
+        let staging = unique_dir("success-keep");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("grab-44-final.recording.mp4"), b"only copy").unwrap();
+        std::fs::write(staging.join("grab-44-chunk.part"), b"scratch").unwrap();
+        sweep_staging_preserving_recordings(&staging, 44);
+        assert!(
+            staging.join("grab-44-final.recording.mp4").exists(),
+            "completed recording is preserved"
+        );
+        assert!(
+            !staging.join("grab-44-chunk.part").exists(),
+            "scratch is swept around the recording"
+        );
+        assert!(staging.exists(), "dest dir is never removed");
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn sweep_preserving_recordings_rejects_non_staging_files() {
+        // Critical: a user's own `grab-42-notes.txt` must survive the sweep,
+        // even though it matches the `grab-<id>-` prefix. Only known Grab
+        // staging patterns are deleted.
+        let staging = unique_dir("allowlist-reject");
+        std::fs::create_dir_all(&staging).unwrap();
+        // Real staging files (must be deleted)
+        std::fs::write(staging.join("grab-42-manifest.json"), b"{}").unwrap();
+        std::fs::write(staging.join("grab-42-video.f137.mp4.part"), b"part").unwrap();
+        // User files that happen to match the prefix (must survive)
+        std::fs::write(staging.join("grab-42-notes.txt"), b"user notes").unwrap();
+        std::fs::write(staging.join("grab-42-export.zip"), b"user export").unwrap();
+        // Bare file without prefix (must survive)
+        std::fs::write(staging.join("video.mp4"), b"user video").unwrap();
+
+        sweep_staging_preserving_recordings(&staging, 42);
+
+        assert!(
+            !staging.join("grab-42-manifest.json").exists(),
+            "staging manifest must be swept"
+        );
+        assert!(
+            !staging.join("grab-42-video.f137.mp4.part").exists(),
+            "staging part file must be swept"
+        );
+        assert!(
+            staging.join("grab-42-notes.txt").exists(),
+            "user's grab-42-notes.txt must survive the sweep"
+        );
+        assert!(
+            staging.join("grab-42-export.zip").exists(),
+            "user's grab-42-export.zip must survive the sweep"
+        );
+        assert!(
+            staging.join("video.mp4").exists(),
+            "bare video.mp4 must survive the sweep"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn sweep_dest_staging_rejects_non_staging_files() {
+        // Same allowlist pin for the orphan sweep: only known patterns go,
+        // user files with the prefix survive.
+        let dest_dir = unique_dir("dest-allowlist-reject");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let mut keep = std::collections::HashSet::new();
+        keep.insert(99u64); // live row
+        // Orphan staging files (id 42 not in keep, must be deleted)
+        std::fs::write(dest_dir.join("grab-42-manifest.json"), b"{}").unwrap();
+        // User files with matching prefix (must survive)
+        std::fs::write(dest_dir.join("grab-42-notes.txt"), b"user notes").unwrap();
+        // Live row's files (must survive)
+        std::fs::write(dest_dir.join("grab-99-manifest.json"), b"{}").unwrap();
+
+        sweep_dest_staging(&dest_dir, &keep);
+
+        assert!(
+            !dest_dir.join("grab-42-manifest.json").exists(),
+            "orphan staging manifest must be swept"
+        );
+        assert!(
+            dest_dir.join("grab-42-notes.txt").exists(),
+            "user's grab-42-notes.txt must survive the orphan sweep"
+        );
+        assert!(
+            dest_dir.join("grab-99-manifest.json").exists(),
+            "live row's files must survive"
+        );
+        let _ = std::fs::remove_dir_all(&dest_dir);
+    }
+
+    #[test]
+    fn ensure_staging_dir_in_rejects_symlinked_dest_dir() {
+        // Critical: if the dest dir is a symlink, ensure must error rather
+        // than allow writes through the link to an arbitrary target.
+        let base = unique_dir("symlink-dest");
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("real-target");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = base.join("link-dest");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let res = ensure_staging_dir_in(&link, &link);
+        assert!(
+            res.is_err(),
+            "symlinked dest dir must be refused, not followed"
         );
         let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
-    fn success_path_keeps_root_while_recording_remains() {
-        // `final.*` preservation is untouched: the item dir stays non-empty,
-        // so the root correctly stays too.
-        let base = unique_dir("success-keep");
-        let root = base.join(".grab-video");
-        let staging = root.join("44");
-        std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join("final.recording.mp4"), b"only copy").unwrap();
-        std::fs::write(staging.join("chunk.part"), b"scratch").unwrap();
-        sweep_staging_preserving_recordings(&staging);
-        if let Some(root) = staging.parent() {
-            drop_empty_staging_root(root);
-        }
+    fn sweep_dest_staging_leaves_symlink_target_alone() {
+        // Critical: sweep must not follow symlinks in the dest dir to delete
+        // the target's files.
+        let base = unique_dir("sweep-symlink");
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("grab-42-manifest.json"), b"{}").unwrap();
+        let dest_dir = base.join("dest");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        std::os::unix::fs::symlink(&target, dest_dir.join("link")).unwrap();
+        // A real orphan staging file in dest_dir (should be swept)
+        std::fs::write(dest_dir.join("grab-42-manifest.json"), b"{}").unwrap();
+
+        let keep = std::collections::HashSet::new();
+        sweep_dest_staging(&dest_dir, &keep);
+
         assert!(
-            staging.join("final.recording.mp4").exists(),
-            "completed recording is preserved"
+            !dest_dir.join("grab-42-manifest.json").exists(),
+            "orphan staging file in dest dir must be swept"
         );
         assert!(
-            !staging.join("chunk.part").exists(),
-            "scratch is swept around the recording"
+            target.join("grab-42-manifest.json").exists(),
+            "symlink target's files must survive the sweep"
         );
-        assert!(root.exists(), "root stays while a recording remains");
         let _ = std::fs::remove_dir_all(&base);
     }
 

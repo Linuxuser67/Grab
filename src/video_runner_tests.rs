@@ -121,9 +121,11 @@ fn a_sweep_removes_only_its_own_temp() {
         )
         .await;
     });
+    // Staging is the dest dir itself: it is never removed, only the item's
+    // `grab-<id>-*` files are swept.
     assert!(
-        !staging.exists(),
-        "an emptied staging dir should be reclaimed, not left as litter"
+        staging.exists(),
+        "the dest dir is never removed by the sweep"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

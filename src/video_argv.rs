@@ -7,9 +7,13 @@ use crate::video_staging::{VideoManifest, dest_part_path, manifest_path, ytdlp_o
 use crate::video_tools::{VideoError, ffmpeg_location_dir, ytdlp_identity_args};
 use std::path::{Path, PathBuf};
 
-pub(crate) async fn write_manifest(dir: &Path, manifest: &VideoManifest) -> Result<(), VideoError> {
+pub(crate) async fn write_manifest(
+    dir: &Path,
+    item_id: u64,
+    manifest: &VideoManifest,
+) -> Result<(), VideoError> {
     let text = serde_json::to_string_pretty(manifest).map_err(VideoError::staging)?;
-    tokio::fs::write(manifest_path(dir), text)
+    tokio::fs::write(manifest_path(dir, item_id), text)
         .await
         .map_err(VideoError::staging)
 }

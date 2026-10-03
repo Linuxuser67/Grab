@@ -485,13 +485,6 @@ fn expired_future() {
 // ── staging ────────────────────────────────────────────────────────────
 
 #[test]
-fn staging_dir_is_under_root() {
-    let d = staging_dir(42);
-    assert!(d.starts_with(staging_root()));
-    assert!(d.ends_with("42"));
-}
-
-#[test]
 fn clean_staging_refuses_outside_root() {
     // /tmp is outside the staging root, so clean_staging must delete nothing.
     let fake = std::env::temp_dir().join("grab-video-PROMISE-I-WILL-NOT-DELETE");
@@ -503,7 +496,7 @@ fn clean_staging_refuses_outside_root() {
 
 #[test]
 fn clean_staging_removes_our_dir() {
-    let dir = staging_dir(999_999);
+    let dir = staging_root().join("999_999");
     std::fs::create_dir_all(&dir).unwrap();
     assert!(dir.exists());
     clean_staging(&dir);
@@ -553,7 +546,7 @@ fn sweep_orphan_staging_keeps_live_rows_and_cookie_files() {
 
 #[test]
 fn ensure_staging_dir_roundtrip_and_clean() {
-    let dir = staging_dir(u64::MAX - 8);
+    let dir = staging_root().join((u64::MAX - 8).to_string());
     let canon = ensure_staging_dir(&dir).expect("fresh dir verifies");
     assert!(
         canon.starts_with(std::fs::canonicalize(staging_root()).unwrap()),
@@ -574,7 +567,7 @@ fn ensure_staging_dir_rejects_symlink_escape() {
     let _ = std::fs::remove_dir_all(&outside);
     let _ = std::fs::remove_file(&outside);
     std::fs::create_dir_all(&outside).unwrap();
-    let link = staging_dir(u64::MAX - 7);
+    let link = staging_root().join((u64::MAX - 7).to_string());
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&outside, &link).unwrap();
     let err = ensure_staging_dir(&link).expect_err("symlink escape must fail");
@@ -595,7 +588,7 @@ fn ensure_staging_dir_refuses_dangling_link() {
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
     let target = base.join("never-created");
-    let link = staging_dir(u64::MAX - 6);
+    let link = staging_root().join((u64::MAX - 6).to_string());
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&target, &link).unwrap();
     let err = ensure_staging_dir(&link).expect_err("dangling link must fail");
@@ -609,50 +602,6 @@ fn ensure_staging_dir_refuses_dangling_link() {
 }
 
 // ── dest-side staging ────────────────────────────────────────────────
-
-#[test]
-fn dest_staging_layout_is_hidden_beside_the_destination() {
-    // `<dest>/.grab-video/<id>`: dot-prefixed so file managers hide the
-    // in-flight scratch, same filesystem as the finished file.
-    let dest = std::path::Path::new("/tmp/some-dest");
-    assert_eq!(dest_staging_root(dest), dest.join(".grab-video"));
-    assert_eq!(
-        staging_dir_for(dest, 42),
-        dest.join(".grab-video").join("42")
-    );
-}
-
-#[test]
-fn staging_location_resolves_dest_side_legacy_fallback_and_fresh() {
-    let base = std::env::temp_dir().join(format!("grab-loc-test-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dest = base.join("dest");
-    std::fs::create_dir_all(&dest).unwrap();
-    let id = 961_000 + std::process::id() as u64;
-
-    // Fresh: the dest-side dir (for creation), guarded by the dest-side root.
-    let loc = staging_location(&dest, id);
-    assert_eq!(loc.dir, staging_dir_for(&dest, id));
-    assert_eq!(loc.root, dest_staging_root(&dest));
-
-    // Both present: dest-side wins (the row already moved over).
-    std::fs::create_dir_all(&loc.dir).unwrap();
-    let legacy = legacy_staging_dir(id);
-    let _ = std::fs::remove_dir_all(&legacy);
-    std::fs::create_dir_all(&legacy).unwrap();
-    let loc = staging_location(&dest, id);
-    assert_eq!(loc.dir, staging_dir_for(&dest, id));
-    assert_eq!(loc.root, dest_staging_root(&dest));
-
-    // Legacy only: a paused row keeps its resume data across the upgrade.
-    std::fs::remove_dir_all(staging_dir_for(&dest, id)).unwrap();
-    let loc = staging_location(&dest, id);
-    assert_eq!(loc.dir, legacy);
-    assert_eq!(loc.root, staging_root());
-
-    clean_staging(&legacy);
-    let _ = std::fs::remove_dir_all(&base);
-}
 
 #[test]
 fn staging_occupied_covers_both_roots() {

@@ -169,6 +169,25 @@ pub fn clean_staging(dir: &Path) {
     clean_staging_in(&staging_root(), dir);
 }
 
+/// Remove all `grab-<id>-*` staging files for an item in the destination dir.
+/// Test-only cleanup for the visible staging scheme.
+#[cfg(test)]
+pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
+    let prefix = format!("grab-{item_id}-");
+    if let Ok(entries) = std::fs::read_dir(dest_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            if entry
+                .file_name()
+                .to_str()
+                .map(|n| n.starts_with(&prefix))
+                .unwrap_or(false)
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 /// Remove a staging dir, guarded to stay under an explicit root (never user data).
 pub(crate) fn clean_staging_in(root: &Path, dir: &Path) {
     if let Some(canon) = guarded_staging_dir(root, dir) {

@@ -4288,7 +4288,7 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
         "staging survived the row: nothing reclaims it once the row is gone"
     );
     assert!(
-        !staging.join("late-remux").exists(),
+        !dest_dir.join(format!("grab-{id}-late-remux")).exists(),
         "the manager swept before the worker stopped, so scratch recreated \
          during teardown outlived the row"
     );

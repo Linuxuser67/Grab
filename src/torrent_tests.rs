@@ -170,7 +170,7 @@ fn torrent_net_plan_direct_passthrough() {
 
 #[test]
 fn torrent_net_plan_upnp_defaults_off() {
-    // UPnP port forwarding is no longer user-configurable; the plan always leaves it off.
+    // UPnP is user-configurable via the torrent-upnp setting; the plan respects the passed flag.
     let plan = plan_torrent_net(true, true, 6881, false, None, None);
     assert!(plan.dht);
     assert_eq!(plan.listen_port, 6881);
@@ -549,4 +549,17 @@ fn upnp_default_is_false() {
         key_section.contains("<default>false</default>"),
         "torrent-upnp default must be false (opt-in)"
     );
+}
+
+#[test]
+fn clamp_listen_port_rejects_out_of_range() {
+    // Valid ports pass through.
+    assert_eq!(clamp_listen_port(0), Ok(0));
+    assert_eq!(clamp_listen_port(6881), Ok(6881));
+    assert_eq!(clamp_listen_port(65535), Ok(65535));
+    // Out of range fails loudly (not silent truncation via `as u16`).
+    // Mutation: revert to `as u16` → 70000 becomes 4464, test must fail.
+    assert!(clamp_listen_port(65536).is_err());
+    assert!(clamp_listen_port(70000).is_err());
+    assert!(clamp_listen_port(-1).is_err());
 }

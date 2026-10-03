@@ -436,6 +436,12 @@ pub(crate) fn resolve_listen_config(
     }
 }
 
+/// Clamp a configured listen port to u16: fail loudly on out-of-range
+/// (defense-in-depth for dconf bypassing the GSettings range).
+pub(crate) fn clamp_listen_port(listen_port: i32) -> Result<u16, String> {
+    u16::try_from(listen_port).map_err(|_| "torrent listen port out of range (0-65535)".to_string())
+}
+
 pub(crate) fn plan_torrent_net(
     dht: bool,
     lsd: bool,
@@ -525,8 +531,7 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, String> {
             }
             // No live setter: applies here and per add, so new downloads pick up edits. 0 = disabled; positive ports bind dual-stack.
             if listen_port > 0 {
-                let port = u16::try_from(listen_port)
-                    .map_err(|_| "torrent listen port out of range (0-65535)".to_string())?;
+                let port = clamp_listen_port(listen_port)?;
                 opts.listen = Some(ListenerOptions {
                     listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, port).into(),
                     enable_upnp_port_forwarding: upnp,

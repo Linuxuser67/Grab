@@ -1123,7 +1123,9 @@ impl DownloadManager {
         let handle = tokio_rt().spawn(run_download(ctx, connections, mode));
         self.running.borrow_mut().insert(item.id(), handle);
         // The engine owns the destination from here: later spawns resume it rather than refusing as foreign.
+        // Persist immediately: a force-close before the next periodic save must not lose the ownership claim.
         self.started.borrow_mut().insert(item.id());
+        self.persist_queue();
         item.set_status(DownloadStatus::Downloading);
         // Attempts start indeterminate: clear any stale fraction so the row pulses through the connecting phase.
         item.set_progress(0.0);

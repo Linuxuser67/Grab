@@ -2083,20 +2083,23 @@ fn hls_progress_banks_each_leg_exactly_once() {
     // totals stay 11.4M no matter how many leg-2 lines arrive.
     let mut p = HlsProgress::default();
     // Leg 1 climbs to 100%.
-    let d = p.update(Some(0), Some(11_000_000));
+    let d = p.update(Some(0), Some(11_000_000), false);
     assert_eq!((d.downloaded, d.total), (0, Some(11_000_000)));
-    let d = p.update(Some(11_000_000), Some(11_000_000));
+    let d = p.update(Some(11_000_000), Some(11_000_000), false);
     assert_eq!((d.downloaded, d.total), (11_000_000, Some(11_000_000)));
-    // Leg 2 boundary banks leg 1 once.
-    let d = p.update(Some(0), Some(400_000));
+    // Leg 1 finished: banks 11MB.
+    let d = p.update(Some(11_000_000), Some(11_000_000), true);
+    assert_eq!((d.downloaded, d.total), (11_000_000, Some(11_000_000)));
+    // Leg 2 starts: 11/11.4 = 96.5%.
+    let d = p.update(Some(0), Some(400_000), false);
     assert_eq!((d.downloaded, d.total), (11_000_000, Some(11_400_000)));
-    // Same boundary repeated: no re-bank, no total growth.
-    let d = p.update(Some(100_000), Some(400_000));
+    // Leg 2 progresses.
+    let d = p.update(Some(100_000), Some(400_000), false);
     assert_eq!((d.downloaded, d.total), (11_100_000, Some(11_400_000)));
-    let d = p.update(Some(200_000), Some(400_000));
+    let d = p.update(Some(200_000), Some(400_000), false);
     assert_eq!((d.downloaded, d.total), (11_200_000, Some(11_400_000)));
     // Leg 2 completes: 100%.
-    let d = p.update(Some(400_000), Some(400_000));
+    let d = p.update(Some(400_000), Some(400_000), true);
     assert_eq!((d.downloaded, d.total), (11_400_000, Some(11_400_000)));
 }
 
@@ -2105,17 +2108,17 @@ fn hls_progress_wobble_never_banks() {
     // Same-leg estimate wobble (up and down, continuous bytes) must not bank:
     // completed stays 0 while the denominator tracks the refined total.
     let mut p = HlsProgress::default();
-    let d = p.update(Some(1_000_000), Some(2_000_000));
+    let d = p.update(Some(1_000_000), Some(2_000_000), false);
     assert_eq!((d.downloaded, d.total), (1_000_000, Some(2_000_000)));
-    let d = p.update(Some(2_000_000), Some(2_000_000));
+    let d = p.update(Some(2_000_000), Some(2_000_000), false);
     assert_eq!((d.downloaded, d.total), (2_000_000, Some(2_000_000)));
     // Refined up 50x with continuous bytes: same file, bigger denominator.
-    let d = p.update(Some(2_000_000), Some(100_000_000));
+    let d = p.update(Some(2_000_000), Some(100_000_000), false);
     assert_eq!((d.downloaded, d.total), (2_000_000, Some(100_000_000)));
-    let d = p.update(Some(44_000_000), Some(100_000_000));
+    let d = p.update(Some(44_000_000), Some(100_000_000), false);
     assert_eq!((d.downloaded, d.total), (44_000_000, Some(100_000_000)));
     // Sharp collapse BELOW downloaded bytes: refuse (would flood to 100%).
-    let d = p.update(Some(46_000_000), Some(40_000_000));
+    let d = p.update(Some(46_000_000), Some(40_000_000), false);
     assert_eq!((d.downloaded, d.total), (46_000_000, Some(100_000_000)));
 }
 
@@ -2123,11 +2126,11 @@ fn hls_progress_wobble_never_banks() {
 fn hls_progress_collapse_adopts_containing_total() {
     // Spike 1.01G -> 533M with 18.5M downloaded: adopt (contains us).
     let mut p = HlsProgress::default();
-    p.update(Some(1_000_000), Some(640_000_000));
-    p.update(Some(18_000_000), Some(1_013_792_256));
-    let d = p.update(Some(18_500_000), Some(533_418_666));
+    p.update(Some(1_000_000), Some(640_000_000), false);
+    p.update(Some(18_000_000), Some(1_013_792_256), false);
+    let d = p.update(Some(18_500_000), Some(533_418_666), false);
     assert_eq!((d.downloaded, d.total), (18_500_000, Some(533_418_666)));
-    let d = p.update(Some(400_000_000), Some(533_418_666));
+    let d = p.update(Some(400_000_000), Some(533_418_666), false);
     assert_eq!((d.downloaded, d.total), (400_000_000, Some(533_418_666)));
     let frac = d.downloaded as f64 / d.total.unwrap() as f64;
     assert!((0.7..0.8).contains(&frac), "expected ~0.75, got {frac}");
@@ -2137,9 +2140,9 @@ fn hls_progress_collapse_adopts_containing_total() {
 fn hls_progress_banks_actual_bytes_not_estimate() {
     // Estimate overshoots reality: bank what downloaded, capped at the leg total.
     let mut p = HlsProgress::default();
-    p.update(Some(9_000_000), Some(11_000_000));
+    p.update(Some(9_000_000), Some(11_000_000), false);
     // Boundary with a smaller leg: bank min(9M, 11M) = 9M, not 11M.
-    let d = p.update(Some(0), Some(400_000));
+    let d = p.update(Some(0), Some(400_000), false);
     assert_eq!((d.downloaded, d.total), (9_000_000, Some(9_400_000)));
 }
 
@@ -2148,10 +2151,69 @@ fn hls_progress_unknown_total_stays_indeterminate() {
     // M3: legs without totals never produce a denominator (indeterminate in
     // both; bytes are now reported where the old code sent zeros).
     let mut p = HlsProgress::default();
-    let d = p.update(Some(1_000_000), None);
+    let d = p.update(Some(1_000_000), None, false);
     assert_eq!((d.downloaded, d.total), (1_000_000, None));
-    let d = p.update(None, None);
+    let d = p.update(None, None, false);
     assert_eq!((d.downloaded, d.total), (1_000_000, None));
+}
+
+#[test]
+fn hls_progress_similar_sized_legs_use_finished() {
+    // 11MB video + 9MB audio: totals within the 2x leg_changed band, so the
+    // heuristic alone would misdetect as wobble. The `finished` flag is the
+    // authoritative boundary.
+    let mut p = HlsProgress::default();
+    // Leg 1: 11MB video.
+    let d = p.update(Some(11_000_000), Some(11_000_000), false);
+    assert_eq!((d.downloaded, d.total), (11_000_000, Some(11_000_000)));
+    // Leg 1 finished: banks 11MB.
+    let d = p.update(Some(11_000_000), Some(11_000_000), true);
+    assert_eq!((d.downloaded, d.total), (11_000_000, Some(11_000_000)));
+    // Leg 2: 9MB audio. Must start at 11/20 = 55%, not 100%.
+    let d = p.update(Some(0), Some(9_000_000), false);
+    assert_eq!((d.downloaded, d.total), (11_000_000, Some(20_000_000)));
+    let frac = d.downloaded as f64 / d.total.unwrap() as f64;
+    assert!(
+        (frac - 0.55).abs() < 0.01,
+        "leg 2 should start at 55%, got {frac}"
+    );
+    // Leg 2 progresses.
+    let d = p.update(Some(4_500_000), Some(9_000_000), false);
+    assert_eq!((d.downloaded, d.total), (15_500_000, Some(20_000_000)));
+    // Leg 2 finished: 100%.
+    let d = p.update(Some(9_000_000), Some(9_000_000), true);
+    assert_eq!((d.downloaded, d.total), (20_000_000, Some(20_000_000)));
+}
+
+#[test]
+fn hls_progress_double_finished_is_idempotent() {
+    // Two `finished` lines in a row (yt-dlp re-emitting, or a retried read)
+    // must not double-bank the same leg.
+    let mut p = HlsProgress::default();
+    let d = p.update(Some(11_000_000), Some(11_000_000), false);
+    assert_eq!((d.downloaded, d.total), (11_000_000, Some(11_000_000)));
+    let d = p.update(Some(11_000_000), Some(11_000_000), true);
+    assert_eq!((d.downloaded, d.total), (11_000_000, Some(11_000_000)));
+    // Second finished: leg state was reset, so this banks an empty leg.
+    let d = p.update(Some(11_000_000), Some(11_000_000), true);
+    assert_eq!((d.downloaded, d.total), (11_000_000, Some(11_000_000)));
+    // Next leg still starts clean.
+    let d = p.update(Some(0), Some(400_000), false);
+    assert_eq!((d.downloaded, d.total), (11_000_000, Some(11_400_000)));
+}
+
+#[test]
+fn hls_progress_finished_without_total_stays_indeterminate() {
+    // A leg that never reported a total: `finished` banks its bytes but must
+    // not invent a denominator.
+    let mut p = HlsProgress::default();
+    let d = p.update(Some(1_000_000), None, false);
+    assert_eq!((d.downloaded, d.total), (1_000_000, None));
+    let d = p.update(Some(1_000_000), None, true);
+    assert_eq!((d.downloaded, d.total), (1_000_000, None));
+    // Next leg with a total starts fresh and sized.
+    let d = p.update(Some(0), Some(400_000), false);
+    assert_eq!((d.downloaded, d.total), (1_000_000, Some(1_400_000)));
 }
 
 #[test]
@@ -5655,9 +5717,11 @@ done
 echo '[Grab];downloading;0;11000000;11000000;NA;NA'
 echo '[Grab];downloading;5000000;11000000;11000000;NA;NA'
 echo '[Grab];downloading;11000000;11000000;11000000;NA;NA'
+echo '[Grab];finished;11000000;11000000;11000000;NA;NA'
 echo '[Grab];downloading;0;400000;400000;NA;NA'
 echo '[Grab];downloading;200000;400000;400000;NA;NA'
 echo '[Grab];downloading;400000;400000;400000;NA;NA'
+echo '[Grab];finished;400000;400000;400000;NA;NA'
 out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
 printf 'hlsbytes' > "$out"
 printf '%s\n' "$out"
@@ -5745,6 +5809,108 @@ fn hls_progress_moves_through_second_leg() {
     for (_, t) in &seen {
         assert!(
             *t == Some(11_000_000u64) || *t == Some(11_400_000u64),
+            "total escaped the known legs (re-banked?): {seen:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fake yt-dlp modeling two similar-sized HLS legs: an 11 MB video leg then
+/// a 9 MB audio leg. Totals within the 2x `leg_changed` band, so the heuristic
+/// alone would misdetect the transition as wobble — the `finished` lines are
+/// the authoritative boundary. The bar must move 55% -> 100% across leg 2.
+fn fake_ytdlp_hls_similar_legs(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-hls-similar-legs");
+    std::fs::write(
+        &bin,
+        probe_guard(
+            r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+echo '[Grab];downloading;0;11000000;11000000;NA;NA'
+echo '[Grab];downloading;11000000;11000000;11000000;NA;NA'
+echo '[Grab];finished;11000000;11000000;11000000;NA;NA'
+echo '[Grab];downloading;0;9000000;9000000;NA;NA'
+echo '[Grab];downloading;4500000;9000000;9000000;NA;NA'
+echo '[Grab];downloading;9000000;9000000;9000000;NA;NA'
+echo '[Grab];finished;9000000;9000000;9000000;NA;NA'
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+printf 'hlsbytes' > "$out"
+printf '%s\n' "$out"
+exit 0
+"#,
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn hls_progress_moves_through_similar_sized_legs() {
+    // Similar-size legs (11M + 9M): without `finished` banking the heuristic
+    // misdetects the transition and the bar freezes at 100% for all of leg 2.
+    // With `finished`, leg 2 must read (11M, 20M) = 55% climbing to 100%.
+    use crate::engine_msg::EngineMsg;
+    let dir = std::env::temp_dir().join(format!("grab-fakehls-similar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls_similar_legs(&dir);
+    let staging = dir.join("staging");
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &AttemptGate::new(),
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+        None,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    let mut seen = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+        if let EngineMsg::Progress {
+            downloaded, total, ..
+        } = msg
+        {
+            seen.push((downloaded, total));
+        }
+    }
+    // The first leg-2 message carries the cumulative total: banked 11M plus
+    // the 9M leg = 20M, not the frozen (11M, 11M).
+    let first_leg2 = seen
+        .iter()
+        .find(|(_, t)| *t == Some(20_000_000u64))
+        .expect("leg 2 must introduce the 20M cumulative total: {seen:?}");
+    assert_eq!(
+        first_leg2.0, 11_000_000u64,
+        "leg 2 must start at banked 11M/20M (55%), not frozen 100%: {seen:?}"
+    );
+    // Completion lands exactly on the cumulative total.
+    assert_eq!(
+        seen.last(),
+        Some(&(20_000_000u64, Some(20_000_000u64))),
+        "{seen:?}"
+    );
+    // Bounded state: every total is one of the two known legs.
+    for (_, t) in &seen {
+        assert!(
+            *t == Some(11_000_000u64) || *t == Some(20_000_000u64),
             "total escaped the known legs (re-banked?): {seen:?}"
         );
     }

@@ -135,6 +135,8 @@ pub(crate) struct HlsProgress {
     leg_have: u64,
     /// Current leg's denominator (`None` = unknown: indeterminate, as before).
     leg_total: Option<u64>,
+    /// Last banked amount, to suppress duplicate `finished` lines.
+    last_bank: u64,
 }
 
 /// Cumulative progress for one template line: the pump renders the bar from
@@ -155,7 +157,45 @@ impl HlsProgress {
         &mut self,
         downloaded: Option<u64>,
         total: Option<u64>,
+        finished: bool,
     ) -> DisplayProgress {
+        // Authoritative leg boundary: yt-dlp prints `finished` once per
+        // completed format leg. Bank the leg's actual bytes (capped at its
+        // estimate — estimates overshoot) and reset for the next leg.
+        // This is edge-triggered, unlike the `leg_changed` heuristic below,
+        // so it cannot re-fire on subsequent lines.
+        if finished {
+            // No progress seen since the last bank: a duplicate `finished`
+            // line for the same leg, not a new one.
+            let had_progress = self.leg_have > 0;
+            if let Some(d) = downloaded {
+                self.leg_have = self.leg_have.max(d);
+            }
+            if self.leg_total.is_none()
+                && let Some(t) = total.filter(|&t| t > 0)
+            {
+                self.leg_total = Some(t);
+            }
+            let bank = self.leg_have.min(self.leg_total.unwrap_or(self.leg_have));
+            // Suppress double-banking on duplicate `finished`: same amount,
+            // no new progress, and we've banked before. (A same-sized next
+            // leg without any progress lines would also match; yt-dlp always
+            // emits `downloading` lines before `finished`, so this is safe.)
+            if bank != self.last_bank || had_progress || self.completed == 0 {
+                self.completed += bank;
+                self.last_bank = bank;
+            }
+            let disp = DisplayProgress {
+                downloaded: self.completed,
+                // A leg that never reported a total stays indeterminate;
+                // finished means done, not sized.
+                total: self.leg_total.map(|_| self.completed),
+            };
+            self.leg_have = 0;
+            self.leg_total = None;
+            return disp;
+        }
+
         if let Some(t) = total.filter(|&t| t > 0) {
             match self.leg_total {
                 // First known total starts the first leg.

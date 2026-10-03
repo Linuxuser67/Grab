@@ -14,15 +14,15 @@ pub fn staging_root() -> PathBuf {
     std::env::temp_dir().join("grab-video")
 }
 
-/// Staging files live directly in the destination dir, dot-prefixed and hidden:
-/// `<dest_dir>/.grab-<id>-<name>`. No subfolder. Same filesystem as the
+/// Staging files live directly in the destination dir, visible like other download managers:
+/// `<dest_dir>/grab-<id>-<name>`. No subfolder. Same filesystem as the
 /// finished file, so delivery is an atomic rename.
 pub fn staging_file(dest_dir: &Path, item_id: u64, name: &str) -> PathBuf {
-    dest_dir.join(format!(".grab-{item_id}-{name}"))
+    dest_dir.join(format!("grab-{item_id}-{name}"))
 }
 
 /// Per-item staging "dir" — now the destination dir itself. Files are
-/// dot-prefixed via [`staging_file`]; there is no `.grab-video/` subfolder.
+/// via [`staging_file`]; there is no `.grab-video/` subfolder.
 pub fn staging_dir_for(dest_dir: &Path, _item_id: u64) -> PathBuf {
     dest_dir.to_path_buf()
 }
@@ -37,7 +37,7 @@ pub struct StagingLocation {
 }
 
 /// Resolve the staging location: the destination dir itself. Staging files
-/// are dot-prefixed via [`staging_file`]; there is no subfolder and no
+/// are named via [`staging_file`]; there is no subfolder and no
 /// legacy tmp fallback.
 pub fn staging_location(dest_dir: &Path, _item_id: u64) -> StagingLocation {
     StagingLocation {
@@ -61,7 +61,7 @@ pub fn staging_location_for_dest(dest: &Path, item_id: u64) -> StagingLocation {
 /// Whether any staging file exists for this id: the id allocator must skip
 /// it so a fresh row never lands on a leftover.
 pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
-    let prefix = format!(".grab-{item_id}-");
+    let prefix = format!("grab-{item_id}-");
     std::fs::read_dir(dest_dir)
         .ok()
         .map(|entries| {
@@ -284,7 +284,7 @@ impl VideoManifest {
     }
 }
 
-/// Fixed part names for a row: `<dest_dir>/.grab-<id>-<kind>.<ext>`.
+/// Fixed part names for a row: `<dest_dir>/grab-<id>-<kind>.<ext>`.
 /// Dot-prefixed, hidden, directly in the destination dir (no subfolder).
 pub(crate) fn part_path(dest_dir: &Path, item_id: u64, kind: &str, ext: &str) -> PathBuf {
     staging_file(dest_dir, item_id, &format!("{kind}.{ext}"))

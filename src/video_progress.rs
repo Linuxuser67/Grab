@@ -63,28 +63,6 @@ pub(crate) fn parse_ytdlp_after_move(line: &str) -> Option<&str> {
         .then_some(trimmed)
 }
 
-/// Whether a fresh total starts a new format leg (video→audio) rather than
-/// HLS/DASH estimate wobble. Wobble moves the total alone; a new leg moves it
-/// substantially *and* resets downloaded back near zero (legs are sequential).
-/// Unknown bytes count as reset. The first known total always (re)inits.
-pub(crate) fn leg_changed(
-    max_total: Option<u64>,
-    max_dl: u64,
-    total: u64,
-    downloaded: Option<u64>,
-) -> bool {
-    if total == 0 {
-        return false;
-    }
-    match max_total {
-        None | Some(0) => true,
-        Some(m) => {
-            let total_moved = total < m / 2 || total > m.saturating_mul(2);
-            total_moved && downloaded.is_none_or(|d| d <= max_dl / 2)
-        }
-    }
-}
-
 /// Whether a refined-up total must move the current leg's denominator. A stale
 /// smaller denominator saturates early: once downloaded passes it every cell
 /// reads done while the bar still shows partial. Any growth adopts the bigger
@@ -103,8 +81,8 @@ pub(crate) fn grid_needs_rebuild(grid_total: Option<u64>, total: u64) -> bool {
 /// total it can never fill (the bar stalls half-lit while the download runs
 /// to completion). A downward revision beyond wobble adopts the correction:
 /// the old denominator was wrong, the new estimate is yt-dlp's best current
-/// guess. Checked after `leg_changed`, so a genuine new leg (total moves
-/// *and* downloaded resets) still wins.
+/// guess. Applies to within-leg wobble only; leg transitions come from
+/// `finished`, not from total movement.
 pub(crate) fn estimate_collapsed(max_total: Option<u64>, total: u64) -> bool {
     match max_total {
         Some(m) if m > 0 => total > 0 && total.saturating_mul(4) < m.saturating_mul(3),
@@ -121,12 +99,12 @@ pub(crate) fn estimate_collapsed(max_total: Option<u64>, total: u64) -> bool {
 /// `(completed + leg)` numbers, from which the bar and the fraction-derived
 /// grid both render. One value, two views; they cannot disagree.
 ///
-/// Leg boundaries reuse [`leg_changed`] against the CURRENT leg's baseline
-/// (not a global sticky max), so a boundary fires exactly once: after banking,
-/// the baseline becomes the new leg and identical following lines no longer
-/// match. Same-leg wobble reuses [`grid_needs_rebuild`] (growth) and
-/// [`estimate_collapsed`] + containment (sharp drops), mirroring the old grid
-/// policy byte-for-byte in fraction space.
+/// Leg boundaries come only from yt-dlp's `finished` status (one per completed
+/// format leg): banking is edge-triggered via `leg_seen`, so a boundary
+/// fires exactly once and duplicate `finished` lines are no-ops. Same-leg
+/// wobble reuses [`grid_needs_rebuild`] (growth) and [`estimate_collapsed`]
+/// with containment (sharp drops), mirroring the old grid policy byte-for-byte
+/// in fraction space.
 #[derive(Default)]
 pub(crate) struct HlsProgress {
     /// Actual bytes banked from finished legs (capped per leg, see `update`).
@@ -135,8 +113,9 @@ pub(crate) struct HlsProgress {
     leg_have: u64,
     /// Current leg's denominator (`None` = unknown: indeterminate, as before).
     leg_total: Option<u64>,
-    /// Last banked amount, to suppress duplicate `finished` lines.
-    last_bank: u64,
+    /// Whether the current leg has seen a progress line. A `finished` with
+    /// no prior progress is a duplicate/stray, not a new leg to bank.
+    leg_seen: bool,
 }
 
 /// Cumulative progress for one template line: the pump renders the bar from
@@ -152,48 +131,29 @@ pub(crate) struct DisplayProgress {
 
 impl HlsProgress {
     /// Fold one parsed template line into canonical cumulative progress.
+    /// Returns `None` on `finished` lines: the leg is banked internally and
+    /// the next `downloading` line publishes the new cumulative denominator.
+    /// This avoids emitting a transient 100% frame at every leg boundary.
     /// Pure for tests.
     pub(crate) fn update(
         &mut self,
         downloaded: Option<u64>,
         total: Option<u64>,
         finished: bool,
-    ) -> DisplayProgress {
+    ) -> Option<DisplayProgress> {
         // Authoritative leg boundary: yt-dlp prints `finished` once per
         // completed format leg. Bank the leg's actual bytes (capped at its
         // estimate — estimates overshoot) and reset for the next leg.
-        // This is edge-triggered, unlike the `leg_changed` heuristic below,
-        // so it cannot re-fire on subsequent lines.
+        // One `finished` event banks at most one active leg.
         if finished {
-            // No progress seen since the last bank: a duplicate `finished`
-            // line for the same leg, not a new one.
-            let had_progress = self.leg_have > 0;
-            if let Some(d) = downloaded {
-                self.leg_have = self.leg_have.max(d);
-            }
-            if self.leg_total.is_none()
-                && let Some(t) = total.filter(|&t| t > 0)
-            {
-                self.leg_total = Some(t);
-            }
-            let bank = self.leg_have.min(self.leg_total.unwrap_or(self.leg_have));
-            // Suppress double-banking on duplicate `finished`: same amount,
-            // no new progress, and we've banked before. (A same-sized next
-            // leg without any progress lines would also match; yt-dlp always
-            // emits `downloading` lines before `finished`, so this is safe.)
-            if bank != self.last_bank || had_progress || self.completed == 0 {
+            if self.leg_seen {
+                let bank = self.leg_have.min(self.leg_total.unwrap_or(self.leg_have));
                 self.completed += bank;
-                self.last_bank = bank;
             }
-            let disp = DisplayProgress {
-                downloaded: self.completed,
-                // A leg that never reported a total stays indeterminate;
-                // finished means done, not sized.
-                total: self.leg_total.map(|_| self.completed),
-            };
             self.leg_have = 0;
             self.leg_total = None;
-            return disp;
+            self.leg_seen = false;
+            return None;
         }
 
         if let Some(t) = total.filter(|&t| t > 0) {
@@ -202,15 +162,8 @@ impl HlsProgress {
                 None => {
                     self.leg_total = Some(t);
                 }
-                Some(cur) => {
-                    // A new leg: bank the finished leg's ACTUAL bytes (capped
-                    // at its estimate — estimates overshoot), exactly once per
-                    // transition: after banking the baseline IS the new leg.
-                    if leg_changed(Some(cur), self.leg_have, t, downloaded) {
-                        self.completed += self.leg_have.min(cur);
-                        self.leg_have = 0;
-                        self.leg_total = Some(t);
-                    } else if grid_needs_rebuild(self.leg_total, t) {
+                Some(_) => {
+                    if grid_needs_rebuild(self.leg_total, t) {
                         // Refined-up estimate: adopt the bigger denominator.
                         self.leg_total = Some(t);
                     } else if estimate_collapsed(self.leg_total, t)
@@ -220,17 +173,20 @@ impl HlsProgress {
                         // have: adopt it rather than sizing for a phantom peak.
                         self.leg_total = Some(t);
                     }
+                    // Otherwise: ordinary wobble, keep the denominator.
+                    // Leg transitions come only from `finished` above.
                 }
             }
         }
         if let Some(d) = downloaded {
             let cap = self.leg_total.unwrap_or(u64::MAX);
             self.leg_have = self.leg_have.max(d.min(cap));
+            self.leg_seen = true;
         }
-        DisplayProgress {
+        Some(DisplayProgress {
             downloaded: self.completed + self.leg_have,
             total: self.leg_total.map(|l| self.completed + l),
-        }
+        })
     }
 }
 

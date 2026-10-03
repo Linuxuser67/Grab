@@ -312,7 +312,7 @@ impl VideoManifest {
 }
 
 /// Fixed part names for a row: `<dest_dir>/grab-<id>-<kind>.<ext>`.
-/// Dot-prefixed, hidden, directly in the destination dir (no subfolder).
+/// Visible, directly in the destination dir (no subfolder, no dot prefix).
 pub(crate) fn part_path(dest_dir: &Path, item_id: u64, kind: &str, ext: &str) -> PathBuf {
     staging_file(dest_dir, item_id, &format!("{kind}.{ext}"))
 }

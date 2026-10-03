@@ -450,7 +450,7 @@ impl DownloadManager {
     }
 
     /// Fresh id that lands on no existing staging dir: the allocator must skip
-    /// leftover `<dest>/.grab-video/<id>/` and legacy tmp dirs, or a new row
+    /// leftover `grab-<id>-*` files in dest dirs and legacy tmp dirs, or a new row
     /// would resume (or sweep) a stranger's scratch.
     fn alloc_id_for(&self, dest_dir: &std::path::Path) -> u64 {
         loop {
@@ -461,7 +461,7 @@ impl DownloadManager {
         }
     }
 
-    /// Reuse a restored row's persisted id where possible, else allocate. The id is the staging key, so a fresh number would point at the wrong `<dest>/.grab-video/<id>/` and risk colliding with a later row.
+    /// Reuse a restored row's persisted id where possible, else allocate. The id is the staging key, so a fresh number would point at the wrong `grab-<id>-*` files and risk colliding with a later row.
     fn claim_id(&self, stored: Option<u64>, dest_dir: &std::path::Path) -> u64 {
         let Some(id) = stored else {
             return self.alloc_id_for(dest_dir);
@@ -2559,7 +2559,7 @@ impl DownloadManager {
 
     /// Load the persisted queue (cap: 1000 items / 10 MB), then resume. Unusable files move to `queue.json.bak`, never deleted.
     pub fn restore_queue(self: &Rc<Self>) {
-        // Staging files are dot-prefixed in each destination dir; the
+        // Staging files are `grab-<id>-*` in each destination dir; the
         // `staging_occupied` check at row creation skips IDs with leftovers.
         if Self::queue_file().exists() {
             const MAX_QUEUE_BYTES: u64 = 10_000_000;
@@ -2663,9 +2663,9 @@ impl DownloadManager {
             // here, after restore and before any worker starts; completed
             // `final.*` recordings are preserved (the user's only copy).
             let live: std::collections::HashSet<u64> = self.items().map(|it| it.id()).collect();
-            // Legacy tmp root first, then every destination's own staging root:
-            // `<dest>/.grab-video` holds one numeric dir per item that staged
-            // there, reclaimed with the same keep-set (ids are session-unique).
+            // Legacy tmp root first, then every destination dir: `grab-<id>-*`
+            // files for items no longer live are reclaimed with the keep-set
+            // (ids are session-unique).
             crate::video::sweep_orphan_staging(&live);
             let mut dest_dirs = std::collections::HashSet::new();
             for it in self.items() {

@@ -4071,10 +4071,10 @@ fn remove_cleans_dest_side_video_staging() {
     let destdir = std::env::temp_dir().join(format!("grab-remove-dest-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&destdir);
     std::fs::create_dir_all(&destdir).unwrap();
-    let dir = destdir.clone();
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("manifest.json"), b"{}").unwrap();
-    for n in ["v.mp4", "v.srt", "v.video.mp4"] {
+    // Visible staging: grab-<id>-* files live in the dest dir itself.
+    std::fs::write(destdir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
+    std::fs::write(destdir.join(format!("grab-{id}-v.video.mp4")), b"x").unwrap();
+    for n in ["v.mp4", "v.srt"] {
         std::fs::write(destdir.join(n), b"x").unwrap();
     }
     let item = DownloadItem::new(
@@ -4098,11 +4098,16 @@ fn remove_cleans_dest_side_video_staging() {
         },
     );
     manager.remove(id);
+    // Only the item's grab-<id>-* files go; the dest dir, finished file, and foreign files stay.
     assert!(
-        !dir.exists(),
+        !destdir.join(format!("grab-{id}-manifest.json")).exists(),
         "dest-side staged scratch must go with the row"
     );
-    assert!(!destdir.join("v.video.mp4").exists(), "dest parts go too");
+    assert!(
+        !destdir.join(format!("grab-{id}-v.video.mp4")).exists(),
+        "dest parts go too"
+    );
+    assert!(destdir.exists(), "dest dir is never removed");
     assert!(destdir.join("v.mp4").exists(), "finished file stays");
     assert!(destdir.join("v.srt").exists(), "foreign files stay");
     let _ = std::fs::remove_dir_all(&destdir);

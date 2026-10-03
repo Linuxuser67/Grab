@@ -2145,7 +2145,8 @@ fn hls_progress_banks_actual_bytes_not_estimate() {
 
 #[test]
 fn hls_progress_unknown_total_stays_indeterminate() {
-    // M3: legs without totals never produce a denominator (as before).
+    // M3: legs without totals never produce a denominator (indeterminate in
+    // both; bytes are now reported where the old code sent zeros).
     let mut p = HlsProgress::default();
     let d = p.update(Some(1_000_000), None);
     assert_eq!((d.downloaded, d.total), (1_000_000, None));
@@ -5406,7 +5407,7 @@ exit 0
 
 #[test]
 fn hls_map_survives_estimate_wobble() {
-    // Stuck-full regression: downward wobble must leave the map at ~46%, not flood it.
+    // Stuck-full regression: downward wobble must leave the bar at ~46%, not flood it.
     use crate::engine_msg::EngineMsg;
     let dir = std::env::temp_dir().join(format!("grab-fakehls-wobble-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -5431,14 +5432,25 @@ fn hls_map_survives_estimate_wobble() {
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut last = (0u64, None);
+    let mut segments = Vec::new();
     while let Ok(msg) = rx.try_recv() {
-        if let EngineMsg::Progress {
-            downloaded, total, ..
-        } = msg
-        {
-            last = (downloaded, total);
+        match msg {
+            EngineMsg::Progress {
+                downloaded, total, ..
+            } => {
+                last = (downloaded, total);
+            }
+            // HLS sends no bitmap traffic: bar and grid share one fraction.
+            EngineMsg::SegmentsInit { .. } | EngineMsg::PieceDone(_) => {
+                segments.push(());
+            }
+            _ => {}
         }
     }
+    assert!(
+        segments.is_empty(),
+        "HLS must not emit SegmentsInit/PieceDone"
+    );
     // Downward wobble must leave the bar at ~46%, not flood it: the last
     // Progress carries 46M of 100M (the collapse below downloaded bytes is
     // refused, so the denominator stays honest).
@@ -5483,8 +5495,9 @@ exit 0
 
 #[test]
 fn hls_map_rebuilds_on_upward_wobble() {
-    // Flood-lit regression: a refined-up total under 2x must rebuild the grid;
-    // the map must track the bar (~58%) instead of reading full at ~56%.
+    // Flood-lit regression: a refined-up total under 2x must move the
+    // denominator; the bar tracks ~58% (639.7/1100 MB), never stuck
+    // near-full on the stale total.
     use crate::engine_msg::EngineMsg;
     let dir = std::env::temp_dir().join(format!("grab-fakehls-upwobble-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -5509,16 +5522,27 @@ fn hls_map_rebuilds_on_upward_wobble() {
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut last = (0u64, None);
+    let mut segments = Vec::new();
     while let Ok(msg) = rx.try_recv() {
-        if let EngineMsg::Progress {
-            downloaded, total, ..
-        } = msg
-        {
-            last = (downloaded, total);
+        match msg {
+            EngineMsg::Progress {
+                downloaded, total, ..
+            } => {
+                last = (downloaded, total);
+            }
+            // HLS sends no bitmap traffic: bar and grid share one fraction.
+            EngineMsg::SegmentsInit { .. } | EngineMsg::PieceDone(_) => {
+                segments.push(());
+            }
+            _ => {}
         }
     }
+    assert!(
+        segments.is_empty(),
+        "HLS must not emit SegmentsInit/PieceDone"
+    );
     // The 640 MB -> 1.1 GB refinement must move the denominator: the bar
-    // tracks ~58% (639.7/1100 MB), never stuck near-full on the stale grid.
+    // tracks ~58% (639.7/1100 MB), never stuck near-full on the stale total.
     assert_eq!(last, (639_700_000u64, Some(1_100_000_000u64)), "{last:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5560,8 +5584,8 @@ exit 0
 #[test]
 fn hls_map_adopts_estimate_collapse() {
     // Spike-collapse regression: after the 1.01 GB -> 533 MB revision the
-    // grid must rebuild for 533 MB; the map must track ~75% (400/533 MB),
-    // not stall at ~40% on the phantom 1 GB grid.
+    // denominator must adopt 533 MB; the bar must track ~75% (400/533 MB),
+    // not stall at ~40% on the phantom 1 GB total.
     use crate::engine_msg::EngineMsg;
     let dir =
         std::env::temp_dir().join(format!("grab-fakehls-spikecollapse-{}", std::process::id()));
@@ -5587,14 +5611,25 @@ fn hls_map_adopts_estimate_collapse() {
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut last = (0u64, None);
+    let mut segments = Vec::new();
     while let Ok(msg) = rx.try_recv() {
-        if let EngineMsg::Progress {
-            downloaded, total, ..
-        } = msg
-        {
-            last = (downloaded, total);
+        match msg {
+            EngineMsg::Progress {
+                downloaded, total, ..
+            } => {
+                last = (downloaded, total);
+            }
+            // HLS sends no bitmap traffic: bar and grid share one fraction.
+            EngineMsg::SegmentsInit { .. } | EngineMsg::PieceDone(_) => {
+                segments.push(());
+            }
+            _ => {}
         }
     }
+    assert!(
+        segments.is_empty(),
+        "HLS must not emit SegmentsInit/PieceDone"
+    );
     // After the 1.01 GB -> 533 MB revision the bar must track ~75%
     // (400/533 MB), not stall at ~40% on the phantom peak.
     assert_eq!(last, (400_000_000u64, Some(533_418_666u64)), "{last:?}");
@@ -5670,14 +5705,25 @@ fn hls_progress_moves_through_second_leg() {
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut seen = Vec::new();
+    let mut segments = Vec::new();
     while let Ok(msg) = rx.try_recv() {
-        if let EngineMsg::Progress {
-            downloaded, total, ..
-        } = msg
-        {
-            seen.push((downloaded, total));
+        match msg {
+            EngineMsg::Progress {
+                downloaded, total, ..
+            } => {
+                seen.push((downloaded, total));
+            }
+            // HLS sends no bitmap traffic: bar and grid share one fraction.
+            EngineMsg::SegmentsInit { .. } | EngineMsg::PieceDone(_) => {
+                segments.push(());
+            }
+            _ => {}
         }
     }
+    assert!(
+        segments.is_empty(),
+        "HLS must not emit SegmentsInit/PieceDone"
+    );
     // The first leg-2 message carries the honest cumulative total: banked 11M
     // plus the 400KB leg, not the frozen (11M, 11M).
     let first_leg2 = seen

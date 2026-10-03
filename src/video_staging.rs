@@ -244,11 +244,26 @@ pub fn sweep_orphan_staging(keep: &std::collections::HashSet<u64>) {
     sweep_orphan_staging_in(&staging_root(), keep);
 }
 
-/// Sweep one destination's staging root (`<dest_dir>/.grab-video`): numeric
-/// dirs with no live row are reclaimed exactly like the legacy tmp root. A
-/// missing root (never staged here, destination deleted) is a no-op.
+/// Sweep one destination's staging files (`grab-<id>-*`): files for item IDs
+/// with no live row are reclaimed. A missing dest dir is a no-op.
 pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>) {
-    sweep_orphan_staging_in(&dest_staging_root(dest_dir), keep);
+    let Ok(entries) = std::fs::read_dir(dest_dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = entry.file_name();
+        let name = name.to_str().unwrap_or("");
+        // Parse `grab-<id>-*` to get the item ID
+        if let Some(rest) = name.strip_prefix("grab-") {
+            if let Some((id_str, _)) = rest.split_once('-') {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    if !keep.contains(&id) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn sweep_orphan_staging_in(root: &Path, keep: &std::collections::HashSet<u64>) {

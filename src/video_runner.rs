@@ -288,10 +288,12 @@ pub async fn run_video_download(
             .await?;
         }
         ResumePlan::Resume => {
-            // Overwrite pre-flight, same as Fresh: anything at `dest` is foreign or stale, so refuse before a wasted download.
+            // If dest exists during a resume, it's stale (resume_plan would have
+            // returned Finished if it were complete). The manifest proves it's our
+            // download, so delete the stale file and resume from staging.
             if job.dest.exists() {
+                let _ = std::fs::remove_file(&job.dest);
                 clean_dest_parts(&job.dest);
-                return Err(VideoError::exists());
             }
             phase(gettext("Resuming download…"));
         }

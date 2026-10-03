@@ -583,12 +583,6 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
     {
         return ResumePlan::Finished;
     }
-    // Force-close after the atomic rename leaves a stale manifest but a complete
-    // dest file. If dest exists and is non-empty, treat as finished rather than
-    // failing the resume with "Destination already exists".
-    if q.dest.exists() && file_len(q.dest).is_some_and(|n| n > 0) {
-        return ResumePlan::Finished;
-    }
     // Oversize temps and sparse shells wipe and restart; anything else lets yt-dlp resume or download fresh.
     if let Some(temp) = discover_unified_output(q.staging, None) {
         let len = file_len(&temp);

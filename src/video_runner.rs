@@ -24,10 +24,9 @@ use crate::video_spawn::{
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging_files, collect_sidecar,
-    dest_part_path, discover_unified_output, drop_empty_staging_root, ensure_staging_dir_in,
-    file_len, part_path, read_manifest, release_remux_lease, reserve_remux_temp, resume_plan,
-    sidecar_path_for, staging_location_for_dest, sweep_partial_remuxes,
-    sweep_staging_preserving_recordings,
+    dest_part_path, discover_unified_output, ensure_staging_dir_in, file_len, part_path,
+    read_manifest, release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
+    staging_location_for_dest, sweep_partial_remuxes, sweep_staging_preserving_recordings,
 };
 use crate::video_tools::{
     VideoError, ensure_tool_versions, resolve_libraries, ytdlp_identity_args,
@@ -777,11 +776,7 @@ async fn sweep_live_capture(
     }
     // Non-recursive: succeeds only when nothing else is in there, so a sibling attempt's remux is never collateral.
     let _ = tokio::fs::remove_dir(staging).await;
-    // Drop the root when the last item dir is gone; no-op while siblings
-    // remain or a salvage exit kept the shell.
-    if let Some(root) = staging.parent() {
-        drop_empty_staging_root(root);
-    }
+    // Staging is the dest dir itself: never remove it or its parent.
 }
 
 /// Reap the recorder, and *only then* reclaim its scratch. The order is the contract: sweeping first could delete a file the recorder is still writing. Pinned by controlled futures in `video_runner_tests.rs`; the sweep is a closure so it cannot even be constructed before the reap completes.

@@ -35,15 +35,12 @@ pub use crate::video_runner::{StopIntent, run_video_download};
 /// Facade: spawn plumbing + fetch resolve live in
 /// [`video_spawn`](crate::video_spawn) now.
 pub use crate::video_spawn::fetch_video_infos;
-pub(crate) use crate::video_staging::clean_staging_in;
 /// Facade: staging/parts/manifest/resume lives in
 /// [`video_staging`](crate::video_staging) now.
 pub use crate::video_staging::{
     clean_dest_parts, staging_location_for_dest, staging_occupied, staging_root,
     sweep_dest_staging, sweep_orphan_staging,
 };
-/// Test-only staging helpers.
-#[cfg(test)]
 pub use crate::video_staging::{clean_staging, clean_staging_files};
 /// Facade: tool provisioning lives in [`video_tools`](crate::video_tools) now.
 pub use crate::video_tools::{

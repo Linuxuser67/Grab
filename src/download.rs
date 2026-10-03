@@ -1966,9 +1966,7 @@ impl DownloadManager {
     /// Engine invariant: a finished file is never deleted. The `remove_file` below is the single exception — a commit that won the race against its row's discard, leaving an orphan no row can own.
     fn finish_discard(&self, id: u64, dest: std::path::PathBuf, gate: std::sync::Arc<AttemptGate>) {
         let _ = gate.discard();
-        // Resolved against the destination: current staging lives beside it,
-        // legacy tmp dirs for rows staged before the move resolve the same way.
-        let staging = crate::video::staging_location_for_dest(&dest, id);
+        // Staging files live visibly in the dest dir as `grab-<id>-*`; no subfolder.
         // `self` (Rc, !Send) cannot go to the tokio runtime: carry reservations as an `Arc` clone.
         // Queue wakeups go through `wake_queue()` (thread-safe, no manager handle needed).
         let reservations = std::sync::Arc::clone(&self.reservations);

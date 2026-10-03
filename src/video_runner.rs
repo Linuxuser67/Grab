@@ -1056,21 +1056,6 @@ pub(crate) async fn run_live_ytdlp(
         let _ = std::fs::remove_file(out.with_extension(format!("{ext}.ytdl")));
         return Err(VideoError::exists());
     }
-    // Record this attempt's manifest: proves ownership for future retries.
-    let _ = write_manifest(
-        staging,
-        job.item_id,
-        &VideoManifest {
-            page_url: page_url.to_string(),
-            quality: job.quality.clone(),
-            video_format_id: None,
-            video_ext: ext.to_string(),
-            audio_format_id: hls_format_id.to_string(),
-            audio_ext: String::new(),
-            final_bytes: None,
-        },
-    )
-    .await;
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
@@ -1478,29 +1463,11 @@ pub(crate) async fn run_hls_ytdlp(
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
-    // Resume correctness: if dest exists but we have a matching manifest, the
-    // dest is stale (force-close left it). Delete and proceed. Without a
-    // matching manifest, dest is the user's file — refuse.
     // Overwrite pre-flight: refuse if dest exists. The manifest proves ownership for future retries,
     // but never delete here — a weak match could delete a completed output.
     if job.dest.exists() {
         return Err(VideoError::exists());
     }
-    // Record this attempt's manifest: proves ownership for future resumes.
-    let _ = write_manifest(
-        staging,
-        job.item_id,
-        &VideoManifest {
-            page_url: job.page_url.clone(),
-            quality: job.quality.clone(),
-            video_format_id: None,
-            video_ext: String::new(),
-            audio_format_id: hls_format_id.to_string(),
-            audio_ext: String::new(),
-            final_bytes: None,
-        },
-    )
-    .await;
     // Resolve the subtitle language against what the video actually offers
     // (preferred, else English, else none) before the media argv is built.
     // An abort here stops the download; a probe failure just drops subtitles.

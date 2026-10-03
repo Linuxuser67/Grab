@@ -202,10 +202,21 @@ fn is_grab_staging_suffix(suffix: &str) -> bool {
 /// other files, or a user's own `grab-<id>-*` files.
 pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
     let prefix = format!("grab-{item_id}-");
+    // Hidden manifest (dot-prefixed) plus legacy names.
+    let hidden_manifest = format!(".grab-{item_id}-manifest.json");
+    let legacy_manifests = [
+        format!("grab-{item_id}-.manifest.json"),
+        format!("grab-{item_id}-manifest.json"),
+    ];
     if let Ok(entries) = std::fs::read_dir(dest_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name();
             let name_str = name.to_str().unwrap_or("");
+            // Hidden or legacy manifest: always clean.
+            if name_str == hidden_manifest || legacy_manifests.iter().any(|m| m == name_str) {
+                let _ = std::fs::remove_file(entry.path());
+                continue;
+            }
             if let Some(suffix) = name_str.strip_prefix(&prefix)
                 && is_grab_staging_suffix(suffix)
             {
@@ -345,7 +356,7 @@ pub(crate) fn ytdlp_output_template(path: &Path) -> String {
 }
 
 /// Grab-namespaced part infixes (the only names `clean_dest_parts` touches).
-const PART_KINDS: &[&str] = &["video.", "audio.", "hls.", "live.", "live-"];
+const PART_KINDS: &[&str] = &["video.", "audio.", "hls.", "live-"];
 
 /// Reserve a `final.<n>.<ext>` remux slot via an atomic `.lease` sidecar (claim is check-then-use across overlapping attempts; fails closed).
 pub(crate) fn reserve_remux_temp(staging: &Path, ext: &str) -> Result<PathBuf, VideoError> {
@@ -505,14 +516,28 @@ pub(crate) fn collect_sidecar(src: &Path, dest: &Path, lang: &str) {
 }
 
 pub(crate) fn manifest_path(dest_dir: &Path, item_id: u64) -> PathBuf {
-    // Dot-prefixed: internal bookkeeping, hidden from normal file views.
-    // The grab-<id>- prefix is kept so staging cleanup still matches.
-    staging_file(dest_dir, item_id, ".manifest.json")
+    // Genuinely hidden: dot at the start of the basename. Internal bookkeeping,
+    // invisible in normal file views.
+    dest_dir.join(format!(".grab-{item_id}-manifest.json"))
+}
+
+/// Previous (non-hidden) manifest names, for backward-compatible reads.
+fn legacy_manifest_paths(dest_dir: &Path, item_id: u64) -> [PathBuf; 2] {
+    [
+        dest_dir.join(format!("grab-{item_id}-.manifest.json")),
+        dest_dir.join(format!("grab-{item_id}-manifest.json")),
+    ]
 }
 
 pub(crate) fn read_manifest(dest_dir: &Path, item_id: u64) -> Option<VideoManifest> {
+    // Try the hidden path first, then legacy names.
     std::fs::read_to_string(manifest_path(dest_dir, item_id))
         .ok()
+        .or_else(|| {
+            legacy_manifest_paths(dest_dir, item_id)
+                .iter()
+                .find_map(|p| std::fs::read_to_string(p).ok())
+        })
         .and_then(|text| serde_json::from_str(&text).ok())
 }
 

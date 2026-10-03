@@ -4213,7 +4213,7 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     std::fs::create_dir_all(&dest_dir).unwrap();
     // Visible staging: grab-<id>-* files in the dest dir (no legacy subfolder).
     std::fs::write(dest_dir.join(format!(".grab-{id}-manifest.json")), b"{}").unwrap();
-    let part = dest_dir.join("v.live.mp4.part");
+    let part = dest_dir.join(format!("live-{id}.mp4.part"));
     std::fs::write(&part, b"recorded").unwrap();
 
     let item = DownloadItem::new(
@@ -4308,7 +4308,7 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
         "the manager swept before the worker stopped, so scratch recreated \
          during teardown outlived the row"
     );
-    if part.exists() || dest_dir.join("v.live.mp4").exists() {
+    if part.exists() || dest_dir.join(format!("live-{id}.mp4")).exists() {
         panic!(
             "the recorder's scratch outlived the row, including anything it \
              recreated after the sweep; dest_dir holds {:?}",
@@ -5272,7 +5272,7 @@ fn a_removal_claims_the_gate_before_the_worker_can_commit() {
         .gates
         .borrow_mut()
         .insert(id, std::sync::Arc::clone(&gate));
-    let part = dest_dir.join("v.live.mp4.part");
+    let part = dest_dir.join(format!("live-{id}.mp4.part"));
     std::fs::write(&part, b"recorded").unwrap();
 
     manager.remove(id);

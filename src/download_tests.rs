@@ -1222,7 +1222,7 @@ fn video_source_survives_restore_and_retry() {
     assert!(
         matches!(stored, crate::media_types::VideoSource::Page { ref quality, .. } if quality == "720p")
     );
-    crate::video::clean_staging_files(std::path::Path::new(dest), id);
+    crate::video::clean_staging_files(std::path::Path::new(&dest), id);
     let _ = std::fs::remove_file(&qf);
 }
 

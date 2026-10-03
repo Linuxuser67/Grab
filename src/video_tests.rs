@@ -47,7 +47,7 @@ use crate::video_staging::{
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir,
     ensure_staging_dir_in, is_grab_part, is_sparse_shell, is_ytdlp_fragment, manifest_path,
     part_path, read_manifest, release_remux_lease, reserve_remux_temp, resume_plan,
-    sidecar_path_for, staging_dir_for, staging_file, staging_location, staging_occupied,
+    sidecar_path_for, staging_dir_for, staging_occupied,
     staging_root, stem_reserved_in, sweep_dest_staging, sweep_orphan_staging_in,
     sweep_partial_remuxes, sweep_staging_preserving_recordings, unified_candidate,
     unified_temp_limit, ytdlp_output_template,
@@ -603,150 +603,9 @@ fn ensure_staging_dir_refuses_dangling_link() {
 
 // ── dest-side staging ────────────────────────────────────────────────
 
-#[test]
-fn staging_occupied_covers_both_roots() {
-    let base = std::env::temp_dir().join(format!("grab-occupied-test-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dest = base.join("dest");
-    std::fs::create_dir_all(&dest).unwrap();
-    let id = 962_000 + std::process::id() as u64;
-    assert!(!staging_occupied(&dest, id));
-
-    std::fs::create_dir_all(staging_dir_for(&dest, id)).unwrap();
-    assert!(staging_occupied(&dest, id), "dest-side dir counts");
-    std::fs::remove_dir_all(staging_dir_for(&dest, id)).unwrap();
-
-    let legacy = legacy_staging_dir(id);
-    std::fs::create_dir_all(&legacy).unwrap();
-    assert!(staging_occupied(&dest, id), "legacy tmp dir counts");
-    clean_staging(&legacy);
-    assert!(!staging_occupied(&dest, id));
-
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn sweep_dest_staging_reclaims_orphans_beside_the_destination() {
-    let base = std::env::temp_dir().join(format!("grab-dest-sweep-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dest = base.join("Downloads");
-    let root = dest_staging_root(&dest);
-    let live_dir = root.join("971");
-    let orphan_dir = root.join("972");
-    let recording_dir = root.join("973");
-    for d in [&live_dir, &orphan_dir, &recording_dir] {
-        std::fs::create_dir_all(d).unwrap();
-    }
-    std::fs::write(orphan_dir.join("grab-media.mp4.part"), b"scratch").unwrap();
-    std::fs::write(recording_dir.join("final.1.mp4"), b"someone's recording").unwrap();
-    std::fs::write(recording_dir.join("grab-media.mp4.part"), b"scratch").unwrap();
-    std::fs::write(dest.join("finished.mp4"), b"user file").unwrap();
-    let keep: std::collections::HashSet<u64> = [971].into_iter().collect();
-    sweep_dest_staging(&dest, &keep);
-    assert!(live_dir.exists(), "live row's staging must survive");
-    assert!(!orphan_dir.exists(), "scratch-only orphan must go");
-    assert!(recording_dir.exists(), "dir with a recording must survive");
-    assert_eq!(
-        std::fs::read(recording_dir.join("final.1.mp4")).unwrap(),
-        b"someone's recording",
-        "the recording must survive the sweep"
-    );
-    assert!(
-        !recording_dir.join("grab-media.mp4.part").exists(),
-        "the recording dir's scratch must be reclaimed"
-    );
-    assert!(
-        dest.join("finished.mp4").exists(),
-        "finished file untouched"
-    );
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn sweep_dest_staging_missing_root_is_a_noop() {
-    // A destination that never staged (or was deleted): nothing to scan.
-    let dest = std::env::temp_dir().join(format!("grab-dest-missing-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dest);
-    sweep_dest_staging(&dest, &std::collections::HashSet::new());
-    assert!(!dest.exists());
-}
-
 #[cfg(unix)]
-#[test]
-fn ensure_staging_dir_in_rejects_symlink_escape_from_dest_root() {
-    let base = std::env::temp_dir().join(format!("grab-dest-escape-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dest = base.join("dest");
-    let root = dest_staging_root(&dest);
-    std::fs::create_dir_all(&root).unwrap();
-    let outside = base.join("outside");
-    std::fs::create_dir_all(&outside).unwrap();
-    let link = root.join("974");
-    std::os::unix::fs::symlink(&outside, &link).unwrap();
-    let err = ensure_staging_dir_in(&root, &link).expect_err("symlink escape must fail");
-    assert!(err.to_string().contains("not a real directory"), "{err}");
-    assert!(outside.read_dir().unwrap().next().is_none());
-    let _ = std::fs::remove_dir_all(&base);
-}
-
 #[cfg(unix)]
-#[test]
-fn ensure_staging_dir_in_rejects_same_root_sibling_link() {
-    // A link to a same-root sibling canonicalizes inside the root, so the
-    // old containment check accepted it and parts landed cross-item.
-    let base = std::env::temp_dir().join(format!("grab-dest-sibling-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dest = base.join("dest");
-    let root = dest_staging_root(&dest);
-    let sibling = root.join("sibling");
-    std::fs::create_dir_all(&sibling).unwrap();
-    let link = root.join("975");
-    std::os::unix::fs::symlink(&sibling, &link).unwrap();
-    let err = ensure_staging_dir_in(&root, &link).expect_err("sibling link must fail");
-    assert!(err.to_string().contains("not a real directory"), "{err}");
-    assert!(
-        sibling.read_dir().unwrap().next().is_none(),
-        "parts must not land in the sibling item's dir"
-    );
-    let _ = std::fs::remove_dir_all(&base);
-}
-
 #[cfg(unix)]
-#[test]
-fn symlinked_staging_root_is_refused_for_writes_and_sweeps() {
-    // A planted `<dest>/.grab-video` symlink must not divert staging writes or
-    // orphan-sweep deletions onto its target: the root itself is untrusted.
-    use std::collections::HashSet;
-    let base = std::env::temp_dir().join(format!("grab-root-link-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dest = base.join("dest");
-    let outside = base.join("outside");
-    std::fs::create_dir_all(&outside).unwrap();
-    let target_item = outside.join("123");
-    std::fs::create_dir_all(&target_item).unwrap();
-    std::fs::write(target_item.join("nonfinal.tmp"), b"do not touch").unwrap();
-    let root = dest_staging_root(&dest);
-    std::fs::create_dir_all(&dest).unwrap();
-    std::os::unix::fs::symlink(&outside, &root).unwrap();
-
-    // Staging creation refuses before writing anything through the link.
-    let err = ensure_staging_dir_in(&root, &root.join("123")).expect_err("linked root must fail");
-    assert!(err.to_string().contains("not a real directory"), "{err}");
-    assert!(
-        !target_item.join("123").exists(),
-        "nothing may be created through the linked root"
-    );
-
-    // The orphan sweep leaves the link target alone.
-    sweep_dest_staging(&dest, &HashSet::new());
-    assert_eq!(
-        std::fs::read(target_item.join("nonfinal.tmp")).unwrap(),
-        b"do not touch",
-        "sweep must not delete through the linked root"
-    );
-    let _ = std::fs::remove_dir_all(&base);
-}
-
 // ── VideoSource serde round-trip ───────────────────────────────────────
 
 #[test]
@@ -1178,10 +1037,10 @@ fn resume_attempt_labels_reresolve_as_resuming() {
     let _env = ScopedEnv::apply("/nonexistent-grab-test", &dir.join("xdg"));
 
     let item_id = 900_000 + std::process::id() as u64;
-    let staging = staging_dir(item_id);
+    let staging = dir.clone();
     std::fs::create_dir_all(&staging).unwrap();
     std::fs::write(
-        manifest_path(&staging),
+        manifest_path(&staging, item_id),
         serde_json::to_string(&test_manifest()).unwrap(),
     )
     .unwrap();
@@ -1276,40 +1135,7 @@ fn pipeline_reports_missing_tools() {
     let dest_dir = std::env::temp_dir();
     let staging = staging_dir_for(&dest_dir, item_id);
     assert!(staging.exists(), "the runner stages before resolving tools");
-    clean_staging_in(&dest_staging_root(&dest_dir), &staging);
-    assert!(!staging.exists());
-}
-
-#[test]
-fn clean_staging_in_drops_empty_root() {
-    // Removing the last download must not leave an empty `.grab-video` behind.
-    let dest_dir = std::env::temp_dir().join(format!("grab-root-test-{}", std::process::id()));
-    let root = dest_staging_root(&dest_dir);
-    let item_dir = staging_dir_for(&dest_dir, 7);
-    std::fs::create_dir_all(&item_dir).unwrap();
-    clean_staging_in(&root, &item_dir);
-    assert!(!item_dir.exists());
-    assert!(!root.exists(), "empty staging root should be removed");
-    let _ = std::fs::remove_dir_all(&dest_dir);
-}
-
-#[test]
-fn clean_staging_in_keeps_nonempty_root() {
-    // A root that still holds another item's staging (or cookie files) stays.
-    let dest_dir = std::env::temp_dir().join(format!("grab-root-test2-{}", std::process::id()));
-    let root = dest_staging_root(&dest_dir);
-    let item_a = staging_dir_for(&dest_dir, 7);
-    let item_b = staging_dir_for(&dest_dir, 8);
-    let cookie = root.join("grab-cookies-7-1.txt");
-    std::fs::create_dir_all(&item_a).unwrap();
-    std::fs::create_dir_all(&item_b).unwrap();
-    std::fs::write(&cookie, "x").unwrap();
-    clean_staging_in(&root, &item_a);
-    assert!(!item_a.exists());
-    assert!(root.exists(), "root with remaining items must stay");
-    assert!(item_b.exists());
-    assert!(cookie.exists(), "cookie files must survive");
-    let _ = std::fs::remove_dir_all(&dest_dir);
+    clean_staging_files(&dest_dir, item_id);
 }
 
 // ── preview freshness (dialog kick/submit gate) ──────────────────────

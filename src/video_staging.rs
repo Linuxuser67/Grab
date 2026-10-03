@@ -50,13 +50,15 @@ pub fn staging_location_for_dest(dest: &Path, item_id: u64) -> StagingLocation {
 /// it so a fresh row never lands on a leftover.
 pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
     let prefix = format!("grab-{item_id}-");
+    // ID-namespaced live pattern: .{id}.live. (e.g., v.1.live.mp4.part)
+    let live_pattern = format!(".{item_id}.live.");
     std::fs::read_dir(dest_dir)
         .ok()
         .map(|entries| {
             entries.filter_map(|e| e.ok()).any(|e| {
                 e.file_name()
                     .to_str()
-                    .map(|n| n.starts_with(&prefix))
+                    .map(|n| n.starts_with(&prefix) || n.contains(&live_pattern))
                     .unwrap_or(false)
             })
         })
@@ -400,7 +402,25 @@ fn strip_stem_suffix<'a>(file_name: &'a str, stem: &str) -> Option<&'a str> {
 }
 
 pub(crate) fn is_grab_part(file_name: &str, stem: &str) -> bool {
-    strip_stem_suffix(file_name, stem).is_some_and(|r| PART_KINDS.iter().any(|k| r.starts_with(k)))
+    let Some(remainder) = strip_stem_suffix(file_name, stem) else {
+        return false;
+    };
+    // Standard kinds: video., audio., hls., live.
+    if PART_KINDS.iter().any(|k| remainder.starts_with(k)) {
+        return true;
+    }
+    // ID-namespaced live: {id}.live. (e.g., "1.live.mp4.part" for v.1.live.mp4.part).
+    // The ID prevents collisions between concurrent rows sharing a dest dir.
+    if let Some(dot_pos) = remainder.find('.') {
+        let (id_part, rest) = remainder.split_at(dot_pos);
+        if !id_part.is_empty()
+            && id_part.chars().all(|c| c.is_ascii_digit())
+            && rest.starts_with(".live.")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// File names directly inside `dir` (unreadable dirs read as empty).

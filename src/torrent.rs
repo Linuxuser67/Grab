@@ -511,8 +511,10 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, String> {
             }
             // No live setter: applies here and per add, so new downloads pick up edits. 0 = disabled; positive ports bind dual-stack.
             if listen_port > 0 {
+                let port = u16::try_from(listen_port)
+                    .map_err(|_| "torrent listen port out of range (0-65535)".to_string())?;
                 opts.listen = Some(ListenerOptions {
-                    listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, listen_port as u16).into(),
+                    listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, port).into(),
                     enable_upnp_port_forwarding: upnp,
                     ..Default::default()
                 });

@@ -458,9 +458,9 @@ pub fn show(
     let listen_port = adw::SpinRow::builder()
         .title(gettext("Listen port"))
         .subtitle(gettext(
-            "Port for incoming connections. 0 disables listening. UPnP is enabled automatically when listening. Takes effect on restart.",
+            "Port for incoming connections. 0 disables listening. 1024+ recommended; binds all interfaces. Takes effect on restart.",
         ))
-        .adjustment(&gtk4::Adjustment::new(6881.0, 0.0, 65535.0, 1.0, 10.0, 0.0))
+        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 65535.0, 1.0, 10.0, 0.0))
         .build();
     listen_port.set_tooltip_text(Some(&gettext(
         "Required for effective seeding behind NAT; UPnP forwards it automatically",
@@ -476,6 +476,22 @@ pub fn show(
         .sync_create()
         .build();
     share_group.add(&listen_port);
+    let upnp = adw::SwitchRow::builder()
+        .title(gettext("UPnP port forwarding"))
+        .subtitle(gettext(
+            "Ask the router to forward the listen port. Only applies when a listen port is set. Takes effect on restart.",
+        ))
+        .build();
+    upnp.set_tooltip_text(Some(&gettext(
+        "Required for incoming connections behind NAT; 1024+ recommended, binds all interfaces",
+    )));
+    settings
+        .bind(crate::settings::key::TORRENT_UPNP, &upnp, "active")
+        .build();
+    seed.bind_property("active", &upnp, "sensitive")
+        .sync_create()
+        .build();
+    share_group.add(&upnp);
 
     let torrent_net_group = adw::PreferencesGroup::builder()
         .title(gettext("Connectivity"))

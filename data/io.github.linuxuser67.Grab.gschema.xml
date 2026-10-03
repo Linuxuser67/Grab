@@ -111,10 +111,15 @@
       <description>Discover torrent peers on the local network via Local Service Discovery. Applies when the torrent engine first starts.</description>
     </key>
     <key name="torrent-listen-port" type="i">
-      <default>6881</default>
+      <default>0</default>
       <range min="0" max="65535"/>
       <summary>Torrent listen port</summary>
-      <description>Port for incoming torrent connections (enables seeding). 0 disables listening. UPnP port forwarding is enabled automatically when listening. Applies when the torrent engine first starts.</description>
+      <description>Port for incoming torrent connections (enables seeding). 0 disables listening. Applies when the torrent engine first starts.</description>
+    </key>
+    <key name="torrent-upnp" type="b">
+      <default>false</default>
+      <summary>UPnP port forwarding for torrents</summary>
+      <description>Ask the router to forward the torrent listen port via UPnP. Only applies when a listen port is set. Applies when the torrent engine first starts.</description>
     </key>
     <key name="video-quality" type="s">
       <default>'1080p'</default>

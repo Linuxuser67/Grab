@@ -313,10 +313,10 @@ impl VideoManifest {
     }
 }
 
-/// Fixed part names for a row: `<dest_dir>/grab-<id>-<kind>.<ext>`.
-/// Visible, directly in the destination dir (no subfolder, no dot prefix).
-pub(crate) fn part_path(dest_dir: &Path, item_id: u64, kind: &str, ext: &str) -> PathBuf {
-    staging_file(dest_dir, item_id, &format!("{kind}.{ext}"))
+/// Fixed part names for a row: `<staging>/live.<ext>.part` (yt-dlp style).
+/// The staging dir is per-item, so no id prefix is needed.
+pub(crate) fn part_path(staging: &Path, _item_id: u64, kind: &str, ext: &str) -> PathBuf {
+    staging.join(format!("{kind}.{ext}.part"))
 }
 
 /// Dest-dir part names (`<stem>.<kind>.<ext>`): deterministic across attempts; feed yt-dlp via `ytdlp_output_template`.

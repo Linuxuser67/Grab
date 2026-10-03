@@ -331,13 +331,6 @@ impl VideoManifest {
     }
 }
 
-/// Fixed part names for a row: `<staging>/grab-<id>.<ext>` (yt-dlp style base).
-/// The grab-<id> prefix namespaces concurrent rows in the shared dest dir.
-/// Callers derive yt-dlp's `.part`/`.ytdl` paths via `with_extension`.
-pub(crate) fn part_path(staging: &Path, item_id: u64, ext: &str) -> PathBuf {
-    staging.join(format!("grab-{item_id}.{ext}"))
-}
-
 /// Dest-dir part names (`<stem>.<kind>.<ext>`): deterministic across attempts; feed yt-dlp via `ytdlp_output_template`.
 pub(crate) fn dest_part_path(dest: &Path, kind: &str, ext: &str) -> PathBuf {
     let dir = dest.parent().unwrap_or_else(|| Path::new(""));

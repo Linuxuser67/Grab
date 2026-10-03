@@ -23,8 +23,8 @@ use crate::video_spawn::{
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging_files, collect_sidecar,
-    dest_part_path, discover_unified_output, ensure_staging_dir_in, file_len, part_path,
-    read_manifest, release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
+    dest_part_path, discover_unified_output, ensure_staging_dir_in, file_len, read_manifest,
+    release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
     staging_location_for_dest, sweep_partial_remuxes, sweep_staging_preserving_recordings,
 };
 use crate::video_tools::{
@@ -1045,7 +1045,9 @@ pub(crate) async fn run_live_ytdlp(
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
     // recording, and the file-growth watcher announces "Recording…" off this path.
-    let out = part_path(staging, job.item_id, ext);
+    // Use the dest directly (yt-dlp appends .part): the title namespaces the file,
+    // no grab-<id> prefix needed.
+    let out = job.dest.clone();
     // Overwrite pre-flight: refuse if dest exists. The manifest proves ownership for future retries,
     // but never delete here — a weak match could delete a completed output from a quality/format-changed retry.
     if job.dest.exists() {

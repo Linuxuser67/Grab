@@ -1108,12 +1108,12 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
         "the restored row took id 9001 which a dest-side leftover staging dir still owns"
     );
     assert_eq!(
-        std::fs::read(leftover.join("final.1.mp4")).unwrap(),
+        std::fs::read(leftover.join("grab-9001-final.1.mp4")).unwrap(),
         b"someone's recording",
         "the leftover recording was destroyed instead of merely left unreachable"
     );
     assert!(
-        !leftover.join("grab-media.mp4.part").exists(),
+        !leftover.join("grab-9001-video.mp4.part").exists(),
         "the startup sweep reclaims the orphan's scratch beside the destination"
     );
     let _ = std::fs::remove_dir_all(&dest);

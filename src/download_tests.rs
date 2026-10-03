@@ -5928,7 +5928,6 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
          instead of awaiting them would leave this behind"
     );
     let _ = std::fs::remove_dir_all(&dest_dir);
-    let _ = std::fs::remove_dir_all(&staging);
 }
 
 #[test]

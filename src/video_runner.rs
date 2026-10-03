@@ -1045,11 +1045,38 @@ pub(crate) async fn run_live_ytdlp(
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
     // recording, and the file-growth watcher announces "Recording…" off this path.
     let out = part_path(staging, job.item_id, "live", ext);
-    // Overwrite pre-flight (Parabolic parity): refuse before recording; the row fails instead of requeueing. Also reclaims pre-upgrade dest-dir scratch for this stem (live parts used to sit beside the finished file); the finished file at dest is left be.
+    // Resume correctness: if dest exists but we have a matching manifest, the
+    // dest is stale (force-close left it). Delete and start a fresh recording
+    // (live streams can't resume). Without a matching manifest, dest is the
+    // user's file — refuse.
     if job.dest.exists() {
-        clean_dest_parts(&job.dest);
-        return Err(VideoError::exists());
+        let manifest = read_manifest(staging, job.item_id);
+        let matches = manifest.as_ref().is_some_and(|m| {
+            m.page_url == page_url
+        });
+        if matches {
+            let _ = std::fs::remove_file(&job.dest);
+            clean_dest_parts(&job.dest);
+        } else {
+            clean_dest_parts(&job.dest);
+            return Err(VideoError::exists());
+        }
     }
+    // Record this attempt's manifest: proves ownership for future retries.
+    let _ = write_manifest(
+        staging,
+        job.item_id,
+        &VideoManifest {
+            page_url: page_url.to_string(),
+            quality: job.quality.clone(),
+            video_format_id: None,
+            video_ext: ext.to_string(),
+            audio_format_id: hls_format_id.to_string(),
+            audio_ext: String::new(),
+            final_bytes: None,
+        },
+    )
+    .await;
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
@@ -1457,10 +1484,36 @@ pub(crate) async fn run_hls_ytdlp(
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
-    // Overwrite pre-flight, same as Fresh: `rename_noreplace` never clobbers, so refuse early.
+    // Resume correctness: if dest exists but we have a matching manifest, the
+    // dest is stale (force-close left it). Delete and proceed. Without a
+    // matching manifest, dest is the user's file — refuse.
     if job.dest.exists() {
-        return Err(VideoError::exists());
+        let manifest = read_manifest(staging, job.item_id);
+        let matches = manifest.as_ref().is_some_and(|m| {
+            m.page_url == job.page_url
+        });
+        if matches {
+            let _ = std::fs::remove_file(&job.dest);
+            clean_dest_parts(&job.dest);
+        } else {
+            return Err(VideoError::exists());
+        }
     }
+    // Record this attempt's manifest: proves ownership for future resumes.
+    let _ = write_manifest(
+        staging,
+        job.item_id,
+        &VideoManifest {
+            page_url: job.page_url.clone(),
+            quality: job.quality.clone(),
+            video_format_id: None,
+            video_ext: String::new(),
+            audio_format_id: hls_format_id.to_string(),
+            audio_ext: String::new(),
+            final_bytes: None,
+        },
+    )
+    .await;
     // Resolve the subtitle language against what the video actually offers
     // (preferred, else English, else none) before the media argv is built.
     // An abort here stops the download; a probe failure just drops subtitles.

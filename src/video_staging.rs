@@ -168,6 +168,14 @@ fn is_grab_staging_suffix(suffix: &str) -> bool {
     if suffix.ends_with(".part") || suffix.ends_with(".ytdl") {
         return true;
     }
+    // Bare media extensions (e.g., "mp4" from grab-<id>.mp4): the base file
+    // yt-dlp writes before appending .part.
+    if matches!(
+        suffix,
+        "mp4" | "webm" | "mkv" | "m4a" | "mp3" | "ogg" | "wav" | "flac" | "opus"
+    ) {
+        return true;
+    }
     // Remux/format parts: <kind>.<ext> where kind is a known Grab kind
     // (video, audio, live) and ext ends with a media extension.
     // Handles video.f137.mp4, live.mp4, etc. Conservative: require the dot.
@@ -195,7 +203,8 @@ fn is_grab_staging_suffix(suffix: &str) -> bool {
 /// Only deletes files matching known staging patterns; never the dir itself,
 /// other files, or a user's own `grab-<id>-*` files.
 pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
-    let prefix = format!("grab-{item_id}-");
+    let prefix_hyphen = format!("grab-{item_id}-");
+    let prefix_dot = format!("grab-{item_id}.");
     // Hidden manifest (dot-prefixed) plus legacy names.
     let hidden_manifest = format!(".grab-{item_id}-manifest.json");
     let legacy_manifests = [
@@ -211,7 +220,11 @@ pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
                 let _ = std::fs::remove_file(entry.path());
                 continue;
             }
-            if let Some(suffix) = name_str.strip_prefix(&prefix)
+            // Match grab-<id>-* (hyphen) or grab-<id>.* (dot, for part_path files).
+            let suffix = name_str
+                .strip_prefix(&prefix_hyphen)
+                .or_else(|| name_str.strip_prefix(&prefix_dot));
+            if let Some(suffix) = suffix
                 && is_grab_staging_suffix(suffix)
             {
                 let _ = std::fs::remove_file(entry.path());
@@ -318,12 +331,11 @@ impl VideoManifest {
     }
 }
 
-/// Fixed part names for a row: `<staging>/grab-<id>-part.<ext>` (yt-dlp style base).
-/// The grab-<id>- prefix namespaces concurrent rows in the shared dest dir
-/// and matches the existing cleaner patterns. Callers derive yt-dlp's
-/// `.part`/`.ytdl` paths via `with_extension`.
+/// Fixed part names for a row: `<staging>/grab-<id>.<ext>` (yt-dlp style base).
+/// The grab-<id> prefix namespaces concurrent rows in the shared dest dir.
+/// Callers derive yt-dlp's `.part`/`.ytdl` paths via `with_extension`.
 pub(crate) fn part_path(staging: &Path, item_id: u64, ext: &str) -> PathBuf {
-    staging.join(format!("grab-{item_id}-part.{ext}"))
+    staging.join(format!("grab-{item_id}.{ext}"))
 }
 
 /// Dest-dir part names (`<stem>.<kind>.<ext>`): deterministic across attempts; feed yt-dlp via `ytdlp_output_template`.

@@ -755,7 +755,7 @@ async fn sweep_live_capture(
     out: &Path,
     part: &Path,
     state: &Path,
-    staging: &Path,
+    _staging: &Path,
     final_tmp: Option<&Path>,
     staging_mode: Staging,
     exit: Exit,

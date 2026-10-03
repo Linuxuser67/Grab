@@ -41,7 +41,7 @@ pub use crate::video_staging::clean_staging_files;
 /// Facade: staging/parts/manifest/resume lives in
 /// [`video_staging`](crate::video_staging) now.
 pub use crate::video_staging::{
-    clean_dest_parts, staging_location_for_dest, staging_occupied, staging_root, sweep_dest_staging,
+    clean_dest_parts, staging_occupied, staging_root, sweep_dest_staging,
 };
 /// Facade: tool provisioning lives in [`video_tools`](crate::video_tools) now.
 pub use crate::video_tools::{

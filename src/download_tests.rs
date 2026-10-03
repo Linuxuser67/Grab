@@ -1,8 +1,8 @@
 use super::*;
 use crate::download_fetch::{
-    AttemptFail, FetchCtx, StartMode, fetch_piece, filename_from_content_disposition, has_holes,
-    parse_content_range, rejects_unexpected_restart, response_total, run_download, stamp_request,
-    truncate_to_prefix,
+    AttemptFail, FetchCtx, StartMode, backoff_delay, fetch_piece,
+    filename_from_content_disposition, has_holes, parse_content_range, rejects_unexpected_restart,
+    response_total, run_download, stamp_request, truncate_to_prefix,
 };
 use crate::download_intake::{MAX_URL_LEN, normalize_url};
 use crate::download_net::{
@@ -148,6 +148,25 @@ fn test_port(offset: u16) -> u16 {
             .wrapping_add(offset as u64)
             .wrapping_add(salt)
             % 40000) as u16
+}
+
+#[test]
+fn backoff_delay_stays_within_cap() {
+    // Bound-only: deterministic, never flakes. Do NOT assert distinctness (jitter is random).
+    for _ in 0..100 {
+        assert!(
+            backoff_delay(1) <= std::time::Duration::from_millis(500),
+            "failures=1 must be within 500ms cap"
+        );
+        assert!(
+            backoff_delay(2) <= std::time::Duration::from_millis(1000),
+            "failures=2 must be within 1000ms cap"
+        );
+        assert!(
+            backoff_delay(3) <= std::time::Duration::from_millis(2000),
+            "failures=3 must be within 2000ms cap"
+        );
+    }
 }
 
 /// Throwaway HTTP fixture. On failure everything stays behind for ranges.log replay.

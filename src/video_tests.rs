@@ -1030,6 +1030,7 @@ fn resume_attempt_labels_reresolve_as_resuming() {
     let _env = ScopedEnv::apply("/nonexistent-grab-test", &dir.join("xdg"));
 
     let item_id = 900_000 + std::process::id() as u64;
+    let staging = dir.clone();
     std::fs::create_dir_all(&staging).unwrap();
     std::fs::write(
         manifest_path(&staging, item_id),
@@ -3920,6 +3921,7 @@ fn live_capture_adopts_part_and_remuxes() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live(&dir, false);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3969,6 +3971,7 @@ fn live_capture_empty_fails_with_detail() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live(&dir, true);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4002,6 +4005,7 @@ fn live_capture_crash_fails_instead_of_adopting() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live_crash(&dir);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4077,6 +4081,7 @@ fn live_capture_stale_staging_never_adopts() {
     std::fs::write(dir.join("grab-1-live.mp4"), b"stale").unwrap();
     let fake_yt = fake_ytdlp_live(&dir, true);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4107,6 +4112,7 @@ fn live_capture_refuses_existing_dest() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live(&dir, false);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     std::fs::write(&job.dest, b"already").unwrap();
@@ -4143,6 +4149,7 @@ fn live_capture_refusal_reclaims_stale_scratch() {
     let dir = std::env::temp_dir().join(format!("grab-fakelive-reclaim-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    let _staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     std::fs::write(&job.dest, b"already").unwrap();
@@ -4194,6 +4201,7 @@ fn live_capture_abort_adopts_partial() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_slow(&dir);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4318,6 +4326,7 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live_with_state(&dir);
     let fake_ff = fake_ffmpeg_fail(&dir, true);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4400,6 +4409,7 @@ fn live_capture_barren_start_sweeps_state_file() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live_barren_with_state(&dir);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4471,6 +4481,7 @@ fn live_capture_lost_rename_race_sweeps_state() {
     let dir = std::env::temp_dir().join(format!("grab-fakelive-race-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    let _staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let fake_yt = fake_ytdlp_live_with_state(&dir);
@@ -4568,6 +4579,7 @@ fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live_abortable(&dir);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let dest = job.dest.clone();
@@ -4714,6 +4726,7 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
     // A recorder that finishes on its own, so the discard lands after the select.
     let fake_yt = fake_ytdlp_live(&dir, false);
     let fake_ff = fake_ffmpeg_release_signalled(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let dest = job.dest.clone();
@@ -5013,6 +5026,7 @@ fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
     let second_yt = fake_ytdlp_live_payload(&base, "fake-yt-second", "second-attempt");
     let copy_ff = fake_ffmpeg_copy(&base);
 
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
 
@@ -5131,6 +5145,7 @@ fn a_sweep_never_removes_another_attempts_remux() {
     // A barren attempt records nothing, so it never reaches the remux.
     let fake_yt = fake_ytdlp_live_barren_with_state(&dir);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -5167,6 +5182,7 @@ fn live_capture_rename_failure_keeps_completed_remux() {
     let staging = base.join("staging");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::create_dir_all(&staging).unwrap();
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let fake_yt = fake_ytdlp_live_with_state(&dir);
@@ -5251,6 +5267,7 @@ fn live_capture_retry_never_inherits_stale_state() {
     let dir = std::env::temp_dir().join(format!("grab-fakelive-retry-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    let _staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     job.live_from_start = true;
@@ -5444,6 +5461,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live_abortable(&dir);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let dest = job.dest.clone();
@@ -8791,6 +8809,7 @@ fn live_part_shell_announces_recording_and_is_swept() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live_shell_only(&dir);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -9615,6 +9634,7 @@ fn a_discard_before_the_commit_delivers_nothing() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live(&dir, false);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let dest = job.dest.clone();
@@ -9661,6 +9681,7 @@ fn a_commit_before_the_discard_delivers_and_is_recorded() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live(&dir, false);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let dest = job.dest.clone();
@@ -9773,6 +9794,7 @@ fn a_closed_stop_receiver_stops_delivery_rather_than_authorising_it() {
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live(&dir, false);
     let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let dest = job.dest.clone();

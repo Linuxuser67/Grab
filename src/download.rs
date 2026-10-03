@@ -1588,11 +1588,11 @@ impl DownloadManager {
         };
         // SOCKS5 takes over TCP peers + HTTP trackers; no listen port, so UPnP has nothing to forward: hardcoded off.
         // Otherwise, listen only when seeding is enabled; UPnP is a separate opt-in.
-        let (listen_port, upnp) = if settings.torrent_seed_finished() {
-            (settings.torrent_listen_port(), settings.torrent_upnp())
-        } else {
-            (0, false)
-        };
+        let (listen_port, upnp) = crate::torrent::resolve_listen_config(
+            settings.torrent_seed_finished(),
+            settings.torrent_listen_port(),
+            settings.torrent_upnp(),
+        );
         let net = crate::torrent::plan_torrent_net(
             settings.torrent_dht(),
             settings.torrent_lsd(),

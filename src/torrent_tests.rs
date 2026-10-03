@@ -501,3 +501,52 @@ fn guard_output_folder_leaves_flat_dest_alone() {
     assert_eq!(guard_output_folder(&base, base.clone()), base);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn listen_config_seed_off_forces_both_off() {
+    // Seed-off users never bind, even with a port configured (backend matches UI gating).
+    assert_eq!(resolve_listen_config(false, 6881, true), (0, false));
+    assert_eq!(resolve_listen_config(false, 6881, false), (0, false));
+    assert_eq!(resolve_listen_config(false, 0, true), (0, false));
+}
+
+#[test]
+fn listen_config_seed_on_passes_through() {
+    // Seed-on: port and UPnP pass through independently (UPnP is a separate opt-in).
+    assert_eq!(resolve_listen_config(true, 6881, true), (6881, true));
+    assert_eq!(resolve_listen_config(true, 6881, false), (6881, false));
+    assert_eq!(resolve_listen_config(true, 0, true), (0, true));
+    assert_eq!(resolve_listen_config(true, 0, false), (0, false));
+}
+
+#[test]
+fn listen_port_default_is_zero() {
+    // Fresh installs must not bind an inbound listener (handoff-34 Critical #1).
+    // Mutation: revert gschema default to 6881 → this test must fail.
+    let xml = std::fs::read_to_string("data/io.github.linuxuser67.Grab.gschema.xml")
+        .expect("gschema.xml readable from crate root");
+    // Find the torrent-listen-port key and assert its default is 0.
+    let key_start = xml
+        .find("<key name=\"torrent-listen-port\"")
+        .expect("torrent-listen-port key exists");
+    let key_section = &xml[key_start..key_start + 500];
+    assert!(
+        key_section.contains("<default>0</default>"),
+        "torrent-listen-port default must be 0 (disabled), not 6881"
+    );
+}
+
+#[test]
+fn upnp_default_is_false() {
+    // UPnP must not be forced on (handoff-34 Critical #2).
+    let xml = std::fs::read_to_string("data/io.github.linuxuser67.Grab.gschema.xml")
+        .expect("gschema.xml readable from crate root");
+    let key_start = xml
+        .find("<key name=\"torrent-upnp\"")
+        .expect("torrent-upnp key exists");
+    let key_section = &xml[key_start..key_start + 500];
+    assert!(
+        key_section.contains("<default>false</default>"),
+        "torrent-upnp default must be false (opt-in)"
+    );
+}

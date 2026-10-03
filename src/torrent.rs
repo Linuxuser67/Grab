@@ -422,6 +422,20 @@ pub(crate) struct TorrentNetPlan {
     pub socks_proxy: Option<String>,
 }
 
+/// Resolve the effective listen port and UPnP flag: only when seeding is
+/// enabled; otherwise both are forced off (backend matches UI gating).
+pub(crate) fn resolve_listen_config(
+    seed_finished: bool,
+    listen_port: i32,
+    upnp: bool,
+) -> (i32, bool) {
+    if seed_finished {
+        (listen_port, upnp)
+    } else {
+        (0, false)
+    }
+}
+
 pub(crate) fn plan_torrent_net(
     dht: bool,
     lsd: bool,

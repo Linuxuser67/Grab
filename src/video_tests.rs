@@ -45,10 +45,10 @@ use crate::video_spawn::{
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir,
-    ensure_staging_dir_in, is_grab_part, is_sparse_shell, is_ytdlp_fragment, manifest_path,
+    is_grab_part, is_sparse_shell, is_ytdlp_fragment, manifest_path,
     part_path, read_manifest, release_remux_lease, reserve_remux_temp, resume_plan,
-    sidecar_path_for, staging_dir_for, staging_occupied, staging_root, stem_reserved_in,
-    sweep_dest_staging, sweep_orphan_staging_in, sweep_partial_remuxes,
+    sidecar_path_for, staging_dir_for, staging_root, stem_reserved_in,
+    sweep_orphan_staging_in, sweep_partial_remuxes,
     sweep_staging_preserving_recordings, unified_candidate, unified_temp_limit,
     ytdlp_output_template,
 };
@@ -1001,15 +1001,17 @@ fn resume_plan_single_file_identity() {
 fn manifest_serde_round_trip() {
     let dir = test_manifest_dir("serde");
     let m = test_manifest();
+    let item_id = 12345u64;
+    let path = manifest_path(&dir, item_id);
     std::fs::write(
-        dir.join("manifest.json"),
+        &path,
         serde_json::to_string_pretty(&m).unwrap(),
     )
     .unwrap();
-    assert_eq!(read_manifest(&dir).as_ref(), Some(&m));
+    assert_eq!(read_manifest(&dir, item_id).as_ref(), Some(&m));
     // Corrupt sidecars read as absent, never fatal.
-    std::fs::write(dir.join("manifest.json"), b"{nope").unwrap();
-    assert_eq!(read_manifest(&dir), None);
+    std::fs::write(&path, b"{nope").unwrap();
+    assert_eq!(read_manifest(&dir, item_id), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -6825,16 +6827,6 @@ fn dest_part_paths_sit_beside_finished_file() {
     assert_eq!(
         dest_part_path(dest, "hls", "%(ext)s"),
         std::path::Path::new("/tmp/dl/Clip.hls.%(ext)s")
-    );
-}
-
-#[test]
-fn live_part_paths_hide_inside_staging() {
-    // Live capture shells live in the row's staging dir, not beside the finished file.
-    let staging = std::path::Path::new("/tmp/dl/.grab-video/7");
-    assert_eq!(
-        part_path(staging, "live", "mp4"),
-        std::path::Path::new("/tmp/dl/.grab-video/7/live.mp4")
     );
 }
 

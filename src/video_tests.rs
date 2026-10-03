@@ -4832,8 +4832,8 @@ fn a_remux_slot_is_claimed_exactly_once() {
     let staging = dir.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
 
-    let first = reserve_remux_temp(&staging, "mp4").unwrap();
-    assert_eq!(first.file_name().unwrap(), "final.1.mp4");
+    let first = reserve_remux_temp(&staging, 42, "mp4").unwrap();
+    assert_eq!(first.file_name().unwrap(), "grab-42-final.1.mp4");
     assert!(
         first.with_extension("mp4.lease").exists(),
         "the slot must be claimed with a lease, not merely observed free"

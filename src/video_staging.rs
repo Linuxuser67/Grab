@@ -157,7 +157,7 @@ fn guarded_staging_dir(root: &Path, dir: &Path) -> Option<PathBuf> {
 }
 
 /// Remove a staging dir, guarded to stay under the staging root (never user data).
-/// Test-only: production cleans through [`clean_staging_in`] with the resolved root.
+/// Test-only: production uses [`clean_staging_files`] with the item's `grab-<id>-` prefix.
 #[cfg(test)]
 pub fn clean_staging(dir: &Path) {
     clean_staging_in(&staging_root(), dir);
@@ -346,11 +346,18 @@ pub(crate) fn ytdlp_output_template(path: &Path) -> String {
 /// Grab-namespaced part infixes (the only names `clean_dest_parts` touches).
 const PART_KINDS: &[&str] = &["video.", "audio.", "hls.", "live."];
 
-/// Reserve a `final.<n>.<ext>` remux slot via an atomic `.lease` sidecar (claim is check-then-use across overlapping attempts; fails closed).
-pub(crate) fn reserve_remux_temp(staging: &Path, ext: &str) -> Result<PathBuf, VideoError> {
+/// Reserve a `grab-<id>-final.<n>.<ext>` remux slot via an atomic `.lease` sidecar
+/// (claim is check-then-use across overlapping attempts; fails closed).
+/// Item-scoped so two rows sharing a dest dir cannot collide on the slot.
+pub(crate) fn reserve_remux_temp(
+    staging: &Path,
+    item_id: u64,
+    ext: &str,
+) -> Result<PathBuf, VideoError> {
     let taken = dir_file_names(staging);
+    let prefix = format!("grab-{item_id}-final.");
     for n in 1..=9999u32 {
-        let name = format!("final.{n}.{ext}");
+        let name = format!("grab-{item_id}-final.{n}.{ext}");
         if taken
             .iter()
             .any(|t| t == &name || t == &format!("{name}.lease"))
@@ -406,7 +413,8 @@ pub(crate) fn dir_file_names(dir: &Path) -> Vec<String> {
 /// Reclaim `final.<n>.<ext>.part` leftovers from attempts that died mid-ffmpeg (never completed recordings).
 pub fn sweep_partial_remuxes(staging: &Path) {
     for name in dir_file_names(staging) {
-        if name.starts_with("final.") && name.ends_with(".part") {
+        // Item-scoped: grab-<id>-final.<n>.<ext>.part (partial remux from died attempt)
+        if name.contains("-final.") && name.ends_with(".part") {
             let _ = std::fs::remove_file(staging.join(&name));
         }
     }

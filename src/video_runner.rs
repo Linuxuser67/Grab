@@ -1326,7 +1326,7 @@ pub(crate) async fn run_live_ytdlp(
         break src;
     };
     tx.send(EngineMsg::Phase(gettext("Finalizing…"))).ok();
-    let final_tmp = match reserve_remux_temp(staging, ext) {
+    let final_tmp = match reserve_remux_temp(staging, job.item_id, ext) {
         Ok(path) => path,
         // No claimable slot: leave the recorded shell for salvage rather
         // than risk sharing one. This is the pre-existing behaviour.

@@ -35,8 +35,9 @@ fn test_locks() -> (
     std::sync::MutexGuard<'static, ()>,
     std::sync::MutexGuard<'static, ()>,
 ) {
-    let q = QUEUE_FILE_LOCK.lock().unwrap();
-    let l = MAIN_LOOP_LOCK.lock().unwrap();
+    // Recover from poison: a panicking test shouldn't cascade into 28 identical failures.
+    let q = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let l = MAIN_LOOP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     (q, l)
 }
 
@@ -4017,13 +4018,12 @@ fn remove_cleans_video_staging() {
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     let id = 910_000 + std::process::id() as u64;
-    let dir = crate::video::staging_root().join(id.to_string());
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("manifest.json"), b"{}").unwrap();
     // Dest-dir parts go with the row too; finished file and foreign neighbors stay.
+    // Visible staging: grab-<id>-* files live in the dest dir itself (no legacy subfolder).
     let destdir = std::env::temp_dir().join(format!("grab-remove-parts-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&destdir);
     std::fs::create_dir_all(&destdir).unwrap();
+    std::fs::write(destdir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
     for n in ["v.mp4", "v.srt", "v.video.mp4", "v.audio.webm.part"] {
         std::fs::write(destdir.join(n), b"x").unwrap();
     }
@@ -4048,7 +4048,10 @@ fn remove_cleans_video_staging() {
         },
     );
     manager.remove(id);
-    assert!(!dir.exists(), "staged sidecar must go with the row");
+    assert!(
+        !destdir.join(format!("grab-{id}-manifest.json")).exists(),
+        "staged sidecar must go with the row"
+    );
     assert!(!destdir.join("v.video.mp4").exists(), "dest parts go too");
     assert!(
         !destdir.join("v.audio.webm.part").exists(),

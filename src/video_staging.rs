@@ -692,6 +692,127 @@ mod tests {
     }
 
     #[test]
+    fn sweep_preserving_recordings_rejects_non_staging_files() {
+        // Critical: a user's own `grab-42-notes.txt` must survive the sweep,
+        // even though it matches the `grab-<id>-` prefix. Only known Grab
+        // staging patterns are deleted.
+        let staging = unique_dir("allowlist-reject");
+        std::fs::create_dir_all(&staging).unwrap();
+        // Real staging files (must be deleted)
+        std::fs::write(staging.join("grab-42-manifest.json"), b"{}").unwrap();
+        std::fs::write(staging.join("grab-42-video.f137.mp4.part"), b"part").unwrap();
+        // User files that happen to match the prefix (must survive)
+        std::fs::write(staging.join("grab-42-notes.txt"), b"user notes").unwrap();
+        std::fs::write(staging.join("grab-42-export.zip"), b"user export").unwrap();
+        // Bare file without prefix (must survive)
+        std::fs::write(staging.join("video.mp4"), b"user video").unwrap();
+
+        sweep_staging_preserving_recordings(&staging, 42);
+
+        assert!(
+            !staging.join("grab-42-manifest.json").exists(),
+            "staging manifest must be swept"
+        );
+        assert!(
+            !staging.join("grab-42-video.f137.mp4.part").exists(),
+            "staging part file must be swept"
+        );
+        assert!(
+            staging.join("grab-42-notes.txt").exists(),
+            "user's grab-42-notes.txt must survive the sweep"
+        );
+        assert!(
+            staging.join("grab-42-export.zip").exists(),
+            "user's grab-42-export.zip must survive the sweep"
+        );
+        assert!(
+            staging.join("video.mp4").exists(),
+            "bare video.mp4 must survive the sweep"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn sweep_dest_staging_rejects_non_staging_files() {
+        // Same allowlist pin for the orphan sweep: only known patterns go,
+        // user files with the prefix survive.
+        let dest_dir = unique_dir("dest-allowlist-reject");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let mut keep = std::collections::HashSet::new();
+        keep.insert(99u64); // live row
+        // Orphan staging files (id 42 not in keep, must be deleted)
+        std::fs::write(dest_dir.join("grab-42-manifest.json"), b"{}").unwrap();
+        // User files with matching prefix (must survive)
+        std::fs::write(dest_dir.join("grab-42-notes.txt"), b"user notes").unwrap();
+        // Live row's files (must survive)
+        std::fs::write(dest_dir.join("grab-99-manifest.json"), b"{}").unwrap();
+
+        sweep_dest_staging(&dest_dir, &keep);
+
+        assert!(
+            !dest_dir.join("grab-42-manifest.json").exists(),
+            "orphan staging manifest must be swept"
+        );
+        assert!(
+            dest_dir.join("grab-42-notes.txt").exists(),
+            "user's grab-42-notes.txt must survive the orphan sweep"
+        );
+        assert!(
+            dest_dir.join("grab-99-manifest.json").exists(),
+            "live row's files must survive"
+        );
+        let _ = std::fs::remove_dir_all(&dest_dir);
+    }
+
+    #[test]
+    fn ensure_staging_dir_in_rejects_symlinked_dest_dir() {
+        // Critical: if the dest dir is a symlink, ensure must error rather
+        // than allow writes through the link to an arbitrary target.
+        let base = unique_dir("symlink-dest");
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("real-target");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = base.join("link-dest");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let res = ensure_staging_dir_in(&link, &link);
+        assert!(
+            res.is_err(),
+            "symlinked dest dir must be refused, not followed"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sweep_dest_staging_leaves_symlink_target_alone() {
+        // Critical: sweep must not follow symlinks in the dest dir to delete
+        // the target's files.
+        let base = unique_dir("sweep-symlink");
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("grab-42-manifest.json"), b"{}").unwrap();
+        let dest_dir = base.join("dest");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        std::os::unix::fs::symlink(&target, dest_dir.join("link")).unwrap();
+        // A real orphan staging file in dest_dir (should be swept)
+        std::fs::write(dest_dir.join("grab-42-manifest.json"), b"{}").unwrap();
+
+        let keep = std::collections::HashSet::new();
+        sweep_dest_staging(&dest_dir, &keep);
+
+        assert!(
+            !dest_dir.join("grab-42-manifest.json").exists(),
+            "orphan staging file in dest dir must be swept"
+        );
+        assert!(
+            target.join("grab-42-manifest.json").exists(),
+            "symlink target's files must survive the sweep"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn drop_empty_staging_root_removes_empty_root() {
         let base = unique_dir("drop-empty");
         let root = base.join(".grab-video");

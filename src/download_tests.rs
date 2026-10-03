@@ -36,8 +36,8 @@ fn test_locks() -> (
     std::sync::MutexGuard<'static, ()>,
 ) {
     // Recover from poison: a panicking test shouldn't cascade into 28 identical failures.
-    let q = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let l = MAIN_LOOP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let q = QUEUE_FILE_LOCK.lock().unwrap();
+    let l = MAIN_LOOP_LOCK.lock().unwrap();
     (q, l)
 }
 
@@ -382,7 +382,7 @@ fn dedupe_caps_iterations() {
 
 #[test]
 fn corrupt_queue_is_quarantined() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let qf = test_queue_file("quarantine");
     std::fs::write(&qf, b"{not json").unwrap();
     let settings = test_settings();
@@ -400,7 +400,7 @@ fn invalid_utf8_queue_is_quarantined() {
     // read_to_string fails on invalid UTF-8: must quarantine like the other
     // corrupt-queue branches instead of silently starting empty (a later
     // persist would then overwrite the unreadable file).
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let qf = test_queue_file("quarantine-utf8");
     std::fs::write(&qf, b"{\xff\xfe not utf-8").unwrap();
     let settings = test_settings();
@@ -417,7 +417,7 @@ fn invalid_utf8_queue_is_quarantined() {
 fn shutdown_with_timeout_returns_promptly_with_stuck_finalizer() {
     // A wedged finalizer must not hang the GTK thread on quit: the join is
     // bounded, partial files are left for the next launch to reconcile.
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("shutdown-timeout");
     let settings = test_settings();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -669,7 +669,7 @@ fn parses_rates() {
 
 #[test]
 fn rate_limit_follows_settings_live() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("rate-live");
     let settings = test_settings();
     // Watch publishes; cap follows with no re-queue, junk reads as unlimited.
@@ -701,7 +701,7 @@ fn notification_toggles() {
 
 #[test]
 fn transferring_ignores_paused() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("transferring");
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -1172,7 +1172,7 @@ fn video_source_survives_restore_and_retry() {
 
 #[test]
 fn mismatched_video_source_dropped_on_restore() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let qf = test_queue_file("video-mismatch");
     // Hand-edited queue: the Page marker names another video.
     let queue = StoredQueue {
@@ -1335,7 +1335,7 @@ fn unremove_restores_video_source() {
 #[test]
 fn queue_file_never_carries_cookies() {
     // Secrets must not reach the persisted queue, whatever the settings.
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _notools = NoVideoTools::apply();
     let qf = test_queue_file("video-cookies-persist");
     let settings = test_settings();
@@ -1370,7 +1370,7 @@ fn queue_file_never_carries_cookies() {
 
 #[test]
 fn active_count_covers_cancel_all_scope() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("active-count");
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -1393,7 +1393,7 @@ fn active_count_covers_cancel_all_scope() {
 
 #[test]
 fn error_banner_ignores_cancelled() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("error-banner");
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -1454,7 +1454,7 @@ fn path_size_async_measures_off_thread() {
     // The async wrapper must actually measure, not just resolve: a stub that
     // returns None without scanning would leave finished rows unsized.
     // MAIN_LOOP_LOCK: glib futures abort if polled from the wrong thread.
-    let _loop = MAIN_LOOP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _loop = MAIN_LOOP_LOCK.lock().unwrap();
     let dir = std::env::temp_dir().join(format!("grab-path-size-async-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let sub = dir.join("sub");
@@ -1626,7 +1626,7 @@ fn staged_selection_survives_respawn() {
 
 #[test]
 fn torrent_file_enqueue_uses_stem_stub() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("torrent-enqueue");
     let settings = test_settings();
     // Occupy the only slot so nothing spawns a real engine below.
@@ -1658,7 +1658,7 @@ fn torrent_file_enqueue_uses_stem_stub() {
 
 #[test]
 fn staged_selection_reaches_spawn_take() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("torrent-take");
     let settings = test_settings();
     // Occupy the only slot so nothing spawns a real engine below.
@@ -1691,7 +1691,7 @@ fn staged_selection_reaches_spawn_take() {
 
 #[test]
 fn delete_download_trashes_torrent_files() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("torrent-del");
     let settings = test_settings();
     // Home-backed dir: GIO refuses to trash across filesystems like /tmp.
@@ -1749,7 +1749,7 @@ fn delete_download_trashes_torrent_files() {
 
 #[test]
 fn remove_keeps_torrent_archive_for_undo() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("torrent-remove");
     let settings = test_settings();
     // Occupy the only slot so nothing spawns a real engine below.
@@ -1786,7 +1786,7 @@ fn remove_keeps_torrent_archive_for_undo() {
 
 #[test]
 fn rejects_relative_download_dir() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("relative-dir");
     let settings = test_settings();
     // Occupy the only slot so nothing spawns a real engine below.
@@ -1853,7 +1853,7 @@ fn normalizes_bare_hosts() {
 
 #[test]
 fn delete_download_removes_file_and_row() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("del");
     let settings = test_settings();
     // Home-backed dir: GIO refuses to trash across filesystems like /tmp.
@@ -1895,7 +1895,7 @@ fn delete_download_removes_file_and_row() {
 
 #[test]
 fn magnet_delete_trashes_recorded_subfolder() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("magnet-subfolder");
     let settings = test_settings();
     // Occupy the only slot so nothing spawns a real engine below.
@@ -1965,7 +1965,7 @@ fn finish_cleans_untoggled_placeholders() {
 
 #[test]
 fn delete_download_trashes_torrent_subfolder() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("del-subfolder");
     let settings = test_settings();
     // Home-backed dir: GIO refuses to trash across filesystems like /tmp.
@@ -2447,7 +2447,7 @@ fn restrict_filename_ascii_folds_to_ascii() {
 
 #[test]
 fn restore_keeps_exact_filename() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("restore-exact");
     test_settings();
     let dir = std::env::temp_dir().join(format!("grab-restore-{}", std::process::id()));
@@ -2558,7 +2558,7 @@ fn history_restore_roundtrip() {
 
 #[test]
 fn selection_survives_persist_restore() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let qf = test_queue_file("selection-roundtrip");
     let settings = test_settings();
     settings.set_int("max-concurrent", 1).unwrap();
@@ -2618,7 +2618,7 @@ fn sane_filenames() {
 
 #[test]
 fn restore_rejects_bad_filenames() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("restore-bad");
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -2781,7 +2781,7 @@ fn raising_max_concurrent_starts_queued() {
 
 #[test]
 fn defer_yields_slot_and_goes_last() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("defer");
     let settings = test_settings();
     settings.set_int("max-concurrent", 1).unwrap();
@@ -2817,7 +2817,7 @@ fn defer_yields_slot_and_goes_last() {
 
 #[test]
 fn lowering_max_concurrent_parks_newest() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("preempt");
     let settings = test_settings();
     settings.set_int("max-concurrent", 2).unwrap();
@@ -2903,7 +2903,7 @@ fn restore_preserves_intent() {
 
 #[test]
 fn restored_status_mapping() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("restored-mapping");
     let settings = test_settings();
     // Occupy the only slot so restored rows never spawn an engine.
@@ -2937,7 +2937,7 @@ fn restored_status_mapping() {
 
 #[test]
 fn retry_persists_immediately() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let qf = test_queue_file("retry-persist");
     let settings = test_settings();
     settings.set_int("max-concurrent", 1).unwrap();
@@ -3505,7 +3505,7 @@ fn segmented_pause_resume_keeps_bytes() {
 
 #[test]
 fn bitmap_persists_across_managers() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let qf = test_queue_file("segpersist");
     let settings = test_settings();
     let m1 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
@@ -3970,7 +3970,7 @@ fn aggregate_downsamples_by_half() {
 
 #[test]
 fn piece_bitmap_prefers_segment_then_torrent_then_bytes() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("piece-bitmap");
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -4846,7 +4846,7 @@ exit 0
 
 #[test]
 fn clear_finished_drops_only_done() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let qf = test_queue_file("clear-finished");
     let settings = test_settings();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -4948,7 +4948,7 @@ fn restore_dedups_finished_urls() {
 fn drop_finished_duplicates_keeps_active_and_newest() {
     // The finish hook's policy, directly: the just-finished row stays,
     // older Done rows for the URL go, everything else is user intent.
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("history-dedup-live");
     let settings = test_settings();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -5026,7 +5026,7 @@ fn enqueue_video_reserves_part_namespaced_stems() {
 fn delete_download_trashes_video_sidecars() {
     // Trashing a video row takes its collected subtitle sidecars along;
     // plain rows keep a same-named srt (never Grab's).
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("video-del-sidecar");
     let settings = test_settings();
     // Home-backed dir: GIO refuses to trash across filesystems like /tmp.

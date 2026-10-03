@@ -1080,8 +1080,8 @@ fn pipeline_reports_missing_tools() {
         tx,
     ));
     assert!(matches!(res, Err(VideoError::MissingLibraries(_))));
-    // Resolving never started; the abandoned empty staging dir is the caller's
-    // to drop — dest-side now (`<dest>/.grab-video/<id>`).
+    // Resolving never started; no staging files were created (visible
+    // `grab-<id>-*` files only appear once the download starts).
     assert!(rx.try_recv().is_err());
     drop(rx);
     let dest_dir = std::env::temp_dir();

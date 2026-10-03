@@ -1037,10 +1037,10 @@ fn a_restored_row_keeps_its_id_so_its_staging_stays_reachable() {
 
 #[test]
 fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
-    // Dest-side mirror of the upgrade guard: a leftover `<dest>/.grab-video/<id>/`
-    // is invisible to the tmpfs scan, so the allocator must skip it per-row or a
-    // new download would resume (or sweep) a stranger's scratch. Leftovers stay
-    // on disk: unreachable beats deleted.
+    // A leftover `grab-<id>-*` in the dest dir is invisible to the allocator,
+    // so it must skip IDs with leftovers per-row or a new download would
+    // resume (or sweep) a stranger's scratch. Leftovers stay on disk:
+    // unreachable beats deleted.
     let (_q, _l) = test_locks();
     let qf = test_queue_file("dest-leftover-guard");
     let dest = std::env::temp_dir().join(format!("grab-dest-leftover-{}", std::process::id()));
@@ -4064,7 +4064,7 @@ fn remove_cleans_video_staging() {
 
 #[test]
 fn remove_cleans_dest_side_video_staging() {
-    // Dest-side mirror: the worker's scratch lives at `<dest>/.grab-video/<id>/`
+    // The worker's scratch lives as `grab-<id>-*` files in the dest dir
     // and goes with the row; the finished file and foreign neighbors stay.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("remove-dest-staging");

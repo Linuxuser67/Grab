@@ -2141,6 +2141,20 @@ fn hls_progress_double_finished_is_idempotent() {
 }
 
 #[test]
+fn hls_progress_finished_folds_final_bytes() {
+    // The `finished` line may carry final bytes never seen on a downloading
+    // line: fold them into the bank rather than under-counting by one
+    // update interval.
+    let mut p = HlsProgress::default();
+    p.update(Some(0), Some(11_000_000), false).unwrap();
+    p.update(Some(10_000_000), Some(11_000_000), false).unwrap();
+    // Finished line reports the true final 11M.
+    assert!(p.update(Some(11_000_000), Some(11_000_000), true).is_none());
+    let d = p.update(Some(0), Some(400_000), false).unwrap();
+    assert_eq!((d.downloaded, d.total), (11_000_000, Some(11_400_000)));
+}
+
+#[test]
 fn hls_progress_finished_without_total_stays_indeterminate() {
     // A leg that never reported a total: `finished` banks its bytes but the
     // next leg starts fresh. (Finished lines emit nothing; indeterminate is

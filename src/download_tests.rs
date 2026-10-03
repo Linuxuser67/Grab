@@ -5014,7 +5014,6 @@ fn enqueue_video_reserves_part_namespaced_stems() {
 }
 
 #[test]
-#[ignore = "Skipped: investigate Other.en.srt trashing (unrelated to staging refactor)"]
 fn delete_download_trashes_video_sidecars() {
     // Trashing a video row takes its collected subtitle sidecars along;
     // plain rows keep a same-named srt (never Grab's).

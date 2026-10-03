@@ -283,10 +283,10 @@ fn show_video_ready(v: &VideoStep) {
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
     hide_video_step(v);
-    v.action_revealer.set_visible(true);
-    v.action_revealer.set_reveal_child(true);
-    // Back to the Add button: the lookup failed, the spinner must not linger.
-    v.action_slot.set_visible_child_name("add");
+    // Lookup failed: nothing to add. Hide the action slot entirely (no
+    // spinner, no Add button) — the entry's tick stays for retry.
+    v.action_revealer.set_reveal_child(false);
+    v.action_revealer.set_visible(false);
     v.tools.set_subtitle(message);
     v.tools.set_visible(true);
     // Reveal after the row is shown: set_visible(true) first so the
@@ -297,10 +297,10 @@ fn show_video_tools_missing(v: &VideoStep, message: &str) {
 
 fn show_video_error(v: &VideoStep, message: &str) {
     hide_video_step(v);
-    v.action_revealer.set_visible(true);
-    v.action_revealer.set_reveal_child(true);
-    // Back to the Add button: the lookup failed, the spinner must not linger.
-    v.action_slot.set_visible_child_name("add");
+    // Lookup failed: nothing to add. Hide the action slot entirely (no
+    // spinner, no Add button) — the entry's tick stays for retry.
+    v.action_revealer.set_reveal_child(false);
+    v.action_revealer.set_visible(false);
     v.error.set_subtitle(message);
     v.error.set_visible(true);
     // Reveal after the row is shown: set_visible(true) first so the

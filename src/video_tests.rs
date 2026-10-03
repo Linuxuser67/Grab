@@ -3744,7 +3744,7 @@ fn live_test_job() -> VideoJob {
 #[test]
 fn live_argv_pins_planner_id_in_mpegts() {
     let job = live_test_job();
-    let out = std::path::Path::new("/tmp/staging/grab-1.mp4");
+    let out = std::path::Path::new("/tmp/staging/grab-1-part.mp4");
     // Planner-resolved id rides along verbatim; yt-dlp's sort never gets a second vote.
     let argv = live_capture_argv(&job, "h1080", out, None);
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
@@ -3758,7 +3758,7 @@ fn live_argv_pins_planner_id_in_mpegts() {
     assert!(!argv.iter().any(|a| a == "--live-from-start"));
     assert!(!argv.iter().any(|a| a == "--wait-for-video"));
     let o = argv.iter().position(|a| a == "-o").expect("has -o");
-    assert_eq!(argv[o + 1], "/tmp/staging/grab-1.mp4");
+    assert_eq!(argv[o + 1], "/tmp/staging/grab-1-part.mp4");
     assert_eq!(argv[argv.len() - 2], "--");
     assert_eq!(argv[argv.len() - 1], "https://x.com/u/status/1");
     let mut pinned = live_test_job();
@@ -4217,7 +4217,7 @@ fn live_capture_refusal_reclaims_stale_scratch() {
     job.dest = dir.join("v.mp4");
     std::fs::write(&job.dest, b"already").unwrap();
     std::fs::write(staging.join("grab-1.mp4.part"), b"crashed").unwrap();
-    std::fs::write(staging.join("grab-1.mp4.ytdl"), b"fragment-3").unwrap();
+    std::fs::write(staging.join("grab-1-part.mp4.ytdl"), b"fragment-3").unwrap();
     let fake_yt = fake_ytdlp_live(&dir, false);
     let fake_ff = fake_ffmpeg_copy(&dir);
     let staging = dir.join("staging");
@@ -4250,7 +4250,7 @@ fn live_capture_refusal_reclaims_stale_scratch() {
         "the crashed run's shell outlived its row"
     );
     assert!(
-        !dir.join("grab-1.mp4.ytdl").exists(),
+        !dir.join("grab-1-part.mp4.ytdl").exists(),
         "the crashed run's state file outlived its row"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -4270,8 +4270,8 @@ fn live_capture_abort_adopts_partial() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let res = crate::runtime::tokio_rt().block_on(async {
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
-        // New scheme: grab-<id>-grab-1.mp4.ytdl in dest dir
-        let state = dir.join("grab-1.mp4.ytdl");
+        // New scheme: grab-<id>-grab-1-part.mp4.ytdl in dest dir
+        let state = dir.join("grab-1-part.mp4.ytdl");
         let seen = dir.join("abort-saw-state");
         tokio::spawn(async move {
             // Wait for the state file before stopping: a fixed sleep would race and pass vacuously.
@@ -4315,7 +4315,7 @@ fn live_capture_abort_adopts_partial() {
     );
     // A killed yt-dlp never removes its `.ytdl` file, so the post-capture sweep owns it.
     assert!(
-        !dir.join("grab-1.mp4.ytdl").exists(),
+        !dir.join("grab-1-part.mp4.ytdl").exists(),
         "killed capture left its .ytdl state file behind"
     );
     assert!(
@@ -4413,7 +4413,7 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
         "the failure must name where the salvaged recording lives"
     );
     assert!(
-        !dir.join("grab-1.mp4.ytdl").exists(),
+        !dir.join("grab-1-part.mp4.ytdl").exists(),
         "failed remux left its .ytdl state file behind"
     );
     assert_eq!(
@@ -4494,7 +4494,7 @@ fn live_capture_barren_start_sweeps_state_file() {
     ));
     assert!(res.is_err(), "barren run must fail, got {res:?}");
     assert!(
-        !dir.join("grab-1.mp4.ytdl").exists(),
+        !dir.join("grab-1-part.mp4.ytdl").exists(),
         "barren run left its .ytdl state file behind"
     );
     assert!(!job.dest.exists(), "no file is delivered from a barren run");
@@ -4732,22 +4732,22 @@ fn a_non_live_sweep_keeps_a_live_recordings_remux() {
     std::fs::write(staging.join(".grab-42-manifest.json"), b"{}").unwrap();
     std::fs::write(staging.join("grab-42-video.f137.mp4"), b"part").unwrap();
     std::fs::write(
-        staging.join("grab-99-final.grab-1.mp4"),
+        staging.join("grab-99-final.grab-1-part.mp4"),
         b"a live recording",
     )
     .unwrap();
-    std::fs::write(staging.join("grab-99-final.grab-1.mp4.lease"), b"").unwrap();
+    std::fs::write(staging.join("grab-99-final.grab-1-part.mp4.lease"), b"").unwrap();
     std::fs::write(staging.join("unrelated.txt"), b"keep").unwrap();
 
     sweep_staging_preserving_recordings(&staging, 42);
 
     assert_eq!(
-        std::fs::read(staging.join("grab-99-final.grab-1.mp4")).unwrap(),
+        std::fs::read(staging.join("grab-99-final.grab-1-part.mp4")).unwrap(),
         b"a live recording",
         "a non-live leg destroyed a live attempt's completed remux"
     );
     assert!(
-        staging.join("grab-99-final.grab-1.mp4.lease").exists(),
+        staging.join("grab-99-final.grab-1-part.mp4.lease").exists(),
         "the lease marks a claimed remux slot and must survive with it"
     );
     assert!(
@@ -4814,7 +4814,7 @@ fn a_successful_live_remux_is_only_named_final_once_ffmpeg_succeeds() {
     std::fs::create_dir_all(&dir).unwrap();
     let src = dir.join("grab-1.mp4.part");
     std::fs::write(&src, b"recorded").unwrap();
-    let final_tmp = dir.join("final.grab-1.mp4");
+    let final_tmp = dir.join("final.grab-1-part.mp4");
     let fake_ff = fake_ffmpeg_copy(&dir);
 
     let res = crate::runtime::tokio_rt().block_on(remux_live_capture(
@@ -4879,7 +4879,7 @@ fn a_failed_live_remux_leaves_no_partial_behind() {
     std::fs::create_dir_all(&dir).unwrap();
     let src = dir.join("grab-1.mp4.part");
     std::fs::write(&src, b"recorded").unwrap();
-    let final_tmp = dir.join("final.grab-1.mp4");
+    let final_tmp = dir.join("final.grab-1-part.mp4");
     let fake_ff = fake_ffmpeg_fail(&dir, true);
 
     let res = crate::runtime::tokio_rt().block_on(remux_live_capture(
@@ -4918,7 +4918,7 @@ fn a_remux_slot_is_claimed_exactly_once() {
     std::fs::create_dir_all(&staging).unwrap();
 
     let first = reserve_remux_temp(&staging, "mp4").unwrap();
-    assert_eq!(first.file_name().unwrap(), "final.grab-1.mp4");
+    assert_eq!(first.file_name().unwrap(), "final.grab-1-part.mp4");
     assert!(
         first.with_extension("mp4.lease").exists(),
         "the slot must be claimed with a lease, not merely observed free"
@@ -4950,7 +4950,7 @@ fn a_sweep_never_removes_another_attempts_remux() {
     let staging = base.join("staging");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::create_dir_all(&staging).unwrap();
-    let survivor = staging.join("final.grab-1.mp4");
+    let survivor = staging.join("final.grab-1-part.mp4");
     std::fs::write(&survivor, b"earlier-attempt").unwrap();
 
     // A barren attempt records nothing, so it never reaches the remux.
@@ -5066,7 +5066,7 @@ fn live_capture_retry_never_inherits_stale_state() {
     );
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"recorded");
     assert!(
-        !dir.join("grab-1.mp4.ytdl").exists(),
+        !dir.join("grab-1-part.mp4.ytdl").exists(),
         "state must not survive"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -5310,7 +5310,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
 
     // File half: partial media is kept, scratch state must go, nothing is delivered.
     assert!(
-        !dir.join("grab-1.mp4.ytdl").exists(),
+        !dir.join("grab-1-part.mp4.ytdl").exists(),
         "the abort left yt-dlp's state file behind: a later attempt would resume \
          fragment N against a shell Grab wipes first, producing a corrupt recording"
     );
@@ -6825,8 +6825,8 @@ fn ytdlp_output_template_round_trips_existing_double_percent() {
     // A stem that already contains `%%` doubles again: yt-dlp renders
     // `%%%%` back to `%%`, so the on-disk name is unchanged.
     assert_eq!(
-        ytdlp_output_template(std::path::Path::new("/tmp/dl/50%%off.grab-1.mp4")),
-        "/tmp/dl/50%%%%off.grab-1.mp4"
+        ytdlp_output_template(std::path::Path::new("/tmp/dl/50%%off.grab-1-part.mp4")),
+        "/tmp/dl/50%%%%off.grab-1-part.mp4"
     );
 }
 
@@ -6860,10 +6860,10 @@ fn hls_argv_escapes_percent_in_stem() {
 #[test]
 fn live_capture_argv_escapes_percent_in_stem() {
     let job = live_test_job();
-    let out = std::path::Path::new("/tmp/staging/100%.grab-1.mp4");
+    let out = std::path::Path::new("/tmp/staging/100%.grab-1-part.mp4");
     let argv = live_capture_argv(&job, "h720", out, None);
     let o = argv.iter().position(|a| a == "-o").expect("-o");
-    assert_eq!(argv[o + 1], "/tmp/staging/100%%.grab-1.mp4");
+    assert_eq!(argv[o + 1], "/tmp/staging/100%%.grab-1-part.mp4");
 }
 
 #[test]
@@ -7224,7 +7224,7 @@ fn live_capture_argv_keeps_flags_before_url_terminator() {
     let argv = live_capture_argv(
         &job,
         "h720",
-        std::path::Path::new("/tmp/dl/v.live-grab-1.mp4"),
+        std::path::Path::new("/tmp/dl/v.live-grab-1-part.mp4"),
         None,
     );
     let dd = argv
@@ -8399,7 +8399,7 @@ async fn live_retry_aborts_stale_recording_watcher() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let shell = dir.join("grab-1.mp4.part");
-    let out = dir.join("grab-1.mp4");
+    let out = dir.join("grab-1-part.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Attempt 1's watcher, aborted as the retry path does; the abort is
@@ -8990,9 +8990,9 @@ fn a_unified_leg_finishing_over_a_live_recording_leaves_it_alone() {
     let fake = fake_ytdlp(&dir);
     let staging = dir.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
-    let recording = staging.join("final.grab-1.mp4");
+    let recording = staging.join("final.grab-1-part.mp4");
     std::fs::write(&recording, b"an unplaceable live recording").unwrap();
-    std::fs::write(staging.join("final.grab-1.mp4.lease"), b"").unwrap();
+    std::fs::write(staging.join("final.grab-1-part.mp4.lease"), b"").unwrap();
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

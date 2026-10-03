@@ -1,7 +1,6 @@
 //! Small GTK dialog helpers; leaf (gtk/adw only) breaking the `window ↔ install_help` cycle.
 
 use gtk4::glib;
-use libadwaita as adw;
 
 /// Escape user-controlled text before it is interpolated into a markup-parsing
 /// widget (`AdwToast` titles and `AdwAlertDialog` heading/body both take Pango

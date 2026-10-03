@@ -1,8 +1,6 @@
 //! Small GTK dialog helpers; leaf (gtk/adw only) breaking the `window ↔ install_help` cycle.
 
-use adw::prelude::*;
 use gtk4::glib;
-use gtk4::prelude::*;
 use libadwaita as adw;
 
 /// Escape user-controlled text before it is interpolated into a markup-parsing
@@ -12,16 +10,6 @@ use libadwaita as adw;
 /// Gtk-WARNING and leave it blank.
 pub(crate) fn esc_markup(s: &str) -> String {
     glib::markup_escape_text(s).into()
-}
-
-/// Close the dialog when the button is clicked (Cancel/close actions).
-pub(crate) fn close_on_click(btn: &gtk4::Button, dialog: &adw::Dialog) {
-    let weak = dialog.downgrade();
-    btn.connect_clicked(move |_| {
-        if let Some(d) = weak.upgrade() {
-            d.close();
-        }
-    });
 }
 
 #[cfg(test)]

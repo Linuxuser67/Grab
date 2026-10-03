@@ -166,8 +166,8 @@ pub fn clean_staging(dir: &Path) {
 /// Whether a `grab-<id>-<suffix>` filename is a known Grab staging file.
 /// Only these are safe to delete; a user's own `grab-<id>-notes.txt` must survive.
 fn is_grab_staging_suffix(suffix: &str) -> bool {
-    // manifest.json: exact match
-    if suffix == "manifest.json" {
+    // .manifest.json: exact match (dot-prefixed, hidden from file views)
+    if suffix == ".manifest.json" {
         return true;
     }
     // yt-dlp sidecars: *.part, *.ytdl (appended to the filenames we pass it)
@@ -504,7 +504,9 @@ pub(crate) fn collect_sidecar(src: &Path, dest: &Path, lang: &str) {
 }
 
 pub(crate) fn manifest_path(dest_dir: &Path, item_id: u64) -> PathBuf {
-    staging_file(dest_dir, item_id, "manifest.json")
+    // Dot-prefixed: internal bookkeeping, hidden from normal file views.
+    // The grab-<id>- prefix is kept so staging cleanup still matches.
+    staging_file(dest_dir, item_id, ".manifest.json")
 }
 
 pub(crate) fn read_manifest(dest_dir: &Path, item_id: u64) -> Option<VideoManifest> {
@@ -699,7 +701,7 @@ mod tests {
         let staging = unique_dir("allowlist-reject");
         std::fs::create_dir_all(&staging).unwrap();
         // Real staging files (must be deleted)
-        std::fs::write(staging.join("grab-42-manifest.json"), b"{}").unwrap();
+        std::fs::write(staging.join("grab-42-.manifest.json"), b"{}").unwrap();
         std::fs::write(staging.join("grab-42-video.f137.mp4.part"), b"part").unwrap();
         // User files that happen to match the prefix (must survive)
         std::fs::write(staging.join("grab-42-notes.txt"), b"user notes").unwrap();
@@ -710,7 +712,7 @@ mod tests {
         sweep_staging_preserving_recordings(&staging, 42);
 
         assert!(
-            !staging.join("grab-42-manifest.json").exists(),
+            !staging.join("grab-42-.manifest.json").exists(),
             "staging manifest must be swept"
         );
         assert!(
@@ -741,16 +743,16 @@ mod tests {
         let mut keep = std::collections::HashSet::new();
         keep.insert(99u64); // live row
         // Orphan staging files (id 42 not in keep, must be deleted)
-        std::fs::write(dest_dir.join("grab-42-manifest.json"), b"{}").unwrap();
+        std::fs::write(dest_dir.join("grab-42-.manifest.json"), b"{}").unwrap();
         // User files with matching prefix (must survive)
         std::fs::write(dest_dir.join("grab-42-notes.txt"), b"user notes").unwrap();
         // Live row's files (must survive)
-        std::fs::write(dest_dir.join("grab-99-manifest.json"), b"{}").unwrap();
+        std::fs::write(dest_dir.join("grab-99-.manifest.json"), b"{}").unwrap();
 
         sweep_dest_staging(&dest_dir, &keep);
 
         assert!(
-            !dest_dir.join("grab-42-manifest.json").exists(),
+            !dest_dir.join("grab-42-.manifest.json").exists(),
             "orphan staging manifest must be swept"
         );
         assert!(
@@ -758,7 +760,7 @@ mod tests {
             "user's grab-42-notes.txt must survive the orphan sweep"
         );
         assert!(
-            dest_dir.join("grab-99-manifest.json").exists(),
+            dest_dir.join("grab-99-.manifest.json").exists(),
             "live row's files must survive"
         );
         let _ = std::fs::remove_dir_all(&dest_dir);
@@ -791,22 +793,22 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let target = base.join("target");
         std::fs::create_dir_all(&target).unwrap();
-        std::fs::write(target.join("grab-42-manifest.json"), b"{}").unwrap();
+        std::fs::write(target.join("grab-42-.manifest.json"), b"{}").unwrap();
         let dest_dir = base.join("dest");
         std::fs::create_dir_all(&dest_dir).unwrap();
         std::os::unix::fs::symlink(&target, dest_dir.join("link")).unwrap();
         // A real orphan staging file in dest_dir (should be swept)
-        std::fs::write(dest_dir.join("grab-42-manifest.json"), b"{}").unwrap();
+        std::fs::write(dest_dir.join("grab-42-.manifest.json"), b"{}").unwrap();
 
         let keep = std::collections::HashSet::new();
         sweep_dest_staging(&dest_dir, &keep);
 
         assert!(
-            !dest_dir.join("grab-42-manifest.json").exists(),
+            !dest_dir.join("grab-42-.manifest.json").exists(),
             "orphan staging file in dest dir must be swept"
         );
         assert!(
-            target.join("grab-42-manifest.json").exists(),
+            target.join("grab-42-.manifest.json").exists(),
             "symlink target's files must survive the sweep"
         );
         let _ = std::fs::remove_dir_all(&base);

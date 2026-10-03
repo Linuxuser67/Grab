@@ -4042,7 +4042,7 @@ fn remove_cleans_video_staging() {
     let destdir = std::env::temp_dir().join(format!("grab-remove-parts-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&destdir);
     std::fs::create_dir_all(&destdir).unwrap();
-    std::fs::write(destdir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
+    std::fs::write(destdir.join(format!("grab-{id}-.manifest.json")), b"{}").unwrap();
     for n in ["v.mp4", "v.srt", "v.video.mp4", "v.audio.webm.part"] {
         std::fs::write(destdir.join(n), b"x").unwrap();
     }
@@ -4068,7 +4068,7 @@ fn remove_cleans_video_staging() {
     );
     manager.remove(id);
     assert!(
-        !destdir.join(format!("grab-{id}-manifest.json")).exists(),
+        !destdir.join(format!("grab-{id}-.manifest.json")).exists(),
         "staged sidecar must go with the row"
     );
     assert!(!destdir.join("v.video.mp4").exists(), "dest parts go too");
@@ -4094,7 +4094,7 @@ fn remove_cleans_dest_side_video_staging() {
     let _ = std::fs::remove_dir_all(&destdir);
     std::fs::create_dir_all(&destdir).unwrap();
     // Visible staging: grab-<id>-* files live in the dest dir itself.
-    std::fs::write(destdir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
+    std::fs::write(destdir.join(format!("grab-{id}-.manifest.json")), b"{}").unwrap();
     std::fs::write(destdir.join(format!("grab-{id}-video.f137.mp4")), b"x").unwrap();
     for n in ["v.mp4", "v.srt"] {
         std::fs::write(destdir.join(n), b"x").unwrap();
@@ -4122,7 +4122,7 @@ fn remove_cleans_dest_side_video_staging() {
     manager.remove(id);
     // Only the item's grab-<id>-* files go; the dest dir, finished file, and foreign files stay.
     assert!(
-        !destdir.join(format!("grab-{id}-manifest.json")).exists(),
+        !destdir.join(format!("grab-{id}-.manifest.json")).exists(),
         "dest-side staged scratch must go with the row"
     );
     assert!(
@@ -4212,7 +4212,7 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     let _ = std::fs::remove_dir_all(&dest_dir);
     std::fs::create_dir_all(&dest_dir).unwrap();
     // Visible staging: grab-<id>-* files in the dest dir (no legacy subfolder).
-    std::fs::write(dest_dir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
+    std::fs::write(dest_dir.join(format!("grab-{id}-.manifest.json")), b"{}").unwrap();
     let part = dest_dir.join("v.live.mp4.part");
     std::fs::write(&part, b"recorded").unwrap();
 
@@ -4299,7 +4299,7 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
             .unwrap_or_else(|e| vec![format!("READDIR-ERR {e:?}")])
     };
     assert!(
-        !dest_dir.join(format!("grab-{id}-manifest.json")).exists()
+        !dest_dir.join(format!("grab-{id}-.manifest.json")).exists()
             && !dest_dir.join(format!("grab-{id}-video.mp4")).exists(),
         "staging survived the row: nothing reclaims it once the row is gone"
     );
@@ -5368,7 +5368,7 @@ fn removing_a_settled_video_row_keeps_the_users_finished_file() {
     let dest = dest_dir.join("v.mp4");
     std::fs::write(&dest, b"owned").unwrap();
     // Visible staging: grab-<id>-* files in the dest dir (no legacy subfolder).
-    std::fs::write(dest_dir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
+    std::fs::write(dest_dir.join(format!("grab-{id}-.manifest.json")), b"{}").unwrap();
     let item = DownloadItem::new(
         id,
         "https://x.com/u/status/1",
@@ -5412,7 +5412,7 @@ fn removing_a_settled_video_row_keeps_the_users_finished_file() {
         "the settled row's file must survive removal byte-for-byte"
     );
     assert!(
-        !dest_dir.join(format!("grab-{id}-manifest.json")).exists(),
+        !dest_dir.join(format!("grab-{id}-.manifest.json")).exists(),
         "the settled row's scratch must still go with the row"
     );
     let _ = std::fs::remove_dir_all(&dest_dir);
@@ -5902,7 +5902,7 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
 
     // Scratch the real finalizer must reclaim: staging sidecar + dest-dir part.
     // Visible staging: grab-<id>-* files in the dest dir (no legacy subfolder).
-    std::fs::write(dest_dir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
+    std::fs::write(dest_dir.join(format!("grab-{id}-.manifest.json")), b"{}").unwrap();
     let part = dest_dir.join("v.video.mp4");
     std::fs::write(&part, b"recorded").unwrap();
 
@@ -5934,7 +5934,7 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
          which detaches the task instead of aborting it"
     );
     assert!(
-        !dest_dir.join(format!("grab-{id}-manifest.json")).exists(),
+        !dest_dir.join(format!("grab-{id}-.manifest.json")).exists(),
         "shutdown never ran the finalizer's staging sweep: aborting finalizers \
          instead of awaiting them would leave this behind"
     );

@@ -4729,7 +4729,7 @@ fn a_non_live_sweep_keeps_a_live_recordings_remux() {
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).unwrap();
     // Scratch the finishing leg owns (item 42), and a recording it does not (item 99).
-    std::fs::write(staging.join("grab-42-manifest.json"), b"{}").unwrap();
+    std::fs::write(staging.join("grab-42-.manifest.json"), b"{}").unwrap();
     std::fs::write(staging.join("grab-42-video.f137.mp4"), b"part").unwrap();
     std::fs::write(staging.join("grab-99-final.1.mp4"), b"a live recording").unwrap();
     std::fs::write(staging.join("grab-99-final.1.mp4.lease"), b"").unwrap();
@@ -4747,7 +4747,7 @@ fn a_non_live_sweep_keeps_a_live_recordings_remux() {
         "the lease marks a claimed remux slot and must survive with it"
     );
     assert!(
-        !staging.join("grab-42-manifest.json").exists()
+        !staging.join("grab-42-.manifest.json").exists()
             && !staging.join("grab-42-video.f137.mp4").exists(),
         "the finishing leg's own scratch was not reclaimed"
     );

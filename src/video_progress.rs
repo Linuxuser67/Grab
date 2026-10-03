@@ -146,6 +146,16 @@ impl HlsProgress {
         // estimate — estimates overshoot) and reset for the next leg.
         // One `finished` event banks at most one active leg.
         if finished {
+            // Fold the finished line's counts first: it may carry final bytes
+            // not seen on any downloading line. Suppression stays flag-keyed
+            // (leg_seen), so a stray finished still can't bank.
+            if let Some(d) = downloaded {
+                let cap = self
+                    .leg_total
+                    .or(total.filter(|&t| t > 0))
+                    .unwrap_or(u64::MAX);
+                self.leg_have = self.leg_have.max(d.min(cap));
+            }
             if self.leg_seen {
                 let bank = self.leg_have.min(self.leg_total.unwrap_or(self.leg_have));
                 self.completed += bank;
@@ -172,6 +182,18 @@ impl HlsProgress {
                         // Sharp downward revision that still contains what we
                         // have: adopt it rather than sizing for a phantom peak.
                         self.leg_total = Some(t);
+                        // Tripwire: if no `finished` line ever arrives for this
+                        // leg, `leg_have` stays pinned above the adopted total
+                        // and the bar freezes. Log so the next frozen-bar
+                        // report points at the missing signal, not the math.
+                        if self.leg_have > t {
+                            tracing::debug!(
+                                "HlsProgress: collapse-adopted total {} below leg_have {}; \
+                                 bar may freeze without a finished line",
+                                t,
+                                self.leg_have
+                            );
+                        }
                     }
                     // Otherwise: ordinary wobble, keep the denominator.
                     // Leg transitions come only from `finished` above.

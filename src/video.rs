@@ -44,7 +44,7 @@ pub use crate::video_staging::{
 };
 /// Test-only staging helpers.
 #[cfg(test)]
-pub use crate::video_staging::{clean_staging, clean_staging_files, staging_dir_for};
+pub use crate::video_staging::{clean_staging, clean_staging_files};
 /// Facade: tool provisioning lives in [`video_tools`](crate::video_tools) now.
 pub use crate::video_tools::{
     install_ffmpeg, install_quickjs, install_ytdlp, latest_ffmpeg_tag, latest_quickjs_tag,

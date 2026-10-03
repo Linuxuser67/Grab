@@ -21,12 +21,6 @@ pub fn staging_file(dest_dir: &Path, item_id: u64, name: &str) -> PathBuf {
     dest_dir.join(format!("grab-{item_id}-{name}"))
 }
 
-/// Per-item staging "dir" — now the destination dir itself. Files are
-/// via [`staging_file`]; there is no `.grab-video/` subfolder.
-pub fn staging_dir_for(dest_dir: &Path, _item_id: u64) -> PathBuf {
-    dest_dir.to_path_buf()
-}
-
 /// A resolved per-item staging dir plus the root it is guarded under: the
 /// dest-side root for current staging, the tmp root for legacy dirs still
 /// draining from before dest-side staging.
@@ -254,14 +248,12 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
         let name = entry.file_name();
         let name = name.to_str().unwrap_or("");
         // Parse `grab-<id>-*` to get the item ID
-        if let Some(rest) = name.strip_prefix("grab-") {
-            if let Some((id_str, _)) = rest.split_once('-') {
-                if let Ok(id) = id_str.parse::<u64>() {
-                    if !keep.contains(&id) {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
-            }
+        if let Some(rest) = name.strip_prefix("grab-")
+            && let Some((id_str, _)) = rest.split_once('-')
+            && let Ok(id) = id_str.parse::<u64>()
+            && !keep.contains(&id)
+        {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }

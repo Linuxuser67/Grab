@@ -46,8 +46,8 @@ use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
     is_sparse_shell, is_ytdlp_fragment, manifest_path, part_path, read_manifest,
-    release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for, staging_dir_for,
-    staging_root, stem_reserved_in, sweep_orphan_staging_in, sweep_partial_remuxes,
+    release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for, staging_root,
+    stem_reserved_in, sweep_orphan_staging_in, sweep_partial_remuxes,
     sweep_staging_preserving_recordings, unified_candidate, unified_temp_limit,
     ytdlp_output_template,
 };
@@ -1127,7 +1127,7 @@ fn pipeline_reports_missing_tools() {
     assert!(rx.try_recv().is_err());
     drop(rx);
     let dest_dir = std::env::temp_dir();
-    let staging = staging_dir_for(&dest_dir, item_id);
+    let staging = dest_dir.clone();
     assert!(staging.exists(), "the runner stages before resolving tools");
     clean_staging_files(&dest_dir, item_id);
 }

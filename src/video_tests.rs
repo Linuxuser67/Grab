@@ -3990,7 +3990,7 @@ fn live_capture_adopts_part_and_remuxes() {
             .any(|e| e
                 .file_name()
                 .to_str()
-                .map(|n| n.starts_with(&prefix))
+                .map(|n| n.starts_with(&prefix) && !n.ends_with(".manifest.json"))
                 .unwrap_or(false)),
         "staging cleaned"
     );
@@ -4423,11 +4423,11 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
     assert!(!job.dest.exists(), "no file is delivered on a failed remux");
     // A failed ffmpeg can leave a partial `final.<n>.mp4`: worthless, and the non-recursive sweep must remove it.
     // Staging itself survives: it now holds the salvaged shell.
-    // Filter out the fake binaries: the staging dir also holds test fixtures.
+    // Filter out the fake binaries and the manifest: the staging dir also holds test fixtures.
     let mut names: Vec<_> = std::fs::read_dir(&staging)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with("fake-"))
+        .filter(|n| !n.starts_with("fake-") && !n.ends_with(".manifest.json"))
         .collect();
     names.sort();
     assert_eq!(

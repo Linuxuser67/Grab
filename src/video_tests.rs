@@ -4270,7 +4270,7 @@ fn live_capture_abort_adopts_partial() {
     let res = crate::runtime::tokio_rt().block_on(async {
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
         // New scheme: grab-<id>-live.mp4.ytdl in dest dir
-        let state = dir.join("live.mp4.part.ytdl".to_string());
+        let state = dir.join("live.mp4.part.ytdl");
         let seen = dir.join("abort-saw-state");
         tokio::spawn(async move {
             // Wait for the state file before stopping: a fixed sleep would race and pass vacuously.

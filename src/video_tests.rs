@@ -4459,82 +4459,9 @@ fn live_capture_barren_start_sweeps_state_file() {
 }
 
 /// Fake ffmpeg that remuxes normally but first plants a file at dest, simulating a mid-capture name claim.
-fn fake_ffmpeg_racing_dest(
-    dir: &std::path::Path,
-    dest: &std::path::Path,
-    out: &std::path::Path,
-) -> std::path::PathBuf {
-    let bin = dir.join("fake-ffmpeg-race");
-    std::fs::write(
-        &bin,
-        format!(
-            r#"#!/bin/sh
-input=""
-prev=""
-last=""
-for a in "$@"; do
-    if [ "$prev" = "-i" ]; then input="$a"; fi
-    prev="$a"
-    last="$a"
-done
-printf 'someone-else' > '{}'
-# Seed the finalized-name path too: a clean yt-dlp exit renames its
-# shell there, so the sweep has both media shapes to reclaim.
-cat "$input" > '{}'
-cat "$input" > "$last"
-exit 0
-"#,
-            dest.display(),
-            out.display()
-        ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    bin
-}
 
 /// Fake ffmpeg that remuxes, then replaces the dest directory with a file so the rename fails with ENOTDIR.
 /// Structural trigger, never a permission bit: CI runs as root, where chmod is a no-op.
-fn fake_ffmpeg_breaking_dest_dir(dest_dir: &std::path::Path) -> std::path::PathBuf {
-    let bin = dest_dir
-        .parent()
-        .expect("dest dir has a parent")
-        .join("fake-ffmpeg-breakdestdir");
-    std::fs::write(
-        &bin,
-        format!(
-            r#"#!/bin/sh
-input=""
-prev=""
-last=""
-for a in "$@"; do
-    if [ "$prev" = "-i" ]; then input="$a"; fi
-    prev="$a"
-    last="$a"
-done
-cat "$input" > "$last"
-# The remux is safely in staging by now; break only the destination side.
-# Fakes live outside this directory so nothing unlinks the running script.
-rm -rf '{}'
-: > '{}'
-exit 0
-"#,
-            dest_dir.display(),
-            dest_dir.display()
-        ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    bin
-}
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -4941,40 +4868,8 @@ fn a_failed_live_remux_leaves_no_partial_behind() {
 
 /// Fake recorder that writes a caller-chosen payload, so two attempts on the same row can be told apart.
 /// Write an executable fake at `path`; kept separate so tests can place one outside the dest dir.
-fn write_fake(path: &std::path::Path, body: &str) -> std::path::PathBuf {
-    std::fs::write(path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    path.to_path_buf()
-}
 
 /// A live recorder that writes `payload` into its `.part` shell and a state sidecar, then exits cleanly.
-fn fake_ytdlp_live_payload(
-    dir: &std::path::Path,
-    bin_name: &str,
-    payload: &str,
-) -> std::path::PathBuf {
-    write_fake(
-        &dir.join(bin_name),
-        &probe_guard(&format!(
-            r#"#!/bin/sh
-out=""
-prev=""
-for a in "$@"; do
-    if [ "$prev" = "-o" ]; then out="$a"; fi
-    prev="$a"
-done
-printf '{payload}' > "$out.part"
-printf '{{"downloader": {{}}}}' > "$out.ytdl"
-exit 0
-"#,
-            payload = payload
-        )),
-    )
-}
 
 #[test]
 fn a_remux_slot_is_claimed_exactly_once() {

@@ -4423,10 +4423,11 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
     assert!(!job.dest.exists(), "no file is delivered on a failed remux");
     // A failed ffmpeg can leave a partial `final.<n>.mp4`: worthless, and the non-recursive sweep must remove it.
     // Staging itself survives: it now holds the salvaged shell.
-    // The staging dir is per-item, so all files in it belong to this item.
+    // Filter out the fake binaries: the staging dir also holds test fixtures.
     let mut names: Vec<_> = std::fs::read_dir(&staging)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with("fake-"))
         .collect();
     names.sort();
     assert_eq!(

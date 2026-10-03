@@ -4458,11 +4458,6 @@ fn live_capture_barren_start_sweeps_state_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake ffmpeg that remuxes normally but first plants a file at dest, simulating a mid-capture name claim.
-
-/// Fake ffmpeg that remuxes, then replaces the dest directory with a file so the rename fails with ENOTDIR.
-/// Structural trigger, never a permission bit: CI runs as root, where chmod is a no-op.
-
 #[cfg(target_os = "linux")]
 #[test]
 fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
@@ -4867,10 +4862,6 @@ fn a_failed_live_remux_leaves_no_partial_behind() {
 }
 
 /// Fake recorder that writes a caller-chosen payload, so two attempts on the same row can be told apart.
-/// Write an executable fake at `path`; kept separate so tests can place one outside the dest dir.
-
-/// A live recorder that writes `payload` into its `.part` shell and a state sidecar, then exits cleanly.
-
 #[test]
 fn a_remux_slot_is_claimed_exactly_once() {
     // Scan-then-claim races: the lease makes the slot claim atomic.

@@ -463,7 +463,7 @@ pub fn show(
         .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 65535.0, 1.0, 10.0, 0.0))
         .build();
     listen_port.set_tooltip_text(Some(&gettext(
-        "Required for effective seeding behind NAT; UPnP forwards it automatically",
+        "Required for effective seeding behind NAT; enable UPnP below to forward it automatically",
     )));
     settings
         .bind(

@@ -163,17 +163,50 @@ pub fn clean_staging(dir: &Path) {
     clean_staging_in(&staging_root(), dir);
 }
 
-/// Remove all `grab-<id>-*` staging files for an item in the destination dir.
-/// Only touches files with the item's prefix; never the dir itself or other files.
+/// Whether a `grab-<id>-<suffix>` filename is a known Grab staging file.
+/// Only these are safe to delete; a user's own `grab-<id>-notes.txt` must survive.
+fn is_grab_staging_suffix(suffix: &str) -> bool {
+    // manifest.json: exact match
+    if suffix == "manifest.json" {
+        return true;
+    }
+    // yt-dlp sidecars: *.part, *.ytdl (appended to the filenames we pass it)
+    if suffix.ends_with(".part") || suffix.ends_with(".ytdl") {
+        return true;
+    }
+    // Live capture output: live.<ext> where ext is a media extension
+    if let Some(ext) = suffix.strip_prefix("live.") {
+        return matches!(
+            ext,
+            "mp4" | "webm" | "mkv" | "m4a" | "mp3" | "ogg" | "wav" | "flac" | "opus"
+        );
+    }
+    // Remux/format parts: <kind>.<ext> where kind is a known Grab kind
+    // (video, audio) and ext is media. Conservative: require the dot.
+    if let Some((kind, ext)) = suffix.split_once('.') {
+        let kind_ok = matches!(kind, "video" | "audio");
+        let ext_ok = matches!(
+            ext.split('.').next().unwrap_or(""),
+            "mp4" | "webm" | "mkv" | "m4a" | "mp3" | "ogg" | "wav" | "flac" | "opus"
+        );
+        if kind_ok && ext_ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// Remove Grab staging files for an item in the destination dir.
+/// Only deletes files matching known staging patterns; never the dir itself,
+/// other files, or a user's own `grab-<id>-*` files.
 pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
     let prefix = format!("grab-{item_id}-");
     if let Ok(entries) = std::fs::read_dir(dest_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
-            if entry
-                .file_name()
-                .to_str()
-                .map(|n| n.starts_with(&prefix))
-                .unwrap_or(false)
+            let name = entry.file_name();
+            let name_str = name.to_str().unwrap_or("");
+            if let Some(suffix) = name_str.strip_prefix(&prefix)
+                && is_grab_staging_suffix(suffix)
             {
                 let _ = std::fs::remove_file(entry.path());
             }
@@ -230,12 +263,14 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
         let name = entry.file_name();
         let name = name.to_str().unwrap_or("");
         // Parse `grab-<id>-*` to get the item ID. Recordings (`grab-<id>-final.*`)
-        // are the user's only copy — preserve them like the old per-dir sweep did.
+        // are the user's only copy — preserve them. Only delete known staging
+        // file patterns; a user's own `grab-<id>-notes.txt` must survive.
         if let Some(rest) = name.strip_prefix("grab-")
             && let Some((id_str, suffix)) = rest.split_once('-')
             && let Ok(id) = id_str.parse::<u64>()
             && !keep.contains(&id)
             && !suffix.starts_with("final.")
+            && is_grab_staging_suffix(suffix)
         {
             let _ = std::fs::remove_file(entry.path());
         }
@@ -381,11 +416,15 @@ pub fn sweep_partial_remuxes(staging: &Path) {
 pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
     let prefix = format!("grab-{item_id}-");
     for name in dir_file_names(staging) {
-        if !name.starts_with(&prefix) {
+        let Some(suffix) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        // Preserve completed recordings: they may be the user's only copy.
+        if suffix.starts_with("final.") {
             continue;
         }
-        // Preserve completed recordings: they may be the user's only copy.
-        if name.starts_with(&format!("{prefix}final.")) {
+        // Only delete known staging patterns; a user's own `grab-<id>-*` file survives.
+        if !is_grab_staging_suffix(suffix) {
             continue;
         }
         let _ = std::fs::remove_file(staging.join(&name));

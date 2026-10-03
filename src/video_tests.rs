@@ -28,8 +28,9 @@ use crate::video_probe::{
     retarget_story_items, sanitize_video_json, story_segment_url, story_tray_url,
 };
 use crate::video_progress::{
-    estimate_collapsed, grid_needs_rebuild, is_format_selection_line, is_ytdlp_merge_line,
-    leg_changed, parse_ytdlp_after_move, parse_ytdlp_template, piece_marks, trace_format_lines,
+    HlsProgress, estimate_collapsed, grid_needs_rebuild, is_format_selection_line,
+    is_ytdlp_merge_line, leg_changed, parse_ytdlp_after_move, parse_ytdlp_template,
+    trace_format_lines,
 };
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
@@ -2010,19 +2011,6 @@ fn estimate_collapsed_detects_spike_correction() {
 }
 
 #[test]
-fn piece_marks_cover_prefix_once() {
-    let mut marked = 0u64;
-    assert!(piece_marks(100, &mut marked, 50).is_empty());
-    assert_eq!(piece_marks(100, &mut marked, 250), vec![0, 1]);
-    assert!(piece_marks(100, &mut marked, 250).is_empty());
-    assert_eq!(
-        piece_marks(100, &mut marked, 1000),
-        vec![2, 3, 4, 5, 6, 7, 8, 9]
-    );
-    assert!(piece_marks(0, &mut marked, 1000).is_empty());
-}
-
-#[test]
 fn leg_changed_ignores_wobble_restarts_legs() {
     // First known total inits the map; unknown (0) never does.
     assert!(leg_changed(None, 0, 9_000_000, Some(0)));
@@ -2085,6 +2073,84 @@ fn leg_changed_ignores_wobble_restarts_legs() {
     // Unknown bytes count as reset; a stable total never restarts regardless.
     assert!(leg_changed(Some(19_000_000), 19_000_000, 2_000_000, None));
     assert!(!leg_changed(Some(19_000_000), 8_000_000, 19_000_000, None));
+}
+
+#[test]
+fn hls_progress_banks_each_leg_exactly_once() {
+    // Twitter HLS: 11MB video leg + 400KB audio leg. The bar must not freeze
+    // at 100% when leg 2 starts (M1): 11/11.4 = 96.5%, then climbs.
+    // Repeated boundary lines must NOT re-bank: completed stays 11M and
+    // totals stay 11.4M no matter how many leg-2 lines arrive.
+    let mut p = HlsProgress::default();
+    // Leg 1 climbs to 100%.
+    let d = p.update(Some(0), Some(11_000_000));
+    assert_eq!((d.downloaded, d.total), (0, Some(11_000_000)));
+    let d = p.update(Some(11_000_000), Some(11_000_000));
+    assert_eq!((d.downloaded, d.total), (11_000_000, Some(11_000_000)));
+    // Leg 2 boundary banks leg 1 once.
+    let d = p.update(Some(0), Some(400_000));
+    assert_eq!((d.downloaded, d.total), (11_000_000, Some(11_400_000)));
+    // Same boundary repeated: no re-bank, no total growth.
+    let d = p.update(Some(100_000), Some(400_000));
+    assert_eq!((d.downloaded, d.total), (11_100_000, Some(11_400_000)));
+    let d = p.update(Some(200_000), Some(400_000));
+    assert_eq!((d.downloaded, d.total), (11_200_000, Some(11_400_000)));
+    // Leg 2 completes: 100%.
+    let d = p.update(Some(400_000), Some(400_000));
+    assert_eq!((d.downloaded, d.total), (11_400_000, Some(11_400_000)));
+}
+
+#[test]
+fn hls_progress_wobble_never_banks() {
+    // Same-leg estimate wobble (up and down, continuous bytes) must not bank:
+    // completed stays 0 while the denominator tracks the refined total.
+    let mut p = HlsProgress::default();
+    let d = p.update(Some(1_000_000), Some(2_000_000));
+    assert_eq!((d.downloaded, d.total), (1_000_000, Some(2_000_000)));
+    let d = p.update(Some(2_000_000), Some(2_000_000));
+    assert_eq!((d.downloaded, d.total), (2_000_000, Some(2_000_000)));
+    // Refined up 50x with continuous bytes: same file, bigger denominator.
+    let d = p.update(Some(2_000_000), Some(100_000_000));
+    assert_eq!((d.downloaded, d.total), (2_000_000, Some(100_000_000)));
+    let d = p.update(Some(44_000_000), Some(100_000_000));
+    assert_eq!((d.downloaded, d.total), (44_000_000, Some(100_000_000)));
+    // Sharp collapse BELOW downloaded bytes: refuse (would flood to 100%).
+    let d = p.update(Some(46_000_000), Some(40_000_000));
+    assert_eq!((d.downloaded, d.total), (46_000_000, Some(100_000_000)));
+}
+
+#[test]
+fn hls_progress_collapse_adopts_containing_total() {
+    // Spike 1.01G -> 533M with 18.5M downloaded: adopt (contains us).
+    let mut p = HlsProgress::default();
+    p.update(Some(1_000_000), Some(640_000_000));
+    p.update(Some(18_000_000), Some(1_013_792_256));
+    let d = p.update(Some(18_500_000), Some(533_418_666));
+    assert_eq!((d.downloaded, d.total), (18_500_000, Some(533_418_666)));
+    let d = p.update(Some(400_000_000), Some(533_418_666));
+    assert_eq!((d.downloaded, d.total), (400_000_000, Some(533_418_666)));
+    let frac = d.downloaded as f64 / d.total.unwrap() as f64;
+    assert!((0.7..0.8).contains(&frac), "expected ~0.75, got {frac}");
+}
+
+#[test]
+fn hls_progress_banks_actual_bytes_not_estimate() {
+    // Estimate overshoots reality: bank what downloaded, capped at the leg total.
+    let mut p = HlsProgress::default();
+    p.update(Some(9_000_000), Some(11_000_000));
+    // Boundary with a smaller leg: bank min(9M, 11M) = 9M, not 11M.
+    let d = p.update(Some(0), Some(400_000));
+    assert_eq!((d.downloaded, d.total), (9_000_000, Some(9_400_000)));
+}
+
+#[test]
+fn hls_progress_unknown_total_stays_indeterminate() {
+    // M3: legs without totals never produce a denominator (as before).
+    let mut p = HlsProgress::default();
+    let d = p.update(Some(1_000_000), None);
+    assert_eq!((d.downloaded, d.total), (1_000_000, None));
+    let d = p.update(None, None);
+    assert_eq!((d.downloaded, d.total), (1_000_000, None));
 }
 
 #[test]
@@ -5364,30 +5430,19 @@ fn hls_map_survives_estimate_wobble() {
         None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
-    let mut inits = Vec::new();
-    let mut marked = std::collections::HashSet::new();
+    let mut last = (0u64, None);
     while let Ok(msg) = rx.try_recv() {
-        match msg {
-            EngineMsg::SegmentsInit { total } => {
-                inits.push(total);
-                marked.clear();
-            }
-            EngineMsg::PieceDone(idx) => {
-                marked.insert(idx);
-            }
-            _ => {}
+        if let EngineMsg::Progress {
+            downloaded, total, ..
+        } = msg
+        {
+            last = (downloaded, total);
         }
     }
-    // One init per total; the downward wobble must not rebuild the grid.
-    assert_eq!(inits, vec![2_000_000u64, 100_000_000u64], "{inits:?}");
-    // 46 MB of 100 MB: marked cells over live grid, never ~full.
-    let cells = 100_000_000u64.div_ceil(crate::file_names::piece_len(100_000_000)) as f64;
-    let frac = marked.len() as f64 / cells;
-    assert!(
-        (0.35..0.6).contains(&frac),
-        "map fraction {frac} ({} marks), expected ~0.46",
-        marked.len()
-    );
+    // Downward wobble must leave the bar at ~46%, not flood it: the last
+    // Progress carries 46M of 100M (the collapse below downloaded bytes is
+    // refused, so the denominator stays honest).
+    assert_eq!(last, (46_000_000u64, Some(100_000_000u64)), "{last:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -5453,30 +5508,18 @@ fn hls_map_rebuilds_on_upward_wobble() {
         None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
-    let mut inits = Vec::new();
-    let mut marked = std::collections::HashSet::new();
+    let mut last = (0u64, None);
     while let Ok(msg) = rx.try_recv() {
-        match msg {
-            EngineMsg::SegmentsInit { total } => {
-                inits.push(total);
-                marked.clear();
-            }
-            EngineMsg::PieceDone(idx) => {
-                marked.insert(idx);
-            }
-            _ => {}
+        if let EngineMsg::Progress {
+            downloaded, total, ..
+        } = msg
+        {
+            last = (downloaded, total);
         }
     }
-    // The 640 MB -> 1.1 GB refinement must rebuild the grid.
-    assert_eq!(inits, vec![640_000_000u64, 1_100_000_000u64], "{inits:?}");
-    // 639.7 MB of 1.1 GB: marked cells over the live grid, never ~full.
-    let cells = 1_100_000_000u64.div_ceil(crate::file_names::piece_len(1_100_000_000)) as f64;
-    let frac = marked.len() as f64 / cells;
-    assert!(
-        (0.5..0.65).contains(&frac),
-        "map fraction {frac} ({} marks), expected ~0.58",
-        marked.len()
-    );
+    // The 640 MB -> 1.1 GB refinement must move the denominator: the bar
+    // tracks ~58% (639.7/1100 MB), never stuck near-full on the stale grid.
+    assert_eq!(last, (639_700_000u64, Some(1_100_000_000u64)), "{last:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -5543,34 +5586,122 @@ fn hls_map_adopts_estimate_collapse() {
         None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
-    let mut inits = Vec::new();
-    let mut marked = std::collections::HashSet::new();
+    let mut last = (0u64, None);
     while let Ok(msg) = rx.try_recv() {
-        match msg {
-            EngineMsg::SegmentsInit { total } => {
-                inits.push(total);
-                marked.clear();
-            }
-            EngineMsg::PieceDone(idx) => {
-                marked.insert(idx);
-            }
-            _ => {}
+        if let EngineMsg::Progress {
+            downloaded, total, ..
+        } = msg
+        {
+            last = (downloaded, total);
         }
     }
-    // Initial, spike, then the collapse correction.
+    // After the 1.01 GB -> 533 MB revision the bar must track ~75%
+    // (400/533 MB), not stall at ~40% on the phantom peak.
+    assert_eq!(last, (400_000_000u64, Some(533_418_666u64)), "{last:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fake yt-dlp modeling a two-leg HLS download (Twitter shape): an 11 MB
+/// video leg with per-leg-reset bytes, then a 400 KB audio leg. The bar must
+/// move 96.5% -> 100% across the second leg instead of freezing at 100% when
+/// it starts (M1) — and repeated leg-2 lines must not re-bank completed bytes.
+fn fake_ytdlp_hls_two_legs(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-hls-two-legs");
+    std::fs::write(
+        &bin,
+        probe_guard(
+            r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+echo '[Grab];downloading;0;11000000;11000000;NA;NA'
+echo '[Grab];downloading;5000000;11000000;11000000;NA;NA'
+echo '[Grab];downloading;11000000;11000000;11000000;NA;NA'
+echo '[Grab];downloading;0;400000;400000;NA;NA'
+echo '[Grab];downloading;200000;400000;400000;NA;NA'
+echo '[Grab];downloading;400000;400000;400000;NA;NA'
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+printf 'hlsbytes' > "$out"
+printf '%s\n' "$out"
+exit 0
+"#,
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn hls_progress_moves_through_second_leg() {
+    // M1 regression: with sticky max accounting the first leg-2 Progress
+    // reads (11M, 11M) — frozen at 100% for the whole audio leg. Sum-of-legs
+    // must read (11M, 11.4M) = 96.5% and climb to (11.4M, 11.4M), with every
+    // total staying within the two known legs (repeated boundary lines must
+    // not re-bank completed bytes into ever-growing totals).
+    use crate::engine_msg::EngineMsg;
+    let dir = std::env::temp_dir().join(format!("grab-fakehls-twolegs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls_two_legs(&dir);
+    let staging = dir.join("staging");
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &AttemptGate::new(),
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+        None,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    let mut seen = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+        if let EngineMsg::Progress {
+            downloaded, total, ..
+        } = msg
+        {
+            seen.push((downloaded, total));
+        }
+    }
+    // The first leg-2 message carries the honest cumulative total: banked 11M
+    // plus the 400KB leg, not the frozen (11M, 11M).
+    let first_leg2 = seen
+        .iter()
+        .find(|(_, t)| *t == Some(11_400_000u64))
+        .expect("leg 2 must introduce the 11.4M cumulative total");
     assert_eq!(
-        inits,
-        vec![640_000_000u64, 1_013_792_256u64, 533_418_666u64],
-        "{inits:?}"
+        first_leg2.0, 11_000_000u64,
+        "leg 2 must start at banked 11M/11.4M (96.5%), not frozen 100%: {seen:?}"
     );
-    // 400 MB of 533 MB over the live grid: ~0.75, never ~0.40.
-    let cells = 533_418_666u64.div_ceil(crate::file_names::piece_len(533_418_666)) as f64;
-    let frac = marked.len() as f64 / cells;
-    assert!(
-        (0.7..0.8).contains(&frac),
-        "map fraction {frac} ({} marks), expected ~0.75",
-        marked.len()
+    // Completion lands exactly on the cumulative total.
+    assert_eq!(
+        seen.last(),
+        Some(&(11_400_000u64, Some(11_400_000u64))),
+        "{seen:?}"
     );
+    // Bounded state: every total is one of the two known legs. Per-line
+    // re-banking would explode totals past 11.4M within lines.
+    for (_, t) in &seen {
+        assert!(
+            *t == Some(11_000_000u64) || *t == Some(11_400_000u64),
+            "total escaped the known legs (re-banked?): {seen:?}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

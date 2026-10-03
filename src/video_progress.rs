@@ -111,19 +111,86 @@ pub(crate) fn estimate_collapsed(max_total: Option<u64>, total: u64) -> bool {
     }
 }
 
-/// Newly completed piece indices as byte progress grows against a
-/// known total. Shared by the HLS progress tasks so the byte→cell
-/// math stays unit-tested in one place.
-pub(crate) fn piece_marks(piece_len: u64, marked: &mut u64, downloaded: u64) -> Vec<u64> {
-    let mut out = Vec::new();
-    if piece_len == 0 {
-        return out;
+/// Canonical progress state for one HLS attempt across format legs.
+///
+/// yt-dlp reports each leg (video, audio, …) with leg-local byte counts, so a
+/// running sticky max freezes the bar when a small leg starts — and a bitmap
+/// grid rebuilt per estimate redefines every cell. Instead this banks each
+/// finished leg's actual bytes once and reports cumulative
+/// `(completed + leg)` numbers, from which the bar and the fraction-derived
+/// grid both render. One value, two views; they cannot disagree.
+///
+/// Leg boundaries reuse [`leg_changed`] against the CURRENT leg's baseline
+/// (not a global sticky max), so a boundary fires exactly once: after banking,
+/// the baseline becomes the new leg and identical following lines no longer
+/// match. Same-leg wobble reuses [`grid_needs_rebuild`] (growth) and
+/// [`estimate_collapsed`] + containment (sharp drops), mirroring the old grid
+/// policy byte-for-byte in fraction space.
+#[derive(Default)]
+pub(crate) struct HlsProgress {
+    /// Actual bytes banked from finished legs (capped per leg, see `update`).
+    completed: u64,
+    /// Max bytes seen in the current leg, capped at its total.
+    leg_have: u64,
+    /// Current leg's denominator (`None` = unknown: indeterminate, as before).
+    leg_total: Option<u64>,
+}
+
+/// Cumulative progress for one template line: the pump renders the bar from
+/// exactly these two numbers, and the HLS grid derives its cells from the
+/// same fraction. No `SegmentsInit`/`PieceDone` needed for HLS rows.
+/// (`fraction` itself is intentionally NOT precomputed: the pump owns the
+/// single downloaded/total→fraction formula, so there is only one place
+/// that can drift.)
+pub(crate) struct DisplayProgress {
+    pub downloaded: u64,
+    pub total: Option<u64>,
+}
+
+impl HlsProgress {
+    /// Fold one parsed template line into canonical cumulative progress.
+    /// Pure for tests.
+    pub(crate) fn update(
+        &mut self,
+        downloaded: Option<u64>,
+        total: Option<u64>,
+    ) -> DisplayProgress {
+        if let Some(t) = total.filter(|&t| t > 0) {
+            match self.leg_total {
+                // First known total starts the first leg.
+                None => {
+                    self.leg_total = Some(t);
+                }
+                Some(cur) => {
+                    // A new leg: bank the finished leg's ACTUAL bytes (capped
+                    // at its estimate — estimates overshoot), exactly once per
+                    // transition: after banking the baseline IS the new leg.
+                    if leg_changed(Some(cur), self.leg_have, t, downloaded) {
+                        self.completed += self.leg_have.min(cur);
+                        self.leg_have = 0;
+                        self.leg_total = Some(t);
+                    } else if grid_needs_rebuild(self.leg_total, t) {
+                        // Refined-up estimate: adopt the bigger denominator.
+                        self.leg_total = Some(t);
+                    } else if estimate_collapsed(self.leg_total, t)
+                        && downloaded.is_some_and(|d| t >= d)
+                    {
+                        // Sharp downward revision that still contains what we
+                        // have: adopt it rather than sizing for a phantom peak.
+                        self.leg_total = Some(t);
+                    }
+                }
+            }
+        }
+        if let Some(d) = downloaded {
+            let cap = self.leg_total.unwrap_or(u64::MAX);
+            self.leg_have = self.leg_have.max(d.min(cap));
+        }
+        DisplayProgress {
+            downloaded: self.completed + self.leg_have,
+            total: self.leg_total.map(|l| self.completed + l),
+        }
     }
-    while *marked < downloaded / piece_len {
-        out.push(*marked);
-        *marked += 1;
-    }
-    out
 }
 
 /// Trace yt-dlp's selected-format line as it streams past, to audit our pick

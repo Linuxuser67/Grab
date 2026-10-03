@@ -44,10 +44,10 @@ use crate::video_spawn::{
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
-    dest_part_path, dest_staging_root, dir_file_names, discover_unified_output, ensure_staging_dir,
-    ensure_staging_dir_in, is_grab_part, is_sparse_shell, is_ytdlp_fragment, legacy_staging_dir,
+    dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir,
+    ensure_staging_dir_in, is_grab_part, is_sparse_shell, is_ytdlp_fragment,
     manifest_path, part_path, read_manifest, release_remux_lease, reserve_remux_temp, resume_plan,
-    sidecar_path_for, staging_dir, staging_dir_for, staging_location, staging_occupied,
+    sidecar_path_for, staging_dir_for, staging_file, staging_location, staging_occupied,
     staging_root, stem_reserved_in, sweep_dest_staging, sweep_orphan_staging_in,
     sweep_partial_remuxes, sweep_staging_preserving_recordings, unified_candidate,
     unified_temp_limit, ytdlp_output_template,

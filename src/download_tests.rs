@@ -5885,10 +5885,8 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
         .insert(id, std::sync::Arc::clone(&gate));
 
     // Scratch the real finalizer must reclaim: staging sidecar + dest-dir part.
-    let staging = crate::video::staging_root().join(id.to_string());
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging).unwrap();
-    std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
+    // Visible staging: grab-<id>-* files in the dest dir (no legacy subfolder).
+    std::fs::write(dest_dir.join(format!("grab-{id}-manifest.json")), b"{}").unwrap();
     let part = dest_dir.join("v.video.mp4");
     std::fs::write(&part, b"recorded").unwrap();
 
@@ -5920,7 +5918,7 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
          which detaches the task instead of aborting it"
     );
     assert!(
-        !staging.exists(),
+        !dest_dir.join(format!("grab-{id}-manifest.json")).exists(),
         "shutdown never ran the finalizer's staging sweep: aborting finalizers \
          instead of awaiting them would leave this behind"
     );

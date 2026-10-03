@@ -930,10 +930,7 @@ fn enqueue_video_spawns_and_fails_without_tools() {
     assert!(!manager.video_abort.borrow().contains_key(&id));
     // The worker stages dest-side before failing on the missing tools.
     let dest_dir = std::path::Path::new(&dest);
-    crate::video::clean_staging_in(
-        &crate::video::dest_staging_root(dest_dir),
-        &crate::video::staging_dir_for(dest_dir, id),
-    );
+    crate::video::clean_staging_files(dest_dir, id);
 }
 
 #[test]
@@ -967,10 +964,7 @@ fn enqueue_video_restrict_filenames_folds_name() {
     drain_engine(&manager, id);
     // The worker stages dest-side before failing on the missing tools.
     let dest_dir = std::path::Path::new(&dest);
-    crate::video::clean_staging_in(
-        &crate::video::dest_staging_root(dest_dir),
-        &crate::video::staging_dir_for(dest_dir, id),
-    );
+    crate::video::clean_staging_files(dest_dir, id);
 }
 
 #[test]
@@ -1228,10 +1222,7 @@ fn video_source_survives_restore_and_retry() {
     assert!(
         matches!(stored, crate::media_types::VideoSource::Page { ref quality, .. } if quality == "720p")
     );
-    crate::video::clean_staging_in(
-        &crate::video::dest_staging_root(std::path::Path::new(&dest)),
-        &crate::video::staging_dir_for(std::path::Path::new(&dest), id),
-    );
+    crate::video::clean_staging_files(std::path::Path::new(dest), id);
     let _ = std::fs::remove_file(&qf);
 }
 
@@ -1393,10 +1384,7 @@ fn unremove_restores_video_source() {
     // the first id's dir, this drops the revived row's.
     let dest_dir = std::path::Path::new(&dest);
     for stale in [id, new_id] {
-        crate::video::clean_staging_in(
-            &crate::video::dest_staging_root(dest_dir),
-            &crate::video::staging_dir_for(dest_dir, stale),
-        );
+        crate::video::clean_staging_files(dest_dir, stale);
     }
 }
 
@@ -1427,10 +1415,7 @@ fn queue_file_never_carries_cookies() {
     drain_engine(&manager, item.id());
     // The worker stages dest-side before failing on the missing tools.
     let dest_dir = std::path::Path::new("/tmp/dl");
-    crate::video::clean_staging_in(
-        &crate::video::dest_staging_root(dest_dir),
-        &crate::video::staging_dir_for(dest_dir, item.id()),
-    );
+    crate::video::clean_staging_files(dest_dir, item.id());
     let text = std::fs::read_to_string(&qf).unwrap();
     assert!(
         !text.contains("cookies"),

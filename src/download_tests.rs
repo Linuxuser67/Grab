@@ -1052,7 +1052,11 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
     let leftover = dest.clone();
     std::fs::create_dir_all(&leftover).unwrap();
     std::fs::write(leftover.join("grab-9001-video.mp4.part"), b"scratch").unwrap();
-    std::fs::write(leftover.join("grab-9001-final.1.mp4"), b"someone's recording").unwrap();
+    std::fs::write(
+        leftover.join("grab-9001-final.1.mp4"),
+        b"someone's recording",
+    )
+    .unwrap();
 
     // Row A pins the allocator at 9001; row B has no persisted id, so restore allocates.
     let items = vec![

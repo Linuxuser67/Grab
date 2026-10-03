@@ -4682,41 +4682,41 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
 #[test]
 fn a_non_live_sweep_keeps_a_live_recordings_remux() {
     // A rerouted retry shares staging with the live path: the finishing leg must step around the unplaceable recording (#178).
-    let dir = std::env::temp_dir().join(format!("grab-sweepscope-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let staging = dir.join("staging");
+    let staging = std::env::temp_dir().join(format!("grab-sweepscope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).unwrap();
-    // Scratch the finishing leg owns, and a recording it does not.
-    std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
-    std::fs::write(staging.join("video.f137.mp4"), b"part").unwrap();
-    std::fs::write(staging.join("final.1.mp4"), b"a live recording").unwrap();
-    std::fs::write(staging.join("final.1.mp4.lease"), b"").unwrap();
+    // Scratch the finishing leg owns (item 42), and a recording it does not (item 99).
+    std::fs::write(staging.join("grab-42-manifest.json"), b"{}").unwrap();
+    std::fs::write(staging.join("grab-42-video.f137.mp4"), b"part").unwrap();
+    std::fs::write(staging.join("grab-99-final.1.mp4"), b"a live recording").unwrap();
+    std::fs::write(staging.join("grab-99-final.1.mp4.lease"), b"").unwrap();
+    std::fs::write(staging.join("unrelated.txt"), b"keep").unwrap();
 
-    sweep_staging_preserving_recordings(&staging);
+    sweep_staging_preserving_recordings(&staging, 42);
 
     assert_eq!(
-        std::fs::read(staging.join("final.1.mp4")).unwrap(),
+        std::fs::read(staging.join("grab-99-final.1.mp4")).unwrap(),
         b"a live recording",
         "a non-live leg destroyed a live attempt's completed remux"
     );
     assert!(
-        staging.join("final.1.mp4.lease").exists(),
+        staging.join("grab-99-final.1.mp4.lease").exists(),
         "the lease marks a claimed remux slot and must survive with it"
     );
     assert!(
-        !staging.join("manifest.json").exists() && !staging.join("video.f137.mp4").exists(),
+        !staging.join("grab-42-manifest.json").exists()
+            && !staging.join("grab-42-video.f137.mp4").exists(),
         "the finishing leg's own scratch was not reclaimed"
     );
-
-    // With the recordings gone the directory itself is reclaimed.
-    std::fs::remove_file(staging.join("final.1.mp4")).unwrap();
-    std::fs::remove_file(staging.join("final.1.mp4.lease")).unwrap();
-    sweep_staging_preserving_recordings(&staging);
     assert!(
-        !staging.exists(),
-        "an emptied staging dir should be reclaimed, not left as litter"
+        staging.join("unrelated.txt").exists(),
+        "unrelated files are never touched"
     );
-    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        staging.exists(),
+        "the dest dir is never removed, even when empty of staging files"
+    );
+    let _ = std::fs::remove_dir_all(&staging);
 }
 
 #[test]

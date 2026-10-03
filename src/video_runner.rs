@@ -23,10 +23,11 @@ use crate::video_spawn::{
     fetch_video_page, join_drain, reap_child, spawn_piped_ytdlp, ytdlp_command,
 };
 use crate::video_staging::{
-    ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, collect_sidecar, dest_part_path,
-    discover_unified_output, drop_empty_staging_root, ensure_staging_dir_in, file_len, part_path,
-    read_manifest, release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
-    staging_location_for_dest, sweep_partial_remuxes, sweep_staging_preserving_recordings,
+    ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging_files, collect_sidecar,
+    dest_part_path, discover_unified_output, drop_empty_staging_root, ensure_staging_dir_in,
+    file_len, part_path, read_manifest, release_remux_lease, reserve_remux_temp, resume_plan,
+    sidecar_path_for, staging_location_for_dest, sweep_partial_remuxes,
+    sweep_staging_preserving_recordings,
 };
 use crate::video_tools::{
     VideoError, ensure_tool_versions, resolve_libraries, ytdlp_identity_args,
@@ -265,11 +266,8 @@ pub async fn run_video_download(
                 clean_dest_parts(&job.dest);
                 return Err(VideoError::exists());
             }
-            // Wipe the staging dir, not just known names: a previous attempt's detached writers may still hold old inodes, so unlink first. Only mismatches/oversize leftovers land here; same-selection resume never does.
-            let _ = tokio::fs::remove_dir_all(&staging).await;
-            tokio::fs::create_dir_all(&staging)
-                .await
-                .map_err(VideoError::staging)?;
+            // Clear this item's staging files (grab-<id>-*), not the dest dir itself: a previous attempt's detached writers may still hold old inodes, so unlink first. Only mismatches/oversize leftovers land here; same-selection resume never does.
+            crate::video::clean_staging_files(&staging, job.item_id);
             // Dest-dir parts are Grab-namespaced, so a mismatch restarts clean instead of resuming into a foreign lookalike. The finished file itself is never touched.
             clean_dest_parts(&job.dest);
             // Record this attempt's selection up front: a pause from here on leaves a matchable sidecar, so the next attempt resumes instead of wiping.
@@ -423,7 +421,8 @@ pub(crate) async fn run_unified_ytdlp(
     }
     // Atomic claim into place (EXDEV-safe, no clobber). The linearization point: either this wins and the row is still here, or the removal already won.
     if !gate.try_commit() {
-        let _ = tokio::fs::remove_dir_all(staging).await;
+        // Lost the race: clear this item's staging files only, never the dest dir.
+        clean_staging_files(staging, job.item_id);
         return Ok(None);
     }
     match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
@@ -450,12 +449,8 @@ pub(crate) async fn run_unified_ytdlp(
         m.final_bytes = final_bytes;
         let _ = write_manifest(staging, job.item_id, &m).await;
     }
-    sweep_staging_preserving_recordings(staging);
-    // Drop the root when the last item dir is gone: no stray `.grab-video`
-    // beside the finished files. No-op while a sibling item still stages.
-    if let Some(root) = staging.parent() {
-        drop_empty_staging_root(root);
-    }
+    sweep_staging_preserving_recordings(staging, job.item_id);
+    // Staging is the dest dir itself: never remove it or its parent.
     Ok(Some(final_bytes.unwrap_or(0)))
 }
 
@@ -1597,10 +1592,8 @@ pub(crate) async fn run_hls_ytdlp(
                 reap_child(&mut child, &mut group).await;
                 progress.abort();
                 logs.abort();
-                sweep_staging_preserving_recordings(staging);
-                if let Some(root) = staging.parent() {
-                    drop_empty_staging_root(root);
-                }
+                sweep_staging_preserving_recordings(staging, job.item_id);
+                // Staging is the dest dir itself: never remove it or its parent.
                 return Ok(None);
             }
             waited = await_child(&mut child, merging_snapshot, remaining, MERGE_WALL_CLOCK) => match waited {
@@ -1677,7 +1670,8 @@ pub(crate) async fn run_hls_ytdlp(
     // ours to sweep: no rename means no delivery happened.
     if !gate.try_commit() {
         clean_dest_parts(&job.dest);
-        let _ = tokio::fs::remove_dir_all(staging).await;
+        // Lost the race: clear this item's staging files only, never the dest dir.
+        clean_staging_files(staging, job.item_id);
         return Ok(None);
     }
     match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
@@ -1706,10 +1700,8 @@ pub(crate) async fn run_hls_ytdlp(
         let _ =
             tokio::fs::remove_file(dest_part_path(&job.dest, "hls", &format!("{lang}.srt"))).await;
     }
-    sweep_staging_preserving_recordings(staging);
-    if let Some(root) = staging.parent() {
-        drop_empty_staging_root(root);
-    }
+    sweep_staging_preserving_recordings(staging, job.item_id);
+    // Staging is the dest dir itself: never remove it or its parent.
     Ok(file_len(&job.dest))
 }
 

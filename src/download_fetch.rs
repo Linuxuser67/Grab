@@ -14,6 +14,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Jittered exponential backoff for retryable failures: `capped_ms = min(60_000, 500 * 2^(failures-1))`,
+/// full jitter via system-time nanos (no `rand` dependency). `failures` is 1-based.
+/// Worst case per episode ~1.5s (500ms + 1s across the two retries `tries` allows).
+pub(crate) fn backoff_delay(failures: u32) -> Duration {
+    let capped_ms = std::cmp::min(60_000u64, 500 * 2u64.pow(failures.saturating_sub(1)));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let sleep_ms = nanos % (capped_ms + 1);
+    Duration::from_millis(sleep_ms)
+}
+
 /// Forward a parseable Last-Modified header to the pump (at most one per HTTP response).
 fn send_last_modified(
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
@@ -100,6 +113,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
 async fn single_loop(ctx: &FetchCtx, tries: &mut i32, expected: Option<u64>, claim: bool) {
     // Only the first attempt may claim a missing file; later bytes are ours.
     let mut claim = claim;
+    let mut failures: u32 = 0;
     loop {
         match attempt_once(ctx, expected, claim).await {
             Ok(()) => {
@@ -122,6 +136,9 @@ async fn single_loop(ctx: &FetchCtx, tries: &mut i32, expected: Option<u64>, cla
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return;
                 }
+                // Jittered backoff on retryable failures (DEST_EXISTS is terminal, handled above).
+                failures += 1;
+                tokio::time::sleep(backoff_delay(failures)).await;
             }
         }
     }
@@ -137,6 +154,7 @@ async fn multi_loop(
     tries: &mut i32,
 ) -> bool {
     let mut st = saved.unwrap_or_else(|| SegmentState::new(total));
+    let mut failures: u32 = 0;
     loop {
         match attempt_multi(ctx, total, &mut st, max_workers).await {
             Ok(()) => {
@@ -166,6 +184,10 @@ async fn multi_loop(
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return false;
                 }
+                // Jittered backoff on retryable failures (Throttled has its own
+                // UI-ack handshake, Changed/DEST_EXISTS are terminal).
+                failures += 1;
+                tokio::time::sleep(backoff_delay(failures)).await;
             }
         }
     }

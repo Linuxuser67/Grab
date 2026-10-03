@@ -1035,68 +1035,6 @@ fn a_restored_row_keeps_its_id_so_its_staging_stays_reachable() {
 }
 
 #[test]
-fn a_pre_upgrade_row_never_lands_on_a_leftover_staging_dir() {
-    // Pre-id queues restore with fresh ids; allocator must skip occupied staging
-    // dirs (#178). Leftovers stay on disk: unreachable beats deleted.
-    let (_q, _l) = test_locks();
-    let qf = test_queue_file("upgrade-guard");
-    let dest = std::env::temp_dir().join("grab-upgrade-guard");
-    let _ = std::fs::remove_dir_all(&dest);
-    std::fs::create_dir_all(&dest).unwrap();
-    let dest = dest.to_string_lossy().into_owned();
-
-    // A leftover from "a previous session", holding something precious.
-    let leftover = crate::video::staging_root().join("9000");
-    std::fs::create_dir_all(&leftover).unwrap();
-    std::fs::write(leftover.join("final.1.mp4"), b"someone's recording").unwrap();
-
-    // A pre-v3 queue: no persisted id, so restore allocates.
-    std::fs::write(
-        &qf,
-        serde_json::to_string_pretty(&StoredQueue {
-            version: 2,
-            items: vec![StoredItem {
-                id: None,
-                url: "https://example.com/legacy.bin".to_string(),
-                dest_dir: dest.clone(),
-                filename: "legacy.bin".to_string(),
-                status: DownloadStatus::Paused,
-                progress: 0.0,
-                segments: None,
-                selected_files: None,
-                output_dir: None,
-                video_source: None,
-                started: None,
-                scheduled_at: None,
-            }],
-        })
-        .unwrap(),
-    )
-    .unwrap();
-
-    let settings = test_settings();
-    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    manager.restore_queue();
-    let item = (0..manager.store().n_items())
-        .filter_map(|i| manager.store().item(i).and_downcast::<DownloadItem>())
-        .find(|it| it.url() == "https://example.com/legacy.bin")
-        .expect("legacy row restored");
-    assert!(
-        item.id() > 9_000,
-        "the restored row took id {} which a leftover staging dir still owns",
-        item.id()
-    );
-    assert_eq!(
-        std::fs::read(leftover.join("final.1.mp4")).unwrap(),
-        b"someone's recording",
-        "the leftover was destroyed instead of merely left unreachable"
-    );
-    let _ = std::fs::remove_dir_all(&leftover);
-    let _ = std::fs::remove_dir_all(&dest);
-    let _ = std::fs::remove_file(&qf);
-}
-
-#[test]
 fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
     // Dest-side mirror of the upgrade guard: a leftover `<dest>/.grab-video/<id>/`
     // is invisible to the tmpfs scan, so the allocator must skip it per-row or a
@@ -1110,10 +1048,11 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
     let dest_s = dest.to_string_lossy().into_owned();
 
     // A crashed attempt's leftover: scratch plus a completed recording (the user's only copy).
+    // New scheme: `grab-<id>-*` files directly in dest dir.
     let leftover = dest.clone();
     std::fs::create_dir_all(&leftover).unwrap();
-    std::fs::write(leftover.join("grab-media.mp4.part"), b"scratch").unwrap();
-    std::fs::write(leftover.join("final.1.mp4"), b"someone's recording").unwrap();
+    std::fs::write(leftover.join("grab-9001-video.mp4.part"), b"scratch").unwrap();
+    std::fs::write(leftover.join("grab-9001-final.1.mp4"), b"someone's recording").unwrap();
 
     // Row A pins the allocator at 9001; row B has no persisted id, so restore allocates.
     let items = vec![

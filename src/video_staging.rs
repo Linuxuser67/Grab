@@ -345,7 +345,7 @@ pub(crate) fn ytdlp_output_template(path: &Path) -> String {
 }
 
 /// Grab-namespaced part infixes (the only names `clean_dest_parts` touches).
-const PART_KINDS: &[&str] = &["video.", "audio.", "hls.", "live."];
+const PART_KINDS: &[&str] = &["video.", "audio.", "hls.", "live.", "live-"];
 
 /// Reserve a `final.<n>.<ext>` remux slot via an atomic `.lease` sidecar (claim is check-then-use across overlapping attempts; fails closed).
 pub(crate) fn reserve_remux_temp(staging: &Path, ext: &str) -> Result<PathBuf, VideoError> {

@@ -375,6 +375,24 @@ pub fn show(
         .build();
     power_group.add(&inhibit);
 
+    let auto_add = adw::SwitchRow::builder()
+        .title(gettext("Add downloads automatically"))
+        .subtitle(gettext(
+            "Skip confirmation; single videos start after lookup",
+        ))
+        .build();
+    auto_add.set_tooltip_text(Some(&gettext(
+        "Links opened from other apps also start without asking",
+    )));
+    settings
+        .bind(
+            crate::settings::key::AUTO_ADD_DOWNLOADS,
+            &auto_add,
+            "active",
+        )
+        .build();
+    dest_group.add(&auto_add);
+
     page.add(&dest_group);
     let sched_group = adw::PreferencesGroup::builder()
         .title(gettext("Scheduling"))

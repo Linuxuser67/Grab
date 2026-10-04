@@ -7,6 +7,7 @@ pub mod key {
     pub const DOWNLOAD_DIR: &str = "download-dir";
     pub const RESTRICT_FILENAMES: &str = "restrict-filenames";
     pub const ENABLE_SCHEDULED_DOWNLOADS: &str = "enable-scheduled-downloads";
+    pub const AUTO_ADD_DOWNLOADS: &str = "auto-add-downloads";
     pub const MAX_CONCURRENT: &str = "max-concurrent";
     pub const CONNECTIONS: &str = "connections";
     pub const SPEED_LIMIT: &str = "speed-limit";
@@ -59,6 +60,11 @@ impl AppSettings {
     /// Master toggle for scheduled downloads; off stops the scheduler timer entirely.
     pub fn scheduled_downloads_enabled(&self) -> bool {
         self.0.boolean(key::ENABLE_SCHEDULED_DOWNLOADS)
+    }
+    /// Skip confirmation: single videos auto-start after lookup, and
+    /// links opened from other apps skip the "Add this download?" dialog.
+    pub fn auto_add_downloads(&self) -> bool {
+        self.0.boolean(key::AUTO_ADD_DOWNLOADS)
     }
     pub fn max_concurrent(&self) -> i32 {
         self.0.int(key::MAX_CONCURRENT)

@@ -1778,12 +1778,29 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 };
                 if fresh {
                     // A fresh playlist resolve hides the format picker (pins
-                    // don't apply across items); a single shows it.
-                    match probe_b.borrow().info.as_ref() {
+                    // don't apply across items); a single shows it — unless
+                    // auto-add is on, which submits single videos immediately
+                    // with the pre-selected quality.
+                    match probe_b.borrow().info.clone() {
                         Some(crate::video::ProbeResult::Playlist(pl)) => {
-                            show_video_playlist(&step_b, pl)
+                            show_video_playlist(&step_b, &pl)
                         }
-                        _ => show_video_ready(&step_b),
+                        Some(crate::video::ProbeResult::Single(v)) => {
+                            if settings_b.auto_add_downloads() {
+                                submit_probed_single(
+                                    &manager_b,
+                                    &dest_b,
+                                    &close_b,
+                                    &step_b,
+                                    &lookup_add_b,
+                                    &v,
+                                    scheduled_at_b.get(),
+                                );
+                            } else {
+                                show_video_ready(&step_b);
+                            }
+                        }
+                        None => show_video_ready(&step_b),
                     }
                     set_lookup_add(&lookup_add_b, true);
                     return;
@@ -1949,9 +1966,23 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 }
                                 probe_b.borrow_mut().last_ok = url;
                                 rebuild_format_options(&step_b, &v, &settings_b.video_quality());
+                                // Store a copy for retry; auto-add submits
+                                // immediately with the pre-selected quality.
                                 probe_b.borrow_mut().info =
-                                    Some(crate::video::ProbeResult::Single(v));
-                                show_video_ready(&step_b);
+                                    Some(crate::video::ProbeResult::Single(v.clone()));
+                                if settings_b.auto_add_downloads() {
+                                    submit_probed_single(
+                                        &manager_b,
+                                        &dest_b,
+                                        &close_b,
+                                        &step_b,
+                                        &lookup_add_b,
+                                        &v,
+                                        scheduled_at_b.get(),
+                                    );
+                                } else {
+                                    show_video_ready(&step_b);
+                                }
                                 set_lookup_add(&lookup_add_b, true);
                             }
                             crate::video::ProbeResult::Playlist(pl) => {

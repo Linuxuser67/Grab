@@ -201,6 +201,13 @@ fn grab_handoff_needs_confirm(uri: &url::Url) -> bool {
     !handoff_goes_to_card(uri)
 }
 
+/// Whether a `grab:` handoff shows the "Add this download?" dialog: only
+/// for handoffs that would enqueue on their own, and only when auto-add
+/// is off (the toggle opts out of the explicit-OK protection).
+fn handoff_should_confirm(via_grab: bool, uri: &url::Url, auto_add: bool) -> bool {
+    via_grab && grab_handoff_needs_confirm(uri) && !auto_add
+}
+
 /// `grab:` handoffs bypass the intake's URL normalization, so re-apply its
 /// userinfo rejection here: credentials must never be sent to a server as
 /// Basic auth on a torrent fetch.
@@ -328,7 +335,8 @@ pub fn setup(app: &adw::Application) {
                 {
                     // Extension handoffs that would enqueue on their own need
                     // an explicit OK first: any web page can fire grab: links.
-                    if via_grab && grab_handoff_needs_confirm(&uri) {
+                    // The auto-add toggle opts out of this protection.
+                    if handoff_should_confirm(via_grab, &uri, s.settings.auto_add_downloads()) {
                         let window = s.window.clone();
                         let (manager, toasts, add_card, settings) = (
                             s.manager.clone(),
@@ -726,7 +734,8 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
 mod tests {
     use super::{
         TorrentFetchError, check_remote_torrent_uri, fetch_remote_torrent_bytes,
-        grab_handoff_needs_confirm, is_remote_torrent_url, normalize_grab_uri,
+        grab_handoff_needs_confirm, handoff_should_confirm, is_remote_torrent_url,
+        normalize_grab_uri,
     };
     use gettextrs::gettext;
 
@@ -1095,5 +1104,20 @@ mod tests {
         assert!(version_key("4.4.4") > version_key("4.4.4-beta.99"));
         assert!(version_key("4.4.4-beta.1") > version_key("4.4.3"));
         assert!(version_key("4.4.4-beta.1") < version_key("4.4.4-beta.1.1"));
+    }
+
+    #[test]
+    fn handoff_should_confirm_respects_auto_add() {
+        // Direct file via grab: needs confirm by default...
+        let direct = "https://example.com/file.zip".parse::<url::Url>().unwrap();
+        assert!(handoff_should_confirm(true, &direct, false));
+        // ...but auto-add skips the dialog.
+        // Mutation: drop the `!auto_add` → this assertion fails.
+        assert!(!handoff_should_confirm(true, &direct, true));
+        // Non-grab handoffs never confirm (not extension-driven).
+        assert!(!handoff_should_confirm(false, &direct, false));
+        // Video pages go to the card (its Add button is the confirmation).
+        let video = "https://example.com/watch?v=1".parse::<url::Url>().unwrap();
+        assert!(!handoff_should_confirm(true, &video, false));
     }
 }

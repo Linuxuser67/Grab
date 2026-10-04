@@ -4790,8 +4790,14 @@ fn sweep_never_touches_bystander_with_id_like_name() {
     sweep_staging_preserving_recordings(&staging, 4);
 
     // Bystanders survive.
-    assert_eq!(std::fs::read(staging.join("linux-5.4.0.tar.gz")).unwrap(), b"kernel");
-    assert_eq!(std::fs::read(staging.join("v1.2.3.zip")).unwrap(), b"release");
+    assert_eq!(
+        std::fs::read(staging.join("linux-5.4.0.tar.gz")).unwrap(),
+        b"kernel"
+    );
+    assert_eq!(
+        std::fs::read(staging.join("v1.2.3.zip")).unwrap(),
+        b"release"
+    );
     assert_eq!(std::fs::read(staging.join("x.4.y")).unwrap(), b"bystander");
     // Our staging is reclaimed.
     assert!(!staging.join("My Video.mp4.part").exists());

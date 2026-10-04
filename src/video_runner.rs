@@ -1092,7 +1092,11 @@ pub(crate) async fn run_live_ytdlp(
                         return Err(VideoError::staging("too many conflicting files"));
                     }
                 }
-                Err(e) => return Err(VideoError::staging(format!("cannot claim staging name: {e}"))),
+                Err(e) => {
+                    return Err(VideoError::staging(format!(
+                        "cannot claim staging name: {e}"
+                    )));
+                }
             }
         }
     };

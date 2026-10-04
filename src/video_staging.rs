@@ -464,13 +464,7 @@ pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
     // A bystander like `linux-5.4.0.tar.gz` must survive row id 4.
     let manifest_names: Vec<String> = read_manifest(staging, item_id)
         .and_then(|m| m.staging_name)
-        .map(|base| {
-            vec![
-                base.clone(),
-                format!("{base}.part"),
-                format!("{base}.ytdl"),
-            ]
-        })
+        .map(|base| vec![base.clone(), format!("{base}.part"), format!("{base}.ytdl")])
         .unwrap_or_default();
     // Legacy live pattern: .{id}.live. (e.g., "v.1.live.mp4.part"). Has the
     // `.live.` marker, so it cannot hit user files.

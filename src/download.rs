@@ -2679,6 +2679,9 @@ impl DownloadManager {
             for dest_dir in dest_dirs {
                 crate::video::sweep_dest_staging(std::path::Path::new(&dest_dir), &live);
             }
+            // Stale cookie dumps from crashes: plaintext session cookies must
+            // not linger on disk.
+            crate::cookies::sweep_cookie_staging();
             // No session yet: the sweep below would no-op, so skip the store walk.
             if crate::torrent::session_handle().is_some() {
                 let keep: std::collections::HashSet<String> = self

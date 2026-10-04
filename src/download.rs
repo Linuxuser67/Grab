@@ -2550,6 +2550,27 @@ impl DownloadManager {
         }
     }
 
+    /// Final persist for shutdown: send the state, drop the sender, await the
+    /// task. `watch::changed()` delivers the final value before the
+    /// closed-channel Err, so the last write lands before we return.
+    /// Tests write synchronously (no channel/task in test builds).
+    fn persist_for_shutdown(&self) {
+        #[cfg(test)]
+        if let Some(text) = self.serialize_queue() {
+            Self::write_queue_file(&text);
+        }
+        #[cfg(not(test))]
+        {
+            if let (Some(text), Some(tx)) = (self.serialize_queue(), &*self.persist_tx.borrow()) {
+                tx.send_replace(Some(text));
+            }
+            drop(self.persist_tx.borrow_mut().take());
+            if let Some(task) = self.persist_task.borrow_mut().take() {
+                let _ = tokio_rt().block_on(task);
+            }
+        }
+    }
+
     /// Serialize the queue to JSON. Returns None if batching or on serialize error.
     fn serialize_queue(&self) -> Option<String> {
         if self.batch.get() > 0 {
@@ -2608,27 +2629,34 @@ impl DownloadManager {
         Some(text)
     }
 
-    /// Write the serialized queue atomically: GLib creates a unique temp file,
-    /// fsyncs it before the rename (when the destination exists), then renames.
-    /// The persist task is the sole writer, so writes are ordered by construction.
-    /// Runs via `spawn_blocking`, never on the async runtime or the UI thread.
+    /// Write the serialized queue atomically: unique temp file + sync_all +
+    /// rename + dir sync. The persist task is the sole writer, so writes are
+    /// ordered by construction. Runs via `spawn_blocking`, never on the async
+    /// runtime or the UI thread.
     fn write_queue_file(text: &str) {
-        let f = gio::File::for_path(Self::queue_file());
-        if let Err(e) = f.replace_contents(
-            text.as_bytes(),
-            None,
-            false,
-            gio::FileCreateFlags::NONE,
-            gio::Cancellable::NONE,
-        ) {
-            tracing::error!("could not persist download queue: {e}");
-            return;
-        }
-        // GLib does not fsync the directory; keep it so the rename is durable.
-        if let Some(parent) = Self::queue_file().parent()
-            && let Ok(dir) = std::fs::File::open(parent)
-        {
-            let _ = dir.sync_all();
+        // Unique temp name: the persist task is the sole writer, but a stale
+        // temp file from a crashed run must not collide.
+        let tmp = Self::queue_file().with_extension(format!("json.tmp.{}", std::process::id()));
+        let write_tmp = || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(text.as_bytes())?;
+            f.sync_all()?;
+            Ok(())
+        };
+        match write_tmp() {
+            Ok(()) => {
+                if let Err(e) = std::fs::rename(&tmp, Self::queue_file()) {
+                    tracing::error!("could not replace download queue: {e}");
+                    return;
+                }
+                if let Some(parent) = Self::queue_file().parent()
+                    && let Ok(dir) = std::fs::File::open(parent)
+                {
+                    let _ = dir.sync_all();
+                }
+            }
+            Err(e) => tracing::error!("could not persist download queue: {e}"),
         }
     }
 
@@ -2915,16 +2943,7 @@ impl DownloadManager {
             .is_ok();
         if !joined {
             tracing::warn!("shutdown: join timed out; persisting without truncating partial files");
-            // Send the final state through the watch channel, drop the sender,
-            // then await the persist task: `changed()` delivers the final value
-            // before the closed-channel Err, so the last write lands.
-            if let (Some(text), Some(tx)) = (self.serialize_queue(), &*self.persist_tx.borrow()) {
-                tx.send_replace(Some(text));
-            }
-            drop(self.persist_tx.borrow_mut().take());
-            if let Some(task) = self.persist_task.borrow_mut().take() {
-                let _ = tokio_rt().block_on(task);
-            }
+            self.persist_for_shutdown();
             return;
         }
         let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
@@ -2937,15 +2956,7 @@ impl DownloadManager {
             }
         }
         // Persist BEFORE returning: pump tails exit silently once draining is set, so this is the only persist that matters.
-        // Send the final state, drop the sender, await the persist task.
-        // `changed()` delivers the final value before the closed-channel Err.
-        if let (Some(text), Some(tx)) = (self.serialize_queue(), &*self.persist_tx.borrow()) {
-            tx.send_replace(Some(text));
-        }
-        drop(self.persist_tx.borrow_mut().take());
-        if let Some(task) = self.persist_task.borrow_mut().take() {
-            let _ = tokio_rt().block_on(task);
-        }
+        self.persist_for_shutdown();
     }
 }
 

@@ -4341,8 +4341,11 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
         // A dying recorder is SIGKILLed, not politely shut down: give teardown
         // a beat, then recreate scratch the way a late write would.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        let staging_ok =
-            std::fs::write(dest_task.join(format!("grab-{id_task}-video.mp4")), b"late").is_ok();
+        let staging_ok = std::fs::write(
+            dest_task.join(format!("grab-{id_task}-video.f137.mp4.part")),
+            b"late",
+        )
+        .is_ok();
         let dest_ok = std::fs::write(dest_task.join("v.live.mp4"), b"late delivery").is_ok();
         *wrote_task.lock().unwrap() = (staging_ok, dest_ok);
         *done_task.lock().unwrap() = true;
@@ -4386,11 +4389,15 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     };
     assert!(
         !dest_dir.join(format!(".grab-{id}-manifest.json")).exists()
-            && !dest_dir.join(format!("grab-{id}-video.mp4")).exists(),
+            && !dest_dir
+                .join(format!("grab-{id}-video.f137.mp4.part"))
+                .exists(),
         "staging survived the row: nothing reclaims it once the row is gone"
     );
     assert!(
-        !dest_dir.join(format!("grab-{id}-video.mp4")).exists(),
+        !dest_dir
+            .join(format!("grab-{id}-video.f137.mp4.part"))
+            .exists(),
         "the manager swept before the worker stopped, so scratch recreated \
          during teardown outlived the row"
     );

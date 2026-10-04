@@ -141,28 +141,17 @@ fn cookie_staging_dir() -> Option<PathBuf> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-        // Must be owned by us and not group/world-accessible.
-        let Ok(md) = std::fs::symlink_metadata(&dir) else {
-            return None;
-        };
-        if md.file_type().is_symlink() {
-            tracing::warn!("cookie staging dir is a symlink; refusing");
-            return None;
-        }
-        // SAFETY: getuid() is async-signal-safe and has no preconditions;
-        // it cannot fail and does not touch memory. The unsafe marker is
-        // a libc-crate API artifact (newer versions mark all FFI unsafe).
-        let uid = unsafe { libc::getuid() };
-        if md.uid() != uid {
-            tracing::warn!("cookie staging dir owned by another user; refusing");
+        if !crate::download_net::validate_secure_dir(&dir) {
             return None;
         }
         // Tighten to 0700 if it's looser (XDG_RUNTIME_DIR is 0700, but be explicit).
-        let mut perms = md.permissions();
-        if perms.mode() & 0o077 != 0 {
-            perms.set_mode(0o700);
-            let _ = std::fs::set_permissions(&dir, perms);
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Ok(md) = std::fs::metadata(&dir) {
+            let mut perms = md.permissions();
+            if perms.mode() & 0o077 != 0 {
+                perms.set_mode(0o700);
+                let _ = std::fs::set_permissions(&dir, perms);
+            }
         }
     }
     Some(dir)

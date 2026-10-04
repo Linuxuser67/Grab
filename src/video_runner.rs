@@ -284,6 +284,7 @@ pub async fn run_video_download(
                     audio_ext: audio_sel.ext.clone(),
                     final_bytes: None,
                     staging_name: None,
+                    ytdlp_output_name: None,
                 },
             )
             .await?;
@@ -348,7 +349,13 @@ pub(crate) async fn run_unified_ytdlp(
     // Split rows merge; adopted singles download one file, nothing to merge.
     let merging = video_ext.is_some();
     let merge_ext = video_ext.map(merge_output_ext).unwrap_or_default();
-    let out_template = unified_output_template(staging);
+    // If a previous attempt recorded the yt-dlp output name, reuse it as a literal:
+    // titles can change between attempts (live streams, edited titles), which would
+    // rename the `.part` file and break resume.
+    let out_template = read_manifest(staging, job.item_id)
+        .and_then(|m| m.ytdlp_output_name)
+        .map(|name| staging.join(name))
+        .unwrap_or_else(|| unified_output_template(staging));
     // Resolve the subtitle language against what the video actually offers
     // (preferred, else English, else none) before the media argv is built.
     // An abort here stops the download; a probe failure just drops subtitles.
@@ -409,6 +416,18 @@ pub(crate) async fn run_unified_ytdlp(
     let Some(()) = done else {
         return Ok(None);
     };
+    // Record the yt-dlp output basename in the manifest so retries reuse it as a
+    // literal instead of re-resolving %(title)s (titles can change between attempts).
+    if let Some(path) = after_move.as_deref()
+        && let Some(name) = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+        && let Some(mut manifest) = read_manifest(staging, job.item_id)
+        && manifest.ytdlp_output_name.is_none()
+    {
+        manifest.ytdlp_output_name = Some(name.to_string());
+        let _ = write_manifest(staging, job.item_id, &manifest).await;
+    }
     let final_tmp = discover_unified_output(staging, after_move.as_deref());
     let Some(final_tmp) = final_tmp else {
         return Err(VideoError::part_failed("no output file produced"));
@@ -1175,8 +1194,8 @@ pub(crate) async fn run_live_ytdlp(
         return Err(VideoError::staging(e));
     }
     // Record the chosen staging name in the manifest for crash cleanup.
-    // The id is also baked into the filename itself, so the file stays
-    // attributable even if this manifest is lost or corrupt.
+    // The manifest is the ownership proof: without it, a leftover .part
+    // is never swept (acceptable — the manifest is written before the download).
     let _ = write_manifest(
         staging,
         job.item_id,
@@ -1189,6 +1208,7 @@ pub(crate) async fn run_live_ytdlp(
             audio_ext: String::new(),
             final_bytes: None,
             staging_name: Some(staging_name.clone()),
+            ytdlp_output_name: None,
         },
     )
     .await;

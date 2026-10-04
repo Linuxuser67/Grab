@@ -338,17 +338,10 @@ impl DownloadManager {
         // so the last persist completes before shutdown awaits the task.
         #[cfg(not(test))]
         let (persist_tx, persist_task) = {
-            let (tx, mut rx) = tokio::sync::watch::channel(None::<String>);
-            let task = tokio_rt().spawn(async move {
-                while rx.changed().await.is_ok() {
-                    let Some(text) = rx.borrow_and_update().clone() else {
-                        continue;
-                    };
-                    // File I/O must not block the async runtime.
-                    let _ =
-                        tokio::task::spawn_blocking(move || Self::write_queue_file(&text)).await;
-                }
-            });
+            let (tx, rx) = tokio::sync::watch::channel(None::<String>);
+            let task = tokio_rt().spawn(Self::persist_task_loop(rx, |text: String| {
+                Self::write_queue_file(&text)
+            }));
             (Some(tx), Some(task))
         };
         #[cfg(test)]
@@ -2516,6 +2509,27 @@ impl DownloadManager {
         dir.join("queue.json")
     }
 
+    /// Remove stale `queue.json.tmp.*` files left by crashed writes.
+    fn sweep_stale_tmp() {
+        let qf = Self::queue_file();
+        let Some(dir) = qf.parent() else { return };
+        let Some(name) = qf.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        let prefix = format!("{name}.tmp.");
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(&prefix))
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
     /// Move a broken queue file aside so the next persist starts fresh.
     /// Uses the first free `queue.json.bak`, `queue.json.bak.1`, ... slot —
     /// never clobbers a previous backup, never deletes.
@@ -2551,30 +2565,59 @@ impl DownloadManager {
         }
     }
 
+    /// The persist task body: watches for new queue states and writes them.
+    /// Extracted for testing: `watch::changed()` delivers the final value before
+    /// the closed-channel Err, so dropping the sender after a final send guarantees
+    /// the last write lands.
+    pub(crate) async fn persist_task_loop(
+        mut rx: tokio::sync::watch::Receiver<Option<String>>,
+        write: impl Fn(String) + Clone + Send + 'static,
+    ) {
+        while rx.changed().await.is_ok() {
+            let Some(text) = rx.borrow_and_update().clone() else {
+                continue;
+            };
+            // File I/O must not block the async runtime.
+            let write = write.clone();
+            let _ = tokio::task::spawn_blocking(move || write(text)).await;
+        }
+    }
+
     /// Final persist for shutdown: send the state, drop the sender, await the
     /// task. `watch::changed()` delivers the final value before the
     /// closed-channel Err, so the last write lands before we return.
     /// Tests write synchronously (no channel/task in test builds).
     fn persist_for_shutdown(&self) {
         #[cfg(test)]
-        if let Some(text) = self.serialize_queue() {
+        if let Some(text) = self.serialize_queue_inner(true) {
             Self::write_queue_file(&text);
         }
         #[cfg(not(test))]
         {
-            if let (Some(text), Some(tx)) = (self.serialize_queue(), &*self.persist_tx.borrow()) {
+            if let (Some(text), Some(tx)) =
+                (self.serialize_queue_inner(true), &*self.persist_tx.borrow())
+            {
                 tx.send_replace(Some(text));
             }
             drop(self.persist_tx.borrow_mut().take());
             if let Some(task) = self.persist_task.borrow_mut().take() {
-                let _ = tokio_rt().block_on(task);
+                // Bound the shutdown wait: a stalled disk must not hang quit.
+                let _ = tokio_rt().block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_secs(5), task).await
+                });
             }
         }
     }
 
     /// Serialize the queue to JSON. Returns None if batching or on serialize error.
     fn serialize_queue(&self) -> Option<String> {
-        if self.batch.get() > 0 {
+        self.serialize_queue_inner(false)
+    }
+
+    /// Serialize the queue to JSON, bypassing the batch gate when `force` is true.
+    /// Shutdown uses `force=true`: quitting mid-batch must persist the final state.
+    fn serialize_queue_inner(&self, force: bool) -> Option<String> {
+        if !force && self.batch.get() > 0 {
             return None;
         }
         let mut items = Vec::new();
@@ -2719,6 +2762,10 @@ impl DownloadManager {
 
     /// Load the persisted queue (cap: 1000 items / 10 MB), then resume. Unusable files move to `queue.json.bak`, never deleted.
     pub fn restore_queue(self: &Rc<Self>) {
+        // Sweep stale tmp files from crashed writes: `write_queue_file` uses
+        // `queue.json.tmp.<pid>.<n>` and renames on success, so any leftover
+        // is from a crash between create_new and rename.
+        Self::sweep_stale_tmp();
         // Staging files are `grab-<id>-*` in each destination dir; the
         // `staging_occupied` check at row creation skips IDs with leftovers.
         if Self::queue_file().exists() {

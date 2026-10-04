@@ -2626,8 +2626,21 @@ fn history_restore_roundtrip() {
     assert_eq!(it.filename(), "old.iso");
     assert_eq!(it.status(), DownloadStatus::Done);
     assert!((it.progress() - 1.0).abs() < f64::EPSILON);
-    // Atomic persist leaves no tmp debris behind.
-    assert!(!qf.with_extension("json.tmp").exists());
+    // Atomic persist leaves no tmp debris behind: temp files are now
+    // `queue.json.tmp.<pid>.<n>`, so scan the directory for the prefix.
+    let qf_dir = qf.parent().unwrap();
+    let qf_name = qf.file_name().unwrap().to_str().unwrap();
+    let tmp_prefix = format!("{qf_name}.tmp.");
+    assert!(
+        !std::fs::read_dir(qf_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(&tmp_prefix))),
+        "tmp debris left behind"
+    );
     // Drain the restored Done row's async sizing so no thread-bound future
     // outlives this test (glib thread guard, serial suite shares one context).
     drain_sizing(&m2);
@@ -6638,4 +6651,30 @@ fn old_queue_without_validators_deserializes() {
         "missing last_modified must default to None"
     );
     assert_eq!(item.url, "http://example.com/old.bin");
+}
+
+#[test]
+fn persist_task_loop_delivers_final_value_before_close() {
+    // The watch channel delivers the final send_replace value before the
+    // closed-channel Err, so the last write lands before the task exits.
+    use std::sync::{Arc, Mutex};
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let writes_clone = writes.clone();
+    let (tx, rx) = tokio::sync::watch::channel(None::<String>);
+    let task = crate::runtime::tokio_rt().spawn(async move {
+        crate::download::DownloadManager::persist_task_loop(rx, move |text| {
+            writes_clone.lock().unwrap().push(text);
+        })
+        .await;
+    });
+    tx.send_replace(Some("A".to_string()));
+    tx.send_replace(Some("B".to_string()));
+    drop(tx);
+    crate::runtime::tokio_rt().block_on(task).unwrap();
+    let writes = writes.lock().unwrap();
+    assert_eq!(
+        writes.last().unwrap(),
+        "B",
+        "final value must be last write"
+    );
 }

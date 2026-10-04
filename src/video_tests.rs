@@ -981,7 +981,7 @@ fn resume_attempt_labels_reresolve_as_resuming() {
     use std::os::unix::fs::PermissionsExt as _;
     for (name, body) in [
         ("yt-dlp", "#!/bin/sh\necho 2026.09.25\n"),
-        ("ffmpeg", "#!/bin/sh\necho ffmpeg version test\n"),
+        ("ffmpeg", "#!/bin/sh\necho ffmpeg version 7.1.2\n"),
     ] {
         let bin = libs.join(name);
         std::fs::write(&bin, body).unwrap();

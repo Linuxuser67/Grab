@@ -249,78 +249,15 @@ pub fn clean_staging(dir: &Path) {
 
 /// Whether a `grab-<id>-<suffix>` filename is a known Grab staging file.
 /// Only these are safe to delete; a user's own `grab-<id>-notes.txt` must survive.
-fn is_grab_staging_suffix(suffix: &str) -> bool {
-    // .manifest.json: exact match (dot-prefixed, hidden from file views)
-    if suffix == ".manifest.json" {
-        return true;
-    }
-    // yt-dlp sidecars: *.part, *.ytdl (appended to the filenames we pass it).
-    // ONLY sidecars via pattern: bare media files (grab-42.mp4) could be user
-    // files — those are deleted only via manifest exact-name match.
-    suffix.ends_with(".part") || suffix.ends_with(".ytdl")
-}
-
 /// Remove Grab staging files for an item in the destination dir.
-/// Only deletes files matching known staging patterns; never the dir itself,
-/// other files, or a user's own `grab-<id>-*` files.
-///
-/// Routing: manifest `staging_name` exact-match first (precise), then the
-/// id-in-name pattern as fallback (covers a lost/corrupt manifest). Pattern
-/// matching only deletes `.part`/`.ytdl` sidecars — never a bare media file,
-/// which could be a completed recording or a user file.
+/// Manifest ownership is the sole destructive authority: only the exact
+/// filenames recorded in the manifest are deleted. No filename pattern
+/// may delete a file.
 pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
-    let prefix_hyphen = format!("grab-{item_id}-");
-    let prefix_dot = format!("grab-{item_id}.");
-    // Hidden manifest (dot-prefixed) plus legacy names.
-    let hidden_manifest = format!(".grab-{item_id}-manifest.json");
-    let legacy_manifests = [
-        format!("grab-{item_id}-.manifest.json"),
-        format!("grab-{item_id}-manifest.json"),
-    ];
-    // Exact staging names from the manifest: the precise primary route.
-    let manifest_names: Vec<String> = read_manifest(dest_dir, item_id)
-        .and_then(|m| m.staging_name)
-        .map(|base| vec![base.clone(), format!("{base}.part"), format!("{base}.ytdl")])
-        .unwrap_or_default();
-    if let Ok(entries) = std::fs::read_dir(dest_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let name = entry.file_name();
-            let name_str = name.to_str().unwrap_or("");
-            // Hidden or legacy manifest: always clean.
-            if name_str == hidden_manifest || legacy_manifests.iter().any(|m| m == name_str) {
-                let _ = std::fs::remove_file(entry.path());
-                continue;
-            }
-            // Manifest exact-match: precise, covers the base recording too.
-            if manifest_names.iter().any(|n| n == name_str) {
-                let _ = std::fs::remove_file(entry.path());
-                continue;
-            }
-            // NO id-in-name fallback for deletion: without a marker, the
-            // pattern is fundamentally ambiguous (a user's `my.backup.4.mp4.part`
-            // is indistinguishable from our `Title.4.mp4.part`). Deletion
-            // requires the manifest's exact name. ID reuse is still prevented
-            // by `staging_occupied`, which may conservatively skip IDs.
-            // Legacy live pattern: .{id}.live. (e.g., "v.1.live.mp4.part").
-            // Restricted to sidecars: a user file like "MyRecording.42.live.mp4"
-            // must not be deleted via pattern.
-            if name_str.contains(&format!(".{item_id}.live."))
-                && (name_str.ends_with(".part") || name_str.ends_with(".ytdl"))
-            {
-                let _ = std::fs::remove_file(entry.path());
-                continue;
-            }
-            // Match grab-<id>-* (hyphen) or grab-<id>.* (dot, for part_path files).
-            let suffix = name_str
-                .strip_prefix(&prefix_hyphen)
-                .or_else(|| name_str.strip_prefix(&prefix_dot));
-            if let Some(suffix) = suffix
-                && is_grab_staging_suffix(suffix)
-            {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
-    }
+    // Manifest ownership is the SOLE destructive authority. Delete exactly
+    // the files the manifest recorded, then the manifest itself (canonical
+    // + legacy names). No filename pattern may delete a file.
+    remove_manifest_owned_files(dest_dir, item_id);
 }
 
 /// Remove a staging dir, guarded to stay under an explicit root (never user data).
@@ -389,74 +326,44 @@ fn file_is_abandoned(path: &Path) -> bool {
 }
 
 pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>) {
+    // Manifest-driven cleanup: the ONLY destructive authority is the
+    // manifest's `staging_name`. No filename pattern may delete a file.
+    // Scan for manifest files, extract orphan IDs, delete exactly the names
+    // each manifest recorded.
     let Ok(entries) = std::fs::read_dir(dest_dir) else {
         return;
     };
     for entry in entries.filter_map(|e| e.ok()) {
         let name = entry.file_name();
-        let name = name.to_str().unwrap_or("");
-        // Legacy: parse `grab-<id>-*` to get the item ID.
-        if let Some(rest) = name.strip_prefix("grab-")
-            && let Some((id_str, suffix)) = rest.split_once('-')
-            && let Ok(id) = id_str.parse::<u64>()
-            && !keep.contains(&id)
-            && !suffix.starts_with("final.")
-            && is_grab_staging_suffix(suffix)
+        let name_str = name.to_str().unwrap_or("");
+        // Find manifest files: .{id}.manifest.json (canonical) or legacy.
+        let id = if let Some(id_str) = name_str
+            .strip_prefix('.')
+            .and_then(|s| s.strip_suffix(".manifest.json"))
         {
-            let _ = std::fs::remove_file(entry.path());
-            continue;
-        }
-        // NO id-in-name attribution for deletion: without a marker, the
-        // pattern is fundamentally ambiguous (a user's `my.backup.4.mp4.part`
-        // is indistinguishable from our `Title.4.mp4.part`). Only the
-        // legacy `grab-<id>-` prefix (has marker) and `.live.` (has marker)
-        // are swept by pattern. ID reuse is still prevented by
-        // `staging_occupied`.
-        // Legacy live: `.{id}.live.` (e.g., "v.1.live.mp4.part"). The
-        // `.live.` marker makes it safe; extract the id and sweep if orphaned.
-        if let Some(live_pos) = name.find(".live.") {
-            let before = &name[..live_pos];
-            if let Some(dot) = before.rfind('.')
-                && let Ok(id) = before[dot + 1..].parse::<u64>()
-                && !keep.contains(&id)
-            {
-                let _ = std::fs::remove_file(entry.path());
-            }
-            continue;
-        }
-        // Id-in-name orphans: trash (recoverable), never permanently delete.
-        // Without a marker the pattern is ambiguous, but an orphan with no
-        // manifest, no live row, and mtime older than 7 days is abandoned.
-        // Trashing frees the ID and clears litter; the user can recover from
-        // trash. Recent files are left alone (a crashed download may resume).
-        if should_trash_orphan(name, &entry.path(), keep, dest_dir) {
-            let _ = gio::File::for_path(entry.path()).trash(gio::Cancellable::NONE);
-        }
-    }
-}
-
-/// Whether an id-in-name file should be trashed: no live row, no manifest,
-/// and abandoned (mtime > 7 days). Extracted for testability; the actual
-/// trash call stays in `sweep_dest_staging`.
-/// Ownership is proven by the manifest, never inferred from the filename:
-/// a user file like `My.backup.4.mp4.part` has no `.4.manifest.json` and is
-/// never touched. Only our own crashed-run leftovers (manifest exists, both
-/// abandoned) are trashed.
-fn should_trash_orphan(
-    name: &str,
-    path: &Path,
-    keep: &std::collections::HashSet<u64>,
-    dest_dir: &Path,
-) -> bool {
-    staging_id_from_name(name).is_some_and(|id| {
+            id_str.parse::<u64>().ok()
+        } else if let Some(rest) = name_str
+            .strip_prefix(".grab-")
+            .and_then(|s| s.strip_suffix("-manifest.json"))
+        {
+            rest.parse::<u64>().ok()
+        } else if let Some(rest) = name_str
+            .strip_prefix("grab-")
+            .and_then(|s| s.strip_suffix("-manifest.json"))
+        {
+            // Handle both "grab-{id}-manifest.json" and "grab-{id}-.manifest.json"
+            rest.strip_suffix('-').unwrap_or(rest).parse::<u64>().ok()
+        } else {
+            None
+        };
+        let Some(id) = id else { continue };
         if keep.contains(&id) {
-            return false;
+            continue;
         }
-        let manifest = manifest_path(dest_dir, id);
-        // Manifest must exist (proof we created this) and be abandoned too:
-        // a fresh manifest means the download just started.
-        manifest.exists() && file_is_abandoned(&manifest) && file_is_abandoned(path)
-    })
+        // Manifest exists = proof we created this. Delete exactly the files
+        // it recorded, then the manifest itself.
+        remove_manifest_owned_files(dest_dir, id);
+    }
 }
 
 /// Sidecar recording completed parts, so a retry can skip straight to the merge.
@@ -619,54 +526,34 @@ pub fn sweep_partial_remuxes(staging: &Path) {
 /// id-in-name pattern as fallback (covers a lost/corrupt manifest). Pattern
 /// matching only deletes `.part`/`.ytdl` sidecars — never a bare media file.
 pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
-    let prefix = format!("grab-{item_id}-");
-    // Hidden manifest: `.{id}.manifest.json` (new) and `.grab-{id}-manifest.json` (legacy).
-    let hidden_manifest = format!(".{item_id}.manifest.json");
-    let legacy_hidden = format!(".grab-{item_id}-manifest.json");
-    // Exact staging names from the manifest: never pattern-match user files.
-    // A bystander like `linux-5.4.0.tar.gz` must survive row id 4.
-    let manifest_names: Vec<String> = read_manifest(staging, item_id)
-        .and_then(|m| m.staging_name)
-        .map(|base| vec![base.clone(), format!("{base}.part"), format!("{base}.ytdl")])
-        .unwrap_or_default();
-    // Legacy live pattern: .{id}.live. (e.g., "v.1.live.mp4.part"). Has the
-    // `.live.` marker, so it cannot hit user files.
-    let live_pattern = format!(".{item_id}.live.");
-    for name in dir_file_names(staging) {
-        // Delete the hidden manifest directly.
-        if name == hidden_manifest || name == legacy_hidden {
-            let _ = std::fs::remove_file(staging.join(&name));
-            continue;
+    // Manifest ownership is the SOLE destructive authority. Delete exactly
+    // the files the manifest recorded, except `final.*` (completed recordings
+    // that may be the user's only copy). No filename pattern may delete a file.
+    let Some(names) = manifest_owned_names(staging, item_id) else {
+        // No manifest = no proof of ownership = preserve everything.
+        // Still remove the manifest files themselves if they exist.
+        let _ = std::fs::remove_file(manifest_path(staging, item_id));
+        for path in legacy_manifest_paths(staging, item_id) {
+            let _ = std::fs::remove_file(path);
         }
+        return;
+    };
+    for name in names {
         // Preserve completed recordings: they may be the user's only copy.
         if name.starts_with("final.") {
             continue;
         }
-        // Exact manifest names only: no substring matching.
-        if manifest_names.iter().any(|n| n == &name) {
-            let _ = std::fs::remove_file(staging.join(&name));
+        let path = staging.join(&name);
+        // Basename only; never allow manifest data to escape staging.
+        if path.file_name().and_then(|n| n.to_str()) != Some(name.as_str()) {
             continue;
         }
-        // NO id-in-name fallback for deletion: without a marker, the pattern
-        // is fundamentally ambiguous. Deletion requires the manifest's exact
-        // name or a legacy marked pattern.
-        // Legacy live pattern (has .live. marker, safe).
-        if name.contains(&live_pattern) {
-            let _ = std::fs::remove_file(staging.join(&name));
-            continue;
-        }
-        let Some(suffix) = name.strip_prefix(&prefix) else {
-            continue;
-        };
-        // Preserve completed recordings: they may be the user's only copy.
-        if suffix.starts_with("final.") {
-            continue;
-        }
-        // Only delete known staging patterns; a user's own `grab-<id>-*` file survives.
-        if !is_grab_staging_suffix(suffix) {
-            continue;
-        }
-        let _ = std::fs::remove_file(staging.join(&name));
+        let _ = std::fs::remove_file(path);
+    }
+    // Remove the manifest itself (canonical + legacy names).
+    let _ = std::fs::remove_file(manifest_path(staging, item_id));
+    for path in legacy_manifest_paths(staging, item_id) {
+        let _ = std::fs::remove_file(path);
     }
     // Never remove_dir: staging is the user's dest dir, not a dedicated subfolder.
 }
@@ -759,6 +646,40 @@ fn legacy_manifest_paths(dest_dir: &Path, item_id: u64) -> [PathBuf; 3] {
         dest_dir.join(format!("grab-{item_id}-.manifest.json")),
         dest_dir.join(format!("grab-{item_id}-manifest.json")),
     ]
+}
+
+/// The exact filenames owned by a manifest: the base staging name plus its
+/// sidecars. This is the SOLE authority for destructive cleanup — no filename
+/// pattern may delete a file without manifest proof.
+fn manifest_owned_names(dest_dir: &Path, item_id: u64) -> Option<Vec<String>> {
+    let base = read_manifest(dest_dir, item_id)?.staging_name?;
+    Some(vec![
+        base.clone(),
+        format!("{base}.part"),
+        format!("{base}.ytdl"),
+    ])
+}
+
+/// Delete exactly the files recorded by a manifest. The manifest's
+/// `staging_name` is the only proof of ownership; without it, files are
+/// preserved.
+fn remove_manifest_owned_files(dest_dir: &Path, item_id: u64) {
+    let Some(names) = manifest_owned_names(dest_dir, item_id) else {
+        return;
+    };
+    for name in names {
+        let path = dest_dir.join(&name);
+        // Basename only; never allow manifest data to escape dest_dir.
+        if path.file_name().and_then(|n| n.to_str()) != Some(name.as_str()) {
+            continue;
+        }
+        let _ = std::fs::remove_file(path);
+    }
+    // Remove the manifest itself (canonical + legacy names).
+    let _ = std::fs::remove_file(manifest_path(dest_dir, item_id));
+    for path in legacy_manifest_paths(dest_dir, item_id) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 pub(crate) fn read_manifest(dest_dir: &Path, item_id: u64) -> Option<VideoManifest> {
@@ -1388,6 +1309,76 @@ mod tests {
         assert!(
             !dir.join("grab-42.mp4.part").exists(),
             "sidecar should be cleaned"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_dest_staging_preserves_user_live_file() {
+        // A user's own MyRecording.42.live.mp4 must survive sweep_dest_staging.
+        // No manifest = no proof of ownership = preserve.
+        let dir = unique_dir("user-live");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("MyRecording.42.live.mp4"), b"user recording").unwrap();
+
+        sweep_dest_staging(&dir, &std::collections::HashSet::new());
+
+        assert!(
+            dir.join("MyRecording.42.live.mp4").exists(),
+            "user .live. file must be preserved"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_dest_staging_preserves_manifest_less_part_file() {
+        // Title.42.mp4.part with NO manifest must survive. This is the most
+        // important regression: filename alone is not ownership proof.
+        let dir = unique_dir("no-manifest-part");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Title.42.mp4.part"), b"user data").unwrap();
+
+        sweep_dest_staging(&dir, &std::collections::HashSet::new());
+
+        assert!(
+            dir.join("Title.42.mp4.part").exists(),
+            "manifest-less part file must be preserved"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_dest_staging_removes_manifest_owned_file() {
+        // With a manifest recording staging_name, the exact files are removed.
+        let dir = unique_dir("manifest-owned");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let manifest = VideoManifest {
+            page_url: "https://example.com".to_string(),
+            quality: "1080p".to_string(),
+            video_format_id: None,
+            video_ext: "mp4".to_string(),
+            audio_format_id: String::new(),
+            audio_ext: String::new(),
+            final_bytes: None,
+            staging_name: Some("Title.42.mp4".to_string()),
+        };
+        let manifest_json = serde_json::to_string(&manifest).unwrap();
+        std::fs::write(dir.join(".42.manifest.json"), manifest_json).unwrap();
+        std::fs::write(dir.join("Title.42.mp4.part"), b"staging").unwrap();
+
+        sweep_dest_staging(&dir, &std::collections::HashSet::new());
+
+        assert!(
+            !dir.join("Title.42.mp4.part").exists(),
+            "manifest-owned file should be removed"
+        );
+        assert!(
+            !dir.join(".42.manifest.json").exists(),
+            "manifest should be removed after cleanup"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -2533,8 +2533,35 @@ impl DownloadManager {
     }
 
     fn persist_queue(&self) {
+        // File I/O runs on the worker thread. The channel is unbounded; the
+        // drain-to-latest loop in the worker keeps memory in check by collapsing
+        // bursts to a single write.
+        // Tests need determinism: they persist then immediately restore in a
+        // new manager, so write synchronously in test builds.
+        #[cfg(test)]
+        if let Some(text) = self.serialize_queue() {
+            Self::write_queue_file(&text);
+        }
+        #[cfg(not(test))]
+        if let Some(text) = self.serialize_queue() {
+            let _ = self.persist_tx.send(text);
+        }
+    }
+
+    /// Synchronous persist for shutdown: the worker thread is detached and
+    /// nothing joins it, so the final persist (truncated bitmaps, paused/stopped
+    /// states) must hit disk before the process exits. Quit is already a
+    /// blocking path, so a synchronous write here is acceptable.
+    fn persist_queue_sync(&self) {
+        if let Some(text) = self.serialize_queue() {
+            Self::write_queue_file(&text);
+        }
+    }
+
+    /// Serialize the queue to JSON. Returns None if batching or on serialize error.
+    fn serialize_queue(&self) -> Option<String> {
         if self.batch.get() > 0 {
-            return;
+            return None;
         }
         let mut items = Vec::new();
         for it in self.items() {
@@ -2583,17 +2610,10 @@ impl DownloadManager {
             Ok(text) => text,
             Err(e) => {
                 tracing::error!("could not serialize download queue: {e}");
-                return;
+                return None;
             }
         };
-        // File I/O runs on the worker thread; a full channel means the worker
-        // is behind, and it will drain to our latest text anyway.
-        // Tests need determinism: they persist then immediately restore in a
-        // new manager, so write synchronously in test builds.
-        #[cfg(test)]
-        Self::write_queue_file(&text);
-        #[cfg(not(test))]
-        let _ = self.persist_tx.send(text);
+        Some(text)
     }
 
     /// Write the serialized queue: temp file + sync_all + rename + dir sync.
@@ -2919,7 +2939,9 @@ impl DownloadManager {
             }
         }
         // Persist BEFORE returning: pump tails exit silently once draining is set, so this is the only persist that matters.
-        self.persist_queue();
+        // Synchronous: the worker thread is detached and nothing joins it, so
+        // the final state must hit disk before the process exits.
+        self.persist_queue_sync();
     }
 }
 

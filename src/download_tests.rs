@@ -3097,7 +3097,7 @@ fn manager_pause_resume_cancel() {
             fail("bytes differ");
         }
         let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
-        if !ranges.lines().any(|l| l.starts_with("bytes=")) {
+        if !ranges.lines().any(|l| l.contains("range=bytes=")) {
             fail("resume never sent a Range request (206 path untested)");
         }
 
@@ -6318,4 +6318,93 @@ fn dropping_manager_removes_scheduler_source() {
         source.is_destroyed(),
         "dropping the manager removes the scheduler source"
     );
+}
+
+/// If-Range header is sent when the session validator is set.
+/// The fixture server logs the If-Range header; we assert it matches.
+#[test]
+fn piece_sends_if_range_when_validator_set() {
+    let Fixture {
+        dir,
+        dl,
+        payload,
+        port,
+        server,
+    } = spawn_fixture("ifrange", "v.bin", 300_000, "0", &[], 44);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let if_range = std::sync::Arc::new(std::sync::OnceLock::new());
+    let _ = if_range.set("\"test-etag-123\"".to_string());
+    let ctx = FetchCtx {
+        client: http_client().clone(),
+        url: format!("http://127.0.0.1:{port}/v.bin"),
+        dest: dl.join("v.bin"),
+        opts: DownloadOptions {
+            ..Default::default()
+        },
+        cookies: None,
+        timeout: Duration::from_secs(30),
+        tx,
+        if_range,
+    };
+    let total = payload.len() as u64;
+    // Fetch a piece; the server logs the If-Range header.
+    match tokio_rt().block_on(fetch_piece(&ctx, 0, 1023, total)) {
+        Ok(_) => {}
+        Err(_) => abort(&server, "piece fetch failed"),
+    }
+    // Verify the If-Range header was sent with our validator.
+    let log = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
+    assert!(
+        log.contains("if-range=\"test-etag-123\""),
+        "If-Range header not sent or wrong value. Log:\n{log}"
+    );
+    cleanup(&server, &dir);
+}
+
+/// 200 after If-Range yields Changed: when the server's ETag doesn't match
+/// our If-Range, it returns 200 (full body) instead of 206. fetch_piece must
+/// fail with Changed, not silently accept the wrong bytes.
+#[test]
+fn piece_rejects_200_after_if_range_mismatch() {
+    // Use if-range-strict mode: server returns 200 if If-Range != ETAG.
+    let Fixture {
+        dir,
+        dl,
+        payload,
+        port,
+        server,
+    } = spawn_fixture(
+        "ifrange200",
+        "v.bin",
+        300_000,
+        "0",
+        &["if-range-strict", "\"server-etag\""],
+        45,
+    );
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let if_range = std::sync::Arc::new(std::sync::OnceLock::new());
+    // Our validator differs from the server's ETag.
+    let _ = if_range.set("\"client-etag\"".to_string());
+    let ctx = FetchCtx {
+        client: http_client().clone(),
+        url: format!("http://127.0.0.1:{port}/v.bin"),
+        dest: dl.join("v.bin"),
+        opts: DownloadOptions {
+            ..Default::default()
+        },
+        cookies: None,
+        timeout: Duration::from_secs(30),
+        tx,
+        if_range,
+    };
+    let total = payload.len() as u64;
+    match tokio_rt().block_on(fetch_piece(&ctx, 0, 1023, total)) {
+        Err(AttemptFail::Changed(_)) => {}
+        Ok(_) => abort(
+            &server,
+            "200 after If-Range mismatch must fail Changed, not succeed",
+        ),
+        Err(_) => abort(&server, "wrong error kind"),
+    }
+    cleanup(&server, &dir);
 }

@@ -107,9 +107,9 @@ fn cookie_staging_dir() -> Option<PathBuf> {
         .unwrap_or_else(|_| crate::video::staging_root());
     let dir = base.join("grab-cookies");
     // Create 0700 if missing; atomic create_dir avoids symlink races.
-    match std::fs::create_dir(&dir) {
+    // Use create_dir_all: the XDG_RUNTIME_DIR fallback (staging_root) may not exist.
+    match std::fs::create_dir_all(&dir) {
         Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => {
             tracing::debug!(error = %e, "cookie staging dir create failed");
             return None;

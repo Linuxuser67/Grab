@@ -447,8 +447,10 @@ pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
 /// tiny (~2.5MB) official linux x86_64 and aarch64 binaries; the deno
 /// alternative is ~40x larger. The installed release follows the quickjs-ng
 /// latest tag so the update check and the installer agree on the source of
-/// truth. quickjs-ng publishes no checksums, so unpinned releases carry no
-/// hash verification (yt-dlp and ffmpeg never had any).
+/// truth. GitHub provides a SHA-256 digest per release asset; quickjs
+/// installs fail closed if it's absent, and the hash is verified while
+/// streaming. yt-dlp and ffmpeg go through the yt-dlp crate's fetcher,
+/// which verifies the digest when present; we refuse if it's absent.
 /// Hard cap on the quickjs download: the asset is ~2.5MB, so anything larger
 /// is not the released binary. Enforced while streaming, before the bytes are
 /// trusted.
@@ -523,9 +525,14 @@ pub async fn install_quickjs() -> Result<PathBuf, VideoError> {
 }
 
 async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
-    let tag = latest_quickjs_tag()
+    let (tag, digest) = latest_quickjs_release()
         .await
         .ok_or_else(|| VideoError::install("couldn't determine the latest quickjs-ng release"))?;
+    // Fail closed: no digest means no verified install. The digest comes from
+    // GitHub's API alongside the binary; absent means we can't verify.
+    let digest = digest.ok_or_else(|| {
+        VideoError::install("quickjs-ng release has no SHA-256 digest; refusing unverified install")
+    })?;
     if !valid_release_tag(&tag) {
         return Err(VideoError::install(format!(
             "quickjs-ng published an unexpected release tag: {tag}"
@@ -540,23 +547,35 @@ async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
     // half-written `qjs` behind for `find_quickjs` to mistake as installed.
     let dest = dir.join("qjs");
     let part = dir.join("qjs.part");
-    fetch_quickjs(&url, &part, &dest).await.map(|_| dest)
+    fetch_quickjs(&url, &part, &dest, &digest)
+        .await
+        .map(|_| dest)
 }
 
 /// Fetch the `qjs` binary, mark it executable, and move it into place.
 /// Size-capped while streaming; the asset is the released binary itself.
 /// Cleans up the `.part` file on any failure, so a half-written binary is
 /// never left behind for a later run to mistake as usable.
-async fn fetch_quickjs(url: &str, part: &Path, dest: &Path) -> Result<(), VideoError> {
-    let result = fetch_quickjs_inner(url, part, dest).await;
+async fn fetch_quickjs(
+    url: &str,
+    part: &Path,
+    dest: &Path,
+    digest: &str,
+) -> Result<(), VideoError> {
+    let result = fetch_quickjs_inner(url, part, dest, digest).await;
     if result.is_err() {
         std::fs::remove_file(part).ok();
     }
     result
 }
 
-async fn fetch_quickjs_inner(url: &str, part: &Path, dest: &Path) -> Result<(), VideoError> {
-    download_to_file(url, part)
+async fn fetch_quickjs_inner(
+    url: &str,
+    part: &Path,
+    dest: &Path,
+    digest: &str,
+) -> Result<(), VideoError> {
+    download_to_file(url, part, digest)
         .await
         .map_err(VideoError::install)?;
     use std::os::unix::fs::PermissionsExt as _;
@@ -588,7 +607,7 @@ fn refuse_symlink_target(dest: &Path) -> Result<(), String> {
     }
 }
 
-async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
+async fn download_to_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<(), String> {
     // Refuse a planted symlink before any I/O: it would divert the download
     // (and the later chmod) onto an arbitrary file.
     refuse_symlink_target(dest)?;
@@ -598,7 +617,13 @@ async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
     let response = response
         .error_for_status()
         .map_err(|e| format!("couldn't fetch {url}: {e}"))?;
-    write_capped_stream(Box::pin(response.bytes_stream()), dest, url).await
+    write_capped_stream(
+        Box::pin(response.bytes_stream()),
+        dest,
+        url,
+        expected_sha256,
+    )
+    .await
 }
 
 /// Stream a download body into `dest`, enforcing the size cap while
@@ -607,7 +632,12 @@ async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
 /// (Currently only the quickjs download uses this helper.)
 /// Split from `download_to_file` so the cap is pinnable with a synthetic
 /// stream — pushing 8 MiB through a loopback test server proved flaky.
-async fn write_capped_stream<S, B, E>(mut stream: S, dest: &Path, url: &str) -> Result<(), String>
+async fn write_capped_stream<S, B, E>(
+    mut stream: S,
+    dest: &Path,
+    url: &str,
+    expected_sha256: &str,
+) -> Result<(), String>
 where
     S: futures_util::Stream<Item = Result<B, E>> + Unpin,
     B: AsRef<[u8]>,
@@ -621,6 +651,8 @@ where
         .await
         .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
     use futures_util::StreamExt as _;
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("couldn't read {url}: {e}"))?;
         let bytes = chunk.as_ref();
@@ -630,6 +662,7 @@ where
                 "{url} exceeds the download size limit ({QUICKJS_MAX_DOWNLOAD_BYTES} bytes)"
             ));
         }
+        hasher.update(bytes);
         tokio::io::AsyncWriteExt::write_all(&mut file, bytes)
             .await
             .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
@@ -641,6 +674,18 @@ where
     tokio::io::AsyncWriteExt::flush(&mut file)
         .await
         .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
+    // Verify SHA-256 before returning Ok: the .part must never be chmod'd or
+    // renamed on a hash mismatch. Compare case-insensitively (GitHub hex is lowercase).
+    let got: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if !got.eq_ignore_ascii_case(expected_sha256) {
+        return Err(format!(
+            "{url}: sha256 mismatch (expected {expected_sha256}, got {got})"
+        ));
+    }
     Ok(())
 }
 
@@ -674,6 +719,13 @@ async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
         .fetch_binary()
         .await
         .map_err(VideoError::install)?;
+    // Fail closed: the crate verifies the digest if present, but skips silently
+    // if absent. Refuse to download an unverified toolchain.
+    if release.checksum.is_none() {
+        return Err(VideoError::install(
+            "ffmpeg release has no SHA-256 checksum; refusing unverified install",
+        ));
+    }
     let archive = dir.join(&release.name);
     release
         .download(&archive)
@@ -1243,13 +1295,26 @@ pub async fn latest_ffmpeg_tag() -> Option<String> {
 
 /// Latest quickjs-ng release tag; `None` when GitHub is unreachable.
 pub async fn latest_quickjs_tag() -> Option<String> {
+    latest_quickjs_release().await.map(|(tag, _)| tag)
+}
+
+/// Latest quickjs-ng release tag and its SHA-256 digest for this architecture.
+/// The digest comes from GitHub's release API (`digest: "sha256:…"` per asset).
+/// Returns None if the digest is absent: we fail closed rather than install
+/// an unverified binary.
+pub async fn latest_quickjs_release() -> Option<(String, Option<String>)> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new("quickjs-ng", "quickjs");
-        fetcher
-            .fetch_latest_release(None)
-            .await
-            .ok()
-            .map(|release| release.tag_name)
+        let release = fetcher.fetch_latest_release(None).await.ok()?;
+        let want = format!("qjs-linux-{}", std::env::consts::ARCH);
+        let digest = release
+            .assets
+            .iter()
+            .find(|a| a.name == want)
+            .and_then(|a| a.digest.as_deref())
+            .and_then(|d| d.strip_prefix("sha256:"))
+            .map(str::to_owned);
+        Some((release.tag_name, digest))
     });
     handle.await.ok().flatten()
 }
@@ -1415,7 +1480,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         // Unroutable URL: the symlink guard must fire before any I/O.
-        let err = download_to_file("http://127.0.0.1:1/nope", &link)
+        let err = download_to_file("http://127.0.0.1:1/nope", &link, "dummy")
             .await
             .unwrap_err();
         assert!(err.contains("symlink"), "unexpected error: {err}");
@@ -1461,7 +1526,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("qjs.part");
 
-        let err = write_capped_stream(Box::pin(chunks), &dest, "http://127.0.0.1/qjs")
+        let err = write_capped_stream(Box::pin(chunks), &dest, "http://127.0.0.1/qjs", "dummy")
             .await
             .unwrap_err();
         assert!(
@@ -1486,10 +1551,38 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("qjs.part");
 
-        write_capped_stream(Box::pin(chunks), &dest, "http://127.0.0.1/qjs")
-            .await
-            .unwrap();
+        write_capped_stream(
+            Box::pin(chunks),
+            &dest,
+            "http://127.0.0.1/qjs",
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+        )
+        .await
+        .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"hello world");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn write_capped_stream_rejects_hash_mismatch() {
+        // Wrong digest: the write must fail and the .part must not be usable.
+        let chunks = futures_util::stream::iter([
+            Ok::<Vec<u8>, String>(b"hello ".to_vec()),
+            Ok::<Vec<u8>, String>(b"world".to_vec()),
+        ]);
+        let dir = unique_dir("cap-stream-badhash");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("qjs.part");
+
+        let err = write_capped_stream(
+            Box::pin(chunks),
+            &dest,
+            "http://127.0.0.1/qjs",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("sha256 mismatch"), "unexpected error: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1550,7 +1643,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let part = dir.join("qjs.part");
         let dest = dir.join("qjs");
-        let err = fetch_quickjs(&format!("http://{addr}/qjs"), &part, &dest)
+        let err = fetch_quickjs(&format!("http://{addr}/qjs"), &part, &dest, "dummy")
             .await
             .unwrap_err();
         // The failure must be the mid-stream truncation — not a connect

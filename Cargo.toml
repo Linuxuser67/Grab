@@ -20,6 +20,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # HTTP-date parser for the keep-server-date option (Last-Modified header).
 httpdate = "1"
+# SHA-256 for verifying downloaded tool binaries against GitHub release digests.
+sha2 = "0.11"
 tokio = { version = "1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "fs", "io-util", "macros", "process"] }
 futures-util = "0.3.34"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "socks", "cookies", "gzip", "brotli", "deflate"] }

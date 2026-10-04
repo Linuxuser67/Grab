@@ -169,9 +169,7 @@ async fn export_cookies(
 ) -> Option<String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let Some(dir) = cookie_staging_dir() else {
-        return None;
-    };
+    let dir = cookie_staging_dir()?;
     // Unique per attempt, created atomically owner-only: a planted symlink fails instead of diverting the dump.
     let path: PathBuf = loop {
         let candidate: PathBuf = dir.join(format!(

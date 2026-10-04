@@ -10,7 +10,12 @@ use gtk4::{gio, glib};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
+
+/// Counter for unique queue temp-file names. Combined with the PID, this makes
+/// temp paths unique across writers in the same process.
+static QUEUE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Facade: HTTP fetch engine lives in [`download_fetch`](crate::download_fetch)
 /// now (no re-exports: the manager consumes it here, tests import it directly).
@@ -198,10 +203,6 @@ pub struct DownloadManager {
     /// The 30s schedule checker's source, if running. Kept so the
     /// scheduling preference can stop the timer entirely.
     scheduler_source: RefCell<Option<glib::SourceId>>,
-    /// Queue persist channel: `persist_queue` serializes on the main thread
-    /// and sends the text here; a dedicated worker does the file I/O
-    /// (temp + sync_all + rename + dir sync) off the UI thread. Bursts
-    /// coalesce via drain-to-latest in the worker.
     /// Queue persist channel: `watch` keeps only the latest value, so rapid
     /// state changes coalesce to a single write. The tokio task (below) is the
     /// sole writer, which makes writes ordered by construction.
@@ -2629,17 +2630,25 @@ impl DownloadManager {
         Some(text)
     }
 
-    /// Write the serialized queue atomically: unique temp file + sync_all +
-    /// rename + dir sync. The persist task is the sole writer, so writes are
-    /// ordered by construction. Runs via `spawn_blocking`, never on the async
-    /// runtime or the UI thread.
+    /// Write the serialized queue atomically: temp file + sync_all + rename +
+    /// dir sync. The persist task is the sole writer, so writes are ordered by
+    /// construction. Runs via `spawn_blocking`, never on the async runtime or
+    /// the UI thread.
     fn write_queue_file(text: &str) {
-        // Unique temp name: the persist task is the sole writer, but a stale
-        // temp file from a crashed run must not collide.
-        let tmp = Self::queue_file().with_extension(format!("json.tmp.{}", std::process::id()));
+        // Temp name is unique per write (PID + monotonic counter): a pre-existing
+        // symlink at this path cannot be predicted, and `create_new` refuses to
+        // follow symlinks or overwrite an existing file.
+        let tmp = Self::queue_file().with_extension(format!(
+            "json.tmp.{}.{}",
+            std::process::id(),
+            QUEUE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         let write_tmp = || -> std::io::Result<()> {
             use std::io::Write;
-            let mut f = std::fs::File::create(&tmp)?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
             f.write_all(text.as_bytes())?;
             f.sync_all()?;
             Ok(())
@@ -2648,6 +2657,7 @@ impl DownloadManager {
             Ok(()) => {
                 if let Err(e) = std::fs::rename(&tmp, Self::queue_file()) {
                     tracing::error!("could not replace download queue: {e}");
+                    let _ = std::fs::remove_file(&tmp);
                     return;
                 }
                 if let Some(parent) = Self::queue_file().parent()

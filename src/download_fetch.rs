@@ -18,7 +18,10 @@ use std::time::{Duration, Instant};
 /// full jitter via GLib's RNG (no `rand` dependency). `failures` is 1-based.
 /// Worst case per episode ~1.5s (500ms + 1s across the two retries `tries` allows).
 pub(crate) fn backoff_delay(failures: u32) -> Duration {
-    let capped_ms = std::cmp::min(60_000u64, 500 * 2u64.pow(failures.saturating_sub(1)));
+    // Cap the exponent before shifting: 500ms * 2^7 = 64s > 60s ceiling,
+    // so higher exponents are indistinguishable after the min().
+    let exponent = failures.saturating_sub(1).min(7);
+    let capped_ms = std::cmp::min(60_000u64, 500u64 << exponent);
     let sleep_ms = glib::random_int_range(0, capped_ms as i32 + 1) as u64;
     Duration::from_millis(sleep_ms)
 }

@@ -4761,6 +4761,45 @@ fn a_non_live_sweep_keeps_a_live_recordings_remux() {
 }
 
 #[test]
+fn sweep_never_touches_bystander_with_id_like_name() {
+    // Regression: the old `.{id}.` substring match deleted user files like
+    // `linux-5.4.0.tar.gz` (row id 4) or `v1.2.3.zip` (row id 2).
+    // The sweep must use exact manifest names only.
+    let staging = std::env::temp_dir().join(format!("grab-bystander-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).unwrap();
+    // Bystanders that the old loose pattern would have deleted.
+    std::fs::write(staging.join("linux-5.4.0.tar.gz"), b"kernel").unwrap();
+    std::fs::write(staging.join("v1.2.3.zip"), b"release").unwrap();
+    std::fs::write(staging.join("x.4.y"), b"bystander").unwrap();
+    // Our own staging (item 4) with a manifest tracking the exact name.
+    let manifest = crate::video_staging::VideoManifest {
+        page_url: "https://example.com".into(),
+        quality: "720p".into(),
+        video_format_id: None,
+        video_ext: "mp4".into(),
+        audio_format_id: String::new(),
+        audio_ext: String::new(),
+        final_bytes: None,
+        staging_name: Some("My Video.mp4".into()),
+    };
+    let manifest_path = staging.join(".4.manifest.json");
+    std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+    std::fs::write(staging.join("My Video.mp4.part"), b"partial").unwrap();
+
+    sweep_staging_preserving_recordings(&staging, 4);
+
+    // Bystanders survive.
+    assert_eq!(std::fs::read(staging.join("linux-5.4.0.tar.gz")).unwrap(), b"kernel");
+    assert_eq!(std::fs::read(staging.join("v1.2.3.zip")).unwrap(), b"release");
+    assert_eq!(std::fs::read(staging.join("x.4.y")).unwrap(), b"bystander");
+    // Our staging is reclaimed.
+    assert!(!staging.join("My Video.mp4.part").exists());
+    assert!(!manifest_path.exists());
+    let _ = std::fs::remove_dir_all(&staging);
+}
+
+#[test]
 fn a_crashed_remux_leaves_only_a_partial_and_it_is_reclaimable() {
     // A remux writes `final.<n>.<ext>.part` and renames only on success, so partials are sweepable by construction.
     let dir = std::env::temp_dir().join(format!("grab-partialremux-{}", std::process::id()));

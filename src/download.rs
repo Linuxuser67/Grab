@@ -1125,7 +1125,9 @@ impl DownloadManager {
             opts,
             if_range: {
                 let etag = item.etag();
-                if !etag.is_empty() {
+                // If-Range requires a strong validator: weak ETags (W/"…")
+                // never match, so skip them and fall back to Last-Modified.
+                if !etag.is_empty() && !etag.starts_with("W/") {
                     Some(etag.to_string())
                 } else {
                     let lm = item.last_modified();
@@ -1500,14 +1502,11 @@ impl DownloadManager {
                         this.server_mtime.borrow_mut().insert(id, t);
                     }
                     EngineMsg::Validator(info) => {
-                        // Resume validator for If-Range: latest response wins.
-                        // Persisted so cross-session resumes validate too.
-                        if let Some(e) = info.etag {
-                            item.set_etag(e);
-                        }
-                        if let Some(lm) = info.last_modified {
-                            item.set_last_modified(lm);
-                        }
+                        // Resume validator for If-Range, captured once per download
+                        // generation. Overwrites both fields: a stale Last-Modified
+                        // must not survive when the new response has only an ETag.
+                        item.set_etag(info.etag.unwrap_or_default());
+                        item.set_last_modified(info.last_modified.unwrap_or_default());
                     }
                     EngineMsg::LiveDetected => {
                         // Downloading only: a stop/pause during resolve must not leave a stale live_rows member (it would skip staging cleanup and take live signal paths).

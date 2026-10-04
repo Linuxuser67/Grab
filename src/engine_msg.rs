@@ -41,8 +41,10 @@ pub(crate) enum EngineMsg {
     /// Server Last-Modified; applied at Finished when keep-server-date is on (best-effort).
     LastModified(SystemTime),
     /// Resume validator from response headers (ETag preferred, Last-Modified
-    /// fallback): stored on the item for If-Range on resume. None clears a
-    /// stale validator after an If-Range mismatch restart.
+    /// fallback): stored on the item for If-Range on resume. Sent once per
+    /// download generation (fresh 200, or 200 after If-Range mismatch); a 206
+    /// in response to If-Range does not re-send, so a mid-download change
+    /// cannot poison the stored validator.
     /// Boxed: this variant is rare but would otherwise inflate every message
     /// on this hot channel (progress ticks) to the largest variant's size.
     Validator(Box<ValidatorInfo>),

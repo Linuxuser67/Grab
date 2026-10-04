@@ -50,9 +50,13 @@ pub fn staging_location_for_dest(dest: &Path, item_id: u64) -> StagingLocation {
 /// it so a fresh row never lands on a leftover.
 pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
     let prefix = format!("grab-{item_id}-");
-    // ID-namespaced pattern: .{id}. (e.g., "My Video.4.mp4.part").
-    // Legacy patterns (grab-{id}-, .{id}.live.) still count for occupancy.
-    let id_pattern = format!(".{item_id}.");
+    // Manifest exists = occupied (it tracks the exact staging name).
+    if manifest_path(dest_dir, item_id).exists() {
+        return true;
+    }
+    // Legacy patterns: grab-{id}- prefix (safe) and .{id}.live. (has marker, safe).
+    // The bare .{id}. pattern is deliberately NOT checked: it false-positives
+    // on user files like linux-5.4.0.tar.gz.
     let live_pattern = format!(".{item_id}.live.");
     std::fs::read_dir(dest_dir)
         .ok()
@@ -60,11 +64,7 @@ pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
             entries.filter_map(|e| e.ok()).any(|e| {
                 e.file_name()
                     .to_str()
-                    .map(|n| {
-                        n.starts_with(&prefix)
-                            || n.contains(&id_pattern)
-                            || n.contains(&live_pattern)
-                    })
+                    .map(|n| n.starts_with(&prefix) || n.contains(&live_pattern))
                     .unwrap_or(false)
             })
         })
@@ -418,14 +418,13 @@ pub(crate) fn is_grab_part(file_name: &str, stem: &str) -> bool {
     if PART_KINDS.iter().any(|k| remainder.starts_with(k)) {
         return true;
     }
-    // ID-namespaced: {id}. (e.g., "4.mp4.part" for "My Video.4.mp4.part").
-    // The ID prevents collisions between concurrent rows sharing a dest dir.
-    // Legacy: {id}.live. (e.g., "1.live.mp4.part").
+    // Legacy ID-namespaced live: {id}.live. (e.g., "1.live.mp4.part").
+    // The bare {id}. pattern is NOT checked: it false-positives on user files.
     if let Some(dot_pos) = remainder.find('.') {
         let (id_part, rest) = remainder.split_at(dot_pos);
         if !id_part.is_empty()
             && id_part.chars().all(|c| c.is_ascii_digit())
-            && (rest.starts_with(".live.") || rest[1..].find('.').is_some_and(|p| p > 0))
+            && rest.starts_with(".live.")
         {
             return true;
         }
@@ -461,8 +460,21 @@ pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
     // Hidden manifest: `.{id}.manifest.json` (new) and `.grab-{id}-manifest.json` (legacy).
     let hidden_manifest = format!(".{item_id}.manifest.json");
     let legacy_hidden = format!(".grab-{item_id}-manifest.json");
-    // ID-namespaced pattern: .{id}. (e.g., "My Video.4.mp4.part").
-    let id_pattern = format!(".{item_id}.");
+    // Exact staging names from the manifest: never pattern-match user files.
+    // A bystander like `linux-5.4.0.tar.gz` must survive row id 4.
+    let manifest_names: Vec<String> = read_manifest(staging, item_id)
+        .and_then(|m| m.staging_name)
+        .map(|base| {
+            vec![
+                base.clone(),
+                format!("{base}.part"),
+                format!("{base}.ytdl"),
+            ]
+        })
+        .unwrap_or_default();
+    // Legacy live pattern: .{id}.live. (e.g., "v.1.live.mp4.part"). Has the
+    // `.live.` marker, so it cannot hit user files.
+    let live_pattern = format!(".{item_id}.live.");
     for name in dir_file_names(staging) {
         // Delete the hidden manifest directly.
         if name == hidden_manifest || name == legacy_hidden {
@@ -473,8 +485,13 @@ pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
         if name.starts_with("final.") {
             continue;
         }
-        // New pattern: .{id}. in the filename.
-        if name.contains(&id_pattern) {
+        // Exact manifest names only: no substring matching.
+        if manifest_names.iter().any(|n| n == &name) {
+            let _ = std::fs::remove_file(staging.join(&name));
+            continue;
+        }
+        // Legacy live pattern (has .live. marker, safe).
+        if name.contains(&live_pattern) {
             let _ = std::fs::remove_file(staging.join(&name));
             continue;
         }

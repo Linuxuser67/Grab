@@ -444,7 +444,15 @@ async fn attempt_once(
             ));
         }
         send_last_modified(&ctx.tx, &resp);
-        send_validator(&ctx.tx, &resp);
+        // Capture validator once per generation: if we sent If-Range and got
+        // 206, the validator already matches — don't overwrite it (a mid-download
+        // change would otherwise poison the stored value). On 200 (fresh or
+        // If-Range mismatch), capture the new generation's validator.
+        let if_range_matched =
+            ctx.if_range.is_some() && status == reqwest::StatusCode::PARTIAL_CONTENT;
+        if !if_range_matched {
+            send_validator(&ctx.tx, &resp);
+        }
         let partial = start > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
         if claim && start > 0 && !partial {
             return Err(DEST_EXISTS.to_string());
@@ -751,7 +759,11 @@ pub(crate) async fn fetch_piece(
             }
         };
         send_last_modified(&ctx.tx, &resp);
-        send_validator(&ctx.tx, &resp);
+        // Capture once: if we sent If-Range and got 206, the validator is
+        // already known — don't let a mid-download change poison it.
+        if ctx.if_range.is_none() {
+            send_validator(&ctx.tx, &resp);
+        }
         if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
             let code = resp.status().as_u16();
             // If-Range mismatch: the object changed → fail terminally, never retry a dead version.

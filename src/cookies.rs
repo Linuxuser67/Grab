@@ -62,11 +62,16 @@ fn parse_netscape_line(line: &str) -> Option<(String, String)> {
         ""
     };
     // Expiry 0 = session cookie; otherwise format as an HTTP date.
+    // Clamp to year 9999: httpdate panics at/past it, and huge u64s overflow UNIX_EPOCH.
+    const MAX_TS: u64 = 253_402_300_799; // 9999-12-31 23:59:59 UTC
     let expires_attr = match expiry.parse::<u64>() {
         Ok(0) | Err(_) => String::new(),
         Ok(ts) => {
-            let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(ts);
-            format!("; Expires={}", httpdate::fmt_http_date(t))
+            let ts = ts.min(MAX_TS);
+            match std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(ts)) {
+                Some(t) => format!("; Expires={}", httpdate::fmt_http_date(t)),
+                None => String::new(),
+            }
         }
     };
     Some((
@@ -98,18 +103,26 @@ pub(crate) fn jar_from_export(text: &str) -> (Arc<reqwest::cookie::Jar>, usize) 
 }
 
 /// Secure directory for cookie dumps: `$XDG_RUNTIME_DIR/grab-cookies` (0700,
-/// owned by us) instead of the shared `/tmp/grab-video`. Falls back to the
-/// legacy path if `XDG_RUNTIME_DIR` is unset. Verifies uid ownership so a
-/// pre-created directory by another user is rejected.
+/// owned by us) instead of the shared `/tmp/grab-video`. Returns None (fail
+/// closed) if `XDG_RUNTIME_DIR` is unset or empty: the `/tmp` fallback is
+/// TOCTOU-able via a pre-created parent, so an insecure dir is worse than
+/// no cookie export. Verifies uid ownership so a pre-created directory by
+/// another user is rejected.
 fn cookie_staging_dir() -> Option<PathBuf> {
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| crate::video::staging_root());
+    let base = match std::env::var("XDG_RUNTIME_DIR") {
+        Ok(s) if !s.is_empty() => PathBuf::from(s),
+        _ => {
+            tracing::debug!("XDG_RUNTIME_DIR unset or empty: skipping cookie export");
+            return None;
+        }
+    };
     let dir = base.join("grab-cookies");
-    // Create 0700 if missing; atomic create_dir avoids symlink races.
-    // Use create_dir_all: the XDG_RUNTIME_DIR fallback (staging_root) may not exist.
-    match std::fs::create_dir_all(&dir) {
+    // Create 0700 atomically: DirBuilder::mode sets permissions at creation,
+    // avoiding a chmod race window.
+    use std::os::unix::fs::DirBuilderExt as _;
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
         Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => {
             tracing::debug!(error = %e, "cookie staging dir create failed");
             return None;
@@ -126,6 +139,9 @@ fn cookie_staging_dir() -> Option<PathBuf> {
             tracing::warn!("cookie staging dir is a symlink; refusing");
             return None;
         }
+        // SAFETY: getuid() is async-signal-safe and has no preconditions;
+        // it cannot fail and does not touch memory. The unsafe marker is
+        // a libc-crate API artifact (newer versions mark all FFI unsafe).
         let uid = unsafe { libc::getuid() };
         if md.uid() != uid {
             tracing::warn!("cookie staging dir owned by another user; refusing");
@@ -144,18 +160,29 @@ fn cookie_staging_dir() -> Option<PathBuf> {
 /// Sweep stale cookie dumps left by crashes: runs at startup before any
 /// worker starts, so nothing live is removed.
 pub(crate) fn sweep_cookie_staging() {
-    let Some(dir) = cookie_staging_dir() else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return;
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let name = entry.file_name();
-        let name = name.to_str().unwrap_or("");
-        // Only our cookie dumps; never touch anything else.
-        if name.starts_with("grab-cookies-") && name.ends_with(".txt") {
-            let _ = std::fs::remove_file(entry.path());
+    // Clean the current dir (if XDG_RUNTIME_DIR is available).
+    if let Some(dir) = cookie_staging_dir()
+        && let Ok(entries) = std::fs::read_dir(&dir)
+    {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name();
+            let name = name.to_str().unwrap_or("");
+            // Only our cookie dumps; never touch anything else.
+            if name.starts_with("grab-cookies-") && name.ends_with(".txt") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    // Clean legacy dumps from older builds in /tmp/grab-video.
+    // These are stale plaintext cookie files; remove them unconditionally.
+    let legacy_dir = crate::video::staging_root();
+    if let Ok(entries) = std::fs::read_dir(&legacy_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name();
+            let name = name.to_str().unwrap_or("");
+            if name.starts_with("grab-cookies-") && name.ends_with(".txt") {
+                let _ = std::fs::remove_file(entry.path());
+            }
         }
     }
 }

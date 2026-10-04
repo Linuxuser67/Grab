@@ -1060,6 +1060,8 @@ pub(crate) async fn run_live_ytdlp(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "part".to_string());
         // Find an unused name: title.ext, title-1.ext, title-2.ext, ...
+        // Atomically claim it with create_new on the .part file: exists()-then-use
+        // races, but create_new fails if another process claimed it first.
         let mut n = 0;
         loop {
             let name = if n == 0 {
@@ -1068,15 +1070,29 @@ pub(crate) async fn run_live_ytdlp(
                 format!("{stem}-{n}.{ext}")
             };
             let path = dir.join(&name);
-            // Never use the final dest as staging; also check .part for crash leftovers.
-            let part = dir.join(format!("{name}.part"));
-            if path != job.dest && !path.exists() && !part.exists() {
-                break (path, name);
+            // Never use the final dest as staging.
+            if path == job.dest {
+                n += 1;
+                if n > 1000 {
+                    return Err(VideoError::staging("too many conflicting files"));
+                }
+                continue;
             }
-            n += 1;
-            // Sanity bound: don't loop forever on a pathological dir.
-            if n > 1000 {
-                return Err(VideoError::staging("too many conflicting files"));
+            let part = dir.join(format!("{name}.part"));
+            // Claim the .part name atomically; the base name is derived from it.
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&part)
+            {
+                Ok(_) => break (path, name),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    n += 1;
+                    if n > 1000 {
+                        return Err(VideoError::staging("too many conflicting files"));
+                    }
+                }
+                Err(e) => return Err(VideoError::staging(format!("cannot claim staging name: {e}"))),
             }
         }
     };

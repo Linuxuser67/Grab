@@ -545,6 +545,31 @@ pub(crate) fn is_grab_part(file_name: &str, stem: &str) -> bool {
             return true;
         }
     }
+    // Id-in-name scheme: {id}.{ext}[.part|.ytdl] (e.g., "1.mp4.part" for
+    // v.1.mp4.part with stem v). The media-ext requirement keeps user files
+    // like "v.1.backup" from matching.
+    let mut base = remainder;
+    if let Some(s) = base.strip_suffix(".part") {
+        base = s;
+    } else if let Some(s) = base.strip_suffix(".ytdl") {
+        base = s;
+    }
+    // base is now "{id}.{ext}" or "{id}-{n}.{ext}"
+    if let Some(dot) = base.rfind('.') {
+        let ext = &base[dot + 1..];
+        let id_part = &base[..dot];
+        // id_part is "{id}" or "{id}-{n}"
+        let id_str = id_part.split('-').next().unwrap_or("");
+        if !id_str.is_empty()
+            && id_str.chars().all(|c| c.is_ascii_digit())
+            && [
+                "mp4", "webm", "mkv", "m4a", "mp3", "ogg", "wav", "flac", "opus",
+            ]
+            .contains(&ext)
+        {
+            return true;
+        }
+    }
     false
 }
 

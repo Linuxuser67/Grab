@@ -50,6 +50,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.0.1" date="2026-10-03">
+      <description>
+        <ul>
+          <li>Torrent seeding: configurable listen port with UPnP port forwarding (Sharing settings).</li>
+          <li>Live captures use title-based staging names.</li>
+          <li>Video manifests are now hidden files.</li>
+          <li>Bug fixes for live capture cleanup and torrent session handling.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.0.1-beta.4" date="2026-10-03">
       <description>
         <ul>

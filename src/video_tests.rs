@@ -740,6 +740,7 @@ fn test_manifest() -> VideoManifest {
         audio_ext: "webm".into(),
         final_bytes: None,
         staging_name: None,
+        ytdlp_output_name: None,
     }
 }
 
@@ -3053,6 +3054,26 @@ fn ffmpeg_version_token_extracts_third_token() {
 }
 
 #[test]
+fn ffmpeg_version_token_takes_word_after_version() {
+    // Distro builds: version token has suffix, must not match later tokens.
+    assert_eq!(
+        ffmpeg_version_token("ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023"),
+        Some("6.1.1-3ubuntu5")
+    );
+    // Git builds: "N-..." doesn't parse, must not fall through to "2000-2025".
+    assert_eq!(
+        ffmpeg_version_token("ffmpeg version N-118345-gabc123 Copyright (c) 2000-2025"),
+        Some("N-118345-gabc123")
+    );
+    assert_eq!(
+        ffmpeg_version_token("ffmpeg version 7.1.2 Copyright (c) 2000-2024"),
+        Some("7.1.2")
+    );
+    // No "version" word at all.
+    assert_eq!(ffmpeg_version_token("ffmpeg 7.1.2"), None);
+}
+
+#[test]
 fn ytdlp_identity_args_pins_quickjs_for_youtube_with_cookies() {
     let args = ytdlp_identity_args("firefox", None, "https://www.youtube.com/watch?v=abc");
     let pos = args
@@ -4778,6 +4799,7 @@ fn sweep_never_touches_bystander_with_id_like_name() {
         audio_ext: String::new(),
         final_bytes: None,
         staging_name: Some("My Video.mp4".into()),
+        ytdlp_output_name: None,
     };
     let manifest_path = staging.join(".4.manifest.json");
     std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();

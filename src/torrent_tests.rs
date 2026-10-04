@@ -563,3 +563,15 @@ fn clamp_listen_port_rejects_out_of_range() {
     assert!(clamp_listen_port(70000).is_err());
     assert!(clamp_listen_port(-1).is_err());
 }
+
+#[test]
+fn https_proxy_uses_https_scheme() {
+    // The https proxy type must build an https:// URL (TLS to the proxy itself),
+    // not http://.
+    let https = manual_proxy("https").expect("proxied");
+    assert!(
+        https.cli_url.starts_with("https://"),
+        "https proxy URL must use https scheme, got: {}",
+        https.cli_url
+    );
+}

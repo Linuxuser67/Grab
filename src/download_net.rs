@@ -315,3 +315,53 @@ pub(crate) fn client_builder() -> reqwest::ClientBuilder {
             }
         }))
 }
+
+/// Validate a directory is safe for sensitive use: not a symlink, owned by us,
+/// not group/world-writable. Shared by cookie staging and tool exec dirs.
+#[cfg(unix)]
+pub(crate) fn validate_secure_dir(dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let Ok(md) = std::fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if md.file_type().is_symlink() {
+        tracing::warn!("secure dir is a symlink; refusing");
+        return false;
+    }
+    // SAFETY: getuid() is async-signal-safe; the unsafe marker is a libc-crate artifact.
+    let uid = unsafe { libc::getuid() };
+    if md.uid() != uid {
+        tracing::warn!("secure dir owned by another user; refusing");
+        return false;
+    }
+    if md.permissions().mode() & 0o022 != 0 {
+        tracing::warn!("secure dir is group/world-writable; refusing");
+        return false;
+    }
+    true
+}
+
+#[cfg(not(unix))]
+pub(crate) fn validate_secure_dir(_dir: &std::path::Path) -> bool {
+    true
+}
+
+/// Client builder for tool installs (ffmpeg, quickjs, yt-dlp): honors env
+/// proxies, unlike `client_builder()`. Tool installs are explicit user actions;
+/// a user behind a corporate proxy needs the env proxy to reach GitHub.
+pub(crate) fn tool_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .referer(false)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let downgrade = attempt
+                .previous()
+                .last()
+                .is_some_and(|u| u.scheme() == "https")
+                && attempt.url().scheme() == "http";
+            if attempt.previous().len() > 5 || downgrade {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+}

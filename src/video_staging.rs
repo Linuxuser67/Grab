@@ -501,6 +501,10 @@ pub(crate) struct VideoManifest {
     /// Exact name for cleanup; the id is also baked into the filename itself
     /// so the file stays attributable if the manifest is lost.
     pub(crate) staging_name: Option<String>,
+    /// The yt-dlp `-o` output basename chosen on the first attempt (e.g., "My Video.mp4").
+    /// Titles can change between attempts (live streams, edited titles); reusing the
+    /// recorded name keeps the `.part` file stable so resume works.
+    pub(crate) ytdlp_output_name: Option<String>,
 }
 
 impl VideoManifest {
@@ -883,13 +887,19 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
 /// non-hidden file that isn't a known temp/fragment type. The staging dir is
 /// ours, so this is safe. Legacy `grab-media.`/`media.` prefixes still match.
 pub(crate) fn unified_candidate(file_name: &str) -> bool {
-    let ext = Path::new(file_name).extension().and_then(|e| e.to_str());
+    // Allowlist of media extensions yt-dlp produces: safer than a denylist,
+    // which would accept any unknown extension (e.g., a future temp format).
+    const MEDIA_EXTS: &[&str] = &[
+        "mp4", "mkv", "webm", "avi", "mov", "flv", "wmv", "m4v", "mpg", "mpeg", "3gp", "ogv",
+        "mp3", "m4a", "opus", "ogg", "oga", "wav", "flac", "aac", "wma", "aiff",
+    ];
+    let ext = Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
     !file_name.starts_with('.')
         && !is_ytdlp_fragment(file_name)
-        && !matches!(
-            ext,
-            Some("part" | "srt" | "ytdl" | "temp" | "tmp" | "frag" | "json" | "manifest")
-        )
+        && ext.as_deref().is_some_and(|e| MEDIA_EXTS.contains(&e))
 }
 
 /// yt-dlp's own merge temp names (`<stem>.f<id>.<ext>`): never the claimed output. Pure.

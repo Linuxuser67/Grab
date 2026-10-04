@@ -126,7 +126,7 @@ fn cookie_staging_dir() -> Option<PathBuf> {
             tracing::warn!("cookie staging dir is a symlink; refusing");
             return None;
         }
-        let uid = libc::getuid();
+        let uid = unsafe { libc::getuid() };
         if md.uid() != uid {
             tracing::warn!("cookie staging dir owned by another user; refusing");
             return None;

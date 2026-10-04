@@ -56,6 +56,8 @@ fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus)
         video_source: None,
         started: None,
         scheduled_at: None,
+        etag: None,
+        last_modified: None,
     }
 }
 
@@ -521,6 +523,8 @@ fn overcap_queue_keeps_active_first() {
             video_source: None,
             started: None,
             scheduled_at: None,
+            etag: None,
+            last_modified: None,
         },
         StoredItem {
             id: None,
@@ -535,6 +539,8 @@ fn overcap_queue_keeps_active_first() {
             video_source: None,
             started: None,
             scheduled_at: None,
+            etag: None,
+            last_modified: None,
         },
     ];
     for i in 0..1000 {
@@ -551,6 +557,8 @@ fn overcap_queue_keeps_active_first() {
             video_source: None,
             started: None,
             scheduled_at: None,
+            etag: None,
+            last_modified: None,
         });
     }
     let queue = StoredQueue {
@@ -1093,6 +1101,8 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             video_source: None,
             started: None,
             scheduled_at: None,
+            etag: None,
+            last_modified: None,
         },
         StoredItem {
             id: None,
@@ -1107,6 +1117,8 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             video_source: None,
             started: None,
             scheduled_at: None,
+            etag: None,
+            last_modified: None,
         },
     ];
     std::fs::write(
@@ -1218,6 +1230,8 @@ fn mismatched_video_source_dropped_on_restore() {
             }),
             started: None,
             scheduled_at: None,
+            etag: None,
+            last_modified: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -1267,6 +1281,8 @@ fn done_video_keeps_page_source_on_restore() {
             }),
             started: None,
             scheduled_at: None,
+            etag: None,
+            last_modified: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -2517,6 +2533,8 @@ fn queue_roundtrip_and_mapping() {
                 video_source: None,
                 started: None,
                 scheduled_at: None,
+                etag: None,
+                last_modified: None,
             },
             StoredItem {
                 id: None,
@@ -2531,6 +2549,8 @@ fn queue_roundtrip_and_mapping() {
                 video_source: None,
                 started: None,
                 scheduled_at: None,
+                etag: None,
+                last_modified: None,
             },
         ],
     };
@@ -2685,6 +2705,8 @@ fn batch_restore_hundred_done() {
             video_source: None,
             started: None,
             scheduled_at: None,
+            etag: None,
+            last_modified: None,
         })
         .collect();
     let queue = StoredQueue {
@@ -2894,6 +2916,8 @@ fn restore_preserves_intent() {
         // None: this round-trips a legacy queue file through restore.
         started: None,
         scheduled_at: None,
+        etag: None,
+        last_modified: None,
     })
     .collect();
     let queue = StoredQueue {
@@ -3603,6 +3627,8 @@ fn killed_segmented_resume_starts_over() {
                 video_source: None,
                 started: None,
                 scheduled_at: None,
+                etag: None,
+                last_modified: None,
             }],
         })
         .unwrap(),

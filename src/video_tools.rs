@@ -484,9 +484,14 @@ pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     // yt-dlp's crate installer verifies a digest when present but skips silently
     // if absent (fail-open, unlike our quickjs/ffmpeg paths). Accepted deliberately
     // so yt-dlp tracks upstream, but log it so the gap is visible.
+    // Nightly channel: sites break extractors constantly; nightly has the fix
+    // within a day. yt-dlp's own docs recommend it for regular users.
     tracing::warn!("yt-dlp install: digest verification is best-effort (crate skips if absent)");
-    let handle = crate::runtime::tokio_rt()
-        .spawn(async move { LibraryInstaller::new(dir).install_youtube(None).await });
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        LibraryInstaller::new(dir)
+            .install_youtube_from_repo("yt-dlp", "yt-dlp-nightly-builds", None, None)
+            .await
+    });
     match handle.await {
         Ok(Ok(path)) => Ok(path),
         Ok(Err(e)) => Err(VideoError::install(&e)),
@@ -1342,12 +1347,13 @@ pub(crate) fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
         .into_owned()
 }
 
-/// Latest released yt-dlp tag without downloading anything: one user-initiated
+/// Latest nightly yt-dlp tag without downloading anything: one user-initiated
 /// GitHub API call. `None` on any network/API failure — the row then reports the
 /// check failed instead of prompting.
 pub async fn latest_ytdlp_tag() -> Option<String> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
-        let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new("yt-dlp", "yt-dlp");
+        let fetcher =
+            yt_dlp::client::deps::github::GitHubFetcher::new("yt-dlp", "yt-dlp-nightly-builds");
         fetcher
             .fetch_latest_release(None)
             .await

@@ -4,6 +4,7 @@
 
 use crate::video_tools::VideoError;
 use gettextrs::gettext;
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 use yt_dlp::model::Video;
 
@@ -66,7 +67,8 @@ pub fn drive_direct_url(url: &str) -> Option<String> {
 }
 
 /// Unix timestamp now, seconds — the probe clock for `is_expired`.
-#[allow(dead_code)]
+/// Test-only: no production caller yet (`VideoInfo.expires_at` has no reader).
+#[cfg(test)]
 pub fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -76,7 +78,8 @@ pub fn now_unix() -> i64 {
 
 /// Whether a resolved media URL is no longer usable. `None` ("not resolved")
 /// counts as expired so restores always re-extract until a fresh URL is stored.
-#[allow(dead_code)]
+/// Test-only: no production caller yet.
+#[cfg(test)]
 pub fn is_expired(expires_at: Option<i64>) -> bool {
     match expires_at {
         None => true,

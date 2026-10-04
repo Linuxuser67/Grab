@@ -105,9 +105,15 @@ fn fold_ascii_part(part: &str) -> String {
             out.push('_');
         }
     }
-    let mut collapsed = String::with_capacity(out.len());
+    collapse_underscores(&out).trim_matches('_').to_string()
+}
+
+/// Collapse runs of `_` into one. Shared by `fold_ascii_part` and
+/// `sanitize_folder_name`; each applies its own edge trim afterward.
+fn collapse_underscores(s: &str) -> String {
+    let mut collapsed = String::with_capacity(s.len());
     let mut prev_underscore = false;
-    for c in out.chars() {
+    for c in s.chars() {
         if c == '_' {
             if prev_underscore {
                 continue;
@@ -118,7 +124,7 @@ fn fold_ascii_part(part: &str) -> String {
         }
         collapsed.push(c);
     }
-    collapsed.trim_matches('_').to_string()
+    collapsed
 }
 
 /// Append ` (n)` before extension until `taken` is false, e.g. `f.iso` taken returns `f (1).iso`.
@@ -175,19 +181,7 @@ pub(crate) fn sanitize_folder_name(title: &str) -> String {
         }
     }
     // Collapse runs and trim edges, mirroring the ASCII fold's tidying.
-    let mut collapsed = String::with_capacity(out.len());
-    let mut prev_underscore = false;
-    for c in out.chars() {
-        if c == '_' {
-            if prev_underscore {
-                continue;
-            }
-            prev_underscore = true;
-        } else {
-            prev_underscore = false;
-        }
-        collapsed.push(c);
-    }
+    let collapsed = collapse_underscores(&out);
     let trimmed = collapsed.trim_matches(|c| c == '_' || c == ' ' || c == '.');
     if trimmed.is_empty() {
         "collection".to_string()

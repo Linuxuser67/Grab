@@ -144,7 +144,8 @@ fn cookie_staging_dir() -> Option<PathBuf> {
         if !crate::download_net::validate_secure_dir(&dir) {
             return None;
         }
-        // Tighten to 0700 if it's looser (XDG_RUNTIME_DIR is 0700, but be explicit).
+        // Group/world-writable dirs were refused above; this tightens a dir that is
+        // merely readable by others (e.g. 0755) down to 0700.
         use std::os::unix::fs::PermissionsExt as _;
         if let Ok(md) = std::fs::metadata(&dir) {
             let mut perms = md.permissions();

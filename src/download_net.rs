@@ -294,26 +294,31 @@ pub(crate) fn proxied_pool_len() -> usize {
     lock_recover(PROXIED.get_or_init(|| Mutex::new(std::collections::HashMap::new()))).len()
 }
 
+/// Shared redirect policy: bounded hops, no https->http downgrades.
+/// `previous` includes the initial URL, so `> 5` follows exactly 5 redirects
+/// (matches reqwest's `Policy::limited(5)` semantics).
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let downgrade = attempt
+            .previous()
+            .last()
+            .is_some_and(|u| u.scheme() == "https")
+            && attempt.url().scheme() == "http";
+        if attempt.previous().len() > 5 || downgrade {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
 /// Shared builder: bounded hops, no downgrades (see [`http_client`]).
 pub(crate) fn client_builder() -> reqwest::ClientBuilder {
     // Bounded hops; refuse https->http downgrades; no ambient proxy (explicit settings or nothing); no automatic Referer (leaks URLs/tokens).
     reqwest::Client::builder()
         .no_proxy()
         .referer(false)
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            let downgrade = attempt
-                .previous()
-                .last()
-                .is_some_and(|u| u.scheme() == "https")
-                && attempt.url().scheme() == "http";
-            // `previous` includes the initial URL, so `> 5` follows exactly 5 redirects
-            // (matches reqwest's `Policy::limited(5)` semantics).
-            if attempt.previous().len() > 5 || downgrade {
-                attempt.stop()
-            } else {
-                attempt.follow()
-            }
-        }))
+        .redirect(redirect_policy())
 }
 
 /// Validate a directory is safe for sensitive use: not a symlink, owned by us,
@@ -352,16 +357,5 @@ pub(crate) fn validate_secure_dir(_dir: &std::path::Path) -> bool {
 pub(crate) fn tool_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .referer(false)
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            let downgrade = attempt
-                .previous()
-                .last()
-                .is_some_and(|u| u.scheme() == "https")
-                && attempt.url().scheme() == "http";
-            if attempt.previous().len() > 5 || downgrade {
-                attempt.stop()
-            } else {
-                attempt.follow()
-            }
-        }))
+        .redirect(redirect_policy())
 }

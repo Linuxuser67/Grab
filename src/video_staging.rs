@@ -455,14 +455,24 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
         // manifest, no live row, and mtime older than 7 days is abandoned.
         // Trashing frees the ID and clears litter; the user can recover from
         // trash. Recent files are left alone (a crashed download may resume).
-        if let Some(id) = staging_id_from_name(name)
-            && !keep.contains(&id)
-            && !manifest_path(dest_dir, id).exists()
-            && file_is_abandoned(&entry.path())
-        {
+        if should_trash_orphan(name, &entry.path(), keep, dest_dir) {
             let _ = gio::File::for_path(entry.path()).trash(gio::Cancellable::NONE);
         }
     }
+}
+
+/// Whether an id-in-name file should be trashed: no live row, no manifest,
+/// and abandoned (mtime > 7 days). Extracted for testability; the actual
+/// trash call stays in `sweep_dest_staging`.
+fn should_trash_orphan(
+    name: &str,
+    path: &Path,
+    keep: &std::collections::HashSet<u64>,
+    dest_dir: &Path,
+) -> bool {
+    staging_id_from_name(name)
+        .is_some_and(|id| !keep.contains(&id) && !manifest_path(dest_dir, id).exists())
+        && file_is_abandoned(path)
 }
 
 /// Sidecar recording completed parts, so a retry can skip straight to the merge.
@@ -1296,39 +1306,73 @@ mod tests {
     #[test]
     fn orphan_trash_age_gate() {
         // Abandoned id-in-name orphans (no manifest, no live row, mtime > 7 days)
-        // are trashed (recoverable), not permanently deleted. Recent orphans
-        // are left alone (a crashed download may resume).
+        // are trashed (recoverable), not permanently deleted. Recent orphans,
+        // live rows, and manifested ids are left alone.
+        // Tests `should_trash_orphan` directly: gio trash itself is env-dependent
+        // and not asserted here.
         let dir = unique_dir("orphan-trash-age");
         std::fs::create_dir_all(&dir).unwrap();
+        let keep = std::collections::HashSet::new();
 
-        // Old orphan: mtime 8 days ago.
+        // Old orphan: mtime 8 days ago, no manifest, no live row → trash.
         let old = dir.join("Title.11.mp4.part");
         std::fs::write(&old, b"orphan").unwrap();
-        let _ = std::process::Command::new("touch")
+        let touch_ok = std::process::Command::new("touch")
             .arg("-d")
             .arg("8 days ago")
             .arg(&old)
-            .status();
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(
+            touch_ok && file_is_abandoned(&old),
+            "test setup: touch must set mtime to 8 days ago"
+        );
+        assert!(
+            should_trash_orphan("Title.11.mp4.part", &old, &keep, &dir),
+            "abandoned orphan must be trash-eligible"
+        );
 
-        // Recent orphan: fresh mtime.
+        // Recent orphan: fresh mtime → leave alone (may resume).
         let recent = dir.join("Title.12.mp4.part");
         std::fs::write(&recent, b"recent").unwrap();
-
-        let keep = std::collections::HashSet::new();
-        sweep_dest_staging(&dir, &keep);
-
-        // Old orphan is trashed (gone from dir, recoverable via trash).
-        // Note: we don't assert trash contents; gio trash may vary by env.
-        // The key property is the file left the download dir without being
-        // permanently deleted via remove_file.
         assert!(
-            !old.exists(),
-            "abandoned orphan (8 days old) must be trashed"
+            !should_trash_orphan("Title.12.mp4.part", &recent, &keep, &dir),
+            "recent orphan must not be trash-eligible"
         );
+
+        // Live row: in keep → leave alone.
+        let mut keep12 = std::collections::HashSet::new();
+        keep12.insert(12u64);
         assert!(
-            recent.exists(),
-            "recent orphan must survive: may still resume"
+            !should_trash_orphan("Title.12.mp4.part", &old, &keep12, &dir),
+            "live row must not be trash-eligible"
         );
+
+        // Manifest exists → leave alone (may resume via manifest).
+        let manifest_id = 13u64;
+        let manifest_file = dir.join("Title.13.mp4.part");
+        std::fs::write(&manifest_file, b"orphan").unwrap();
+        let _ = std::process::Command::new("touch")
+            .arg("-d")
+            .arg("8 days ago")
+            .arg(&manifest_file)
+            .status();
+        std::fs::write(
+            manifest_path(&dir, manifest_id),
+            br#"{"page_url":"u","quality":"q","video_ext":"mp4","audio_ext":"mp3"}"#,
+        )
+        .unwrap();
+        assert!(
+            !should_trash_orphan("Title.13.mp4.part", &manifest_file, &keep, &dir),
+            "manifested id must not be trash-eligible"
+        );
+
+        // Non-matching file → never trash-eligible.
+        assert!(
+            !should_trash_orphan("user-video.mp4", &old, &keep, &dir),
+            "user file must not be trash-eligible"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

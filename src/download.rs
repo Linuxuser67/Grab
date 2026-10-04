@@ -3,23 +3,14 @@ use crate::file_names::{
     dedupe_filename, filename_from_url, fmt_bytes, name_stem, piece_len, rename_noreplace,
     restrict_filename_ascii, sane_filename, shorten_filename,
 };
-use crate::runtime::{lock_recover, tokio_rt};
+use crate::runtime::tokio_rt;
 use gettextrs::{gettext, ngettext};
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
-
-/// Queue persist writer coordination: the worker thread and the synchronous
-/// shutdown path both call `write_queue_file`, which uses a fixed temp path.
-/// The mutex serializes writers (no interleaved temp file), and the sequence
-/// number drops stale writes (an older queued state must not overwrite a newer
-/// one that already landed).
-static QUEUE_WRITER_SEQ: AtomicU64 = AtomicU64::new(0);
-static QUEUE_WRITER_LAST: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
 
 /// Facade: HTTP fetch engine lives in [`download_fetch`](crate::download_fetch)
 /// now (no re-exports: the manager consumes it here, tests import it directly).
@@ -211,9 +202,16 @@ pub struct DownloadManager {
     /// and sends the text here; a dedicated worker does the file I/O
     /// (temp + sync_all + rename + dir sync) off the UI thread. Bursts
     /// coalesce via drain-to-latest in the worker.
+    /// Queue persist channel: `watch` keeps only the latest value, so rapid
+    /// state changes coalesce to a single write. The tokio task (below) is the
+    /// sole writer, which makes writes ordered by construction.
     /// Tests write synchronously and never use the channel.
     #[cfg_attr(test, allow(dead_code))]
-    persist_tx: std::sync::mpsc::Sender<(u64, String)>,
+    persist_tx: RefCell<Option<tokio::sync::watch::Sender<Option<String>>>>,
+    /// Handle for the queue persist task; awaited on shutdown after the final
+    /// state is sent. Tests never spawn it.
+    #[cfg_attr(test, allow(dead_code))]
+    persist_task: RefCell<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// What a stop means for the worker and the bytes it has written (manager policy; distinct from the worker's `StopIntent`).
@@ -333,6 +331,28 @@ thread_local! {
 impl DownloadManager {
     /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
     pub fn new(store: gio::ListStore, settings: crate::settings::AppSettings) -> Rc<Self> {
+        // Queue persist worker: `watch` keeps only the latest value (coalescing
+        // built in); the task is the sole writer, so writes are ordered.
+        // `changed()` delivers the final value before the closed-channel Err,
+        // so the last persist completes before shutdown awaits the task.
+        #[cfg(not(test))]
+        let (persist_tx, persist_task) = {
+            let (tx, mut rx) = tokio::sync::watch::channel(None::<String>);
+            let task = tokio_rt().spawn(async move {
+                while rx.changed().await.is_ok() {
+                    let Some(text) = rx.borrow_and_update().clone() else {
+                        continue;
+                    };
+                    // File I/O must not block the async runtime.
+                    let _ =
+                        tokio::task::spawn_blocking(move || Self::write_queue_file(&text)).await;
+                }
+            });
+            (Some(tx), Some(task))
+        };
+        #[cfg(test)]
+        let (persist_tx, persist_task) = (None, None);
+
         let this = Rc::new(Self {
             store,
             settings,
@@ -357,37 +377,8 @@ impl DownloadManager {
             draining: Cell::new(false),
             sizing_inflight: Rc::new(Cell::new(0)),
             scheduler_source: RefCell::new(None),
-            persist_tx: {
-                #[cfg(not(test))]
-                {
-                    let (tx, rx) = std::sync::mpsc::channel::<(u64, String)>();
-                    std::thread::Builder::new()
-                        .name("grab-queue-persist".to_string())
-                        .spawn(move || {
-                            // Coalesce bursts: drain to the latest text before each write.
-                            // `recv` returns Err only after the sender is dropped and the
-                            // channel is drained, so all persists complete before exit.
-                            while let Ok((seq, text)) = rx.recv() {
-                                let mut latest = (seq, text);
-                                while let Ok(t) = rx.try_recv() {
-                                    // Keep the highest sequence number (newest state).
-                                    if t.0 > latest.0 {
-                                        latest = t;
-                                    }
-                                }
-                                Self::write_queue_file(latest.0, &latest.1);
-                            }
-                        })
-                        .expect("queue persist thread");
-                    tx
-                }
-                #[cfg(test)]
-                {
-                    // Tests write synchronously via `write_queue_file`; no worker needed.
-                    let (tx, _rx) = std::sync::mpsc::channel::<(u64, String)>();
-                    tx
-                }
-            },
+            persist_tx: RefCell::new(persist_tx),
+            persist_task: RefCell::new(persist_task),
         });
         // Publish the Weak for `wake_queue()`'s `Send` closure (see `MANAGER_WEAK`).
         MANAGER_WEAK.with(|w| *w.borrow_mut() = Some(Rc::downgrade(&this)));
@@ -2545,34 +2536,22 @@ impl DownloadManager {
     }
 
     fn persist_queue(&self) {
-        // File I/O runs on the worker thread. The channel is unbounded; the
-        // drain-to-latest loop in the worker keeps memory in check by collapsing
-        // bursts to a single write.
+        // `watch::send_replace` keeps only the latest value: rapid state changes
+        // coalesce to a single write by the persist task.
         // Tests need determinism: they persist then immediately restore in a
         // new manager, so write synchronously in test builds.
         #[cfg(test)]
-        if let Some((seq, text)) = self.serialize_queue() {
-            Self::write_queue_file(seq, &text);
+        if let Some(text) = self.serialize_queue() {
+            Self::write_queue_file(&text);
         }
         #[cfg(not(test))]
-        if let Some((seq, text)) = self.serialize_queue() {
-            let _ = self.persist_tx.send((seq, text));
+        if let (Some(text), Some(tx)) = (self.serialize_queue(), &*self.persist_tx.borrow()) {
+            tx.send_replace(Some(text));
         }
     }
 
-    /// Synchronous persist for shutdown: the worker thread is detached and
-    /// nothing joins it, so the final persist (truncated bitmaps, paused/stopped
-    /// states) must hit disk before the process exits. Quit is already a
-    /// blocking path, so a synchronous write here is acceptable.
-    fn persist_queue_sync(&self) {
-        if let Some((seq, text)) = self.serialize_queue() {
-            Self::write_queue_file(seq, &text);
-        }
-    }
-
-    /// Serialize the queue to JSON. Returns (sequence, text); the sequence
-    /// orders writes so a stale worker write can't overwrite a newer state.
-    fn serialize_queue(&self) -> Option<(u64, String)> {
+    /// Serialize the queue to JSON. Returns None if batching or on serialize error.
+    fn serialize_queue(&self) -> Option<String> {
         if self.batch.get() > 0 {
             return None;
         }
@@ -2626,48 +2605,30 @@ impl DownloadManager {
                 return None;
             }
         };
-        let seq = QUEUE_WRITER_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-        Some((seq, text))
+        Some(text)
     }
 
-    /// Write the serialized queue: temp file + sync_all + rename + dir sync.
-    /// Serialized by `QUEUE_WRITER_LAST`: stale writes (older sequence than
-    /// what already landed) are dropped, so the worker can't overwrite a newer
-    /// shutdown write.
-    fn write_queue_file(seq: u64, text: &str) {
+    /// Write the serialized queue atomically: GLib creates a unique temp file,
+    /// fsyncs it before the rename (when the destination exists), then renames.
+    /// The persist task is the sole writer, so writes are ordered by construction.
+    /// Runs via `spawn_blocking`, never on the async runtime or the UI thread.
+    fn write_queue_file(text: &str) {
+        let f = gio::File::for_path(Self::queue_file());
+        if let Err(e) = f.replace_contents(
+            text.as_bytes(),
+            None,
+            false,
+            gio::FileCreateFlags::NONE,
+            gio::Cancellable::NONE,
+        ) {
+            tracing::error!("could not persist download queue: {e}");
+            return;
+        }
+        // GLib does not fsync the directory; keep it so the rename is durable.
+        if let Some(parent) = Self::queue_file().parent()
+            && let Ok(dir) = std::fs::File::open(parent)
         {
-            let mut last = lock_recover(&QUEUE_WRITER_LAST);
-            if seq <= *last {
-                return; // Stale: a newer state already landed.
-            }
-            // Hold the lock through the write: prevents interleaving on the
-            // fixed temp path when the worker and shutdown race.
-            let tmp = Self::queue_file().with_extension("json.tmp");
-            let write_tmp = || -> std::io::Result<()> {
-                use std::io::Write;
-                let mut f = std::fs::File::create(&tmp)?;
-                f.write_all(text.as_bytes())?;
-                f.sync_all()?;
-                Ok(())
-            };
-            match write_tmp() {
-                Ok(()) => {
-                    if let Err(e) = std::fs::rename(&tmp, Self::queue_file()) {
-                        tracing::error!("could not replace download queue: {e}");
-                        return;
-                    }
-                    if let Some(parent) = Self::queue_file().parent()
-                        && let Ok(dir) = std::fs::File::open(parent)
-                    {
-                        let _ = dir.sync_all();
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("could not persist download queue: {e}");
-                    return;
-                }
-            }
-            *last = seq;
+            let _ = dir.sync_all();
         }
     }
 
@@ -2954,7 +2915,16 @@ impl DownloadManager {
             .is_ok();
         if !joined {
             tracing::warn!("shutdown: join timed out; persisting without truncating partial files");
-            self.persist_queue_sync();
+            // Send the final state through the watch channel, drop the sender,
+            // then await the persist task: `changed()` delivers the final value
+            // before the closed-channel Err, so the last write lands.
+            if let (Some(text), Some(tx)) = (self.serialize_queue(), &*self.persist_tx.borrow()) {
+                tx.send_replace(Some(text));
+            }
+            drop(self.persist_tx.borrow_mut().take());
+            if let Some(task) = self.persist_task.borrow_mut().take() {
+                let _ = tokio_rt().block_on(task);
+            }
             return;
         }
         let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
@@ -2967,9 +2937,15 @@ impl DownloadManager {
             }
         }
         // Persist BEFORE returning: pump tails exit silently once draining is set, so this is the only persist that matters.
-        // Synchronous: the worker thread is detached and nothing joins it, so
-        // the final state must hit disk before the process exits.
-        self.persist_queue_sync();
+        // Send the final state, drop the sender, await the persist task.
+        // `changed()` delivers the final value before the closed-channel Err.
+        if let (Some(text), Some(tx)) = (self.serialize_queue(), &*self.persist_tx.borrow()) {
+            tx.send_replace(Some(text));
+        }
+        drop(self.persist_tx.borrow_mut().take());
+        if let Some(task) = self.persist_task.borrow_mut().take() {
+            let _ = tokio_rt().block_on(task);
+        }
     }
 }
 

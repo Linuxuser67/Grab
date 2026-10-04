@@ -6639,36 +6639,3 @@ fn old_queue_without_validators_deserializes() {
     );
     assert_eq!(item.url, "http://example.com/old.bin");
 }
-
-#[test]
-fn queue_writer_drops_stale_sequence() {
-    // R3: the worker and the synchronous shutdown path share write_queue_file.
-    // A stale (older sequence) write must not overwrite a newer one.
-    use std::sync::atomic::Ordering;
-    let dir = std::env::temp_dir().join(format!("grab-queue-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("queue.json");
-    // SAFETY: test runs single-threaded (--test-threads=1); no other thread
-    // reads the environment here.
-    unsafe {
-        std::env::set_var("GRAB_QUEUE_FILE", &path);
-    }
-
-    // Fresh sequence numbers: both greater than anything used before.
-    let base = super::QUEUE_WRITER_SEQ.fetch_add(2, Ordering::SeqCst);
-    let old_seq = base + 1;
-    let new_seq = base + 2;
-
-    super::DownloadManager::write_queue_file(new_seq, "new");
-    super::DownloadManager::write_queue_file(old_seq, "old");
-
-    let content = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(content, "new", "stale write must not overwrite newer state");
-
-    // SAFETY: test runs single-threaded (--test-threads=1); no other thread
-    // reads the environment here.
-    unsafe {
-        std::env::remove_var("GRAB_QUEUE_FILE");
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}

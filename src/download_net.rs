@@ -69,6 +69,26 @@ fn ignore_entry_normalized(pattern: &str) -> Option<String> {
     let p = pattern.trim().trim_end_matches('.').to_lowercase();
     let p = p.strip_prefix("*.").unwrap_or(&p);
     let p = p.strip_prefix('.').unwrap_or(p);
+    // Strip a trailing :port (hyper-util matches NoProxy entries against
+    // Uri::host(), which excludes the port — a port-suffixed entry would
+    // never match and the bypass would silently fail). IPv6 literals in
+    // brackets are left intact; bare IPv6 without brackets is ambiguous
+    // and dropped.
+    let p = if let Some(bracketed) = p.strip_prefix('[') {
+        // [::1] or [::1]:8080 → keep the bracketed host, drop the port.
+        let end = bracketed.find(']')?;
+        &p[..end + 2] // include the closing bracket
+    } else if p.matches(':').count() == 1 {
+        // hostname:port or IPv4:port → strip the port.
+        match p.rsplit_once(':') {
+            Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host,
+            _ => p,
+        }
+    } else if p.contains(':') {
+        return None; // bare IPv6 or malformed — out of scope
+    } else {
+        p
+    };
     if p.is_empty() {
         return None;
     }

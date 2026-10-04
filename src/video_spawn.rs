@@ -308,7 +308,7 @@ pub(crate) fn kill_tree(child: &mut tokio::process::Child) {
 
 /// Kills the process group on drop (covers task-abort mid-await, where async cleanup never runs).
 /// Disarm as soon as the child is reaped: a recycled PGID would otherwise SIGKILL an unrelated group.
-/// Runners must disarm in their own wait arm too; the six spawn sites each carry a guard plus a disarm.
+/// Runners must disarm in their own wait arm too; the seven spawn sites each carry a guard plus a disarm.
 pub(crate) struct ProcessGroupGuard {
     pid: Option<libc::pid_t>,
 }

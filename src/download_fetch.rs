@@ -253,9 +253,9 @@ async fn attempt_multi(
     st: &mut SegmentState,
     max_workers: usize,
 ) -> Result<(), AttemptFail> {
-    // Invariant: callers always pass the state's own total. A mismatch would
-    // mean the file changed on server mid-attempt, which the caller checks.
-    debug_assert_eq!(st.total, total);
+    if st.total != total {
+        return Err(AttemptFail::Retryable(gettext("File changed on server")));
+    }
     let missing: Vec<(u64, u64, u64)> = st.missing();
     if missing.is_empty() {
         return Ok(());

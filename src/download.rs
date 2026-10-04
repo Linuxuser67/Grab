@@ -3015,11 +3015,6 @@ impl DownloadManager {
             }
         }
         // Persist BEFORE returning: pump tails exit silently once draining is set, so this is the only persist that matters.
-        // Drain the main loop once: engine messages buffered in the channel at
-        // abort time (e.g., Finished) are processed by the pump, which is a glib
-        // future blocked during the block_on join above. Without this, those
-        // messages land after persist_for_shutdown returns and are lost.
-        while glib::MainContext::default().iteration(false) {}
         self.persist_for_shutdown();
     }
 }

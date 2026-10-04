@@ -483,7 +483,7 @@ pub fn show(
         ))
         .build();
     upnp.set_tooltip_text(Some(&gettext(
-        "Required for incoming connections behind NAT; 1024+ recommended, binds all interfaces",
+        "Lets the router forward the port automatically; without it, incoming connections fail behind NAT",
     )));
     settings
         .bind(crate::settings::key::TORRENT_UPNP, &upnp, "active")

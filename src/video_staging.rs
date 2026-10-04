@@ -531,6 +531,10 @@ pub(crate) fn dest_part_path(dest: &Path, kind: &str, ext: &str) -> PathBuf {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".to_string());
+    // Neutralize `%` for the -o template: a dest stem containing `%(` (from a
+    // title like "100%(title)s") would be interpolated by yt-dlp. Fullwidth
+    // `％` sidesteps escaping (the .part is internal, renamed on completion).
+    let stem = stem.replace('%', "\u{FF05}");
     dir.join(format!("{stem}.{kind}.{ext}"))
 }
 

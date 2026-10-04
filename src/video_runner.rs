@@ -897,6 +897,9 @@ pub(crate) async fn resolve_subtitle_lang(
             return Ok(None);
         }
     };
+    // Process group guard: kills yt-dlp AND its JS-runtime grandchildren on
+    // abort/timeout (child.kill() alone orphans them).
+    let mut group = ProcessGroupGuard::new(&child);
     // Drain stdout concurrently with the wait: the probe's info JSON can
     // exceed the pipe buffer (many subtitle tracks), and a child blocked on
     // a full pipe never exits — waiting first would stall to the timeout and
@@ -928,6 +931,9 @@ pub(crate) async fn resolve_subtitle_lang(
         tracing::warn!("subtitle probe failed; downloading without subtitles");
         return Ok(None);
     };
+    // Child reaped successfully: disarm the group guard (Drop would killpg
+    // an already-reaped PID, risking a recycled PGID).
+    group.disarm();
     // The drain is bounded: the child's stdout can stay open after it exits
     // (a grandchild inheriting the pipe), and an unbounded `drain.await`
     // would stall the download on an otherwise successful probe. 5 s is

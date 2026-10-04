@@ -879,17 +879,24 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
     ResumePlan::Resume
 }
 /// Whether a staging filename may be the unified download's claimed output (never fragments, `.part` shells, sidecars, or metadata).
-/// The template uses `%(title)s`, so there's no fixed prefix. We accept any
-/// non-hidden file that isn't a known temp/fragment type. The staging dir is
-/// ours, so this is safe. Legacy `grab-media.`/`media.` prefixes still match.
+/// The template is named after the row's dest stem, but the staging dir is dedicated
+/// to this download, so any non-hidden media file qualifies (legacy
+/// `grab-media.`/`media.` prefixes still match).
 pub(crate) fn unified_candidate(file_name: &str) -> bool {
-    let ext = Path::new(file_name).extension().and_then(|e| e.to_str());
+    // Allowlist of media extensions yt-dlp produces: safer than a denylist,
+    // which would accept any unknown extension (e.g., a future temp format).
+    const MEDIA_EXTS: &[&str] = &[
+        "mp4", "mkv", "webm", "avi", "mov", "flv", "wmv", "m4v", "mpg", "mpeg", "3gp", "ogv",
+        "mp3", "m4a", "opus", "ogg", "oga", "wav", "flac", "aac", "wma", "aiff", "ts", "mka",
+        "weba", "f4v", "3g2",
+    ];
+    let ext = Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
     !file_name.starts_with('.')
         && !is_ytdlp_fragment(file_name)
-        && !matches!(
-            ext,
-            Some("part" | "srt" | "ytdl" | "temp" | "tmp" | "frag" | "json" | "manifest")
-        )
+        && ext.as_deref().is_some_and(|e| MEDIA_EXTS.contains(&e))
 }
 
 /// yt-dlp's own merge temp names (`<stem>.f<id>.<ext>`): never the claimed output. Pure.

@@ -2,7 +2,7 @@
 //! every spawn. Leaf module: the dialog, prefs and engines consume it through the
 //! `video` facade.
 
-use crate::download_net::client_builder;
+use crate::download_net::tool_client_builder;
 use gettextrs::gettext;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -247,10 +247,12 @@ pub fn user_lib_dir() -> PathBuf {
     match base {
         Some(b) => b.join("grab").join("libs"),
         None => {
-            // Temp fallback: validate before use.
+            // Temp fallback: validate before use, but don't create here —
+            // this is a getter, and the per-PID fallback never persists anyway.
+            // Creation happens at install time.
             let fallback =
                 std::env::temp_dir().join(format!("grab-fallback-data-{}", std::process::id()));
-            if validate_exec_dir(&fallback) {
+            if crate::download_net::validate_secure_dir(&fallback) || !fallback.exists() {
                 fallback.join("grab").join("libs")
             } else {
                 // Validation failed: return nonexistent path.
@@ -260,41 +262,53 @@ pub fn user_lib_dir() -> PathBuf {
     }
 }
 
-/// Validate a directory for executable discovery: must exist (or be creatable),
-/// owned by us, not a symlink, not world-writable.
-#[cfg(unix)]
-fn validate_exec_dir(dir: &std::path::Path) -> bool {
-    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
-    // Create 0700 atomically.
-    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(_) => return false,
+/// Create the library dir for an install. Called at install time (the getter stays
+/// side-effect free). Components are created 0700. The `/tmp` fallback root
+/// (`grab-fallback-data-<pid>`, used only when `XDG_DATA_HOME` and `HOME` are both
+/// unset) is validated after creation: owned by us, not a symlink, not group- or
+/// world-writable, so a pre-planted directory is refused instead of written into.
+pub(crate) async fn ensure_lib_dir(dir: &Path) -> Result<(), VideoError> {
+    let dir = dir.to_path_buf();
+    match tokio::task::spawn_blocking(move || ensure_lib_dir_blocking(&dir)).await {
+        Ok(res) => res.map_err(VideoError::install),
+        Err(e) => Err(VideoError::runtime(&e)),
     }
-    let Ok(md) = std::fs::symlink_metadata(dir) else {
-        return false;
-    };
-    if md.file_type().is_symlink() {
-        tracing::warn!("exec dir is a symlink; refusing");
-        return false;
-    }
-    // SAFETY: getuid() is async-signal-safe; the unsafe marker is a libc-crate artifact.
-    let uid = unsafe { libc::getuid() };
-    if md.uid() != uid {
-        tracing::warn!("exec dir owned by another user; refusing");
-        return false;
-    }
-    if md.permissions().mode() & 0o022 != 0 {
-        tracing::warn!("exec dir is group/world-writable; refusing");
-        return false;
-    }
-    true
 }
 
-#[cfg(not(unix))]
-fn validate_exec_dir(_dir: &std::path::Path) -> bool {
-    // Non-Unix: no uid/symlink semantics to validate; allow.
-    true
+fn ensure_lib_dir_blocking(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let tmp = std::env::temp_dir();
+        if let Ok(rel) = dir.strip_prefix(&tmp)
+            && let Some(first) = rel.components().next()
+            && first
+                .as_os_str()
+                .to_string_lossy()
+                .starts_with("grab-fallback-data-")
+        {
+            let root = tmp.join(first);
+            match std::fs::DirBuilder::new().mode(0o700).create(&root) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+            if !crate::download_net::validate_secure_dir(&root) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "temporary library dir is not private to this user",
+                ));
+            }
+        }
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
 }
 
 /// Bundled-tool dir inside the Flatpak sandbox — Flatpak mounts the app tree at
@@ -481,6 +495,7 @@ pub(crate) const MERGER_FASTSTART_ARGS: &str = "Merger+ffmpeg:-movflags +faststa
 /// Await from a spawned task — never block the GTK thread.
 pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
+    ensure_lib_dir(&dir).await?;
     // yt-dlp's crate installer verifies a digest when present but skips silently
     // if absent (fail-open, unlike our quickjs/ffmpeg paths). Accepted deliberately
     // so yt-dlp tracks upstream, but log it so the gap is visible.
@@ -614,9 +629,7 @@ async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
     }
     let url = quickjs_download_url(&tag)
         .ok_or_else(|| VideoError::install("quickjs has no release for this architecture"))?;
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(VideoError::install)?;
+    ensure_lib_dir(&dir).await?;
     // Download straight to `qjs.part`: a failed download must never leave a
     // half-written `qjs` behind for `find_quickjs` to mistake as installed.
     let dest = dir.join("qjs");
@@ -685,9 +698,9 @@ async fn download_to_file(url: &str, dest: &Path, expected_sha256: &str) -> Resu
     // Refuse a planted symlink before any I/O: it would divert the download
     // (and the later chmod) onto an arbitrary file.
     refuse_symlink_target(dest)?;
-    // Use the hardened client (no ambient proxy, no downgrades, no referer),
-    // not reqwest::get()'s default client.
-    let client = client_builder()
+    // Tool installs use the proxy-honoring client: the user explicitly clicked
+    // install, and a corporate proxy may be the only route to GitHub.
+    let client = tool_client_builder()
         .build()
         .map_err(|e| format!("couldn't build HTTP client: {e}"))?;
     let response = client
@@ -793,9 +806,7 @@ pub(crate) async fn ensure_quickjs(page_url: &str) -> Result<(), VideoError> {
 async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
     use yt_dlp::client::deps::ffmpeg::BuildFetcher;
 
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(VideoError::install)?;
+    ensure_lib_dir(&dir).await?;
     let release = BuildFetcher::new()
         .fetch_binary()
         .await
@@ -972,10 +983,18 @@ pub(crate) fn tool_update_available(installed: &str, tag: &str) -> bool {
     }
 }
 
-/// Version token from an `ffmpeg -version` first line:
-/// `ffmpeg version n9.0.2-static …` → `n9.0.2-static`.
+/// Version token from an `ffmpeg -version` first line: the word after "version".
+/// `ffmpeg version 7.1.2 …` → `7.1.2`. Returns None if there's no "version"
+/// word or nothing follows it. A positional nth(2) would match "2000-2025" in
+/// git builds ("ffmpeg version N-... Copyright (c) 2000-2025") as 2000.
 pub(crate) fn ffmpeg_version_token(first_line: &str) -> Option<&str> {
-    first_line.split_whitespace().nth(2)
+    let mut words = first_line.split_whitespace();
+    for w in words.by_ref() {
+        if w == "version" {
+            return words.next();
+        }
+    }
+    None
 }
 
 /// Real home dir from the passwd database, bypassing sandbox `$HOME` remapping
@@ -1476,8 +1495,10 @@ pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, St
         return Err(VideoError::outdated());
     }
     let ff = ff.ok_or_else(VideoError::missing_tools)?;
-    // ffmpeg version line looks like "ffmpeg version 7.1.2 ...": skip the words.
-    let ff_version = ff.split_whitespace().find_map(parse_dotted_version);
+    // ffmpeg version line looks like "ffmpeg version 7.1.2 ...": take the token
+    // right after "version". A find_map over all tokens would match "2000-2025"
+    // in git builds ("ffmpeg version N-... Copyright (c) 2000-2025") as 2000.
+    let ff_version = ffmpeg_version_token(&ff).and_then(parse_dotted_version);
     let ff_fresh = ff_version.is_some_and(|v| v >= MIN_FFMPEG_VERSION);
     if !ff_fresh {
         return Err(VideoError::outdated());
@@ -1818,5 +1839,34 @@ mod digest_tests {
         }"#,
         );
         assert_eq!(digest_for_asset(&release, "qjs-linux-x86_64"), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lib_dir_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn ensure_lib_dir_refuses_planted_fallback_root() {
+        let root =
+            std::env::temp_dir().join(format!("grab-fallback-data-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).unwrap();
+        // Looks like an attacker pre-created the predictable per-PID root.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let dir = root.join("grab").join("libs");
+        let err = ensure_lib_dir_blocking(&dir).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!dir.exists(), "nothing is created inside a refused root");
+        // A private root is accepted and the tree is created 0700.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        ensure_lib_dir_blocking(&dir).unwrap();
+        assert!(dir.is_dir());
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

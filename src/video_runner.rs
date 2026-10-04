@@ -348,7 +348,9 @@ pub(crate) async fn run_unified_ytdlp(
     // Split rows merge; adopted singles download one file, nothing to merge.
     let merging = video_ext.is_some();
     let merge_ext = video_ext.map(merge_output_ext).unwrap_or_default();
-    let out_template = unified_output_template(staging);
+    // Named after `job.dest`, which is fixed for the row: a title that changes between
+    // attempts cannot rename the `.part` file and break resume.
+    let out_template = unified_output_template(staging, &job.dest);
     // Resolve the subtitle language against what the video actually offers
     // (preferred, else English, else none) before the media argv is built.
     // An abort here stops the download; a probe failure just drops subtitles.
@@ -1175,8 +1177,8 @@ pub(crate) async fn run_live_ytdlp(
         return Err(VideoError::staging(e));
     }
     // Record the chosen staging name in the manifest for crash cleanup.
-    // The id is also baked into the filename itself, so the file stays
-    // attributable even if this manifest is lost or corrupt.
+    // The manifest is the ownership proof: without it, a leftover .part
+    // is never swept (acceptable — the manifest is written before the download).
     let _ = write_manifest(
         staging,
         job.item_id,

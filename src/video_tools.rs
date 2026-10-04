@@ -1684,8 +1684,8 @@ mod digest_tests {
             r#"{
             "tag_name": "v1.0.0",
             "assets": [
-                {"name": "qjs-linux-x86_64", "digest": "sha256:abc123"},
-                {"name": "qjs-linux-aarch64", "digest": "sha256:def456"}
+                {"name": "qjs-linux-x86_64", "browser_download_url": "https://example.com/qjs-x64", "digest": "sha256:abc123"},
+                {"name": "qjs-linux-aarch64", "browser_download_url": "https://example.com/qjs-arm64", "digest": "sha256:def456"}
             ]
         }"#,
         );
@@ -1706,7 +1706,7 @@ mod digest_tests {
             r#"{
             "tag_name": "v1.0.0",
             "assets": [
-                {"name": "qjs-linux-x86_64"}
+                {"name": "qjs-linux-x86_64", "browser_download_url": "https://example.com/qjs-x64"}
             ]
         }"#,
         );
@@ -1726,7 +1726,7 @@ mod digest_tests {
             r#"{
             "tag_name": "v1.0.0",
             "assets": [
-                {"name": "qjs-linux-x86_64", "digest": "md5:abc123"}
+                {"name": "qjs-linux-x86_64", "browser_download_url": "https://example.com/qjs-x64", "digest": "md5:abc123"}
             ]
         }"#,
         );

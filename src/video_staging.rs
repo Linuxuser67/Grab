@@ -1,5 +1,18 @@
 //! Video staging/parts/manifest/resume scratch dirs and templates.
 //! Consumed by the runner/engine through the `video` facade.
+//!
+//! # Ownership invariant
+//!
+//! Filename inference is for reservation/occupancy ONLY. Destructive cleanup
+//! requires manifest ownership (exact-name match). Legacy markers (`.part`,
+//! `.ytdl`, `.live.` sidecars) are the only filename patterns allowed for
+//! deletion, and only for sidecars — never bare media files.
+//!
+//! ```text
+//! Filename inference:  reservation / occupancy only
+//! Manifest ownership:  destructive cleanup
+//! Legacy sidecar:      .part/.ytdl deletion only (explicitly safe)
+//! ```
 
 use crate::video_prefs::subtitle_content_languages;
 use crate::video_tools::VideoError;
@@ -667,8 +680,9 @@ pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
         // NO id-in-name fallback for deletion: without a marker, the pattern
         // is fundamentally ambiguous. Deletion requires the manifest's exact
         // name or a legacy marked pattern.
-        // Legacy live pattern (has .live. marker, safe).
-        if name.contains(&live_pattern) {
+        // Legacy live pattern (has .live. marker): restricted to sidecars —
+        // a user file like "MyRecording.42.live.mp4" must survive.
+        if name.contains(&live_pattern) && (name.ends_with(".part") || name.ends_with(".ytdl")) {
             let _ = std::fs::remove_file(staging.join(&name));
             continue;
         }

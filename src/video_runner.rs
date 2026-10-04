@@ -1043,7 +1043,7 @@ fn claim_staging_name(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".to_string());
-    // The id rides in the on-disk name (`{stem}.grab-{id}.{ext}`): the file
+    // The id rides in the on-disk name (`{stem}.{id}.{ext}`): the file
     // is self-identifying, so a lost/corrupt manifest cannot orphan it into
     // id reuse. Find an unused name and claim it atomically via create_new
     // on the .part file: exists()-then-use races, but create_new fails if
@@ -1052,9 +1052,9 @@ fn claim_staging_name(
     let mut n = 0;
     loop {
         let name = if n == 0 {
-            format!("{stem}.grab-{id}.{ext}")
+            format!("{stem}.{id}.{ext}")
         } else {
-            format!("{stem}.grab-{id}-{n}.{ext}")
+            format!("{stem}.{id}-{n}.{ext}")
         };
         let path = dir.join(&name);
         // Never use the final dest as staging.
@@ -1067,7 +1067,7 @@ fn claim_staging_name(
         }
         // Never claim a base name that already exists: the .part claim
         // is atomic, but the base file belongs to the user. If
-        // Title.grab-1.mp4 exists, skip to Title.grab-1-1.mp4.
+        // Title.1.mp4 exists, skip to Title.1-1.mp4.
         if path.exists() {
             n += 1;
             if n > 1000 {
@@ -1132,7 +1132,7 @@ pub(crate) async fn run_live_ytdlp(
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
     // recording, and the file-growth watcher announces "Recording…" off this path.
-    // The id rides in the name (e.g., "My Video.grab-4.mp4"); on collision,
+    // The id rides in the name (e.g., "My Video.4.mp4"); on collision,
     // -1, -2, ... after the id. The chosen name is stored in the manifest for
     // cleanup. Never equal to job.dest (the final file); staging is always distinct.
     let (out, staging_name) = claim_staging_name(job, ext)?;

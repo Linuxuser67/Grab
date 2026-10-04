@@ -307,8 +307,8 @@ fn recording_watcher_guard_aborts_on_drop() {
     });
 }
 
-/// Staging claim skips existing base files: if the user has Title.grab-1.mp4,
-/// the claim must choose Title.grab-1-1.mp4 and leave Title.grab-1.mp4 byte-identical.
+/// Staging claim skips existing base files: if the user has Title.1.mp4,
+/// the claim must choose Title.1-1.mp4 and leave Title.1.mp4 byte-identical.
 /// Regression test for the live-staging collision data loss.
 #[test]
 fn staging_claim_skips_existing_base_file() {
@@ -316,8 +316,8 @@ fn staging_claim_skips_existing_base_file() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    // User's existing file: Title.grab-1.mp4 with known content.
-    let user_file = dir.join("Title.grab-1.mp4");
+    // User's existing file: Title.1.mp4 with known content.
+    let user_file = dir.join("Title.1.mp4");
     let user_content = b"user's precious video content";
     std::fs::write(&user_file, user_content).unwrap();
 
@@ -345,18 +345,18 @@ fn staging_claim_skips_existing_base_file() {
         proxy: None,
     };
 
-    // Claim a staging name: should skip Title.mp4 (== dest) and Title.grab-1.mp4 (exists),
-    // landing on Title.grab-1-1.mp4.
+    // Claim a staging name: should skip Title.mp4 (== dest) and Title.1.mp4 (exists),
+    // landing on Title.1-1.mp4.
     let (out, staging_name) = claim_staging_name(&job, "mp4").unwrap();
 
-    assert_eq!(staging_name, "Title.grab-1-1.mp4");
-    assert_eq!(out, dir.join("Title.grab-1-1.mp4"));
+    assert_eq!(staging_name, "Title.1-1.mp4");
+    assert_eq!(out, dir.join("Title.1-1.mp4"));
 
     // User's file must be byte-identical.
     assert_eq!(std::fs::read(&user_file).unwrap(), user_content);
 
     // The .part claim file should exist (we claimed it).
-    let part = dir.join("Title.grab-1-1.mp4.part");
+    let part = dir.join("Title.1-1.mp4.part");
     assert!(part.exists());
 
     // Cleanup

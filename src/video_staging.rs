@@ -53,11 +53,13 @@ const MEDIA_EXTS: &[&str] = &[
 ];
 
 /// Whether `file_name` is a Grab staging file for `item_id` under the
-/// id-in-name scheme: `{stem}.grab-{id}.{ext}[.part|.ytdl]` or the deduped
-/// `{stem}.grab-{id}-{n}.{ext}[.part|.ytdl]`.
+/// id-in-name scheme: `{stem}.{id}.{ext}[.part|.ytdl]` or the deduped
+/// `{stem}.{id}-{n}.{ext}[.part|.ytdl]`.
 ///
-/// The `grab-{id}` infix (not a bare `.{id}.`) keeps user files like
-/// `linux-5.4.0.tar.gz` or `my.backup.4.mp4` from ever matching.
+/// The id must be followed by a known media extension (optionally plus a
+/// yt-dlp sidecar suffix). Pattern-based deletion only ever touches
+/// `.part`/`.ytdl` sidecars — never a bare media file — so a user file like
+/// `my.backup.4.mp4` can never be deleted via this matcher.
 pub(crate) fn staging_name_matches_id(file_name: &str, item_id: u64) -> bool {
     // Strip yt-dlp sidecar suffixes first.
     let mut base = file_name;
@@ -74,17 +76,17 @@ pub(crate) fn staging_name_matches_id(file_name: &str, item_id: u64) -> bool {
         return false;
     }
     let stem_with_id = &base[..dot];
-    // Exact: {stem}.grab-{id}
-    let id_tag = format!(".grab-{item_id}");
+    // Exact: {stem}.{id}
+    let id_str = item_id.to_string();
     if stem_with_id
         .rfind('.')
-        .map(|p| &stem_with_id[p..])
-        .is_some_and(|tail| tail == id_tag)
+        .map(|p| &stem_with_id[p + 1..])
+        .is_some_and(|tail| tail == id_str)
     {
         return true;
     }
-    // Deduped: {stem}.grab-{id}-{n}
-    let prefix = format!(".grab-{item_id}-");
+    // Deduped: {stem}.{id}-{n}
+    let prefix = format!(".{id_str}-");
     if let Some(pos) = stem_with_id.rfind(&prefix) {
         let after = &stem_with_id[pos + prefix.len()..];
         return !after.is_empty() && after.chars().all(|c| c.is_ascii_digit());
@@ -106,11 +108,11 @@ pub(crate) fn staging_id_from_name(file_name: &str) -> Option<u64> {
         return None;
     }
     let stem_with_id = &base[..dot];
-    // Find `.grab-{id}` or `.grab-{id}-{n}` from the end.
-    let pos = stem_with_id.rfind(".grab-")?;
-    let after = &stem_with_id[pos + ".grab-".len()..];
-    // after is "{id}" or "{id}-{n}".
-    let id_str = after.split('-').next()?;
+    // The id is the last dot-component (or the part before -{n} in dedup).
+    let id_dot = stem_with_id.rfind('.')?;
+    let tail = &stem_with_id[id_dot + 1..];
+    // tail is "{id}" or "{id}-{n}".
+    let id_str = tail.split('-').next()?;
     let id: u64 = id_str.parse().ok()?;
     // Strict verify: the full match must hold.
     staging_name_matches_id(file_name, id).then_some(id)
@@ -429,7 +431,7 @@ pub(crate) struct VideoManifest {
     /// Final output size once the file has been renamed into place.
     /// Lets a retry after a crash adopt the finished file without any work.
     pub(crate) final_bytes: Option<u64>,
-    /// Staging basename (e.g., "My Video.grab-4.mp4").
+    /// Staging basename (e.g., "My Video.4.mp4").
     /// Exact name for cleanup; the id is also baked into the filename itself
     /// so the file stays attributable if the manifest is lost.
     pub(crate) staging_name: Option<String>,
@@ -1087,15 +1089,15 @@ mod tests {
     #[test]
     fn staging_name_matches_id_accepts_own_files() {
         // Own files under the id-in-name scheme must match.
-        assert!(staging_name_matches_id("Title.grab-4.mp4", 4));
-        assert!(staging_name_matches_id("Title.grab-4.mp4.part", 4));
-        assert!(staging_name_matches_id("Title.grab-4.mp4.ytdl", 4));
-        assert!(staging_name_matches_id("Title.grab-4-1.mp4", 4));
-        assert!(staging_name_matches_id("Title.grab-4-1.mp4.part", 4));
-        assert!(staging_name_matches_id("My Video.grab-42.webm.part", 42));
+        assert!(staging_name_matches_id("Title.4.mp4", 4));
+        assert!(staging_name_matches_id("Title.4.mp4.part", 4));
+        assert!(staging_name_matches_id("Title.4.mp4.ytdl", 4));
+        assert!(staging_name_matches_id("Title.4-1.mp4", 4));
+        assert!(staging_name_matches_id("Title.4-1.mp4.part", 4));
+        assert!(staging_name_matches_id("My Video.42.webm.part", 42));
         // Other ids must not match.
-        assert!(!staging_name_matches_id("Title.grab-4.mp4", 5));
-        assert!(!staging_name_matches_id("Title.grab-4.mp4.part", 44));
+        assert!(!staging_name_matches_id("Title.4.mp4", 5));
+        assert!(!staging_name_matches_id("Title.4.mp4.part", 44));
     }
 
     #[test]
@@ -1112,9 +1114,9 @@ mod tests {
 
     #[test]
     fn staging_id_from_name_roundtrip() {
-        assert_eq!(staging_id_from_name("Title.grab-4.mp4"), Some(4));
-        assert_eq!(staging_id_from_name("Title.grab-4.mp4.part"), Some(4));
-        assert_eq!(staging_id_from_name("Title.grab-42-3.webm.ytdl"), Some(42));
+        assert_eq!(staging_id_from_name("Title.4.mp4"), Some(4));
+        assert_eq!(staging_id_from_name("Title.4.mp4.part"), Some(4));
+        assert_eq!(staging_id_from_name("Title.42-3.webm.ytdl"), Some(42));
         assert_eq!(staging_id_from_name("linux-5.4.0.tar.gz"), None);
         assert_eq!(staging_id_from_name("my.backup.4.mp4"), None);
         assert_eq!(staging_id_from_name("Title.mp4"), None);
@@ -1128,8 +1130,8 @@ mod tests {
         let dir = unique_dir("manifest-loss-occupancy");
         std::fs::create_dir_all(&dir).unwrap();
         // Simulate a crashed capture: id-in-name files, no manifest.
-        std::fs::write(dir.join("Title.grab-7.mp4.part"), b"partial").unwrap();
-        std::fs::write(dir.join("Title.grab-7.mp4.ytdl"), b"state").unwrap();
+        std::fs::write(dir.join("Title.7.mp4.part"), b"partial").unwrap();
+        std::fs::write(dir.join("Title.7.mp4.ytdl"), b"state").unwrap();
         // No manifest written.
 
         assert!(
@@ -1150,24 +1152,24 @@ mod tests {
         // media file (could be a completed recording).
         let dir = unique_dir("manifest-loss-sweep");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("Title.grab-7.mp4.part"), b"partial").unwrap();
-        std::fs::write(dir.join("Title.grab-7.mp4.ytdl"), b"state").unwrap();
-        std::fs::write(dir.join("Title.grab-7.mp4"), b"maybe-a-recording").unwrap();
+        std::fs::write(dir.join("Title.7.mp4.part"), b"partial").unwrap();
+        std::fs::write(dir.join("Title.7.mp4.ytdl"), b"state").unwrap();
+        std::fs::write(dir.join("Title.7.mp4"), b"maybe-a-recording").unwrap();
         std::fs::write(dir.join("user-video.mp4"), b"user file").unwrap();
         // No manifest.
 
         sweep_staging_preserving_recordings(&dir, 7);
 
         assert!(
-            !dir.join("Title.grab-7.mp4.part").exists(),
+            !dir.join("Title.7.mp4.part").exists(),
             "orphan .part must be swept via id-in-name fallback"
         );
         assert!(
-            !dir.join("Title.grab-7.mp4.ytdl").exists(),
+            !dir.join("Title.7.mp4.ytdl").exists(),
             "orphan .ytdl must be swept via id-in-name fallback"
         );
         assert!(
-            dir.join("Title.grab-7.mp4").exists(),
+            dir.join("Title.7.mp4").exists(),
             "bare media file must be preserved without a manifest to confirm it"
         );
         assert!(
@@ -1184,7 +1186,7 @@ mod tests {
         let dir = unique_dir("corrupt-manifest");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".7.manifest.json"), b"not valid json{{").unwrap();
-        std::fs::write(dir.join("Title.grab-7.mp4.part"), b"partial").unwrap();
+        std::fs::write(dir.join("Title.7.mp4.part"), b"partial").unwrap();
 
         assert!(
             read_manifest(&dir, 7).is_none(),
@@ -1204,8 +1206,8 @@ mod tests {
         let dir = unique_dir("two-rows-same-stem");
         std::fs::create_dir_all(&dir).unwrap();
         // Simulate two claimed staging files for different ids, same stem.
-        std::fs::write(dir.join("Title.grab-4.mp4.part"), b"row4").unwrap();
-        std::fs::write(dir.join("Title.grab-9.mp4.part"), b"row9").unwrap();
+        std::fs::write(dir.join("Title.4.mp4.part"), b"row4").unwrap();
+        std::fs::write(dir.join("Title.9.mp4.part"), b"row9").unwrap();
 
         assert!(staging_occupied(&dir, 4), "id 4 occupied");
         assert!(staging_occupied(&dir, 9), "id 9 occupied");
@@ -1213,11 +1215,11 @@ mod tests {
         // Per-id sweep of row 4 must preserve row 9's sibling.
         sweep_staging_preserving_recordings(&dir, 4);
         assert!(
-            !dir.join("Title.grab-4.mp4.part").exists(),
+            !dir.join("Title.4.mp4.part").exists(),
             "row 4's part is swept"
         );
         assert!(
-            dir.join("Title.grab-9.mp4.part").exists(),
+            dir.join("Title.9.mp4.part").exists(),
             "row 9's sibling part must survive row 4's sweep"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1229,19 +1231,19 @@ mod tests {
         // ids with no live row, via the filename itself.
         let dir = unique_dir("orphan-id-in-name");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("Title.grab-11.mp4.part"), b"orphan").unwrap();
-        std::fs::write(dir.join("Title.grab-12.mp4.part"), b"live").unwrap();
+        std::fs::write(dir.join("Title.11.mp4.part"), b"orphan").unwrap();
+        std::fs::write(dir.join("Title.12.mp4.part"), b"live").unwrap();
         let mut keep = std::collections::HashSet::new();
         keep.insert(12u64);
 
         sweep_dest_staging(&dir, &keep);
 
         assert!(
-            !dir.join("Title.grab-11.mp4.part").exists(),
+            !dir.join("Title.11.mp4.part").exists(),
             "orphan id 11's part must be swept"
         );
         assert!(
-            dir.join("Title.grab-12.mp4.part").exists(),
+            dir.join("Title.12.mp4.part").exists(),
             "live id 12's part must survive"
         );
         let _ = std::fs::remove_dir_all(&dir);

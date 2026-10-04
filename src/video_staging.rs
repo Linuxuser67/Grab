@@ -72,7 +72,7 @@ pub(crate) fn staging_name_matches_id(file_name: &str, item_id: u64) -> bool {
     let Some(dot) = base.rfind('.') else {
         return false;
     };
-    if !MEDIA_EXTS.contains(&base[dot + 1..]) {
+    if !MEDIA_EXTS.iter().any(|e| *e == &base[dot + 1..]) {
         return false;
     }
     let stem_with_id = &base[..dot];
@@ -104,7 +104,7 @@ pub(crate) fn staging_id_from_name(file_name: &str) -> Option<u64> {
         base = s;
     }
     let dot = base.rfind('.')?;
-    if !MEDIA_EXTS.contains(&base[dot + 1..]) {
+    if !MEDIA_EXTS.iter().any(|e| *e == &base[dot + 1..]) {
         return None;
     }
     let stem_with_id = &base[..dot];

@@ -1027,6 +1027,77 @@ impl Drop for RecordingWatcherGuard {
 
 /// One live capture through the yt-dlp binary. The MPEG-TS container keeps every kill point playable, so Stop is kill, adopt and remux. Stalled captures yield their partial; an empty capture fails. `timeout` is a stall budget, not a wall clock: any stdout line or output-file growth resets it, so a healthy multi-hour stream never trips it — only silence kills the capture.
 #[allow(clippy::too_many_arguments)]
+/// Claim a staging name for a live capture: `Title.mp4`, `Title-1.mp4`, ...
+/// Returns the base path and the file name. The `.part` file is atomically
+/// claimed via `create_new`; the base name is derived from it.
+/// Skips the final dest and any existing base file (user's files are never
+/// overwritten or deleted by staging selection).
+fn claim_staging_name(
+    job: &crate::video_argv::VideoJob,
+    ext: &str,
+) -> Result<(std::path::PathBuf, String), VideoError> {
+    let dir = job
+        .dest
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""));
+    let stem = job
+        .dest
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".to_string());
+    // Find an unused name: title.ext, title-1.ext, title-2.ext, ...
+    // Atomically claim it with create_new on the .part file: exists()-then-use
+    // races, but create_new fails if another process claimed it first.
+    let mut n = 0;
+    loop {
+        let name = if n == 0 {
+            format!("{stem}.{ext}")
+        } else {
+            format!("{stem}-{n}.{ext}")
+        };
+        let path = dir.join(&name);
+        // Never use the final dest as staging.
+        if path == job.dest {
+            n += 1;
+            if n > 1000 {
+                return Err(VideoError::staging("too many conflicting files"));
+            }
+            continue;
+        }
+        // Never claim a base name that already exists: the .part claim
+        // is atomic, but the base file belongs to the user. If Title-1.mp4
+        // exists, skip to Title-2.mp4.
+        if path.exists() {
+            n += 1;
+            if n > 1000 {
+                return Err(VideoError::staging("too many conflicting files"));
+            }
+            continue;
+        }
+        let part = dir.join(format!("{name}.part"));
+        // Claim the .part name atomically; the base name is derived from it.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part)
+        {
+            Ok(_) => return Ok((path, name)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                n += 1;
+                if n > 1000 {
+                    return Err(VideoError::staging("too many conflicting files"));
+                }
+            }
+            Err(e) => {
+                return Err(VideoError::staging(format!(
+                    "cannot claim staging name: {e}"
+                )));
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_live_ytdlp(
     youtube_bin: &Path,
     ffmpeg_bin: &Path,
@@ -1049,64 +1120,19 @@ pub(crate) async fn run_live_ytdlp(
     // Unix-style: just the title (e.g., "My Video.mp4"). On collision, -1, -2, ...
     // (wget-style dedup). The chosen name is stored in the manifest for cleanup.
     // Never equal to job.dest (the final file); staging is always distinct.
-    let (out, staging_name) = {
-        let dir = job
-            .dest
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(""));
-        let stem = job
-            .dest
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "part".to_string());
-        // Find an unused name: title.ext, title-1.ext, title-2.ext, ...
-        // Atomically claim it with create_new on the .part file: exists()-then-use
-        // races, but create_new fails if another process claimed it first.
-        let mut n = 0;
-        loop {
-            let name = if n == 0 {
-                format!("{stem}.{ext}")
-            } else {
-                format!("{stem}-{n}.{ext}")
-            };
-            let path = dir.join(&name);
-            // Never use the final dest as staging.
-            if path == job.dest {
-                n += 1;
-                if n > 1000 {
-                    return Err(VideoError::staging("too many conflicting files"));
-                }
-                continue;
-            }
-            let part = dir.join(format!("{name}.part"));
-            // Claim the .part name atomically; the base name is derived from it.
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&part)
-            {
-                Ok(_) => break (path, name),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    n += 1;
-                    if n > 1000 {
-                        return Err(VideoError::staging("too many conflicting files"));
-                    }
-                }
-                Err(e) => {
-                    return Err(VideoError::staging(format!(
-                        "cannot claim staging name: {e}"
-                    )));
-                }
-            }
-        }
-    };
+    let (out, staging_name) = claim_staging_name(job, ext)?;
     // Overwrite pre-flight: refuse if dest exists. The manifest proves ownership for future retries,
     // but never delete here — a weak match could delete a completed output from a quality/format-changed retry.
     if job.dest.exists() {
         clean_dest_parts(&job.dest);
-        // Reclaim the stale shell from the crashed run.
-        let _ = std::fs::remove_file(&out);
-        let _ = std::fs::remove_file(out.with_extension(format!("{ext}.part")));
+        // Reclaim only our .part claim from the staging selection above.
+        // Never delete `out` (the base): it was verified non-existent at claim
+        // time, and deleting it could remove a user's file if a race occurred.
+        let part = out
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .join(format!("{staging_name}.part"));
+        let _ = std::fs::remove_file(&part);
         let _ = std::fs::remove_file(out.with_extension(format!("{ext}.ytdl")));
         return Err(VideoError::exists());
     }

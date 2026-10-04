@@ -113,7 +113,14 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 return;
             }
             match probe_ranges(&ctx.client, &ctx.url, ctx.cookies.as_ref(), timeout).await {
-                Ok(total) => {
+                Ok((total, validator)) => {
+                    // The probe captured the session validator before any worker started.
+                    // All piece requests send it as If-Range from the first byte.
+                    // Don't overwrite a resume validator: the stored one is for the
+                    // existing partial file, the probe is for a fresh download.
+                    if ctx.if_range.is_none() {
+                        ctx.if_range = validator;
+                    }
                     if plan_pieces(total, connections).is_empty() {
                         single_loop(&ctx, &mut tries, Some(total), true).await;
                     } else {
@@ -655,12 +662,28 @@ async fn execute_with_timeout(
 }
 
 /// One `Range: bytes=0-0` round trip: proves range support AND yields the total. Any error falls back to single-stream.
+/// Extract the validator from a response: strong ETag preferred, Last-Modified
+/// fallback. Weak ETags are skipped (never valid for If-Range).
+fn response_validator(resp: &reqwest::Response) -> Option<String> {
+    resp.headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .filter(|e| !e.starts_with("W/"))
+        .map(|s| s.to_string())
+        .or_else(|| {
+            resp.headers()
+                .get(reqwest::header::LAST_MODIFIED)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        })
+}
+
 async fn probe_ranges(
     client: &reqwest::Client,
     url: &str,
     cookies: Option<&std::sync::Arc<reqwest::cookie::Jar>>,
     timeout: Duration,
-) -> Result<u64, String> {
+) -> Result<(u64, Option<String>), String> {
     let req = stamp_request(
         client.get(url).header("Range", "bytes=0-0"),
         DEFAULT_USER_AGENT,
@@ -675,10 +698,14 @@ async fn probe_ranges(
         .headers()
         .get(reqwest::header::CONTENT_RANGE)
         .and_then(|v| v.to_str().ok());
-    parse_content_range(value.unwrap_or_default())
+    let total = parse_content_range(value.unwrap_or_default())
         .filter(|(s, _, _)| *s == 0)
         .map(|(_, _, t)| t)
-        .ok_or_else(|| gettext("Bad Content-Range"))
+        .ok_or_else(|| gettext("Bad Content-Range"))?;
+    // Capture the validator from the probe: this becomes the session validator
+    // for all piece workers.
+    let validator = response_validator(&resp);
+    Ok((total, validator))
 }
 
 /// Parse `Content-Range: bytes <start>-<end>/<total>` (a wrong range pins all chunks to one file version).
@@ -776,6 +803,17 @@ pub(crate) async fn fetch_piece(
             }
             last_err = Retryable(format!("Range rejected: HTTP {code}"));
             continue;
+        }
+        // 206 with a different validator than our session: the object changed
+        // mid-download but the server didn't honor If-Range (returned 206
+        // anyway). Treat as Changed to avoid splicing versions.
+        if let Some(session_validator) = ctx.if_range.as_ref() {
+            let mismatch = response_validator(&resp)
+                .map(|rv| rv != *session_validator)
+                .unwrap_or(false);
+            if mismatch {
+                return Err(Changed(gettext("File changed on server")));
+            }
         }
         let cr = resp
             .headers()

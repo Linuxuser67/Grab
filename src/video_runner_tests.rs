@@ -306,3 +306,59 @@ fn recording_watcher_guard_aborts_on_drop() {
         );
     });
 }
+
+/// Staging claim skips existing base files: if the user has Title-1.mp4,
+/// the claim must choose Title-2.mp4 and leave Title-1.mp4 byte-identical.
+/// Regression test for the live-staging collision data loss.
+#[test]
+fn staging_claim_skips_existing_base_file() {
+    let dir = std::env::temp_dir().join(format!("grab-staging-claim-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // User's existing file: Title-1.mp4 with known content.
+    let user_file = dir.join("Title-1.mp4");
+    let user_content = b"user's precious video content";
+    std::fs::write(&user_file, user_content).unwrap();
+
+    // Simulate a VideoJob with dest Title.mp4 in the same dir.
+    let job = VideoJob {
+        item_id: 1,
+        page_url: "https://example.com/v".into(),
+        playlist_item_id: None,
+        quality: "1080p".into(),
+        audio_only: false,
+        dest: dir.join("Title.mp4"),
+        speed_limit: None,
+        keep_server_date: false,
+        video_format_id: None,
+        is_live: false,
+        live_from_start: false,
+        newest_codecs: true,
+        cookies_browser: "none".into(),
+        subtitles: None,
+        embed_subs: false,
+        sponsorblock_remove: false,
+        sponsorblock_mark: false,
+        remux_video: None,
+        embed_chapters: false,
+        proxy: None,
+    };
+
+    // Claim a staging name: should skip Title.mp4 (== dest) and Title-1.mp4 (exists),
+    // landing on Title-2.mp4.
+    let (out, staging_name) = claim_staging_name(&job, "mp4").unwrap();
+
+    assert_eq!(staging_name, "Title-2.mp4");
+    assert_eq!(out, dir.join("Title-2.mp4"));
+
+    // User's file must be byte-identical.
+    assert_eq!(std::fs::read(&user_file).unwrap(), user_content);
+
+    // The .part claim file should exist (we claimed it).
+    let part = dir.join("Title-2.mp4.part");
+    assert!(part.exists());
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&dir);
+}

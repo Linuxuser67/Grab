@@ -1415,8 +1415,12 @@ impl DownloadManager {
                     }
                     EngineMsg::FailedVersion(e) => {
                         // Server bytes changed mid-download: the resume bitmap describes a dead version, so drop it and re-probe fresh.
+                        // Clear the validator too: retrying with the dead ETag/Last-Modified would send a stale If-Range,
+                        // get 200 on every piece, and fail again permanently.
                         this.segment_state.borrow_mut().remove(&id);
                         this.pending_names.borrow_mut().remove(&id);
+                        item.set_etag(String::new());
+                        item.set_last_modified(String::new());
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {

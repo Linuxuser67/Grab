@@ -489,6 +489,19 @@ async fn attempt_once(
         if claim && start > 0 && !partial {
             return Err(DEST_EXISTS.to_string());
         }
+        // A 206 must carry a Content-Range starting at our offset: a proxy or
+        // server answering for the wrong offset would otherwise be appended at
+        // the wrong position, silently corrupting the file. The segmented path
+        // (`fetch_piece`) already validates this; match it here.
+        if partial {
+            let cr = resp
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok());
+            if !accepts_content_range(cr, start, expected_total) {
+                return Err(gettext("Server returned an unexpected range"));
+            }
+        }
         let total = response_total(
             resp.content_length(),
             resp.headers()
@@ -787,6 +800,19 @@ pub(crate) fn rejects_unexpected_restart(
     content_length: Option<u64>,
 ) -> bool {
     !partial && start > 0 && matches!((expected, content_length), (Some(t), Some(l)) if l != t)
+}
+
+/// Whether a 206 response's Content-Range is acceptable: must start at our
+/// offset and (if we know it) match the expected total. A missing, unparseable,
+/// or mismatched range is rejected — appending it would silently corrupt the file.
+pub(crate) fn accepts_content_range(
+    content_range: Option<&str>,
+    start: u64,
+    expected_total: Option<u64>,
+) -> bool {
+    content_range
+        .and_then(parse_content_range)
+        .is_some_and(|(s, _, t)| s == start && expected_total.is_none_or(|e| e == t))
 }
 
 /// Why a piece or segmented attempt failed (throttled = downgrade to single-stream; changed = fail terminally, never retry).

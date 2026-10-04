@@ -1,6 +1,6 @@
 use super::*;
 use crate::download_fetch::{
-    AttemptFail, FetchCtx, StartMode, backoff_delay, fetch_piece,
+    AttemptFail, FetchCtx, StartMode, accepts_content_range, backoff_delay, fetch_piece,
     filename_from_content_disposition, has_holes, parse_content_range, rejects_unexpected_restart,
     response_total, run_download, stamp_request, truncate_to_prefix,
 };
@@ -374,6 +374,33 @@ fn rejects_size_mismatched_restarts() {
     assert!(!rejects_unexpected_restart(true, 40, Some(100), Some(60)));
     assert!(!rejects_unexpected_restart(false, 40, None, Some(12)));
     assert!(!rejects_unexpected_restart(false, 40, Some(100), None));
+}
+
+#[test]
+fn accepts_content_range_validates_206_start() {
+    // Correct start and total: accept.
+    assert!(accepts_content_range(
+        Some("bytes 40-99/100"),
+        40,
+        Some(100)
+    ));
+    // Correct start, no expected total: accept.
+    assert!(accepts_content_range(Some("bytes 40-99/100"), 40, None));
+    // Wrong start (the corruption case): reject, even with Content-Length present.
+    assert!(!accepts_content_range(
+        Some("bytes 0-59/100"),
+        40,
+        Some(100)
+    ));
+    // Wrong total: reject.
+    assert!(!accepts_content_range(
+        Some("bytes 40-99/200"),
+        40,
+        Some(100)
+    ));
+    // Missing or unparseable: reject (206 without valid Content-Range is non-compliant).
+    assert!(!accepts_content_range(None, 40, Some(100)));
+    assert!(!accepts_content_range(Some("garbage"), 40, Some(100)));
 }
 
 #[test]

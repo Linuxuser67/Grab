@@ -360,6 +360,13 @@ pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
         tokio::spawn(warm_impersonation_cache(youtube_bin.to_path_buf()));
         false
     } else {
+        // Blocking 15s probe: must never run on the GTK thread. Debug-guard
+        // so a future caller moving this onto the UI thread fails loudly in
+        // development instead of hanging the UI in production.
+        debug_assert!(
+            !glib::MainContext::default().is_owner(),
+            "ytdlp impersonation probe must not block the GTK thread"
+        );
         let supported = probe_impersonate_support(youtube_bin);
         if let Ok(mut guard) = cache.lock() {
             guard.insert(youtube_bin.to_path_buf(), supported);
@@ -905,6 +912,8 @@ fn extract_entries(
 /// Minimum accepted yt-dlp version by release date. Older binaries predate the
 /// JS-challenge era and fail in ways that look like broken pages.
 pub const MIN_YTDLP_VERSION: [u32; 3] = [2026, 1, 1];
+/// Minimum ffmpeg: 7.0 (2024). Older releases lack codec/API coverage Grab relies on.
+pub const MIN_FFMPEG_VERSION: [u32; 3] = [7, 0, 0];
 
 /// Parse a `yt-dlp --version` first line into comparable parts; anything else
 /// (nightlies, forks) is unverifiable.
@@ -1461,6 +1470,12 @@ pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, St
         return Err(VideoError::outdated());
     }
     let ff = ff.ok_or_else(VideoError::missing_tools)?;
+    // ffmpeg version line looks like "ffmpeg version 7.1.2 ...": skip the words.
+    let ff_version = ff.split_whitespace().find_map(parse_dotted_version);
+    let ff_fresh = ff_version.is_some_and(|v| v >= MIN_FFMPEG_VERSION);
+    if !ff_fresh {
+        return Err(VideoError::outdated());
+    }
     Ok((yt, ff))
 }
 

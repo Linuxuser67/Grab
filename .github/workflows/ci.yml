@@ -71,7 +71,9 @@ jobs:
           persist-credentials: false
       - name: Install sentrux
         run: |
+          # Pinned hash: a swapped release asset fails here instead of running unverified.
           curl -sSL --fail https://github.com/sentrux/sentrux/releases/download/v0.5.7/sentrux-linux-x86_64 -o /usr/local/bin/sentrux
+          echo "3237f80fe20d54aad4deefa8a143f0d60543bb5d2d6ad891eb42432f155725a6  /usr/local/bin/sentrux" | sha256sum -c -
           chmod +x /usr/local/bin/sentrux
       - run: sentrux check
   # Guards the offline Flatpak build: a Cargo.lock stale against

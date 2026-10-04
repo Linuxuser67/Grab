@@ -413,6 +413,9 @@ pub(crate) async fn join_drain<T>(task: tokio::task::JoinHandle<T>) -> Option<T>
 /// The finished file of one yt-dlp attempt: the `after_move` path when trustworthy, else the largest non-temp file.
 pub(crate) fn discover_ytdlp_output(dest: &Path, after_move: Option<&str>) -> Option<PathBuf> {
     let dir = dest.parent().unwrap_or_else(|| Path::new(""));
+    // Canonicalize dir too: a symlinked download dir would otherwise defeat
+    // the fast-path comparison below (canonical vs non-canonical).
+    let dir_canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let stem = dest
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -420,7 +423,7 @@ pub(crate) fn discover_ytdlp_output(dest: &Path, after_move: Option<&str>) -> Op
     let prefix = format!("{stem}.hls.");
     if let Some(path) = after_move
         && let Ok(canonical) = std::fs::canonicalize(path)
-        && canonical.starts_with(dir)
+        && canonical.starts_with(&dir_canonical)
         && canonical.is_file()
         && let Some(name) = canonical.file_name().and_then(|n| n.to_str())
         && name.starts_with(&prefix)

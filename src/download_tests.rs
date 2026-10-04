@@ -2448,6 +2448,18 @@ fn shortens_long_filenames() {
     assert!(short.ends_with(".mp4"));
     let no_ext = "b".repeat(300);
     assert!(shorten_filename(&no_ext).len() <= 240);
+    // Oversize extension (>= 240 bytes): dropped, stem truncated. Without
+    // this, the result would be the extension alone (> 255 bytes → ENAMETOOLONG).
+    let huge_ext = format!("file.{}", "x".repeat(300));
+    let short = shorten_filename(&huge_ext);
+    assert!(
+        short.len() <= 240,
+        "oversize extension must not produce ENAMETOOLONG"
+    );
+    assert!(
+        !short.contains('x'),
+        "pathological extension must be dropped"
+    );
 }
 
 #[test]

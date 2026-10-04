@@ -1194,11 +1194,13 @@ mod tests {
         assert!(staging_occupied(&dir, 4), "id 4 occupied");
         assert!(staging_occupied(&dir, 9), "id 9 occupied");
 
-        // Per-id sweep of row 4 must preserve row 9's sibling.
+        // Without a manifest, the sweep must NOT pattern-delete: Title.4.mp4.part
+        // is indistinguishable from a user's own file. Deletion requires the
+        // manifest's exact name.
         sweep_staging_preserving_recordings(&dir, 4);
         assert!(
-            !dir.join("Title.4.mp4.part").exists(),
-            "row 4's part is swept"
+            dir.join("Title.4.mp4.part").exists(),
+            "row 4's part must survive without a manifest to confirm it"
         );
         assert!(
             dir.join("Title.9.mp4.part").exists(),
@@ -1209,8 +1211,9 @@ mod tests {
 
     #[test]
     fn orphan_sweep_attributes_via_id_in_name() {
-        // Blocker 2: sweep_dest_staging must reclaim id-in-name orphans for
-        // ids with no live row, via the filename itself.
+        // Orphan id-in-name files are NOT swept by pattern: without a marker,
+        // Title.11.mp4.part is indistinguishable from a user's own file.
+        // sweep_dest_staging only removes legacy marked patterns.
         let dir = unique_dir("orphan-id-in-name");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Title.11.mp4.part"), b"orphan").unwrap();
@@ -1221,8 +1224,8 @@ mod tests {
         sweep_dest_staging(&dir, &keep);
 
         assert!(
-            !dir.join("Title.11.mp4.part").exists(),
-            "orphan id 11's part must be swept"
+            dir.join("Title.11.mp4.part").exists(),
+            "orphan id 11's part must survive: no marker, no deletion"
         );
         assert!(
             dir.join("Title.12.mp4.part").exists(),

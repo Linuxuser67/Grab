@@ -1422,6 +1422,9 @@ impl DownloadManager {
                         // Server bytes changed mid-download: the resume bitmap describes a dead version, so drop it and re-probe fresh.
                         // Clear the validator too: retrying with the dead ETag/Last-Modified would send a stale If-Range,
                         // get 200 on every piece, and fail again permanently.
+                        // Explicitly delete the partial file: its bytes belong to the dead version and must not survive
+                        // into a retry (previously this was only emergent via 416/hole handling).
+                        let _ = std::fs::remove_file(item.file_path());
                         this.segment_state.borrow_mut().remove(&id);
                         this.pending_names.borrow_mut().remove(&id);
                         item.set_etag(String::new());
@@ -2022,7 +2025,7 @@ impl DownloadManager {
                     if let Some(dest_dir) = dest.parent() {
                         crate::video::clean_staging_files(dest_dir, id);
                     }
-                    crate::video::clean_dest_parts(&dest);
+                    crate::video::clean_dest_parts_for(&dest, id);
                     if gate.was_delivered() {
                         // The commit won the race, so this file is the attempt's own orphan and the row is gone: the one sanctioned exception to never deleting a finished file.
                         let _ = std::fs::remove_file(&dest);
@@ -2049,7 +2052,7 @@ impl DownloadManager {
                 if let Some(dest_dir) = dest.parent() {
                     crate::video::clean_staging_files(dest_dir, id);
                 }
-                crate::video::clean_dest_parts(&dest);
+                crate::video::clean_dest_parts_for(&dest, id);
                 self.release_dest(&dest);
                 // Same wakeup as the async finalizer above; already on the main thread.
                 wake_queue();
@@ -2474,10 +2477,22 @@ impl DownloadManager {
         dir.join("queue.json")
     }
 
-    /// Move a broken queue file aside (`queue.json.bak`) so the next persist starts fresh.
+    /// Move a broken queue file aside so the next persist starts fresh.
+    /// Uses the first free `queue.json.bak`, `queue.json.bak.1`, ... slot —
+    /// never clobbers a previous backup, never deletes.
     fn quarantine_queue() {
-        let bak = Self::queue_file().with_extension("json.bak");
-        if let Err(e) = std::fs::rename(Self::queue_file(), &bak) {
+        let base = Self::queue_file().with_extension("json.bak");
+        let mut target = base.clone();
+        let mut n = 0;
+        while target.exists() {
+            n += 1;
+            target = Self::queue_file().with_extension(format!("json.bak.{n}"));
+            if n > 99 {
+                tracing::error!("too many queue backups; keeping broken queue in place");
+                return;
+            }
+        }
+        if let Err(e) = std::fs::rename(Self::queue_file(), &target) {
             tracing::error!("could not quarantine download queue: {e}");
         }
     }

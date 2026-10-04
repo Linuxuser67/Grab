@@ -23,3 +23,8 @@ target-sdk/
 
 # Compiled GSettings schemas are build artifacts, never committed.
 data/gschemas.compiled
+
+# Double-dot argv log (debug dump, never commit)
+*.argv.log
+# Scratch mockup scripts (never commit)
+mockup_*.py

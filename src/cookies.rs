@@ -171,6 +171,28 @@ fn cookie_staging_dir() -> Option<PathBuf> {
 /// Sweep stale cookie dumps left by crashes: runs at startup before any
 /// worker starts, so nothing live is removed.
 pub(crate) fn sweep_cookie_staging() {
+    // Only delete files owned by our uid: /tmp is shared, and another
+    // user's grab-cookies-*.txt is not ours to remove.
+    #[cfg(unix)]
+    let my_uid = unsafe { libc::getuid() };
+    let owned_by_me = |path: &std::path::Path| -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            // symlink_metadata: do not follow symlinks. A symlink-to-own-file
+            // would pass a metadata() uid check vacuously, then we'd unlink
+            // the link (not the target, but the check is meaningless).
+            // Refuse symlinks outright.
+            std::fs::symlink_metadata(path)
+                .map(|m| !m.is_symlink() && m.uid() == my_uid)
+                .unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            true
+        }
+    };
     // Clean the current dir (if XDG_RUNTIME_DIR is available).
     if let Some(dir) = cookie_staging_dir()
         && let Ok(entries) = std::fs::read_dir(&dir)
@@ -179,19 +201,25 @@ pub(crate) fn sweep_cookie_staging() {
             let name = entry.file_name();
             let name = name.to_str().unwrap_or("");
             // Only our cookie dumps; never touch anything else.
-            if name.starts_with("grab-cookies-") && name.ends_with(".txt") {
+            if name.starts_with("grab-cookies-")
+                && name.ends_with(".txt")
+                && owned_by_me(&entry.path())
+            {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
     }
     // Clean legacy dumps from older builds in /tmp/grab-video.
-    // These are stale plaintext cookie files; remove them unconditionally.
+    // These are stale plaintext cookie files; remove only our own (uid-checked).
     let legacy_dir = crate::video::staging_root();
     if let Ok(entries) = std::fs::read_dir(&legacy_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name();
             let name = name.to_str().unwrap_or("");
-            if name.starts_with("grab-cookies-") && name.ends_with(".txt") {
+            if name.starts_with("grab-cookies-")
+                && name.ends_with(".txt")
+                && owned_by_me(&entry.path())
+            {
                 let _ = std::fs::remove_file(entry.path());
             }
         }

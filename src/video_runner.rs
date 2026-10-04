@@ -22,9 +22,9 @@ use crate::video_spawn::{
     fetch_video_page, join_drain, reap_child, spawn_piped_ytdlp, ytdlp_command,
 };
 use crate::video_staging::{
-    ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging_files, collect_sidecar,
-    dest_part_path, discover_unified_output, ensure_staging_dir_in, file_len, read_manifest,
-    release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
+    ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts_for, clean_staging_files,
+    collect_sidecar, dest_part_path, discover_unified_output, ensure_staging_dir_in, file_len,
+    read_manifest, release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
     staging_location_for_dest, sweep_partial_remuxes, sweep_staging_preserving_recordings,
 };
 use crate::video_tools::{
@@ -261,13 +261,13 @@ pub async fn run_video_download(
         ResumePlan::Fresh => {
             // Overwrite pre-flight (Parabolic parity): a finished file at `dest` means the atomic claim fails at the end, so refuse before a wasted download. This arm's cleanup drops our own shells too.
             if job.dest.exists() {
-                clean_dest_parts(&job.dest);
+                clean_dest_parts_for(&job.dest, job.item_id);
                 return Err(VideoError::exists());
             }
             // Clear this item's staging files (grab-<id>-*), not the dest dir itself: a previous attempt's detached writers may still hold old inodes, so unlink first. Only mismatches/oversize leftovers land here; same-selection resume never does.
             crate::video::clean_staging_files(&staging, job.item_id);
             // Dest-dir parts are Grab-namespaced, so a mismatch restarts clean instead of resuming into a foreign lookalike. The finished file itself is never touched.
-            clean_dest_parts(&job.dest);
+            clean_dest_parts_for(&job.dest, job.item_id);
             // Record this attempt's selection up front: a pause from here on leaves a matchable sidecar, so the next attempt resumes instead of wiping.
             write_manifest(
                 &staging,
@@ -294,7 +294,7 @@ pub async fn run_video_download(
             // is written with final_bytes: None and only updated on success, so a crash between the atomic rename
             // and the update would delete a good file.
             if job.dest.exists() {
-                clean_dest_parts(&job.dest);
+                clean_dest_parts_for(&job.dest, job.item_id);
                 return Err(VideoError::exists());
             }
             phase(gettext("Resuming download…"));
@@ -444,7 +444,7 @@ pub(crate) async fn run_unified_ytdlp(
         collect_sidecar(&sidecar_path_for(&final_tmp, lang), &job.dest, lang);
     }
     // Sweep legacy dest-dir parts, so pre-migration rows (or foreign lookalikes the Fresh arm never saw) don't sit beside the finished file forever.
-    clean_dest_parts(&job.dest);
+    clean_dest_parts_for(&job.dest, job.item_id);
     // Record the finished size so a later retry adopts the file.
     let final_bytes = file_len(&job.dest);
     if let Some(mut m) = read_manifest(staging, job.item_id) {
@@ -1043,15 +1043,18 @@ fn claim_staging_name(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".to_string());
-    // Find an unused name: title.ext, title-1.ext, title-2.ext, ...
-    // Atomically claim it with create_new on the .part file: exists()-then-use
-    // races, but create_new fails if another process claimed it first.
+    // The id rides in the on-disk name (`{stem}.{id}.{ext}`): the file
+    // is self-identifying, so a lost/corrupt manifest cannot orphan it into
+    // id reuse. Find an unused name and claim it atomically via create_new
+    // on the .part file: exists()-then-use races, but create_new fails if
+    // another process claimed it first.
+    let id = job.item_id;
     let mut n = 0;
     loop {
         let name = if n == 0 {
-            format!("{stem}.{ext}")
+            format!("{stem}.{id}.{ext}")
         } else {
-            format!("{stem}-{n}.{ext}")
+            format!("{stem}.{id}-{n}.{ext}")
         };
         let path = dir.join(&name);
         // Never use the final dest as staging.
@@ -1063,8 +1066,8 @@ fn claim_staging_name(
             continue;
         }
         // Never claim a base name that already exists: the .part claim
-        // is atomic, but the base file belongs to the user. If Title-1.mp4
-        // exists, skip to Title-2.mp4.
+        // is atomic, but the base file belongs to the user. If
+        // Title.1.mp4 exists, skip to Title.1-1.mp4.
         if path.exists() {
             n += 1;
             if n > 1000 {
@@ -1079,7 +1082,21 @@ fn claim_staging_name(
             .create_new(true)
             .open(&part)
         {
-            Ok(_) => return Ok((path, name)),
+            Ok(_) => {
+                // TOCTOU re-validation: the base may have appeared between the
+                // exists() check above and the atomic .part claim (user file
+                // or another claimer racing). If it did, drop our claim and
+                // try the next name — never adopt a foreign base file.
+                if path.exists() {
+                    let _ = std::fs::remove_file(&part);
+                    n += 1;
+                    if n > 1000 {
+                        return Err(VideoError::staging("too many conflicting files"));
+                    }
+                    continue;
+                }
+                return Ok((path, name));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 n += 1;
                 if n > 1000 {
@@ -1115,9 +1132,9 @@ pub(crate) async fn run_live_ytdlp(
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
     // recording, and the file-growth watcher announces "Recording…" off this path.
-    // Unix-style: just the title (e.g., "My Video.mp4"). On collision, -1, -2, ...
-    // (wget-style dedup). The chosen name is stored in the manifest for cleanup.
-    // Never equal to job.dest (the final file); staging is always distinct.
+    // The id rides in the name (e.g., "My Video.4.mp4"); on collision,
+    // -1, -2, ... after the id. The chosen name is stored in the manifest for
+    // cleanup. Never equal to job.dest (the final file); staging is always distinct.
     let (out, staging_name) = claim_staging_name(job, ext)?;
     // Clean up the previous attempt's .part if the manifest points to a
     // different staging name (crash/retry orphan). Never delete the base
@@ -1135,7 +1152,7 @@ pub(crate) async fn run_live_ytdlp(
     // Overwrite pre-flight: refuse if dest exists. The manifest proves ownership for future retries,
     // but never delete here — a weak match could delete a completed output from a quality/format-changed retry.
     if job.dest.exists() {
-        clean_dest_parts(&job.dest);
+        clean_dest_parts_for(&job.dest, job.item_id);
         // Reclaim only our .part claim from the staging selection above.
         // Never delete `out` (the base): it was verified non-existent at claim
         // time, and deleting it could remove a user's file if a race occurred.
@@ -1158,7 +1175,8 @@ pub(crate) async fn run_live_ytdlp(
         return Err(VideoError::staging(e));
     }
     // Record the chosen staging name in the manifest for crash cleanup.
-    // The ID stays hidden in the manifest; the filename is just title (+ dedup).
+    // The id is also baked into the filename itself, so the file stays
+    // attributable even if this manifest is lost or corrupt.
     let _ = write_manifest(
         staging,
         job.item_id,
@@ -1739,7 +1757,7 @@ pub(crate) async fn run_hls_ytdlp(
     // point as on the live leg. The part shells beside the finished file are
     // ours to sweep: no rename means no delivery happened.
     if !gate.try_commit() {
-        clean_dest_parts(&job.dest);
+        clean_dest_parts_for(&job.dest, job.item_id);
         // Lost the race: clear this item's staging files only, never the dest dir.
         clean_staging_files(staging, job.item_id);
         return Ok(None);

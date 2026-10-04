@@ -84,10 +84,10 @@ pub(crate) struct FetchCtx {
     pub(crate) cookies: Option<std::sync::Arc<reqwest::cookie::Jar>>,
     pub(crate) timeout: Duration,
     pub(crate) tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    /// Resume validator for If-Range: ETag preferred, Last-Modified fallback.
-    /// None on fresh downloads; the engine reports it back via Validator.
-    /// Updated from the first response for single-stream retries.
-    pub(crate) if_range: Option<String>,
+    /// Session validator for If-Range: ETag preferred, Last-Modified fallback.
+    /// Set from the stored validator (resume) or the first response (fresh).
+    /// All requests in the session use it; OnceLock ensures first-wins.
+    pub(crate) if_range: std::sync::Arc<std::sync::OnceLock<String>>,
 }
 
 pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
@@ -119,19 +119,22 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                     // Persist it for cross-session resume, and use it for If-Range.
                     // Don't overwrite a resume validator: the stored one is for the
                     // existing partial file, the probe is for a fresh download.
-                    if ctx.if_range.is_none() {
+                    if ctx.if_range.get().is_none() {
                         // Send Validator for persistence: the item's etag/last_modified
                         // must be populated, or a pause/restart loses the validator.
                         ctx.tx
                             .send(EngineMsg::Validator(Box::new(validator.clone())))
                             .ok();
                         // Derive If-Range from the same value.
-                        ctx.if_range = validator
+                        let if_range_val = validator
                             .etag
                             .as_deref()
                             .filter(|e| !e.starts_with("W/"))
                             .map(|s| s.to_string())
                             .or_else(|| validator.last_modified.clone());
+                        if let Some(v) = if_range_val {
+                            let _ = ctx.if_range.set(v);
+                        }
                     }
                     if plan_pieces(total, connections).is_empty() {
                         single_loop(&ctx, &mut tries, Some(total), true).await;
@@ -414,7 +417,7 @@ async fn attempt_once(
             // If-Range: the server returns 206 only if the object still
             // matches our validator; a 200 means it changed → restart fresh
             // instead of splicing a different file onto our bytes.
-            if let Some(ref v) = ctx.if_range {
+            if let Some(v) = ctx.if_range.get() {
                 req = req.header("If-Range", v);
             }
         }
@@ -468,9 +471,17 @@ async fn attempt_once(
         // change would otherwise poison the stored value). On 200 (fresh or
         // If-Range mismatch), capture the new generation's validator.
         let if_range_matched =
-            ctx.if_range.is_some() && status == reqwest::StatusCode::PARTIAL_CONTENT;
+            ctx.if_range.get().is_some() && status == reqwest::StatusCode::PARTIAL_CONTENT;
         if !if_range_matched {
             send_validator(&ctx.tx, &resp);
+        }
+        // Capture the session validator for single-stream retries: the first
+        // response sets it (first-wins via OnceLock), and all retries send it
+        // as If-Range. This closes the splice hole for fresh single-stream
+        // downloads.
+        // Set the session validator once (first-wins); ignore if already set.
+        if ctx.if_range.get().is_none() {
+            response_validator(&resp).map(|v| ctx.if_range.set(v));
         }
         let partial = start > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
         if claim && start > 0 && !partial {
@@ -806,7 +817,7 @@ pub(crate) async fn fetch_piece(
             .header("Range", format!("bytes={start}-{end}"));
         // If-Range: a changed object returns 200 instead of 206, which the
         // Content-Range check below turns into a Changed failure.
-        if let Some(ref v) = ctx.if_range {
+        if let Some(v) = ctx.if_range.get() {
             builder = builder.header("If-Range", v);
         }
         let req = stamp_request(builder, DEFAULT_USER_AGENT, ctx.cookies.as_ref(), &ctx.url);
@@ -820,13 +831,13 @@ pub(crate) async fn fetch_piece(
         send_last_modified(&ctx.tx, &resp);
         // Capture once: if we sent If-Range and got 206, the validator is
         // already known — don't let a mid-download change poison it.
-        if ctx.if_range.is_none() {
+        if ctx.if_range.get().is_none() {
             send_validator(&ctx.tx, &resp);
         }
         if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
             let code = resp.status().as_u16();
             // If-Range mismatch: the object changed → fail terminally, never retry a dead version.
-            if code == 200 && ctx.if_range.is_some() {
+            if code == 200 && ctx.if_range.get().is_some() {
                 return Err(Changed(gettext("File changed on server")));
             }
             // Per-IP limits speak 403/429/503 (509 on some hosts): downgrade at once instead of burning retries.
@@ -839,7 +850,7 @@ pub(crate) async fn fetch_piece(
         // 206 with a different validator than our session: the object changed
         // mid-download but the server didn't honor If-Range (returned 206
         // anyway). Treat as Changed to avoid splicing versions.
-        if let Some(session_validator) = ctx.if_range.as_ref() {
+        if let Some(session_validator) = ctx.if_range.get() {
             let mismatch = response_validator(&resp)
                 .map(|rv| rv != *session_validator)
                 .unwrap_or(false);

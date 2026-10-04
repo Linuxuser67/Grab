@@ -1124,17 +1124,22 @@ impl DownloadManager {
             dest,
             opts,
             if_range: {
+                let lock = std::sync::Arc::new(std::sync::OnceLock::new());
                 let etag = item.etag();
                 // If-Range requires a strong validator: weak ETags (W/"…")
                 // never match, so skip them and fall back to Last-Modified.
                 // If both are absent (weak ETag with no Last-Modified), no
                 // If-Range is sent and resume is unvalidated, as before.
-                if !etag.is_empty() && !etag.starts_with("W/") {
+                let validator = if !etag.is_empty() && !etag.starts_with("W/") {
                     Some(etag.to_string())
                 } else {
                     let lm = item.last_modified();
                     (!lm.is_empty()).then(|| lm.to_string())
+                };
+                if let Some(v) = validator {
+                    let _ = lock.set(v);
                 }
+                lock
             },
             cookies: None,
             timeout,

@@ -103,20 +103,25 @@ pub(crate) fn jar_from_export(text: &str) -> (Arc<reqwest::cookie::Jar>, usize) 
 }
 
 /// Secure directory for cookie dumps: `$XDG_RUNTIME_DIR/grab-cookies` (0700,
-/// owned by us) instead of the shared `/tmp/grab-video`. Returns None (fail
-/// closed) if `XDG_RUNTIME_DIR` is unset or empty: the `/tmp` fallback is
-/// TOCTOU-able via a pre-created parent, so an insecure dir is worse than
-/// no cookie export. Verifies uid ownership so a pre-created directory by
-/// another user is rejected.
+/// owned by us) instead of the shared `/tmp/grab-video`. Falls back to
+/// `~/.cache/grab-cookies` if `XDG_RUNTIME_DIR` is unset or empty: the home
+/// dir is not world-writable, so the `/tmp` pre-created-parent TOCTOU does
+/// not apply. Verifies uid ownership so a pre-created directory by another
+/// user is rejected.
 fn cookie_staging_dir() -> Option<PathBuf> {
     let base = match std::env::var("XDG_RUNTIME_DIR") {
         Ok(s) if !s.is_empty() => PathBuf::from(s),
         _ => {
-            tracing::debug!("XDG_RUNTIME_DIR unset or empty: skipping cookie export");
-            return None;
+            // Fallback: ~/.cache (user-owned, not world-writable).
+            let home = std::env::var("HOME").ok()?;
+            PathBuf::from(home).join(".cache")
         }
     };
     let dir = base.join("grab-cookies");
+    // Ensure the parent exists (e.g., ~/.cache may not exist yet).
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     // Create 0700 atomically: DirBuilder::mode sets permissions at creation,
     // avoiding a chmod race window.
     use std::os::unix::fs::DirBuilderExt as _;

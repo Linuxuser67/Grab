@@ -268,6 +268,9 @@ pub(crate) fn collection_subdir(dir: &str, title: &str) -> String {
 pub(crate) fn sane_filename(s: &str) -> bool {
     !s.is_empty()
         && !s.contains('/')
+        // Backslash: `basename()` in download_fetch.rs already treats it as a
+        // directory separator; reject here for consistency.
+        && !s.contains('\\')
         && !s.contains('\0')
         && s != "."
         && s != ".."
@@ -275,33 +278,18 @@ pub(crate) fn sane_filename(s: &str) -> bool {
         && !s.chars().any(|c| c.is_control() || is_bidi_control(c))
 }
 
-/// Best-effort filename from URL path via GLib's `g_uri_unescape_string`
+/// Best-effort filename from URL path via `percent_encoding`
 /// (single-pass `%XX` decode, leaves `+`); falls back to the literal input,
 /// then `index.html` at the call sites.
 pub(crate) fn percent_decode(s: &str) -> String {
-    // The safe `glib::uri_unescape_string` binding can't be used here: its
-    // gtk-rs string conversion debug-asserts UTF-8 (panics in debug builds)
-    // and wraps unchecked in release (undefined behavior) when GLib passes
-    // invalid-UTF-8 escapes (%FF%FE) through as raw bytes. Call the FFI
-    // directly and validate the bytes ourselves.
-    let Ok(input) = std::ffi::CString::new(s) else {
-        // An interior NUL can't be passed to C; keep the literal.
-        return s.to_owned();
-    };
-    // SAFETY: `input` is a valid NUL-terminated C string; GLib returns a
-    // freshly allocated NUL-terminated string (or NULL), which we free
-    // after reading its bytes.
-    unsafe {
-        let ptr = glib::ffi::g_uri_unescape_string(input.as_ptr(), std::ptr::null());
-        if ptr.is_null() {
-            // GLib rejects the input (e.g. an escaped NUL): keep literal.
-            return s.to_owned();
-        }
-        let bytes = std::ffi::CStr::from_ptr(ptr).to_bytes();
-        let decoded = std::str::from_utf8(bytes).ok().map(str::to_owned);
-        glib::ffi::g_free(ptr as *mut _);
-        decoded.unwrap_or_else(|| s.to_owned())
-    }
+    // Decoded NUL (from `%00` or a literal NUL) is rejected: filenames
+    // can't contain it, so keep the literal like the old GLib path did.
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8()
+        .ok()
+        .filter(|decoded| !decoded.contains('\0'))
+        .map(|cow| cow.into_owned())
+        .unwrap_or_else(|| s.to_owned())
 }
 
 pub fn filename_from_url(url_str: &str) -> String {

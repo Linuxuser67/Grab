@@ -644,7 +644,11 @@ pub(crate) enum StartMode {
     Resume(SegmentState),
 }
 
-/// Stamp one outbound request like a browser (UA, cookies, self-origin Referer); single choke point for all requests.
+/// Stamp one outbound request like a browser (UA, cookies); single choke point for all requests.
+/// Note: no Referer is sent. The client builder disables reqwest's automatic
+/// Referer (it leaks URLs/tokens), and a manually-stamped Referer would persist
+/// across redirects (reqwest doesn't strip custom headers), leaking the origin
+/// to cross-origin targets. Hotlink guards requiring Referer are not supported.
 pub(crate) fn stamp_request(
     mut req: reqwest::RequestBuilder,
     user_agent: &str,
@@ -658,16 +662,6 @@ pub(crate) fn stamp_request(
         && let Some(cookie) = crate::cookies::cookie_header_for(jar, url)
     {
         req = req.header("Cookie", cookie);
-    }
-    // Self-origin Referer (hotlink guards often accept the file's own origin; reveals nothing new).
-    if let Ok(parsed) = url.parse::<url::Url>()
-        && let Some(host) = parsed.host_str()
-    {
-        let mut origin = format!("{}://{host}", parsed.scheme());
-        if let Some(port) = parsed.port() {
-            origin.push_str(&format!(":{port}"));
-        }
-        req = req.header("Referer", origin);
     }
     req
 }

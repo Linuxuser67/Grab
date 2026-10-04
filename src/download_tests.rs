@@ -2641,8 +2641,9 @@ fn selection_survives_persist_restore() {
 fn sane_filenames() {
     assert!(sane_filename("a.iso"));
     assert!(sane_filename("my file (1).tar.gz"));
-    // Backslash is an ordinary (legal, harmless) char on Linux.
-    assert!(sane_filename("a\\b"));
+    // Backslash is rejected for consistency with `basename()` in
+    // download_fetch.rs, which treats it as a directory separator.
+    assert!(!sane_filename("a\\b"));
     assert!(!sane_filename(""));
     assert!(!sane_filename("."));
     assert!(!sane_filename(".."));
@@ -4814,8 +4815,10 @@ fn single_connection_skips_probe() {
 }
 
 #[test]
-fn stamp_request_sends_self_origin_referer() {
-    // Hotlink guards accept the file's own origin; Referer carries scheme+host only.
+fn stamp_request_sends_no_referer() {
+    // No Referer is sent: a manually-stamped Referer would persist across
+    // redirects (reqwest doesn't strip custom headers), leaking the origin
+    // to cross-origin targets.
     let built = stamp_request(
         http_client().get("http://127.0.0.1:8080/a/b?token=secret"),
         "",
@@ -4824,7 +4827,7 @@ fn stamp_request_sends_self_origin_referer() {
     )
     .build()
     .unwrap();
-    assert_eq!(built.headers()["referer"], "http://127.0.0.1:8080");
+    assert!(!built.headers().contains_key("referer"));
     let built = stamp_request(
         http_client().get("https://example.com/v"),
         "",
@@ -4833,7 +4836,7 @@ fn stamp_request_sends_self_origin_referer() {
     )
     .build()
     .unwrap();
-    assert_eq!(built.headers()["referer"], "https://example.com");
+    assert!(!built.headers().contains_key("referer"));
 }
 
 #[test]

@@ -396,7 +396,26 @@ fn is_hostile_entry(path: &str) -> bool {
 }
 
 /// Remove a file, then prune parents left empty (never removing `folder`).
+/// Refuses if any intermediate component under `folder` is a symlink:
+/// a pre-existing symlinked subdirectory would otherwise divert the
+/// deletion outside the torrent folder.
 fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Path) {
+    // Walk from `path` up to (not including) `folder`; if any component
+    // is a symlink, bail — the target may point outside `folder`.
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir == folder {
+            break;
+        }
+        if std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_symlink()) {
+            return;
+        }
+        // Stop at filesystem root or if we've left `folder`'s subtree.
+        if !dir.starts_with(folder) {
+            return;
+        }
+        current = dir.parent();
+    }
     let _ = std::fs::remove_file(path);
     let mut parent = path.parent();
     while let Some(dir) = parent {

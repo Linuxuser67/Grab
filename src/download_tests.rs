@@ -3161,7 +3161,7 @@ fn segmented_multi_connection_download() {
         // Distinct bounded ranges prove parallel fetching (one stream would log one open-ended line).
         let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
         let mut distinct = std::collections::HashSet::new();
-        for line in ranges.lines().filter(|l| l.starts_with("bytes=")) {
+        for line in ranges.lines().filter(|l| l.starts_with("range=bytes=")) {
             if line.contains('-') && !line.ends_with('-') && line.split('-').count() == 2 {
                 distinct.insert(line.to_string());
             }
@@ -3456,7 +3456,7 @@ fn falls_back_to_single_stream_when_throttled() {
         }
         // A full (unranged) request proves the single-stream fallback ran.
         let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
-        if !ranges.lines().any(|l| l == "full") {
+        if !ranges.lines().any(|l| l.starts_with("range=full")) {
             abort(
                 &server,
                 &format!("expected single-stream fallback, log: {ranges:?}"),
@@ -4801,7 +4801,7 @@ fn single_connection_skips_probe() {
     }
     let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
     assert!(
-        ranges.lines().all(|l| l == "full"),
+        ranges.lines().all(|l| l.starts_with("range=full")),
         "no Range request may precede the download: {ranges:?}"
     );
     cleanup(&server, &dir);

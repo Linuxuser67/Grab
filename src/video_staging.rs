@@ -328,6 +328,12 @@ pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
                 let _ = std::fs::remove_file(entry.path());
                 continue;
             }
+            // Legacy live pattern: .{id}.live. (e.g., "v.1.live.mp4.part").
+            // Has the `.live.` marker, so it cannot hit user files.
+            if name_str.contains(&format!(".{item_id}.live.")) {
+                let _ = std::fs::remove_file(entry.path());
+                continue;
+            }
             // Match grab-<id>-* (hyphen) or grab-<id>.* (dot, for part_path files).
             let suffix = name_str
                 .strip_prefix(&prefix_hyphen)
@@ -415,6 +421,19 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
             && (name.ends_with(".part") || name.ends_with(".ytdl"))
         {
             let _ = std::fs::remove_file(entry.path());
+            continue;
+        }
+        // Legacy live: `.{id}.live.` (e.g., "v.1.live.mp4.part"). The
+        // `.live.` marker makes it safe; extract the id and sweep if orphaned.
+        if let Some(live_pos) = name.find(".live.") {
+            let before = &name[..live_pos];
+            if let Some(dot) = before.rfind('.') {
+                if let Ok(id) = before[dot + 1..].parse::<u64>()
+                    && !keep.contains(&id)
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
         }
     }
 }
@@ -535,37 +554,14 @@ pub(crate) fn is_grab_part(file_name: &str, stem: &str) -> bool {
         return true;
     }
     // Legacy ID-namespaced live: {id}.live. (e.g., "1.live.mp4.part").
-    // The bare {id}. pattern is NOT checked: it false-positives on user files.
+    // The bare {id}. pattern is NOT checked here: it false-positives on user
+    // files like Movie.2024.mp4. Id-scoped matching lives in
+    // `clean_dest_parts_for`, which takes the row's item_id.
     if let Some(dot_pos) = remainder.find('.') {
         let (id_part, rest) = remainder.split_at(dot_pos);
         if !id_part.is_empty()
             && id_part.chars().all(|c| c.is_ascii_digit())
             && rest.starts_with(".live.")
-        {
-            return true;
-        }
-    }
-    // Id-in-name scheme: {id}.{ext}[.part|.ytdl] (e.g., "1.mp4.part" for
-    // v.1.mp4.part with stem v). The media-ext requirement keeps user files
-    // like "v.1.backup" from matching.
-    let mut base = remainder;
-    if let Some(s) = base.strip_suffix(".part") {
-        base = s;
-    } else if let Some(s) = base.strip_suffix(".ytdl") {
-        base = s;
-    }
-    // base is now "{id}.{ext}" or "{id}-{n}.{ext}"
-    if let Some(dot) = base.rfind('.') {
-        let ext = &base[dot + 1..];
-        let id_part = &base[..dot];
-        // id_part is "{id}" or "{id}-{n}"
-        let id_str = id_part.split('-').next().unwrap_or("");
-        if !id_str.is_empty()
-            && id_str.chars().all(|c| c.is_ascii_digit())
-            && [
-                "mp4", "webm", "mkv", "m4a", "mp3", "ogg", "wav", "flac", "opus",
-            ]
-            .contains(&ext)
         {
             return true;
         }
@@ -678,7 +674,9 @@ fn stem_has_subtitle_sidecar(names: &[String], stem: &str) -> bool {
 }
 
 /// Delete a row's dest-dir part files (never the finished file).
-pub fn clean_dest_parts(dest: &Path) {
+/// `item_id` scopes the id-in-name arm (`Title.<id>.mp4.part`) to this row so
+/// a user file like `Movie.2024.mp4.part` is never touched.
+pub fn clean_dest_parts_for(dest: &Path, item_id: u64) {
     let (Some(dir), Some(stem)) = (dest.parent(), dest.file_stem().and_then(|s| s.to_str())) else {
         return;
     };
@@ -690,10 +688,16 @@ pub fn clean_dest_parts(dest: &Path) {
         if !path.is_file() {
             continue;
         }
-        if let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && is_grab_part(name, stem)
-        {
-            let _ = std::fs::remove_file(&path);
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            // Legacy patterns (PART_KINDS, .live.) are stem-scoped already.
+            // The id-in-name arm is id-scoped AND sidecar-only: a bare
+            // `Title.<id>.mp4` is never deleted via pattern.
+            let legacy = is_grab_part(name, stem);
+            let id_scoped = staging_name_matches_id(name, item_id)
+                && (name.ends_with(".part") || name.ends_with(".ytdl"));
+            if legacy || id_scoped {
+                let _ = std::fs::remove_file(&path);
+            }
         }
     }
 }

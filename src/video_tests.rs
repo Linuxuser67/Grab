@@ -43,7 +43,7 @@ use crate::video_spawn::{
     ytdlp_command,
 };
 use crate::video_staging::{
-    ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
+    ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts_for, clean_staging, collect_sidecar,
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
     is_sparse_shell, is_ytdlp_fragment, manifest_path, read_manifest, release_remux_lease,
     reserve_remux_temp, resume_plan, sidecar_path_for, staging_root, stem_reserved_in,
@@ -4901,7 +4901,7 @@ fn a_live_capture_in_flight_keeps_its_destination_stem_reserved() {
 
     // Once the finalizer has swept, the stem is free again -- which is the
     // point of deferring: the reservation ends when the row really is gone.
-    crate::video::clean_dest_parts(&dest);
+    crate::video::clean_dest_parts_for(&dest, 1);
     let names = dir_file_names(&dir);
     assert!(
         !stem_reserved_in(&names, "v"),
@@ -6923,6 +6923,7 @@ fn clean_dest_parts_keeps_finished_and_foreign_files() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let dest = dir.join("Clip.mp4");
+    // item_id 7: only Clip.7.* sidecars are ours; Clip.2024.* is a user file.
     let keep = [
         "Clip.mp4",
         "Clip.srt",
@@ -6930,6 +6931,13 @@ fn clean_dest_parts_keeps_finished_and_foreign_files() {
         "Clip.en.srt",
         "Other.video.mp4",
         "Clip.video-notes.txt",
+        // Adversarial: year-suffixed user files must survive the id-scoped sweep.
+        "Clip.2024.mp4",
+        "Clip.2024.mp4.part",
+        "Clip.2024.mp4.ytdl",
+        // S01E04/1080p-style tails are safe by non-digit check, pinned here.
+        "Clip.S01E04.mp4.part",
+        "Clip.1080p.mp4.part",
     ];
     let drop = [
         "Clip.video.mp4",
@@ -6941,11 +6949,15 @@ fn clean_dest_parts_keeps_finished_and_foreign_files() {
         // Stale sidecars beside part files are part-namespace litter.
         "Clip.video.en.srt",
         "Clip.hls.en.srt",
+        // Our own id-in-name sidecars (id 7).
+        "Clip.7.mp4.part",
+        "Clip.7.mp4.ytdl",
+        "Clip.7-1.mp4.part",
     ];
     for n in keep.iter().chain(drop.iter()) {
         std::fs::write(dir.join(n), b"x").unwrap();
     }
-    clean_dest_parts(&dest);
+    clean_dest_parts_for(&dest, 7);
     for n in keep {
         assert!(dir.join(n).exists(), "{n} must survive");
     }

@@ -179,8 +179,12 @@ pub(crate) fn sweep_cookie_staging() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
-            std::fs::metadata(path)
-                .map(|m| m.uid() == my_uid)
+            // symlink_metadata: do not follow symlinks. A symlink-to-own-file
+            // would pass a metadata() uid check vacuously, then we'd unlink
+            // the link (not the target, but the check is meaningless).
+            // Refuse symlinks outright.
+            std::fs::symlink_metadata(path)
+                .map(|m| !m.is_symlink() && m.uid() == my_uid)
                 .unwrap_or(false)
         }
         #[cfg(not(unix))]
@@ -206,7 +210,7 @@ pub(crate) fn sweep_cookie_staging() {
         }
     }
     // Clean legacy dumps from older builds in /tmp/grab-video.
-    // These are stale plaintext cookie files; remove them unconditionally.
+    // These are stale plaintext cookie files; remove only our own (uid-checked).
     let legacy_dir = crate::video::staging_root();
     if let Ok(entries) = std::fs::read_dir(&legacy_dir) {
         for entry in entries.filter_map(|e| e.ok()) {

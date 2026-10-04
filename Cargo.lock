@@ -1330,6 +1330,7 @@ dependencies = [
  "libadwaita",
  "libc",
  "librqbit",
+ "percent-encoding",
  "pretty_assertions",
  "reqwest",
  "serde",

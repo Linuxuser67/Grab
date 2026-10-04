@@ -50,6 +50,18 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.1.0" date="2026-10-04">
+      <description>
+        <ul>
+          <li>Queue persistence moved off the UI thread: no more stalls when the queue saves.</li>
+          <li>Staging cleanup now requires a manifest as proof of ownership before trashing orphans.</li>
+          <li>Tool downloads use the hardened HTTP client (no ambient proxy, no downgrades).</li>
+          <li>HTTPS proxy type now connects with TLS to the proxy.</li>
+          <li>Minimum ffmpeg version is now 7.0.</li>
+          <li>Hardened temporary file handling for queue saves.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.0.1" date="2026-10-03">
       <description>
         <ul>

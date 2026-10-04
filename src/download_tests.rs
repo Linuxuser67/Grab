@@ -6579,7 +6579,7 @@ fn old_queue_without_validators_deserializes() {
         "url": "http://example.com/old.bin",
         "dest_dir": "/tmp",
         "filename": "old.bin",
-        "status": "Paused",
+        "status": "paused",
         "progress": 0.5,
         "segments": null,
         "selected_files": null,

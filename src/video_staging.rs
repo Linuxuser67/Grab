@@ -464,15 +464,25 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
 /// Whether an id-in-name file should be trashed: no live row, no manifest,
 /// and abandoned (mtime > 7 days). Extracted for testability; the actual
 /// trash call stays in `sweep_dest_staging`.
+/// Ownership is proven by the manifest, never inferred from the filename:
+/// a user file like `My.backup.4.mp4.part` has no `.4.manifest.json` and is
+/// never touched. Only our own crashed-run leftovers (manifest exists, both
+/// abandoned) are trashed.
 fn should_trash_orphan(
     name: &str,
     path: &Path,
     keep: &std::collections::HashSet<u64>,
     dest_dir: &Path,
 ) -> bool {
-    staging_id_from_name(name)
-        .is_some_and(|id| !keep.contains(&id) && !manifest_path(dest_dir, id).exists())
-        && file_is_abandoned(path)
+    staging_id_from_name(name).is_some_and(|id| {
+        if keep.contains(&id) {
+            return false;
+        }
+        let manifest = manifest_path(dest_dir, id);
+        // Manifest must exist (proof we created this) and be abandoned too:
+        // a fresh manifest means the download just started.
+        manifest.exists() && file_is_abandoned(&manifest) && file_is_abandoned(path)
+    })
 }
 
 /// Sidecar recording completed parts, so a retry can skip straight to the merge.
@@ -1305,67 +1315,63 @@ mod tests {
 
     #[test]
     fn orphan_trash_age_gate() {
-        // Abandoned id-in-name orphans (no manifest, no live row, mtime > 7 days)
-        // are trashed (recoverable), not permanently deleted. Recent orphans,
-        // live rows, and manifested ids are left alone.
+        // Ownership is proven by the manifest, never inferred from the filename.
+        // A `.part` file is trash-eligible only if its `.{id}.manifest.json`
+        // exists and both are abandoned (> 7 days). User files without a
+        // manifest are never touched.
         // Tests `should_trash_orphan` directly: gio trash itself is env-dependent
         // and not asserted here.
         let dir = unique_dir("orphan-trash-age");
         std::fs::create_dir_all(&dir).unwrap();
         let keep = std::collections::HashSet::new();
+        let eight_days = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86400);
+        let set_old = |p: &std::path::Path| {
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(eight_days)
+                .unwrap();
+        };
 
-        // Old orphan: mtime 8 days ago, no manifest, no live row → trash.
+        // Old orphan WITH abandoned manifest → trash.
         let old = dir.join("Title.11.mp4.part");
         std::fs::write(&old, b"orphan").unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&old)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86400))
-            .unwrap();
-        assert!(
-            file_is_abandoned(&old),
-            "test setup: mtime must be 8 days ago"
-        );
+        set_old(&old);
+        let manifest11 = manifest_path(&dir, 11);
+        std::fs::write(&manifest11, b"{}").unwrap();
+        set_old(&manifest11);
         assert!(
             should_trash_orphan("Title.11.mp4.part", &old, &keep, &dir),
-            "abandoned orphan must be trash-eligible"
+            "abandoned orphan with abandoned manifest must be trash-eligible"
         );
 
-        // Recent orphan: fresh mtime → leave alone (may resume).
-        let recent = dir.join("Title.12.mp4.part");
-        std::fs::write(&recent, b"recent").unwrap();
+        // Old file WITHOUT manifest: user file → never trash.
+        let user = dir.join("My.backup.12.mp4.part");
+        std::fs::write(&user, b"user").unwrap();
+        set_old(&user);
         assert!(
-            !should_trash_orphan("Title.12.mp4.part", &recent, &keep, &dir),
-            "recent orphan must not be trash-eligible"
+            !should_trash_orphan("My.backup.12.mp4.part", &user, &keep, &dir),
+            "user file without manifest must never be trash-eligible"
+        );
+
+        // Fresh manifest → may resume → leave alone.
+        let recent_part = dir.join("Title.13.mp4.part");
+        std::fs::write(&recent_part, b"recent").unwrap();
+        set_old(&recent_part);
+        std::fs::write(manifest_path(&dir, 13), b"{}").unwrap();
+        // Manifest just written (fresh).
+        assert!(
+            !should_trash_orphan("Title.13.mp4.part", &recent_part, &keep, &dir),
+            "fresh manifest must not be trash-eligible"
         );
 
         // Live row: in keep → leave alone.
-        let mut keep12 = std::collections::HashSet::new();
-        keep12.insert(12u64);
+        let mut keep11 = std::collections::HashSet::new();
+        keep11.insert(11u64);
         assert!(
-            !should_trash_orphan("Title.12.mp4.part", &old, &keep12, &dir),
+            !should_trash_orphan("Title.11.mp4.part", &old, &keep11, &dir),
             "live row must not be trash-eligible"
-        );
-
-        // Manifest exists → leave alone (may resume via manifest).
-        let manifest_id = 13u64;
-        let manifest_file = dir.join("Title.13.mp4.part");
-        std::fs::write(&manifest_file, b"orphan").unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&manifest_file)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86400))
-            .unwrap();
-        std::fs::write(
-            manifest_path(&dir, manifest_id),
-            br#"{"page_url":"u","quality":"q","video_ext":"mp4","audio_ext":"mp3"}"#,
-        )
-        .unwrap();
-        assert!(
-            !should_trash_orphan("Title.13.mp4.part", &manifest_file, &keep, &dir),
-            "manifested id must not be trash-eligible"
         );
 
         // Non-matching file → never trash-eligible.

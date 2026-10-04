@@ -255,9 +255,26 @@ fn is_grab_staging_suffix(suffix: &str) -> bool {
         return true;
     }
     // yt-dlp sidecars: *.part, *.ytdl (appended to the filenames we pass it).
-    // ONLY sidecars via pattern: bare media files (grab-42.mp4) could be user
-    // files — those are deleted only via manifest exact-name match.
-    suffix.ends_with(".part") || suffix.ends_with(".ytdl")
+    // ONLY sidecars and format parts via pattern: bare media files
+    // (grab-42.mp4, grab-42-video.mp4) could be user files — those are
+    // deleted only via manifest exact-name match.
+    if suffix.ends_with(".part") || suffix.ends_with(".ytdl") {
+        return true;
+    }
+    // Format parts: <kind>.<format>.<ext> (e.g., "video.f137.mp4").
+    // The format code (f137) proves yt-dlp created it. Bare "video.mp4"
+    // (no format code) is NOT matched — could be a user file.
+    if let Some((kind, rest)) = suffix.split_once('.')
+        && matches!(kind, "video" | "audio" | "live")
+        && let Some((_format, ext)) = rest.split_once('.')
+    {
+        // rest must be "<format>.<ext>" (two parts), not just "<ext>".
+        return matches!(
+            ext,
+            "mp4" | "webm" | "mkv" | "m4a" | "mp3" | "ogg" | "wav" | "flac" | "opus"
+        );
+    }
+    false
 }
 
 /// Remove Grab staging files for an item in the destination dir.
@@ -1367,13 +1384,16 @@ mod tests {
     fn clean_staging_files_preserves_user_media_with_grab_prefix() {
         // Regression test: a user's own file named grab-42.mp4 must NOT be
         // deleted by clean_staging_files(). Pattern deletion is restricted to
-        // sidecars (.part/.ytdl); bare media files require manifest ownership.
+        // sidecars (.part/.ytdl) and format parts (video.f137.mp4); bare media
+        // files require manifest ownership.
         let dir = unique_dir("user-media");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("grab-42.mp4"), b"user video").unwrap();
         std::fs::write(dir.join("grab-42-video.mp4"), b"user video").unwrap();
         // Sidecars ARE deleted (safe: users don't name files .part).
         std::fs::write(dir.join("grab-42.mp4.part"), b"partial").unwrap();
+        // Format parts ARE deleted (the f137 format code proves yt-dlp made it).
+        std::fs::write(dir.join("grab-42-video.f137.mp4"), b"format part").unwrap();
 
         clean_staging_files(&dir, 42);
 
@@ -1388,6 +1408,10 @@ mod tests {
         assert!(
             !dir.join("grab-42.mp4.part").exists(),
             "sidecar should be cleaned"
+        );
+        assert!(
+            !dir.join("grab-42-video.f137.mp4").exists(),
+            "format part should be cleaned"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

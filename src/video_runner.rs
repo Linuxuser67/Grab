@@ -1043,15 +1043,18 @@ fn claim_staging_name(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".to_string());
-    // Find an unused name: title.ext, title-1.ext, title-2.ext, ...
-    // Atomically claim it with create_new on the .part file: exists()-then-use
-    // races, but create_new fails if another process claimed it first.
+    // The id rides in the on-disk name (`{stem}.grab-{id}.{ext}`): the file
+    // is self-identifying, so a lost/corrupt manifest cannot orphan it into
+    // id reuse. Find an unused name and claim it atomically via create_new
+    // on the .part file: exists()-then-use races, but create_new fails if
+    // another process claimed it first.
+    let id = job.item_id;
     let mut n = 0;
     loop {
         let name = if n == 0 {
-            format!("{stem}.{ext}")
+            format!("{stem}.grab-{id}.{ext}")
         } else {
-            format!("{stem}-{n}.{ext}")
+            format!("{stem}.grab-{id}-{n}.{ext}")
         };
         let path = dir.join(&name);
         // Never use the final dest as staging.
@@ -1063,8 +1066,8 @@ fn claim_staging_name(
             continue;
         }
         // Never claim a base name that already exists: the .part claim
-        // is atomic, but the base file belongs to the user. If Title-1.mp4
-        // exists, skip to Title-2.mp4.
+        // is atomic, but the base file belongs to the user. If
+        // Title.grab-1.mp4 exists, skip to Title.grab-1-1.mp4.
         if path.exists() {
             n += 1;
             if n > 1000 {
@@ -1079,7 +1082,21 @@ fn claim_staging_name(
             .create_new(true)
             .open(&part)
         {
-            Ok(_) => return Ok((path, name)),
+            Ok(_) => {
+                // TOCTOU re-validation: the base may have appeared between the
+                // exists() check above and the atomic .part claim (user file
+                // or another claimer racing). If it did, drop our claim and
+                // try the next name — never adopt a foreign base file.
+                if path.exists() {
+                    let _ = std::fs::remove_file(&part);
+                    n += 1;
+                    if n > 1000 {
+                        return Err(VideoError::staging("too many conflicting files"));
+                    }
+                    continue;
+                }
+                return Ok((path, name));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 n += 1;
                 if n > 1000 {
@@ -1115,9 +1132,9 @@ pub(crate) async fn run_live_ytdlp(
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
     // recording, and the file-growth watcher announces "Recording…" off this path.
-    // Unix-style: just the title (e.g., "My Video.mp4"). On collision, -1, -2, ...
-    // (wget-style dedup). The chosen name is stored in the manifest for cleanup.
-    // Never equal to job.dest (the final file); staging is always distinct.
+    // The id rides in the name (e.g., "My Video.grab-4.mp4"); on collision,
+    // -1, -2, ... after the id. The chosen name is stored in the manifest for
+    // cleanup. Never equal to job.dest (the final file); staging is always distinct.
     let (out, staging_name) = claim_staging_name(job, ext)?;
     // Clean up the previous attempt's .part if the manifest points to a
     // different staging name (crash/retry orphan). Never delete the base
@@ -1158,7 +1175,8 @@ pub(crate) async fn run_live_ytdlp(
         return Err(VideoError::staging(e));
     }
     // Record the chosen staging name in the manifest for crash cleanup.
-    // The ID stays hidden in the manifest; the filename is just title (+ dedup).
+    // The id is also baked into the filename itself, so the file stays
+    // attributable even if this manifest is lost or corrupt.
     let _ = write_manifest(
         staging,
         job.item_id,

@@ -46,17 +46,89 @@ pub fn staging_location_for_dest(dest: &Path, item_id: u64) -> StagingLocation {
     }
 }
 
+/// Media extensions Grab writes (shared by the id-in-name matcher and the
+/// legacy staging-suffix allowlist).
+const MEDIA_EXTS: &[&str] = &[
+    "mp4", "webm", "mkv", "m4a", "mp3", "ogg", "wav", "flac", "opus",
+];
+
+/// Whether `file_name` is a Grab staging file for `item_id` under the
+/// id-in-name scheme: `{stem}.grab-{id}.{ext}[.part|.ytdl]` or the deduped
+/// `{stem}.grab-{id}-{n}.{ext}[.part|.ytdl]`.
+///
+/// The `grab-{id}` infix (not a bare `.{id}.`) keeps user files like
+/// `linux-5.4.0.tar.gz` or `my.backup.4.mp4` from ever matching.
+pub(crate) fn staging_name_matches_id(file_name: &str, item_id: u64) -> bool {
+    // Strip yt-dlp sidecar suffixes first.
+    let mut base = file_name;
+    if let Some(s) = base.strip_suffix(".part") {
+        base = s;
+    } else if let Some(s) = base.strip_suffix(".ytdl") {
+        base = s;
+    }
+    // Must end with .{media-ext}.
+    let Some(dot) = base.rfind('.') else {
+        return false;
+    };
+    if !MEDIA_EXTS.contains(&base[dot + 1..]) {
+        return false;
+    }
+    let stem_with_id = &base[..dot];
+    // Exact: {stem}.grab-{id}
+    let id_tag = format!(".grab-{item_id}");
+    if stem_with_id
+        .rfind('.')
+        .map(|p| &stem_with_id[p..])
+        .is_some_and(|tail| tail == id_tag)
+    {
+        return true;
+    }
+    // Deduped: {stem}.grab-{id}-{n}
+    let prefix = format!(".grab-{item_id}-");
+    if let Some(pos) = stem_with_id.rfind(&prefix) {
+        let after = &stem_with_id[pos + prefix.len()..];
+        return !after.is_empty() && after.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
+/// Extract the item id from an id-in-name staging file, if it matches the
+/// scheme. Returns `None` for user files and legacy names.
+pub(crate) fn staging_id_from_name(file_name: &str) -> Option<u64> {
+    let mut base = file_name;
+    if let Some(s) = base.strip_suffix(".part") {
+        base = s;
+    } else if let Some(s) = base.strip_suffix(".ytdl") {
+        base = s;
+    }
+    let dot = base.rfind('.')?;
+    if !MEDIA_EXTS.contains(&base[dot + 1..]) {
+        return None;
+    }
+    let stem_with_id = &base[..dot];
+    // Find `.grab-{id}` or `.grab-{id}-{n}` from the end.
+    let pos = stem_with_id.rfind(".grab-")?;
+    let after = &stem_with_id[pos + ".grab-".len()..];
+    // after is "{id}" or "{id}-{n}".
+    let id_str = after.split('-').next()?;
+    let id: u64 = id_str.parse().ok()?;
+    // Strict verify: the full match must hold.
+    staging_name_matches_id(file_name, id).then_some(id)
+}
+
 /// Whether any staging file exists for this id: the id allocator must skip
 /// it so a fresh row never lands on a leftover.
 pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
-    let prefix = format!("grab-{item_id}-");
     // Manifest exists = occupied (it tracks the exact staging name).
     if manifest_path(dest_dir, item_id).exists() {
         return true;
     }
+    // Id-in-name scheme: the file itself carries the id, so a lost manifest
+    // cannot orphan the id into reuse.
     // Legacy patterns: grab-{id}- prefix (safe) and .{id}.live. (has marker, safe).
     // The bare .{id}. pattern is deliberately NOT checked: it false-positives
     // on user files like linux-5.4.0.tar.gz.
+    let prefix = format!("grab-{item_id}-");
     let live_pattern = format!(".{item_id}.live.");
     std::fs::read_dir(dest_dir)
         .ok()
@@ -64,7 +136,11 @@ pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
             entries.filter_map(|e| e.ok()).any(|e| {
                 e.file_name()
                     .to_str()
-                    .map(|n| n.starts_with(&prefix) || n.contains(&live_pattern))
+                    .map(|n| {
+                        staging_name_matches_id(n, item_id)
+                            || n.starts_with(&prefix)
+                            || n.contains(&live_pattern)
+                    })
                     .unwrap_or(false)
             })
         })
@@ -210,6 +286,11 @@ fn is_grab_staging_suffix(suffix: &str) -> bool {
 /// Remove Grab staging files for an item in the destination dir.
 /// Only deletes files matching known staging patterns; never the dir itself,
 /// other files, or a user's own `grab-<id>-*` files.
+///
+/// Routing: manifest `staging_name` exact-match first (precise), then the
+/// id-in-name pattern as fallback (covers a lost/corrupt manifest). Pattern
+/// matching only deletes `.part`/`.ytdl` sidecars — never a bare media file,
+/// which could be a completed recording or a user file.
 pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
     let prefix_hyphen = format!("grab-{item_id}-");
     let prefix_dot = format!("grab-{item_id}.");
@@ -219,12 +300,29 @@ pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
         format!("grab-{item_id}-.manifest.json"),
         format!("grab-{item_id}-manifest.json"),
     ];
+    // Exact staging names from the manifest: the precise primary route.
+    let manifest_names: Vec<String> = read_manifest(dest_dir, item_id)
+        .and_then(|m| m.staging_name)
+        .map(|base| vec![base.clone(), format!("{base}.part"), format!("{base}.ytdl")])
+        .unwrap_or_default();
     if let Ok(entries) = std::fs::read_dir(dest_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name();
             let name_str = name.to_str().unwrap_or("");
             // Hidden or legacy manifest: always clean.
             if name_str == hidden_manifest || legacy_manifests.iter().any(|m| m == name_str) {
+                let _ = std::fs::remove_file(entry.path());
+                continue;
+            }
+            // Manifest exact-match: precise, covers the base recording too.
+            if manifest_names.iter().any(|n| n == name_str) {
+                let _ = std::fs::remove_file(entry.path());
+                continue;
+            }
+            // Id-in-name fallback (manifest lost): only sidecars, never bare media.
+            if staging_name_matches_id(name_str, item_id)
+                && (name_str.ends_with(".part") || name_str.ends_with(".ytdl"))
+            {
                 let _ = std::fs::remove_file(entry.path());
                 continue;
             }
@@ -280,8 +378,15 @@ pub(crate) fn drop_empty_staging_root(root: &Path) {
 /// dir names are touched — the `grab-cookies-*.txt` files and anything else
 /// under the root are left alone. Runs at startup after the queue is restored,
 /// before any worker starts, so nothing live is removed.
-/// Sweep one destination's staging files (`grab-<id>-*`): files for item IDs
-/// with no live row are reclaimed. A missing dest dir is a no-op.
+/// Sweep one destination's staging files: files for item IDs with no live row
+/// are reclaimed. A missing dest dir is a no-op.
+///
+/// Two id sources: the legacy `grab-<id>-*` prefix (parsed directly) and the
+/// id-in-name scheme (via [`staging_id_from_name`], which keeps working when
+/// the manifest is lost). Recordings are the user's only copy — preserve
+/// them. Only delete known staging file patterns; a user's own
+/// `grab-<id>-notes.txt` must survive. For id-in-name files without a
+/// manifest, only `.part`/`.ytdl` sidecars are swept, never a bare media file.
 pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>) {
     let Ok(entries) = std::fs::read_dir(dest_dir) else {
         return;
@@ -289,15 +394,23 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
     for entry in entries.filter_map(|e| e.ok()) {
         let name = entry.file_name();
         let name = name.to_str().unwrap_or("");
-        // Parse `grab-<id>-*` to get the item ID. Recordings (`grab-<id>-final.*`)
-        // are the user's only copy — preserve them. Only delete known staging
-        // file patterns; a user's own `grab-<id>-notes.txt` must survive.
+        // Legacy: parse `grab-<id>-*` to get the item ID.
         if let Some(rest) = name.strip_prefix("grab-")
             && let Some((id_str, suffix)) = rest.split_once('-')
             && let Ok(id) = id_str.parse::<u64>()
             && !keep.contains(&id)
             && !suffix.starts_with("final.")
             && is_grab_staging_suffix(suffix)
+        {
+            let _ = std::fs::remove_file(entry.path());
+            continue;
+        }
+        // Id-in-name scheme: attribute via the filename itself. Without a
+        // manifest to confirm the exact staging name, only sidecars go —
+        // a bare `*.grab-{id}.mp4` could be a completed recording.
+        if let Some(id) = staging_id_from_name(name)
+            && !keep.contains(&id)
+            && (name.ends_with(".part") || name.ends_with(".ytdl"))
         {
             let _ = std::fs::remove_file(entry.path());
         }
@@ -316,8 +429,9 @@ pub(crate) struct VideoManifest {
     /// Final output size once the file has been renamed into place.
     /// Lets a retry after a crash adopt the finished file without any work.
     pub(crate) final_bytes: Option<u64>,
-    /// Staging basename (e.g., "My Video.mp4" or "My Video-1.mp4").
-    /// Lets cleanup find the temp files without an ID in the name.
+    /// Staging basename (e.g., "My Video.grab-4.mp4").
+    /// Exact name for cleanup; the id is also baked into the filename itself
+    /// so the file stays attributable if the manifest is lost.
     pub(crate) staging_name: Option<String>,
 }
 
@@ -453,8 +567,12 @@ pub fn sweep_partial_remuxes(staging: &Path) {
     }
 }
 
-/// Remove a leg's staging scratch, preserving completed `grab-<id>-final.*` recordings (do not delete the user's only copy).
-/// Only touches files with the item's `grab-<id>-` prefix; never the dest dir itself or other files.
+/// Remove a leg's staging scratch, preserving completed recordings (do not delete the user's only copy).
+/// Only touches this item's files; never the dest dir itself or other files.
+///
+/// Routing: manifest `staging_name` exact-match first (precise), then the
+/// id-in-name pattern as fallback (covers a lost/corrupt manifest). Pattern
+/// matching only deletes `.part`/`.ytdl` sidecars — never a bare media file.
 pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
     let prefix = format!("grab-{item_id}-");
     // Hidden manifest: `.{id}.manifest.json` (new) and `.grab-{id}-manifest.json` (legacy).
@@ -481,6 +599,13 @@ pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
         }
         // Exact manifest names only: no substring matching.
         if manifest_names.iter().any(|n| n == &name) {
+            let _ = std::fs::remove_file(staging.join(&name));
+            continue;
+        }
+        // Id-in-name fallback (manifest lost): only sidecars, never bare media.
+        if staging_name_matches_id(&name, item_id)
+            && (name.ends_with(".part") || name.ends_with(".ytdl"))
+        {
             let _ = std::fs::remove_file(staging.join(&name));
             continue;
         }
@@ -957,5 +1082,168 @@ mod tests {
             "link target is untouched"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn staging_name_matches_id_accepts_own_files() {
+        // Own files under the id-in-name scheme must match.
+        assert!(staging_name_matches_id("Title.grab-4.mp4", 4));
+        assert!(staging_name_matches_id("Title.grab-4.mp4.part", 4));
+        assert!(staging_name_matches_id("Title.grab-4.mp4.ytdl", 4));
+        assert!(staging_name_matches_id("Title.grab-4-1.mp4", 4));
+        assert!(staging_name_matches_id("Title.grab-4-1.mp4.part", 4));
+        assert!(staging_name_matches_id("My Video.grab-42.webm.part", 42));
+        // Other ids must not match.
+        assert!(!staging_name_matches_id("Title.grab-4.mp4", 5));
+        assert!(!staging_name_matches_id("Title.grab-4.mp4.part", 44));
+    }
+
+    #[test]
+    fn staging_name_matches_id_rejects_user_files() {
+        // User files must never match, even with tricky names.
+        assert!(!staging_name_matches_id("linux-5.4.0.tar.gz", 4));
+        assert!(!staging_name_matches_id("my.backup.4.mp4", 4));
+        assert!(!staging_name_matches_id("my.backup.4.mp4.part", 4));
+        assert!(!staging_name_matches_id("Title.mp4", 4));
+        assert!(!staging_name_matches_id("Title.mp4.part", 4));
+        assert!(!staging_name_matches_id("grab-4-notes.txt", 4));
+        assert!(!staging_name_matches_id("4.mp4", 4));
+    }
+
+    #[test]
+    fn staging_id_from_name_roundtrip() {
+        assert_eq!(staging_id_from_name("Title.grab-4.mp4"), Some(4));
+        assert_eq!(staging_id_from_name("Title.grab-4.mp4.part"), Some(4));
+        assert_eq!(staging_id_from_name("Title.grab-42-3.webm.ytdl"), Some(42));
+        assert_eq!(staging_id_from_name("linux-5.4.0.tar.gz"), None);
+        assert_eq!(staging_id_from_name("my.backup.4.mp4"), None);
+        assert_eq!(staging_id_from_name("Title.mp4"), None);
+        assert_eq!(staging_id_from_name("grab-4-video.mp4.part"), None);
+    }
+
+    #[test]
+    fn manifest_loss_still_occupies_id_via_filename() {
+        // Blocker 1: a lost manifest must not orphan the id into reuse.
+        // The id-in-name scheme keeps the file attributable.
+        let dir = unique_dir("manifest-loss-occupancy");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Simulate a crashed capture: id-in-name files, no manifest.
+        std::fs::write(dir.join("Title.grab-7.mp4.part"), b"partial").unwrap();
+        std::fs::write(dir.join("Title.grab-7.mp4.ytdl"), b"state").unwrap();
+        // No manifest written.
+
+        assert!(
+            staging_occupied(&dir, 7),
+            "id 7 must stay occupied via id-in-name even with no manifest"
+        );
+        assert!(
+            !staging_occupied(&dir, 8),
+            "unrelated id 8 must not be occupied"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_loss_sweep_reclaims_sidecars_preserves_base() {
+        // Blocker 1+2: without a manifest, the sweep must still reclaim
+        // .part/.ytdl via the id-in-name fallback, but never delete a bare
+        // media file (could be a completed recording).
+        let dir = unique_dir("manifest-loss-sweep");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Title.grab-7.mp4.part"), b"partial").unwrap();
+        std::fs::write(dir.join("Title.grab-7.mp4.ytdl"), b"state").unwrap();
+        std::fs::write(dir.join("Title.grab-7.mp4"), b"maybe-a-recording").unwrap();
+        std::fs::write(dir.join("user-video.mp4"), b"user file").unwrap();
+        // No manifest.
+
+        sweep_staging_preserving_recordings(&dir, 7);
+
+        assert!(
+            !dir.join("Title.grab-7.mp4.part").exists(),
+            "orphan .part must be swept via id-in-name fallback"
+        );
+        assert!(
+            !dir.join("Title.grab-7.mp4.ytdl").exists(),
+            "orphan .ytdl must be swept via id-in-name fallback"
+        );
+        assert!(
+            dir.join("Title.grab-7.mp4").exists(),
+            "bare media file must be preserved without a manifest to confirm it"
+        );
+        assert!(
+            dir.join("user-video.mp4").exists(),
+            "user file must survive"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_manifest_files_still_attributable() {
+        // A corrupt manifest reads as None; the id-in-name fallback must
+        // still attribute the files so they are not orphaned.
+        let dir = unique_dir("corrupt-manifest");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".7.manifest.json"), b"not valid json{{").unwrap();
+        std::fs::write(dir.join("Title.grab-7.mp4.part"), b"partial").unwrap();
+
+        assert!(
+            read_manifest(&dir, 7).is_none(),
+            "corrupt manifest must read as None"
+        );
+        assert!(
+            staging_occupied(&dir, 7),
+            "id 7 must stay occupied via id-in-name despite corrupt manifest"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_rows_same_stem_get_distinct_files() {
+        // Blocker 3: two live rows with the same stem must not collide.
+        // The id in the name keeps them distinct.
+        let dir = unique_dir("two-rows-same-stem");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Simulate two claimed staging files for different ids, same stem.
+        std::fs::write(dir.join("Title.grab-4.mp4.part"), b"row4").unwrap();
+        std::fs::write(dir.join("Title.grab-9.mp4.part"), b"row9").unwrap();
+
+        assert!(staging_occupied(&dir, 4), "id 4 occupied");
+        assert!(staging_occupied(&dir, 9), "id 9 occupied");
+
+        // Per-id sweep of row 4 must preserve row 9's sibling.
+        sweep_staging_preserving_recordings(&dir, 4);
+        assert!(
+            !dir.join("Title.grab-4.mp4.part").exists(),
+            "row 4's part is swept"
+        );
+        assert!(
+            dir.join("Title.grab-9.mp4.part").exists(),
+            "row 9's sibling part must survive row 4's sweep"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphan_sweep_attributes_via_id_in_name() {
+        // Blocker 2: sweep_dest_staging must reclaim id-in-name orphans for
+        // ids with no live row, via the filename itself.
+        let dir = unique_dir("orphan-id-in-name");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Title.grab-11.mp4.part"), b"orphan").unwrap();
+        std::fs::write(dir.join("Title.grab-12.mp4.part"), b"live").unwrap();
+        let mut keep = std::collections::HashSet::new();
+        keep.insert(12u64);
+
+        sweep_dest_staging(&dir, &keep);
+
+        assert!(
+            !dir.join("Title.grab-11.mp4.part").exists(),
+            "orphan id 11's part must be swept"
+        );
+        assert!(
+            dir.join("Title.grab-12.mp4.part").exists(),
+            "live id 12's part must survive"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

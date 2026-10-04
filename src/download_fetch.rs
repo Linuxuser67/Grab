@@ -41,8 +41,10 @@ fn send_last_modified(
 }
 
 /// Report the response's resume validator (ETag preferred, Last-Modified
-/// fallback) so the item stores it for If-Range on resume. Sent on every
-/// successful response; the handler overwrites any stale validator.
+/// fallback) so the item stores it for If-Range on resume. Sent when the
+/// response carries a new validator generation — not on 206 resume hits
+/// where the validator is already known (a mid-download change must not
+/// poison the stored value). The handler overwrites any stale validator.
 fn send_validator(tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>, resp: &reqwest::Response) {
     let etag = resp
         .headers()

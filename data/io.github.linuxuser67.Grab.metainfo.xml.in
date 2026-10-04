@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.1.2" date="2026-10-04">
+      <description>
+        <ul>
+          <li>yt-dlp now follows the nightly channel for faster extractor fixes.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.1.1" date="2026-10-04">
       <description>
         <ul>

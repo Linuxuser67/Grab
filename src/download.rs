@@ -202,6 +202,8 @@ pub struct DownloadManager {
     /// and sends the text here; a dedicated worker does the file I/O
     /// (temp + sync_all + rename + dir sync) off the UI thread. Bursts
     /// coalesce via drain-to-latest in the worker.
+    /// Tests write synchronously and never use the channel.
+    #[cfg_attr(test, allow(dead_code))]
     persist_tx: std::sync::mpsc::Sender<String>,
 }
 
@@ -347,23 +349,32 @@ impl DownloadManager {
             sizing_inflight: Rc::new(Cell::new(0)),
             scheduler_source: RefCell::new(None),
             persist_tx: {
-                let (tx, rx) = std::sync::mpsc::channel::<String>();
-                std::thread::Builder::new()
-                    .name("grab-queue-persist".to_string())
-                    .spawn(move || {
-                        // Coalesce bursts: drain to the latest text before each write.
-                        // `recv` returns Err only after the sender is dropped and the
-                        // channel is drained, so all persists complete before exit.
-                        while let Ok(text) = rx.recv() {
-                            let mut latest = text;
-                            while let Ok(t) = rx.try_recv() {
-                                latest = t;
+                #[cfg(not(test))]
+                {
+                    let (tx, rx) = std::sync::mpsc::channel::<String>();
+                    std::thread::Builder::new()
+                        .name("grab-queue-persist".to_string())
+                        .spawn(move || {
+                            // Coalesce bursts: drain to the latest text before each write.
+                            // `recv` returns Err only after the sender is dropped and the
+                            // channel is drained, so all persists complete before exit.
+                            while let Ok(text) = rx.recv() {
+                                let mut latest = text;
+                                while let Ok(t) = rx.try_recv() {
+                                    latest = t;
+                                }
+                                Self::write_queue_file(&latest);
                             }
-                            Self::write_queue_file(&latest);
-                        }
-                    })
-                    .expect("queue persist thread");
-                tx
+                        })
+                        .expect("queue persist thread");
+                    tx
+                }
+                #[cfg(test)]
+                {
+                    // Tests write synchronously via `write_queue_file`; no worker needed.
+                    let (tx, _rx) = std::sync::mpsc::channel::<String>();
+                    tx
+                }
             },
         });
         // Publish the Weak for `wake_queue()`'s `Send` closure (see `MANAGER_WEAK`).
@@ -2577,6 +2588,11 @@ impl DownloadManager {
         };
         // File I/O runs on the worker thread; a full channel means the worker
         // is behind, and it will drain to our latest text anyway.
+        // Tests need determinism: they persist then immediately restore in a
+        // new manager, so write synchronously in test builds.
+        #[cfg(test)]
+        Self::write_queue_file(&text);
+        #[cfg(not(test))]
         let _ = self.persist_tx.send(text);
     }
 

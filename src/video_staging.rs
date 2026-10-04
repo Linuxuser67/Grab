@@ -427,12 +427,11 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
         // `.live.` marker makes it safe; extract the id and sweep if orphaned.
         if let Some(live_pos) = name.find(".live.") {
             let before = &name[..live_pos];
-            if let Some(dot) = before.rfind('.') {
-                if let Ok(id) = before[dot + 1..].parse::<u64>()
-                    && !keep.contains(&id)
-                {
-                    let _ = std::fs::remove_file(entry.path());
-                }
+            if let Some(dot) = before.rfind('.')
+                && let Ok(id) = before[dot + 1..].parse::<u64>()
+                && !keep.contains(&id)
+            {
+                let _ = std::fs::remove_file(entry.path());
             }
         }
     }

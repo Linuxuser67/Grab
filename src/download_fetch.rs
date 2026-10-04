@@ -15,15 +15,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Jittered exponential backoff for retryable failures: `capped_ms = min(60_000, 500 * 2^(failures-1))`,
-/// full jitter via system-time nanos (no `rand` dependency). `failures` is 1-based.
+/// full jitter via GLib's RNG (no `rand` dependency). `failures` is 1-based.
 /// Worst case per episode ~1.5s (500ms + 1s across the two retries `tries` allows).
 pub(crate) fn backoff_delay(failures: u32) -> Duration {
     let capped_ms = std::cmp::min(60_000u64, 500 * 2u64.pow(failures.saturating_sub(1)));
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
-        .unwrap_or(0);
-    let sleep_ms = nanos % (capped_ms + 1);
+    let sleep_ms = glib::random_int_range(0, capped_ms as i32 + 1) as u64;
     Duration::from_millis(sleep_ms)
 }
 

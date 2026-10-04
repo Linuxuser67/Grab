@@ -1301,6 +1301,18 @@ pub async fn latest_quickjs_tag() -> Option<String> {
     latest_quickjs_release().await.map(|(tag, _)| tag)
 }
 
+/// SHA-256 digest for a release asset, stripped of the "sha256:" prefix.
+/// Returns None if the asset is absent or has no digest: callers fail closed.
+fn digest_for_asset(release: &yt_dlp::client::deps::github::Release, name: &str) -> Option<String> {
+    release
+        .assets
+        .iter()
+        .find(|a| a.name == name)
+        .and_then(|a| a.digest.as_deref())
+        .and_then(|d| d.strip_prefix("sha256:"))
+        .map(str::to_owned)
+}
+
 /// Latest quickjs-ng release tag and its SHA-256 digest for this architecture.
 /// The digest comes from GitHub's release API (`digest: "sha256:…"` per asset).
 /// Returns None if the digest is absent: we fail closed rather than install
@@ -1310,13 +1322,7 @@ pub async fn latest_quickjs_release() -> Option<(String, Option<String>)> {
         let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new("quickjs-ng", "quickjs");
         let release = fetcher.fetch_latest_release(None).await.ok()?;
         let want = format!("qjs-linux-{}", std::env::consts::ARCH);
-        let digest = release
-            .assets
-            .iter()
-            .find(|a| a.name == want)
-            .and_then(|a| a.digest.as_deref())
-            .and_then(|d| d.strip_prefix("sha256:"))
-            .map(str::to_owned);
+        let digest = digest_for_asset(&release, &want);
         Some((release.tag_name, digest))
     });
     handle.await.ok().flatten()
@@ -1660,5 +1666,70 @@ mod tests {
         assert!(!part.exists(), "half-written .part survived a failed fetch");
         assert!(!dest.exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    /// Build a minimal Release from JSON for testing digest extraction.
+    fn release_from_json(json: &str) -> yt_dlp::client::deps::github::Release {
+        serde_json::from_str(json).expect("test Release JSON must parse")
+    }
+
+    #[test]
+    fn digest_for_asset_extracts_sha256() {
+        let release = release_from_json(
+            r#"{
+            "tag_name": "v1.0.0",
+            "assets": [
+                {"name": "qjs-linux-x86_64", "digest": "sha256:abc123"},
+                {"name": "qjs-linux-aarch64", "digest": "sha256:def456"}
+            ]
+        }"#,
+        );
+        assert_eq!(
+            digest_for_asset(&release, "qjs-linux-x86_64").as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            digest_for_asset(&release, "qjs-linux-aarch64").as_deref(),
+            Some("def456")
+        );
+    }
+
+    #[test]
+    fn digest_for_asset_returns_none_when_missing() {
+        // No digest field: fail-closed path.
+        let release = release_from_json(
+            r#"{
+            "tag_name": "v1.0.0",
+            "assets": [
+                {"name": "qjs-linux-x86_64"}
+            ]
+        }"#,
+        );
+        assert_eq!(digest_for_asset(&release, "qjs-linux-x86_64"), None);
+
+        // Asset not found.
+        let release = release_from_json(
+            r#"{
+            "tag_name": "v1.0.0",
+            "assets": []
+        }"#,
+        );
+        assert_eq!(digest_for_asset(&release, "qjs-linux-x86_64"), None);
+
+        // Digest without sha256: prefix.
+        let release = release_from_json(
+            r#"{
+            "tag_name": "v1.0.0",
+            "assets": [
+                {"name": "qjs-linux-x86_64", "digest": "md5:abc123"}
+            ]
+        }"#,
+        );
+        assert_eq!(digest_for_asset(&release, "qjs-linux-x86_64"), None);
     }
 }

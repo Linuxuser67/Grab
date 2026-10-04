@@ -6384,7 +6384,7 @@ fn piece_rejects_200_after_if_range_mismatch() {
         "v.bin",
         300_000,
         "0",
-        &["if-range-strict", "\"server-etag\""],
+        &["", "if-range-strict", "\"server-etag\""],
         45,
     );
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -6412,5 +6412,188 @@ fn piece_rejects_200_after_if_range_mismatch() {
         ),
         Err(_) => abort(&server, "wrong error kind"),
     }
+    // Prove the 200 path was taken: the server logged our If-Range header,
+    // and in strict mode a mismatched If-Range yields 200 (not 206). The
+    // 206-validator-mismatch path cannot trigger here.
+    let log = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
+    assert!(
+        log.contains("if-range=\"client-etag\""),
+        "server never saw our If-Range; strict mode not engaged. Log:\n{log}"
+    );
     cleanup(&server, &dir);
+}
+
+/// 206 with mismatched validator yields Changed: when the server ignores
+/// If-Range (returns 206 anyway) but the response ETag differs from our
+/// session validator, fetch_piece must fail with Changed, not splice versions.
+#[test]
+fn piece_rejects_206_with_mismatched_validator() {
+    // Normal mode (not strict): server returns 206 with its ETag even when
+    // If-Range doesn't match. Our validator differs from the server's ETag.
+    let Fixture {
+        dir: _dir,
+        dl,
+        payload,
+        port,
+        server,
+    } = spawn_fixture(
+        "ifrange206",
+        "v.bin",
+        300_000,
+        "0",
+        &["", "", "\"server-etag-v2\""],
+        46,
+    );
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let if_range = std::sync::Arc::new(std::sync::OnceLock::new());
+    // Our validator differs from the server's ETag ("server-etag-v2").
+    let _ = if_range.set("\"client-etag-v1\"".to_string());
+    let ctx = FetchCtx {
+        client: http_client().clone(),
+        url: format!("http://127.0.0.1:{port}/v.bin"),
+        dest: dl.join("v.bin"),
+        opts: DownloadOptions {
+            ..Default::default()
+        },
+        cookies: None,
+        timeout: Duration::from_secs(30),
+        tx,
+        if_range,
+    };
+    let total = payload.len() as u64;
+    match tokio_rt().block_on(fetch_piece(&ctx, 0, 1023, total)) {
+        Err(AttemptFail::Changed(_)) => {}
+        Ok(_) => abort(
+            &server,
+            "206 with mismatched validator must fail Changed, not succeed",
+        ),
+        Err(e) => abort(&server, &format!("wrong error kind: {e:?}")),
+    }
+    cleanup(&server, &_dir);
+}
+
+/// Probe validator is persisted via EngineMsg::Validator: when a fresh
+/// segmented download starts, the probe's ETag must be sent through the
+/// channel before workers proceed, so pause/restart can resume with If-Range.
+#[test]
+fn probe_validator_sent_before_workers() {
+    let Fixture {
+        dir,
+        dl,
+        payload: _payload,
+        port,
+        server,
+    } = spawn_fixture(
+        "probeval",
+        "v.bin",
+        5_000_000,
+        "0",
+        &["", "", "\"probe-etag-456\""],
+        47,
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let ctx = FetchCtx {
+        client: http_client().clone(),
+        url: format!("http://127.0.0.1:{port}/v.bin"),
+        dest: dl.join("v.bin"),
+        opts: DownloadOptions {
+            ..Default::default()
+        },
+        cookies: None,
+        timeout: Duration::from_secs(30),
+        tx,
+        if_range: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    // Run the download in the background; we only care about the Validator message.
+    let dl_clone = dl.clone();
+    let handle = std::thread::spawn(move || {
+        tokio_rt().block_on(run_download(ctx, 4, StartMode::Fresh));
+        let _ = std::fs::remove_dir_all(dl_clone);
+    });
+    // Wait for the Validator message (probe must send it before workers start).
+    let validator = tokio_rt().block_on(async {
+        let timeout = tokio::time::timeout(Duration::from_secs(30), async {
+            while let Some(msg) = rx.recv().await {
+                if let EngineMsg::Validator(info) = msg {
+                    return Some(info);
+                }
+                // Stop waiting once the download finishes or fails.
+                if matches!(msg, EngineMsg::Finished { .. } | EngineMsg::Failed(_)) {
+                    return None;
+                }
+            }
+            None
+        });
+        timeout.await.unwrap_or(None)
+    });
+    let _ = handle.join();
+    let info = validator.unwrap_or_else(|| abort(&server, "probe never sent EngineMsg::Validator"));
+    assert_eq!(
+        info.etag.as_deref(),
+        Some("\"probe-etag-456\""),
+        "validator ETag must match the probe response"
+    );
+    cleanup(&server, &dir);
+}
+
+/// StoredItem validator persistence: etag/last_modified round-trip through
+/// JSON serialization, so cross-session resume has the validator.
+#[test]
+fn stored_item_validator_roundtrip() {
+    let mut item = stored_row(
+        "http://example.com/f.bin",
+        "/tmp",
+        "f.bin",
+        DownloadStatus::Paused,
+    );
+    item.etag = Some("\"test-etag-789\"".to_string());
+    item.last_modified = Some("Wed, 21 Oct 2015 07:28:00 GMT".to_string());
+
+    let json = serde_json::to_string(&item).expect("serialize");
+    assert!(json.contains("test-etag-789"), "etag not persisted: {json}");
+    assert!(
+        json.contains("Wed, 21 Oct 2015"),
+        "last_modified not persisted: {json}"
+    );
+
+    let restored: StoredItem = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(
+        restored.etag.as_deref(),
+        Some("\"test-etag-789\""),
+        "etag not restored"
+    );
+    assert_eq!(
+        restored.last_modified.as_deref(),
+        Some("Wed, 21 Oct 2015 07:28:00 GMT"),
+        "last_modified not restored"
+    );
+}
+
+/// Old queue compatibility: a queue file predating the validator fields
+/// (no etag/last_modified keys) must deserialize with None, not fail.
+#[test]
+fn old_queue_without_validators_deserializes() {
+    // Simulate an old queue file: StoredItem JSON without etag/last_modified.
+    let old_json = r#"{
+        "id": null,
+        "url": "http://example.com/old.bin",
+        "dest_dir": "/tmp",
+        "filename": "old.bin",
+        "status": "Paused",
+        "progress": 0.5,
+        "segments": null,
+        "selected_files": null,
+        "output_dir": null,
+        "video_source": null,
+        "started": true,
+        "scheduled_at": null
+    }"#;
+    let item: StoredItem =
+        serde_json::from_str(old_json).expect("old queue format must deserialize");
+    assert_eq!(item.etag, None, "missing etag must default to None");
+    assert_eq!(
+        item.last_modified, None,
+        "missing last_modified must default to None"
+    );
+    assert_eq!(item.url, "http://example.com/old.bin");
 }

@@ -18,7 +18,14 @@ pub(crate) fn shorten_filename(name: &str) -> String {
     }
     let (stem, ext) = split_stem_ext(name);
     let ext_len = ext.map_or(0, str::len);
-    let keep = stem.floor_char_boundary(MAX_FILENAME_BYTES.saturating_sub(ext_len));
+    // If the extension alone exceeds the budget, drop it: a 240-byte
+    // "extension" is pathological, and keeping it would produce a name
+    // over 255 bytes (ENAMETOOLONG).
+    if ext_len >= MAX_FILENAME_BYTES {
+        let keep = stem.floor_char_boundary(MAX_FILENAME_BYTES);
+        return stem[..keep].to_string();
+    }
+    let keep = stem.floor_char_boundary(MAX_FILENAME_BYTES - ext_len);
     match ext {
         Some(e) => format!("{}{e}", &stem[..keep]),
         None => stem[..keep].to_string(),

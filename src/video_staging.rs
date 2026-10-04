@@ -4,6 +4,7 @@
 use crate::video_prefs::subtitle_content_languages;
 use crate::video_tools::VideoError;
 use gettextrs::gettext;
+use gio::prelude::FileExt;
 use std::path::{Path, PathBuf};
 
 /// Shared root for tiny engine scratch (cookie dumps, probe output). Stays on
@@ -92,6 +93,33 @@ pub(crate) fn staging_name_matches_id(file_name: &str, item_id: u64) -> bool {
         return !after.is_empty() && after.chars().all(|c| c.is_ascii_digit());
     }
     false
+}
+
+/// Extract the item id from an id-in-name staging file, if it matches the
+/// scheme. Returns `None` for user files and legacy names.
+/// Used only for the recoverable trash path (never permanent deletion):
+/// without a marker the pattern is ambiguous, so deletion requires the
+/// manifest's exact name.
+pub(crate) fn staging_id_from_name(file_name: &str) -> Option<u64> {
+    let mut base = file_name;
+    if let Some(s) = base.strip_suffix(".part") {
+        base = s;
+    } else if let Some(s) = base.strip_suffix(".ytdl") {
+        base = s;
+    }
+    let dot = base.rfind('.')?;
+    if !MEDIA_EXTS.iter().any(|e| *e == &base[dot + 1..]) {
+        return None;
+    }
+    let stem_with_id = &base[..dot];
+    // The id is the last dot-component (or the part before -{n} in dedup).
+    let id_dot = stem_with_id.rfind('.')?;
+    let tail = &stem_with_id[id_dot + 1..];
+    // tail is "{id}" or "{id}-{n}".
+    let id_str = tail.split('-').next()?;
+    let id: u64 = id_str.parse().ok()?;
+    // Strict verify: the full match must hold.
+    staging_name_matches_id(file_name, id).then_some(id)
 }
 
 /// Whether any staging file exists for this id: the id allocator must skip
@@ -364,10 +392,28 @@ pub(crate) fn drop_empty_staging_root(root: &Path) {
 /// are reclaimed. A missing dest dir is a no-op.
 ///
 /// Two id sources: the legacy `grab-<id>-*` prefix (parsed directly) and the
-/// `.live.` marker pattern. The id-in-name scheme is NOT swept by pattern:
-/// without a marker it is fundamentally ambiguous. Recordings are the user's
-/// only copy — preserve them. Only delete known staging file patterns; a
-/// user's own `grab-<id>-notes.txt` must survive.
+/// `.live.` marker pattern. The id-in-name scheme is NOT permanently deleted
+/// by pattern (fundamentally ambiguous without a marker), but abandoned
+/// orphans (no manifest, no live row, mtime > 7 days) are moved to trash
+/// (recoverable). Recordings are the user's only copy — preserve them. Only
+/// delete known staging file patterns; a user's own `grab-<id>-notes.txt`
+/// must survive.
+///
+/// Age after which an id-in-name orphan with no manifest and no live row is
+/// considered abandoned and trashed (recoverable). Recent files are left
+/// alone: a crashed download may still resume.
+const ORPHAN_ABANDONED_AFTER: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// Whether `path` is old enough to be considered abandoned (mtime older than
+/// `ORPHAN_ABANDONED_AFTER`). Unreadable mtime reads as not-abandoned.
+fn file_is_abandoned(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|mtime| std::time::SystemTime::now().duration_since(mtime).ok())
+        .is_some_and(|age| age >= ORPHAN_ABANDONED_AFTER)
+}
+
 pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>) {
     let Ok(entries) = std::fs::read_dir(dest_dir) else {
         return;
@@ -402,6 +448,19 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
             {
                 let _ = std::fs::remove_file(entry.path());
             }
+            continue;
+        }
+        // Id-in-name orphans: trash (recoverable), never permanently delete.
+        // Without a marker the pattern is ambiguous, but an orphan with no
+        // manifest, no live row, and mtime older than 7 days is abandoned.
+        // Trashing frees the ID and clears litter; the user can recover from
+        // trash. Recent files are left alone (a crashed download may resume).
+        if let Some(id) = staging_id_from_name(name)
+            && !keep.contains(&id)
+            && !manifest_path(dest_dir, id).exists()
+            && file_is_abandoned(&entry.path())
+        {
+            let _ = gio::File::for_path(entry.path()).trash(gio::Cancellable::NONE);
         }
     }
 }
@@ -1230,6 +1289,45 @@ mod tests {
         assert!(
             dir.join("Title.12.mp4.part").exists(),
             "live id 12's part must survive"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphan_trash_age_gate() {
+        // Abandoned id-in-name orphans (no manifest, no live row, mtime > 7 days)
+        // are trashed (recoverable), not permanently deleted. Recent orphans
+        // are left alone (a crashed download may resume).
+        let dir = unique_dir("orphan-trash-age");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Old orphan: mtime 8 days ago.
+        let old = dir.join("Title.11.mp4.part");
+        std::fs::write(&old, b"orphan").unwrap();
+        let _ = std::process::Command::new("touch")
+            .arg("-d")
+            .arg("8 days ago")
+            .arg(&old)
+            .status();
+
+        // Recent orphan: fresh mtime.
+        let recent = dir.join("Title.12.mp4.part");
+        std::fs::write(&recent, b"recent").unwrap();
+
+        let keep = std::collections::HashSet::new();
+        sweep_dest_staging(&dir, &keep);
+
+        // Old orphan is trashed (gone from dir, recoverable via trash).
+        // Note: we don't assert trash contents; gio trash may vary by env.
+        // The key property is the file left the download dir without being
+        // permanently deleted via remove_file.
+        assert!(
+            !old.exists(),
+            "abandoned orphan (8 days old) must be trashed"
+        );
+        assert!(
+            recent.exists(),
+            "recent orphan must survive: may still resume"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

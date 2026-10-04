@@ -86,6 +86,7 @@ pub(crate) struct FetchCtx {
     pub(crate) tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     /// Resume validator for If-Range: ETag preferred, Last-Modified fallback.
     /// None on fresh downloads; the engine reports it back via Validator.
+    /// Updated from the first response for single-stream retries.
     pub(crate) if_range: Option<String>,
 }
 
@@ -115,11 +116,22 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
             match probe_ranges(&ctx.client, &ctx.url, ctx.cookies.as_ref(), timeout).await {
                 Ok((total, validator)) => {
                     // The probe captured the session validator before any worker started.
-                    // All piece requests send it as If-Range from the first byte.
+                    // Persist it for cross-session resume, and use it for If-Range.
                     // Don't overwrite a resume validator: the stored one is for the
                     // existing partial file, the probe is for a fresh download.
                     if ctx.if_range.is_none() {
-                        ctx.if_range = validator;
+                        // Send Validator for persistence: the item's etag/last_modified
+                        // must be populated, or a pause/restart loses the validator.
+                        ctx.tx
+                            .send(EngineMsg::Validator(Box::new(validator.clone())))
+                            .ok();
+                        // Derive If-Range from the same value.
+                        ctx.if_range = validator
+                            .etag
+                            .as_deref()
+                            .filter(|e| !e.starts_with("W/"))
+                            .map(|s| s.to_string())
+                            .or_else(|| validator.last_modified.clone());
                     }
                     if plan_pieces(total, connections).is_empty() {
                         single_loop(&ctx, &mut tries, Some(total), true).await;
@@ -661,29 +673,45 @@ async fn execute_with_timeout(
     }
 }
 
-/// One `Range: bytes=0-0` round trip: proves range support AND yields the total. Any error falls back to single-stream.
 /// Extract the validator from a response: strong ETag preferred, Last-Modified
 /// fallback. Weak ETags are skipped (never valid for If-Range).
+/// Returns the If-Range value to send.
 fn response_validator(resp: &reqwest::Response) -> Option<String> {
-    resp.headers()
-        .get(reqwest::header::ETAG)
-        .and_then(|v| v.to_str().ok())
-        .filter(|e| !e.starts_with("W/"))
-        .map(|s| s.to_string())
-        .or_else(|| {
-            resp.headers()
-                .get(reqwest::header::LAST_MODIFIED)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string())
-        })
+    response_validators(resp).0
 }
 
+/// Extract both validators from a response for persistence.
+/// Returns (if_range_value, etag, last_modified).
+fn response_validators(
+    resp: &reqwest::Response,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let etag = resp
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let last_modified = resp
+        .headers()
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    // If-Range value: strong ETag preferred, Last-Modified fallback.
+    let if_range = etag
+        .as_deref()
+        .filter(|e| !e.starts_with("W/"))
+        .map(|s| s.to_string())
+        .or_else(|| last_modified.clone());
+    (if_range, etag, last_modified)
+}
+
+/// One `Range: bytes=0-0` round trip: proves range support AND yields the total. Any error falls back to single-stream.
+/// Returns the total and the validators for persistence.
 async fn probe_ranges(
     client: &reqwest::Client,
     url: &str,
     cookies: Option<&std::sync::Arc<reqwest::cookie::Jar>>,
     timeout: Duration,
-) -> Result<(u64, Option<String>), String> {
+) -> Result<(u64, crate::engine_msg::ValidatorInfo), String> {
     let req = stamp_request(
         client.get(url).header("Range", "bytes=0-0"),
         DEFAULT_USER_AGENT,
@@ -702,9 +730,13 @@ async fn probe_ranges(
         .filter(|(s, _, _)| *s == 0)
         .map(|(_, _, t)| t)
         .ok_or_else(|| gettext("Bad Content-Range"))?;
-    // Capture the validator from the probe: this becomes the session validator
-    // for all piece workers.
-    let validator = response_validator(&resp);
+    // Capture the validators from the probe: this becomes the session validator
+    // for all piece workers, and is persisted for cross-session resume.
+    let (_, etag, last_modified) = response_validators(&resp);
+    let validator = crate::engine_msg::ValidatorInfo {
+        etag,
+        last_modified,
+    };
     Ok((total, validator))
 }
 

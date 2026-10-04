@@ -1025,8 +1025,6 @@ impl Drop for RecordingWatcherGuard {
     }
 }
 
-/// One live capture through the yt-dlp binary. The MPEG-TS container keeps every kill point playable, so Stop is kill, adopt and remux. Stalled captures yield their partial; an empty capture fails. `timeout` is a stall budget, not a wall clock: any stdout line or output-file growth resets it, so a healthy multi-hour stream never trips it — only silence kills the capture.
-#[allow(clippy::too_many_arguments)]
 /// Claim a staging name for a live capture: `Title.mp4`, `Title-1.mp4`, ...
 /// Returns the base path and the file name. The `.part` file is atomically
 /// claimed via `create_new`; the base name is derived from it.

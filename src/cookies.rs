@@ -377,4 +377,23 @@ mod tests {
         let (_, cookie) = parse_netscape_line(line).unwrap();
         assert!(cookie.contains("Path=/api"), "path kept: {cookie}");
     }
+
+    #[test]
+    fn huge_expiry_does_not_panic() {
+        // Expiry u64::MAX would overflow UNIX_EPOCH + Duration: the clamp to
+        // 9999-12-31 must prevent the panic. Mutation: remove the .min(MAX_TS)
+        // → this test panics.
+        let line = "example.com\tFALSE\t/\tTRUE\t18446744073709551615\tsid\tabc123";
+        let (domain, cookie) = parse_netscape_line(line).unwrap();
+        assert_eq!(domain, "example.com");
+        // Clamped to 9999-12-31, not panicked.
+        assert!(
+            cookie.contains("Expires="),
+            "expected Expires attr: {cookie}"
+        );
+        assert!(
+            cookie.contains("9999"),
+            "expected clamped to 9999: {cookie}"
+        );
+    }
 }

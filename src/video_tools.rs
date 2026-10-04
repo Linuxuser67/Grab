@@ -449,8 +449,11 @@ pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
 /// latest tag so the update check and the installer agree on the source of
 /// truth. GitHub provides a SHA-256 digest per release asset; quickjs
 /// installs fail closed if it's absent, and the hash is verified while
-/// streaming. yt-dlp and ffmpeg go through the yt-dlp crate's fetcher,
-/// which verifies the digest when present; we refuse if it's absent.
+/// streaming. ffmpeg goes through the yt-dlp crate's fetcher, which verifies
+/// the digest when present; we refuse if it's absent. yt-dlp uses the crate's
+/// `install_youtube` which verifies when a digest is present but skips
+/// silently if absent (fail-open); yt-dlp must track upstream, so we accept
+/// the crate's behavior there.
 /// Hard cap on the quickjs download: the asset is ~2.5MB, so anything larger
 /// is not the released binary. Enforced while streaming, before the bytes are
 /// trusted.

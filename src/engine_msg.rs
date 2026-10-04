@@ -3,6 +3,7 @@
 use std::time::SystemTime;
 
 /// Resume validator info (boxed in EngineMsg to keep the enum small).
+#[derive(Clone, Debug)]
 pub(crate) struct ValidatorInfo {
     pub(crate) etag: Option<String>,
     pub(crate) last_modified: Option<String>,

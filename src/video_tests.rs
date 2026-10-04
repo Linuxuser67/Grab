@@ -3995,7 +3995,7 @@ fn live_capture_adopts_part_and_remuxes() {
         "staging cleaned"
     );
     assert!(
-        !dir.join("v.1.live.mp4.part").exists(),
+        !dir.join("v.1.mp4.part").exists(),
         "capture shell must not leak beside the finished file"
     );
     // The row must leave Resolving the moment capture starts.
@@ -4083,7 +4083,7 @@ fn live_capture_crash_fails_instead_of_adopting() {
     }
     assert!(!job.dest.exists(), "crashed partial must not deliver");
     assert!(
-        dir.join("v.1.live.mp4.part").exists(),
+        dir.join("v.1.mp4.part").exists(),
         "raw shell kept for salvage, hidden in staging"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -4125,7 +4125,7 @@ fn live_capture_stale_staging_never_adopts() {
     let _ = std::fs::remove_dir_all(&dir);
     let staging = dir.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
-    std::fs::write(dir.join("v.1.live.mp4.part"), b"stale").unwrap();
+    std::fs::write(dir.join("v.1.mp4.part"), b"stale").unwrap();
     let fake_yt = fake_ytdlp_live(&dir, true);
     let fake_ff = fake_ffmpeg_copy(&dir);
     let staging = dir.clone();
@@ -4183,7 +4183,7 @@ fn live_capture_refuses_existing_dest() {
         ok => panic!("expected pre-flight refusal, got {ok:?}"),
     }
     assert!(
-        !dir.join("v.1.live.mp4.part").exists(),
+        !dir.join("v.1.mp4.part").exists(),
         "no capture shell: the fake must never have run"
     );
     let prefix = format!("grab-{}-", job.item_id);
@@ -4213,8 +4213,8 @@ fn live_capture_refusal_reclaims_stale_scratch() {
     job.dest = dir.join("v.mp4");
     std::fs::write(&job.dest, b"already").unwrap();
     // Stale shell is beside the dest (dest_part_path), not in the staging subdir.
-    std::fs::write(dir.join("v.1.live.mp4.part"), b"crashed").unwrap();
-    std::fs::write(dir.join("v.1.live.mp4.ytdl"), b"fragment-3").unwrap();
+    std::fs::write(dir.join("v.1.mp4.part"), b"crashed").unwrap();
+    std::fs::write(dir.join("v.1.mp4.ytdl"), b"fragment-3").unwrap();
     let fake_yt = fake_ytdlp_live(&dir, false);
     let fake_ff = fake_ffmpeg_copy(&dir);
     let staging = dir.join("staging");
@@ -4243,11 +4243,11 @@ fn live_capture_refusal_reclaims_stale_scratch() {
         "the finished file at dest must never be touched by a parts sweep"
     );
     assert!(
-        !dir.join("v.1.live.mp4.part").exists(),
+        !dir.join("v.1.mp4.part").exists(),
         "the crashed run's shell outlived its row"
     );
     assert!(
-        !dir.join("v.1.live.mp4.ytdl").exists(),
+        !dir.join("v.1.mp4.ytdl").exists(),
         "the crashed run's state file outlived its row"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -4267,8 +4267,8 @@ fn live_capture_abort_adopts_partial() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let res = crate::runtime::tokio_rt().block_on(async {
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
-        // New scheme: grab-<id>-v.1.live.mp4.ytdl in dest dir
-        let state = dir.join("v.1.live.mp4.ytdl");
+        // New scheme: grab-<id>-v.1.mp4.ytdl in dest dir
+        let state = dir.join("v.1.mp4.ytdl");
         let seen = dir.join("abort-saw-state");
         tokio::spawn(async move {
             // Wait for the state file before stopping: a fixed sleep would race and pass vacuously.
@@ -4312,15 +4312,15 @@ fn live_capture_abort_adopts_partial() {
     );
     // A killed yt-dlp never removes its `.ytdl` file, so the post-capture sweep owns it.
     assert!(
-        !dir.join("v.1.live.mp4.ytdl").exists(),
+        !dir.join("v.1.mp4.ytdl").exists(),
         "killed capture left its .ytdl state file behind"
     );
     assert!(
-        !dir.join("v.1.live.mp4.part").exists(),
+        !dir.join("v.1.mp4.part").exists(),
         "killed capture left its .part shell behind"
     );
     assert!(
-        !dir.join("v.1.live.mp4.part").exists(),
+        !dir.join("v.1.mp4.part").exists(),
         "capture shell must not leak beside the finished file"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -4410,11 +4410,11 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
         "the failure must name where the salvaged recording lives"
     );
     assert!(
-        !dir.join("v.1.live.mp4.ytdl").exists(),
+        !dir.join("v.1.mp4.ytdl").exists(),
         "failed remux left its .ytdl state file behind"
     );
     assert_eq!(
-        std::fs::read(dir.join("v.1.live.mp4.part")).unwrap(),
+        std::fs::read(dir.join("v.1.mp4.part")).unwrap(),
         b"recorded",
         "the recording is the only copy: it must survive a failed remux"
     );
@@ -4430,7 +4430,7 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
     names.sort();
     assert_eq!(
         names,
-        ["v.1.live.mp4.part"],
+        ["v.1.mp4.part"],
         "staging must hold only the salvaged shell after a failed remux"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -4491,7 +4491,7 @@ fn live_capture_barren_start_sweeps_state_file() {
     ));
     assert!(res.is_err(), "barren run must fail, got {res:?}");
     assert!(
-        !dir.join("v.1.live.mp4.ytdl").exists(),
+        !dir.join("v.1.mp4.ytdl").exists(),
         "barren run left its .ytdl state file behind"
     );
     assert!(!job.dest.exists(), "no file is delivered from a barren run");
@@ -4805,7 +4805,7 @@ fn a_successful_live_remux_is_only_named_final_once_ffmpeg_succeeds() {
     let dir = std::env::temp_dir().join(format!("grab-remuxrename-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let src = dir.join("v.1.live.mp4.part");
+    let src = dir.join("v.1.mp4.part");
     std::fs::write(&src, b"recorded").unwrap();
     let final_tmp = dir.join("final.1.mp4");
     let fake_ff = fake_ffmpeg_copy(&dir);
@@ -4870,7 +4870,7 @@ fn a_failed_live_remux_leaves_no_partial_behind() {
     let dir = std::env::temp_dir().join(format!("grab-remuxfail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let src = dir.join("v.1.live.mp4.part");
+    let src = dir.join("v.1.mp4.part");
     std::fs::write(&src, b"recorded").unwrap();
     let final_tmp = dir.join("final.1.mp4");
     let fake_ff = fake_ffmpeg_fail(&dir, true);
@@ -5058,10 +5058,7 @@ fn live_capture_retry_never_inherits_stale_state() {
         "the retry inherited a stale .ytdl and would have resumed a deleted shell"
     );
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"recorded");
-    assert!(
-        !dir.join("v.1.live.mp4.ytdl").exists(),
-        "state must not survive"
-    );
+    assert!(!dir.join("v.1.mp4.ytdl").exists(), "state must not survive");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -5303,7 +5300,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
 
     // File half: partial media is kept, scratch state must go, nothing is delivered.
     assert!(
-        !dir.join("v.1.live.mp4.ytdl").exists(),
+        !dir.join("v.1.mp4.ytdl").exists(),
         "the abort left yt-dlp's state file behind: a later attempt would resume \
          fragment N against a shell Grab wipes first, producing a corrupt recording"
     );
@@ -5314,7 +5311,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
          parked completed remux from an earlier attempt"
     );
     assert_eq!(
-        std::fs::read(dir.join("v.1.live.mp4.part")).unwrap(),
+        std::fs::read(dir.join("v.1.mp4.part")).unwrap(),
         b"partial",
         "the partial recording must not be destroyed by an involuntary shutdown"
     );
@@ -8391,7 +8388,7 @@ async fn live_retry_aborts_stale_recording_watcher() {
     let dir = std::env::temp_dir().join(format!("grab-watcher-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let shell = dir.join("v.1.live.mp4.part");
+    let shell = dir.join("v.1.mp4.part");
     let out = dir.join("grab-1.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -8811,11 +8808,11 @@ fn live_part_shell_announces_recording_and_is_swept() {
         "shell growth must announce Recording, phases seen: {phases:?}"
     );
     assert!(
-        !dir.join("v.1.live.mp4.part").exists(),
+        !dir.join("v.1.mp4.part").exists(),
         "stopped capture must not leave its shell behind"
     );
     assert!(
-        !dir.join("v.1.live.mp4.part").exists(),
+        !dir.join("v.1.mp4.part").exists(),
         "capture shell must not leak beside the finished file"
     );
     let _ = std::fs::remove_dir_all(&dir);

@@ -50,7 +50,9 @@ pub fn staging_location_for_dest(dest: &Path, item_id: u64) -> StagingLocation {
 /// it so a fresh row never lands on a leftover.
 pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
     let prefix = format!("grab-{item_id}-");
-    // ID-namespaced live pattern: .{id}.live. (e.g., v.1.live.mp4.part)
+    // ID-namespaced pattern: .{id}. (e.g., "My Video.4.mp4.part").
+    // Legacy patterns (grab-{id}-, .{id}.live.) still count for occupancy.
+    let id_pattern = format!(".{item_id}.");
     let live_pattern = format!(".{item_id}.live.");
     std::fs::read_dir(dest_dir)
         .ok()
@@ -58,7 +60,11 @@ pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
             entries.filter_map(|e| e.ok()).any(|e| {
                 e.file_name()
                     .to_str()
-                    .map(|n| n.starts_with(&prefix) || n.contains(&live_pattern))
+                    .map(|n| {
+                        n.starts_with(&prefix)
+                            || n.contains(&id_pattern)
+                            || n.contains(&live_pattern)
+                    })
                     .unwrap_or(false)
             })
         })
@@ -405,17 +411,22 @@ pub(crate) fn is_grab_part(file_name: &str, stem: &str) -> bool {
     let Some(remainder) = strip_stem_suffix(file_name, stem) else {
         return false;
     };
-    // Standard kinds: video., audio., hls., live.
+    // Standard kinds: video., audio., hls., live. (legacy)
     if PART_KINDS.iter().any(|k| remainder.starts_with(k)) {
         return true;
     }
-    // ID-namespaced live: {id}.live. (e.g., "1.live.mp4.part" for v.1.live.mp4.part).
+    // ID-namespaced: {id}. (e.g., "4.mp4.part" for "My Video.4.mp4.part").
     // The ID prevents collisions between concurrent rows sharing a dest dir.
+    // Legacy: {id}.live. (e.g., "1.live.mp4.part").
     if let Some(dot_pos) = remainder.find('.') {
         let (id_part, rest) = remainder.split_at(dot_pos);
         if !id_part.is_empty()
             && id_part.chars().all(|c| c.is_ascii_digit())
-            && rest.starts_with(".live.")
+            && (rest.starts_with(".live.") || {
+                // New pattern: .{id}.{ext} — rest is ".{ext}..."
+                let after_dot = &rest[1..];
+                after_dot.find('.').is_some_or(|p| p > 0)
+            })
         {
             return true;
         }
@@ -448,11 +459,19 @@ pub fn sweep_partial_remuxes(staging: &Path) {
 /// Only touches files with the item's `grab-<id>-` prefix; never the dest dir itself or other files.
 pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
     let prefix = format!("grab-{item_id}-");
-    // Hidden manifest: `.grab-<id>-manifest.json` (dot-prefixed, not matched by the prefix above).
-    let hidden_manifest = format!(".grab-{item_id}-manifest.json");
+    // Hidden manifest: `.{id}.manifest.json` (new) and `.grab-{id}-manifest.json` (legacy).
+    let hidden_manifest = format!(".{item_id}.manifest.json");
+    let legacy_hidden = format!(".grab-{item_id}-manifest.json");
+    // ID-namespaced pattern: .{id}. (e.g., "My Video.4.mp4.part").
+    let id_pattern = format!(".{item_id}.");
     for name in dir_file_names(staging) {
         // Delete the hidden manifest directly.
-        if name == hidden_manifest {
+        if name == hidden_manifest || name == legacy_hidden {
+            let _ = std::fs::remove_file(staging.join(&name));
+            continue;
+        }
+        // New pattern: .{id}. in the filename.
+        if name.contains(&id_pattern) {
             let _ = std::fs::remove_file(staging.join(&name));
             continue;
         }
@@ -544,13 +563,14 @@ pub(crate) fn collect_sidecar(src: &Path, dest: &Path, lang: &str) {
 
 pub(crate) fn manifest_path(dest_dir: &Path, item_id: u64) -> PathBuf {
     // Genuinely hidden: dot at the start of the basename. Internal bookkeeping,
-    // invisible in normal file views.
-    dest_dir.join(format!(".grab-{item_id}-manifest.json"))
+    // invisible in normal file views. Just the ID: simple and unique.
+    dest_dir.join(format!(".{item_id}.manifest.json"))
 }
 
-/// Previous (non-hidden) manifest names, for backward-compatible reads.
-fn legacy_manifest_paths(dest_dir: &Path, item_id: u64) -> [PathBuf; 2] {
+/// Previous manifest names, for backward-compatible reads.
+fn legacy_manifest_paths(dest_dir: &Path, item_id: u64) -> [PathBuf; 3] {
     [
+        dest_dir.join(format!(".grab-{item_id}-manifest.json")),
         dest_dir.join(format!("grab-{item_id}-.manifest.json")),
         dest_dir.join(format!("grab-{item_id}-manifest.json")),
     ]

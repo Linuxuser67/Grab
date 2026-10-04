@@ -1045,8 +1045,9 @@ pub(crate) async fn run_live_ytdlp(
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
     // recording, and the file-growth watcher announces "Recording…" off this path.
-    // Dest-based staging with ID namespacing (v.4.live.mp4): title + ID, no grab prefix.
-    // The ID prevents collisions between concurrent rows sharing a dest dir (handoff-33 #2).
+    // Dest-based staging with ID namespacing: title + ID (e.g., "My Video.4.mp4").
+    // The ID prevents collisions between concurrent rows sharing a dest dir.
+    // Unix-style: just the title and ID, no kind prefixes.
     let out = {
         let dir = job
             .dest
@@ -1057,7 +1058,7 @@ pub(crate) async fn run_live_ytdlp(
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "part".to_string());
-        dir.join(format!("{stem}.{}.live.{ext}", job.item_id))
+        dir.join(format!("{stem}.{}.{ext}", job.item_id))
     };
     // Overwrite pre-flight: refuse if dest exists. The manifest proves ownership for future retries,
     // but never delete here — a weak match could delete a completed output from a quality/format-changed retry.

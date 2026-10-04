@@ -1499,16 +1499,13 @@ impl DownloadManager {
                         // Latest attempt wins; applied at Finished when keep-server-date is on.
                         this.server_mtime.borrow_mut().insert(id, t);
                     }
-                    EngineMsg::Validator {
-                        etag,
-                        last_modified,
-                    } => {
+                    EngineMsg::Validator(info) => {
                         // Resume validator for If-Range: latest response wins.
                         // Persisted so cross-session resumes validate too.
-                        if let Some(e) = etag {
+                        if let Some(e) = info.etag {
                             item.set_etag(e);
                         }
-                        if let Some(lm) = last_modified {
+                        if let Some(lm) = info.last_modified {
                             item.set_last_modified(lm);
                         }
                     }

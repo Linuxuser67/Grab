@@ -283,6 +283,7 @@ pub async fn run_video_download(
                     audio_format_id: audio_sel.format_id.clone(),
                     audio_ext: audio_sel.ext.clone(),
                     final_bytes: None,
+                    staging_name: None,
                 },
             )
             .await?;
@@ -1045,10 +1046,10 @@ pub(crate) async fn run_live_ytdlp(
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
     // recording, and the file-growth watcher announces "Recording…" off this path.
-    // Dest-based staging with ID namespacing: title + ID (e.g., "My Video.4.mp4").
-    // The ID prevents collisions between concurrent rows sharing a dest dir.
-    // Unix-style: just the title and ID, no kind prefixes.
-    let out = {
+    // Unix-style: just the title (e.g., "My Video.mp4"). On collision, -1, -2, ...
+    // (wget-style dedup). The chosen name is stored in the manifest for cleanup.
+    // Never equal to job.dest (the final file); staging is always distinct.
+    let (out, staging_name) = {
         let dir = job
             .dest
             .parent()
@@ -1058,7 +1059,26 @@ pub(crate) async fn run_live_ytdlp(
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "part".to_string());
-        dir.join(format!("{stem}.{}.{ext}", job.item_id))
+        // Find an unused name: title.ext, title-1.ext, title-2.ext, ...
+        let mut n = 0;
+        loop {
+            let name = if n == 0 {
+                format!("{stem}.{ext}")
+            } else {
+                format!("{stem}-{n}.{ext}")
+            };
+            let path = dir.join(&name);
+            // Never use the final dest as staging; also check .part for crash leftovers.
+            let part = dir.join(format!("{name}.part"));
+            if path != job.dest && !path.exists() && !part.exists() {
+                break (path, name);
+            }
+            n += 1;
+            // Sanity bound: don't loop forever on a pathological dir.
+            if n > 1000 {
+                return Err(VideoError::staging("too many conflicting files"));
+            }
+        }
     };
     // Overwrite pre-flight: refuse if dest exists. The manifest proves ownership for future retries,
     // but never delete here — a weak match could delete a completed output from a quality/format-changed retry.
@@ -1073,6 +1093,23 @@ pub(crate) async fn run_live_ytdlp(
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
+    // Record the chosen staging name in the manifest for crash cleanup.
+    // The ID stays hidden in the manifest; the filename is just title (+ dedup).
+    let _ = write_manifest(
+        staging,
+        job.item_id,
+        &VideoManifest {
+            page_url: job.page_url.clone(),
+            quality: job.quality.clone(),
+            video_format_id: None,
+            video_ext: ext.to_string(),
+            audio_format_id: String::new(),
+            audio_ext: String::new(),
+            final_bytes: None,
+            staging_name: Some(staging_name.clone()),
+        },
+    )
+    .await;
     // Reclaim partial remuxes from attempts that died mid-ffmpeg: worthless by construction (a completed one is renamed), so this bounds crash litter without risking a real recording.
     sweep_partial_remuxes(staging);
     // At most two attempts: the from-start capture, then — only if it recorded nothing and wasn't stopped — one retry from the live edge.

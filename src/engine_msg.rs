@@ -2,6 +2,12 @@
 
 use std::time::SystemTime;
 
+/// Resume validator info (boxed in EngineMsg to keep the enum small).
+pub(crate) struct ValidatorInfo {
+    pub(crate) etag: Option<String>,
+    pub(crate) last_modified: Option<String>,
+}
+
 pub(crate) enum EngineMsg {
     Progress {
         downloaded: u64,
@@ -37,10 +43,9 @@ pub(crate) enum EngineMsg {
     /// Resume validator from response headers (ETag preferred, Last-Modified
     /// fallback): stored on the item for If-Range on resume. None clears a
     /// stale validator after an If-Range mismatch restart.
-    Validator {
-        etag: Option<String>,
-        last_modified: Option<String>,
-    },
+    /// Boxed: this variant is rare but would otherwise inflate every message
+    /// on this hot channel (progress ticks) to the largest variant's size.
+    Validator(Box<ValidatorInfo>),
     /// Dialog-less live row: track so Stop finalizes capture instead of killing it as stalled VOD.
     LiveDetected,
     /// Server object changed mid-download: drop bitmap so retry starts fresh.

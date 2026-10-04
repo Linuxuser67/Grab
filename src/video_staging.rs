@@ -316,6 +316,9 @@ pub(crate) struct VideoManifest {
     /// Final output size once the file has been renamed into place.
     /// Lets a retry after a crash adopt the finished file without any work.
     pub(crate) final_bytes: Option<u64>,
+    /// Staging basename (e.g., "My Video.mp4" or "My Video-1.mp4").
+    /// Lets cleanup find the temp files without an ID in the name.
+    pub(crate) staging_name: Option<String>,
 }
 
 impl VideoManifest {
@@ -422,11 +425,7 @@ pub(crate) fn is_grab_part(file_name: &str, stem: &str) -> bool {
         let (id_part, rest) = remainder.split_at(dot_pos);
         if !id_part.is_empty()
             && id_part.chars().all(|c| c.is_ascii_digit())
-            && (rest.starts_with(".live.") || {
-                // New pattern: .{id}.{ext} — rest is ".{ext}..."
-                let after_dot = &rest[1..];
-                after_dot.find('.').is_some_or(|p| p > 0)
-            })
+            && (rest.starts_with(".live.") || rest[1..].find('.').is_some_and(|p| p > 0))
         {
             return true;
         }
@@ -468,6 +467,10 @@ pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
         // Delete the hidden manifest directly.
         if name == hidden_manifest || name == legacy_hidden {
             let _ = std::fs::remove_file(staging.join(&name));
+            continue;
+        }
+        // Preserve completed recordings: they may be the user's only copy.
+        if name.starts_with("final.") {
             continue;
         }
         // New pattern: .{id}. in the filename.

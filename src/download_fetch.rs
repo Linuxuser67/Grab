@@ -57,10 +57,12 @@ fn send_validator(tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>, resp: &req
     // Only report if at least one validator is present; absent headers
     // leave any stored validator alone (don't clear on a bare response).
     if etag.is_some() || last_modified.is_some() {
-        tx.send(EngineMsg::Validator {
-            etag,
-            last_modified,
-        })
+        tx.send(EngineMsg::Validator(Box::new(
+            crate::engine_msg::ValidatorInfo {
+                etag,
+                last_modified,
+            },
+        )))
         .ok();
     }
 }

@@ -2025,7 +2025,7 @@ impl DownloadManager {
                     if let Some(dest_dir) = dest.parent() {
                         crate::video::clean_staging_files(dest_dir, id);
                     }
-                    crate::video::clean_dest_parts_for(&dest, id);
+                    crate::video::clean_dest_parts(&dest);
                     if gate.was_delivered() {
                         // The commit won the race, so this file is the attempt's own orphan and the row is gone: the one sanctioned exception to never deleting a finished file.
                         let _ = std::fs::remove_file(&dest);
@@ -2052,7 +2052,7 @@ impl DownloadManager {
                 if let Some(dest_dir) = dest.parent() {
                     crate::video::clean_staging_files(dest_dir, id);
                 }
-                crate::video::clean_dest_parts_for(&dest, id);
+                crate::video::clean_dest_parts(&dest);
                 self.release_dest(&dest);
                 // Same wakeup as the async finalizer above; already on the main thread.
                 wake_queue();

@@ -7,37 +7,83 @@
 <meta name="description" content="Grab is a fast, native download manager for GNOME. Segmented downloads, video extraction, torrents, and live stream capture.">
 <style>
   :root {
-    --bg: #1e1e1e;
-    --bg-card: #2d2d2d;
-    --fg: #f0f0f0;
-    --fg-dim: #b0b0b0;
+    --ground: #1e1e1e;
+    --surface-1: #262626;
+    --surface-2: #2d2d2d;
+    --hairline: rgba(255,255,255,0.08);
+    --text: #f0f0f0;
+    --text-2: #b0b0b0;
+    --text-3: #808080;
     --accent: #3584e4;
     --accent-hover: #1c71d8;
-    --border: #3d3d3d;
+    --code-bg: #262626;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-    background: var(--bg);
-    color: var(--fg);
-    line-height: 1.6;
+    font-family: system-ui, -apple-system, "Segoe UI", "Ubuntu", sans-serif;
+    background: var(--ground);
+    color: var(--text);
+    line-height: 1.55;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
-  header.hero {
+  .wrap { max-width: 1024px; margin: 0 auto; padding: 0 24px; }
+
+  /* Nav */
+  nav {
+    border-bottom: 1px solid var(--hairline);
+    padding: 16px 0;
+  }
+  nav .wrap {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  nav .brand {
+    font-weight: 700;
+    font-size: 1.1rem;
+    letter-spacing: -0.01em;
+    text-decoration: none;
+    color: var(--text);
+  }
+  nav .brand span { color: var(--accent); }
+  nav .links a {
+    color: var(--text-2);
+    text-decoration: none;
+    margin-left: 24px;
+    font-size: .9rem;
+  }
+  nav .links a:hover { color: var(--text); }
+
+  /* Hero */
+  .hero {
     text-align: center;
-    padding: 72px 24px 48px;
+    padding: 80px 24px 0;
   }
-  header.hero h1 {
-    font-size: 3rem;
-    font-weight: 800;
+  .hero .pill {
+    display: inline-block;
+    font-size: .8rem;
+    color: var(--text-2);
+    border: 1px solid var(--hairline);
+    border-radius: 999px;
+    padding: 6px 16px;
+    margin-bottom: 24px;
+    background: var(--surface-1);
+  }
+  .hero h1 {
+    font-size: clamp(2.5rem, 6vw, 4rem);
+    font-weight: 700;
     letter-spacing: -0.02em;
+    line-height: 1.1;
   }
-  header.hero h1 .grab { color: var(--accent); }
-  header.hero p.tagline {
-    font-size: 1.25rem;
-    color: var(--fg-dim);
-    margin: 12px 0 28px;
+  .hero h1 .accent { color: var(--accent); }
+  .hero p.sub {
+    font-size: 1.2rem;
+    color: var(--text-2);
+    margin: 16px auto 32px;
+    max-width: 560px;
   }
+  .cta-row { margin-bottom: 16px; }
   .btn {
     display: inline-block;
     background: var(--accent);
@@ -46,113 +92,214 @@
     border-radius: 8px;
     text-decoration: none;
     font-weight: 600;
+    font-size: .95rem;
     margin: 0 8px 8px 0;
+    transition: background 150ms ease-out;
   }
   .btn:hover { background: var(--accent-hover); }
   .btn.ghost {
     background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg);
+    border: 1px solid var(--hairline);
+    color: var(--text);
   }
-  .btn.ghost:hover { border-color: var(--accent); }
+  .btn.ghost:hover { border-color: var(--accent); background: transparent; }
+
   .screenshot {
-    margin: 40px auto 0;
-    max-width: 800px;
+    margin: 48px auto 0;
+    max-width: 880px;
     border-radius: 12px;
     overflow: hidden;
-    border: 1px solid var(--border);
-    box-shadow: 0 12px 48px rgba(0,0,0,.5);
+    border: 1px solid var(--hairline);
+    box-shadow: 0 16px 64px rgba(0,0,0,.45);
   }
   .screenshot img { width: 100%; display: block; }
-  section { padding: 56px 0; }
+
+  /* Sections */
+  section { padding: 72px 0; border-top: 1px solid var(--hairline); }
   section h2 {
-    font-size: 1.75rem;
-    margin-bottom: 24px;
+    font-size: 1.6rem;
+    font-weight: 700;
+    letter-spacing: -0.015em;
     text-align: center;
+    margin-bottom: 12px;
   }
+  section p.lead {
+    text-align: center;
+    color: var(--text-2);
+    max-width: 560px;
+    margin: 0 auto 40px;
+  }
+
+  /* Features */
   .features {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-    gap: 20px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
   }
   .feature {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
+    background: var(--surface-1);
+    border: 1px solid var(--hairline);
     border-radius: 12px;
     padding: 24px;
+    transition: border-color 150ms ease-out;
   }
-  .feature h3 { font-size: 1.1rem; margin-bottom: 8px; }
-  .feature p { color: var(--fg-dim); font-size: .95rem; }
-  .install {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
+  .feature:hover { border-color: rgba(53,132,228,.35); }
+  .feature .icon {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    background: rgba(53,132,228,.12);
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 16px;
+    font-size: 1.1rem;
+  }
+  .feature h3 { font-size: 1rem; font-weight: 600; margin-bottom: 8px; }
+  .feature p { color: var(--text-2); font-size: .9rem; }
+
+  /* Screenshots */
+  .shots {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 16px;
+  }
+  .shot {
+    border: 1px solid var(--hairline);
     border-radius: 12px;
-    padding: 32px;
-    text-align: center;
+    overflow: hidden;
+    background: var(--surface-1);
   }
-  .install code {
-    display: inline-block;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 8px 16px;
-    margin: 12px 0;
-    font-size: .95rem;
+  .shot img { width: 100%; display: block; }
+  .shot figcaption {
+    padding: 12px 16px;
+    font-size: .85rem;
+    color: var(--text-2);
+    border-top: 1px solid var(--hairline);
   }
-  .install p { color: var(--fg-dim); margin-bottom: 8px; }
+
+  /* Install */
+  .install-box {
+    background: var(--surface-1);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 40px;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  .install-box h3 {
+    font-size: 1rem; font-weight: 600; margin-bottom: 12px;
+  }
+  .install-box h3:not(:first-child) { margin-top: 28px; }
+  .install-box p { color: var(--text-2); font-size: .9rem; margin-bottom: 12px; }
+  code.block {
+    display: block;
+    font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", monospace;
+    font-size: .85rem;
+    background: var(--ground);
+    border: 1px solid var(--hairline);
+    border-radius: 8px;
+    padding: 16px 20px;
+    color: var(--text);
+    overflow-x: auto;
+    white-space: pre;
+  }
+  code.block .comment { color: var(--text-3); }
+
   footer {
     text-align: center;
-    padding: 32px 24px;
-    color: var(--fg-dim);
-    font-size: .9rem;
-    border-top: 1px solid var(--border);
+    padding: 40px 24px;
+    color: var(--text-3);
+    font-size: .85rem;
+    border-top: 1px solid var(--hairline);
   }
   footer a { color: var(--accent); text-decoration: none; }
   footer a:hover { text-decoration: underline; }
+  footer p + p { margin-top: 8px; }
 </style>
 </head>
 <body>
 
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#"><span>Grab</span></a>
+    <div class="links">
+      <a href="#features">Features</a>
+      <a href="#screenshots">Screenshots</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/Linuxuser67/Grab">GitHub</a>
+    </div>
+  </div>
+</nav>
+
 <header class="hero">
   <div class="wrap">
-    <h1><span class="grab">Grab</span></h1>
-    <p class="tagline">A fast, native download manager for GNOME.</p>
-    <a class="btn" href="#install">Get Grab</a>
-    <a class="btn ghost" href="https://github.com/Linuxuser67/Grab">GitHub</a>
+    <div class="pill">v5.0.1 — now available</div>
+    <h1>A download manager<br>that feels <span class="accent">native</span>.</h1>
+    <p class="sub">Grab is fast, keyboard-friendly, and built for GNOME. Segmented downloads, video extraction, torrents, and live capture — no Electron, no clutter.</p>
+    <div class="cta-row">
+      <a class="btn" href="#install">Install Grab</a>
+      <a class="btn ghost" href="https://github.com/Linuxuser67/Grab">View source</a>
+    </div>
     <div class="screenshot">
-      <img src="screenshots/dark-live.png" alt="Grab main window with a live stream recording and active downloads">
+      <img src="screenshots/dark-live.png" alt="Grab with a live stream recording alongside active downloads">
     </div>
   </div>
 </header>
 
-<section>
+<section id="features">
   <div class="wrap">
-    <h2>Features</h2>
+    <h2>Everything a downloader should do</h2>
+    <p class="lead">Six reasons Grab earns a place in your dock.</p>
     <div class="features">
       <div class="feature">
-        <h3>⚡ Segmented downloads</h3>
-        <p>Split files across multiple connections for maximum speed, with automatic resume and integrity checks.</p>
+        <div class="icon">▲</div>
+        <h3>Segmented downloads</h3>
+        <p>Split files across parallel connections for maximum throughput. Automatic resume, per-block progress maps, and integrity checks on every piece.</p>
       </div>
       <div class="feature">
-        <h3>🎬 Video extraction</h3>
-        <p>Download videos via yt-dlp with format selection, subtitles, and metadata — right from the URL bar.</p>
+        <div class="icon">▣</div>
+        <h3>Video extraction</h3>
+        <p>Paste a URL and pick a format. Powered by yt-dlp with quality selection, subtitles, and metadata — inline in the New Download card.</p>
       </div>
       <div class="feature">
-        <h3>🧲 Torrents</h3>
-        <p>Full torrent support with magnet links, file selection, and progress tracking.</p>
+        <div class="icon">⬢</div>
+        <h3>Torrents &amp; magnets</h3>
+        <p>Full torrent support: magnet links, .torrent files, per-file selection, DHT, and seeding controls.</p>
       </div>
       <div class="feature">
-        <h3>🔴 Live capture</h3>
-        <p>Record live streams as they happen, with clean staging and crash recovery.</p>
+        <div class="icon">●</div>
+        <h3>Live stream capture</h3>
+        <p>Record live streams as they broadcast. Crash-safe staging means an interrupted capture never loses your recording.</p>
       </div>
       <div class="feature">
-        <h3>🧩 Browser extension</h3>
-        <p>Send downloads straight from Firefox, Chrome, or Brave with the companion extension.</p>
+        <div class="icon">⌁</div>
+        <h3>Browser extension</h3>
+        <p>Send downloads straight from Firefox, Chrome, or Brave. The companion extension hands URLs to Grab with one click.</p>
       </div>
       <div class="feature">
-        <h3>🎨 Native GNOME</h3>
-        <p>Built with GTK 4 and libadwaita. Follows GNOME HIG, supports dark mode, and feels at home on your desktop.</p>
+        <div class="icon">◈</div>
+        <h3>Truly native</h3>
+        <p>GTK 4 and libadwaita throughout. Follows GNOME HIG, respects your theme, and stays out of the way.</p>
       </div>
+    </div>
+  </div>
+</section>
+
+<section id="screenshots">
+  <div class="wrap">
+    <h2>See it in action</h2>
+    <p class="lead">Real screenshots, no mockups.</p>
+    <div class="shots">
+      <figure class="shot">
+        <img src="screenshots/dark-downloads.png" alt="Active downloads with per-block progress maps">
+        <figcaption>Active downloads with per-block progress maps</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="screenshots/dark-torrent.png" alt="Torrent download with segmented filter">
+        <figcaption>Torrent download with segmented filter</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="screenshots/dark-new-download.png" alt="New Download card with media format picker">
+        <figcaption>New Download card with inline format picker</figcaption>
+      </figure>
     </div>
   </div>
 </section>
@@ -160,21 +307,28 @@
 <section id="install">
   <div class="wrap">
     <h2>Install</h2>
-    <div class="install">
-      <p><strong>Flatpak bundle</strong> — download the <code>.flatpak</code> file from the latest release, then install it:</p>
-      <code>flatpak install --user Grab.flatpak</code>
-      <p style="margin-top:16px">Or grab the <strong>tarball</strong> — extract and run:</p>
-      <code>tar xf grab-*.tar.gz && ./grab</code>
-      <p style="margin-top:16px"></p>
-      <a class="btn" href="https://github.com/Linuxuser67/Grab/releases/latest">Download latest release</a>
-      <p style="margin-top:16px; font-size:.85rem">Flathub submission is in progress — check back soon.</p>
+    <p class="lead">Two commands and you're downloading.</p>
+    <div class="install-box">
+      <h3>From FlatPark <span style="color:var(--text-3);font-weight:400">— recommended</span></h3>
+      <p>Gets updates automatically with <code style="font-size:.85em">flatpak update</code>.</p>
+      <code class="block"><span class="comment"># Add the FlatPark remote (once)</span>
+flatpak remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo
+
+<span class="comment"># Install Grab</span>
+flatpak install flatpark io.github.linuxuser67.Grab</code>
+
+      <h3>Manually from GitHub releases</h3>
+      <p>Prefer the tarball or the standalone <code style="font-size:.85em">.flatpak</code> bundle:</p>
+      <code class="block">flatpak install --user Grab.flatpak</code>
+      <p style="margin-top:16px"><a href="https://github.com/Linuxuser67/Grab/releases/latest" style="color:var(--accent);text-decoration:none;font-weight:600">Browse all releases →</a></p>
     </div>
   </div>
 </section>
 
 <footer>
   <div class="wrap">
-    <p>Grab is free and open source. <a href="https://github.com/Linuxuser67/Grab">Contribute on GitHub</a>.</p>
+    <p>Grab is free software under the GPL-3.0-only license.</p>
+    <p><a href="https://github.com/Linuxuser67/Grab">GitHub</a> · <a href="https://github.com/Linuxuser67/Grab/issues">Issues</a> · <a href="https://github.com/Linuxuser67/Grab/releases">Releases</a></p>
   </div>
 </footer>
 

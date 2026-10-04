@@ -6467,7 +6467,7 @@ fn piece_rejects_206_with_mismatched_validator() {
             &server,
             "206 with mismatched validator must fail Changed, not succeed",
         ),
-        Err(e) => abort(&server, &format!("wrong error kind: {e:?}")),
+        Err(_) => abort(&server, "wrong error kind"),
     }
     cleanup(&server, &_dir);
 }

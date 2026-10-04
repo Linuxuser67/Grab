@@ -1303,7 +1303,7 @@ pub async fn latest_quickjs_tag() -> Option<String> {
 
 /// SHA-256 digest for a release asset, stripped of the "sha256:" prefix.
 /// Returns None if the asset is absent or has no digest: callers fail closed.
-fn digest_for_asset(release: &yt_dlp::client::deps::github::Release, name: &str) -> Option<String> {
+fn digest_for_asset(release: &yt_dlp::client::deps::Release, name: &str) -> Option<String> {
     release
         .assets
         .iter()
@@ -1674,7 +1674,7 @@ mod digest_tests {
     use super::*;
 
     /// Build a minimal Release from JSON for testing digest extraction.
-    fn release_from_json(json: &str) -> yt_dlp::client::deps::github::Release {
+    fn release_from_json(json: &str) -> yt_dlp::client::deps::Release {
         serde_json::from_str(json).expect("test Release JSON must parse")
     }
 

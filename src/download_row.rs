@@ -33,6 +33,13 @@ mod imp {
         /// Unix timestamp when a scheduled download should start; 0 = not scheduled.
         #[property(get, set)]
         pub scheduled_at: Cell<i64>,
+        /// Resume validator: ETag from the server (empty = none). Sent as
+        /// If-Range on resume so a changed file restarts instead of splicing.
+        #[property(get, set)]
+        pub etag: RefCell<String>,
+        /// Resume validator fallback: Last-Modified header value (empty = none).
+        #[property(get, set)]
+        pub last_modified: RefCell<String>,
     }
 
     #[glib::object_subclass]

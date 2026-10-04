@@ -3367,6 +3367,7 @@ fn piece_rejects_changed_file_version() {
         cookies: None,
         timeout: Duration::from_secs(30),
         tx,
+        if_range: None,
     };
     let total = payload.len() as u64;
     // Bogus total: server Content-Range disagrees, must fail Changed at once.
@@ -4681,6 +4682,7 @@ fn direct_mode_ignores_proxy_env() {
         cookies: None,
         timeout: Duration::from_secs(30),
         tx,
+        if_range: None,
     };
     tokio_rt().block_on(run_download(ctx, 1, StartMode::Single));
     let got = std::fs::read(dl.join("v.bin")).unwrap_or_default();
@@ -4764,6 +4766,7 @@ fn single_connection_skips_probe() {
         cookies: None,
         timeout: Duration::from_secs(30),
         tx,
+        if_range: None,
     };
     tokio_rt().block_on(run_download(ctx, 1, StartMode::Fresh));
     let got = std::fs::read(dl.join("v.bin")).unwrap_or_default();

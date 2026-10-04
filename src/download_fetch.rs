@@ -40,6 +40,31 @@ fn send_last_modified(
     }
 }
 
+/// Report the response's resume validator (ETag preferred, Last-Modified
+/// fallback) so the item stores it for If-Range on resume. Sent on every
+/// successful response; the handler overwrites any stale validator.
+fn send_validator(tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>, resp: &reqwest::Response) {
+    let etag = resp
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let last_modified = resp
+        .headers()
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    // Only report if at least one validator is present; absent headers
+    // leave any stored validator alone (don't clear on a bare response).
+    if etag.is_some() || last_modified.is_some() {
+        tx.send(EngineMsg::Validator {
+            etag,
+            last_modified,
+        })
+        .ok();
+    }
+}
+
 /// First recorded worker error, or a generic interruption message (callers keep their own `AttemptFail` variant).
 fn take_first_err(first_err: &Mutex<Option<String>>) -> String {
     lock_recover(first_err)
@@ -57,6 +82,9 @@ pub(crate) struct FetchCtx {
     pub(crate) cookies: Option<std::sync::Arc<reqwest::cookie::Jar>>,
     pub(crate) timeout: Duration,
     pub(crate) tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    /// Resume validator for If-Range: ETag preferred, Last-Modified fallback.
+    /// None on fresh downloads; the engine reports it back via Validator.
+    pub(crate) if_range: Option<String>,
 }
 
 pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
@@ -362,6 +390,12 @@ async fn attempt_once(
         );
         if start > 0 {
             req = req.header("Range", format!("bytes={start}-"));
+            // If-Range: the server returns 206 only if the object still
+            // matches our validator; a 200 means it changed → restart fresh
+            // instead of splicing a different file onto our bytes.
+            if let Some(ref v) = ctx.if_range {
+                req = req.header("If-Range", v);
+            }
         }
         let resp = execute_with_timeout(&ctx.client, req, ctx.timeout).await?;
         let status = resp.status();
@@ -408,6 +442,7 @@ async fn attempt_once(
             ));
         }
         send_last_modified(&ctx.tx, &resp);
+        send_validator(&ctx.tx, &resp);
         let partial = start > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
         if claim && start > 0 && !partial {
             return Err(DEST_EXISTS.to_string());
@@ -696,14 +731,16 @@ pub(crate) async fn fetch_piece(
     use AttemptFail::{Changed, Retryable, Throttled};
     let mut last_err = Retryable(gettext("Empty response"));
     for _ in 0..PIECE_TRIES {
-        let req = stamp_request(
-            ctx.client
-                .get(&ctx.url)
-                .header("Range", format!("bytes={start}-{end}")),
-            DEFAULT_USER_AGENT,
-            ctx.cookies.as_ref(),
-            &ctx.url,
-        );
+        let mut builder = ctx
+            .client
+            .get(&ctx.url)
+            .header("Range", format!("bytes={start}-{end}"));
+        // If-Range: a changed object returns 200 instead of 206, which the
+        // Content-Range check below turns into a Changed failure.
+        if let Some(ref v) = ctx.if_range {
+            builder = builder.header("If-Range", v);
+        }
+        let req = stamp_request(builder, DEFAULT_USER_AGENT, ctx.cookies.as_ref(), &ctx.url);
         let resp = match execute_with_timeout(&ctx.client, req, timeout).await {
             Ok(r) => r,
             Err(e) => {
@@ -712,8 +749,13 @@ pub(crate) async fn fetch_piece(
             }
         };
         send_last_modified(&ctx.tx, &resp);
+        send_validator(&ctx.tx, &resp);
         if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
             let code = resp.status().as_u16();
+            // If-Range mismatch: the object changed → fail terminally, never retry a dead version.
+            if code == 200 && ctx.if_range.is_some() {
+                return Err(Changed(gettext("File changed on server")));
+            }
             // Per-IP limits speak 403/429/503 (509 on some hosts): downgrade at once instead of burning retries.
             if matches!(code, 403 | 429 | 503) || code == 509 {
                 return Err(Throttled(format!("Range rejected: HTTP {code}")));

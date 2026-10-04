@@ -829,6 +829,13 @@ impl DownloadManager {
             .unwrap_or(0);
         let scheduled_at = stored.scheduled_at.unwrap_or(0);
         item.set_scheduled_at(scheduled_at);
+        // Resume validators for If-Range (empty = none / predates the field).
+        if let Some(e) = stored.etag.as_deref() {
+            item.set_etag(e);
+        }
+        if let Some(lm) = stored.last_modified.as_deref() {
+            item.set_last_modified(lm);
+        }
         item.set_status(match status {
             DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Done => *status,
             DownloadStatus::Scheduled if scheduled_at > now => DownloadStatus::Scheduled,
@@ -1116,6 +1123,15 @@ impl DownloadManager {
             url,
             dest,
             opts,
+            if_range: {
+                let etag = item.etag();
+                if !etag.is_empty() {
+                    Some(etag.to_string())
+                } else {
+                    let lm = item.last_modified();
+                    (!lm.is_empty()).then(|| lm.to_string())
+                }
+            },
             cookies: None,
             timeout,
             tx,
@@ -1482,6 +1498,19 @@ impl DownloadManager {
                     EngineMsg::LastModified(t) => {
                         // Latest attempt wins; applied at Finished when keep-server-date is on.
                         this.server_mtime.borrow_mut().insert(id, t);
+                    }
+                    EngineMsg::Validator {
+                        etag,
+                        last_modified,
+                    } => {
+                        // Resume validator for If-Range: latest response wins.
+                        // Persisted so cross-session resumes validate too.
+                        if let Some(e) = etag {
+                            item.set_etag(e);
+                        }
+                        if let Some(lm) = last_modified {
+                            item.set_last_modified(lm);
+                        }
                     }
                     EngineMsg::LiveDetected => {
                         // Downloading only: a stop/pause during resolve must not leave a stale live_rows member (it would skip staging cleanup and take live signal paths).
@@ -2477,6 +2506,14 @@ impl DownloadManager {
                     scheduled_at: {
                         let ts = it.scheduled_at();
                         (ts > 0).then_some(ts)
+                    },
+                    etag: {
+                        let e = it.etag();
+                        (!e.is_empty()).then_some(e.to_string())
+                    },
+                    last_modified: {
+                        let lm = it.last_modified();
+                        (!lm.is_empty()).then_some(lm.to_string())
                     },
                 });
             }

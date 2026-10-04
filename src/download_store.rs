@@ -71,6 +71,13 @@ pub(crate) struct StoredItem {
     /// `None` or 0 = not scheduled.
     #[serde(default)]
     pub(crate) scheduled_at: Option<i64>,
+    /// Resume validator: ETag (strong) or Last-Modified for If-Range.
+    /// Additive, no version bump; `None` = predates the field or server
+    /// sent no validator.
+    #[serde(default)]
+    pub(crate) etag: Option<String>,
+    #[serde(default)]
+    pub(crate) last_modified: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

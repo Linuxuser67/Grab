@@ -34,6 +34,13 @@ pub(crate) enum EngineMsg {
     SuggestName(String),
     /// Server Last-Modified; applied at Finished when keep-server-date is on (best-effort).
     LastModified(SystemTime),
+    /// Resume validator from response headers (ETag preferred, Last-Modified
+    /// fallback): stored on the item for If-Range on resume. None clears a
+    /// stale validator after an If-Range mismatch restart.
+    Validator {
+        etag: Option<String>,
+        last_modified: Option<String>,
+    },
     /// Dialog-less live row: track so Stop finalizes capture instead of killing it as stalled VOD.
     LiveDetected,
     /// Server object changed mid-download: drop bitmap so retry starts fresh.

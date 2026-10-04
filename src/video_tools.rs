@@ -2,6 +2,7 @@
 //! every spawn. Leaf module: the dialog, prefs and engines consume it through the
 //! `video` facade.
 
+use crate::download_net::client_builder;
 use gettextrs::gettext;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -233,13 +234,67 @@ pub(crate) fn distro_packages(os_release: &str) -> Option<DistroPackages> {
 /// Where on-demand tool installs keep the yt-dlp/ffmpeg binaries:
 /// `$XDG_DATA_HOME/grab/libs`. Both Flatpak and tarball/dev builds fetch here;
 /// `/app/bin` and PATH remain fallbacks for system-provided copies.
+///
+/// Security: when both `XDG_DATA_HOME` and `HOME` are unset (broken container),
+/// the temp-dir fallback is world-writable. We validate it like
+/// `cookie_staging_dir()`: must be owned by us, not a symlink. On failure we
+/// return a nonexistent path so no planted binary is ever discovered.
 pub fn user_lib_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(|| std::env::temp_dir().join("grab-fallback-data"));
-    base.join("grab").join("libs")
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    match base {
+        Some(b) => b.join("grab").join("libs"),
+        None => {
+            // Temp fallback: validate before use.
+            let fallback =
+                std::env::temp_dir().join(format!("grab-fallback-data-{}", std::process::id()));
+            if validate_exec_dir(&fallback) {
+                fallback.join("grab").join("libs")
+            } else {
+                // Validation failed: return nonexistent path.
+                PathBuf::from("/nonexistent-grab-lib-dir")
+            }
+        }
+    }
+}
+
+/// Validate a directory for executable discovery: must exist (or be creatable),
+/// owned by us, not a symlink, not world-writable.
+#[cfg(unix)]
+fn validate_exec_dir(dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+    // Create 0700 atomically.
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return false,
+    }
+    let Ok(md) = std::fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if md.file_type().is_symlink() {
+        tracing::warn!("exec dir is a symlink; refusing");
+        return false;
+    }
+    // SAFETY: getuid() is async-signal-safe; the unsafe marker is a libc-crate artifact.
+    let uid = unsafe { libc::getuid() };
+    if md.uid() != uid {
+        tracing::warn!("exec dir owned by another user; refusing");
+        return false;
+    }
+    if md.permissions().mode() & 0o022 != 0 {
+        tracing::warn!("exec dir is group/world-writable; refusing");
+        return false;
+    }
+    true
+}
+
+#[cfg(not(unix))]
+fn validate_exec_dir(_dir: &std::path::Path) -> bool {
+    // Non-Unix: no uid/symlink semantics to validate; allow.
+    true
 }
 
 /// Bundled-tool dir inside the Flatpak sandbox — Flatpak mounts the app tree at
@@ -419,6 +474,10 @@ pub(crate) const MERGER_FASTSTART_ARGS: &str = "Merger+ffmpeg:-movflags +faststa
 /// Await from a spawned task — never block the GTK thread.
 pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
+    // yt-dlp's crate installer verifies a digest when present but skips silently
+    // if absent (fail-open, unlike our quickjs/ffmpeg paths). Accepted deliberately
+    // so yt-dlp tracks upstream, but log it so the gap is visible.
+    tracing::warn!("yt-dlp install: digest verification is best-effort (crate skips if absent)");
     let handle = crate::runtime::tokio_rt()
         .spawn(async move { LibraryInstaller::new(dir).install_youtube(None).await });
     match handle.await {
@@ -614,7 +673,14 @@ async fn download_to_file(url: &str, dest: &Path, expected_sha256: &str) -> Resu
     // Refuse a planted symlink before any I/O: it would divert the download
     // (and the later chmod) onto an arbitrary file.
     refuse_symlink_target(dest)?;
-    let response = reqwest::get(url)
+    // Use the hardened client (no ambient proxy, no downgrades, no referer),
+    // not reqwest::get()'s default client.
+    let client = client_builder()
+        .build()
+        .map_err(|e| format!("couldn't build HTTP client: {e}"))?;
+    let response = client
+        .get(url)
+        .send()
         .await
         .map_err(|e| format!("couldn't fetch {url}: {e}"))?;
     let response = response

@@ -370,6 +370,12 @@ pub(crate) fn rename_noreplace(
                 return copy_noreplace(old, new);
             }
             Err(e) if matches!(e.raw_os_error(), Some(1 | 95 | 38)) => {
+                // Filesystem doesn't support hard links (EPERM/EOPNOTSUPP/ENOSYS):
+                // fall back to clobbering rename. Warn: no-replace semantics are lost.
+                tracing::warn!(
+                    "rename_noreplace: hard link unsupported (errno {}), falling back to clobbering rename",
+                    e.raw_os_error().unwrap_or(-1)
+                );
                 return std::fs::rename(old, new);
             }
             Err(e) => return Err(e),

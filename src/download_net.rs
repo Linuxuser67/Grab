@@ -208,8 +208,14 @@ fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
     let no_proxy_env = LOOPBACK_BYPASS.to_string();
     let apply_bypass = |p: reqwest::Proxy| p.no_proxy(reqwest::NoProxy::from_string(&no_proxy_env));
     let (proxies, cli_url) = match o.proxy_type.as_str() {
-        "http" | "https" => {
+        "http" => {
             let url = format!("http://{host}:{}", o.proxy_port);
+            let proxies = http_proxies(&url, &no_proxy_env).map_err(|e| e.to_string())?;
+            (proxies, url)
+        }
+        // HTTPS proxy: TLS to the proxy itself.
+        "https" => {
+            let url = format!("https://{host}:{}", o.proxy_port);
             let proxies = http_proxies(&url, &no_proxy_env).map_err(|e| e.to_string())?;
             (proxies, url)
         }
@@ -289,7 +295,7 @@ pub(crate) fn proxied_pool_len() -> usize {
 }
 
 /// Shared builder: bounded hops, no downgrades (see [`http_client`]).
-fn client_builder() -> reqwest::ClientBuilder {
+pub(crate) fn client_builder() -> reqwest::ClientBuilder {
     // Bounded hops; refuse https->http downgrades; no ambient proxy (explicit settings or nothing); no automatic Referer (leaks URLs/tokens).
     reqwest::Client::builder()
         .no_proxy()

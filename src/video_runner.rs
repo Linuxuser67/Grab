@@ -1110,9 +1110,16 @@ pub(crate) async fn run_live_ytdlp(
         let _ = std::fs::remove_file(out.with_extension(format!("{ext}.ytdl")));
         return Err(VideoError::exists());
     }
-    tokio::fs::create_dir_all(staging)
-        .await
-        .map_err(VideoError::staging)?;
+    if let Err(e) = tokio::fs::create_dir_all(staging).await {
+        // The .part was claimed before the staging dir was ensured: remove
+        // the zero-byte claim so a failed start doesn't leave litter.
+        let part = out
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .join(format!("{staging_name}.part"));
+        let _ = std::fs::remove_file(&part);
+        return Err(VideoError::staging(e));
+    }
     // Record the chosen staging name in the manifest for crash cleanup.
     // The ID stays hidden in the manifest; the filename is just title (+ dedup).
     let _ = write_manifest(

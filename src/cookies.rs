@@ -104,17 +104,23 @@ pub(crate) fn jar_from_export(text: &str) -> (Arc<reqwest::cookie::Jar>, usize) 
 
 /// Secure directory for cookie dumps: `$XDG_RUNTIME_DIR/grab-cookies` (0700,
 /// owned by us) instead of the shared `/tmp/grab-video`. Falls back to
-/// `~/.cache/grab-cookies` if `XDG_RUNTIME_DIR` is unset or empty: the home
-/// dir is not world-writable, so the `/tmp` pre-created-parent TOCTOU does
-/// not apply. Verifies uid ownership so a pre-created directory by another
-/// user is rejected.
+/// `$XDG_CACHE_HOME/grab-cookies` (or `~/.cache/grab-cookies` if
+/// `XDG_CACHE_HOME` is unset or empty) when `XDG_RUNTIME_DIR` is unavailable:
+/// the home dir is not world-writable, so the `/tmp` pre-created-parent
+/// TOCTOU does not apply. Verifies uid ownership so a pre-created directory
+/// by another user is rejected.
 fn cookie_staging_dir() -> Option<PathBuf> {
     let base = match std::env::var("XDG_RUNTIME_DIR") {
         Ok(s) if !s.is_empty() => PathBuf::from(s),
         _ => {
-            // Fallback: ~/.cache (user-owned, not world-writable).
-            let home = std::env::var("HOME").ok()?;
-            PathBuf::from(home).join(".cache")
+            // Fallback: XDG_CACHE_HOME or ~/.cache (user-owned, not world-writable).
+            match std::env::var("XDG_CACHE_HOME") {
+                Ok(s) if !s.is_empty() => PathBuf::from(s),
+                _ => {
+                    let home = std::env::var("HOME").ok()?;
+                    PathBuf::from(home).join(".cache")
+                }
+            }
         }
     };
     let dir = base.join("grab-cookies");

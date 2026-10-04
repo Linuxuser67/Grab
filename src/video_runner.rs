@@ -1122,7 +1122,10 @@ pub(crate) async fn run_live_ytdlp(
     // Clean up the previous attempt's .part if the manifest points to a
     // different staging name (crash/retry orphan). Never delete the base
     // recording — only the .part shell.
-    if let Some(old) = read_manifest(staging.as_path(), job.item_id)
+    // NOTE: the `&staging` borrow is required (&PathBuf -> &Path coercion);
+    // clippy::needless_borrow false-positives on it inside let-chains (1.99).
+    #[allow(clippy::needless_borrow)]
+    if let Some(old) = read_manifest(&staging, job.item_id)
         && let Some(old_name) = old.staging_name.as_deref()
         && old_name != staging_name
     {

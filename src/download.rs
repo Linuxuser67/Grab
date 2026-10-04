@@ -202,9 +202,16 @@ pub struct DownloadManager {
     /// and sends the text here; a dedicated worker does the file I/O
     /// (temp + sync_all + rename + dir sync) off the UI thread. Bursts
     /// coalesce via drain-to-latest in the worker.
+    /// Queue persist channel: `watch` keeps only the latest value, so rapid
+    /// state changes coalesce to a single write. The tokio task (below) is the
+    /// sole writer, which makes writes ordered by construction.
     /// Tests write synchronously and never use the channel.
     #[cfg_attr(test, allow(dead_code))]
-    persist_tx: std::sync::mpsc::Sender<String>,
+    persist_tx: RefCell<Option<tokio::sync::watch::Sender<Option<String>>>>,
+    /// Handle for the queue persist task; awaited on shutdown after the final
+    /// state is sent. Tests never spawn it.
+    #[cfg_attr(test, allow(dead_code))]
+    persist_task: RefCell<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// What a stop means for the worker and the bytes it has written (manager policy; distinct from the worker's `StopIntent`).
@@ -324,6 +331,28 @@ thread_local! {
 impl DownloadManager {
     /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
     pub fn new(store: gio::ListStore, settings: crate::settings::AppSettings) -> Rc<Self> {
+        // Queue persist worker: `watch` keeps only the latest value (coalescing
+        // built in); the task is the sole writer, so writes are ordered.
+        // `changed()` delivers the final value before the closed-channel Err,
+        // so the last persist completes before shutdown awaits the task.
+        #[cfg(not(test))]
+        let (persist_tx, persist_task) = {
+            let (tx, mut rx) = tokio::sync::watch::channel(None::<String>);
+            let task = tokio_rt().spawn(async move {
+                while rx.changed().await.is_ok() {
+                    let Some(text) = rx.borrow_and_update().clone() else {
+                        continue;
+                    };
+                    // File I/O must not block the async runtime.
+                    let _ =
+                        tokio::task::spawn_blocking(move || Self::write_queue_file(&text)).await;
+                }
+            });
+            (Some(tx), Some(task))
+        };
+        #[cfg(test)]
+        let (persist_tx, persist_task) = (None, None);
+
         let this = Rc::new(Self {
             store,
             settings,
@@ -348,34 +377,8 @@ impl DownloadManager {
             draining: Cell::new(false),
             sizing_inflight: Rc::new(Cell::new(0)),
             scheduler_source: RefCell::new(None),
-            persist_tx: {
-                #[cfg(not(test))]
-                {
-                    let (tx, rx) = std::sync::mpsc::channel::<String>();
-                    std::thread::Builder::new()
-                        .name("grab-queue-persist".to_string())
-                        .spawn(move || {
-                            // Coalesce bursts: drain to the latest text before each write.
-                            // `recv` returns Err only after the sender is dropped and the
-                            // channel is drained, so all persists complete before exit.
-                            while let Ok(text) = rx.recv() {
-                                let mut latest = text;
-                                while let Ok(t) = rx.try_recv() {
-                                    latest = t;
-                                }
-                                Self::write_queue_file(&latest);
-                            }
-                        })
-                        .expect("queue persist thread");
-                    tx
-                }
-                #[cfg(test)]
-                {
-                    // Tests write synchronously via `write_queue_file`; no worker needed.
-                    let (tx, _rx) = std::sync::mpsc::channel::<String>();
-                    tx
-                }
-            },
+            persist_tx: RefCell::new(persist_tx),
+            persist_task: RefCell::new(persist_task),
         });
         // Publish the Weak for `wake_queue()`'s `Send` closure (see `MANAGER_WEAK`).
         MANAGER_WEAK.with(|w| *w.borrow_mut() = Some(Rc::downgrade(&this)));
@@ -2533,9 +2536,8 @@ impl DownloadManager {
     }
 
     fn persist_queue(&self) {
-        // File I/O runs on the worker thread. The channel is unbounded; the
-        // drain-to-latest loop in the worker keeps memory in check by collapsing
-        // bursts to a single write.
+        // `watch::send_replace` keeps only the latest value: rapid state changes
+        // coalesce to a single write by the persist task.
         // Tests need determinism: they persist then immediately restore in a
         // new manager, so write synchronously in test builds.
         #[cfg(test)]
@@ -2543,18 +2545,29 @@ impl DownloadManager {
             Self::write_queue_file(&text);
         }
         #[cfg(not(test))]
-        if let Some(text) = self.serialize_queue() {
-            let _ = self.persist_tx.send(text);
+        if let (Some(text), Some(tx)) = (self.serialize_queue(), &*self.persist_tx.borrow()) {
+            tx.send_replace(Some(text));
         }
     }
 
-    /// Synchronous persist for shutdown: the worker thread is detached and
-    /// nothing joins it, so the final persist (truncated bitmaps, paused/stopped
-    /// states) must hit disk before the process exits. Quit is already a
-    /// blocking path, so a synchronous write here is acceptable.
-    fn persist_queue_sync(&self) {
+    /// Final persist for shutdown: send the state, drop the sender, await the
+    /// task. `watch::changed()` delivers the final value before the
+    /// closed-channel Err, so the last write lands before we return.
+    /// Tests write synchronously (no channel/task in test builds).
+    fn persist_for_shutdown(&self) {
+        #[cfg(test)]
         if let Some(text) = self.serialize_queue() {
             Self::write_queue_file(&text);
+        }
+        #[cfg(not(test))]
+        {
+            if let (Some(text), Some(tx)) = (self.serialize_queue(), &*self.persist_tx.borrow()) {
+                tx.send_replace(Some(text));
+            }
+            drop(self.persist_tx.borrow_mut().take());
+            if let Some(task) = self.persist_task.borrow_mut().take() {
+                let _ = tokio_rt().block_on(task);
+            }
         }
     }
 
@@ -2616,10 +2629,14 @@ impl DownloadManager {
         Some(text)
     }
 
-    /// Write the serialized queue: temp file + sync_all + rename + dir sync.
-    /// Runs on the persist worker thread, never the UI thread.
+    /// Write the serialized queue atomically: unique temp file + sync_all +
+    /// rename + dir sync. The persist task is the sole writer, so writes are
+    /// ordered by construction. Runs via `spawn_blocking`, never on the async
+    /// runtime or the UI thread.
     fn write_queue_file(text: &str) {
-        let tmp = Self::queue_file().with_extension("json.tmp");
+        // Unique temp name: the persist task is the sole writer, but a stale
+        // temp file from a crashed run must not collide.
+        let tmp = Self::queue_file().with_extension(format!("json.tmp.{}", std::process::id()));
         let write_tmp = || -> std::io::Result<()> {
             use std::io::Write;
             let mut f = std::fs::File::create(&tmp)?;
@@ -2926,7 +2943,7 @@ impl DownloadManager {
             .is_ok();
         if !joined {
             tracing::warn!("shutdown: join timed out; persisting without truncating partial files");
-            self.persist_queue();
+            self.persist_for_shutdown();
             return;
         }
         let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
@@ -2939,9 +2956,7 @@ impl DownloadManager {
             }
         }
         // Persist BEFORE returning: pump tails exit silently once draining is set, so this is the only persist that matters.
-        // Synchronous: the worker thread is detached and nothing joins it, so
-        // the final state must hit disk before the process exits.
-        self.persist_queue_sync();
+        self.persist_for_shutdown();
     }
 }
 

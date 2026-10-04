@@ -1317,15 +1317,15 @@ mod tests {
         // Old orphan: mtime 8 days ago, no manifest, no live row → trash.
         let old = dir.join("Title.11.mp4.part");
         std::fs::write(&old, b"orphan").unwrap();
-        let touch_ok = std::process::Command::new("touch")
-            .arg("-d")
-            .arg("8 days ago")
-            .arg(&old)
-            .status()
-            .is_ok_and(|s| s.success());
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86400))
+            .unwrap();
         assert!(
-            touch_ok && file_is_abandoned(&old),
-            "test setup: touch must set mtime to 8 days ago"
+            file_is_abandoned(&old),
+            "test setup: mtime must be 8 days ago"
         );
         assert!(
             should_trash_orphan("Title.11.mp4.part", &old, &keep, &dir),
@@ -1352,11 +1352,12 @@ mod tests {
         let manifest_id = 13u64;
         let manifest_file = dir.join("Title.13.mp4.part");
         std::fs::write(&manifest_file, b"orphan").unwrap();
-        let _ = std::process::Command::new("touch")
-            .arg("-d")
-            .arg("8 days ago")
-            .arg(&manifest_file)
-            .status();
+        std::fs::File::options()
+            .write(true)
+            .open(&manifest_file)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86400))
+            .unwrap();
         std::fs::write(
             manifest_path(&dir, manifest_id),
             br#"{"page_url":"u","quality":"q","video_ext":"mp4","audio_ext":"mp3"}"#,

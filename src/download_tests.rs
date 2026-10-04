@@ -4801,7 +4801,7 @@ fn proxy_argv_precedes_end_of_options() {
             true,
             "mp4",
             std::path::Path::new("/usr/bin/ffmpeg"),
-            std::path::Path::new("/tmp/staging/grab-media.%(ext)s"),
+            std::path::Path::new("/tmp/staging/media.%(ext)s"),
             None,
         ),
         crate::video_argv::live_capture_argv(&job, "h", std::path::Path::new("/tmp/x.mp4"), None),

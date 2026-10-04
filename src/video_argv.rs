@@ -153,8 +153,9 @@ pub(crate) fn container_truth_name(dest: &Path, discovered: &Path) -> Option<Str
 }
 
 /// Stable `-o` template inside the row's staging dir (yt-dlp resumes its `.part` beside it).
+/// Uses the video title so staging files are recognizable.
 pub(crate) fn unified_output_template(staging: &Path) -> PathBuf {
-    staging.join("grab-media.%(ext)s")
+    staging.join("%(title)s.%(ext)s")
 }
 
 /// Shared argv tail for the VOD builders: subtitles, proxy, identity/cookie args.

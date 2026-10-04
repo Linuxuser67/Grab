@@ -153,9 +153,21 @@ pub(crate) fn container_truth_name(dest: &Path, discovered: &Path) -> Option<Str
 }
 
 /// Stable `-o` template inside the row's staging dir (yt-dlp resumes its `.part` beside it).
-/// Uses the video title so staging files are recognizable.
-pub(crate) fn unified_output_template(staging: &Path) -> PathBuf {
-    staging.join("%(title)s.%(ext)s")
+/// Named after the row's destination stem: `dest` is fixed for the row's life, so a title
+/// that changes between attempts (live streams, edits) cannot rename the `.part` and break
+/// resume. Staging names are internal (the claim renames to `dest`), so a fullwidth percent
+/// sign replaces `%` in the stem and sidesteps `-o` escaping. The stem is capped to leave
+/// room for yt-dlp's `.f<id>.<ext>.part` suffix under the 255-byte name limit. Pure.
+pub(crate) fn unified_output_template(staging: &Path, dest: &Path) -> PathBuf {
+    const MAX_STEM_BYTES: usize = 200;
+    let stem = dest
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("media")
+        .replace('%', "\u{FF05}");
+    let cut = stem.floor_char_boundary(MAX_STEM_BYTES.min(stem.len()));
+    staging.join(format!("{}.%(ext)s", &stem[..cut]))
 }
 
 /// Shared argv tail for the VOD builders: subtitles, proxy, identity/cookie args.
@@ -209,7 +221,7 @@ pub(crate) fn unified_download_argv(
         "-f".to_string(),
         spec.to_string(),
         "-o".to_string(),
-        out.to_string_lossy().into_owned(),
+        ytdlp_output_template(out),
         "--ffmpeg-location".to_string(),
         ffmpeg_location_dir(ffmpeg_bin),
         "--print".to_string(),

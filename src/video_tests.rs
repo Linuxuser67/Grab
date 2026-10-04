@@ -9,7 +9,7 @@ use crate::video_argv::{
     YTDLP_PROGRESS_TEMPLATE, apply_proxy_env, container_truth_name, fallback_to_live_edge,
     hls_download_argv, hls_format_spec, live_capture_argv, live_from_start_unsupported,
     live_remux_argv, merge_output_ext, part_fallback_spec, playlist_scope_args, proxy_cli_args,
-    unified_download_argv, unified_format_spec,
+    unified_download_argv, unified_format_spec, unified_output_template,
 };
 use crate::video_plan::{
     StreamSel, find_hls_format, find_usable_format, plan_streams, select_audio_original_first,
@@ -740,7 +740,6 @@ fn test_manifest() -> VideoManifest {
         audio_ext: "webm".into(),
         final_bytes: None,
         staging_name: None,
-        ytdlp_output_name: None,
     }
 }
 
@@ -4799,7 +4798,6 @@ fn sweep_never_touches_bystander_with_id_like_name() {
         audio_ext: String::new(),
         final_bytes: None,
         staging_name: Some("My Video.mp4".into()),
-        ytdlp_output_name: None,
     };
     let manifest_path = staging.join(".4.manifest.json");
     std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
@@ -7002,6 +7000,54 @@ fn playlist_scope_args_selects_picked_entry() {
 }
 
 #[test]
+fn unified_output_template_is_named_after_dest_stem_and_stable() {
+    let staging = std::path::Path::new("/d/.staging");
+    let dest = std::path::Path::new("/d/My Video.mp4");
+    let t = unified_output_template(staging, dest);
+    assert_eq!(t, std::path::Path::new("/d/.staging/My Video.%(ext)s"));
+    // Pure function of `dest`: a retry builds the identical template, so the
+    // `.part` yt-dlp left beside it is found again.
+    assert_eq!(t, unified_output_template(staging, dest));
+    // No stem at all falls back to a fixed name.
+    assert_eq!(
+        unified_output_template(staging, std::path::Path::new("")),
+        std::path::Path::new("/d/.staging/media.%(ext)s")
+    );
+}
+
+#[test]
+fn unified_output_template_neutralizes_percent_and_caps_stem() {
+    let staging = std::path::Path::new("/d/.staging");
+    // `%` (and a lookalike `%(field)s`) in a title must not reach the `-o` template.
+    let t = unified_output_template(staging, std::path::Path::new("/d/50% off %(title)s.mp4"));
+    let name = t.file_name().unwrap().to_str().unwrap();
+    assert_eq!(
+        name.matches('%').count(),
+        "%(ext)s".matches('%').count(),
+        "{name}"
+    );
+    assert!(name.ends_with(".%(ext)s"), "{name}");
+    // Multi-byte stems are cut on a char boundary, leaving room for yt-dlp's
+    // `.f<id>.<ext>.part` suffix under the 255-byte limit.
+    let long = format!("/d/{}.mp4", "é".repeat(300));
+    let t = unified_output_template(staging, std::path::Path::new(&long));
+    let name = t.file_name().unwrap().to_str().unwrap();
+    assert!(name.len() <= 200 + ".%(ext)s".len(), "{} bytes", name.len());
+    assert!(name.ends_with(".%(ext)s"), "{name}");
+}
+
+#[test]
+fn unified_download_argv_escapes_percent_in_staging_path() {
+    // A destination folder like `100%` must not corrupt the printf-style template.
+    let job = direct_test_job();
+    let ff = std::path::Path::new("/usr/bin/ffmpeg");
+    let out = std::path::Path::new("/tmp/100%/.staging/v.%(ext)s");
+    let argv = unified_download_argv(&job, "b", false, "", ff, out, None);
+    let p = argv.iter().position(|a| a == "-o").expect("-o");
+    assert_eq!(argv[p + 1], "/tmp/100%%/.staging/v.%(ext)s");
+}
+
+#[test]
 fn picked_row_download_argv_scopes_to_its_entry() {
     // Regression: highlight rows re-resolve the tray URL, so `--no-playlist`
     // downloaded the tray's first story for every row (N byte-identical
@@ -9042,7 +9088,10 @@ fn unified_runner_downloads_claims_and_collects() {
     let logged = std::fs::read_to_string(dir.join("staging.argv.log")).unwrap();
     assert!(logged.contains("-f v123+a456/bv*+ba/b"), "{logged}");
     assert!(logged.contains("--merge-output-format mp4"), "{logged}");
-    assert!(logged.contains("%(title)s.%(ext)s"), "{logged}");
+    // Staging output is named after the row's dest stem (stable across attempts),
+    // never the re-resolved title.
+    assert!(logged.contains("v.%(ext)s"), "{logged}");
+    assert!(!logged.contains("%(title)s"), "{logged}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -9331,10 +9380,24 @@ fn merge_output_ext_maps_supported_or_mp4() {
 fn unified_candidate_names_claimable_output() {
     // Merge-fragment leftovers, `.part` shells, sidecars and metadata
     // droppings are never claimed, on either discovery path.
-    // The template uses %(title)s, so any non-hidden media file is a candidate
-    // (the staging dir is dedicated to this download). "other.mp4" is claimable
-    // because it could be a video titled "other".
+    // The template is named after the dest stem, but the staging dir is dedicated
+    // to this download, so any non-hidden media file is a candidate. "other.mp4"
+    // is claimable because it could be a video titled "other".
     assert!(unified_candidate("My Video.mp4"));
+    assert!(
+        unified_candidate("Clip.MP4"),
+        "extension match is case-insensitive"
+    );
+    assert!(unified_candidate("Clip.mka") && unified_candidate("Clip.ts"));
+    for junk in [
+        "Clip.jpg",
+        "Clip.webp",
+        "Clip.info.json",
+        "Clip.description",
+        "Clip",
+    ] {
+        assert!(!unified_candidate(junk), "{junk} is not a claimable output");
+    }
     assert!(unified_candidate("media.mp4"));
     assert!(unified_candidate("other.mp4"));
     assert!(!unified_candidate("media.f399.mp4"));

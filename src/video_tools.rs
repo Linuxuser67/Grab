@@ -262,6 +262,55 @@ pub fn user_lib_dir() -> PathBuf {
     }
 }
 
+/// Create the library dir for an install. Called at install time (the getter stays
+/// side-effect free). Components are created 0700. The `/tmp` fallback root
+/// (`grab-fallback-data-<pid>`, used only when `XDG_DATA_HOME` and `HOME` are both
+/// unset) is validated after creation: owned by us, not a symlink, not group- or
+/// world-writable, so a pre-planted directory is refused instead of written into.
+pub(crate) async fn ensure_lib_dir(dir: &Path) -> Result<(), VideoError> {
+    let dir = dir.to_path_buf();
+    match tokio::task::spawn_blocking(move || ensure_lib_dir_blocking(&dir)).await {
+        Ok(res) => res.map_err(VideoError::install),
+        Err(e) => Err(VideoError::runtime(&e)),
+    }
+}
+
+fn ensure_lib_dir_blocking(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let tmp = std::env::temp_dir();
+        if let Ok(rel) = dir.strip_prefix(&tmp)
+            && let Some(first) = rel.components().next()
+            && first
+                .as_os_str()
+                .to_string_lossy()
+                .starts_with("grab-fallback-data-")
+        {
+            let root = tmp.join(first);
+            match std::fs::DirBuilder::new().mode(0o700).create(&root) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+            if !crate::download_net::validate_secure_dir(&root) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "temporary library dir is not private to this user",
+                ));
+            }
+        }
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
 /// Bundled-tool dir inside the Flatpak sandbox — Flatpak mounts the app tree at
 /// `/app`; this is not an XDG rule. Absent outside Flatpak.
 const FLATPAK_APP_BIN: &str = "/app/bin";
@@ -446,6 +495,7 @@ pub(crate) const MERGER_FASTSTART_ARGS: &str = "Merger+ffmpeg:-movflags +faststa
 /// Await from a spawned task — never block the GTK thread.
 pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
+    ensure_lib_dir(&dir).await?;
     // yt-dlp's crate installer verifies a digest when present but skips silently
     // if absent (fail-open, unlike our quickjs/ffmpeg paths). Accepted deliberately
     // so yt-dlp tracks upstream, but log it so the gap is visible.
@@ -579,9 +629,7 @@ async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
     }
     let url = quickjs_download_url(&tag)
         .ok_or_else(|| VideoError::install("quickjs has no release for this architecture"))?;
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(VideoError::install)?;
+    ensure_lib_dir(&dir).await?;
     // Download straight to `qjs.part`: a failed download must never leave a
     // half-written `qjs` behind for `find_quickjs` to mistake as installed.
     let dest = dir.join("qjs");
@@ -758,9 +806,7 @@ pub(crate) async fn ensure_quickjs(page_url: &str) -> Result<(), VideoError> {
 async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
     use yt_dlp::client::deps::ffmpeg::BuildFetcher;
 
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(VideoError::install)?;
+    ensure_lib_dir(&dir).await?;
     let release = BuildFetcher::new()
         .fetch_binary()
         .await
@@ -1793,5 +1839,34 @@ mod digest_tests {
         }"#,
         );
         assert_eq!(digest_for_asset(&release, "qjs-linux-x86_64"), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lib_dir_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn ensure_lib_dir_refuses_planted_fallback_root() {
+        let root =
+            std::env::temp_dir().join(format!("grab-fallback-data-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).unwrap();
+        // Looks like an attacker pre-created the predictable per-PID root.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let dir = root.join("grab").join("libs");
+        let err = ensure_lib_dir_blocking(&dir).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!dir.exists(), "nothing is created inside a refused root");
+        // A private root is accepted and the tree is created 0700.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        ensure_lib_dir_blocking(&dir).unwrap();
+        assert!(dir.is_dir());
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

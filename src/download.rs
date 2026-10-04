@@ -2517,12 +2517,14 @@ impl DownloadManager {
             return;
         };
         let prefix = format!("{name}.tmp.");
+        // This process's own temp files (`<prefix><pid>.<n>`) may be mid-write.
+        let own = format!("{prefix}{}.", std::process::id());
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 if entry
                     .file_name()
                     .to_str()
-                    .is_some_and(|n| n.starts_with(&prefix))
+                    .is_some_and(|n| n.starts_with(&prefix) && !n.starts_with(&own))
                 {
                     let _ = std::fs::remove_file(entry.path());
                 }

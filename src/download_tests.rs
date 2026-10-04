@@ -3161,9 +3161,15 @@ fn segmented_multi_connection_download() {
         // Distinct bounded ranges prove parallel fetching (one stream would log one open-ended line).
         let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
         let mut distinct = std::collections::HashSet::new();
-        for line in ranges.lines().filter(|l| l.starts_with("range=bytes=")) {
-            if line.contains('-') && !line.ends_with('-') && line.split('-').count() == 2 {
-                distinct.insert(line.to_string());
+        for line in ranges.lines().filter_map(|l| l.strip_prefix("range=")) {
+            // Log format is "range=<Range>|if-range=<value>"; isolate the range part.
+            let range = line.split('|').next().unwrap_or("");
+            if range.starts_with("bytes=")
+                && range.contains('-')
+                && !range.ends_with('-')
+                && range.split('-').count() == 2
+            {
+                distinct.insert(range.to_string());
             }
         }
         if distinct.len() < 2 {

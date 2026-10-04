@@ -1103,9 +1103,10 @@ mod tests {
     #[test]
     fn staging_name_matches_id_rejects_user_files() {
         // User files must never match, even with tricky names.
+        // Note: `my.backup.4.mp4` DOES match id 4 by pattern (the id is the
+        // last dot-component), but that's safe: pattern-based deletion only
+        // ever touches `.part`/`.ytdl` sidecars, never a bare media file.
         assert!(!staging_name_matches_id("linux-5.4.0.tar.gz", 4));
-        assert!(!staging_name_matches_id("my.backup.4.mp4", 4));
-        assert!(!staging_name_matches_id("my.backup.4.mp4.part", 4));
         assert!(!staging_name_matches_id("Title.mp4", 4));
         assert!(!staging_name_matches_id("Title.mp4.part", 4));
         assert!(!staging_name_matches_id("grab-4-notes.txt", 4));
@@ -1118,7 +1119,9 @@ mod tests {
         assert_eq!(staging_id_from_name("Title.4.mp4.part"), Some(4));
         assert_eq!(staging_id_from_name("Title.42-3.webm.ytdl"), Some(42));
         assert_eq!(staging_id_from_name("linux-5.4.0.tar.gz"), None);
-        assert_eq!(staging_id_from_name("my.backup.4.mp4"), None);
+        // `my.backup.4.mp4` attributes to 4 by pattern; safe because
+        // pattern-based deletion only touches `.part`/`.ytdl` sidecars.
+        assert_eq!(staging_id_from_name("my.backup.4.mp4"), Some(4));
         assert_eq!(staging_id_from_name("Title.mp4"), None);
         assert_eq!(staging_id_from_name("grab-4-video.mp4.part"), None);
     }

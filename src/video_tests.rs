@@ -789,7 +789,7 @@ fn resume_plan_resumes_partial_temp() {
     let dir = test_manifest_dir("partial-temp");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
-    std::fs::write(staging.join("grab-media.mp4"), vec![0u8; 60]).unwrap();
+    std::fs::write(staging.join("media.mp4"), vec![0u8; 60]).unwrap();
     let m = test_manifest();
     let q = test_query(Some(&m), &dest, &staging);
     assert_eq!(resume_plan(&q), ResumePlan::Resume);
@@ -823,7 +823,7 @@ fn resume_plan_resumes_temp_within_merge_margin() {
     let dir = test_manifest_dir("merge-margin-temp");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
-    std::fs::write(staging.join("grab-media.mp4"), vec![0u8; 200]).unwrap();
+    std::fs::write(staging.join("media.mp4"), vec![0u8; 200]).unwrap();
     let m = test_manifest();
     let q = test_query(Some(&m), &dest, &staging);
     assert_eq!(resume_plan(&q), ResumePlan::Resume);
@@ -838,7 +838,7 @@ fn resume_plan_resumes_temp_at_limit_boundary() {
     let dir = test_manifest_dir("limit-boundary-temp");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
-    std::fs::write(staging.join("grab-media.mp4"), vec![0u8; AT_LIMIT]).unwrap();
+    std::fs::write(staging.join("media.mp4"), vec![0u8; AT_LIMIT]).unwrap();
     let m = test_manifest();
     let q = test_query(Some(&m), &dest, &staging);
     assert_eq!(resume_plan(&q), ResumePlan::Resume);
@@ -853,7 +853,7 @@ fn resume_plan_fresh_on_overlong_temp() {
     let dir = test_manifest_dir("overlong-temp");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
-    std::fs::write(staging.join("grab-media.mp4"), vec![0u8; OVERLONG]).unwrap();
+    std::fs::write(staging.join("media.mp4"), vec![0u8; OVERLONG]).unwrap();
     let m = test_manifest();
     let q = test_query(Some(&m), &dest, &staging);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
@@ -866,7 +866,7 @@ fn resume_plan_fresh_on_sparse_temp() {
     let dir = test_manifest_dir("sparse-temp");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
-    let temp = staging.join("grab-media.mp4");
+    let temp = staging.join("media.mp4");
     std::fs::File::create(&temp).unwrap().set_len(150).unwrap();
     assert!(is_sparse_shell(&temp));
     let m = test_manifest();
@@ -895,7 +895,7 @@ fn resume_plan_fresh_without_manifest_despite_temp() {
     let dir = test_manifest_dir("unverified");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
-    std::fs::write(staging.join("grab-media.mp4"), vec![0u8; 60]).unwrap();
+    std::fs::write(staging.join("media.mp4"), vec![0u8; 60]).unwrap();
     let q = test_query(None, &dest, &staging);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1643,47 +1643,40 @@ fn container_truth_name_corrects_stale_ext() {
     use std::path::Path;
     // Native webm merge under an mp4 intake name: same stem, truer ext.
     assert_eq!(
-        container_truth_name(
-            Path::new("/dl/Clip [x].mp4"),
-            Path::new("/st/grab-media.webm"),
-        )
-        .as_deref(),
+        container_truth_name(Path::new("/dl/Clip [x].mp4"), Path::new("/st/media.webm"),)
+            .as_deref(),
         Some("Clip [x].webm")
     );
     // Agreement (even case-insensitively) and exotic intake names stay.
     assert_eq!(
-        container_truth_name(Path::new("/dl/Clip.mp4"), Path::new("/st/grab-media.MP4")),
+        container_truth_name(Path::new("/dl/Clip.mp4"), Path::new("/st/media.MP4")),
         None
     );
     assert_eq!(
-        container_truth_name(Path::new("/dl/talk.mkv"), Path::new("/st/grab-media.webm")),
+        container_truth_name(Path::new("/dl/talk.mkv"), Path::new("/st/media.webm")),
         None
     );
     // Unknown containers and extensionless sides never rename.
     assert_eq!(
-        container_truth_name(Path::new("/dl/Clip.mp4"), Path::new("/st/grab-media.bin")),
+        container_truth_name(Path::new("/dl/Clip.mp4"), Path::new("/st/media.bin")),
         None
     );
     assert_eq!(
-        container_truth_name(Path::new("/dl/Clip"), Path::new("/st/grab-media.webm")),
+        container_truth_name(Path::new("/dl/Clip"), Path::new("/st/media.webm")),
         None
     );
     assert_eq!(
-        container_truth_name(Path::new("/dl/.mp4"), Path::new("/st/grab-media.webm")),
+        container_truth_name(Path::new("/dl/.mp4"), Path::new("/st/media.webm")),
         None
     );
     // Multi-dot stems keep everything but the last extension.
     assert_eq!(
-        container_truth_name(
-            Path::new("/dl/my.clip.v2.mp4"),
-            Path::new("/st/grab-media.mkv"),
-        )
-        .as_deref(),
+        container_truth_name(Path::new("/dl/my.clip.v2.mp4"), Path::new("/st/media.mkv"),)
+            .as_deref(),
         Some("my.clip.v2.mkv")
     );
     assert_eq!(
-        container_truth_name(Path::new("/dl/Clip.m4a"), Path::new("/st/grab-media.webm"))
-            .as_deref(),
+        container_truth_name(Path::new("/dl/Clip.m4a"), Path::new("/st/media.webm")).as_deref(),
         Some("Clip.webm")
     );
 }
@@ -6745,7 +6738,7 @@ fn resume_plan_unknown_total_resumes_bytes_on_disk() {
     let dir = test_manifest_dir("unknown-total");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
-    std::fs::write(staging.join("grab-media.mp4"), vec![0u8; 49]).unwrap();
+    std::fs::write(staging.join("media.mp4"), vec![0u8; 49]).unwrap();
     let m = test_manifest();
     let mut q = test_query(Some(&m), &dest, &staging);
     q.total = None;
@@ -7093,7 +7086,7 @@ fn every_download_path_embeds_metadata() {
     // The id is no longer in the filename, so only the file's own tags keep
     // it (`--embed-metadata` writes `webpage_url` into `comment`). It used
     // to be passed only when merging, leaving every other path untagged.
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let ff = std::path::Path::new("/usr/bin/ffmpeg");
 
     let mut merged = direct_test_job();
@@ -7145,7 +7138,7 @@ fn every_download_path_embeds_metadata() {
 fn merged_mp4_moves_moov_to_front() {
     // Merged mp4s get `-movflags +faststart` (scoped Merger+ffmpeg) so
     // playback starts without a full scan.
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let ff = std::path::Path::new("/usr/bin/ffmpeg");
     let mut job = direct_test_job();
     job.quality = "1080".into();
@@ -7160,7 +7153,7 @@ fn merged_mp4_moves_moov_to_front() {
 #[test]
 fn merged_webm_skips_moov_flag() {
     // movflags are meaningless outside the mp4 family; don't pass them.
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let ff = std::path::Path::new("/usr/bin/ffmpeg");
     let mut job = direct_test_job();
     job.quality = "1080".into();
@@ -7174,7 +7167,7 @@ fn merged_webm_skips_moov_flag() {
 #[test]
 fn audio_only_extraction_skips_moov_flag() {
     // No merge happens on the audio-only path, so no Merger args either.
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let ff = std::path::Path::new("/usr/bin/ffmpeg");
     let mut job = direct_test_job();
     job.audio_only = true;
@@ -7205,7 +7198,7 @@ fn unified_argv_extracts_audio_for_audio_only() {
     let mut job = direct_test_job();
     job.audio_only = true;
     job.subtitles = Some("en".into());
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "a456/ba/b",
@@ -7306,7 +7299,7 @@ fn unified_argv_embeds_subs_when_enabled() {
     let mut job = direct_test_job();
     job.embed_subs = true;
     job.subtitles = Some("en".into());
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "v123+a456/bv*+ba/b",
@@ -7369,7 +7362,7 @@ fn unified_argv_leaves_fragments_serial() {
     // yt-dlp legs stay at the serial fragment default even when the app's
     // own segmented engine runs hot: fragment floods trip 429s.
     let job = direct_test_job();
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "bv+ba/b",
@@ -7387,7 +7380,7 @@ fn unified_argv_cuts_sponsors_when_enabled() {
     // Opt-in post-processing: the "sponsor" category only, nothing else.
     let mut job = direct_test_job();
     job.sponsorblock_remove = true;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "bv+ba/b",
@@ -7426,7 +7419,7 @@ fn unified_argv_marks_sponsors_when_enabled() {
     // Opt-in post-processing: the "sponsor" category only, nothing else.
     let mut job = direct_test_job();
     job.sponsorblock_mark = true;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "bv+ba/b",
@@ -7621,7 +7614,7 @@ fn unified_argv_embeds_chapters_when_enabled() {
     // Opt-in post-processing: chapter markers land in the finished file.
     let mut job = direct_test_job();
     job.embed_chapters = true;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "bv+ba/b",
@@ -7657,7 +7650,7 @@ fn unified_argv_remuxes_video_when_enabled() {
     // chosen container without re-encoding.
     let mut job = direct_test_job();
     job.remux_video = Some("mkv".to_string());
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "bv+ba/b",
@@ -7731,7 +7724,7 @@ fn audio_only_rows_still_get_chapters() {
     let mut job = direct_test_job();
     job.audio_only = true;
     job.embed_chapters = true;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "bestaudio",
@@ -7775,7 +7768,7 @@ fn vod_and_live_argv_never_emit_removed_tuning_flags() {
         "--user-agent",
     ];
     let job = direct_test_job();
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let unified = unified_download_argv(
         &job,
         "bv+ba/b",
@@ -7815,7 +7808,7 @@ fn unified_argv_ratelimit_when_set() {
     // `--ratelimit` (plain bytes; yt-dlp accepts the raw rate).
     let mut job = direct_test_job();
     job.speed_limit = Some(512_000);
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "bv+ba/b",
@@ -7849,7 +7842,7 @@ fn unified_argv_mtime_when_set() {
     // instead of the download time.
     let mut job = direct_test_job();
     job.keep_server_date = true;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "bv+ba/b",
@@ -7967,7 +7960,7 @@ fn audio_only_legs_never_pass_an_extraction_quality() {
     // yt-dlp's own default, so the flag must not appear on any leg.
     let mut job = direct_test_job();
     job.audio_only = true;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "ba/b",
@@ -8098,7 +8091,7 @@ fn live_from_start_stays_off_non_live_rows() {
     // preference opted in — no live edge exists to rewind to.
     let mut job = direct_test_job();
     job.live_from_start = true;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "bv+ba/b",
@@ -8757,7 +8750,7 @@ for a in "$@"; do
     prev="$a"
 done
 echo "$@" >> "$(dirname "$out").argv.log"
-out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/; s/%(title)s/Test Title/')"
 stem="$(basename "$out" .mp4)"
 if [ -n "$dump" ]; then
     printf '{"subtitles":{"en":[{"url":"http://x/en","ext":"vtt"}]},"automatic_captions":{}}'
@@ -9027,7 +9020,7 @@ fn unified_runner_downloads_claims_and_collects() {
     let logged = std::fs::read_to_string(dir.join("staging.argv.log")).unwrap();
     assert!(logged.contains("-f v123+a456/bv*+ba/b"), "{logged}");
     assert!(logged.contains("--merge-output-format mp4"), "{logged}");
-    assert!(logged.contains("grab-media.%(ext)s"), "{logged}");
+    assert!(logged.contains("%(title)s.%(ext)s"), "{logged}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -9316,25 +9309,30 @@ fn merge_output_ext_maps_supported_or_mp4() {
 fn unified_candidate_names_claimable_output() {
     // Merge-fragment leftovers, `.part` shells, sidecars and metadata
     // droppings are never claimed, on either discovery path.
-    assert!(unified_candidate("grab-media.mp4"));
-    assert!(!unified_candidate("grab-media.f399.mp4"));
-    assert!(!unified_candidate("grab-media.f251.webm"));
-    assert!(!unified_candidate("grab-media.mp4.part"));
-    assert!(!unified_candidate("grab-media.en.srt"));
-    assert!(!unified_candidate("grab-media.ytdl"));
-    assert!(!unified_candidate("grab-media.temp"));
-    assert!(!unified_candidate("other.mp4"));
+    // The template uses %(title)s, so any non-hidden media file is a candidate
+    // (the staging dir is dedicated to this download). "other.mp4" is claimable
+    // because it could be a video titled "other".
+    assert!(unified_candidate("My Video.mp4"));
+    assert!(unified_candidate("media.mp4"));
+    assert!(unified_candidate("other.mp4"));
+    assert!(!unified_candidate("media.f399.mp4"));
+    assert!(!unified_candidate("media.f251.webm"));
+    assert!(!unified_candidate("media.mp4.part"));
+    assert!(!unified_candidate("media.en.srt"));
+    assert!(!unified_candidate("media.ytdl"));
+    assert!(!unified_candidate("media.temp"));
+    assert!(!unified_candidate(".hidden.mp4"));
 }
 
 #[test]
 fn is_ytdlp_fragment_names_merge_temps() {
-    assert!(is_ytdlp_fragment("grab-media.f399.mp4"));
-    assert!(is_ytdlp_fragment("grab-media.f251.webm"));
-    assert!(!is_ytdlp_fragment("grab-media.mp4"));
-    assert!(!is_ytdlp_fragment("grab-media.en.srt"));
-    assert!(!is_ytdlp_fragment("grab-media.mp4.part"));
-    assert!(!is_ytdlp_fragment("grab-media.f.mp4"));
-    assert!(!is_ytdlp_fragment("grab-media.%(ext)s"));
+    assert!(is_ytdlp_fragment("media.f399.mp4"));
+    assert!(is_ytdlp_fragment("media.f251.webm"));
+    assert!(!is_ytdlp_fragment("media.mp4"));
+    assert!(!is_ytdlp_fragment("media.en.srt"));
+    assert!(!is_ytdlp_fragment("media.mp4.part"));
+    assert!(!is_ytdlp_fragment("media.f.mp4"));
+    assert!(!is_ytdlp_fragment("media.%(ext)s"));
 }
 
 #[test]
@@ -9345,11 +9343,11 @@ fn discover_unified_output_prefers_after_move_and_excludes() {
     let _ = std::fs::remove_dir_all(&dir);
     let staging = dir.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
-    std::fs::write(staging.join("grab-media.f399.mp4"), b"fragment").unwrap();
-    std::fs::write(staging.join("grab-media.mp4.part"), b"partial").unwrap();
-    std::fs::write(staging.join("grab-media.en.srt"), b"subs").unwrap();
-    std::fs::write(staging.join("grab-media.mp4"), b"output12").unwrap();
-    let out = staging.join("grab-media.mp4");
+    std::fs::write(staging.join("media.f399.mp4"), b"fragment").unwrap();
+    std::fs::write(staging.join("media.mp4.part"), b"partial").unwrap();
+    std::fs::write(staging.join("media.en.srt"), b"subs").unwrap();
+    std::fs::write(staging.join("media.mp4"), b"output12").unwrap();
+    let out = staging.join("media.mp4");
     assert_eq!(
         discover_unified_output(&staging, Some(out.to_str().unwrap())),
         Some(out.clone())
@@ -9363,21 +9361,14 @@ fn discover_unified_output_prefers_after_move_and_excludes() {
     assert_eq!(
         discover_unified_output(
             &staging,
-            Some(
-                staging
-                    .join("grab-media.en.srt")
-                    .to_str()
-                    .unwrap()
-                    .to_string()
-            )
-            .as_deref(),
+            Some(staging.join("media.en.srt").to_str().unwrap().to_string()).as_deref(),
         ),
         Some(out.clone())
     );
     // Nothing claimable at all: no output.
     let empty = dir.join("empty");
     std::fs::create_dir_all(&empty).unwrap();
-    std::fs::write(empty.join("grab-media.f1.mp4"), b"frag").unwrap();
+    std::fs::write(empty.join("media.f1.mp4"), b"frag").unwrap();
     assert_eq!(discover_unified_output(&empty, None), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -9389,7 +9380,7 @@ fn unified_argv_takes_subtitle_flags() {
     let mut job = direct_test_job();
     job.subtitles = Some("en".into());
     job.embed_subs = true;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
         &job,
         "v123+a456/bv*+a456/bv*+ba/b",

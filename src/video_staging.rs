@@ -879,11 +879,17 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
     ResumePlan::Resume
 }
 /// Whether a staging filename may be the unified download's claimed output (never fragments, `.part` shells, sidecars, or metadata).
+/// The template uses `%(title)s`, so there's no fixed prefix. We accept any
+/// non-hidden file that isn't a known temp/fragment type. The staging dir is
+/// ours, so this is safe. Legacy `grab-media.`/`media.` prefixes still match.
 pub(crate) fn unified_candidate(file_name: &str) -> bool {
     let ext = Path::new(file_name).extension().and_then(|e| e.to_str());
-    file_name.starts_with("grab-media.")
+    !file_name.starts_with('.')
         && !is_ytdlp_fragment(file_name)
-        && !matches!(ext, Some("part" | "srt" | "ytdl" | "temp" | "tmp" | "frag"))
+        && !matches!(
+            ext,
+            Some("part" | "srt" | "ytdl" | "temp" | "tmp" | "frag" | "json" | "manifest")
+        )
 }
 
 /// yt-dlp's own merge temp names (`<stem>.f<id>.<ext>`): never the claimed output. Pure.

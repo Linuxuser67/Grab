@@ -94,30 +94,6 @@ pub(crate) fn staging_name_matches_id(file_name: &str, item_id: u64) -> bool {
     false
 }
 
-/// Extract the item id from an id-in-name staging file, if it matches the
-/// scheme. Returns `None` for user files and legacy names.
-pub(crate) fn staging_id_from_name(file_name: &str) -> Option<u64> {
-    let mut base = file_name;
-    if let Some(s) = base.strip_suffix(".part") {
-        base = s;
-    } else if let Some(s) = base.strip_suffix(".ytdl") {
-        base = s;
-    }
-    let dot = base.rfind('.')?;
-    if !MEDIA_EXTS.iter().any(|e| *e == &base[dot + 1..]) {
-        return None;
-    }
-    let stem_with_id = &base[..dot];
-    // The id is the last dot-component (or the part before -{n} in dedup).
-    let id_dot = stem_with_id.rfind('.')?;
-    let tail = &stem_with_id[id_dot + 1..];
-    // tail is "{id}" or "{id}-{n}".
-    let id_str = tail.split('-').next()?;
-    let id: u64 = id_str.parse().ok()?;
-    // Strict verify: the full match must hold.
-    staging_name_matches_id(file_name, id).then_some(id)
-}
-
 /// Whether any staging file exists for this id: the id allocator must skip
 /// it so a fresh row never lands on a leftover.
 pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
@@ -321,13 +297,11 @@ pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
                 let _ = std::fs::remove_file(entry.path());
                 continue;
             }
-            // Id-in-name fallback (manifest lost): only sidecars, never bare media.
-            if staging_name_matches_id(name_str, item_id)
-                && (name_str.ends_with(".part") || name_str.ends_with(".ytdl"))
-            {
-                let _ = std::fs::remove_file(entry.path());
-                continue;
-            }
+            // NO id-in-name fallback for deletion: without a marker, the
+            // pattern is fundamentally ambiguous (a user's `my.backup.4.mp4.part`
+            // is indistinguishable from our `Title.4.mp4.part`). Deletion
+            // requires the manifest's exact name. ID reuse is still prevented
+            // by `staging_occupied`, which may conservatively skip IDs.
             // Legacy live pattern: .{id}.live. (e.g., "v.1.live.mp4.part").
             // Has the `.live.` marker, so it cannot hit user files.
             if name_str.contains(&format!(".{item_id}.live.")) {
@@ -390,11 +364,10 @@ pub(crate) fn drop_empty_staging_root(root: &Path) {
 /// are reclaimed. A missing dest dir is a no-op.
 ///
 /// Two id sources: the legacy `grab-<id>-*` prefix (parsed directly) and the
-/// id-in-name scheme (via [`staging_id_from_name`], which keeps working when
-/// the manifest is lost). Recordings are the user's only copy — preserve
-/// them. Only delete known staging file patterns; a user's own
-/// `grab-<id>-notes.txt` must survive. For id-in-name files without a
-/// manifest, only `.part`/`.ytdl` sidecars are swept, never a bare media file.
+/// `.live.` marker pattern. The id-in-name scheme is NOT swept by pattern:
+/// without a marker it is fundamentally ambiguous. Recordings are the user's
+/// only copy — preserve them. Only delete known staging file patterns; a
+/// user's own `grab-<id>-notes.txt` must survive.
 pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>) {
     let Ok(entries) = std::fs::read_dir(dest_dir) else {
         return;
@@ -413,16 +386,12 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
             let _ = std::fs::remove_file(entry.path());
             continue;
         }
-        // Id-in-name scheme: attribute via the filename itself. Without a
-        // manifest to confirm the exact staging name, only sidecars go —
-        // a bare `*.grab-{id}.mp4` could be a completed recording.
-        if let Some(id) = staging_id_from_name(name)
-            && !keep.contains(&id)
-            && (name.ends_with(".part") || name.ends_with(".ytdl"))
-        {
-            let _ = std::fs::remove_file(entry.path());
-            continue;
-        }
+        // NO id-in-name attribution for deletion: without a marker, the
+        // pattern is fundamentally ambiguous (a user's `my.backup.4.mp4.part`
+        // is indistinguishable from our `Title.4.mp4.part`). Only the
+        // legacy `grab-<id>-` prefix (has marker) and `.live.` (has marker)
+        // are swept by pattern. ID reuse is still prevented by
+        // `staging_occupied`.
         // Legacy live: `.{id}.live.` (e.g., "v.1.live.mp4.part"). The
         // `.live.` marker makes it safe; extract the id and sweep if orphaned.
         if let Some(live_pos) = name.find(".live.") {
@@ -554,8 +523,9 @@ pub(crate) fn is_grab_part(file_name: &str, stem: &str) -> bool {
     }
     // Legacy ID-namespaced live: {id}.live. (e.g., "1.live.mp4.part").
     // The bare {id}. pattern is NOT checked here: it false-positives on user
-    // files like Movie.2024.mp4. Id-scoped matching lives in
-    // `clean_dest_parts_for`, which takes the row's item_id.
+    // files like Movie.2024.mp4. Pattern-based deletion of id-in-name files
+    // is unsafe (no marker); only `staging_occupied` uses the pattern, and
+    // only conservatively.
     if let Some(dot_pos) = remainder.find('.') {
         let (id_part, rest) = remainder.split_at(dot_pos);
         if !id_part.is_empty()
@@ -624,13 +594,9 @@ pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
             let _ = std::fs::remove_file(staging.join(&name));
             continue;
         }
-        // Id-in-name fallback (manifest lost): only sidecars, never bare media.
-        if staging_name_matches_id(&name, item_id)
-            && (name.ends_with(".part") || name.ends_with(".ytdl"))
-        {
-            let _ = std::fs::remove_file(staging.join(&name));
-            continue;
-        }
+        // NO id-in-name fallback for deletion: without a marker, the pattern
+        // is fundamentally ambiguous. Deletion requires the manifest's exact
+        // name or a legacy marked pattern.
         // Legacy live pattern (has .live. marker, safe).
         if name.contains(&live_pattern) {
             let _ = std::fs::remove_file(staging.join(&name));
@@ -673,9 +639,12 @@ fn stem_has_subtitle_sidecar(names: &[String], stem: &str) -> bool {
 }
 
 /// Delete a row's dest-dir part files (never the finished file).
-/// `item_id` scopes the id-in-name arm (`Title.<id>.mp4.part`) to this row so
-/// a user file like `Movie.2024.mp4.part` is never touched.
-pub fn clean_dest_parts_for(dest: &Path, item_id: u64) {
+/// Delete a row's dest-dir part files (never the finished file).
+/// Only legacy marked patterns (`PART_KINDS`, `.live.`) are matched: the
+/// id-in-name scheme has no marker, so pattern-deleting it would risk user
+/// files like `Movie.2024.mp4.part`. ID reuse is prevented separately by
+/// `staging_occupied`.
+pub fn clean_dest_parts(dest: &Path) {
     let (Some(dir), Some(stem)) = (dest.parent(), dest.file_stem().and_then(|s| s.to_str())) else {
         return;
     };
@@ -687,16 +656,10 @@ pub fn clean_dest_parts_for(dest: &Path, item_id: u64) {
         if !path.is_file() {
             continue;
         }
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            // Legacy patterns (PART_KINDS, .live.) are stem-scoped already.
-            // The id-in-name arm is id-scoped AND sidecar-only: a bare
-            // `Title.<id>.mp4` is never deleted via pattern.
-            let legacy = is_grab_part(name, stem);
-            let id_scoped = staging_name_matches_id(name, item_id)
-                && (name.ends_with(".part") || name.ends_with(".ytdl"));
-            if legacy || id_scoped {
-                let _ = std::fs::remove_file(&path);
-            }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && is_grab_part(name, stem)
+        {
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
@@ -1142,19 +1105,6 @@ mod tests {
     }
 
     #[test]
-    fn staging_id_from_name_roundtrip() {
-        assert_eq!(staging_id_from_name("Title.4.mp4"), Some(4));
-        assert_eq!(staging_id_from_name("Title.4.mp4.part"), Some(4));
-        assert_eq!(staging_id_from_name("Title.42-3.webm.ytdl"), Some(42));
-        assert_eq!(staging_id_from_name("linux-5.4.0.tar.gz"), None);
-        // `my.backup.4.mp4` attributes to 4 by pattern; safe because
-        // pattern-based deletion only touches `.part`/`.ytdl` sidecars.
-        assert_eq!(staging_id_from_name("my.backup.4.mp4"), Some(4));
-        assert_eq!(staging_id_from_name("Title.mp4"), None);
-        assert_eq!(staging_id_from_name("grab-4-video.mp4.part"), None);
-    }
-
-    #[test]
     fn manifest_loss_still_occupies_id_via_filename() {
         // Blocker 1: a lost manifest must not orphan the id into reuse.
         // The id-in-name scheme keeps the file attributable.
@@ -1178,9 +1128,10 @@ mod tests {
 
     #[test]
     fn manifest_loss_sweep_reclaims_sidecars_preserves_base() {
-        // Blocker 1+2: without a manifest, the sweep must still reclaim
-        // .part/.ytdl via the id-in-name fallback, but never delete a bare
-        // media file (could be a completed recording).
+        // Without a manifest, id-in-name sidecars are NOT swept by pattern:
+        // without a marker, `Title.7.mp4.part` is indistinguishable from a
+        // user's own file. Deletion requires the manifest's exact name.
+        // ID reuse is still prevented by `staging_occupied`.
         let dir = unique_dir("manifest-loss-sweep");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Title.7.mp4.part"), b"partial").unwrap();
@@ -1192,12 +1143,12 @@ mod tests {
         sweep_staging_preserving_recordings(&dir, 7);
 
         assert!(
-            !dir.join("Title.7.mp4.part").exists(),
-            "orphan .part must be swept via id-in-name fallback"
+            dir.join("Title.7.mp4.part").exists(),
+            "ambiguous id-in-name .part must NOT be pattern-deleted"
         );
         assert!(
-            !dir.join("Title.7.mp4.ytdl").exists(),
-            "orphan .ytdl must be swept via id-in-name fallback"
+            dir.join("Title.7.mp4.ytdl").exists(),
+            "ambiguous id-in-name .ytdl must NOT be pattern-deleted"
         );
         assert!(
             dir.join("Title.7.mp4").exists(),
@@ -1243,11 +1194,13 @@ mod tests {
         assert!(staging_occupied(&dir, 4), "id 4 occupied");
         assert!(staging_occupied(&dir, 9), "id 9 occupied");
 
-        // Per-id sweep of row 4 must preserve row 9's sibling.
+        // Without a manifest, the sweep must NOT pattern-delete: Title.4.mp4.part
+        // is indistinguishable from a user's own file. Deletion requires the
+        // manifest's exact name.
         sweep_staging_preserving_recordings(&dir, 4);
         assert!(
-            !dir.join("Title.4.mp4.part").exists(),
-            "row 4's part is swept"
+            dir.join("Title.4.mp4.part").exists(),
+            "row 4's part must survive without a manifest to confirm it"
         );
         assert!(
             dir.join("Title.9.mp4.part").exists(),
@@ -1258,8 +1211,9 @@ mod tests {
 
     #[test]
     fn orphan_sweep_attributes_via_id_in_name() {
-        // Blocker 2: sweep_dest_staging must reclaim id-in-name orphans for
-        // ids with no live row, via the filename itself.
+        // Orphan id-in-name files are NOT swept by pattern: without a marker,
+        // Title.11.mp4.part is indistinguishable from a user's own file.
+        // sweep_dest_staging only removes legacy marked patterns.
         let dir = unique_dir("orphan-id-in-name");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Title.11.mp4.part"), b"orphan").unwrap();
@@ -1270,8 +1224,8 @@ mod tests {
         sweep_dest_staging(&dir, &keep);
 
         assert!(
-            !dir.join("Title.11.mp4.part").exists(),
-            "orphan id 11's part must be swept"
+            dir.join("Title.11.mp4.part").exists(),
+            "orphan id 11's part must survive: no marker, no deletion"
         );
         assert!(
             dir.join("Title.12.mp4.part").exists(),

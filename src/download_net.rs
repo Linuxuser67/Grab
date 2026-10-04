@@ -300,7 +300,8 @@ fn client_builder() -> reqwest::ClientBuilder {
                 .last()
                 .is_some_and(|u| u.scheme() == "https")
                 && attempt.url().scheme() == "http";
-            if attempt.previous().len() > 5 || downgrade {
+            // Max 5 redirects: `previous` holds the URLs already followed.
+            if attempt.previous().len() >= 5 || downgrade {
                 attempt.stop()
             } else {
                 attempt.follow()

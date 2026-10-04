@@ -1122,13 +1122,12 @@ pub(crate) async fn run_live_ytdlp(
     // Clean up the previous attempt's .part if the manifest points to a
     // different staging name (crash/retry orphan). Never delete the base
     // recording — only the .part shell.
-    if let Some(old) = read_manifest(&staging, job.item_id) {
-        if let Some(old_name) = old.staging_name.as_deref() {
-            if old_name != staging_name {
-                let old_part = staging.join(format!("{old_name}.part"));
-                let _ = std::fs::remove_file(&old_part);
-            }
-        }
+    if let Some(old) = read_manifest(&staging, job.item_id)
+        && let Some(old_name) = old.staging_name.as_deref()
+        && old_name != staging_name
+    {
+        let old_part = staging.join(format!("{old_name}.part"));
+        let _ = std::fs::remove_file(&old_part);
     }
     // Overwrite pre-flight: refuse if dest exists. The manifest proves ownership for future retries,
     // but never delete here — a weak match could delete a completed output from a quality/format-changed retry.

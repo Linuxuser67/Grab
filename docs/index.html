@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grab — A download manager for GNOME</title>
+<meta name="description" content="Grab is a fast, native download manager for GNOME. Segmented downloads, video extraction, torrents, and live stream capture.">
+<style>
+  :root {
+    --bg: #1e1e1e;
+    --bg-card: #2d2d2d;
+    --fg: #f0f0f0;
+    --fg-dim: #b0b0b0;
+    --accent: #3584e4;
+    --accent-hover: #1c71d8;
+    --border: #3d3d3d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+  header.hero {
+    text-align: center;
+    padding: 72px 24px 48px;
+  }
+  header.hero h1 {
+    font-size: 3rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
+  header.hero h1 .grab { color: var(--accent); }
+  header.hero p.tagline {
+    font-size: 1.25rem;
+    color: var(--fg-dim);
+    margin: 12px 0 28px;
+  }
+  .btn {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    padding: 12px 28px;
+    border-radius: 8px;
+    text-decoration: none;
+    font-weight: 600;
+    margin: 0 8px 8px 0;
+  }
+  .btn:hover { background: var(--accent-hover); }
+  .btn.ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg);
+  }
+  .btn.ghost:hover { border-color: var(--accent); }
+  .screenshot {
+    margin: 40px auto 0;
+    max-width: 800px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    box-shadow: 0 12px 48px rgba(0,0,0,.5);
+  }
+  .screenshot img { width: 100%; display: block; }
+  section { padding: 56px 0; }
+  section h2 {
+    font-size: 1.75rem;
+    margin-bottom: 24px;
+    text-align: center;
+  }
+  .features {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 20px;
+  }
+  .feature {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .feature h3 { font-size: 1.1rem; margin-bottom: 8px; }
+  .feature p { color: var(--fg-dim); font-size: .95rem; }
+  .install {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px;
+    text-align: center;
+  }
+  .install code {
+    display: inline-block;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 16px;
+    margin: 12px 0;
+    font-size: .95rem;
+  }
+  .install p { color: var(--fg-dim); margin-bottom: 8px; }
+  footer {
+    text-align: center;
+    padding: 32px 24px;
+    color: var(--fg-dim);
+    font-size: .9rem;
+    border-top: 1px solid var(--border);
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1><span class="grab">Grab</span></h1>
+    <p class="tagline">A fast, native download manager for GNOME.</p>
+    <a class="btn" href="#install">Get Grab</a>
+    <a class="btn ghost" href="https://github.com/Linuxuser67/Grab">GitHub</a>
+    <div class="screenshot">
+      <img src="screenshots/dark-live.png" alt="Grab main window with a live stream recording and active downloads">
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2>Features</h2>
+    <div class="features">
+      <div class="feature">
+        <h3>⚡ Segmented downloads</h3>
+        <p>Split files across multiple connections for maximum speed, with automatic resume and integrity checks.</p>
+      </div>
+      <div class="feature">
+        <h3>🎬 Video extraction</h3>
+        <p>Download videos via yt-dlp with format selection, subtitles, and metadata — right from the URL bar.</p>
+      </div>
+      <div class="feature">
+        <h3>🧲 Torrents</h3>
+        <p>Full torrent support with magnet links, file selection, and progress tracking.</p>
+      </div>
+      <div class="feature">
+        <h3>🔴 Live capture</h3>
+        <p>Record live streams as they happen, with clean staging and crash recovery.</p>
+      </div>
+      <div class="feature">
+        <h3>🧩 Browser extension</h3>
+        <p>Send downloads straight from Firefox, Chrome, or Brave with the companion extension.</p>
+      </div>
+      <div class="feature">
+        <h3>🎨 Native GNOME</h3>
+        <p>Built with GTK 4 and libadwaita. Follows GNOME HIG, supports dark mode, and feels at home on your desktop.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2>Install</h2>
+    <div class="install">
+      <p><strong>Flatpak</strong> (recommended)</p>
+      <code>flatpak install flathub io.github.linuxuser67.Grab</code>
+      <p style="margin-top:16px">Or grab the <strong>tarball</strong> from the latest release:</p>
+      <a class="btn" href="https://github.com/Linuxuser67/Grab/releases/latest">Download latest release</a>
+      <p style="margin-top:16px; font-size:.85rem">Requires GNOME 45+ or any distro with Flatpak.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>Grab is free and open source. <a href="https://github.com/Linuxuser67/Grab">Contribute on GitHub</a>.</p>
+  </div>
+</footer>
+
+</body>
+</html>

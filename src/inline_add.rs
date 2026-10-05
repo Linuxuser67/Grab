@@ -813,7 +813,8 @@ fn push_playlist_items_page(
     {
         let close_card = close_card.clone();
         let picks = picks.clone();
-        add_btn.connect_clicked(move |_| {
+        let add_btn_click = add_btn.clone();
+        add_btn_click.connect_clicked(move |_| {
             let picked: Vec<usize> = list_selected(&picks);
             let picked_set: std::collections::HashSet<usize> = picked.into_iter().collect();
             // Owned clones for the async import below.

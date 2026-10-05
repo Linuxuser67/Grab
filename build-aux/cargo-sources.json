@@ -3603,14 +3603,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/r-efi/r-efi-5.3.1.crate",
+        "url": "https://static.crates.io/crates/r-efi/r-efi-5.3.0.crate",
         "sha256": "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f",
-        "dest": "cargo/r-efi-5.3.1"
+        "dest": "cargo/r-efi-5.3.0"
     },
     {
         "type": "inline",
         "contents": "{\"package\": \"69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f\", \"files\": {}}",
-        "dest": "cargo/r-efi-5.3.1",
+        "dest": "cargo/r-efi-5.3.0",
         "dest-filename": ".cargo-checksum.json"
     },
     {

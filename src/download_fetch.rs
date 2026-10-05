@@ -521,9 +521,14 @@ async fn attempt_once(
             return Err(gettext("Server restarted the download with a smaller file"));
         }
         let mut file = if partial {
-            open_nofollow(|o| o.append(true), &ctx.dest)
-                .await
-                .map_err(|e| format!("Cannot write file: {e}"))?
+            open_nofollow(
+                |o| {
+                    o.append(true);
+                },
+                &ctx.dest,
+            )
+            .await
+            .map_err(|e| format!("Cannot write file: {e}"))?
         } else if claim {
             // Retries truncate our own bytes (see the `claim` parameter).
             match tokio::fs::OpenOptions::new()
@@ -617,7 +622,12 @@ pub(crate) fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
     let prefix = st.prefix_len();
     if let Ok(md) = std::fs::metadata(path)
         && md.len() > prefix
-        && let Ok(f) = std_open_nofollow(|o| o.write(true), path)
+        && let Ok(f) = std_open_nofollow(
+            |o| {
+                o.write(true);
+            },
+            path,
+        )
     {
         let _ = f.set_len(prefix);
     }
@@ -645,9 +655,14 @@ async fn open_nofollow(
 }
 
 async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptFail> {
-    let file = open_nofollow(|o| o.write(true).create(true), dest)
-        .await
-        .map_err(|e| AttemptFail::Retryable(format!("Cannot write file: {e}")))?;
+    let file = open_nofollow(
+        |o| {
+            o.write(true).create(true);
+        },
+        dest,
+    )
+    .await
+    .map_err(|e| AttemptFail::Retryable(format!("Cannot write file: {e}")))?;
     if file.metadata().await.map(|m| m.len()).unwrap_or(u64::MAX) != total
         && let Err(e) = file.set_len(total).await
     {

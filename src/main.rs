@@ -100,15 +100,33 @@ fn ensure_schema_dir() {
     }
 }
 
+/// Chromium extension IDs are 32 lowercase letters a-p (Chrome Web Store
+/// format). Reject anything else: the ID is interpolated into
+/// `chrome-extension://{id}/` origins and re-trusted at every startup.
+fn valid_chromium_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))
+}
+
 fn main() -> glib::ExitCode {
+    // Schema dir first: the installer branch below reads GSettings, and the
+    // schema may not be in the default source (tarball/uninstalled run).
+    ensure_schema_dir();
     // Browser native-host installer: runs before GTK init, no display needed.
     let args: Vec<String> = std::env::args().collect();
     if let Some(pos) = args.iter().position(|a| a == "--install-browser-host") {
         let mut ids: Vec<String> = Vec::new();
         let mut i = pos + 1;
         while i < args.len() {
-            if args[i] == "--chromium-id" && i + 1 < args.len() {
-                ids.push(args[i + 1].clone());
+            if args[i] == "--chromium-id" {
+                let Some(id) = args.get(i + 1) else {
+                    eprintln!("error: --chromium-id needs a value");
+                    return glib::ExitCode::FAILURE;
+                };
+                if !valid_chromium_id(id) {
+                    eprintln!("error: invalid Chromium extension ID: {id}");
+                    return glib::ExitCode::FAILURE;
+                }
+                ids.push(id.clone());
                 i += 2;
             } else {
                 i += 1;
@@ -140,7 +158,6 @@ fn main() -> glib::ExitCode {
         }
     }
     tracing_subscriber::fmt::init();
-    ensure_schema_dir();
     // Register before dialogs open; corrupt bundle only loses release notes (About guards the missing case).
     if let Ok(res) = gio::Resource::from_data(&glib::Bytes::from_static(GRESOURCE_DATA)) {
         gio::resources_register(&res);

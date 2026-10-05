@@ -71,9 +71,15 @@ fn main() {
             .ok()
             .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_owned))
             .unwrap_or_default();
-        let reply = match launch(&url) {
-            Ok(()) => serde_json::json!({"success": true}),
-            Err(e) => serde_json::json!({"success": false, "error": e}),
+        // Distinguish malformed input from a wrong scheme: an empty URL means
+        // the JSON was malformed or lacked a "url" string.
+        let reply = if url.is_empty() {
+            serde_json::json!({"success": false, "error": "malformed message: missing \"url\""})
+        } else {
+            match launch(&url) {
+                Ok(()) => serde_json::json!({"success": true}),
+                Err(e) => serde_json::json!({"success": false, "error": e}),
+            }
         };
         let frame = match encode_message(&reply) {
             Ok(f) => f,

@@ -521,9 +521,7 @@ async fn attempt_once(
             return Err(gettext("Server restarted the download with a smaller file"));
         }
         let mut file = if partial {
-            tokio::fs::OpenOptions::new()
-                .append(true)
-                .open(&ctx.dest)
+            open_nofollow(tokio::fs::OpenOptions::new().append(true), &ctx.dest)
                 .await
                 .map_err(|e| format!("Cannot write file: {e}"))?
         } else if claim {
@@ -541,9 +539,15 @@ async fn attempt_once(
                 Err(e) => return Err(format!("Cannot write file: {e}")),
             }
         } else {
-            tokio::fs::File::create(&ctx.dest)
-                .await
-                .map_err(|e| format!("Cannot write file: {e}"))?
+            open_nofollow(
+                tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true),
+                &ctx.dest,
+            )
+            .await
+            .map_err(|e| format!("Cannot write file: {e}"))?
         };
         if !partial
             && let Some(name) = resp
@@ -621,12 +625,19 @@ pub(crate) fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
 }
 
 /// Open for writing without truncating (truncating here would corrupt resumed pieces the bitmap claims as done).
+/// Open a file refusing to follow symlinks: a link swapped in between attempts
+/// must not divert a resume-append or retry-truncate onto an arbitrary file.
+/// Returns ELOOP if the final component is a symlink.
+async fn open_nofollow(
+    options: &mut tokio::fs::OpenOptions,
+    path: &std::path::Path,
+) -> std::io::Result<tokio::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    options.custom_flags(libc::O_NOFOLLOW).open(path).await
+}
+
 async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptFail> {
-    let file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dest)
+    let file = open_nofollow(tokio::fs::OpenOptions::new().write(true).create(true), dest)
         .await
         .map_err(|e| AttemptFail::Retryable(format!("Cannot write file: {e}")))?;
     if file.metadata().await.map(|m| m.len()).unwrap_or(u64::MAX) != total
@@ -953,8 +964,33 @@ pub fn filename_from_content_disposition(value: &str) -> Option<String> {
             .unwrap_or("")
             .trim()
     }
+    /// Split on `;` but not inside double quotes: `filename="a;b.zip"`
+    /// is one parameter, not two.
+    fn split_params(value: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut start = 0;
+        let mut in_quotes = false;
+        let mut escaped = false;
+        for (i, c) in value.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match c {
+                '\\' if in_quotes => escaped = true,
+                '"' => in_quotes = !in_quotes,
+                ';' if !in_quotes => {
+                    parts.push(value[start..i].trim());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(value[start..].trim());
+        parts
+    }
     let mut fallback = None;
-    for part in value.split(';').map(str::trim) {
+    for part in split_params(value) {
         let Some((pname, pval)) = part.split_once('=') else {
             continue;
         };

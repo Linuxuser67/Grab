@@ -199,11 +199,11 @@ pub fn ensure_firefox_host() -> bool {
     });
     let mut text = serde_json::to_string_pretty(&manifest).unwrap_or_default();
     text.push('\n');
-    if let Some(parent) = manifest_path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            tracing::warn!("firefox host manifest: cannot create dir: {e}");
-            return false;
-        }
+    if let Some(parent) = manifest_path.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        tracing::warn!("firefox host manifest: cannot create dir: {e}");
+        return false;
     }
     // Atomic write via temp file.
     let tmp_path = manifest_path.with_extension("json.tmp");
@@ -273,11 +273,11 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
         {
             continue;
         }
-        if let Some(parent) = target.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                tracing::warn!("chromium host manifest: cannot create dir: {e}");
-                continue;
-            }
+        if let Some(parent) = target.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            tracing::warn!("chromium host manifest: cannot create dir: {e}");
+            continue;
         }
         let mut text = serde_json::to_string_pretty(&extra_chromium_manifest(&host_path, ids))
             .unwrap_or_default();

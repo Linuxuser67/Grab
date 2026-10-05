@@ -6042,11 +6042,10 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
         "shutdown never ran the finalizer's staging sweep: aborting finalizers \
          instead of awaiting them would leave this behind"
     );
-    // Under manifest-only cleanup, the part without a valid manifest
-    // staging_name is preserved (no ownership proof).
     assert!(
-        part.exists(),
-        "part without valid manifest is preserved (safe)"
+        !part.exists(),
+        "shutdown never ran the finalizer's dest-parts sweep: aborting finalizers \
+         instead of awaiting them would leave this behind"
     );
     let _ = std::fs::remove_dir_all(&dest_dir);
 }

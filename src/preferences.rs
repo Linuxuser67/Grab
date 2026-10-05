@@ -378,7 +378,7 @@ pub fn show(
     let auto_add = adw::SwitchRow::builder()
         .title(gettext("Add downloads automatically"))
         .subtitle(gettext(
-            "Skip confirmation; single videos start after lookup",
+            "Pasted links start looking up on their own; single videos download after lookup",
         ))
         .build();
     auto_add.set_tooltip_text(Some(&gettext(

@@ -50,7 +50,7 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="5.2.7" date="2026-10-05">
+    <release version="5.3.0" date="2026-10-05">
       <description>
         <ul>
           <li>Deleting a torrent now trashes only the files its metadata lists, never the whole folder; magnet deletions leave the output directory untouched.</li>

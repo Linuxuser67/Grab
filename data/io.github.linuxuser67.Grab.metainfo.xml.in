@@ -50,6 +50,17 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.4.0" date="2026-10-05">
+      <description>
+        <ul>
+          <li>Verify the yt-dlp download against its published SHA-256 checksum before installing it.</li>
+          <li>Refuse to write a resumed or retried download through a symlinked path.</li>
+          <li>Validate the browser extension ID before writing the native-messaging host manifest.</li>
+          <li>Decode and sanitize torrent file names taken from a download URL.</li>
+          <li>Check links handed off to an external browser before showing the confirmation dialog.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.3.2-beta.1" date="2026-10-05">
       <description>
         <ul>

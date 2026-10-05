@@ -2329,7 +2329,10 @@ impl DownloadManager {
                             if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {
                         }
                         Err(e) => {
-                            return Err(format!("Could not move {} to Trash: {e}", item.filename()));
+                            return Err(format!(
+                                "Could not move {} to Trash: {e}",
+                                item.filename()
+                            ));
                         }
                     }
                 } else if has_archive {

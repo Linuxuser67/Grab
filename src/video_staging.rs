@@ -757,7 +757,15 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
 /// ours, so this is safe. Legacy `grab-media.`/`media.` prefixes still match.
 pub(crate) fn unified_candidate(file_name: &str) -> bool {
     let ext = Path::new(file_name).extension().and_then(|e| e.to_str());
-    !file_name.starts_with('.')
+    // Must be a media file (not just "not excluded"). Includes containers
+    // like mka/ts that aren't in MEDIA_EXTS (used for staging matching).
+    const UNIFIED_MEDIA_EXTS: &[&str] = &[
+        "mp4", "webm", "mkv", "mka", "ts", "m4a", "mp3", "ogg", "wav", "flac", "opus",
+    ];
+    let is_media =
+        ext.is_some_and(|e| UNIFIED_MEDIA_EXTS.iter().any(|m| m.eq_ignore_ascii_case(e)));
+    is_media
+        && !file_name.starts_with('.')
         && !is_ytdlp_fragment(file_name)
         && !matches!(
             ext,

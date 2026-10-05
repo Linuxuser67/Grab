@@ -4124,14 +4124,21 @@ fn remove_cleans_video_staging() {
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     let id = 910_000 + std::process::id() as u64;
     // Dest-dir parts go with the row too; finished file and foreign neighbors stay.
-    // Visible staging: grab-<id>-* files live in the dest dir itself (no legacy subfolder).
+    // Under manifest-only cleanup, only manifest-owned files are deleted.
     let destdir = std::env::temp_dir().join(format!("grab-remove-parts-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&destdir);
     std::fs::create_dir_all(&destdir).unwrap();
-    std::fs::write(destdir.join(format!(".grab-{id}-manifest.json")), b"{}").unwrap();
-    for n in ["v.mp4", "v.srt", "v.video.mp4", "v.audio.webm.part"] {
+    // Create a valid manifest owning the staging files.
+    // Note: manifest writing is done via JSON directly in tests.
+    let manifest_json = format!(
+        r#"{{"page_url":"https://x.com/u/status/1","quality":"1080p","video_format_id":null,"video_ext":"mp4","audio_format_id":"","audio_ext":"","final_bytes":null,"staging_name":"v.{id}.mp4"}}"#
+    );
+    std::fs::write(destdir.join(format!(".{id}.manifest.json")), manifest_json).unwrap();
+    for n in ["v.mp4", "v.srt"] {
         std::fs::write(destdir.join(n), b"x").unwrap();
     }
+    // Manifest-owned files (will be deleted)
+    std::fs::write(destdir.join(format!("v.{id}.mp4.part")), b"x").unwrap();
     let item = DownloadItem::new(
         id,
         "https://x.com/u/status/1",
@@ -4154,13 +4161,12 @@ fn remove_cleans_video_staging() {
     );
     manager.remove(id);
     assert!(
-        !destdir.join(format!(".grab-{id}-manifest.json")).exists(),
+        !destdir.join(format!(".{id}.manifest.json")).exists(),
         "staged sidecar must go with the row"
     );
-    assert!(!destdir.join("v.video.mp4").exists(), "dest parts go too");
     assert!(
-        !destdir.join("v.audio.webm.part").exists(),
-        "part shells go too"
+        !destdir.join(format!("v.{id}.mp4.part")).exists(),
+        "manifest-owned part goes too"
     );
     assert!(destdir.join("v.mp4").exists(), "finished file stays");
     assert!(destdir.join("v.srt").exists(), "foreign files stay");

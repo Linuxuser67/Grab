@@ -463,16 +463,24 @@ fn copy_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Resu
         .create_new(true)
         .write(true)
         .open(new)?;
-    let copy = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all());
+    // chmod via the open fd (fchmod): set_permissions(new) after drop would
+    // re-resolve the path and chmod a swapped-in symlink instead.
+    let copy = std::io::copy(&mut src, &mut dst).and_then(|_| {
+        if let Some(p) = permissions {
+            dst.set_permissions(p)?;
+        }
+        dst.sync_all()
+    });
     if copy.is_err() {
         let _ = std::fs::remove_file(new);
         return copy.map(|_| ());
     }
     drop(dst);
-    if let Some(permissions) = permissions {
-        let _ = std::fs::set_permissions(new, permissions);
+    // The copy landed: a failed unlink is a warning, not a failed rename.
+    if let Err(e) = std::fs::remove_file(old) {
+        tracing::warn!("copy_noreplace: copied but could not unlink source: {e}");
     }
-    std::fs::remove_file(old)
+    Ok(())
 }
 
 /// `renameat2` via libc: no hand-declared FFI, no glibc version dependency.

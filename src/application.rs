@@ -236,13 +236,9 @@ fn route_open_uri(
             return;
         }
         let url = uri.as_str().to_string();
-        let file_name = uri
-            .path()
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("download.torrent")
-            .to_string();
+        // Decode percent-encoding and sanitize: the raw path would keep
+        // `My%20Show.torrent` as the stem `My%20Show`.
+        let file_name = crate::file_names::filename_from_url(uri.as_str());
         // The fetch honors the proxy settings like any other download.
         let proxy =
             match crate::download_net::DownloadOptions::from_settings(&settings).proxy_config() {
@@ -349,7 +345,17 @@ pub fn setup(app: &adw::Application) {
                             s.add_card.clone(),
                             s.settings.clone(),
                         );
-                        let shown = uri.clone();
+                        // Validate before the dialog: the user should approve
+                        // the canonical URL, not a raw string that enqueue
+                        // would reject (overlong, userinfo, etc.).
+                        let canonical = match crate::download_intake::normalize_url(uri.as_str()) {
+                            Ok(u) => u,
+                            Err(e) => {
+                                toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+                                continue;
+                            }
+                        };
+                        let shown: url::Url = canonical.parse().unwrap_or_else(|_| uri.clone());
                         confirm_download(&window, &shown, move || {
                             // The dialog may invoke this more than once in
                             // theory; clone per call so the closure stays Fn.

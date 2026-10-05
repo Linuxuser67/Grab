@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
-use yt_dlp::client::deps::{Libraries, LibraryInstaller};
+use yt_dlp::client::deps::Libraries;
 use yt_dlp::model::DrmStatus;
 use yt_dlp::model::format::{Format, FormatType, Protocol};
 
@@ -493,25 +493,61 @@ pub(crate) const MERGER_FASTSTART_ARGS: &str = "Merger+ffmpeg:-movflags +faststa
 /// Install just yt-dlp into the user library dir. Split from ffmpeg so the UI
 /// can report honest per-tool stages; the crate installer exposes no progress.
 /// Await from a spawned task — never block the GTK thread.
+/// yt-dlp binary size cap: the linux standalone is ~30MB; anything larger is
+/// not the released binary.
+const YTDLP_MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
+
 pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
+    let (url, digest) = latest_ytdlp_asset()
+        .await
+        .ok_or_else(|| VideoError::install("couldn't determine the latest yt-dlp release"))?;
+    // Fail closed: no digest means no verified install. The digest comes from
+    // GitHub's API alongside the binary; absent means we can't verify.
+    let digest = digest.ok_or_else(|| {
+        VideoError::install(
+            "yt-dlp release has no SHA-256 digest; refusing unverified install. \
+             Try the stable channel instead.",
+        )
+    })?;
     let dir = user_lib_dir();
     ensure_lib_dir(&dir)?;
-    // yt-dlp's crate installer verifies a digest when present but skips silently
-    // if absent (fail-open, unlike our quickjs/ffmpeg paths). Accepted deliberately
-    // so yt-dlp tracks upstream, but log it so the gap is visible.
-    // Nightly channel: sites break extractors constantly; nightly has the fix
-    // within a day. yt-dlp's own docs recommend it for regular users.
-    tracing::warn!("yt-dlp install: digest verification is best-effort (crate skips if absent)");
+    // Download straight to `yt-dlp.part`: a failed download must never leave a
+    // half-written `yt-dlp` behind.
+    let dest = dir.join("yt-dlp");
+    let part = dir.join("yt-dlp.part");
+    let dest_clone = dest.clone();
     let handle = crate::runtime::tokio_rt().spawn(async move {
-        LibraryInstaller::new(dir)
-            .install_youtube_from_repo("yt-dlp", "yt-dlp-nightly-builds", None, None)
-            .await
+        let result = fetch_ytdlp_inner(&url, &part, &dest_clone, &digest).await;
+        if result.is_err() {
+            std::fs::remove_file(&part).ok();
+        }
+        result
     });
     match handle.await {
-        Ok(Ok(path)) => Ok(path),
-        Ok(Err(e)) => Err(VideoError::install(&e)),
+        Ok(Ok(())) => Ok(dest),
+        Ok(Err(e)) => Err(e),
         Err(e) => Err(VideoError::runtime(&e)),
     }
+}
+
+async fn fetch_ytdlp_inner(
+    url: &str,
+    part: &Path,
+    dest: &Path,
+    digest: &str,
+) -> Result<(), VideoError> {
+    download_to_file(url, part, digest, YTDLP_MAX_DOWNLOAD_BYTES)
+        .await
+        .map_err(VideoError::install)?;
+    use std::os::unix::fs::PermissionsExt as _;
+    tokio::fs::set_permissions(part, std::fs::Permissions::from_mode(0o755))
+        .await
+        .map_err(|e| {
+            VideoError::install(format!("couldn't mark {} executable: {e}", part.display()))
+        })?;
+    tokio::fs::rename(part, dest)
+        .await
+        .map_err(|e| VideoError::install(format!("couldn't install {}: {e}", dest.display())))
 }
 
 /// Install the ffmpeg toolchain (ffmpeg *and* ffprobe) into the user library dir.
@@ -533,13 +569,8 @@ pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
 /// tiny (~2.5MB) official linux x86_64 and aarch64 binaries; the deno
 /// alternative is ~40x larger. The installed release follows the quickjs-ng
 /// latest tag so the update check and the installer agree on the source of
-/// truth. GitHub provides a SHA-256 digest per release asset; quickjs
-/// installs fail closed if it's absent, and the hash is verified while
-/// streaming. ffmpeg goes through the yt-dlp crate's fetcher, which verifies
-/// the digest when present; we refuse if it's absent. yt-dlp uses the crate's
-/// `install_youtube` which verifies when a digest is present but skips
-/// silently if absent (fail-open); yt-dlp must track upstream, so we accept
-/// the crate's behavior there.
+/// truth. GitHub provides a SHA-256 digest per release asset; installs fail
+/// closed if it's absent, and the hash is verified while streaming.
 /// Hard cap on the quickjs download: the asset is ~2.5MB, so anything larger
 /// is not the released binary. Enforced while streaming, before the bytes are
 /// trusted.
@@ -662,7 +693,7 @@ async fn fetch_quickjs_inner(
     dest: &Path,
     digest: &str,
 ) -> Result<(), VideoError> {
-    download_to_file(url, part, digest)
+    download_to_file(url, part, digest, QUICKJS_MAX_DOWNLOAD_BYTES)
         .await
         .map_err(VideoError::install)?;
     use std::os::unix::fs::PermissionsExt as _;
@@ -681,7 +712,7 @@ async fn fetch_quickjs_inner(
 /// file, so refuse instead of following it. A stale regular file (crashed
 /// run) is removed so the caller can create atomically with `create_new`,
 /// which never follows a freshly planted link either (it just fails).
-fn refuse_symlink_target(dest: &Path) -> Result<(), String> {
+fn clear_dest_refusing_symlink(dest: &Path) -> Result<(), String> {
     match std::fs::symlink_metadata(dest) {
         Ok(m) if m.file_type().is_symlink() => Err(format!(
             "refusing to write through symlink {}",
@@ -694,10 +725,15 @@ fn refuse_symlink_target(dest: &Path) -> Result<(), String> {
     }
 }
 
-async fn download_to_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<(), String> {
+async fn download_to_file(
+    url: &str,
+    dest: &Path,
+    expected_sha256: &str,
+    max_bytes: u64,
+) -> Result<(), String> {
     // Refuse a planted symlink before any I/O: it would divert the download
     // (and the later chmod) onto an arbitrary file.
-    refuse_symlink_target(dest)?;
+    clear_dest_refusing_symlink(dest)?;
     // Tool installs use the proxy-honoring client: the user explicitly clicked
     // install, and a corporate proxy may be the only route to GitHub.
     let client = tool_client_builder()
@@ -716,6 +752,7 @@ async fn download_to_file(url: &str, dest: &Path, expected_sha256: &str) -> Resu
         dest,
         url,
         expected_sha256,
+        max_bytes,
     )
     .await
 }
@@ -731,6 +768,7 @@ async fn write_capped_stream<S, B, E>(
     dest: &Path,
     url: &str,
     expected_sha256: &str,
+    max_bytes: u64,
 ) -> Result<(), String>
 where
     S: futures_util::Stream<Item = Result<B, E>> + Unpin,
@@ -751,9 +789,9 @@ where
         let chunk = chunk.map_err(|e| format!("couldn't read {url}: {e}"))?;
         let bytes = chunk.as_ref();
         downloaded += bytes.len() as u64;
-        if downloaded > QUICKJS_MAX_DOWNLOAD_BYTES {
+        if downloaded > max_bytes {
             return Err(format!(
-                "{url} exceeds the download size limit ({QUICKJS_MAX_DOWNLOAD_BYTES} bytes)"
+                "{url} exceeds the download size limit ({max_bytes} bytes)"
             ));
         }
         hasher.update(bytes);
@@ -894,7 +932,7 @@ fn extract_entries(
         let dest = dir.join(tool);
         // A planted symlink would divert the extracted binary (and the
         // chmod) onto an arbitrary file: refuse instead of following it.
-        refuse_symlink_target(&dest)?;
+        clear_dest_refusing_symlink(&dest)?;
         let mut out = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1366,6 +1404,25 @@ pub(crate) fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
         .into_owned()
 }
 
+/// Latest nightly yt-dlp download URL and its SHA-256 digest.
+/// Fail closed: `None` digest means no verified install.
+/// The nightly builds publish `yt-dlp_linux` with a `digest: "sha256:…"` field.
+pub async fn latest_ytdlp_asset() -> Option<(String, Option<String>)> {
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        let fetcher =
+            yt_dlp::client::deps::github::GitHubFetcher::new("yt-dlp", "yt-dlp-nightly-builds");
+        let release = fetcher.fetch_latest_release(None).await.ok()?;
+        let asset = release.assets.iter().find(|a| a.name == "yt-dlp_linux")?;
+        let digest = asset
+            .digest
+            .as_deref()
+            .and_then(|d| d.strip_prefix("sha256:"))
+            .map(str::to_owned);
+        Some((asset.download_url.clone(), digest))
+    });
+    handle.await.ok().flatten()
+}
+
 /// Latest nightly yt-dlp tag without downloading anything: one user-initiated
 /// GitHub API call. `None` on any network/API failure — the row then reports the
 /// check failed instead of prompting.
@@ -1550,7 +1607,7 @@ mod tests {
     }
 
     #[test]
-    fn refuse_symlink_target_rejects_link() {
+    fn clear_dest_refusing_symlink_rejects_link() {
         let dir = unique_dir("symlink");
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("target");
@@ -1558,7 +1615,7 @@ mod tests {
         let link = dir.join("qjs.part");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let err = refuse_symlink_target(&link).unwrap_err();
+        let err = clear_dest_refusing_symlink(&link).unwrap_err();
         assert!(err.contains("symlink"), "unexpected error: {err}");
         // Untouched: the link still points at the intact target.
         assert!(link.is_symlink());
@@ -1567,23 +1624,23 @@ mod tests {
     }
 
     #[test]
-    fn refuse_symlink_target_clears_regular_file() {
+    fn clear_dest_refusing_symlink_clears_regular_file() {
         let dir = unique_dir("regular");
         std::fs::create_dir_all(&dir).unwrap();
         let part = dir.join("qjs.part");
         std::fs::write(&part, b"stale").unwrap();
 
-        refuse_symlink_target(&part).unwrap();
+        clear_dest_refusing_symlink(&part).unwrap();
         assert!(!part.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn refuse_symlink_target_missing_is_fine() {
+    fn clear_dest_refusing_symlink_missing_is_fine() {
         let dir = unique_dir("missing");
         std::fs::create_dir_all(&dir).unwrap();
 
-        refuse_symlink_target(&dir.join("qjs.part")).unwrap();
+        clear_dest_refusing_symlink(&dir.join("qjs.part")).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1597,9 +1654,14 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         // Unroutable URL: the symlink guard must fire before any I/O.
-        let err = download_to_file("http://127.0.0.1:1/nope", &link, "dummy")
-            .await
-            .unwrap_err();
+        let err = download_to_file(
+            "http://127.0.0.1:1/nope",
+            &link,
+            "dummy",
+            QUICKJS_MAX_DOWNLOAD_BYTES,
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("symlink"), "unexpected error: {err}");
         assert_eq!(std::fs::read(&target).unwrap(), b"precious");
         std::fs::remove_dir_all(&dir).ok();
@@ -1643,9 +1705,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("qjs.part");
 
-        let err = write_capped_stream(Box::pin(chunks), &dest, "http://127.0.0.1/qjs", "dummy")
-            .await
-            .unwrap_err();
+        let err = write_capped_stream(
+            Box::pin(chunks),
+            &dest,
+            "http://127.0.0.1/qjs",
+            "dummy",
+            QUICKJS_MAX_DOWNLOAD_BYTES,
+        )
+        .await
+        .unwrap_err();
         assert!(
             err.contains("exceeds the download size limit"),
             "unexpected error: {err}"
@@ -1673,6 +1741,7 @@ mod tests {
             &dest,
             "http://127.0.0.1/qjs",
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+            QUICKJS_MAX_DOWNLOAD_BYTES,
         )
         .await
         .unwrap();
@@ -1696,6 +1765,7 @@ mod tests {
             &dest,
             "http://127.0.0.1/qjs",
             "0000000000000000000000000000000000000000000000000000000000000000",
+            QUICKJS_MAX_DOWNLOAD_BYTES,
         )
         .await
         .unwrap_err();

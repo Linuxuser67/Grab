@@ -139,9 +139,6 @@ fn chromium_manifest_matches(
         && manifest.get("allowed_origins").and_then(|v| v.as_array()) == Some(&expected_origins)
 }
 
-/// Ensure the Firefox native host is installed, silently fixing it if missing
-/// or stale. The Firefox add-on ID is fixed, so this needs no user input and
-/// runs on every startup. Returns true if (re)installed.
 /// Whether the Firefox manifest matches the expected structure exactly.
 /// Validates name, description, path, type, and allowed_extensions — not just
 /// the path, so a stale/corrupted manifest is detected and replaced.
@@ -159,6 +156,9 @@ fn firefox_manifest_matches(manifest: &serde_json::Value, host_path: &str) -> bo
 }
 
 pub fn ensure_firefox_host() -> bool {
+    // Ensure the Firefox native host is installed, silently fixing it if
+    // missing or stale. The Firefox add-on ID is fixed, so this needs no user
+    // input and runs on every startup. Returns true if (re)installed.
     if in_flatpak() {
         return false;
     }
@@ -235,13 +235,15 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
     let host_path = host_bin.to_string_lossy().into_owned();
     let mut changed = false;
 
-    // Crate-covered browsers.
+    // Crate-covered browsers. Note: this also rewrites the Firefox manifest
+    // that ensure_firefox_host just handled; the crate offers no
+    // chromium-only entry point, so we accept the redundant write.
     let chromium_origins: Vec<String> = ids
         .iter()
         .map(|id| format!("chrome-extension://{id}/"))
         .collect();
     let firefox_ids = vec![FIREFOX_ADDON_ID.to_string()];
-    if native_messaging::install(
+    if let Err(e) = native_messaging::install(
         HOST_NAME,
         DESCRIPTION,
         Path::new(&host_path),
@@ -249,10 +251,8 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
         &firefox_ids,
         CRATE_BROWSERS,
         native_messaging::Scope::User,
-    )
-    .is_ok()
-    {
-        changed = true;
+    ) {
+        tracing::warn!("browser host install via crate failed: {e}");
     }
 
     // Extra channels the crate misses.

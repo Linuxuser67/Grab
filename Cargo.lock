@@ -1330,6 +1330,7 @@ dependencies = [
  "libadwaita",
  "libc",
  "librqbit",
+ "native_messaging",
  "percent-encoding",
  "pretty_assertions",
  "reqwest",
@@ -2543,6 +2544,18 @@ name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
+
+[[package]]
+name = "native_messaging"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c69815c3f5651282fb4ef60bca0e5d5e19841c2a0deec17cea09decb236d989a"
+dependencies = [
+ "once_cell",
+ "serde",
+ "serde_json",
+ "toml",
+]
 
 [[package]]
 name = "network-interface"
@@ -3780,7 +3793,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

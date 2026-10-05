@@ -3005,6 +3005,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/native_messaging/native_messaging-0.3.0.crate",
+        "sha256": "c69815c3f5651282fb4ef60bca0e5d5e19841c2a0deec17cea09decb236d989a",
+        "dest": "cargo/native_messaging-0.3.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"c69815c3f5651282fb4ef60bca0e5d5e19841c2a0deec17cea09decb236d989a\", \"files\": {}}",
+        "dest": "cargo/native_messaging-0.3.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/network-interface/network-interface-2.0.5.crate",
         "sha256": "4ddcb8865ad3d9950f22f42ffa0ef0aecbfbf191867b3122413602b0a360b2a6",
         "dest": "cargo/network-interface-2.0.5"

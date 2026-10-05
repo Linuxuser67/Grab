@@ -1,38 +1,15 @@
 //! Grab native messaging host.
 //!
 //! Spawned by the browser (via the manifest installed by
-//! `grab --install-browser-host`). Speaks the Native Messaging stdio
-//! protocol: 4-byte little-endian length prefix + UTF-8 JSON, both directions.
-//!
-//! Only `grab://` URLs are accepted; anything else is rejected without
-//! executing anything. The URL is handed to the OS URI opener as a single
-//! argv element, never through a shell.
+//! `grab --install-browser-host`). Uses the `native_messaging` crate for the
+//! stdio wire protocol; only `grab://` URLs are accepted and handed to the
+//! OS URI opener as a single argv element, never through a shell.
 
-use std::io::{self, Read, Write};
+use native_messaging::host::{decode_message, encode_message, MAX_FROM_BROWSER};
+use std::io::{self, Write};
 use std::process::Command;
 
 const GRAB_SCHEME: &str = "grab://";
-const MAX_MESSAGE: usize = 1024 * 1024;
-
-fn read_message() -> Option<serde_json::Value> {
-    let mut len_buf = [0u8; 4];
-    io::stdin().read_exact(&mut len_buf).ok()?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len == 0 || len > MAX_MESSAGE {
-        return None;
-    }
-    let mut buf = vec![0u8; len];
-    io::stdin().read_exact(&mut buf).ok()?;
-    serde_json::from_slice(&buf).ok()
-}
-
-fn write_message(payload: &serde_json::Value) {
-    let raw = serde_json::to_vec(payload).unwrap_or_default();
-    let mut out = io::stdout();
-    let _ = out.write_all(&(raw.len() as u32).to_le_bytes());
-    let _ = out.write_all(&raw);
-    let _ = out.flush();
-}
 
 fn find_opener() -> Option<String> {
     // PATH lookup without a shell.
@@ -66,15 +43,28 @@ fn launch(url: &str) -> Result<(), String> {
 }
 
 fn main() {
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    let mut output = io::stdout();
     loop {
-        let msg = match read_message() {
-            Some(m) => m,
-            None => break,
+        let raw = match decode_message(&mut input, MAX_FROM_BROWSER) {
+            Ok(raw) => raw,
+            Err(_) => break, // EOF or corrupt frame: browser is gone.
         };
-        let url = msg.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        match launch(url) {
-            Ok(()) => write_message(&serde_json::json!({"success": true})),
-            Err(e) => write_message(&serde_json::json!({"success": false, "error": e})),
+        let url = serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_owned))
+            .unwrap_or_default();
+        let reply = match launch(&url) {
+            Ok(()) => serde_json::json!({"success": true}),
+            Err(e) => serde_json::json!({"success": false, "error": e}),
+        };
+        let frame = match encode_message(&reply) {
+            Ok(f) => f,
+            Err(_) => break,
+        };
+        if output.write_all(&frame).is_err() || output.flush().is_err() {
+            break;
         }
     }
 }

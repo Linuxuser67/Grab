@@ -23,6 +23,10 @@ url = "2"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Browser native-messaging host: wire protocol framing + manifest installer.
+# Sync framing only (no tokio); the installer covers standard browsers, with
+# a thin supplement for Brave channels the crate misses (incl. Origin Beta).
+native_messaging = { version = "0.3", default-features = false, features = ["install"] }
 # HTTP-date parser for the keep-server-date option (Last-Modified header).
 httpdate = "1"
 # SHA-256 for verifying downloaded tool binaries against GitHub release digests.

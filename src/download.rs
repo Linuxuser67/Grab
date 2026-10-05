@@ -2337,7 +2337,7 @@ impl DownloadManager {
                     }
                 } else if has_archive {
                     // Archived multi-file: trash only metadata files, folder if empty.
-                    let folder_empty = crate::torrent::trash_torrent_contents(&path, &url);
+                    let folder_empty = crate::torrent::trash_torrent_contents(&path, &url)?;
                     if folder_empty {
                         match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
                             Ok(()) => {}

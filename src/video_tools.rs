@@ -1418,7 +1418,7 @@ pub async fn latest_ytdlp_asset() -> Option<(String, Option<String>)> {
             .as_deref()
             .and_then(|d| d.strip_prefix("sha256:"))
             .map(str::to_owned);
-        Some((asset.browser_download_url.clone(), digest))
+        Some((asset.download_url.clone(), digest))
     });
     handle.await.ok().flatten()
 }

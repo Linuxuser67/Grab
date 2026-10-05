@@ -470,6 +470,7 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
     // no manual close needed.
     if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
         use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::io::AsRawFd;
         let name_c = std::ffi::CString::new(name.as_bytes()).ok();
         let dir_fd = std::fs::OpenOptions::new()

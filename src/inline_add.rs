@@ -164,20 +164,22 @@ struct FormatOption {
 /// time (ready rows, tools row, or the centered error card), driven by the
 /// probe below.
 struct VideoStep {
-    /// Action slot beside the URL entry: a homogeneous GtkStack holding the
-    /// Add button and the lookup spinner. Swapping pages keeps the slot at
-    /// the widest child's width, so a lookup never reallocates the URL row
-    /// (no separate status line, no layout shift when a lookup starts).
-    action_slot: gtk4::Stack,
-    /// Revealer wrapping the action slot: the Add button / spinner slides
-    /// in from the left (SlideRight) after the tick submits, pushing the
-    /// gear and X buttons aside; it slides out on enqueue or card close.
-    /// The slide uses GtkRevealer, the established API — no hand-rolled
-    /// animation.
+    /// The URL entry itself: its secondary icon is the lookup state machine
+    /// (tick → spinner → none), shared with the helpers below.
+    url_entry: gtk4::Entry,
+    /// Spinner paintable for the entry's secondary icon slot: GTK4 entries
+    /// take paintables, not widgets, as icons. Animated by the entry's own
+    /// frame clock (the established AdwSpinnerPaintable API).
+    spinner_paintable: adw::SpinnerPaintable,
+    /// A lookup is in flight for the current text. Any edit stales it (the
+    /// probe generation bump discards its completion), so the changed
+    /// handler clears this and the icon follows.
+    looking_up: Cell<bool>,
+    /// Revealer wrapping the Add button: it slides in from the left
+    /// (SlideRight) once the lookup resolves, pushing the gear and X
+    /// buttons aside; it slides out on enqueue or card close. The slide
+    /// uses GtkRevealer, the established API — no hand-rolled animation.
     action_revealer: gtk4::Revealer,
-    /// The spinner page of the action slot: kept so the show/hide helpers
-    /// can set and clear its accessible label.
-    url_spinner: adw::Spinner,
     /// Slide-down revealer wrapping the preview block's PreferencesGroup:
     /// the block animates in/out instead of snapping.
     group_revealer: gtk4::Revealer,
@@ -197,24 +199,75 @@ struct VideoStep {
     add_btn: gtk4::Button,
 }
 
-/// Reserve trailing text space inside the URL entry while the lookup
+/// The URL entry's secondary icon: exactly one state shows at a time.
+/// The tick submits the URL; while looking up it morphs into a spinner in
+/// place (browser-address-bar style); once the Add button appears beside
+/// the entry — or the preview block shows an error/tools state with its
+/// own recovery button — the entry carries no icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryIcon {
+    Tick,
+    Spinner,
+    None,
+}
+
+/// Derive the entry icon from the card state. Pure so it's unit-testable
+/// (widget creation segfaults headless, so CI can't cover the GTK calls).
+fn entry_icon_for(has_text: bool, looking_up: bool, add_shown: bool, blocked: bool) -> EntryIcon {
+    if looking_up {
+        EntryIcon::Spinner
+    } else if blocked {
+        EntryIcon::None
+    } else if has_text && !add_shown {
+        EntryIcon::Tick
+    } else {
+        EntryIcon::None
+    }
+}
+
+/// Apply the derived icon state to the URL entry.
+fn sync_entry_icon(v: &VideoStep) {
+    let icon = entry_icon_for(
+        !v.url_entry.text().trim().is_empty(),
+        v.looking_up.get(),
+        v.action_revealer.reveals_child(),
+        v.error.is_visible() || v.tools.is_visible(),
+    );
+    let pos = gtk4::EntryIconPosition::Secondary;
+    match icon {
+        EntryIcon::Tick => {
+            v.url_entry
+                .set_icon_from_icon_name(pos, Some("object-select-symbolic"));
+            v.url_entry.set_icon_activatable(pos, true);
+            v.url_entry
+                .set_icon_tooltip_text(pos, Some(&gettext("Look up")));
+        }
+        EntryIcon::Spinner => {
+            v.url_entry
+                .set_icon_from_paintable(pos, Some(&v.spinner_paintable));
+            // No re-submit mid-lookup: Enter still says "still looking up".
+            v.url_entry.set_icon_activatable(pos, false);
+            v.url_entry.set_icon_tooltip_text(pos, None);
+        }
+        EntryIcon::None => {
+            v.url_entry
+                .set_icon_from_paintable(pos, None::<&gtk4::gdk::Paintable>);
+            v.url_entry.set_icon_tooltip_text(pos, None);
+        }
+    }
+}
+
 fn hide_video_step(v: &VideoStep) {
     // Slide the preview block closed; the child-revealed handler hides the
     // revealer once the animation finishes, so no dead spacing remains.
     v.group_revealer.set_reveal_child(false);
-    // NOTE: the action revealer (Add button / spinner) is NOT touched here:
-    // its visibility is owned by the submit/lookup flow (show_video_loading
-    // reveals, close_card hides). Hiding it here would break show_video_ready,
-    // which resets the step before showing the Add button.
-    // Back to the Add button: the action slot keeps its width, so selecting
-    // a page never reallocates the row. The spinner page is unmapped while
-    // hidden, which stops its animation (no set_spinning on adw::Spinner).
-    v.action_slot.set_visible_child_name("add");
-    // Clear the accessible name so a screen reader doesn't re-read the
-    // stale "Looking up…" set by show_video_loading.
-    v.url_spinner
-        .upcast_ref::<gtk4::Widget>()
-        .update_property(&[gtk4::accessible::Property::Label("")]);
+    // NOTE: the action revealer (Add button) is NOT touched here: its
+    // visibility is owned by the submit/lookup flow (show_video_ready
+    // reveals, close_card hides). Hiding it here would break
+    // show_video_ready, which resets the step before showing Add.
+    // NOTE: the entry icon is NOT touched here either: the caller owns the
+    // lookup state (show_video_loading sets the spinner, the terminal
+    // states clear it) and sync_entry_icon derives the icon from it.
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
@@ -241,31 +294,34 @@ fn reset_video_step(step: &VideoStep) {
     step.tools.set_subtitle("");
     step.error.set_subtitle("");
     hide_video_step(step);
-    // Slide the action slot out: card is closing, gear + X slide back.
+    // No lookup survives a close: clear the flag before the entry text is
+    // cleared below (its changed handler would otherwise keep the spinner).
+    step.looking_up.set(false);
+    sync_entry_icon(step);
+    // Slide the Add button out: card is closing, gear + X slide back.
     step.action_revealer.set_reveal_child(false);
 }
 
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
-    // Slide the action slot in (Add button / spinner pushes gear + X right),
-    // then swap to the spinner: same reserved width, no shift.
-    v.action_revealer.set_visible(true);
-    v.action_revealer.set_reveal_child(true);
-    v.action_slot.set_visible_child_name("spinner");
-    // Screen-reader announcement: the spinner alone is silent.
-    // `adw::Spinner` doesn't expose `update_property` directly; upcast to Widget.
+    // The tick morphs into a spinner in place (browser-address-bar style):
+    // no separate indicator beside the entry, no layout shift.
+    v.looking_up.set(true);
+    sync_entry_icon(v);
+    // Screen-reader announcement: the spinner alone is silent. Announced on
+    // the entry itself — no persistent label change, the entry keeps its name.
     // A static label alone is never spoken: `announce` voices the state change.
     // (gtk-rs names GTK's polite tier `Medium`; there is no `Polite` variant.)
-    let spinner = v.url_spinner.upcast_ref::<gtk4::Widget>();
     let looking_up = gettext("Looking up…");
-    spinner.update_property(&[gtk4::accessible::Property::Label(&looking_up)]);
-    spinner.announce(&looking_up, gtk4::AccessibleAnnouncementPriority::Medium);
+    v.url_entry
+        .announce(&looking_up, gtk4::AccessibleAnnouncementPriority::Medium);
 }
 
 fn show_video_ready(v: &VideoStep) {
     hide_video_step(v);
-    // Ensure the action slot is visible: the fresh-preview path reaches here
-    // without a show_video_loading (no new lookup to reveal it).
+    v.looking_up.set(false);
+    // Ensure the action revealer is visible: the fresh-preview path reaches
+    // here without a show_video_loading (no new lookup to reveal it).
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
     v.name.set_visible(true);
@@ -279,13 +335,15 @@ fn show_video_ready(v: &VideoStep) {
     v.add_btn.set_icon_name("");
     v.add_btn.remove_css_class("circular");
     v.add_btn.set_label(&gettext("Add"));
+    sync_entry_icon(v);
 }
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
     hide_video_step(v);
-    // Lookup failed: nothing to add. Slide the action slot out (the
-    // child-revealed handler hides it once the animation finishes) — the
-    // entry's tick stays for retry.
+    v.looking_up.set(false);
+    // Lookup failed: nothing to add. Slide the Add button out (the
+    // child-revealed handler hides it once the animation finishes); the
+    // entry carries no icon — Install in the tools row owns recovery.
     v.action_revealer.set_reveal_child(false);
     v.tools.set_subtitle(message);
     v.tools.set_visible(true);
@@ -293,13 +351,15 @@ fn show_video_tools_missing(v: &VideoStep, message: &str) {
     // SlideDown has a mapped widget to animate (see slide_down_revealer).
     v.group_revealer.set_visible(true);
     v.group_revealer.set_reveal_child(true);
+    sync_entry_icon(v);
 }
 
 fn show_video_error(v: &VideoStep, message: &str) {
     hide_video_step(v);
-    // Lookup failed: nothing to add. Slide the action slot out (the
-    // child-revealed handler hides it once the animation finishes) — the
-    // entry's tick stays for retry.
+    v.looking_up.set(false);
+    // Lookup failed: nothing to add. Slide the Add button out (the
+    // child-revealed handler hides it once the animation finishes); the
+    // entry carries no icon — Retry in the error row owns recovery.
     v.action_revealer.set_reveal_child(false);
     v.error.set_subtitle(message);
     v.error.set_visible(true);
@@ -307,6 +367,7 @@ fn show_video_error(v: &VideoStep, message: &str) {
     // SlideDown has a mapped widget to animate (see slide_down_revealer).
     v.group_revealer.set_visible(true);
     v.group_revealer.set_reveal_child(true);
+    sync_entry_icon(v);
 }
 
 /// Desensitize the form's Add button while a lookup is in flight (a dead
@@ -540,15 +601,12 @@ fn queue_plain(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
-    file_row: &adw::EntryRow,
     url: &str,
     scheduled_at: Option<i64>,
 ) -> Result<(), String> {
     // Batch guard defers start_next until the Scheduled status is set.
     let _guard = manager.batch_guard();
-    let typed = file_row.text().trim().to_string();
-    let name = (!typed.is_empty()).then_some(typed);
-    let item = manager.enqueue(url, Some(&dest.borrow()), name.as_deref())?;
+    let item = manager.enqueue(url, Some(&dest.borrow()), None)?;
     apply_scheduled_at(&item, scheduled_at);
     close_card();
     Ok(())
@@ -1149,6 +1207,7 @@ fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
     // the preview block stays hidden — but the probe resolved, so Add earns
     // its label like a single video; tapping it opens the title picker.
     hide_video_step(v);
+    v.looking_up.set(false);
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
     v.add_btn.set_icon_name("");
@@ -1330,22 +1389,16 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .hexpand(true)
         .build();
     url_entry.set_input_purpose(gtk4::InputPurpose::Url);
-    // Tick icon inside the entry: appears only when there's text to submit
-    // (the changed handler below adds/removes it). Icon-press submits like
-    // Enter. Entry starts empty, so no icon initially.
+    // Tick icon inside the entry: managed by sync_entry_icon (tick while
+    // idle with text, spinner paintable while looking up, none otherwise).
+    // Icon-press submits like Enter. Entry starts empty, so no icon initially.
     url_bar.append(&url_entry);
-    // Action slot: a homogeneous GtkStack swapping the Add button with the
-    // lookup spinner, wrapped in a revealer. The slot keeps the widest
-    // child's width, so starting a lookup never reallocates the URL row.
-    // The revealer slides the slot in from the left (SlideRight) after the
-    // tick submits, pushing the gear and X buttons aside; it slides out on
-    // enqueue or card close. The swap itself is instant: a slide transition
-    // on every lookup would distract from the entry being read.
-    let url_spinner = adw::Spinner::new();
-    url_spinner.set_valign(gtk4::Align::Center);
-    // Add button: appears only after the lookup finishes (or for direct
-    // files, after the tick submits). Labeled pill once a format is picked;
-    // icon-only checkmark otherwise. Colored rounded HIG button.
+    // Spinner paintable for the entry's secondary icon slot, animated by
+    // the entry's own frame clock.
+    let spinner_paintable = adw::SpinnerPaintable::new(Some(&url_entry));
+    // Add button: appears only after the lookup finishes. Labeled pill once
+    // a format is picked; icon-only checkmark otherwise. Colored rounded
+    // HIG button.
     let add_btn = gtk4::Button::builder()
         .icon_name("object-select-symbolic")
         .tooltip_text(gettext("Add download"))
@@ -1353,17 +1406,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .valign(gtk4::Align::Center)
         .build();
     add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
-    let action_slot = gtk4::Stack::builder()
-        .hhomogeneous(true)
-        .transition_type(gtk4::StackTransitionType::None)
-        .valign(gtk4::Align::Center)
-        .build();
-    action_slot.add_named(&add_btn, Some("add"));
-    action_slot.add_named(&url_spinner, Some("spinner"));
-    // The revealer uses the shared slide helper: hidden (no spacing) until
-    // revealed, and collapses back when the slide-out finishes.
+    // The revealer slides the Add button in from the left (SlideRight) once
+    // the lookup resolves, pushing the gear and X buttons aside; it slides
+    // out on enqueue or card close. Hidden (no spacing) until revealed, and
+    // collapses back when the slide-out finishes.
     let action_revealer = slide_revealer(gtk4::RevealerTransitionType::SlideRight);
-    action_revealer.set_child(Some(&action_slot));
+    action_revealer.set_child(Some(&add_btn));
     url_bar.append(&action_revealer);
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
@@ -1464,9 +1512,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let video_revealer = slide_down_revealer();
     video_revealer.set_child(Some(&video_group));
     let step = Rc::new(VideoStep {
-        action_slot,
+        url_entry: url_entry.clone(),
+        spinner_paintable,
+        looking_up: Cell::new(false),
         action_revealer: action_revealer.clone(),
-        url_spinner: url_spinner.clone(),
         group_revealer: video_revealer.clone(),
         name: video_name,
         revert: video_revert_btn,
@@ -1483,14 +1532,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // Download options: HIG AdwPreferencesGroup, no header — the rows
     // speak for themselves. Rows get the 12px internal margins natively.
     let group = adw::PreferencesGroup::new();
-    let file_row = adw::EntryRow::builder()
-        .title(gettext("File name (optional)"))
-        .text("")
-        .build();
-    group.add(&file_row);
 
     // Torrent and save location sit behind the gear toggle: the common
-    // case is a URL plus an optional file name, so the card opens compact.
+    // case is a bare URL, so the card opens compact.
     let torrent_btn = gtk4::Button::builder()
         .label(gettext("Choose…"))
         .tooltip_text(gettext("Choose a .torrent file"))
@@ -1688,7 +1732,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let open_state = Rc::clone(&open_state);
         let probe = Rc::clone(&probe);
         let url_entry = url_entry.clone();
-        let file_row = file_row.clone();
         let step = Rc::clone(&step);
         let torrent_row = torrent_row.clone();
         let lookup_add = Rc::clone(&lookup_add);
@@ -1709,7 +1752,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             clear_field_error(&url_entry);
             clear_field_error(&torrent_row);
             set_lookup_add(&lookup_add, true);
-            file_row.set_text("");
             dest_dir.replace(default_dir.clone());
             dest_label.set_text(&default_dir);
             // The options reopen collapsed with the default destination,
@@ -1745,7 +1787,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let probe = Rc::clone(&probe);
         let step2 = step.clone();
         let url_entry2 = url_entry.clone();
-        let file_row2 = file_row.clone();
         let settings2 = manager.settings().clone();
         let lookup_add_kick = lookup_add.clone();
         let manager_kick = manager.clone();
@@ -1771,7 +1812,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 step_b,
                 url_b,
                 settings_b,
-                file_b,
                 lookup_add_b,
                 manager_b,
                 dest_b,
@@ -1782,7 +1822,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 step2.clone(),
                 url_entry2.clone(),
                 settings2.clone(),
-                file_row2.clone(),
                 lookup_add_kick.clone(),
                 manager_kick.clone(),
                 dest_kick.clone(),
@@ -1904,7 +1943,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 &manager_b,
                                 &dest_b,
                                 &close_b,
-                                &file_b,
                                 &url,
                                 scheduled_at_b.get(),
                             ) {
@@ -1935,7 +1973,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 &manager_b,
                                 &dest_b,
                                 &close_b,
-                                &file_b,
                                 &direct,
                                 scheduled_at_b.get(),
                             ) {
@@ -1973,7 +2010,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 &manager_b,
                                 &dest_b,
                                 &close_b,
-                                &file_b,
                                 &url,
                                 scheduled_at_b.get(),
                             ) {
@@ -1995,18 +2031,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 // Group header carries the identity (title + page); rows
                                 // below carry the choices. Both sinks parse Pango markup:
                                 // URLs carry `&`, titles anything.
-                                // Seed the file name once: an explicit name wins, else
-                                // the title default. Never clobbers an edit here.
+                                // Seed the file name once from the title default.
+                                // Never clobbers an edit here.
                                 if step_b.name.text().trim().is_empty() {
-                                    let typed = file_b.text().trim().to_string();
-                                    let base = if typed.is_empty() {
-                                        // Seeded before the format rebuild;
-                                        // audio-only is always off by design
-                                        // at seed time.
-                                        default_name_for(&settings_b, &v.title, false)
-                                    } else {
-                                        typed
-                                    };
+                                    // Seeded before the format rebuild;
+                                    // audio-only is always off by design
+                                    // at seed time.
+                                    let base = default_name_for(&settings_b, &v.title, false);
                                     step_b.name.set_text(&base);
                                 }
                                 probe_b.borrow_mut().last_ok = url;
@@ -2060,7 +2091,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let m = manager.clone();
         let dd = dest_dir.clone();
         let url_entry = url_entry.clone();
-        let file_row = file_row.clone();
         let close_card = close_card.clone();
         let probe = Rc::clone(&probe);
         let step2 = step.clone();
@@ -2174,23 +2204,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if url.is_empty() && from_activate {
                 return;
             }
-            let fname = file_row.text().trim().to_string();
             enqueue_and_close(
                 &m,
                 &dd,
                 &close_card,
                 scheduled_at.get(),
-                |d| {
-                    m.enqueue(
-                        &url,
-                        d,
-                        if fname.is_empty() {
-                            None
-                        } else {
-                            Some(fname.as_str())
-                        },
-                    )
-                },
+                |d| m.enqueue(&url, d, None),
                 fail,
             );
         })
@@ -2221,7 +2240,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     {
         let probe = Rc::clone(&probe);
         let step2 = step.clone();
-        let file_row2 = file_row.clone();
         let submit_auto = submit.clone();
         let settings_auto = manager.settings().clone();
         let debounce: Rc<std::cell::RefCell<Option<glib::SourceId>>> =
@@ -2263,33 +2281,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             } else if let Some(id) = debounce.borrow_mut().take() {
                 id.remove();
             }
-            // Tick icon appears only when there's a URL to submit: add it
-            // on first text, remove it when cleared.
-            let has_text = !text.is_empty();
-            let icon_shown = row.icon_name(gtk4::EntryIconPosition::Secondary).is_some();
-            if has_text != icon_shown {
-                if has_text {
-                    row.set_icon_from_icon_name(
-                        gtk4::EntryIconPosition::Secondary,
-                        Some("object-select-symbolic"),
-                    );
-                    row.set_icon_tooltip_text(
-                        gtk4::EntryIconPosition::Secondary,
-                        Some(&gettext("Look up")),
-                    );
-                } else {
-                    row.set_icon_from_icon_name(gtk4::EntryIconPosition::Secondary, None);
-                }
-            }
-            // The direct-only file row hides in video mode (the preview has its own
-            // name row); a non-empty entry is not lost — the resolve seeds the video name
-            // from it. A probed preview counts as video mode while its canonical URL matches.
+            // A probed preview counts as video mode while its canonical URL
+            // matches the entry text.
             let fresh = probe
                 .borrow()
                 .info
                 .as_ref()
                 .is_some_and(|p| p.page_url() == text);
-            file_row2.set_visible(!(crate::video::is_video_page(&text) || fresh));
             // Leaving video-land (or editing a resolved URL) hides the stale
             // step at once; `fresh` is deliberately the stricter canonical
             // compare: a mismatch is always safe to hide.
@@ -2305,6 +2303,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             // Editing mid-lookup stales the in-flight resolve so its
             // completion is discarded.
             probe.borrow_mut().bump_generation();
+            // Any edit clears the lookup-in-flight state, and the icon
+            // follows: the tick returns for non-empty text, the spinner
+            // and the icon-less states clear.
+            step2.looking_up.set(false);
+            sync_entry_icon(&step2);
         });
     }
 
@@ -2527,6 +2530,39 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_icon_lookup_wins_over_everything() {
+        // While a lookup is in flight the tick morphs into a spinner in
+        // place, regardless of text, Add visibility, or error state.
+        assert_eq!(entry_icon_for(true, true, false, false), EntryIcon::Spinner);
+        assert_eq!(entry_icon_for(true, true, true, false), EntryIcon::Spinner);
+        assert_eq!(entry_icon_for(false, true, false, true), EntryIcon::Spinner);
+    }
+
+    #[test]
+    fn entry_icon_tick_only_when_idle_with_text_and_no_add() {
+        // The tick submits: idle, non-empty, and no Add button yet.
+        assert_eq!(entry_icon_for(true, false, false, false), EntryIcon::Tick);
+        // Empty entry: nothing to submit.
+        assert_eq!(entry_icon_for(false, false, false, false), EntryIcon::None);
+    }
+
+    #[test]
+    fn entry_icon_cleared_once_add_appears() {
+        // Once Add appears beside the entry, the entry carries no icon —
+        // the button owns the action.
+        assert_eq!(entry_icon_for(true, false, true, false), EntryIcon::None);
+        assert_eq!(entry_icon_for(false, false, true, false), EntryIcon::None);
+    }
+
+    #[test]
+    fn entry_icon_cleared_on_error_or_tools_state() {
+        // On lookup failure the error row's Retry (or the tools row's
+        // Install) owns recovery: no entry icon.
+        assert_eq!(entry_icon_for(true, false, false, true), EntryIcon::None);
+        assert_eq!(entry_icon_for(true, false, true, true), EntryIcon::None);
+    }
 
     fn dummy_probe() -> crate::video::ProbeResult {
         crate::video::ProbeResult::Single(crate::video::VideoInfo {

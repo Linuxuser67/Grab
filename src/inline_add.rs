@@ -2203,13 +2203,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     id.remove();
                 }
                 let s = submit_auto.clone();
-                let id = glib::timeout_add_local(
-                    std::time::Duration::from_millis(800),
-                    move || {
+                let id =
+                    glib::timeout_add_local(std::time::Duration::from_millis(800), move || {
                         s(true);
                         glib::ControlFlow::Break
-                    },
-                );
+                    });
                 *debounce.borrow_mut() = Some(id);
             } else if let Some(id) = debounce.borrow_mut().take() {
                 id.remove();

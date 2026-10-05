@@ -78,7 +78,10 @@ fn extra_chromium_manifest(host_path: &str, extension_ids: &[String]) -> serde_j
         "description": DESCRIPTION,
         "path": host_path,
         "type": "stdio",
-        "allowed_origins": extension_ids.iter().map(|id| format!("chrome-extension://{id}/")).collect::<Vec<_>>(),
+        "allowed_origins": extension_ids
+            .iter()
+            .map(|id| format!("chrome-extension://{id}/"))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -93,7 +96,9 @@ pub fn ensure_firefox_host() -> bool {
         Some(h) => h,
         None => return false,
     };
-    let manifest_path = home.join(".mozilla/native-messaging-hosts").join(format!("{HOST_NAME}.json"));
+    let manifest_path = home
+        .join(".mozilla/native-messaging-hosts")
+        .join(format!("{HOST_NAME}.json"));
 
     // Already installed and the binary exists? Nothing to do.
     if let Ok(text) = fs::read_to_string(&manifest_path) {
@@ -145,7 +150,10 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
     let mut changed = false;
 
     // Crate-covered browsers.
-    let chromium_origins: Vec<String> = ids.iter().map(|id| format!("chrome-extension://{id}/")).collect();
+    let chromium_origins: Vec<String> = ids
+        .iter()
+        .map(|id| format!("chrome-extension://{id}/"))
+        .collect();
     let firefox_ids = vec![FIREFOX_ADDON_ID.to_string()];
     if native_messaging::install(
         HOST_NAME,
@@ -184,7 +192,9 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
         if let Some(parent) = target.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let mut text = serde_json::to_string_pretty(&extra_chromium_manifest(&host_path, ids)).unwrap_or_default();
+        let mut text =
+            serde_json::to_string_pretty(&extra_chromium_manifest(&host_path, ids))
+                .unwrap_or_default();
         text.push('\n');
         if fs::write(&target, text).is_ok() {
             changed = true;

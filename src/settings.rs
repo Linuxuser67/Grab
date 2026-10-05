@@ -153,11 +153,15 @@ impl AppSettings {
     }
     /// Chromium extension IDs allowed for native messaging (stored once).
     pub fn browser_extension_ids(&self) -> Vec<String> {
-        self.0.strv(key::BROWSER_EXTENSION_IDS).iter().map(|s| s.to_string()).collect()
+        self.0
+            .string(key::BROWSER_EXTENSION_IDS)
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
     }
     pub fn set_browser_extension_ids(&self, ids: &[String]) {
-        let vals: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-        self.0.set_strv(key::BROWSER_EXTENSION_IDS, &vals).ok();
+        self.0.set_string(key::BROWSER_EXTENSION_IDS, &ids.join(",")).ok();
     }
     /// Cut SponsorBlock-flagged sponsor segments out of yt-dlp downloads.
     pub fn sponsorblock_remove(&self) -> bool {

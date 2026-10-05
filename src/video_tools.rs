@@ -267,12 +267,12 @@ pub fn user_lib_dir() -> PathBuf {
 /// (`grab-fallback-data-<pid>`, used only when `XDG_DATA_HOME` and `HOME` are both
 /// unset) is validated after creation: owned by us, not a symlink, not group- or
 /// world-writable, so a pre-planted directory is refused instead of written into.
-pub(crate) async fn ensure_lib_dir(dir: &Path) -> Result<(), VideoError> {
-    let dir = dir.to_path_buf();
-    match tokio::task::spawn_blocking(move || ensure_lib_dir_blocking(&dir)).await {
-        Ok(res) => res.map_err(VideoError::install),
-        Err(e) => Err(VideoError::runtime(&e)),
-    }
+///
+/// Synchronous: mkdir + metadata checks are fast, and this must work from
+/// `glib::spawn_future_local` (GTK main loop), where `tokio::task::spawn_blocking`
+/// would panic with "no reactor running".
+pub(crate) fn ensure_lib_dir(dir: &Path) -> Result<(), VideoError> {
+    ensure_lib_dir_blocking(dir).map_err(VideoError::install)
 }
 
 fn ensure_lib_dir_blocking(dir: &Path) -> std::io::Result<()> {
@@ -495,7 +495,7 @@ pub(crate) const MERGER_FASTSTART_ARGS: &str = "Merger+ffmpeg:-movflags +faststa
 /// Await from a spawned task — never block the GTK thread.
 pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
-    ensure_lib_dir(&dir).await?;
+    ensure_lib_dir(&dir)?;
     // yt-dlp's crate installer verifies a digest when present but skips silently
     // if absent (fail-open, unlike our quickjs/ffmpeg paths). Accepted deliberately
     // so yt-dlp tracks upstream, but log it so the gap is visible.
@@ -629,7 +629,7 @@ async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
     }
     let url = quickjs_download_url(&tag)
         .ok_or_else(|| VideoError::install("quickjs has no release for this architecture"))?;
-    ensure_lib_dir(&dir).await?;
+    ensure_lib_dir(&dir)?;
     // Download straight to `qjs.part`: a failed download must never leave a
     // half-written `qjs` behind for `find_quickjs` to mistake as installed.
     let dest = dir.join("qjs");
@@ -806,7 +806,7 @@ pub(crate) async fn ensure_quickjs(page_url: &str) -> Result<(), VideoError> {
 async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
     use yt_dlp::client::deps::ffmpeg::BuildFetcher;
 
-    ensure_lib_dir(&dir).await?;
+    ensure_lib_dir(&dir)?;
     let release = BuildFetcher::new()
         .fetch_binary()
         .await

@@ -122,9 +122,42 @@ fn extra_chromium_manifest(host_path: &str, extension_ids: &[String]) -> serde_j
     })
 }
 
+/// Whether the Chromium manifest matches the expected structure exactly.
+fn chromium_manifest_matches(
+    manifest: &serde_json::Value,
+    host_path: &str,
+    ids: &[String],
+) -> bool {
+    let expected_origins: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|id| serde_json::Value::String(format!("chrome-extension://{id}/")))
+        .collect();
+    manifest.get("name").and_then(|v| v.as_str()) == Some(HOST_NAME)
+        && manifest.get("description").and_then(|v| v.as_str()) == Some(DESCRIPTION)
+        && manifest.get("path").and_then(|v| v.as_str()) == Some(host_path)
+        && manifest.get("type").and_then(|v| v.as_str()) == Some("stdio")
+        && manifest.get("allowed_origins").and_then(|v| v.as_array()) == Some(&expected_origins)
+}
+
 /// Ensure the Firefox native host is installed, silently fixing it if missing
 /// or stale. The Firefox add-on ID is fixed, so this needs no user input and
 /// runs on every startup. Returns true if (re)installed.
+/// Whether the Firefox manifest matches the expected structure exactly.
+/// Validates name, description, path, type, and allowed_extensions — not just
+/// the path, so a stale/corrupted manifest is detected and replaced.
+fn firefox_manifest_matches(manifest: &serde_json::Value, host_path: &str) -> bool {
+    manifest.get("name").and_then(|v| v.as_str()) == Some(HOST_NAME)
+        && manifest.get("description").and_then(|v| v.as_str()) == Some(DESCRIPTION)
+        && manifest.get("path").and_then(|v| v.as_str()) == Some(host_path)
+        && manifest.get("type").and_then(|v| v.as_str()) == Some("stdio")
+        && manifest
+            .get("allowed_extensions")
+            .and_then(|v| v.as_array())
+            == Some(&vec![serde_json::Value::String(
+                FIREFOX_ADDON_ID.to_string(),
+            )])
+}
+
 pub fn ensure_firefox_host() -> bool {
     if in_flatpak() {
         return false;
@@ -151,13 +184,12 @@ pub fn ensure_firefox_host() -> bool {
     // Manifest already correct? Nothing more to do.
     if let Ok(text) = fs::read_to_string(&manifest_path)
         && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text)
-        && let Some(path) = manifest.get("path").and_then(|p| p.as_str())
-        && path == host_path
+        && firefox_manifest_matches(&manifest, &host_path)
     {
         return replaced;
     }
 
-    // (Re)install the manifest.
+    // (Re)install the manifest (atomic: write temp + rename).
     let manifest = serde_json::json!({
         "name": HOST_NAME,
         "description": DESCRIPTION,
@@ -167,10 +199,22 @@ pub fn ensure_firefox_host() -> bool {
     });
     let mut text = serde_json::to_string_pretty(&manifest).unwrap_or_default();
     text.push('\n');
-    if let Some(parent) = manifest_path.parent() {
-        let _ = fs::create_dir_all(parent);
+    if let Some(parent) = manifest_path.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        tracing::warn!("firefox host manifest: cannot create dir: {e}");
+        return false;
     }
-    fs::write(&manifest_path, text).is_ok()
+    // Atomic write via temp file.
+    let tmp_path = manifest_path.with_extension("json.tmp");
+    match fs::write(&tmp_path, &text).and_then(|()| fs::rename(&tmp_path, &manifest_path)) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("firefox host manifest: write failed: {e}");
+            let _ = fs::remove_file(&tmp_path);
+            false
+        }
+    }
 }
 
 /// Ensure Chromium manifests for previously-registered extension IDs.
@@ -222,31 +266,30 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
         let target = cfg
             .join("NativeMessagingHosts")
             .join(format!("{HOST_NAME}.json"));
-        // Skip if already correct.
+        // Skip if already correct (full structure, not just origins).
         if let Ok(text) = fs::read_to_string(&target)
             && let Ok(m) = serde_json::from_str::<serde_json::Value>(&text)
+            && chromium_manifest_matches(&m, &host_path, ids)
         {
-            let origins: Vec<String> = m
-                .get("allowed_origins")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if origins == chromium_origins {
-                continue;
-            }
+            continue;
         }
-        if let Some(parent) = target.parent() {
-            let _ = fs::create_dir_all(parent);
+        if let Some(parent) = target.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            tracing::warn!("chromium host manifest: cannot create dir: {e}");
+            continue;
         }
         let mut text = serde_json::to_string_pretty(&extra_chromium_manifest(&host_path, ids))
             .unwrap_or_default();
         text.push('\n');
-        if fs::write(&target, text).is_ok() {
-            changed = true;
+        // Atomic write via temp file.
+        let tmp = target.with_extension("json.tmp");
+        match fs::write(&tmp, &text).and_then(|()| fs::rename(&tmp, &target)) {
+            Ok(()) => changed = true,
+            Err(e) => {
+                tracing::warn!("chromium host manifest: write failed: {e}");
+                let _ = fs::remove_file(&tmp);
+            }
         }
     }
     changed

@@ -1759,53 +1759,29 @@ fn delete_download_trashes_torrent_files() {
     // Home-backed dir: GIO refuses to trash across filesystems like /tmp.
     let dir = glib::user_data_dir().join(format!("grab-torrent-del-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("gone.bin");
+    let dest = dir.to_string_lossy().into_owned();
+    // Archived .torrent gives Grab authoritative metadata about the file it owns.
+    // single_torrent_bytes() describes a file named "foo".
+    let pseudo =
+        crate::torrent::archive_torrent_file("gone.torrent", &single_torrent_bytes()).unwrap();
+    let file = dir.join("foo");
     std::fs::write(&file, b"bye").unwrap();
 
     let store = gio::ListStore::new::<DownloadItem>();
     let manager = DownloadManager::new(store.clone(), settings);
-    let item = DownloadItem::new(
-        7,
-        "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3&dn=gone",
-        "gone.bin",
-        &dir.to_string_lossy(),
-    );
+    let item = DownloadItem::new(7, &pseudo, "gone", &dest);
     item.set_status(DownloadStatus::Done);
     store.append(&item);
 
     // Explicit delete trashes real files and drops the row; no session entry offline.
-    let dbg = manager.delete_download(7);
-    eprintln!(
-        "DEBUG delete={:?} user_data={:?} exists={}",
-        dbg.as_ref().err(),
-        glib::user_data_dir(),
-        dir.display()
-    );
-    assert!(dbg.is_ok());
+    assert!(manager.delete_download(7).is_ok());
     assert!(!file.exists());
     assert_eq!(store.n_items(), 0);
+    assert!(crate::torrent::archive_path_for_url(&pseudo).is_none());
     // Undo the test's own Trash litter.
     let trash = glib::user_data_dir().join("Trash");
-    let _ = std::fs::remove_file(trash.join("files/gone.bin"));
-    let _ = std::fs::remove_file(trash.join("info/gone.bin.trashinfo"));
-
-    // Multi-file torrents trash the whole subfolder.
-    let sub = dir.join("Some Torrent");
-    std::fs::create_dir_all(&sub).unwrap();
-    std::fs::write(sub.join("a.mp4"), b"data").unwrap();
-    let item2 = DownloadItem::new(
-        8,
-        "magnet:?xt=urn:btih:b94a8fe5ccb19ba61c4c0873d391e987982fbbd4&dn=Some+Torrent",
-        "Some Torrent",
-        &dir.to_string_lossy(),
-    );
-    item2.set_status(DownloadStatus::Done);
-    store.append(&item2);
-    assert!(manager.delete_download(8).is_ok());
-    assert!(!sub.exists());
-    assert_eq!(store.n_items(), 0);
-    let _ = std::fs::remove_dir_all(trash.join("files/Some Torrent"));
-    let _ = std::fs::remove_file(trash.join("info/Some Torrent.trashinfo"));
+    let _ = std::fs::remove_file(trash.join("files/foo"));
+    let _ = std::fs::remove_file(trash.join("info/foo.trashinfo"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1992,12 +1968,12 @@ fn magnet_delete_trashes_recorded_subfolder() {
     item.set_filename("real-name.bin");
     item.set_status(DownloadStatus::Done);
     assert!(manager.delete_download(item.id()).is_ok());
-    assert!(!folder.exists());
+    // Metadata-less magnet: output directory ownership is unknown.
+    // Delete removes the queue row but leaves the directory untouched.
+    assert!(folder.exists());
+    assert!(folder.join("real-name.bin").exists());
     assert_eq!(manager.store().n_items(), 0);
-    // Undo the test's own Trash litter.
-    let trash = glib::user_data_dir().join("Trash");
-    let _ = std::fs::remove_dir_all(trash.join("files/gone"));
-    let _ = std::fs::remove_file(trash.join("info/gone.trashinfo"));
+    let _ = std::fs::remove_dir_all(&dir);
     // Teardown BEFORE restoring keys (see rejects_relative_download_dir).
     manager.cancel_all();
     let _ = std::fs::remove_dir_all(&dir);
@@ -2035,11 +2011,13 @@ fn delete_download_trashes_torrent_subfolder() {
     std::fs::create_dir_all(&dir).unwrap();
     let dest = dir.to_string_lossy().into_owned();
     // Meta name ("bar") differs from archive stem: folder is dest/<meta-name>/.
+    // multi_torrent_bytes() contains a.txt and sub/b.txt (owned).
     let pseudo =
         crate::torrent::archive_torrent_file("mymeta.torrent", &multi_torrent_bytes()).unwrap();
     let folder = dir.join("bar");
     std::fs::create_dir_all(&folder).unwrap();
-    std::fs::write(folder.join("a.txt"), b"hi").unwrap();
+    std::fs::write(folder.join("a.txt"), b"owned").unwrap();
+    std::fs::write(folder.join("unrelated.txt"), b"keep").unwrap();
 
     let store = gio::ListStore::new::<DownloadItem>();
     let manager = DownloadManager::new(store.clone(), settings);
@@ -2048,13 +2026,51 @@ fn delete_download_trashes_torrent_subfolder() {
     store.append(&item);
 
     assert!(manager.delete_download(9).is_ok());
-    assert!(!folder.exists());
+    // Owned file trashed, unrelated file survives, folder left in place.
+    assert!(!folder.join("a.txt").exists());
+    assert!(folder.join("unrelated.txt").exists());
+    assert!(folder.exists());
     assert!(crate::torrent::archive_path_for_url(&pseudo).is_none());
     assert_eq!(store.n_items(), 0);
-    // Undo the test's own Trash litter.
+    // Undo the test's own Trash litter (metadata files were trashed).
     let trash = glib::user_data_dir().join("Trash");
     let _ = std::fs::remove_dir_all(trash.join("files/bar"));
     let _ = std::fs::remove_file(trash.join("info/bar.trashinfo"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn delete_download_magnet_leaves_preexisting_folder() {
+    // P1 regression: pre-existing dir + unrelated file + magnet with same name
+    // + Delete => unrelated file survives, folder left in place.
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("del-magnet-preexist");
+    let settings = test_settings();
+    let dir = glib::user_data_dir().join(format!("grab-delmag-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dest = dir.to_string_lossy().into_owned();
+    // Pre-existing directory with unrelated file.
+    let folder = dir.join("My Magnet");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("unrelated.txt"), b"do not trash").unwrap();
+
+    let store = gio::ListStore::new::<DownloadItem>();
+    let manager = DownloadManager::new(store.clone(), settings);
+    // Magnet URL (no archive).
+    let magnet = "magnet:?xt=urn:btih:1234567890123456789012345678901234567890&dn=My+Magnet";
+    let item = DownloadItem::new(10, magnet, "My Magnet", &dest);
+    item.set_output_dir(folder.to_string_lossy().into_owned());
+    item.set_status(DownloadStatus::Done);
+    store.append(&item);
+
+    assert!(manager.delete_download(10).is_ok());
+    // Folder and unrelated file must survive.
+    assert!(folder.exists());
+    assert_eq!(
+        std::fs::read(folder.join("unrelated.txt")).unwrap(),
+        b"do not trash"
+    );
+    assert_eq!(store.n_items(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

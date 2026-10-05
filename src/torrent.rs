@@ -9,6 +9,8 @@ use std::{
 };
 
 use gettextrs::gettext;
+use gtk4::gio;
+use gtk4::gio::prelude::*;
 use gtk4::glib;
 use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ConnectionOptions, ListenerOptions,
@@ -164,11 +166,32 @@ pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, Str
     let stem = safe_stem(file_name).unwrap_or("torrent");
     let dir = torrents_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot store torrent file: {e}"))?;
-    let candidate = dir.join(dedupe_filename(&format!("{stem}.torrent"), |n| {
-        dir.join(n).exists()
-    }));
-    std::fs::write(&candidate, bytes).map_err(|e| format!("Cannot store torrent file: {e}"))?;
-    Ok(format!("torrent:{}", candidate.to_string_lossy()))
+    // Atomic create_new loop: no check-then-write race.
+    let mut tried: Vec<String> = Vec::new();
+    for _ in 0..32 {
+        let candidate = dedupe_filename(&format!("{stem}.torrent"), |n| {
+            tried.iter().any(|t| t.as_str() == n)
+        });
+        tried.push(candidate.clone());
+        let path = dir.join(&candidate);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                f.write_all(bytes)
+                    .map_err(|e| format!("Cannot store torrent file: {e}"))?;
+                return Ok(format!("torrent:{}", path.to_string_lossy()));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("Cannot store torrent file: {e}")),
+        }
+    }
+    Err(gettext(
+        "Cannot store torrent file: too many name collisions",
+    ))
 }
 
 /// Stub row name for an archived file: the sanitized file stem.
@@ -205,6 +228,11 @@ pub(crate) fn read_torrent_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
 /// Bounded read of the archived `.torrent` behind a queue pseudo-URL (`None` when missing, unreadable, or over the ceiling).
 pub(crate) fn read_archive_bytes(url: &str) -> Option<Vec<u8>> {
     read_torrent_bytes(&archive_path_for_url(url)?)
+}
+
+/// Whether a `.torrent` archive exists for the URL (magnets have none).
+pub(crate) fn has_archive(url: &str) -> bool {
+    archive_path_for_url(url).is_some_and(|p| p.exists())
 }
 
 /// Parse `.torrent` bytes into a display list for the file picker (display strips bidi/controls and caps length; selection is index-based).
@@ -351,6 +379,22 @@ pub fn torrent_output_dir(dest: &std::path::Path, url: &str) -> Option<PathBuf> 
     Some(output_folder_for(dest, name, true, &fallback))
 }
 
+/// Path of a single-file torrent's file (dest dir + metadata filename).
+/// Returns None for multi-file torrents or if the archive is missing.
+pub(crate) fn single_file_path(dest: &std::path::Path, url: &str) -> Option<std::path::PathBuf> {
+    if !is_torrent_url(url) {
+        return None;
+    }
+    let bytes = read_archive_bytes(url)?;
+    let meta = librqbit::torrent_from_bytes(&bytes).ok()?;
+    if is_multi_file(meta.info.data.files.as_deref()) {
+        return None;
+    }
+    let name = safe_torrent_name(raw_torrent_name(meta.info.data.name.as_ref()))
+        .unwrap_or_else(|| meta.info_hash.as_string());
+    Some(dest.join(name))
+}
+
 /// Delete untoggled files after a filtered torrent finishes (librqbit pre-creates every file, so unselected ones must be removed here).
 pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str) {
     let Some(selected) = get_selection(url) else {
@@ -467,6 +511,54 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
             Err(_) => break,
         }
     }
+}
+
+/// Trash all files listed in the torrent metadata (not the whole folder).
+/// Skips hostile entries and U+FFFD paths. Returns true if the folder is empty afterwards.
+pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> bool {
+    let Some(bytes) = read_archive_bytes(url) else {
+        return false;
+    };
+    let Ok(meta) = librqbit::torrent_from_bytes(&bytes) else {
+        return false;
+    };
+    let multi = is_multi_file(meta.info.data.files.as_deref());
+    if !multi {
+        // Single-file torrent: torrent_file_list returns empty (no selectable
+        // children for the UI), so resolve the filename directly.
+        let name = safe_torrent_name(raw_torrent_name(meta.info.data.name.as_ref()))
+            .unwrap_or_else(|| meta.info_hash.as_string());
+        let target = folder.join(name);
+        let _ = gio::File::for_path(&target).trash(gio::Cancellable::NONE);
+        return std::fs::read_dir(folder)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true);
+    }
+    let Ok((_, entries)) = torrent_file_list(&bytes) else {
+        return false;
+    };
+    let empty_keep: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (i, entry) in entries.iter().enumerate() {
+        if let Some(target) = deletion_target(folder, i, &empty_keep, entry) {
+            // Trash the file (not permanent delete), then prune empty parents.
+            let _ = gio::File::for_path(&target).trash(gio::Cancellable::NONE);
+            // Prune parents left empty by the trash (they're empty, safe to remove).
+            let mut parent = target.parent();
+            while let Some(dir) = parent {
+                if dir == folder {
+                    break;
+                }
+                match std::fs::remove_dir(dir) {
+                    Ok(()) => parent = dir.parent(),
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    // Check if folder is empty.
+    std::fs::read_dir(folder)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(true)
 }
 
 /// Network plan for one torrent add, resolved from settings at spawn.

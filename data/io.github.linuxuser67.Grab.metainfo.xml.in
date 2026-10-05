@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.2.2" date="2026-10-05">
+      <description>
+        <ul>
+          <li>Fix crash when installing media tools (Tokio runtime panic).</li>
+          <li>Fix GTK warnings when re-opening the install popover.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.2.1" date="2026-10-05">
       <description>
         <ul>

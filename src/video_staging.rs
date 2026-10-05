@@ -483,11 +483,17 @@ pub(crate) fn dir_file_names(dir: &Path) -> Vec<String> {
 }
 
 /// Async `dir_file_names` for GTK-thread call sites: readdir can stall on
-/// network mounts, so it runs on the blocking pool.
+/// network mounts, so it runs on the blocking pool. Used by the C3
+/// follow-ups (see issue #336); the playlist import inlines its own
+/// combined blocking call.
+#[allow(dead_code)]
 pub(crate) async fn dir_file_names_async(dir: std::path::PathBuf) -> Vec<String> {
     gio::spawn_blocking(move || dir_file_names(&dir))
         .await
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!("readdir task failed: {e:?}");
+            Vec::new()
+        })
 }
 
 /// Reclaim `final.<n>.<ext>.part` leftovers from attempts that died mid-ffmpeg (never completed recordings).

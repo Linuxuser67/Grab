@@ -813,7 +813,8 @@ fn push_playlist_items_page(
     {
         let close_card = close_card.clone();
         let picks = picks.clone();
-        add_btn.connect_clicked(move |_| {
+        let add_btn_click = add_btn.clone();
+        add_btn_click.connect_clicked(move |_| {
             let picked: Vec<usize> = list_selected(&picks);
             let picked_set: std::collections::HashSet<usize> = picked.into_iter().collect();
             // Owned clones for the async import below.
@@ -830,27 +831,47 @@ fn push_playlist_items_page(
                 return;
             }
             // Multiple items from one collection share a titled subfolder,
-            // torrent-style; a lone item keeps the flat behavior.
-            let dir = manager.resolve_dir(Some(&dest_dir.borrow()));
-            let dir = if chosen.len() > 1 {
-                crate::file_names::collection_subdir(&dir, &playlist.title)
-            } else {
-                dir
-            };
-            // The readdir can stall on network mounts: run it off the GTK
-            // thread, then do the import loop.
+            // torrent-style; a lone item keeps the flat behavior. The base
+            // dir is pure path manipulation; the subdir creation and readdir
+            // can stall on network mounts, so they run off the GTK thread.
+            let base_dir = manager.resolve_dir(Some(&dest_dir.borrow()));
+            let multi = chosen.len() > 1;
+            let title = playlist.title.clone();
+            // Disable the button while the import is in flight: a second
+            // click would see the picks still active and enqueue duplicates.
+            add_btn.set_sensitive(false);
             let manager = manager.clone();
             let picks = picks.clone();
             let error_caption = error_caption.clone();
             let close_card = close_card.clone();
             let page_url = playlist.page_url.clone();
+            let add_btn = add_btn.clone();
             glib::spawn_future_local(async move {
-                // One persist for the whole import, not one per row.
+                // One blocking call for subdir creation + readdir.
+                let (dir, existing) = match gio::spawn_blocking(move || {
+                    let dir = if multi {
+                        crate::file_names::collection_subdir(&base_dir, &title)
+                    } else {
+                        base_dir
+                    };
+                    let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
+                    (dir, existing)
+                })
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("playlist import dir setup failed: {e:?}");
+                        error_caption.set_text(&gettext("Could not prepare the download folder"));
+                        error_caption.set_visible(true);
+                        add_btn.set_sensitive(true);
+                        return;
+                    }
+                };
+                // One persist for the whole import, not one per row. Taken
+                // after the await: holding it across the readdir would suppress
+                // every other persist/UI refresh/scheduler kick in the app.
                 let _batch = manager.batch_guard();
-                // One readdir for the whole import instead of one per row.
-                let existing =
-                    crate::video_staging::dir_file_names_async(std::path::PathBuf::from(&dir))
-                        .await;
                 // Story segments are addressable as their own pages: queue those so each row
                 // re-resolves its own segment instead of the tray (tray + format ids would
                 // download the first segment once per row). Attempted unconditionally:
@@ -893,6 +914,7 @@ fn push_playlist_items_page(
                 if let Some(e) = failed {
                     error_caption.set_text(&e);
                     error_caption.set_visible(true);
+                    add_btn.set_sensitive(true);
                     return;
                 }
                 // Complete success collapses the whole New Download card; a partial failure stays

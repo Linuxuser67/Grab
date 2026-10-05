@@ -50,6 +50,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.2.6" date="2026-10-05">
+      <description>
+        <ul>
+          <li>Fix playlist import blocking the UI during folder scans.</li>
+          <li>Fix Firefox native host not refreshing on upgrade.</li>
+          <li>Fix duplicate playlist imports via double-click or Enter.</li>
+          <li>Harden filename handling and native host installation.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.2.5" date="2026-10-05">
       <description>
         <ul>

@@ -2248,8 +2248,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     id.remove();
                 }
                 let s = submit_auto.clone();
+                let debounce_c = Rc::clone(&debounce);
                 let id =
                     glib::timeout_add_local(std::time::Duration::from_millis(800), move || {
+                        // Clear the stored ID first: after Break the source is
+                        // gone, and a later `changed` (e.g. programmatic
+                        // set_text) must not remove this dead ID — that was a
+                        // hard abort ("Source ID was not found").
+                        *debounce_c.borrow_mut() = None;
                         s(true);
                         glib::ControlFlow::Break
                     });

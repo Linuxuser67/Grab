@@ -152,13 +152,11 @@ pub(crate) fn container_truth_name(dest: &Path, discovered: &Path) -> Option<Str
     Some(format!("{stem}.{}", found_ext.to_ascii_lowercase()))
 }
 
-/// Stable `-o` template inside the row's staging dir (yt-dlp resumes its `.part` beside it).
-/// Named after the row's destination stem: `dest` is fixed for the row's life, so a title
-/// that changes between attempts (live streams, edits) cannot rename the `.part` and break
-/// resume. Staging names are internal (the claim renames to `dest`), so a fullwidth percent
-/// sign replaces `%` in the stem and sidesteps `-o` escaping. The stem is capped to leave
-/// room for yt-dlp's `.f<id>.<ext>.part` suffix under the 255-byte name limit. Pure.
-pub(crate) fn unified_output_template(staging: &Path, dest: &Path) -> PathBuf {
+/// The manifest-recorded ownership prefix for unified downloads:
+/// `{stem}.{item_id}.` (same stem derivation as the output template, so the
+/// two can never drift). Any file in the dest dir starting with this prefix
+/// (except `final.*`) is owned by this item's attempt. Pure.
+pub(crate) fn unified_staging_prefix(dest: &Path, item_id: u64) -> String {
     const MAX_STEM_BYTES: usize = 200;
     let stem = dest
         .file_stem()
@@ -167,7 +165,19 @@ pub(crate) fn unified_output_template(staging: &Path, dest: &Path) -> PathBuf {
         .unwrap_or("media")
         .replace('%', "\u{FF05}");
     let cut = stem.floor_char_boundary(MAX_STEM_BYTES.min(stem.len()));
-    staging.join(format!("{}.%(ext)s", &stem[..cut]))
+    format!("{}.{item_id}.", &stem[..cut])
+}
+
+/// Stable `-o` template inside the row's staging dir (yt-dlp resumes its `.part` beside it).
+/// Named after the row's destination stem plus the item id: `dest` is fixed for the row's life,
+/// so a title that changes between attempts (live streams, edits) cannot rename the `.part`
+/// and break resume. The id keeps the template distinct from `dest` itself — without it,
+/// a finished download would land exactly on `dest` and the claim rename would fail with
+/// "file exists". Staging names are internal (the claim renames to `dest`), so a fullwidth
+/// percent sign replaces `%` in the stem and sidesteps `-o` escaping. The stem is capped to
+/// leave room for yt-dlp's `.f<id>.<ext>.part` suffix under the 255-byte name limit. Pure.
+pub(crate) fn unified_output_template(staging: &Path, dest: &Path, item_id: u64) -> PathBuf {
+    staging.join(format!("{}%(ext)s", unified_staging_prefix(dest, item_id)))
 }
 
 /// Shared argv tail for the VOD builders: subtitles, proxy, identity/cookie args.

@@ -8,7 +8,7 @@ use crate::video_argv::{
     VideoJob, apply_proxy_env, container_truth_name, fallback_to_live_edge, hls_download_argv,
     live_capture_argv, live_from_start_unsupported, live_remux_argv, merge_output_ext,
     playlist_scope_args, proxy_cli_args, unified_download_argv, unified_format_spec,
-    unified_output_template, write_manifest,
+    unified_output_template, unified_staging_prefix, write_manifest,
 };
 use crate::video_plan::{StreamPlan, plan_streams};
 use crate::video_probe::page_host;
@@ -284,6 +284,10 @@ pub async fn run_video_download(
                     audio_ext: audio_sel.ext.clone(),
                     final_bytes: None,
                     staging_name: None,
+                    // The unified path stages many files (parts, ytdl) under
+                    // `{stem}.{id}.`; record the prefix so cleanup can reclaim
+                    // them. Manifest-anchored, not inferred.
+                    staging_prefix: Some(unified_staging_prefix(&job.dest, job.item_id)),
                 },
             )
             .await?;
@@ -350,7 +354,7 @@ pub(crate) async fn run_unified_ytdlp(
     let merge_ext = video_ext.map(merge_output_ext).unwrap_or_default();
     // Named after `job.dest`, which is fixed for the row: a title that changes between
     // attempts cannot rename the `.part` file and break resume.
-    let out_template = unified_output_template(staging, &job.dest);
+    let out_template = unified_output_template(staging, &job.dest, job.item_id);
     // Resolve the subtitle language against what the video actually offers
     // (preferred, else English, else none) before the media argv is built.
     // An abort here stops the download; a probe failure just drops subtitles.
@@ -1197,6 +1201,7 @@ pub(crate) async fn run_live_ytdlp(
             audio_ext: String::new(),
             final_bytes: None,
             staging_name: Some(staging_name.clone()),
+            staging_prefix: None,
         },
     )
     .await;

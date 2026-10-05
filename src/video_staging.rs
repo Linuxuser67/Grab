@@ -9,9 +9,12 @@
 //! No manifest:           preserve everything
 //! ```
 //!
-//! All cleanup functions (`clean_staging_files`,
+//! All staging cleanup functions (`clean_staging_files`,
 //! `sweep_staging_preserving_recordings`, `sweep_dest_staging`) follow this
-//! single model. No filename pattern may delete a file.
+//! single model. No filename pattern may delete a staging file: ownership
+//! must be recorded in a manifest (`staging_name` exact-match or
+//! `staging_prefix`). (Separate stem-based helpers like `clean_dest_parts`
+//! handle files beside the finished download, not staging.)
 
 use crate::video_prefs::subtitle_content_languages;
 use crate::video_tools::VideoError;
@@ -231,20 +234,11 @@ pub fn clean_staging(dir: &Path) {
     clean_staging_in(&staging_root(), dir);
 }
 
-/// Whether a `grab-<id>-<suffix>` filename is a known Grab staging file.
-/// Only these are safe to delete; a user's own `grab-<id>-notes.txt` must survive.
 /// Remove Grab staging files for an item in the destination dir.
 /// Manifest ownership is the sole destructive authority: only the exact
-/// filenames recorded in the manifest are deleted. No filename pattern
-/// may delete a file.
-////// Routing: manifest `staging_name` exact-match first (precise), then the
-/// id-in-name pattern as fallback (covers a lost/corrupt manifest). Pattern
-/// matching only deletes `.part`/`.ytdl` sidecars — never a bare media file,
-/// which could be a completed recording or a user file.
-/// Remove Grab staging files for an item in the destination dir.
-/// Manifest ownership is the sole destructive authority: only the exact
-/// filenames recorded in the manifest are deleted. No filename pattern
-/// may delete a file.
+/// filenames recorded in the manifest (`staging_name`) and files under its
+/// recorded `staging_prefix` are deleted. A manifest that records no ownership
+/// is left alone.
 pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
     remove_manifest_owned_files(dest_dir, item_id);
 }
@@ -291,19 +285,16 @@ pub(crate) fn drop_empty_staging_root(root: &Path) {
 /// Sweep one destination's staging files: files for item IDs with no live row
 /// are reclaimed. A missing dest dir is a no-op.
 ///
-/// Two id sources: the legacy `grab-<id>-*` prefix (parsed directly) and the
-/// `.live.` marker pattern. The id-in-name scheme is NOT permanently deleted
-/// by pattern (fundamentally ambiguous without a marker), but abandoned
-/// orphans (no manifest, no live row, mtime > 7 days) are moved to trash
-/// (recoverable). Recordings are the user's only copy — preserve them. Only
-/// delete known staging file patterns; a user's own `grab-<id>-notes.txt`
-/// must survive.
+/// Startup sweep: reclaim staging files for items with no live row.
+/// Scans for manifest files, extracts their ids, and deletes exactly the
+/// files each manifest owns (`staging_name` / `staging_prefix`). A manifest
+/// that records no ownership is left alone. A user's own files are never
+/// touched: without a manifest, everything is preserved.
 ///
 pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>) {
-    // Manifest-driven cleanup: the ONLY destructive authority is the
-    // manifest's `staging_name`. No filename pattern may delete a file.
-    // Scan for manifest files, extract orphan IDs, delete exactly the names
-    // each manifest recorded.
+    // Manifest-driven cleanup: the ONLY destructive authority for staging
+    // files is the manifest's `staging_name` / `staging_prefix`. Scan for
+    // manifest files, extract orphan IDs, delete exactly what each manifest owns.
     let Ok(entries) = std::fs::read_dir(dest_dir) else {
         return;
     };
@@ -357,6 +348,12 @@ pub(crate) struct VideoManifest {
     /// Exact name for cleanup; the id is also baked into the filename itself
     /// so the file stays attributable if the manifest is lost.
     pub(crate) staging_name: Option<String>,
+    /// Ownership prefix for paths that stage many files (unified downloads):
+    /// e.g., "My Video.4.". Any file in the dest dir starting with this
+    /// (except `final.*`) is owned. Recorded in the manifest, so the
+    /// pattern is manifest-anchored, not inferred.
+    #[serde(default)]
+    pub(crate) staging_prefix: Option<String>,
 }
 
 impl VideoManifest {
@@ -497,23 +494,21 @@ pub fn sweep_partial_remuxes(staging: &Path) {
 /// Remove a leg's staging scratch, preserving completed recordings (do not delete the user's only copy).
 /// Only touches this item's files; never the dest dir itself or other files.
 ///
-/// Routing: manifest `staging_name` exact-match first (precise), then the
-/// id-in-name pattern as fallback (covers a lost/corrupt manifest). Pattern
-/// matching only deletes `.part`/`.ytdl` sidecars — never a bare media file.
+/// Ownership comes from the manifest's `staging_name` (exact) and
+/// `staging_prefix` (manifest-recorded prefix). `final.*` is always preserved.
 pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
-    // Manifest ownership is the SOLE destructive authority. Delete exactly
-    // the files the manifest recorded, except `final.*` (completed recordings
-    // that may be the user's only copy). No filename pattern may delete a file.
-    let Some(names) = manifest_owned_names(staging, item_id) else {
-        // No manifest = no proof of ownership = preserve everything.
-        // Still remove the manifest files themselves if they exist.
-        let _ = std::fs::remove_file(manifest_path(staging, item_id));
-        for path in legacy_manifest_paths(staging, item_id) {
-            let _ = std::fs::remove_file(path);
+    // Manifest ownership is the SOLE destructive authority for staging files.
+    // Delete exactly the files the manifest owns, except `final.*` (completed
+    // recordings that may be the user's only copy).
+    let Some(ownership) = manifest_ownership(staging, item_id) else {
+        // No ownership recorded. A valid manifest is left alone (it is the
+        // only proof of ownership); missing/corrupt sidecars are removed.
+        if read_manifest(staging, item_id).is_none() {
+            remove_manifest_files(staging, item_id);
         }
         return;
     };
-    for name in names {
+    for name in owned_file_names(staging, &ownership) {
         // Preserve completed recordings: they may be the user's only copy.
         if name.starts_with("final.") {
             continue;
@@ -623,33 +618,86 @@ fn legacy_manifest_paths(dest_dir: &Path, item_id: u64) -> [PathBuf; 3] {
     ]
 }
 
-/// The exact filenames owned by a manifest: the base staging name plus its
-/// sidecars. This is the SOLE authority for destructive cleanup — no filename
-/// pattern may delete a file without manifest proof.
-fn manifest_owned_names(dest_dir: &Path, item_id: u64) -> Option<Vec<String>> {
-    let base = read_manifest(dest_dir, item_id)?.staging_name?;
-    Some(vec![
-        base.clone(),
-        format!("{base}.part"),
-        format!("{base}.ytdl"),
-    ])
+/// Ownership proof from a manifest: exact staging names and/or a recorded prefix.
+/// Both are manifest-anchored (written by the runner), never inferred.
+struct ManifestOwnership {
+    /// Exact basenames: `staging_name` plus its `.part`/`.ytdl` sidecars.
+    exact: Vec<String>,
+    /// Prefix (e.g., `"My Video.4."`); any file in the dir starting with it
+    /// (except `final.*`) is owned.
+    prefix: Option<String>,
 }
 
-/// Delete exactly the files recorded by a manifest. The manifest's
-/// `staging_name` is the only proof of ownership; without it, files are
-/// preserved. The manifest file itself is always deleted (even if corrupt).
-fn remove_manifest_owned_files(dest_dir: &Path, item_id: u64) {
-    // Read owned names BEFORE deleting the manifest.
-    let names = manifest_owned_names(dest_dir, item_id);
-    // Always delete the manifest files themselves, even if content is invalid.
+fn manifest_ownership(dest_dir: &Path, item_id: u64) -> Option<ManifestOwnership> {
+    let m = read_manifest(dest_dir, item_id)?;
+    let mut exact = Vec::new();
+    if let Some(base) = &m.staging_name {
+        exact.push(base.clone());
+        exact.push(format!("{base}.part"));
+        exact.push(format!("{base}.ytdl"));
+    }
+    let prefix = m.staging_prefix.clone();
+    if exact.is_empty() && prefix.is_none() {
+        return None;
+    }
+    Some(ManifestOwnership { exact, prefix })
+}
+
+/// All owned basenames: exact names plus prefix matches (excluding `final.*`).
+/// Confined to `dest_dir`; symlinks are not followed (only the dir's own
+/// entries are considered).
+fn owned_file_names(dest_dir: &Path, ownership: &ManifestOwnership) -> Vec<String> {
+    let mut names = ownership.exact.clone();
+    if let Some(prefix) = &ownership.prefix {
+        if let Ok(entries) = std::fs::read_dir(dest_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                // Only regular files; never follow symlinks out of the dir.
+                let Ok(ft) = entry.file_type() else {
+                    continue;
+                };
+                if !ft.is_file() {
+                    continue;
+                }
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with(prefix.as_str())
+                        && !name.starts_with("final.")
+                        && !names.iter().any(|n| n == name)
+                    {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Delete the manifest sidecar files (canonical + legacy names).
+fn remove_manifest_files(dest_dir: &Path, item_id: u64) {
     let _ = std::fs::remove_file(manifest_path(dest_dir, item_id));
     for path in legacy_manifest_paths(dest_dir, item_id) {
         let _ = std::fs::remove_file(path);
     }
-    // Delete owned files only if manifest had valid staging_name.
-    let Some(names) = names else {
+}
+
+/// Delete exactly the files a manifest owns. The manifest's `staging_name`
+/// and `staging_prefix` are the only proof of ownership.
+///
+/// A manifest that exists but records no ownership is left alone: it is the
+/// only proof of ownership, and deleting it would make its files unreclaimable.
+/// A missing or corrupt manifest still has its sidecar files removed (they are
+/// ours), but nothing else is touched.
+fn remove_manifest_owned_files(dest_dir: &Path, item_id: u64) {
+    let Some(ownership) = manifest_ownership(dest_dir, item_id) else {
+        // No ownership recorded. If a manifest file exists and is valid, leave
+        // it alone. If it's missing/corrupt, remove the sidecars (ours).
+        if read_manifest(dest_dir, item_id).is_none() {
+            remove_manifest_files(dest_dir, item_id);
+        }
         return;
     };
+    // Read owned names BEFORE deleting the manifest.
+    let names = owned_file_names(dest_dir, &ownership);
     for name in names {
         let path = dest_dir.join(&name);
         // Basename only; never allow manifest data to escape dest_dir.
@@ -658,6 +706,7 @@ fn remove_manifest_owned_files(dest_dir: &Path, item_id: u64) {
         }
         let _ = std::fs::remove_file(path);
     }
+    remove_manifest_files(dest_dir, item_id);
 }
 
 pub(crate) fn read_manifest(dest_dir: &Path, item_id: u64) -> Option<VideoManifest> {
@@ -752,25 +801,20 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
     ResumePlan::Resume
 }
 /// Whether a staging filename may be the unified download's claimed output (never fragments, `.part` shells, sidecars, or metadata).
-/// The template uses `%(title)s`, so there's no fixed prefix. We accept any
-/// non-hidden file that isn't a known temp/fragment type. The staging dir is
-/// ours, so this is safe. Legacy `grab-media.`/`media.` prefixes still match.
+/// The template is `{stem}.{id}.%(ext)s`, so the output is a media file; the
+/// staging dir is the dest dir itself, so non-media files (photos, documents)
+/// must never be claimed.
 pub(crate) fn unified_candidate(file_name: &str) -> bool {
     let ext = Path::new(file_name).extension().and_then(|e| e.to_str());
-    // Must be a media file (not just "not excluded"). Includes containers
-    // like mka/ts that aren't in MEDIA_EXTS (used for staging matching).
+    // Media containers yt-dlp can produce. Anything else (jpg, webp, json,
+    // srt, part shells, temp files) is never the claimed output.
     const UNIFIED_MEDIA_EXTS: &[&str] = &[
-        "mp4", "webm", "mkv", "mka", "ts", "m4a", "mp3", "ogg", "wav", "flac", "opus",
+        "mp4", "webm", "mkv", "mka", "ts", "m4a", "mp3", "ogg", "wav", "flac", "opus", "avi",
+        "mov", "m4v", "aac", "weba", "flv", "f4v", "ogv", "wmv", "3gp", "3g2",
     ];
-    let is_media =
-        ext.is_some_and(|e| UNIFIED_MEDIA_EXTS.iter().any(|m| m.eq_ignore_ascii_case(e)));
-    is_media
+    ext.is_some_and(|e| UNIFIED_MEDIA_EXTS.iter().any(|m| m.eq_ignore_ascii_case(e)))
         && !file_name.starts_with('.')
         && !is_ytdlp_fragment(file_name)
-        && !matches!(
-            ext,
-            Some("part" | "srt" | "ytdl" | "temp" | "tmp" | "frag" | "json" | "manifest")
-        )
 }
 
 /// yt-dlp's own merge temp names (`<stem>.f<id>.<ext>`): never the claimed output. Pure.
@@ -819,7 +863,16 @@ mod tests {
     /// Unique scratch dir per test (never a shared staging parent).
     fn unique_dir(tag: &str) -> PathBuf {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        std::env::temp_dir().join(format!("grab-staging-{tag}-{}-{n}", std::process::id()))
+        // Nanos timestamp: the counter resets and PIDs recycle across runs,
+        // so neither alone guarantees uniqueness if a previous run left its dir behind.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "grab-staging-{tag}-{}-{n}-{nanos}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -838,6 +891,7 @@ mod tests {
             audio_ext: String::new(),
             final_bytes: None,
             staging_name: Some("Title.42.mp4".to_string()),
+            staging_prefix: None,
         };
         let manifest_json = serde_json::to_string(&manifest).unwrap();
         std::fs::write(staging.join(".42.manifest.json"), manifest_json).unwrap();
@@ -873,6 +927,7 @@ mod tests {
             audio_ext: String::new(),
             final_bytes: None,
             staging_name: Some("Title.44.mp4".to_string()),
+            staging_prefix: None,
         };
         let manifest_json = serde_json::to_string(&manifest).unwrap();
         std::fs::write(staging.join(".44.manifest.json"), manifest_json).unwrap();
@@ -993,7 +1048,6 @@ mod tests {
         std::fs::write(target.join("grab-42-.manifest.json"), b"{}").unwrap();
         let dest_dir = base.join("dest");
         std::fs::create_dir_all(&dest_dir).unwrap();
-        let _ = std::fs::remove_file(dest_dir.join("link"));
         std::os::unix::fs::symlink(&target, dest_dir.join("link")).unwrap();
         // A real orphan staging file in dest_dir (should be swept)
         std::fs::write(dest_dir.join("grab-42-.manifest.json"), b"{}").unwrap();
@@ -1278,6 +1332,7 @@ mod tests {
             audio_ext: String::new(),
             final_bytes: None,
             staging_name: Some("Title.42.mp4".to_string()),
+            staging_prefix: None,
         };
         let manifest_json = serde_json::to_string(&manifest).unwrap();
         std::fs::write(dir.join(".42.manifest.json"), manifest_json).unwrap();
@@ -1295,5 +1350,127 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prefix_owned_files_are_reclaimed() {
+        // A manifest recording staging_prefix owns every file under it
+        // (except final.*): the unified path's parts, ytdl, and fragments.
+        let dir = unique_dir("prefix-owned");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let manifest = VideoManifest {
+            page_url: "https://example.com".to_string(),
+            quality: "1080p".to_string(),
+            video_format_id: None,
+            video_ext: "mp4".to_string(),
+            audio_format_id: String::new(),
+            audio_ext: String::new(),
+            final_bytes: None,
+            staging_name: None,
+            staging_prefix: Some("My Video.42.".to_string()),
+        };
+        let manifest_json = serde_json::to_string(&manifest).unwrap();
+        std::fs::write(dir.join(".42.manifest.json"), manifest_json).unwrap();
+        std::fs::write(dir.join("My Video.42.f137.mp4.part"), b"part").unwrap();
+        std::fs::write(dir.join("My Video.42.f251.webm.part"), b"part").unwrap();
+        std::fs::write(dir.join("My Video.42.mp4.ytdl"), b"meta").unwrap();
+        // A recording another leg owns must survive.
+        std::fs::write(dir.join("final.recording.mp4"), b"keep").unwrap();
+        // A user file that merely shares a word must survive.
+        std::fs::write(dir.join("My Video.1080p.srt"), b"keep").unwrap();
+
+        remove_manifest_owned_files(&dir, 42);
+
+        assert!(
+            !dir.join("My Video.42.f137.mp4.part").exists(),
+            "prefix-owned part must go"
+        );
+        assert!(
+            !dir.join("My Video.42.f251.webm.part").exists(),
+            "prefix-owned part must go"
+        );
+        assert!(
+            !dir.join("My Video.42.mp4.ytdl").exists(),
+            "prefix-owned sidecar must go"
+        );
+        assert!(
+            dir.join("final.recording.mp4").exists(),
+            "another leg's recording must survive"
+        );
+        assert!(
+            dir.join("My Video.1080p.srt").exists(),
+            "user file outside the prefix must survive"
+        );
+        assert!(
+            !dir.join(".42.manifest.json").exists(),
+            "manifest goes after its files"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_without_ownership_survives_sweep() {
+        // A valid manifest that records neither staging_name nor
+        // staging_prefix is left alone: it is the only proof of ownership,
+        // and deleting it would make its files permanently unreclaimable.
+        let dir = unique_dir("manifest-no-ownership");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let manifest = VideoManifest {
+            page_url: "https://example.com".to_string(),
+            quality: "1080p".to_string(),
+            video_format_id: None,
+            video_ext: "mp4".to_string(),
+            audio_format_id: String::new(),
+            audio_ext: String::new(),
+            final_bytes: None,
+            staging_name: None,
+            staging_prefix: None,
+        };
+        let manifest_json = serde_json::to_string(&manifest).unwrap();
+        std::fs::write(dir.join(".42.manifest.json"), manifest_json).unwrap();
+        std::fs::write(dir.join("orphan.mp4.part"), b"scratch").unwrap();
+
+        remove_manifest_owned_files(&dir, 42);
+
+        assert!(
+            dir.join(".42.manifest.json").exists(),
+            "manifest without ownership must survive the sweep"
+        );
+        assert!(
+            dir.join("orphan.mp4.part").exists(),
+            "files without ownership proof must survive"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unified_template_never_equals_dest() {
+        // Staging is the dest dir itself: if the template could equal
+        // `dest`, the claim rename would target the file onto itself and
+        // fail with "file exists" after a successful download. The item id
+        // in the template keeps them distinct.
+        let staging = unique_dir("template-dest");
+        std::fs::create_dir_all(&staging).unwrap();
+        let dest = staging.join("My Video.mp4");
+        let template = crate::video_argv::unified_output_template(&staging, &dest, 42);
+        // yt-dlp substitutes %(ext)s; simulate the mp4 case.
+        let produced = staging.join("My Video.42.mp4");
+        assert_ne!(
+            produced, dest,
+            "template output must never equal the destination path"
+        );
+        assert!(
+            template
+                .to_str()
+                .unwrap()
+                .starts_with(staging.to_str().unwrap()),
+            "template stays in the staging dir"
+        );
+
+        let _ = std::fs::remove_dir_all(&staging);
     }
 }

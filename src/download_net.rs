@@ -378,4 +378,7 @@ pub(crate) fn tool_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .referer(false)
         .redirect(redirect_policy())
+        // A stalled server must not hang the install indefinitely.
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(60))
 }

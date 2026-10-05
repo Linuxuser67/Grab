@@ -1931,17 +1931,21 @@ impl DownloadManager {
         if name == item.filename() {
             return Ok(());
         }
-        if name.is_empty() || !sane_filename(name) {
+        // Cap at filesystem limits before validating (ENAMETOOLONG on >255 bytes).
+        let name = shorten_filename(name);
+        if name.is_empty() || !sane_filename(&name) {
             return Err(gettext("That isn't a valid file name"));
         }
         if item.status() == DownloadStatus::Done {
-            let new_path = std::path::PathBuf::from(item.dest_dir().to_string()).join(name);
+            let new_path = std::path::PathBuf::from(item.dest_dir().to_string()).join(&name);
             match rename_noreplace(&item.file_path(), &new_path) {
                 Ok(()) => {}
                 // Deleted behind our back: the label update below still applies.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
-                    return Err(format!("Could not rename {}: {e}", item.filename()));
+                    return Err(gettext("Could not rename {name}: {error}")
+                        .replace("{name}", item.filename().as_str())
+                        .replace("{error}", &e.to_string()));
                 }
             }
         }
@@ -2690,9 +2694,12 @@ impl DownloadManager {
         ));
         let write_tmp = || -> std::io::Result<()> {
             use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt as _;
             let mut f = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
+                // URLs can carry signed tokens: restrict to owner.
+                .mode(0o600)
                 .open(&tmp)?;
             f.write_all(text.as_bytes())?;
             f.sync_all()?;

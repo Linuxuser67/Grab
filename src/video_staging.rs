@@ -16,7 +16,6 @@
 use crate::video_prefs::subtitle_content_languages;
 use crate::video_tools::VideoError;
 use gettextrs::gettext;
-use gio::prelude::FileExt;
 use std::path::{Path, PathBuf};
 
 /// Shared root for tiny engine scratch (cookie dumps, probe output). Stays on
@@ -105,33 +104,6 @@ pub(crate) fn staging_name_matches_id(file_name: &str, item_id: u64) -> bool {
         return !after.is_empty() && after.chars().all(|c| c.is_ascii_digit());
     }
     false
-}
-
-/// Extract the item id from an id-in-name staging file, if it matches the
-/// scheme. Returns `None` for user files and legacy names.
-/// Used only for the recoverable trash path (never permanent deletion):
-/// without a marker the pattern is ambiguous, so deletion requires the
-/// manifest's exact name.
-pub(crate) fn staging_id_from_name(file_name: &str) -> Option<u64> {
-    let mut base = file_name;
-    if let Some(s) = base.strip_suffix(".part") {
-        base = s;
-    } else if let Some(s) = base.strip_suffix(".ytdl") {
-        base = s;
-    }
-    let dot = base.rfind('.')?;
-    if !MEDIA_EXTS.iter().any(|e| *e == &base[dot + 1..]) {
-        return None;
-    }
-    let stem_with_id = &base[..dot];
-    // The id is the last dot-component (or the part before -{n} in dedup).
-    let id_dot = stem_with_id.rfind('.')?;
-    let tail = &stem_with_id[id_dot + 1..];
-    // tail is "{id}" or "{id}-{n}".
-    let id_str = tail.split('-').next()?;
-    let id: u64 = id_str.parse().ok()?;
-    // Strict verify: the full match must hold.
-    staging_name_matches_id(file_name, id).then_some(id)
 }
 
 /// Whether any staging file exists for this id: the id allocator must skip
@@ -327,21 +299,6 @@ pub(crate) fn drop_empty_staging_root(root: &Path) {
 /// delete known staging file patterns; a user's own `grab-<id>-notes.txt`
 /// must survive.
 ///
-/// Age after which an id-in-name orphan with no manifest and no live row is
-/// considered abandoned and trashed (recoverable). Recent files are left
-/// alone: a crashed download may still resume.
-const ORPHAN_ABANDONED_AFTER: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
-
-/// Whether `path` is old enough to be considered abandoned (mtime older than
-/// `ORPHAN_ABANDONED_AFTER`). Unreadable mtime reads as not-abandoned.
-fn file_is_abandoned(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|mtime| std::time::SystemTime::now().duration_since(mtime).ok())
-        .is_some_and(|age| age >= ORPHAN_ABANDONED_AFTER)
-}
-
 pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>) {
     // Manifest-driven cleanup: the ONLY destructive authority is the
     // manifest's `staging_name`. No filename pattern may delete a file.
@@ -1228,76 +1185,6 @@ mod tests {
             dir.join("Title.12.mp4.part").exists(),
             "live id 12's part must survive"
         );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn orphan_trash_age_gate() {
-        // Ownership is proven by the manifest, never inferred from the filename.
-        // A `.part` file is trash-eligible only if its `.{id}.manifest.json`
-        // exists and both are abandoned (> 7 days). User files without a
-        // manifest are never touched.
-        // Tests `should_trash_orphan` directly: gio trash itself is env-dependent
-        // and not asserted here.
-        let dir = unique_dir("orphan-trash-age");
-        std::fs::create_dir_all(&dir).unwrap();
-        let keep = std::collections::HashSet::new();
-        let eight_days = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86400);
-        let set_old = |p: &std::path::Path| {
-            std::fs::File::options()
-                .write(true)
-                .open(p)
-                .unwrap()
-                .set_modified(eight_days)
-                .unwrap();
-        };
-
-        // Old orphan WITH abandoned manifest → trash.
-        let old = dir.join("Title.11.mp4.part");
-        std::fs::write(&old, b"orphan").unwrap();
-        set_old(&old);
-        let manifest11 = manifest_path(&dir, 11);
-        std::fs::write(&manifest11, b"{}").unwrap();
-        set_old(&manifest11);
-        assert!(
-            should_trash_orphan("Title.11.mp4.part", &old, &keep, &dir),
-            "abandoned orphan with abandoned manifest must be trash-eligible"
-        );
-
-        // Old file WITHOUT manifest: user file → never trash.
-        let user = dir.join("My.backup.12.mp4.part");
-        std::fs::write(&user, b"user").unwrap();
-        set_old(&user);
-        assert!(
-            !should_trash_orphan("My.backup.12.mp4.part", &user, &keep, &dir),
-            "user file without manifest must never be trash-eligible"
-        );
-
-        // Fresh manifest → may resume → leave alone.
-        let recent_part = dir.join("Title.13.mp4.part");
-        std::fs::write(&recent_part, b"recent").unwrap();
-        set_old(&recent_part);
-        std::fs::write(manifest_path(&dir, 13), b"{}").unwrap();
-        // Manifest just written (fresh).
-        assert!(
-            !should_trash_orphan("Title.13.mp4.part", &recent_part, &keep, &dir),
-            "fresh manifest must not be trash-eligible"
-        );
-
-        // Live row: in keep → leave alone.
-        let mut keep11 = std::collections::HashSet::new();
-        keep11.insert(11u64);
-        assert!(
-            !should_trash_orphan("Title.11.mp4.part", &old, &keep11, &dir),
-            "live row must not be trash-eligible"
-        );
-
-        // Non-matching file → never trash-eligible.
-        assert!(
-            !should_trash_orphan("user-video.mp4", &old, &keep, &dir),
-            "user file must not be trash-eligible"
-        );
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 

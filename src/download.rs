@@ -2293,63 +2293,76 @@ impl DownloadManager {
         if crate::torrent::is_torrent(&item.url()) {
             let url = item.url();
             let has_archive = crate::torrent::has_archive(&url);
-            crate::torrent::forget_download(id);
-            crate::torrent::delete_archive_for_url(&url);
-            self.remove(id);
-            // Archived single-file: resolve the actual filename from metadata.
-            // torrent_folder() returns item.file_path() which uses the item name,
-            // not the metadata name.
-            if has_archive
-                && let Some(single_path) = crate::torrent::single_file_path(
+
+            // Resolve all paths while the archive still exists. Both
+            // single_file_path() and torrent_folder() need the metadata.
+            let single_path = if has_archive {
+                crate::torrent::single_file_path(
                     std::path::Path::new(&item.dest_dir().to_string()),
                     &url,
                 )
-            {
-                return match gio::File::for_path(&single_path).trash(gio::Cancellable::NONE) {
-                    Ok(()) => Ok(()),
-                    Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {
-                        Ok(())
+            } else {
+                None
+            };
+            let folder = if single_path.is_none() {
+                Some(Self::torrent_folder(&item))
+            } else {
+                None
+            };
+
+            // Trash the actual owned files while metadata is still available.
+            if let Some(path) = single_path {
+                // Archived single-file: metadata name (e.g. "foo"), not the item name.
+                match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
+                    Ok(()) => {}
+                    Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
+                    Err(e) => {
+                        return Err(format!("Could not move {} to Trash: {e}", item.filename()));
                     }
-                    Err(e) => Err(format!("Could not move {} to Trash: {e}", item.filename())),
-                };
-            }
-            let path = Self::torrent_folder(&item);
-            // Single file (not a directory): trash it directly. The ownership
-            // concern applies only to directories that might be pre-existing.
-            if path.is_file() {
-                return match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
-                    Ok(()) => Ok(()),
-                    Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {
-                        Ok(())
-                    }
-                    Err(e) => Err(format!("Could not move {} to Trash: {e}", item.filename())),
-                };
-            }
-            if has_archive {
-                // .torrent: trash only the metadata files, not the whole folder.
-                // The folder may be pre-existing/shared. Trash it only if empty.
-                let folder_empty = crate::torrent::trash_torrent_contents(&path, &url);
-                if folder_empty {
-                    return match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
-                        Ok(()) => Ok(()),
-                        Err(e)
-                            if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) =>
-                        {
-                            Ok(())
-                        }
-                        Err(e) => Err(format!("Could not move {} to Trash: {e}", item.filename())),
-                    };
                 }
-                // Folder not empty: contains unrelated files, leave it in place.
-                return Ok(());
+            } else if let Some(path) = folder {
+                if path.is_file() {
+                    // Single file (not a directory): trash it directly.
+                    match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
+                        Ok(()) => {}
+                        Err(e)
+                            if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {
+                        }
+                        Err(e) => {
+                            return Err(format!("Could not move {} to Trash: {e}", item.filename()));
+                        }
+                    }
+                } else if has_archive {
+                    // Archived multi-file: trash only metadata files, folder if empty.
+                    let folder_empty = crate::torrent::trash_torrent_contents(&path, &url);
+                    if folder_empty {
+                        match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
+                            Ok(()) => {}
+                            Err(e)
+                                if e.kind::<gio::IOErrorEnum>()
+                                    == Some(gio::IOErrorEnum::NotFound) => {}
+                            Err(e) => {
+                                return Err(format!(
+                                    "Could not move {} to Trash: {e}",
+                                    item.filename()
+                                ));
+                            }
+                        }
+                    }
+                    // Folder not empty: contains unrelated files, leave it.
+                } else {
+                    // Magnet without archive: ownership unknown, leave in place.
+                    tracing::info!(
+                        "magnet delete: leaving folder in place (no archive to enumerate): {}",
+                        path.display()
+                    );
+                }
             }
-            // Magnet (no archive): we cannot enumerate the torrent's files, and
-            // the folder may be pre-existing. Leave it in place rather than
-            // trashing an entire user directory. The user can delete it manually.
-            tracing::info!(
-                "magnet delete: leaving folder in place (no archive to enumerate): {}",
-                path.display()
-            );
+
+            // Only remove metadata after the filesystem operation succeeded.
+            crate::torrent::forget_download(id);
+            crate::torrent::delete_archive_for_url(&url);
+            self.remove(id);
             return Ok(());
         }
         match gio::File::for_path(item.file_path()).trash(gio::Cancellable::NONE) {

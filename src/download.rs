@@ -2292,32 +2292,10 @@ impl DownloadManager {
         // Torrent rows: drop the session entry and archive, drop the row, then Trash the real files (they live in the recorded/recomputed folder, never the stub path).
         if crate::torrent::is_torrent(&item.url()) {
             let path = Self::torrent_folder(&item);
-            let url = item.url();
-            let has_archive = crate::torrent::has_archive(&url);
             crate::torrent::forget_download(id);
-            crate::torrent::delete_archive_for_url(&url);
+            crate::torrent::delete_archive_for_url(&item.url());
             self.remove(id);
-            if has_archive {
-                // Trash only the torrent's files, not the whole folder: the folder
-                // may be shared or pre-existing. Trash the folder itself only if empty.
-                let folder_empty = crate::torrent::trash_torrent_contents(&path, &url);
-                if folder_empty {
-                    return match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
-                        Ok(()) => Ok(()),
-                        Err(e)
-                            if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) =>
-                        {
-                            Ok(())
-                        }
-                        Err(e) => Err(format!("Could not move {} to Trash: {e}", item.filename())),
-                    };
-                }
-                // Folder not empty: it contains unrelated files, leave it.
-                return Ok(());
-            }
-            // Magnet (no archive): fall back to trashing the whole folder.
-            // TODO: only when Grab created the folder.
-            return match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
+            return match gio::File::for_path(path).trash(gio::Cancellable::NONE) {
                 Ok(()) => Ok(()),
                 Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {
                     Ok(())

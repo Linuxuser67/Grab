@@ -9,8 +9,6 @@ use std::{
 };
 
 use gettextrs::gettext;
-use gtk4::gio;
-use gtk4::gio::prelude::*;
 use gtk4::glib;
 use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ConnectionOptions, ListenerOptions,
@@ -207,11 +205,6 @@ pub(crate) fn read_torrent_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
 /// Bounded read of the archived `.torrent` behind a queue pseudo-URL (`None` when missing, unreadable, or over the ceiling).
 pub(crate) fn read_archive_bytes(url: &str) -> Option<Vec<u8>> {
     read_torrent_bytes(&archive_path_for_url(url)?)
-}
-
-/// Whether a `.torrent` archive exists for the URL (magnets have none).
-pub(crate) fn has_archive(url: &str) -> bool {
-    archive_path_for_url(url).is_some_and(|p| p.exists())
 }
 
 /// Parse `.torrent` bytes into a display list for the file picker (display strips bidi/controls and caps length; selection is index-based).
@@ -474,39 +467,6 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
             Err(_) => break,
         }
     }
-}
-
-/// Trash all files listed in the torrent metadata (not the whole folder).
-/// Skips hostile entries. Returns true if the folder is empty afterwards.
-pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> bool {
-    let Some(bytes) = read_archive_bytes(url) else {
-        return false;
-    };
-    let Ok((_, entries)) = torrent_file_list(&bytes) else {
-        return false;
-    };
-    let empty_keep: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for (i, entry) in entries.iter().enumerate() {
-        if let Some(target) = deletion_target(folder, i, &empty_keep, entry) {
-            // Trash the file (not permanent delete), then prune empty parents.
-            let _ = gio::File::for_path(&target).trash(gio::Cancellable::NONE);
-            // Prune parents left empty by the trash (they're empty, safe to remove).
-            let mut parent = target.parent();
-            while let Some(dir) = parent {
-                if dir == folder {
-                    break;
-                }
-                match std::fs::remove_dir(dir) {
-                    Ok(()) => parent = dir.parent(),
-                    Err(_) => break,
-                }
-            }
-        }
-    }
-    // Check if folder is empty.
-    std::fs::read_dir(folder)
-        .map(|mut entries| entries.next().is_none())
-        .unwrap_or(true)
 }
 
 /// Network plan for one torrent add, resolved from settings at spawn.

@@ -438,32 +438,30 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
     // Use unlinkat with O_NOFOLLOW on the parent: the filename is resolved
     // relative to the opened fd, so a symlink swapped in for the parent
     // after our check cannot divert the unlink.
-    if let Some(parent) = path.parent() {
-        if let Some(name) = path.file_name() {
-            use std::os::unix::ffi::OsStrExt;
-            let parent_c = std::ffi::CString::new(parent.as_os_str().as_bytes()).ok();
-            let name_c = std::ffi::CString::new(name.as_bytes()).ok();
-            if let (Some(parent_c), Some(name_c)) = (parent_c, name_c) {
-                // SAFETY: open with O_NOFOLLOW|O_DIRECTORY ensures parent is a real dir.
-                let fd = unsafe {
-                    libc::open(
-                        parent_c.as_ptr(),
-                        libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
-                    )
-                };
-                if fd >= 0 {
-                    // SAFETY: fd is valid, name_c is a valid C string.
-                    unsafe {
-                        libc::unlinkat(fd, name_c.as_ptr(), 0);
-                        libc::close(fd);
-                    }
-                } else {
-                    // Fallback: parent vanished or became a symlink; skip.
-                    return;
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        use std::os::unix::ffi::OsStrExt;
+        let parent_c = std::ffi::CString::new(parent.as_os_str().as_bytes()).ok();
+        let name_c = std::ffi::CString::new(name.as_bytes()).ok();
+        if let (Some(parent_c), Some(name_c)) = (parent_c, name_c) {
+            // SAFETY: open with O_NOFOLLOW|O_DIRECTORY ensures parent is a real dir.
+            let fd = unsafe {
+                libc::open(
+                    parent_c.as_ptr(),
+                    libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )
+            };
+            if fd >= 0 {
+                // SAFETY: fd is valid, name_c is a valid C string.
+                unsafe {
+                    libc::unlinkat(fd, name_c.as_ptr(), 0);
+                    libc::close(fd);
                 }
             } else {
-                let _ = std::fs::remove_file(path);
+                // Fallback: parent vanished or became a symlink; skip.
+                return;
             }
+        } else {
+            let _ = std::fs::remove_file(path);
         }
     }
     let mut parent = path.parent();

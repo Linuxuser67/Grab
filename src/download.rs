@@ -1937,7 +1937,7 @@ impl DownloadManager {
             return Err(gettext("That isn't a valid file name"));
         }
         if item.status() == DownloadStatus::Done {
-            let new_path = std::path::PathBuf::from(item.dest_dir().to_string()).join(name);
+            let new_path = std::path::PathBuf::from(item.dest_dir().to_string()).join(&name);
             match rename_noreplace(&item.file_path(), &new_path) {
                 Ok(()) => {}
                 // Deleted behind our back: the label update below still applies.

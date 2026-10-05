@@ -2048,13 +2048,51 @@ fn delete_download_trashes_torrent_subfolder() {
     store.append(&item);
 
     assert!(manager.delete_download(9).is_ok());
-    assert!(!folder.exists());
+    // P1 ownership model: a.txt is not in the torrent metadata, so the folder
+    // is left in place (not trashed). Only metadata files are trashed.
+    assert!(folder.exists());
+    assert!(folder.join("a.txt").exists());
     assert!(crate::torrent::archive_path_for_url(&pseudo).is_none());
     assert_eq!(store.n_items(), 0);
-    // Undo the test's own Trash litter.
+    // Undo the test's own Trash litter (metadata files were trashed).
     let trash = glib::user_data_dir().join("Trash");
     let _ = std::fs::remove_dir_all(trash.join("files/bar"));
     let _ = std::fs::remove_file(trash.join("info/bar.trashinfo"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn delete_download_magnet_leaves_preexisting_folder() {
+    // P1 regression: pre-existing dir + unrelated file + magnet with same name
+    // + Delete => unrelated file survives, folder left in place.
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("del-magnet-preexist");
+    let settings = test_settings();
+    let dir = glib::user_data_dir().join(format!("grab-delmag-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dest = dir.to_string_lossy().into_owned();
+    // Pre-existing directory with unrelated file.
+    let folder = dir.join("My Magnet");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("unrelated.txt"), b"do not trash").unwrap();
+
+    let store = gio::ListStore::new::<DownloadItem>();
+    let manager = DownloadManager::new(store.clone(), settings);
+    // Magnet URL (no archive).
+    let magnet = "magnet:?xt=urn:btih:1234567890123456789012345678901234567890&dn=My+Magnet";
+    let item = DownloadItem::new(10, magnet, "My Magnet", &dest);
+    item.set_output_dir(folder.to_string_lossy().into_owned());
+    item.set_status(DownloadStatus::Done);
+    store.append(&item);
+
+    assert!(manager.delete_download(10).is_ok());
+    // Folder and unrelated file must survive.
+    assert!(folder.exists());
+    assert_eq!(
+        std::fs::read(folder.join("unrelated.txt")).unwrap(),
+        b"do not trash"
+    );
+    assert_eq!(store.n_items(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -2292,16 +2292,37 @@ impl DownloadManager {
         // Torrent rows: drop the session entry and archive, drop the row, then Trash the real files (they live in the recorded/recomputed folder, never the stub path).
         if crate::torrent::is_torrent(&item.url()) {
             let path = Self::torrent_folder(&item);
+            let url = item.url();
+            let has_archive = crate::torrent::has_archive(&url);
             crate::torrent::forget_download(id);
-            crate::torrent::delete_archive_for_url(&item.url());
+            crate::torrent::delete_archive_for_url(&url);
             self.remove(id);
-            return match gio::File::for_path(path).trash(gio::Cancellable::NONE) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {
-                    Ok(())
+            if has_archive {
+                // .torrent: trash only the metadata files, not the whole folder.
+                // The folder may be pre-existing/shared. Trash it only if empty.
+                let folder_empty = crate::torrent::trash_torrent_contents(&path, &url);
+                if folder_empty {
+                    return match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
+                        Ok(()) => Ok(()),
+                        Err(e)
+                            if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) =>
+                        {
+                            Ok(())
+                        }
+                        Err(e) => Err(format!("Could not move {} to Trash: {e}", item.filename())),
+                    };
                 }
-                Err(e) => Err(format!("Could not move {} to Trash: {e}", item.filename())),
-            };
+                // Folder not empty: contains unrelated files, leave it in place.
+                return Ok(());
+            }
+            // Magnet (no archive): we cannot enumerate the torrent's files, and
+            // the folder may be pre-existing. Leave it in place rather than
+            // trashing an entire user directory. The user can delete it manually.
+            tracing::info!(
+                "magnet delete: leaving folder in place (no archive to enumerate): {}",
+                path.display()
+            );
+            return Ok(());
         }
         match gio::File::for_path(item.file_path()).trash(gio::Cancellable::NONE) {
             Ok(()) => {}

@@ -816,19 +816,19 @@ fn push_playlist_items_page(
         add_btn.connect_clicked(move |_| {
             let picked: Vec<usize> = list_selected(&picks);
             let picked_set: std::collections::HashSet<usize> = picked.into_iter().collect();
-            let chosen: Vec<(usize, &crate::media_types::PlaylistItem)> = playlist
+            // Owned clones for the async import below.
+            let chosen: Vec<(usize, crate::media_types::PlaylistItem)> = playlist
                 .items
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| picked_set.contains(i))
+                .map(|(i, item)| (i, item.clone()))
                 .collect();
             if chosen.is_empty() {
                 error_caption.set_text(&gettext("Select at least one item"));
                 error_caption.set_visible(true);
                 return;
             }
-            // One persist for the whole import, not one per row.
-            let _batch = manager.batch_guard();
             // Multiple items from one collection share a titled subfolder,
             // torrent-style; a lone item keeps the flat behavior.
             let dir = manager.resolve_dir(Some(&dest_dir.borrow()));
@@ -837,55 +837,68 @@ fn push_playlist_items_page(
             } else {
                 dir
             };
-            // One readdir for the whole import instead of one per row.
-            let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
-            // Story segments are addressable as their own pages: queue those so each row
-            // re-resolves its own segment instead of the tray (tray + format ids would
-            // download the first segment once per row). Attempted unconditionally:
-            // highlights and non-story URLs return None and keep the tray.
-            let mut failed: Option<String> = None;
-            for (i, item) in &chosen {
-                let page_url = crate::video_probe::story_segment_url(&playlist.page_url, &item.id)
-                    .unwrap_or_else(|| item.page_url.clone());
-                let settings = manager.settings();
-                let name = default_name_for(settings, &item.title, false);
-                match manager.enqueue_video_staged(
-                    &page_url,
-                    &dir,
-                    Some(&name),
-                    crate::media_types::VideoChoices {
-                        quality: manager.settings().video_quality(),
-                        audio_only: false,
-                        video_format_id: None,
-                        // Live streams queued from a playlist take the VOD
-                        // path; the worker re-resolves each item page anyway.
-                        is_live: false,
-                        // Remember the picked entry as fallback: story rows normally carry
-                        // segment pages and never need it, but highlights — and anything
-                        // unparseable at pick time — re-resolve the tray by this id.
-                        playlist_item_id: Some(item.id.to_string()),
-                    },
-                    &existing,
-                ) {
-                    Ok(enqueued) => apply_scheduled_at(&enqueued, scheduled_at),
-                    Err(e) => {
-                        failed = Some(e);
-                        break;
+            // The readdir can stall on network mounts: run it off the GTK
+            // thread, then do the import loop.
+            let manager = manager.clone();
+            let picks = picks.clone();
+            let error_caption = error_caption.clone();
+            let close_card = close_card.clone();
+            let page_url = playlist.page_url.clone();
+            glib::spawn_future_local(async move {
+                // One persist for the whole import, not one per row.
+                let _batch = manager.batch_guard();
+                // One readdir for the whole import instead of one per row.
+                let existing =
+                    crate::video_staging::dir_file_names_async(std::path::PathBuf::from(&dir))
+                        .await;
+                // Story segments are addressable as their own pages: queue those so each row
+                // re-resolves its own segment instead of the tray (tray + format ids would
+                // download the first segment once per row). Attempted unconditionally:
+                // highlights and non-story URLs return None and keep the tray.
+                let mut failed: Option<String> = None;
+                for (i, item) in &chosen {
+                    let item_page_url = crate::video_probe::story_segment_url(&page_url, &item.id)
+                        .unwrap_or_else(|| item.page_url.clone());
+                    let settings = manager.settings();
+                    let name = default_name_for(settings, &item.title, false);
+                    match manager.enqueue_video_staged(
+                        &item_page_url,
+                        &dir,
+                        Some(&name),
+                        crate::media_types::VideoChoices {
+                            quality: manager.settings().video_quality(),
+                            audio_only: false,
+                            video_format_id: None,
+                            // Live streams queued from a playlist take the VOD
+                            // path; the worker re-resolves each item page anyway.
+                            is_live: false,
+                            // Remember the picked entry as fallback: story rows normally carry
+                            // segment pages and never need it, but highlights — and anything
+                            // unparseable at pick time — re-resolve the tray by this id.
+                            playlist_item_id: Some(item.id.to_string()),
+                        },
+                        &existing,
+                    ) {
+                        Ok(enqueued) => apply_scheduled_at(&enqueued, scheduled_at),
+                        Err(e) => {
+                            failed = Some(e);
+                            break;
+                        }
                     }
+                    // Rows already queued stay queued on a partial failure: unselect
+                    // them so a retry submits only the remainder (dedupe is by
+                    // filename).
+                    picks[*i].set_active(false);
                 }
-                // Rows already queued stay queued on a partial failure: unselect
-                // them so a retry submits only the remainder (dedupe is by
-                // filename).
-                picks[*i].set_active(false);
-            }
-            if let Some(e) = failed {
-                error_caption.set_text(&e);
-                error_caption.set_visible(true);
-                return;
-            }
-            // Complete success collapses the whole New Download card; a partial failure stays
-            // on the picker so the remaining rows (unchecked above) can be retried.
-            close_card();
+                if let Some(e) = failed {
+                    error_caption.set_text(&e);
+                    error_caption.set_visible(true);
+                    return;
+                }
+                // Complete success collapses the whole New Download card; a partial failure stays
+                // on the picker so the remaining rows (unchecked above) can be retried.
+                close_card();
+            });
         });
     }
 

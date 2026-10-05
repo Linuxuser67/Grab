@@ -482,6 +482,14 @@ pub(crate) fn dir_file_names(dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Async `dir_file_names` for GTK-thread call sites: readdir can stall on
+/// network mounts, so it runs on the blocking pool.
+pub(crate) async fn dir_file_names_async(dir: std::path::PathBuf) -> Vec<String> {
+    gio::spawn_blocking(move || dir_file_names(&dir))
+        .await
+        .unwrap_or_default()
+}
+
 /// Reclaim `final.<n>.<ext>.part` leftovers from attempts that died mid-ffmpeg (never completed recordings).
 pub fn sweep_partial_remuxes(staging: &Path) {
     for name in dir_file_names(staging) {

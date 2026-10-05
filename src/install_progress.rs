@@ -143,6 +143,7 @@ pub fn run(
         SESSION.with(|s| {
             if let Some(pop) = s.borrow().as_ref() {
                 pop.popdown();
+                pop.unparent();
                 pop.set_parent(&btn);
                 pop.popup();
             }

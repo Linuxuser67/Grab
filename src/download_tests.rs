@@ -2076,6 +2076,44 @@ fn delete_download_magnet_leaves_preexisting_folder() {
 
 #[cfg(unix)]
 #[test]
+fn torrent_delete_refuses_symlinked_subdirectory() {
+    // P1 regression: folder/sub -> outside/, outside/b.txt is precious.
+    // Torrent metadata lists sub/b.txt. Delete must not trash outside/b.txt.
+    use std::os::unix::fs::symlink;
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("del-symlink");
+    let settings = test_settings();
+    let dir = glib::user_data_dir().join(format!("grab-delsym-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dest = dir.to_string_lossy().into_owned();
+    let outside = dir.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("b.txt"), b"precious").unwrap();
+    // Torrent folder with symlinked subdir.
+    let folder = dir.join("bar");
+    std::fs::create_dir_all(&folder).unwrap();
+    symlink(&outside, folder.join("sub")).unwrap();
+    // multi_torrent_bytes() contains sub/b.txt in its metadata.
+    let pseudo =
+        crate::torrent::archive_torrent_file("mymeta.torrent", &multi_torrent_bytes()).unwrap();
+
+    let store = gio::ListStore::new::<DownloadItem>();
+    let manager = DownloadManager::new(store.clone(), settings);
+    let item = DownloadItem::new(11, &pseudo, "mymeta", &dest);
+    item.set_output_dir(folder.to_string_lossy().into_owned());
+    item.set_status(DownloadStatus::Done);
+    store.append(&item);
+
+    assert!(manager.delete_download(11).is_ok());
+    // Precious file and symlink must survive.
+    assert_eq!(std::fs::read(outside.join("b.txt")).unwrap(), b"precious");
+    assert!(folder.join("sub").is_symlink());
+    assert_eq!(store.n_items(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
 fn torrent_folder_delete_path_never_follows_a_planted_link() {
     // The delete/trash path recomputes the engine's folder from the archive:
     // a symlink planted at that leaf must dedupe to a fresh folder, never

@@ -205,13 +205,11 @@ pub fn ensure_firefox_host() -> bool {
         tracing::warn!("firefox host manifest: cannot create dir: {e}");
         return false;
     }
-    // Atomic write via temp file.
-    let tmp_path = manifest_path.with_extension("json.tmp");
-    match fs::write(&tmp_path, &text).and_then(|()| fs::rename(&tmp_path, &manifest_path)) {
+    // Atomic write via uniquely-named temp file (create_new prevents symlink attacks).
+    match crate::file_names::atomic_replace_file(&manifest_path, text.as_bytes()) {
         Ok(()) => true,
         Err(e) => {
             tracing::warn!("firefox host manifest: write failed: {e}");
-            let _ = fs::remove_file(&tmp_path);
             false
         }
     }
@@ -282,13 +280,11 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
         let mut text = serde_json::to_string_pretty(&extra_chromium_manifest(&host_path, ids))
             .unwrap_or_default();
         text.push('\n');
-        // Atomic write via temp file.
-        let tmp = target.with_extension("json.tmp");
-        match fs::write(&tmp, &text).and_then(|()| fs::rename(&tmp, &target)) {
+        // Atomic write via uniquely-named temp file.
+        match crate::file_names::atomic_replace_file(&target, text.as_bytes()) {
             Ok(()) => changed = true,
             Err(e) => {
                 tracing::warn!("chromium host manifest: write failed: {e}");
-                let _ = fs::remove_file(&tmp);
             }
         }
     }
@@ -354,7 +350,8 @@ pub fn install(chromium_ids: &[String]) -> Result<Vec<PathBuf>, String> {
                 serde_json::to_string_pretty(&extra_chromium_manifest(&host_path, chromium_ids))
                     .unwrap_or_default();
             text.push('\n');
-            fs::write(&target, text).map_err(|e| format!("write {target:?}: {e}"))?;
+            crate::file_names::atomic_replace_file(&target, text.as_bytes())
+                .map_err(|e| format!("write {target:?}: {e}"))?;
             written.push(target);
         }
     }

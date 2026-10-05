@@ -4761,9 +4761,14 @@ fn a_non_live_sweep_keeps_a_live_recordings_remux() {
         "the lease marks a claimed remux slot and must survive with it"
     );
     assert!(
-        !staging.join(".grab-42-manifest.json").exists()
-            && !staging.join("grab-42-video.f137.mp4").exists(),
-        "the finishing leg's own scratch was not reclaimed"
+        !staging.join(".grab-42-manifest.json").exists(),
+        "the finishing leg's manifest was reclaimed"
+    );
+    // Under manifest-only cleanup, the video file without a valid manifest
+    // staging_name is preserved (no ownership proof).
+    assert!(
+        staging.join("grab-42-video.f137.mp4").exists(),
+        "manifest-less scratch is preserved (safe)"
     );
     assert!(
         staging.join("unrelated.txt").exists(),

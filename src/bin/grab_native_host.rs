@@ -12,12 +12,21 @@ use std::process::Command;
 const GRAB_SCHEME: &str = "grab://";
 
 fn find_opener() -> Option<String> {
-    // PATH lookup without a shell.
+    use std::os::unix::fs::PermissionsExt as _;
+    // PATH lookup without a shell. Empty entries (=> CWD) are skipped, and
+    // the executable bit is checked: a non-executable match is unusable.
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
         for name in ["xdg-open", "gio"] {
             let candidate = dir.join(name);
-            if candidate.is_file() {
+            if candidate.is_file()
+                && candidate
+                    .metadata()
+                    .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+            {
                 return Some(candidate.to_string_lossy().into_owned());
             }
         }
@@ -31,14 +40,25 @@ fn launch(url: &str) -> Result<(), String> {
     }
     let opener = find_opener().ok_or_else(|| "no URI opener found (xdg-open/gio)".to_string())?;
     let mut cmd = Command::new(&opener);
-    if opener.ends_with("gio") {
+    let is_gio = std::path::Path::new(&opener)
+        .file_name()
+        .is_some_and(|n| n == "gio");
+    if is_gio {
         cmd.arg("open");
     }
-    cmd.arg(url)
+    // Detach fully: the child must not inherit the browser's
+    // native-messaging pipe, and a reaper thread avoids zombies when the
+    // host stays alive across launches (persistent connectNative port).
+    let mut child = cmd
+        .arg(url)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    // Spawn and detach: the browser must not wait on the GUI app.
-    cmd.spawn().map_err(|e| e.to_string())?;
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 

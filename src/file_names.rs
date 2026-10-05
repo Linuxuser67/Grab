@@ -42,9 +42,17 @@ pub(crate) fn restrict_filename_ascii(name: &str) -> String {
     } else {
         stem
     };
-    match ext {
+    let out = match ext {
         Some(e) => format!("{stem}{}", fold_ascii_part(e)),
         None => stem,
+    };
+    // The fold keeps dots: "..ф" -> "..", "._" -> ".", "a.фф" -> "a.".
+    // Re-validate so a server-supplied name can't escape to parent dir.
+    let out = out.trim_end_matches('.').to_string();
+    if out.is_empty() || !sane_filename(&out) {
+        "file".to_string()
+    } else {
+        out
     }
 }
 
@@ -101,6 +109,7 @@ fn fold_ascii_part(part: &str) -> String {
         } else if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
             out.push(c);
         } else if c == '"' || c.is_control() {
+            continue;
         } else {
             out.push('_');
         }
@@ -347,36 +356,62 @@ pub(crate) fn piece_len(total: u64) -> u64 {
         .clamp(PIECE_MIN, PIECE_MAX)
 }
 
-/// Rename without clobbering: `renameat2(RENAME_NOREPLACE)`, else hard-link claim, else rename, else `create_new` copy cross-device.
+/// Rename without clobbering: `renameat2(RENAME_NOREPLACE)`, else hard-link claim, else atomic-claim rename, else `create_new` copy cross-device.
 pub(crate) fn rename_noreplace(
     old: &std::path::Path,
     new: &std::path::Path,
 ) -> std::io::Result<()> {
+    fn noreplace_unsupported(e: &std::io::Error) -> bool {
+        matches!(
+            e.raw_os_error(),
+            Some(c) if c == libc::ENOSYS || c == libc::EINVAL || c == libc::EOPNOTSUPP
+        )
+    }
+    fn link_unsupported(e: &std::io::Error) -> bool {
+        matches!(
+            e.raw_os_error(),
+            Some(c) if c == libc::EPERM || c == libc::EOPNOTSUPP || c == libc::ENOSYS
+        )
+    }
+
     #[cfg(target_os = "linux")]
     match rename_noreplace_sys(old, new) {
-        // Ancient kernels (< 3.15) lack renameat2 (ENOSYS 38): use the portable path.
-        Err(e) if e.raw_os_error() == Some(38) => {}
-        // Cross-device (EXDEV 18): copy through a `create_new` claim.
-        Err(e) if e.raw_os_error() == Some(18) => return copy_noreplace(old, new),
+        // Old kernels (< 3.15) lack renameat2 (ENOSYS); some filesystems
+        // reject the flag with EINVAL/EOPNOTSUPP: use the portable path.
+        Err(e) if noreplace_unsupported(&e) => {}
+        // Cross-device (EXDEV): copy through a `create_new` claim.
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => return copy_noreplace(old, new),
         r => return r,
     }
     // Claim `new` via link: `exists()` + rename is a TOCTOU; the errno arms below pick the fallback.
     loop {
         match std::fs::hard_link(old, new) {
-            Ok(()) => return std::fs::remove_file(old),
+            Ok(()) => {
+                if let Err(e) = std::fs::remove_file(old) {
+                    tracing::warn!("rename_noreplace: linked but could not unlink source: {e}");
+                }
+                return Ok(());
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) if e.raw_os_error() == Some(18) => {
+            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
                 return copy_noreplace(old, new);
             }
-            Err(e) if matches!(e.raw_os_error(), Some(1 | 95 | 38)) => {
-                // Filesystem doesn't support hard links (EPERM/EOPNOTSUPP/ENOSYS):
-                // fall back to clobbering rename. Warn: no-replace semantics are lost.
+            Err(e) if link_unsupported(&e) => {
+                // Filesystem doesn't support hard links: claim `new`
+                // atomically with create_new, then rename over our own
+                // placeholder. AlreadyExists propagates; cleanup on failure.
                 tracing::warn!(
-                    "rename_noreplace: hard link unsupported (errno {}), falling back to clobbering rename",
+                    "rename_noreplace: hard link unsupported (errno {}), using atomic claim",
                     e.raw_os_error().unwrap_or(-1)
                 );
-                return std::fs::rename(old, new);
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(new)?;
+                return std::fs::rename(old, new).inspect_err(|_| {
+                    let _ = std::fs::remove_file(new);
+                });
             }
             Err(e) => return Err(e),
         }
@@ -403,21 +438,11 @@ fn copy_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Resu
     std::fs::remove_file(old)
 }
 
-/// `renameat2` without libc: one syscall, three stable constants.
+/// `renameat2` via libc: no hand-declared FFI, no glibc version dependency.
 #[cfg(target_os = "linux")]
 fn rename_noreplace_sys(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt as _;
-    unsafe extern "C" {
-        fn renameat2(
-            olddirfd: std::os::raw::c_int,
-            oldpath: *const std::os::raw::c_char,
-            newdirfd: std::os::raw::c_int,
-            newpath: *const std::os::raw::c_char,
-            flags: std::os::raw::c_uint,
-        ) -> std::os::raw::c_int;
-    }
-    const AT_FDCWD: std::os::raw::c_int = -100;
-    const RENAME_NOREPLACE: std::os::raw::c_uint = 1; // renameat2(2)
+    const RENAME_NOREPLACE: std::os::raw::c_ulong = 1; // renameat2(2)
     // Names never contain NUL; fail visibly instead of truncating if one slips through.
     let cvt = |p: &std::path::Path| {
         std::ffi::CString::new(p.as_os_str().as_bytes())
@@ -426,10 +451,11 @@ fn rename_noreplace_sys(old: &std::path::Path, new: &std::path::Path) -> std::io
     let (old, new) = (cvt(old)?, cvt(new)?);
     // SAFETY: NUL-terminated buffers outlive the call; the rest are integers.
     let r = unsafe {
-        renameat2(
-            AT_FDCWD,
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
             old.as_ptr(),
-            AT_FDCWD,
+            libc::AT_FDCWD,
             new.as_ptr(),
             RENAME_NOREPLACE,
         )
@@ -618,5 +644,29 @@ mod tests {
 
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn restrict_ascii_never_returns_dot_or_dotdot() {
+        // Regression: the fold kept dots, so server-supplied names like
+        // "..ф" folded to ".." (parent dir escape).
+        for (input, bad) in [("..ф", ".."), ("._", "."), ("a.фф", "a.")] {
+            let out = restrict_filename_ascii(input);
+            assert!(
+                out != bad,
+                "restrict_filename_ascii({input:?}) returned {out:?}, want not {bad:?}"
+            );
+            assert!(
+                sane_filename(&out),
+                "restrict_filename_ascii({input:?}) returned insane {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn restrict_ascii_dot_cases_fall_back_to_file() {
+        assert_eq!(restrict_filename_ascii("..ф"), "file");
+        assert_eq!(restrict_filename_ascii("._"), "file");
+        assert_eq!(restrict_filename_ascii("a.фф"), "a");
     }
 }

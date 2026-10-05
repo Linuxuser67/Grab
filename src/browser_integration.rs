@@ -60,13 +60,27 @@ fn install_binary() -> Result<PathBuf, String> {
         "grab-native-host binary not found next to the Grab executable".to_string()
     })?;
     let dst = install_dir.join("grab-native-host");
-    fs::copy(&src, &dst).map_err(|e| format!("copy host binary: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut perms = fs::metadata(&dst).map_err(|e| e.to_string())?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&dst, perms).map_err(|e| e.to_string())?;
+    // Skip when the installed copy is already identical (avoids churn and
+    // detects a stale binary after upgrades via the byte mismatch).
+    let fresh = fs::read(&src)
+        .ok()
+        .zip(fs::read(&dst).ok())
+        .is_some_and(|(a, b)| a == b);
+    if !fresh {
+        // Atomic replace: copy to a temp file, chmod, then rename over the
+        // destination. rename(2) is safe while the old binary is executing
+        // (the running image keeps its inode); a direct copy would hit
+        // ETXTBSY.
+        let tmp = install_dir.join(format!(".grab-native-host.{}", std::process::id()));
+        fs::copy(&src, &tmp).map_err(|e| format!("copy host binary: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut perms = fs::metadata(&tmp).map_err(|e| e.to_string())?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&tmp, perms).map_err(|e| e.to_string())?;
+        }
+        fs::rename(&tmp, &dst).map_err(|e| format!("install host binary: {e}"))?;
     }
     Ok(dst)
 }
@@ -112,7 +126,10 @@ pub fn ensure_firefox_host() -> bool {
     // (Re)install the binary and manifest.
     let host_bin = match install_binary() {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(e) => {
+            tracing::warn!("browser host install: {e}");
+            return false;
+        }
     };
     let host_path = host_bin.to_string_lossy().into_owned();
     let manifest = serde_json::json!({
@@ -142,7 +159,10 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
     };
     let host_bin = match install_binary() {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(e) => {
+            tracing::warn!("browser host install: {e}");
+            return false;
+        }
     };
     let host_path = host_bin.to_string_lossy().into_owned();
     let mut changed = false;
@@ -205,6 +225,8 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
     }
     changed
 }
+
+/// Install the native host binary and browser manifests.
 ///
 /// `chromium_ids` are the extension IDs from `chrome://extensions` (unpacked
 /// installs get a generated ID). The Firefox add-on ID is fixed, so its

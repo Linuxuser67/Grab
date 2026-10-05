@@ -34,9 +34,6 @@ fn is_remote_torrent_url(uri: &url::Url) -> bool {
             .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
 }
 
-/// Fetch a remote .torrent URL and run it through the torrent intake, mirroring
-/// the local .torrent file path: the picker for multi-file torrents, direct
-/// enqueue otherwise.
 /// How long a remote .torrent fetch may take overall (headers + body).
 /// Per-request, not on the shared client builder: a total timeout there
 /// would kill slow legitimate downloads too.
@@ -90,6 +87,9 @@ async fn fetch_remote_torrent_bytes(
     Ok(bytes)
 }
 
+/// Fetch a remote .torrent URL and run it through the torrent intake, mirroring
+/// the local .torrent file path: the picker for multi-file torrents, direct
+/// enqueue otherwise.
 async fn intake_remote_torrent(
     manager: Rc<DownloadManager>,
     toasts: Rc<adw::ToastOverlay>,

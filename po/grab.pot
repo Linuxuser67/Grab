@@ -205,6 +205,10 @@ msgstr ""
 msgid "Could not rename {name}: {error}"
 msgstr ""
 
+#: src/inline_add.rs:874
+msgid "Could not prepare the download folder"
+msgstr ""
+
 #: src/download_fetch.rs:182 src/download_fetch.rs:709
 msgid "File changed on server"
 msgstr ""

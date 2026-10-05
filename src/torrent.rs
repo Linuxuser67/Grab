@@ -386,6 +386,12 @@ pub(crate) fn deletion_target(
     if keep.contains(&index) || is_hostile_entry(&entry.raw_path) {
         return None;
     }
+    // Skip lossy paths: from_utf8_lossy replaced invalid bytes with U+FFFD,
+    // so the raw_path may not match what's on disk. A miss is harmless,
+    // but a collision could target the wrong file.
+    if entry.raw_path.contains('\u{FFFD}') {
+        return None;
+    }
     Some(folder.join(&entry.raw_path))
 }
 
@@ -399,6 +405,12 @@ fn is_hostile_entry(path: &str) -> bool {
 /// Refuses if any intermediate component under `folder` is a symlink:
 /// a pre-existing symlinked subdirectory would otherwise divert the
 /// deletion outside the torrent folder.
+///
+/// TOCTOU note: the symlink check and the remove are not atomic. A symlink
+/// swapped in between could divert the delete. Exploiting this requires
+/// write access to the download directory, so the risk is low. For the
+/// file itself we use `unlinkat` with `O_NOFOLLOW` on the parent fd, which
+/// closes the window for the final component.
 fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Path) {
     // Walk from `path` up to (not including) `folder`; if any component
     // is a symlink, bail — the target may point outside `folder`.
@@ -416,7 +428,35 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
         }
         current = dir.parent();
     }
-    let _ = std::fs::remove_file(path);
+    // Use unlinkat with O_NOFOLLOW on the parent: the filename is resolved
+    // relative to the opened fd, so a symlink swapped in for the parent
+    // after our check cannot divert the unlink.
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        use std::os::unix::ffi::OsStrExt;
+        let parent_c = std::ffi::CString::new(parent.as_os_str().as_bytes()).ok();
+        let name_c = std::ffi::CString::new(name.as_bytes()).ok();
+        if let (Some(parent_c), Some(name_c)) = (parent_c, name_c) {
+            // SAFETY: open with O_NOFOLLOW|O_DIRECTORY ensures parent is a real dir.
+            let fd = unsafe {
+                libc::open(
+                    parent_c.as_ptr(),
+                    libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )
+            };
+            if fd >= 0 {
+                // SAFETY: fd is valid, name_c is a valid C string.
+                unsafe {
+                    libc::unlinkat(fd, name_c.as_ptr(), 0);
+                    libc::close(fd);
+                }
+            } else {
+                // Fallback: parent vanished or became a symlink; skip.
+                return;
+            }
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
     let mut parent = path.parent();
     while let Some(dir) = parent {
         if dir == folder {

@@ -563,7 +563,10 @@ fn picker_enter_confirms(page: &adw::NavigationPage, add_btn: &gtk4::Button) {
     let add_btn = add_btn.clone();
     key.connect_key_pressed(move |_, keyval, _, _| {
         if keyval == gtk4::gdk::Key::Return || keyval == gtk4::gdk::Key::KP_Enter {
-            add_btn.emit_clicked();
+            // emit_clicked bypasses sensitivity; skip while the import is in flight.
+            if add_btn.is_sensitive() {
+                add_btn.emit_clicked();
+            }
             glib::Propagation::Stop
         } else {
             glib::Propagation::Proceed
@@ -815,6 +818,12 @@ fn push_playlist_items_page(
         let picks = picks.clone();
         let add_btn_click = add_btn.clone();
         add_btn_click.connect_clicked(move |_| {
+            // Guard against re-entry: Enter emits clicked directly, bypassing
+            // the sensitivity check, so a second press while the import is in
+            // flight would enqueue duplicates.
+            if !add_btn.is_sensitive() {
+                return;
+            }
             let picked: Vec<usize> = list_selected(&picks);
             let picked_set: std::collections::HashSet<usize> = picked.into_iter().collect();
             // Owned clones for the async import below.

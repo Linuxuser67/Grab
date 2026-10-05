@@ -1927,12 +1927,13 @@ impl DownloadManager {
                 ));
             }
         }
-        let name = new_name.trim();
+        // Cap at filesystem limits before the equality check: a >240-byte
+        // name that shortens to the current filename must be a no-op, not
+        // a rename_noreplace(old, old) -> EEXIST.
+        let name = shorten_filename(new_name.trim());
         if name == item.filename() {
             return Ok(());
         }
-        // Cap at filesystem limits before validating (ENAMETOOLONG on >255 bytes).
-        let name = shorten_filename(name);
         if name.is_empty() || !sane_filename(&name) {
             return Err(gettext("That isn't a valid file name"));
         }

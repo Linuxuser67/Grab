@@ -101,14 +101,12 @@ pub fn ensure_firefox_host() -> bool {
         .join(format!("{HOST_NAME}.json"));
 
     // Already installed and the binary exists? Nothing to do.
-    if let Ok(text) = fs::read_to_string(&manifest_path) {
-        if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(path) = manifest.get("path").and_then(|p| p.as_str()) {
-                if Path::new(path).is_file() {
-                    return false;
-                }
-            }
-        }
+    if let Ok(text) = fs::read_to_string(&manifest_path)
+        && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text)
+        && let Some(path) = manifest.get("path").and_then(|p| p.as_str())
+        && Path::new(path).is_file()
+    {
+        return false;
     }
 
     // (Re)install the binary and manifest.
@@ -175,18 +173,24 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
         if !cfg.is_dir() {
             continue;
         }
-        let target = cfg.join("NativeMessagingHosts").join(format!("{HOST_NAME}.json"));
+        let target = cfg
+            .join("NativeMessagingHosts")
+            .join(format!("{HOST_NAME}.json"));
         // Skip if already correct.
-        if let Ok(text) = fs::read_to_string(&target) {
-            if let Ok(m) = serde_json::from_str::<serde_json::Value>(&text) {
-                let origins: Vec<String> = m
-                    .get("allowed_origins")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
-                    .unwrap_or_default();
-                if origins == chromium_origins {
-                    continue;
-                }
+        if let Ok(text) = fs::read_to_string(&target)
+            && let Ok(m) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            let origins: Vec<String> = m
+                .get("allowed_origins")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if origins == chromium_origins {
+                continue;
             }
         }
         if let Some(parent) = target.parent() {

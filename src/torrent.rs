@@ -181,8 +181,12 @@ pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, Str
         {
             Ok(mut f) => {
                 use std::io::Write;
-                f.write_all(bytes)
-                    .map_err(|e| format!("Cannot store torrent file: {e}"))?;
+                // Clean up partial file on write/sync failure: a corrupt
+                // archive would otherwise linger and collide later.
+                if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(format!("Cannot store torrent file: {e}"));
+                }
                 return Ok(format!("torrent:{}", path.to_string_lossy()));
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -515,12 +519,31 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
 
 /// Trash all files listed in the torrent metadata (not the whole folder).
 /// Skips hostile entries and U+FFFD paths. Returns true if the folder is empty afterwards.
-pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> bool {
+/// Whether any intermediate component of `path` under `folder` is a symlink
+/// or escapes `folder`. Used to refuse trashing through a symlinked directory.
+fn path_has_symlink_component(path: &std::path::Path, folder: &std::path::Path) -> bool {
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir == folder {
+            return false;
+        }
+        if !dir.starts_with(folder) {
+            return true;
+        }
+        if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+            return true;
+        }
+        current = dir.parent();
+    }
+    true
+}
+
+pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> Result<bool, String> {
     let Some(bytes) = read_archive_bytes(url) else {
-        return false;
+        return Err("no torrent archive".to_string());
     };
     let Ok(meta) = librqbit::torrent_from_bytes(&bytes) else {
-        return false;
+        return Err("invalid torrent metadata".to_string());
     };
     let multi = is_multi_file(meta.info.data.files.as_deref());
     if !multi {
@@ -529,19 +552,37 @@ pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> boo
         let name = safe_torrent_name(raw_torrent_name(meta.info.data.name.as_ref()))
             .unwrap_or_else(|| meta.info_hash.as_string());
         let target = folder.join(name);
-        let _ = gio::File::for_path(&target).trash(gio::Cancellable::NONE);
-        return std::fs::read_dir(folder)
+        if path_has_symlink_component(&target, folder) {
+            return Err(format!(
+                "refusing to trash through symlink: {}",
+                target.display()
+            ));
+        }
+        match gio::File::for_path(&target).trash(gio::Cancellable::NONE) {
+            Ok(()) => {}
+            Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
+            Err(e) => return Err(format!("could not move {} to Trash: {e}", target.display())),
+        }
+        return Ok(std::fs::read_dir(folder)
             .map(|mut entries| entries.next().is_none())
-            .unwrap_or(true);
+            .unwrap_or(true));
     }
     let Ok((_, entries)) = torrent_file_list(&bytes) else {
-        return false;
+        return Err("invalid torrent file list".to_string());
     };
     let empty_keep: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (i, entry) in entries.iter().enumerate() {
         if let Some(target) = deletion_target(folder, i, &empty_keep, entry) {
+            // Refuse symlinked intermediate components (same as remove_file_and_prune_parents).
+            if path_has_symlink_component(&target, folder) {
+                continue;
+            }
             // Trash the file (not permanent delete), then prune empty parents.
-            let _ = gio::File::for_path(&target).trash(gio::Cancellable::NONE);
+            match gio::File::for_path(&target).trash(gio::Cancellable::NONE) {
+                Ok(()) => {}
+                Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
+                Err(e) => return Err(format!("could not move {} to Trash: {e}", target.display())),
+            }
             // Prune parents left empty by the trash (they're empty, safe to remove).
             let mut parent = target.parent();
             while let Some(dir) = parent {
@@ -556,9 +597,9 @@ pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> boo
         }
     }
     // Check if folder is empty.
-    std::fs::read_dir(folder)
+    Ok(std::fs::read_dir(folder)
         .map(|mut entries| entries.next().is_none())
-        .unwrap_or(true)
+        .unwrap_or(true))
 }
 
 /// Network plan for one torrent add, resolved from settings at spawn.

@@ -201,6 +201,10 @@ msgstr ""
 msgid "That isn't a valid file name"
 msgstr ""
 
+#: src/download.rs:1947
+msgid "Could not rename {name}: {error}"
+msgstr ""
+
 #: src/download_fetch.rs:182 src/download_fetch.rs:709
 msgid "File changed on server"
 msgstr ""

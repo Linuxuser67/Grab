@@ -487,7 +487,10 @@ pub(crate) fn dir_file_names(dir: &Path) -> Vec<String> {
 pub(crate) async fn dir_file_names_async(dir: std::path::PathBuf) -> Vec<String> {
     gio::spawn_blocking(move || dir_file_names(&dir))
         .await
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!("readdir task failed: {e:?}");
+            Vec::new()
+        })
 }
 
 /// Reclaim `final.<n>.<ext>.part` leftovers from attempts that died mid-ffmpeg (never completed recordings).

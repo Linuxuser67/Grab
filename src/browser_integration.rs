@@ -50,7 +50,7 @@ fn find_host_binary() -> Option<PathBuf> {
 }
 
 /// Install the host binary to `~/.local/share/grab-native-host/`.
-fn install_binary() -> Result<PathBuf, String> {
+fn install_binary() -> Result<(PathBuf, bool), String> {
     let install_dir = home_dir()
         .map(|h| h.join(".local/share/grab-native-host"))
         .ok_or_else(|| "HOME is not set".to_string())?;
@@ -60,29 +60,52 @@ fn install_binary() -> Result<PathBuf, String> {
         "grab-native-host binary not found next to the Grab executable".to_string()
     })?;
     let dst = install_dir.join("grab-native-host");
-    // Skip when the installed copy is already identical (avoids churn and
-    // detects a stale binary after upgrades via the byte mismatch).
-    let fresh = fs::read(&src)
-        .ok()
-        .zip(fs::read(&dst).ok())
-        .is_some_and(|(a, b)| a == b);
+    // Skip when the installed copy is already identical and executable
+    // (avoids churn; a byte mismatch detects a stale binary after upgrades).
+    // Compare lengths first: only read when they match.
+    let fresh = {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt as _;
+        let src_len = fs::metadata(&src).ok().map(|m| m.len());
+        let dst_meta = fs::metadata(&dst).ok();
+        let len_match = src_len.is_some_and(|l| dst_meta.as_ref().is_some_and(|m| m.len() == l));
+        #[cfg(unix)]
+        let exec_ok = dst_meta
+            .as_ref()
+            .is_some_and(|m| m.permissions().mode() & 0o111 != 0);
+        #[cfg(not(unix))]
+        let exec_ok = true;
+        len_match
+            && exec_ok
+            && fs::read(&src)
+                .ok()
+                .zip(fs::read(&dst).ok())
+                .is_some_and(|(a, b)| a == b)
+    };
     if !fresh {
         // Atomic replace: copy to a temp file, chmod, then rename over the
         // destination. rename(2) is safe while the old binary is executing
         // (the running image keeps its inode); a direct copy would hit
         // ETXTBSY.
         let tmp = install_dir.join(format!(".grab-native-host.{}", std::process::id()));
-        fs::copy(&src, &tmp).map_err(|e| format!("copy host binary: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mut perms = fs::metadata(&tmp).map_err(|e| e.to_string())?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&tmp, perms).map_err(|e| e.to_string())?;
+        let install = || -> Result<(), String> {
+            fs::copy(&src, &tmp).map_err(|e| format!("copy host binary: {e}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mut perms = fs::metadata(&tmp).map_err(|e| e.to_string())?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&tmp, perms).map_err(|e| e.to_string())?;
+            }
+            fs::rename(&tmp, &dst).map_err(|e| format!("install host binary: {e}"))?;
+            Ok(())
+        };
+        if let Err(e) = install() {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
         }
-        fs::rename(&tmp, &dst).map_err(|e| format!("install host binary: {e}"))?;
     }
-    Ok(dst)
+    Ok((dst, !fresh))
 }
 
 /// Manifest JSON for the extra Chromium channels (same shape the crate writes).
@@ -114,24 +137,27 @@ pub fn ensure_firefox_host() -> bool {
         .join(".mozilla/native-messaging-hosts")
         .join(format!("{HOST_NAME}.json"));
 
-    // Already installed and the binary exists? Nothing to do.
-    if let Ok(text) = fs::read_to_string(&manifest_path)
-        && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text)
-        && let Some(path) = manifest.get("path").and_then(|p| p.as_str())
-        && Path::new(path).is_file()
-    {
-        return false;
-    }
-
-    // (Re)install the binary and manifest.
-    let host_bin = match install_binary() {
-        Ok(p) => p,
+    // Install/refresh the binary first: the manifest check below can't
+    // detect a stale binary after an upgrade.
+    let (host_bin, replaced) = match install_binary() {
+        Ok(v) => v,
         Err(e) => {
             tracing::warn!("browser host install: {e}");
             return false;
         }
     };
     let host_path = host_bin.to_string_lossy().into_owned();
+
+    // Manifest already correct? Nothing more to do.
+    if let Ok(text) = fs::read_to_string(&manifest_path)
+        && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text)
+        && let Some(path) = manifest.get("path").and_then(|p| p.as_str())
+        && path == host_path
+    {
+        return replaced;
+    }
+
+    // (Re)install the manifest.
     let manifest = serde_json::json!({
         "name": HOST_NAME,
         "description": DESCRIPTION,
@@ -157,8 +183,8 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
         Some(h) => h,
         None => return false,
     };
-    let host_bin = match install_binary() {
-        Ok(p) => p,
+    let (host_bin, _) = match install_binary() {
+        Ok(v) => v,
         Err(e) => {
             tracing::warn!("browser host install: {e}");
             return false;
@@ -236,7 +262,7 @@ pub fn install(chromium_ids: &[String]) -> Result<Vec<PathBuf>, String> {
         return Err(flatpak_instructions().to_string());
     }
     let home = home_dir().ok_or_else(|| "HOME is not set".to_string())?;
-    let host_bin = install_binary()?;
+    let (host_bin, _) = install_binary()?;
     let host_path = host_bin.to_string_lossy().into_owned();
 
     let chromium_origins: Vec<String> = chromium_ids

@@ -46,11 +46,7 @@ fn main() {
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let mut output = io::stdout();
-    loop {
-        let raw = match decode_message(&mut input, MAX_FROM_BROWSER) {
-            Ok(raw) => raw,
-            Err(_) => break, // EOF or corrupt frame: browser is gone.
-        };
+    while let Ok(raw) = decode_message(&mut input, MAX_FROM_BROWSER) {
         let url = serde_json::from_str::<serde_json::Value>(&raw)
             .ok()
             .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_owned))

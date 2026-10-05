@@ -2170,14 +2170,50 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
 
     // Sync the form skeleton while typing. The lookup itself never fires
     // on its own: pasting or editing only updates the form, and the resolve
-    // starts when Add Download (or Enter) is pressed.
+    // starts when Add Download (or Enter) is pressed — unless auto-add is
+    // on, in which case a pasted/typed URL auto-starts the lookup (debounced)
+    // and the download follows automatically on resolve.
     {
         let probe = Rc::clone(&probe);
         let step2 = step.clone();
         let file_row2 = file_row.clone();
+        let submit_auto = submit.clone();
+        let settings_auto = manager.settings().clone();
+        let debounce: Rc<std::cell::RefCell<Option<glib::SourceId>>> =
+            Rc::new(std::cell::RefCell::new(None));
+        // Only auto-trigger for URLs that look complete: a parseable
+        // http(s) URL with a dotted host, or a magnet link. This avoids
+        // firing on partial input while the user is still typing.
+        let url_looks_complete = |text: &str| -> bool {
+            if text.starts_with("magnet:?") {
+                return true;
+            }
+            url::Url::parse(text).is_ok_and(|u| {
+                matches!(u.scheme(), "http" | "https")
+                    && u.host_str().is_some_and(|h| h.contains('.'))
+            })
+        };
         url_entry.connect_changed(move |row| {
             clear_field_error(row);
             let text = row.text().trim().to_string();
+            // Auto-add: debounce the lookup so it fires after the user
+            // pauses typing/pasting, not on every keystroke.
+            if settings_auto.auto_add_downloads() && url_looks_complete(&text) {
+                if let Some(id) = debounce.borrow_mut().take() {
+                    id.remove();
+                }
+                let s = submit_auto.clone();
+                let id = glib::timeout_add_local(
+                    std::time::Duration::from_millis(800),
+                    move || {
+                        s(true);
+                        glib::ControlFlow::Break
+                    },
+                );
+                *debounce.borrow_mut() = Some(id);
+            } else if let Some(id) = debounce.borrow_mut().take() {
+                id.remove();
+            }
             // Tick icon appears only when there's a URL to submit: add it
             // on first text, remove it when cleared.
             let has_text = !text.is_empty();

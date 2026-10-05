@@ -521,7 +521,7 @@ async fn attempt_once(
             return Err(gettext("Server restarted the download with a smaller file"));
         }
         let mut file = if partial {
-            open_nofollow(tokio::fs::OpenOptions::new().append(true), &ctx.dest)
+            open_nofollow(|o| o.append(true), &ctx.dest)
                 .await
                 .map_err(|e| format!("Cannot write file: {e}"))?
         } else if claim {
@@ -540,10 +540,9 @@ async fn attempt_once(
             }
         } else {
             open_nofollow(
-                tokio::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true),
+                |o| {
+                    o.write(true).create(true).truncate(true);
+                },
                 &ctx.dest,
             )
             .await
@@ -618,7 +617,7 @@ pub(crate) fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
     let prefix = st.prefix_len();
     if let Ok(md) = std::fs::metadata(path)
         && md.len() > prefix
-        && let Ok(f) = std::fs::OpenOptions::new().write(true).open(path)
+        && let Ok(f) = std_open_nofollow(|o| o.write(true), path)
     {
         let _ = f.set_len(prefix);
     }
@@ -628,16 +627,25 @@ pub(crate) fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
 /// Open a file refusing to follow symlinks: a link swapped in between attempts
 /// must not divert a resume-append or retry-truncate onto an arbitrary file.
 /// Returns ELOOP if the final component is a symlink.
+fn std_open_nofollow(
+    configure: impl FnOnce(&mut std::fs::OpenOptions),
+    path: &std::path::Path,
+) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut opts = std::fs::OpenOptions::new();
+    configure(&mut opts);
+    opts.custom_flags(libc::O_NOFOLLOW).open(path)
+}
+
 async fn open_nofollow(
-    options: &mut tokio::fs::OpenOptions,
+    configure: impl FnOnce(&mut std::fs::OpenOptions),
     path: &std::path::Path,
 ) -> std::io::Result<tokio::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    options.custom_flags(libc::O_NOFOLLOW).open(path).await
+    std_open_nofollow(configure, path).map(tokio::fs::File::from_std)
 }
 
 async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptFail> {
-    let file = open_nofollow(tokio::fs::OpenOptions::new().write(true).create(true), dest)
+    let file = open_nofollow(|o| o.write(true).create(true), dest)
         .await
         .map_err(|e| AttemptFail::Retryable(format!("Cannot write file: {e}")))?;
     if file.metadata().await.map(|m| m.len()).unwrap_or(u64::MAX) != total

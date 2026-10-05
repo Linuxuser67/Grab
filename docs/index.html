@@ -271,7 +271,7 @@
 
 <header class="hero">
   <div class="wrap">
-    <div class="pill">v5.0.1 — now available</div>
+    <div class="pill" id="version-pill">v5.3.0 — now available</div>
     <h1>A download manager<br>that feels <span class="accent">native</span>.</h1>
     <p class="sub">Grab is fast, keyboard-friendly, and built for GNOME. Segmented downloads, video extraction, torrents, and live capture — no Electron, no clutter.</p>
     <div class="cta-row">
@@ -383,6 +383,18 @@ flatpak install flatpark io.github.linuxuser67.Grab</code>
     }
   }, { threshold: 0.12 });
   document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+
+  // Keep the version pill current: pull the latest release tag.
+  // Falls back to the baked-in version if the API is unreachable.
+  fetch('https://api.github.com/repos/Linuxuser67/Grab/releases/latest')
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      if (d && d.tag_name) {
+        document.getElementById('version-pill').textContent =
+          `${d.tag_name} — now available`;
+      }
+    })
+    .catch(() => {});
 </script>
 
 </body>

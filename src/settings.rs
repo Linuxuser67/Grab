@@ -161,7 +161,9 @@ impl AppSettings {
             .collect()
     }
     pub fn set_browser_extension_ids(&self, ids: &[String]) {
-        self.0.set_string(key::BROWSER_EXTENSION_IDS, &ids.join(",")).ok();
+        self.0
+            .set_string(key::BROWSER_EXTENSION_IDS, &ids.join(","))
+            .ok();
     }
     /// Cut SponsorBlock-flagged sponsor segments out of yt-dlp downloads.
     pub fn sponsorblock_remove(&self) -> bool {

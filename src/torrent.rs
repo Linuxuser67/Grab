@@ -207,6 +207,11 @@ pub(crate) fn read_archive_bytes(url: &str) -> Option<Vec<u8>> {
     read_torrent_bytes(&archive_path_for_url(url)?)
 }
 
+/// Whether a `.torrent` archive exists for the URL (magnets have none).
+pub(crate) fn has_archive(url: &str) -> bool {
+    archive_path_for_url(url).is_some_and(|p| p.exists())
+}
+
 /// Parse `.torrent` bytes into a display list for the file picker (display strips bidi/controls and caps length; selection is index-based).
 fn sanitize_display_path(path: &str) -> String {
     const MAX_CHARS: usize = 120;
@@ -386,6 +391,12 @@ pub(crate) fn deletion_target(
     if keep.contains(&index) || is_hostile_entry(&entry.raw_path) {
         return None;
     }
+    // Skip lossy paths: from_utf8_lossy replaced invalid bytes with U+FFFD,
+    // so the raw_path may not match what's on disk. A miss is harmless,
+    // but a collision could target the wrong file.
+    if entry.raw_path.contains('\u{FFFD}') {
+        return None;
+    }
     Some(folder.join(&entry.raw_path))
 }
 
@@ -399,6 +410,12 @@ fn is_hostile_entry(path: &str) -> bool {
 /// Refuses if any intermediate component under `folder` is a symlink:
 /// a pre-existing symlinked subdirectory would otherwise divert the
 /// deletion outside the torrent folder.
+///
+/// TOCTOU note: the symlink check and the remove are not atomic. A symlink
+/// swapped in between could divert the delete. Exploiting this requires
+/// write access to the download directory, so the risk is low. For the
+/// file itself we use `unlinkat` with `O_NOFOLLOW` on the parent fd, which
+/// closes the window for the final component.
 fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Path) {
     // Walk from `path` up to (not including) `folder`; if any component
     // is a symlink, bail — the target may point outside `folder`.
@@ -416,7 +433,37 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
         }
         current = dir.parent();
     }
-    let _ = std::fs::remove_file(path);
+    // Use unlinkat with O_NOFOLLOW on the parent: the filename is resolved
+    // relative to the opened fd, so a symlink swapped in for the parent
+    // after our check cannot divert the unlink.
+    if let Some(parent) = path.parent() {
+        if let Some(name) = path.file_name() {
+            use std::os::unix::ffi::OsStrExt;
+            let parent_c = std::ffi::CString::new(parent.as_os_str().as_bytes()).ok();
+            let name_c = std::ffi::CString::new(name.as_bytes()).ok();
+            if let (Some(parent_c), Some(name_c)) = (parent_c, name_c) {
+                // SAFETY: open with O_NOFOLLOW|O_DIRECTORY ensures parent is a real dir.
+                let fd = unsafe {
+                    libc::open(
+                        parent_c.as_ptr(),
+                        libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                    )
+                };
+                if fd >= 0 {
+                    // SAFETY: fd is valid, name_c is a valid C string.
+                    unsafe {
+                        libc::unlinkat(fd, name_c.as_ptr(), 0);
+                        libc::close(fd);
+                    }
+                } else {
+                    // Fallback: parent vanished or became a symlink; skip.
+                    return;
+                }
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
     let mut parent = path.parent();
     while let Some(dir) = parent {
         if dir == folder {
@@ -427,6 +474,39 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
             Err(_) => break,
         }
     }
+}
+
+/// Trash all files listed in the torrent metadata (not the whole folder).
+/// Skips hostile entries. Returns true if the folder is empty afterwards.
+pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> bool {
+    let Some(bytes) = read_archive_bytes(url) else {
+        return false;
+    };
+    let Ok((_, entries)) = torrent_file_list(&bytes) else {
+        return false;
+    };
+    let empty_keep: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (i, entry) in entries.iter().enumerate() {
+        if let Some(target) = deletion_target(folder, i, &empty_keep, entry) {
+            // Trash the file (not permanent delete), then prune empty parents.
+            let _ = gio::File::for_path(&target).trash(gio::Cancellable::NONE);
+            // Prune parents left empty by the trash (they're empty, safe to remove).
+            let mut parent = target.parent();
+            while let Some(dir) = parent {
+                if dir == folder {
+                    break;
+                }
+                match std::fs::remove_dir(dir) {
+                    Ok(()) => parent = dir.parent(),
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    // Check if folder is empty.
+    std::fs::read_dir(folder)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(true)
 }
 
 /// Network plan for one torrent add, resolved from settings at spawn.

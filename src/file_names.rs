@@ -356,7 +356,6 @@ pub(crate) fn piece_len(total: u64) -> u64 {
         .clamp(PIECE_MIN, PIECE_MAX)
 }
 
-/// Rename without clobbering: `renameat2(RENAME_NOREPLACE)`, else hard-link claim, else atomic-claim rename, else `create_new` copy cross-device.
 fn noreplace_unsupported(e: &std::io::Error) -> bool {
     matches!(
         e.raw_os_error(),
@@ -371,6 +370,19 @@ fn link_unsupported(e: &std::io::Error) -> bool {
     )
 }
 
+/// Claim `new` atomically with `create_new`, then rename `old` over the
+/// placeholder. Cleans up the placeholder if the rename fails.
+fn claim_and_rename(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(new)?;
+    std::fs::rename(old, new).inspect_err(|_| {
+        let _ = std::fs::remove_file(new);
+    })
+}
+
+/// Rename without clobbering: `renameat2(RENAME_NOREPLACE)`, else hard-link claim, else atomic-claim rename, else `create_new` copy cross-device.
 pub(crate) fn rename_noreplace(
     old: &std::path::Path,
     new: &std::path::Path,
@@ -400,19 +412,13 @@ pub(crate) fn rename_noreplace(
             }
             Err(e) if link_unsupported(&e) => {
                 // Filesystem doesn't support hard links: claim `new`
-                // atomically with create_new, then rename over our own
-                // placeholder. AlreadyExists propagates; cleanup on failure.
+                // atomically, then rename over our own placeholder.
+                // AlreadyExists propagates; cleanup on failure.
                 tracing::warn!(
                     "rename_noreplace: hard link unsupported (errno {}), using atomic claim",
                     e.raw_os_error().unwrap_or(-1)
                 );
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(new)?;
-                return std::fs::rename(old, new).inspect_err(|_| {
-                    let _ = std::fs::remove_file(new);
-                });
+                return claim_and_rename(old, new);
             }
             Err(e) => return Err(e),
         }
@@ -703,26 +709,48 @@ mod tests {
     }
 
     #[test]
-    fn rename_noreplace_cleans_up_claim_on_failure() {
-        // If the atomic-claim rename fails, the placeholder must not leak.
-        // We can't easily force hard_link to fail with EPERM in a test,
-        // so we test the cleanup logic directly: create a placeholder,
-        // simulate a failed rename by using an invalid source, and verify
-        // the placeholder is removed.
-        let dir = unique_dir("claim-cleanup");
+    fn claim_and_rename_missing_source_cleans_up() {
+        // Missing source: rename fails with NotFound, placeholder is removed.
+        let dir = unique_dir("claim-missing");
         std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("nonexistent");
         let new = dir.join("target");
-        // Simulate: placeholder created, rename fails (source doesn't exist)
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&new)
-            .unwrap();
-        let result = std::fs::rename(dir.join("nonexistent"), &new);
-        assert!(result.is_err());
-        // Manual cleanup (as the code does on rename failure)
-        let _ = std::fs::remove_file(&new);
-        assert!(!new.exists(), "placeholder should be cleaned up");
+        let result = claim_and_rename(&old, &new);
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert!(!new.exists(), "placeholder must be cleaned up");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn claim_and_rename_existing_target_untouched() {
+        // Existing target: create_new fails with AlreadyExists, target bytes untouched.
+        let dir = unique_dir("claim-exists");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("source");
+        let new = dir.join("target");
+        std::fs::write(&old, b"source content").unwrap();
+        std::fs::write(&new, b"target content").unwrap();
+        let result = claim_and_rename(&old, &new);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&new).unwrap(), b"target content");
+        assert!(old.exists(), "source must not be moved on failure");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn claim_and_rename_happy_path() {
+        // Happy path: content moves, source is gone.
+        let dir = unique_dir("claim-happy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("source");
+        let new = dir.join("target");
+        std::fs::write(&old, b"hello").unwrap();
+        claim_and_rename(&old, &new).unwrap();
+        assert_eq!(std::fs::read(&new).unwrap(), b"hello");
+        assert!(!old.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

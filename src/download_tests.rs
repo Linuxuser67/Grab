@@ -1172,8 +1172,8 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
         "the leftover recording was destroyed instead of merely left unreachable"
     );
     assert!(
-        !leftover.join("grab-9001-video.mp4.part").exists(),
-        "the startup sweep reclaims the orphan's scratch beside the destination"
+        leftover.join("grab-9001-video.mp4.part").exists(),
+        "manifest-less orphan scratch is preserved (no manifest = no deletion)"
     );
     let _ = std::fs::remove_dir_all(&dest);
     let _ = std::fs::remove_file(&qf);

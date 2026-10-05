@@ -636,9 +636,17 @@ fn manifest_owned_names(dest_dir: &Path, item_id: u64) -> Option<Vec<String>> {
 
 /// Delete exactly the files recorded by a manifest. The manifest's
 /// `staging_name` is the only proof of ownership; without it, files are
-/// preserved.
+/// preserved. The manifest file itself is always deleted (even if corrupt).
 fn remove_manifest_owned_files(dest_dir: &Path, item_id: u64) {
-    let Some(names) = manifest_owned_names(dest_dir, item_id) else {
+    // Read owned names BEFORE deleting the manifest.
+    let names = manifest_owned_names(dest_dir, item_id);
+    // Always delete the manifest files themselves, even if content is invalid.
+    let _ = std::fs::remove_file(manifest_path(dest_dir, item_id));
+    for path in legacy_manifest_paths(dest_dir, item_id) {
+        let _ = std::fs::remove_file(path);
+    }
+    // Delete owned files only if manifest had valid staging_name.
+    let Some(names) = names else {
         return;
     };
     for name in names {
@@ -647,11 +655,6 @@ fn remove_manifest_owned_files(dest_dir: &Path, item_id: u64) {
         if path.file_name().and_then(|n| n.to_str()) != Some(name.as_str()) {
             continue;
         }
-        let _ = std::fs::remove_file(path);
-    }
-    // Remove the manifest itself (canonical + legacy names).
-    let _ = std::fs::remove_file(manifest_path(dest_dir, item_id));
-    for path in legacy_manifest_paths(dest_dir, item_id) {
         let _ = std::fs::remove_file(path);
     }
 }
@@ -812,15 +815,28 @@ mod tests {
 
     #[test]
     fn success_path_leaves_no_empty_staging_root() {
-        // The run_unified_ytdlp success tail: sweep the item's grab-<id>-* files.
+        // The run_unified_ytdlp success tail: sweep the item's manifest-owned files.
         // The dest dir itself is never removed.
         let staging = unique_dir("success-root");
         std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join("grab-42-chunk.part"), b"scratch").unwrap();
+        // Create manifest owning the staging file.
+        let manifest = VideoManifest {
+            page_url: "https://example.com".to_string(),
+            quality: "1080p".to_string(),
+            video_format_id: None,
+            video_ext: "mp4".to_string(),
+            audio_format_id: String::new(),
+            audio_ext: String::new(),
+            final_bytes: None,
+            staging_name: Some("Title.42.mp4".to_string()),
+        };
+        let manifest_json = serde_json::to_string(&manifest).unwrap();
+        std::fs::write(staging.join(".42.manifest.json"), manifest_json).unwrap();
+        std::fs::write(staging.join("Title.42.mp4.part"), b"scratch").unwrap();
         std::fs::write(staging.join("unrelated.txt"), b"keep").unwrap();
         sweep_staging_preserving_recordings(&staging, 42);
         assert!(
-            !staging.join("grab-42-chunk.part").exists(),
+            !staging.join("Title.42.mp4.part").exists(),
             "item staging file is swept on success"
         );
         assert!(staging.exists(), "dest dir is never removed");
@@ -833,19 +849,32 @@ mod tests {
 
     #[test]
     fn success_path_keeps_root_while_recording_remains() {
-        // `grab-<id>-final.*` preservation: the recording stays, scratch is swept.
+        // `final.*` preservation: the recording stays, manifest-owned scratch is swept.
         // The dest dir itself is never removed.
         let staging = unique_dir("success-keep");
         std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join("grab-44-final.recording.mp4"), b"only copy").unwrap();
-        std::fs::write(staging.join("grab-44-chunk.part"), b"scratch").unwrap();
+        std::fs::write(staging.join("final.recording.mp4"), b"only copy").unwrap();
+        // Create manifest owning the staging file.
+        let manifest = VideoManifest {
+            page_url: "https://example.com".to_string(),
+            quality: "1080p".to_string(),
+            video_format_id: None,
+            video_ext: "mp4".to_string(),
+            audio_format_id: String::new(),
+            audio_ext: String::new(),
+            final_bytes: None,
+            staging_name: Some("Title.44.mp4".to_string()),
+        };
+        let manifest_json = serde_json::to_string(&manifest).unwrap();
+        std::fs::write(staging.join(".44.manifest.json"), manifest_json).unwrap();
+        std::fs::write(staging.join("Title.44.mp4.part"), b"scratch").unwrap();
         sweep_staging_preserving_recordings(&staging, 44);
         assert!(
-            staging.join("grab-44-final.recording.mp4").exists(),
+            staging.join("final.recording.mp4").exists(),
             "completed recording is preserved"
         );
         assert!(
-            !staging.join("grab-44-chunk.part").exists(),
+            !staging.join("Title.44.mp4.part").exists(),
             "scratch is swept around the recording"
         );
         assert!(staging.exists(), "dest dir is never removed");
@@ -854,15 +883,15 @@ mod tests {
 
     #[test]
     fn sweep_preserving_recordings_rejects_non_staging_files() {
-        // Critical: a user's own `grab-42-notes.txt` must survive the sweep,
-        // even though it matches the `grab-<id>-` prefix. Only known Grab
-        // staging patterns are deleted.
+        // Critical: files without manifests must survive the sweep.
+        // Under manifest-only cleanup, only manifest-owned files are deleted.
         let staging = unique_dir("allowlist-reject");
         std::fs::create_dir_all(&staging).unwrap();
-        // Real staging files (must be deleted)
+        // Legacy manifest (must be deleted - it's a manifest file)
         std::fs::write(staging.join("grab-42-.manifest.json"), b"{}").unwrap();
+        // Part file WITHOUT manifest (must survive - no proof of ownership)
         std::fs::write(staging.join("grab-42-video.f137.mp4.part"), b"part").unwrap();
-        // User files that happen to match the prefix (must survive)
+        // User files (must survive)
         std::fs::write(staging.join("grab-42-notes.txt"), b"user notes").unwrap();
         std::fs::write(staging.join("grab-42-export.zip"), b"user export").unwrap();
         // Bare file without prefix (must survive)
@@ -875,8 +904,8 @@ mod tests {
             "staging manifest must be swept"
         );
         assert!(
-            !staging.join("grab-42-video.f137.mp4.part").exists(),
-            "staging part file must be swept"
+            staging.join("grab-42-video.f137.mp4.part").exists(),
+            "part file without manifest must survive (no ownership proof)"
         );
         assert!(
             staging.join("grab-42-notes.txt").exists(),

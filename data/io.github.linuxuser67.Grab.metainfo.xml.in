@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.2.0" date="2026-10-05">
+      <description>
+        <ul>
+          <li>Staging cleanup now requires manifest proof of ownership: files without a manifest are never deleted.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.1.2" date="2026-10-04">
       <description>
         <ul>

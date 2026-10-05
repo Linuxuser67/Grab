@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.2.3" date="2026-10-05">
+      <description>
+        <ul>
+          <li>Browser native messaging host: <code>grab-native-host</code> binary and <code>grab --install-browser-host</code> installer (replaces the extension repo's Python script).</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.2.2" date="2026-10-05">
       <description>
         <ul>

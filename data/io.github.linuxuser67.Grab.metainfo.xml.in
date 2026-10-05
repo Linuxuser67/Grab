@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.2.5" date="2026-10-05">
+      <description>
+        <ul>
+          <li>Fix browser native host settings (GSettings string array API).</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.2.4" date="2026-10-05">
       <description>
         <ul>

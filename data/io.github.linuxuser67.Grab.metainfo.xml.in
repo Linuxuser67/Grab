@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.2.4" date="2026-10-05">
+      <description>
+        <ul>
+          <li>Browser native host now installs automatically on startup (Firefox fully automatic; Chromium re-installs for saved extension IDs).</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.2.3" date="2026-10-05">
       <description>
         <ul>

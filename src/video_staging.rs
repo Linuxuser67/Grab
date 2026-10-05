@@ -321,11 +321,12 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
             .and_then(|s| s.strip_suffix("-manifest.json"))
         {
             rest.parse::<u64>().ok()
-        } else if let Some(rest) = name_str
-            .strip_prefix("grab-")
-            .and_then(|s| s.strip_suffix("-manifest.json"))
-        {
-            // Handle both "grab-{id}-manifest.json" and "grab-{id}-.manifest.json"
+        } else if let Some(rest) = name_str.strip_prefix("grab-").and_then(|s| {
+            // Handle "grab-{id}-manifest.json" and "grab-{id}-.manifest.json"
+            s.strip_suffix("-manifest.json")
+                .or_else(|| s.strip_suffix("-.manifest.json"))
+        }) {
+            // Remove trailing dash if present (from "grab-{id}-.manifest.json")
             rest.strip_suffix('-').unwrap_or(rest).parse::<u64>().ok()
         } else {
             None

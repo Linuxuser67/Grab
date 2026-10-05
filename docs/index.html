@@ -214,6 +214,45 @@
   footer a { color: var(--accent); text-decoration: none; }
   footer a:hover { text-decoration: underline; }
   footer p + p { margin-top: 8px; }
+
+  /* Motion (vauchi-style restraint: fade + rise, no libraries) */
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(18px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .hero .pill,
+  .hero h1,
+  .hero p.sub,
+  .hero .cta-row,
+  .hero .screenshot {
+    animation: rise .8s ease both;
+  }
+  .hero h1 { animation-delay: .08s; }
+  .hero p.sub { animation-delay: .16s; }
+  .hero .cta-row { animation-delay: .24s; }
+  .hero .screenshot { animation-delay: .32s; }
+  .reveal {
+    opacity: 0;
+    transform: translateY(18px);
+    transition: opacity .7s ease, transform .7s ease;
+  }
+  .reveal.visible {
+    opacity: 1;
+    transform: none;
+  }
+  .features .feature:nth-child(2) { transition-delay: .06s; }
+  .features .feature:nth-child(3) { transition-delay: .12s; }
+  .features .feature:nth-child(4) { transition-delay: .18s; }
+  .features .feature:nth-child(5) { transition-delay: .24s; }
+  .features .feature:nth-child(6) { transition-delay: .3s; }
+  @media (prefers-reduced-motion: reduce) {
+    .hero .pill,
+    .hero h1,
+    .hero p.sub,
+    .hero .cta-row,
+    .hero .screenshot { animation: none; }
+    .reveal { opacity: 1; transform: none; transition: none; }
+  }
 </style>
 </head>
 <body>
@@ -245,7 +284,7 @@
   </div>
 </header>
 
-<section id="features">
+<section id="features" class="reveal">
   <div class="wrap">
     <h2>Everything a downloader should do</h2>
     <p class="lead">Six reasons Grab earns a place in your dock.</p>
@@ -284,7 +323,7 @@
   </div>
 </section>
 
-<section id="screenshots">
+<section id="screenshots" class="reveal">
   <div class="wrap">
     <h2>See it in action</h2>
     <p class="lead">Real screenshots, no mockups.</p>
@@ -305,7 +344,7 @@
   </div>
 </section>
 
-<section id="install">
+<section id="install" class="reveal">
   <div class="wrap">
     <h2>Install</h2>
     <p class="lead">Two commands and you're downloading.</p>
@@ -326,12 +365,25 @@ flatpak install flatpark io.github.linuxuser67.Grab</code>
   </div>
 </section>
 
-<footer>
+<footer class="reveal">
   <div class="wrap">
     <p>Grab is free software under the GPL-3.0-only license.</p>
     <p><a href="https://github.com/Linuxuser67/Grab">GitHub</a> · <a href="https://github.com/Linuxuser67/Grab/issues">Issues</a> · <a href="https://github.com/Linuxuser67/Grab/releases">Releases</a></p>
   </div>
 </footer>
+
+<script>
+  // Scroll-triggered reveals, vauchi-style: fade + rise, once.
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) {
+        e.target.classList.add('visible');
+        io.unobserve(e.target);
+      }
+    }
+  }, { threshold: 0.12 });
+  document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+</script>
 
 </body>
 </html>

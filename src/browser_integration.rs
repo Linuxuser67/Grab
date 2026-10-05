@@ -196,9 +196,8 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
         if let Some(parent) = target.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let mut text =
-            serde_json::to_string_pretty(&extra_chromium_manifest(&host_path, ids))
-                .unwrap_or_default();
+        let mut text = serde_json::to_string_pretty(&extra_chromium_manifest(&host_path, ids))
+            .unwrap_or_default();
         text.push('\n');
         if fs::write(&target, text).is_ok() {
             changed = true;

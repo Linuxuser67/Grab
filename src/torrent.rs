@@ -9,6 +9,8 @@ use std::{
 };
 
 use gettextrs::gettext;
+use gtk4::gio;
+use gtk4::gio::prelude::*;
 use gtk4::glib;
 use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ConnectionOptions, ListenerOptions,

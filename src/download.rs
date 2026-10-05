@@ -2291,12 +2291,29 @@ impl DownloadManager {
         let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
         // Torrent rows: drop the session entry and archive, drop the row, then Trash the real files (they live in the recorded/recomputed folder, never the stub path).
         if crate::torrent::is_torrent(&item.url()) {
-            let path = Self::torrent_folder(&item);
             let url = item.url();
             let has_archive = crate::torrent::has_archive(&url);
             crate::torrent::forget_download(id);
             crate::torrent::delete_archive_for_url(&url);
             self.remove(id);
+            // Archived single-file: resolve the actual filename from metadata.
+            // torrent_folder() returns item.file_path() which uses the item name,
+            // not the metadata name.
+            if has_archive
+                && let Some(single_path) = crate::torrent::single_file_path(
+                    std::path::Path::new(&item.dest_dir().to_string()),
+                    &url,
+                )
+            {
+                return match gio::File::for_path(&single_path).trash(gio::Cancellable::NONE) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("Could not move {} to Trash: {e}", item.filename())),
+                };
+            }
+            let path = Self::torrent_folder(&item);
             // Single file (not a directory): trash it directly. The ownership
             // concern applies only to directories that might be pre-existing.
             if path.is_file() {

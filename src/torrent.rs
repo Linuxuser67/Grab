@@ -379,6 +379,22 @@ pub fn torrent_output_dir(dest: &std::path::Path, url: &str) -> Option<PathBuf> 
     Some(output_folder_for(dest, name, true, &fallback))
 }
 
+/// Path of a single-file torrent's file (dest dir + metadata filename).
+/// Returns None for multi-file torrents or if the archive is missing.
+pub(crate) fn single_file_path(dest: &std::path::Path, url: &str) -> Option<std::path::PathBuf> {
+    if !is_torrent_url(url) {
+        return None;
+    }
+    let bytes = read_archive_bytes(url)?;
+    let meta = librqbit::torrent_from_bytes(&bytes).ok()?;
+    if is_multi_file(meta.info.data.files.as_deref()) {
+        return None;
+    }
+    let name = safe_torrent_name(raw_torrent_name(meta.info.data.name.as_ref()))
+        .unwrap_or_else(|| meta.info_hash.as_string());
+    Some(dest.join(name))
+}
+
 /// Delete untoggled files after a filtered torrent finishes (librqbit pre-creates every file, so unselected ones must be removed here).
 pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str) {
     let Some(selected) = get_selection(url) else {

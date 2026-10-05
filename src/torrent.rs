@@ -503,6 +503,22 @@ pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> boo
     let Some(bytes) = read_archive_bytes(url) else {
         return false;
     };
+    let Ok(meta) = librqbit::torrent_from_bytes(&bytes) else {
+        return false;
+    };
+    let multi = is_multi_file(meta.info.data.files.as_deref());
+    if !multi {
+        // Single-file torrent: torrent_file_list returns empty (no selectable
+        // children for the UI), so resolve the filename directly.
+        let name = raw_torrent_name(meta.info.data.name.as_ref())
+            .and_then(safe_torrent_name)
+            .unwrap_or_else(|| meta.info_hash.as_string());
+        let target = folder.join(name);
+        let _ = gio::File::for_path(&target).trash(gio::Cancellable::NONE);
+        return std::fs::read_dir(folder)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true);
+    }
     let Ok((_, entries)) = torrent_file_list(&bytes) else {
         return false;
     };

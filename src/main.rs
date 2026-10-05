@@ -1,5 +1,6 @@
 mod application;
 mod attempt_gate;
+mod browser_integration;
 mod cookies;
 mod download;
 mod download_fetch;
@@ -100,6 +101,33 @@ fn ensure_schema_dir() {
 }
 
 fn main() -> glib::ExitCode {
+    // Browser native-host installer: runs before GTK init, no display needed.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--install-browser-host") {
+        let mut ids: Vec<String> = Vec::new();
+        let mut i = pos + 1;
+        while i < args.len() {
+            if args[i] == "--chromium-id" && i + 1 < args.len() {
+                ids.push(args[i + 1].clone());
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        match browser_integration::install(&ids) {
+            Ok(written) => {
+                for p in &written {
+                    println!("wrote {}", p.display());
+                }
+                println!("done");
+                return glib::ExitCode::SUCCESS;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return glib::ExitCode::FAILURE;
+            }
+        }
+    }
     tracing_subscriber::fmt::init();
     ensure_schema_dir();
     // Register before dialogs open; corrupt bundle only loses release notes (About guards the missing case).

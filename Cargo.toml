@@ -6,6 +6,10 @@ rust-version = "1.98"
 description = "A GNOME download manager (GTK 4 / libadwaita, reqwest backend)"
 license = "GPL-3.0-only"
 
+[[bin]]
+name = "grab-native-host"
+path = "src/bin/grab_native_host.rs"
+
 [dependencies]
 # Version features must match the system libs (GTK 4.18+ / Adw 1.8+ API used).
 gtk4 = { version = "0.11", features = ["v4_10", "v4_12", "v4_14", "v4_16", "v4_18"] }
@@ -19,6 +23,10 @@ url = "2"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Browser native-messaging host: wire protocol framing + manifest installer.
+# Sync framing only (no tokio); the installer covers standard browsers, with
+# a thin supplement for Brave channels the crate misses (incl. Origin Beta).
+native_messaging = { version = "0.3", default-features = false, features = ["install"] }
 # HTTP-date parser for the keep-server-date option (Last-Modified header).
 httpdate = "1"
 # SHA-256 for verifying downloaded tool binaries against GitHub release digests.

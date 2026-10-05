@@ -33,6 +33,7 @@ pub mod key {
     pub const SUBTITLE_LANGUAGE: &str = "subtitle-language";
     pub const EMBED_SUBS: &str = "embed-subs";
     pub const COOKIES_BROWSER: &str = "cookies-browser";
+    pub const BROWSER_EXTENSION_IDS: &str = "browser-extension-ids";
     pub const SPONSORBLOCK_REMOVE: &str = "sponsorblock-remove";
     pub const SPONSORBLOCK_MARK: &str = "sponsorblock-mark";
     pub const REMUX_VIDEO: &str = "remux-video";
@@ -149,6 +150,14 @@ impl AppSettings {
     }
     pub fn cookies_browser(&self) -> String {
         self.0.string(key::COOKIES_BROWSER).to_string()
+    }
+    /// Chromium extension IDs allowed for native messaging (stored once).
+    pub fn browser_extension_ids(&self) -> Vec<String> {
+        self.0.strv(key::BROWSER_EXTENSION_IDS).iter().map(|s| s.to_string()).collect()
+    }
+    pub fn set_browser_extension_ids(&self, ids: &[String]) {
+        let vals: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        self.0.set_strv(key::BROWSER_EXTENSION_IDS, &vals).ok();
     }
     /// Cut SponsorBlock-flagged sponsor segments out of yt-dlp downloads.
     pub fn sponsorblock_remove(&self) -> bool {

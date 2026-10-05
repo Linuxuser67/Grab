@@ -50,6 +50,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.2.7" date="2026-10-05">
+      <description>
+        <ul>
+          <li>Deleting a torrent now trashes only the files its metadata lists, never the whole folder; magnet deletions leave the output directory untouched.</li>
+          <li>Refuse to delete torrent files through symlinked subdirectories.</li>
+          <li>Write browser native-host manifests atomically and validate their structure on startup.</li>
+          <li>Surface file-trash failures instead of silently ignoring them.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.2.6" date="2026-10-05">
       <description>
         <ul>

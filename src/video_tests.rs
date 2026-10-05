@@ -740,6 +740,7 @@ fn test_manifest() -> VideoManifest {
         audio_ext: "webm".into(),
         final_bytes: None,
         staging_name: None,
+        staging_prefix: None,
     }
 }
 
@@ -4761,9 +4762,14 @@ fn a_non_live_sweep_keeps_a_live_recordings_remux() {
         "the lease marks a claimed remux slot and must survive with it"
     );
     assert!(
-        !staging.join(".grab-42-manifest.json").exists()
-            && !staging.join("grab-42-video.f137.mp4").exists(),
-        "the finishing leg's own scratch was not reclaimed"
+        !staging.join(".grab-42-manifest.json").exists(),
+        "the finishing leg's manifest was reclaimed"
+    );
+    // Under manifest-only cleanup, the video file without a valid manifest
+    // staging_name is preserved (no ownership proof).
+    assert!(
+        staging.join("grab-42-video.f137.mp4").exists(),
+        "manifest-less scratch is preserved (safe)"
     );
     assert!(
         staging.join("unrelated.txt").exists(),
@@ -4798,6 +4804,7 @@ fn sweep_never_touches_bystander_with_id_like_name() {
         audio_ext: String::new(),
         final_bytes: None,
         staging_name: Some("My Video.mp4".into()),
+        staging_prefix: None,
     };
     let manifest_path = staging.join(".4.manifest.json");
     std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
@@ -7003,15 +7010,18 @@ fn playlist_scope_args_selects_picked_entry() {
 fn unified_output_template_is_named_after_dest_stem_and_stable() {
     let staging = std::path::Path::new("/d/.staging");
     let dest = std::path::Path::new("/d/My Video.mp4");
-    let t = unified_output_template(staging, dest);
-    assert_eq!(t, std::path::Path::new("/d/.staging/My Video.%(ext)s"));
-    // Pure function of `dest`: a retry builds the identical template, so the
+    let t = unified_output_template(staging, dest, 7);
+    assert_eq!(t, std::path::Path::new("/d/.staging/My Video.7.%(ext)s"));
+    // Pure function of (`dest`, id): a retry builds the identical template, so the
     // `.part` yt-dlp left beside it is found again.
-    assert_eq!(t, unified_output_template(staging, dest));
+    assert_eq!(t, unified_output_template(staging, dest, 7));
+    // The id keeps the template distinct from `dest` itself: without it the
+    // claim rename would target the file onto itself.
+    assert_ne!(t, dest);
     // No stem at all falls back to a fixed name.
     assert_eq!(
-        unified_output_template(staging, std::path::Path::new("")),
-        std::path::Path::new("/d/.staging/media.%(ext)s")
+        unified_output_template(staging, std::path::Path::new(""), 7),
+        std::path::Path::new("/d/.staging/media.7.%(ext)s")
     );
 }
 
@@ -7019,7 +7029,7 @@ fn unified_output_template_is_named_after_dest_stem_and_stable() {
 fn unified_output_template_neutralizes_percent_and_caps_stem() {
     let staging = std::path::Path::new("/d/.staging");
     // `%` (and a lookalike `%(field)s`) in a title must not reach the `-o` template.
-    let t = unified_output_template(staging, std::path::Path::new("/d/50% off %(title)s.mp4"));
+    let t = unified_output_template(staging, std::path::Path::new("/d/50% off %(title)s.mp4"), 7);
     let name = t.file_name().unwrap().to_str().unwrap();
     assert_eq!(
         name.matches('%').count(),
@@ -7030,9 +7040,13 @@ fn unified_output_template_neutralizes_percent_and_caps_stem() {
     // Multi-byte stems are cut on a char boundary, leaving room for yt-dlp's
     // `.f<id>.<ext>.part` suffix under the 255-byte limit.
     let long = format!("/d/{}.mp4", "é".repeat(300));
-    let t = unified_output_template(staging, std::path::Path::new(&long));
+    let t = unified_output_template(staging, std::path::Path::new(&long), 7);
     let name = t.file_name().unwrap().to_str().unwrap();
-    assert!(name.len() <= 200 + ".%(ext)s".len(), "{} bytes", name.len());
+    assert!(
+        name.len() <= 200 + ".7.%(ext)s".len(),
+        "{} bytes",
+        name.len()
+    );
     assert!(name.ends_with(".%(ext)s"), "{name}");
 }
 
@@ -9088,9 +9102,10 @@ fn unified_runner_downloads_claims_and_collects() {
     let logged = std::fs::read_to_string(dir.join("staging.argv.log")).unwrap();
     assert!(logged.contains("-f v123+a456/bv*+ba/b"), "{logged}");
     assert!(logged.contains("--merge-output-format mp4"), "{logged}");
-    // Staging output is named after the row's dest stem (stable across attempts),
-    // never the re-resolved title.
-    assert!(logged.contains("v.%(ext)s"), "{logged}");
+    // Staging output is named after the row's dest stem plus the item id
+    // (stable across attempts), never the re-resolved title. The id keeps
+    // the template distinct from `dest` itself.
+    assert!(logged.contains("v.1.%(ext)s"), "{logged}");
     assert!(!logged.contains("%(title)s"), "{logged}");
     let _ = std::fs::remove_dir_all(&dir);
 }

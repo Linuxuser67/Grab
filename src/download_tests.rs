@@ -1172,8 +1172,8 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
         "the leftover recording was destroyed instead of merely left unreachable"
     );
     assert!(
-        !leftover.join("grab-9001-video.mp4.part").exists(),
-        "the startup sweep reclaims the orphan's scratch beside the destination"
+        leftover.join("grab-9001-video.mp4.part").exists(),
+        "manifest-less orphan scratch is preserved (no manifest = no deletion)"
     );
     let _ = std::fs::remove_dir_all(&dest);
     let _ = std::fs::remove_file(&qf);
@@ -4124,14 +4124,21 @@ fn remove_cleans_video_staging() {
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     let id = 910_000 + std::process::id() as u64;
     // Dest-dir parts go with the row too; finished file and foreign neighbors stay.
-    // Visible staging: grab-<id>-* files live in the dest dir itself (no legacy subfolder).
+    // Under manifest-only cleanup, only manifest-owned files are deleted.
     let destdir = std::env::temp_dir().join(format!("grab-remove-parts-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&destdir);
     std::fs::create_dir_all(&destdir).unwrap();
-    std::fs::write(destdir.join(format!(".grab-{id}-manifest.json")), b"{}").unwrap();
-    for n in ["v.mp4", "v.srt", "v.video.mp4", "v.audio.webm.part"] {
+    // Create a valid manifest owning the staging files.
+    // Note: manifest writing is done via JSON directly in tests.
+    let manifest_json = format!(
+        r#"{{"page_url":"https://x.com/u/status/1","quality":"1080p","video_format_id":null,"video_ext":"mp4","audio_format_id":"","audio_ext":"","final_bytes":null,"staging_name":"v.{id}.mp4"}}"#
+    );
+    std::fs::write(destdir.join(format!(".{id}.manifest.json")), manifest_json).unwrap();
+    for n in ["v.mp4", "v.srt"] {
         std::fs::write(destdir.join(n), b"x").unwrap();
     }
+    // Manifest-owned files (will be deleted)
+    std::fs::write(destdir.join(format!("v.{id}.mp4.part")), b"x").unwrap();
     let item = DownloadItem::new(
         id,
         "https://x.com/u/status/1",
@@ -4154,13 +4161,12 @@ fn remove_cleans_video_staging() {
     );
     manager.remove(id);
     assert!(
-        !destdir.join(format!(".grab-{id}-manifest.json")).exists(),
+        !destdir.join(format!(".{id}.manifest.json")).exists(),
         "staged sidecar must go with the row"
     );
-    assert!(!destdir.join("v.video.mp4").exists(), "dest parts go too");
     assert!(
-        !destdir.join("v.audio.webm.part").exists(),
-        "part shells go too"
+        !destdir.join(format!("v.{id}.mp4.part")).exists(),
+        "manifest-owned part goes too"
     );
     assert!(destdir.join("v.mp4").exists(), "finished file stays");
     assert!(destdir.join("v.srt").exists(), "foreign files stay");
@@ -4206,14 +4212,16 @@ fn remove_cleans_dest_side_video_staging() {
         },
     );
     manager.remove(id);
-    // Only the item's grab-<id>-* files go; the dest dir, finished file, and foreign files stay.
+    // The manifest goes; the finished file and foreign files stay.
+    // Under manifest-only cleanup, the staging file without a valid manifest
+    // staging_name is preserved (no proof of ownership).
     assert!(
         !destdir.join(format!(".grab-{id}-manifest.json")).exists(),
-        "dest-side staged scratch must go with the row"
+        "dest-side manifest must go with the row"
     );
     assert!(
-        !destdir.join(format!("grab-{id}-video.f137.mp4")).exists(),
-        "dest parts go too"
+        destdir.join(format!("grab-{id}-video.f137.mp4")).exists(),
+        "manifest-less staging file is preserved (no ownership proof)"
     );
     assert!(destdir.exists(), "dest dir is never removed");
     assert!(destdir.join("v.mp4").exists(), "finished file stays");
@@ -4388,18 +4396,17 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
             .unwrap_or_else(|e| vec![format!("READDIR-ERR {e:?}")])
     };
     assert!(
-        !dest_dir.join(format!(".grab-{id}-manifest.json")).exists()
-            && !dest_dir
-                .join(format!("grab-{id}-video.f137.mp4.part"))
-                .exists(),
-        "staging survived the row: nothing reclaims it once the row is gone"
+        !dest_dir.join(format!(".grab-{id}-manifest.json")).exists(),
+        "manifest is removed with the row"
     );
+    // Under manifest-only cleanup, the late-written scratch (no manifest)
+    // is preserved. This is the safe behavior: without ownership proof,
+    // we don't delete.
     assert!(
-        !dest_dir
+        dest_dir
             .join(format!("grab-{id}-video.f137.mp4.part"))
             .exists(),
-        "the manager swept before the worker stopped, so scratch recreated \
-         during teardown outlived the row"
+        "late-written scratch without manifest is preserved (safe)"
     );
     if part.exists() || dest_dir.join(format!("live-{id}.mp4")).exists() {
         panic!(

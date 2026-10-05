@@ -1546,6 +1546,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let date_btn = gtk4::MenuButton::builder()
         .label(gettext("Choose date…"))
         .popover(&date_popover)
+        .valign(gtk4::Align::Center)
         .build();
     let date_row = adw::ActionRow::builder().title(gettext("Date")).build();
     date_row.add_suffix(&date_btn);

@@ -1537,24 +1537,17 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let schedule_revealer = slide_down_revealer();
     schedule_revealer.set_child(Some(&schedule_group));
 
-    // Date picker: plain Button (matches the "Choose…" buttons) toggling a
-    // popover with GtkCalendar (HIG: no text entry for dates). MenuButton was
-    // tried but its dropdown arrow made the row visually inconsistent.
+    // Date picker: MenuButton opens a popover with GtkCalendar (HIG: no text
+    // entry for dates). GTK/libadwaita provide no stock date picker, so this
+    // composes native primitives — MenuButton, not a hand-wired Button+Popover.
     let calendar = gtk4::Calendar::new();
     let date_popover = gtk4::Popover::new();
     date_popover.set_child(Some(&calendar));
-    let date_btn = gtk4::Button::builder()
+    let date_btn = gtk4::MenuButton::builder()
         .label(gettext("Choose date…"))
+        .popover(&date_popover)
         .valign(gtk4::Align::Center)
         .build();
-    {
-        let popover = date_popover.clone();
-        let btn = date_btn.clone();
-        date_btn.connect_clicked(move |_| {
-            popover.set_parent(&btn);
-            popover.popup();
-        });
-    }
     let date_row = adw::ActionRow::builder().title(gettext("Date")).build();
     date_row.add_suffix(&date_btn);
     date_row.set_activatable_widget(Some(&date_btn));
@@ -1601,11 +1594,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         });
         {
             let update = Rc::clone(&update);
-            let popover_c = date_popover.clone();
-            calendar.connect_day_selected(move |_| {
-                update();
-                popover_c.popdown();
-            });
+            calendar.connect_day_selected(move |_| update());
         }
         {
             let update = Rc::clone(&update);

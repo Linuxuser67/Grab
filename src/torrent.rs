@@ -460,21 +460,9 @@ fn is_hostile_entry(path: &str) -> bool {
 /// file itself we use `unlinkat` with `O_NOFOLLOW` on the parent fd, which
 /// closes the window for the final component.
 fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Path) {
-    // Walk from `path` up to (not including) `folder`; if any component
-    // is a symlink, bail — the target may point outside `folder`.
-    let mut current = path.parent();
-    while let Some(dir) = current {
-        if dir == folder {
-            break;
-        }
-        if std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_symlink()) {
-            return;
-        }
-        // Stop at filesystem root or if we've left `folder`'s subtree.
-        if !dir.starts_with(folder) {
-            return;
-        }
-        current = dir.parent();
+    // Bail if any intermediate component is a symlink or escapes `folder`.
+    if path_has_symlink_component(path, folder) {
+        return;
     }
     // Use unlinkat with O_NOFOLLOW on the parent: the filename is resolved
     // relative to the opened fd, so a symlink swapped in for the parent

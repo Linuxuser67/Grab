@@ -515,8 +515,9 @@ pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     // half-written `yt-dlp` behind.
     let dest = dir.join("yt-dlp");
     let part = dir.join("yt-dlp.part");
+    let dest_clone = dest.clone();
     let handle = crate::runtime::tokio_rt().spawn(async move {
-        let result = fetch_ytdlp_inner(&url, &part, &dest, &digest).await;
+        let result = fetch_ytdlp_inner(&url, &part, &dest_clone, &digest).await;
         if result.is_err() {
             std::fs::remove_file(&part).ok();
         }

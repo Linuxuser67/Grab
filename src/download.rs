@@ -2297,6 +2297,17 @@ impl DownloadManager {
             crate::torrent::forget_download(id);
             crate::torrent::delete_archive_for_url(&url);
             self.remove(id);
+            // Single file (not a directory): trash it directly. The ownership
+            // concern applies only to directories that might be pre-existing.
+            if path.is_file() {
+                return match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("Could not move {} to Trash: {e}", item.filename())),
+                };
+            }
             if has_archive {
                 // .torrent: trash only the metadata files, not the whole folder.
                 // The folder may be pre-existing/shared. Trash it only if empty.

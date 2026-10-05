@@ -5,7 +5,7 @@
 //! stdio wire protocol; only `grab://` URLs are accepted and handed to the
 //! OS URI opener as a single argv element, never through a shell.
 
-use native_messaging::host::{decode_message, encode_message, MAX_FROM_BROWSER};
+use native_messaging::host::{MAX_FROM_BROWSER, decode_message, encode_message};
 use std::io::{self, Write};
 use std::process::Command;
 

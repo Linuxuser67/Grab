@@ -56,8 +56,9 @@ fn install_binary() -> Result<PathBuf, String> {
         .ok_or_else(|| "HOME is not set".to_string())?;
     fs::create_dir_all(&install_dir).map_err(|e| format!("create {install_dir:?}: {e}"))?;
 
-    let src = find_host_binary()
-        .ok_or_else(|| "grab-native-host binary not found next to the Grab executable".to_string())?;
+    let src = find_host_binary().ok_or_else(|| {
+        "grab-native-host binary not found next to the Grab executable".to_string()
+    })?;
     let dst = install_dir.join("grab-native-host");
     fs::copy(&src, &dst).map_err(|e| format!("copy host binary: {e}"))?;
     #[cfg(unix)]
@@ -130,7 +131,9 @@ pub fn install(chromium_ids: &[String]) -> Result<Vec<PathBuf>, String> {
             if !cfg.is_dir() {
                 continue;
             }
-            let target = cfg.join("NativeMessagingHosts").join(format!("{HOST_NAME}.json"));
+            let target = cfg
+                .join("NativeMessagingHosts")
+                .join(format!("{HOST_NAME}.json"));
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|e| format!("create {parent:?}: {e}"))?;
             }

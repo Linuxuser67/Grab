@@ -985,6 +985,7 @@ mod tests {
         std::fs::write(target.join("grab-42-.manifest.json"), b"{}").unwrap();
         let dest_dir = base.join("dest");
         std::fs::create_dir_all(&dest_dir).unwrap();
+        let _ = std::fs::remove_file(dest_dir.join("link"));
         std::os::unix::fs::symlink(&target, dest_dir.join("link")).unwrap();
         // A real orphan staging file in dest_dir (should be swept)
         std::fs::write(dest_dir.join("grab-42-.manifest.json"), b"{}").unwrap();

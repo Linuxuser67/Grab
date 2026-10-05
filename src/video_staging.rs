@@ -648,24 +648,21 @@ fn manifest_ownership(dest_dir: &Path, item_id: u64) -> Option<ManifestOwnership
 /// entries are considered).
 fn owned_file_names(dest_dir: &Path, ownership: &ManifestOwnership) -> Vec<String> {
     let mut names = ownership.exact.clone();
-    if let Some(prefix) = &ownership.prefix {
-        if let Ok(entries) = std::fs::read_dir(dest_dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                // Only regular files; never follow symlinks out of the dir.
-                let Ok(ft) = entry.file_type() else {
-                    continue;
-                };
-                if !ft.is_file() {
-                    continue;
-                }
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with(prefix.as_str())
-                        && !name.starts_with("final.")
-                        && !names.iter().any(|n| n == name)
-                    {
-                        names.push(name.to_string());
-                    }
-                }
+    if let (Some(prefix), Ok(entries)) = (&ownership.prefix, std::fs::read_dir(dest_dir)) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            // Only regular files; never follow symlinks out of the dir.
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if !ft.is_file() {
+                continue;
+            }
+            if let Some(name) = entry.file_name().to_str()
+                && name.starts_with(prefix.as_str())
+                && !name.starts_with("final.")
+                && !names.iter().any(|n| n == name)
+            {
+                names.push(name.to_string());
             }
         }
     }

@@ -151,6 +151,11 @@
       <summary>Browser for video page cookies</summary>
       <description>Read cookies straight from this browser's profile for age-gated or member-only video pages. 'none' disables it.</description>
     </key>
+    <key name="browser-extension-ids" type="as">
+      <default>[]</default>
+      <summary>Browser extension IDs for native messaging</summary>
+      <description>Chromium extension IDs (from chrome://extensions) allowed to use the Grab native messaging host. Stored once via --install-browser-host; manifests are re-installed automatically on startup.</description>
+    </key>
     <key name="sponsorblock-remove" type="b">
       <default>false</default>
       <summary>Remove sponsored segments</summary>

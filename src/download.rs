@@ -1944,7 +1944,7 @@ impl DownloadManager {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
                     return Err(gettext("Could not rename {name}: {error}")
-                        .replace("{name}", item.filename())
+                        .replace("{name}", item.filename().as_str())
                         .replace("{error}", &e.to_string()));
                 }
             }

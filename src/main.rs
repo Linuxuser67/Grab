@@ -119,6 +119,17 @@ fn main() -> glib::ExitCode {
                 for p in &written {
                     println!("wrote {}", p.display());
                 }
+                // Remember Chromium IDs so startup re-installs manifests after upgrades.
+                if !ids.is_empty() {
+                    let settings = crate::settings::AppSettings::new();
+                    let mut stored = settings.browser_extension_ids();
+                    for id in &ids {
+                        if !stored.contains(id) {
+                            stored.push(id.clone());
+                        }
+                    }
+                    settings.set_browser_extension_ids(&stored);
+                }
                 println!("done");
                 return glib::ExitCode::SUCCESS;
             }

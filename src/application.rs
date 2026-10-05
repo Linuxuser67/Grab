@@ -277,7 +277,12 @@ pub fn setup(app: &adw::Application) {
     {
         let st = Rc::clone(&state);
         app.connect_startup(move |app| {
+            // Browser native hosts: Firefox needs no user input (fixed add-on
+            // ID) so it's kept installed silently; Chromium manifests are
+            // re-installed for previously-registered extension IDs.
+            crate::browser_integration::ensure_firefox_host();
             let settings = AppSettings::new();
+            crate::browser_integration::ensure_chromium_hosts(&settings.browser_extension_ids());
             let store = gio::ListStore::new::<crate::download::DownloadItem>();
             let manager = DownloadManager::new(store, settings.clone());
             manager.restore_queue();

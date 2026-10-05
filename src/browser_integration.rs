@@ -82,7 +82,116 @@ fn extra_chromium_manifest(host_path: &str, extension_ids: &[String]) -> serde_j
     })
 }
 
-/// Install the native host binary and browser manifests.
+/// Ensure the Firefox native host is installed, silently fixing it if missing
+/// or stale. The Firefox add-on ID is fixed, so this needs no user input and
+/// runs on every startup. Returns true if (re)installed.
+pub fn ensure_firefox_host() -> bool {
+    if in_flatpak() {
+        return false;
+    }
+    let home = match home_dir() {
+        Some(h) => h,
+        None => return false,
+    };
+    let manifest_path = home.join(".mozilla/native-messaging-hosts").join(format!("{HOST_NAME}.json"));
+
+    // Already installed and the binary exists? Nothing to do.
+    if let Ok(text) = fs::read_to_string(&manifest_path) {
+        if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(path) = manifest.get("path").and_then(|p| p.as_str()) {
+                if Path::new(path).is_file() {
+                    return false;
+                }
+            }
+        }
+    }
+
+    // (Re)install the binary and manifest.
+    let host_bin = match install_binary() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let host_path = host_bin.to_string_lossy().into_owned();
+    let manifest = serde_json::json!({
+        "name": HOST_NAME,
+        "description": DESCRIPTION,
+        "path": host_path,
+        "type": "stdio",
+        "allowed_extensions": [FIREFOX_ADDON_ID],
+    });
+    let mut text = serde_json::to_string_pretty(&manifest).unwrap_or_default();
+    text.push('\n');
+    if let Some(parent) = manifest_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    fs::write(&manifest_path, text).is_ok()
+}
+
+/// Ensure Chromium manifests for previously-registered extension IDs.
+/// Called on startup; the IDs were stored by `--install-browser-host`.
+pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
+    if in_flatpak() || ids.is_empty() {
+        return false;
+    }
+    let home = match home_dir() {
+        Some(h) => h,
+        None => return false,
+    };
+    let host_bin = match install_binary() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let host_path = host_bin.to_string_lossy().into_owned();
+    let mut changed = false;
+
+    // Crate-covered browsers.
+    let chromium_origins: Vec<String> = ids.iter().map(|id| format!("chrome-extension://{id}/")).collect();
+    let firefox_ids = vec![FIREFOX_ADDON_ID.to_string()];
+    if native_messaging::install(
+        HOST_NAME,
+        DESCRIPTION,
+        Path::new(&host_path),
+        &chromium_origins,
+        &firefox_ids,
+        CRATE_BROWSERS,
+        native_messaging::Scope::User,
+    )
+    .is_ok()
+    {
+        changed = true;
+    }
+
+    // Extra channels the crate misses.
+    for rel in EXTRA_CHROMIUM_DIRS {
+        let cfg = home.join(rel);
+        if !cfg.is_dir() {
+            continue;
+        }
+        let target = cfg.join("NativeMessagingHosts").join(format!("{HOST_NAME}.json"));
+        // Skip if already correct.
+        if let Ok(text) = fs::read_to_string(&target) {
+            if let Ok(m) = serde_json::from_str::<serde_json::Value>(&text) {
+                let origins: Vec<String> = m
+                    .get("allowed_origins")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                    .unwrap_or_default();
+                if origins == chromium_origins {
+                    continue;
+                }
+            }
+        }
+        if let Some(parent) = target.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let mut text = serde_json::to_string_pretty(&extra_chromium_manifest(&host_path, ids)).unwrap_or_default();
+        text.push('\n');
+        if fs::write(&target, text).is_ok() {
+            changed = true;
+        }
+    }
+    changed
+}
 ///
 /// `chromium_ids` are the extension IDs from `chrome://extensions` (unpacked
 /// installs get a generated ID). The Firefox add-on ID is fixed, so its

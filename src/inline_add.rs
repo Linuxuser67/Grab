@@ -273,10 +273,10 @@ fn hide_video_step(v: &VideoStep) {
     v.format.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
-    // No format picked in these states: back to the icon-only button.
-    v.add_btn.set_label("");
-    v.add_btn.set_icon_name("object-select-symbolic");
-    v.add_btn.add_css_class("circular");
+    // NOTE: the Add button keeps its labeled-pill appearance while sliding
+    // out: the revealer is only ever revealed after show_video_ready /
+    // show_video_playlist set the label, so the icon-only form is never
+    // visible — resetting it here would flash a blue tick mid-slide.
 }
 
 /// Clear the video preview block back to a pristine state: `close_card`

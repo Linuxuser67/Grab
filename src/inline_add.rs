@@ -2448,6 +2448,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let reveal = Rc::clone(&reveal);
         let open_state = Rc::clone(&open_state);
         let url_entry = url_entry.clone();
+        // The last URL the clipboard auto-paste inserted: a stale clipboard
+        // link pastes once, not on every fresh open.
+        let last_auto_paste: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         Rc::new(move |initial_url: Option<String>| {
             let already = open_state.is_open();
             reveal();
@@ -2460,6 +2463,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             } else if !already && url_entry.text().trim().is_empty() {
                 // Single clipboard read per fresh open; no watch, no polling.
                 let url_entry = url_entry.clone();
+                let last_auto_paste = Rc::clone(&last_auto_paste);
                 glib::spawn_future_local(async move {
                     let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
                     let Some(clipboard) = clipboard else { return };
@@ -2471,7 +2475,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     }
                     let pasted = text.trim().to_string();
                     if let Ok(normalized) = crate::download::normalize_url(&pasted) {
+                        // Paste once: skip a link this auto-paste already inserted.
+                        if last_auto_paste.borrow().as_deref() == Some(normalized.as_str()) {
+                            return;
+                        }
                         url_entry.set_text(&normalized);
+                        *last_auto_paste.borrow_mut() = Some(normalized);
                     }
                 });
             }

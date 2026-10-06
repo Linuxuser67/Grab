@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.5.0" date="2026-10-06">
+      <description>
+        <ul>
+          <li>Paste a clipboard link into the New Download card only once; reopening the card no longer re-pastes the same link.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.4.5" date="2026-10-06">
       <description>
         <p>Fix the release lockfile.</p>

@@ -1213,6 +1213,7 @@ fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
     v.add_btn.set_icon_name("");
     v.add_btn.remove_css_class("circular");
     v.add_btn.set_label(&gettext("Add"));
+    sync_entry_icon(v);
 }
 
 /// The New Download card's open state, decoupled from the widgets: every

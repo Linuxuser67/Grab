@@ -1566,19 +1566,25 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     dest_row.set_activatable_widget(Some(&dest_btn));
     group.add(&dest_row);
 
-    // Schedule: switch row reveals a single date/time row. The timestamp is
-    // shared with the enqueue paths via the `scheduled_at` cell defined at
-    // the top of `build_add_card`.
+    // Schedule: switch row reveals date/time pickers. The timestamp is shared
+    // with the enqueue paths via the `scheduled_at` cell defined at the top
+    // of `build_add_card`.
     let schedule_switch = adw::SwitchRow::builder()
         .title(gettext("Schedule download"))
         .subtitle(gettext("Start at a specific time"))
         .build();
     group.add(&schedule_switch);
 
-    // Date + time in ONE row: the pickers are suffix widgets on a single
-    // AdwActionRow — MenuButton (calendar popover) for the date, compact
-    // SpinButtons for hour/minute. AdwSpinRow is a full row and can't be a
-    // suffix; GtkSpinButton is the widget form that can.
+    // Revealed schedule rows live in their own PreferencesGroup: AdwActionRow
+    // and AdwSpinRow must be placed in a GtkListBox (which PreferencesGroup
+    // provides), not a plain GtkBox — Adwaita warns otherwise.
+    let schedule_group = adw::PreferencesGroup::new();
+    let schedule_revealer = slide_down_revealer();
+    schedule_revealer.set_child(Some(&schedule_group));
+
+    // Date picker: MenuButton opens a popover with GtkCalendar (HIG: no text
+    // entry for dates). GTK/libadwaita provide no stock date picker, so this
+    // composes native primitives — MenuButton, not a hand-wired Button+Popover.
     let calendar = gtk4::Calendar::new();
     let date_popover = gtk4::Popover::new();
     date_popover.set_child(Some(&calendar));
@@ -1587,26 +1593,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .popover(&date_popover)
         .valign(gtk4::Align::Center)
         .build();
-    let hour_spin = gtk4::SpinButton::with_range(0.0, 23.0, 1.0);
-    hour_spin.set_value(12.0);
-    hour_spin.set_width_chars(2);
-    hour_spin.set_valign(gtk4::Align::Center);
-    let minute_spin = gtk4::SpinButton::with_range(0.0, 59.0, 1.0);
-    minute_spin.set_width_chars(2);
-    minute_spin.set_valign(gtk4::Align::Center);
-    let colon = gtk4::Label::builder()
-        .label(":")
-        .valign(gtk4::Align::Center)
+    let date_row = adw::ActionRow::builder().title(gettext("Date")).build();
+    date_row.add_suffix(&date_btn);
+    date_row.set_activatable_widget(Some(&date_btn));
+    schedule_group.add(&date_row);
+
+    // Time pickers: hour/minute spin rows (HIG: SpinRow for numbers).
+    let hour_spin = adw::SpinRow::builder()
+        .title(gettext("Hour"))
+        .adjustment(&gtk4::Adjustment::new(12.0, 0.0, 23.0, 1.0, 5.0, 0.0))
         .build();
-    let datetime_row = adw::ActionRow::builder()
-        .title(gettext("Date and time"))
+    let minute_spin = adw::SpinRow::builder()
+        .title(gettext("Minute"))
+        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 59.0, 1.0, 5.0, 0.0))
         .build();
-    datetime_row.add_suffix(&date_btn);
-    datetime_row.add_suffix(&hour_spin);
-    datetime_row.add_suffix(&colon);
-    datetime_row.add_suffix(&minute_spin);
-    datetime_row.set_visible(false);
-    group.add(&datetime_row);
+    schedule_group.add(&hour_spin);
+    schedule_group.add(&minute_spin);
 
     // Update the shared timestamp when date/time changes or the switch toggles.
     {
@@ -1648,10 +1650,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             minute_spin.connect_changed(move |_| update());
         }
         let scheduled_at_c2 = Rc::clone(&scheduled_at);
-        let datetime_row_c = datetime_row.clone();
+        let schedule_revealer_c = schedule_revealer.clone();
         schedule_switch.connect_active_notify(move |sw| {
             let active = sw.is_active();
-            datetime_row_c.set_visible(active);
+            if active {
+                // Visible before revealing so the slide-down still animates.
+                schedule_revealer_c.set_visible(true);
+            }
+            schedule_revealer_c.set_reveal_child(active);
             if active {
                 update();
             } else {
@@ -1659,11 +1665,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             }
         });
     }
-    // The schedule rows live in the options card with the other rows.
+    // The schedule rows are their own card under the options: separate
+    // PreferencesGroups get the 12px box spacing instead of touching.
     // Stays inside opts_revealer so the gear toggle collapses it together
     // with the other options.
     let opts_box = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     opts_box.append(&group);
+    opts_box.append(&schedule_revealer);
     // The whole schedule section hides when the preference is off: a hidden
     // switch can't be toggled, so no new scheduled downloads can be created
     // while the scheduler is disabled. Weak settings ref: settings must not
@@ -1671,13 +1679,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     {
         let settings_w = manager.settings().downgrade();
         let switch_c = schedule_switch.clone();
-        let datetime_row_c = datetime_row.clone();
+        let revealer_c = schedule_revealer.clone();
         let scheduled_at_c = Rc::clone(&scheduled_at);
         let sync = Rc::new(move || {
             if let Some(s) = settings_w.upgrade() {
                 let enabled = crate::settings::AppSettings::from(s).scheduled_downloads_enabled();
                 switch_c.set_visible(enabled);
-                datetime_row_c.set_visible(enabled && switch_c.is_active());
+                // Only visible while the switch is on: a collapsed revealer
+                // would otherwise leave a dead 12px gap under the card.
+                revealer_c.set_visible(enabled && switch_c.is_active());
                 if !enabled {
                     scheduled_at_c.set(None);
                     switch_c.set_active(false);

@@ -50,6 +50,17 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.4.3" date="2026-10-06">
+      <description>
+        <ul>
+          <li>Refuse redirects from public hosts to local or private network addresses.</li>
+          <li>Links to this computer or a private network always ask before downloading, even with automatic adding on.</li>
+          <li>Send staged browser cookies through a read-only provider so they survive redirects to other hosts.</li>
+          <li>Report HTTP client setup failures on the download row instead of aborting.</li>
+          <li>Fix the Add button briefly flashing its tick icon while the New Download card closes.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.4.1" date="2026-10-05">
       <description>
         <ul>

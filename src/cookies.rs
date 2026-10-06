@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use reqwest::cookie::CookieStore as _;
 
 /// Jar reuse TTL: outlives hourly site expiries, yet browser logout takes effect without restart.
@@ -333,6 +334,8 @@ pub(crate) async fn jar_for_browser(
 }
 
 /// `Cookie` value for one URL, if the jar holds anything in scope.
+/// Test-only: production sends cookies through the client's cookie provider.
+#[cfg(test)]
 pub(crate) fn cookie_header_for(
     jar: &reqwest::cookie::Jar,
     url: &str,

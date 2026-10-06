@@ -91,6 +91,18 @@ flatpak override --user --filesystem=~/.config/<browser-dir>:ro io.github.linuxu
 
 Undo with `flatpak override --user --reset io.github.linuxuser67.Grab`.
 
+### Media tool installs
+
+Grab fetches its media tools (yt-dlp, ffmpeg, quickjs) from their upstream
+GitHub releases on first run, and Preferences → Check for Updates keeps them
+current. Each download is verified against the SHA-256 digest published in the
+same GitHub release before it is installed; a missing digest refuses the
+install.
+
+That digest detects corrupted or truncated downloads, not a compromised
+release — it shares the release's trust root. If you need a separate trust
+root, install the tools from your distribution instead.
+
 ## Browser extension
 
 Send browser downloads and links straight to Grab with the

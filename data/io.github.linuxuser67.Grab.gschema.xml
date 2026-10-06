@@ -19,7 +19,7 @@
     <key name="auto-add-downloads" type="b">
       <default>false</default>
       <summary>Add downloads automatically</summary>
-      <description>Skip confirmation: single videos start right after lookup with the preferred quality, and links opened from other apps start without asking.</description>
+      <description>Skip confirmation: single videos start right after lookup with the preferred quality, and links opened from other apps start without asking, except links to this computer or a private network, which always ask.</description>
     </key>
     <key name="max-concurrent" type="i">
       <default>3</default>

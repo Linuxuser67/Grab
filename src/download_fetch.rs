@@ -104,6 +104,26 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 crate::cookies::jar_for_browser(&ctx.opts.cookies_browser, &bin, &ctx.url).await;
         }
     }
+    // With a jar, swap in a provider-backed client: reqwest re-applies
+    // in-scope cookies on every redirect hop, while a stamped Cookie header
+    // would be stripped on a cross-host redirect. The provider is read-only;
+    // the shared jar stays a browser snapshot.
+    if let Some(jar) = ctx.cookies.clone() {
+        let proxy = match ctx.opts.proxy_config() {
+            Ok(p) => p,
+            Err(e) => {
+                ctx.tx.send(EngineMsg::Failed(e)).ok();
+                return;
+            }
+        };
+        match crate::download_net::http_client_with_jar(proxy.as_ref(), jar) {
+            Ok(client) => ctx.client = client,
+            Err(e) => {
+                ctx.tx.send(EngineMsg::Failed(e)).ok();
+                return;
+            }
+        }
+    }
     match mode {
         StartMode::Single => {
             single_loop(&ctx, &mut tries, None, false).await;
@@ -114,7 +134,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 single_loop(&ctx, &mut tries, None, true).await;
                 return;
             }
-            match probe_ranges(&ctx.client, &ctx.url, ctx.cookies.as_ref(), timeout).await {
+            match probe_ranges(&ctx.client, &ctx.url, timeout).await {
                 Ok((total, validator)) => {
                     // The probe captured the session validator before any worker started.
                     // Persist it for cross-session resume, and use it for If-Range.
@@ -407,12 +427,7 @@ async fn attempt_once(
             .await
             .map(|m| m.len())
             .unwrap_or(0);
-        let mut req = stamp_request(
-            ctx.client.get(&ctx.url),
-            DEFAULT_USER_AGENT,
-            ctx.cookies.as_ref(),
-            &ctx.url,
-        );
+        let mut req = stamp_request(ctx.client.get(&ctx.url), DEFAULT_USER_AGENT);
         if start > 0 {
             req = req.header("Range", format!("bytes={start}-"));
             // If-Range: the server returns 206 only if the object still
@@ -438,12 +453,7 @@ async fn attempt_once(
             }
             if claimed.is_none() && start > 0 && !restarted {
                 // Bare 416 with no usable Content-Range: confirm the length before deleting anything that might be complete.
-                let hreq = stamp_request(
-                    ctx.client.head(&ctx.url),
-                    DEFAULT_USER_AGENT,
-                    ctx.cookies.as_ref(),
-                    &ctx.url,
-                );
+                let hreq = stamp_request(ctx.client.head(&ctx.url), DEFAULT_USER_AGENT);
                 if let Ok(hresp) = execute_with_timeout(&ctx.client, hreq, ctx.timeout).await
                     && hresp.status().is_success()
                     && hresp.content_length() == Some(start)
@@ -690,24 +700,21 @@ pub(crate) enum StartMode {
     Resume(SegmentState),
 }
 
-/// Stamp one outbound request like a browser (UA, cookies); single choke point for all requests.
+/// Stamp one outbound request like a browser (User-Agent); single choke point for all requests.
 /// Note: no Referer is sent. The client builder disables reqwest's automatic
 /// Referer (it leaks URLs/tokens), and a manually-stamped Referer would persist
-/// across redirects (reqwest doesn't strip custom headers), leaking the origin
+/// across redirects (reqwest doesn't strip it), leaking the origin
 /// to cross-origin targets. Hotlink guards requiring Referer are not supported.
+/// Cookies are not stamped here either: reqwest strips a manually-set Cookie
+/// header when a redirect changes host, port or scheme, so cookie-bearing
+/// downloads use a client with the jar as provider instead (see
+/// `http_client_with_jar`), which re-applies in-scope cookies on every hop.
 pub(crate) fn stamp_request(
     mut req: reqwest::RequestBuilder,
     user_agent: &str,
-    cookies: Option<&std::sync::Arc<reqwest::cookie::Jar>>,
-    url: &str,
 ) -> reqwest::RequestBuilder {
     if !user_agent.trim().is_empty() {
         req = req.header("User-Agent", user_agent.trim());
-    }
-    if let Some(jar) = cookies
-        && let Some(cookie) = crate::cookies::cookie_header_for(jar, url)
-    {
-        req = req.header("Cookie", cookie);
     }
     req
 }
@@ -762,14 +769,11 @@ fn response_validators(
 async fn probe_ranges(
     client: &reqwest::Client,
     url: &str,
-    cookies: Option<&std::sync::Arc<reqwest::cookie::Jar>>,
     timeout: Duration,
 ) -> Result<(u64, crate::engine_msg::ValidatorInfo), String> {
     let req = stamp_request(
         client.get(url).header("Range", "bytes=0-0"),
         DEFAULT_USER_AGENT,
-        cookies,
-        url,
     );
     let resp = execute_with_timeout(client, req, timeout).await?;
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
@@ -875,7 +879,7 @@ pub(crate) async fn fetch_piece(
         if let Some(v) = ctx.if_range.get() {
             builder = builder.header("If-Range", v);
         }
-        let req = stamp_request(builder, DEFAULT_USER_AGENT, ctx.cookies.as_ref(), &ctx.url);
+        let req = stamp_request(builder, DEFAULT_USER_AGENT);
         let resp = match execute_with_timeout(&ctx.client, req, timeout).await {
             Ok(r) => r,
             Err(e) => {

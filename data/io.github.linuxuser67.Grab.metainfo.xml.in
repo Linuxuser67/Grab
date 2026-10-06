@@ -50,6 +50,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.4.4" date="2026-10-06">
+      <description>
+        <p>Fix the Flatpak build.</p>
+      </description>
+    </release>
     <release version="5.4.3" date="2026-10-06">
       <description>
         <ul>

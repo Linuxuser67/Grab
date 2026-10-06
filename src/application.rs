@@ -20,7 +20,7 @@ struct State {
     settings: AppSettings,
     toasts: Rc<adw::ToastOverlay>,
     window: adw::ApplicationWindow,
-    search_bar: gtk4::SearchBar,
+    search_toggle: gtk4::ToggleButton,
     add_card: crate::inline_add::AddCard,
 }
 
@@ -303,7 +303,7 @@ pub fn setup(app: &adw::Application) {
                 settings,
                 toasts,
                 window: win.0,
-                search_bar: win.1,
+                search_toggle: win.1,
                 add_card: win.2,
             }));
 
@@ -543,8 +543,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
             gio::ActionEntry::builder("search")
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
-                        let on = !s.search_bar.is_search_mode();
-                        s.search_bar.set_search_mode(on);
+                        s.search_toggle.set_active(!s.search_toggle.is_active());
                     }
                 })
                 .build()

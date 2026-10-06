@@ -191,7 +191,7 @@ pub fn build_window(
     toasts: Rc<adw::ToastOverlay>,
 ) -> (
     adw::ApplicationWindow,
-    gtk4::SearchBar,
+    gtk4::ToggleButton,
     crate::inline_add::AddCard,
 ) {
     let window = adw::ApplicationWindow::builder()
@@ -216,10 +216,19 @@ pub fn build_window(
     // Inline New Download card, pinned under the header above the list (and
     // the empty state). The queue stays usable underneath it.
     let add_card = crate::inline_add::build_add_card(Rc::clone(&manager));
-    header.set_title_widget(Some(&adw::WindowTitle::new(
-        &gettext("Grab"),
-        &gettext("Download Manager"),
-    )));
+    // Search lives in the header title slot (Nautilus-style): the search
+    // toggle swaps the window title for a search entry in place.
+    let title_stack = gtk4::Stack::new();
+    title_stack.add_named(
+        &adw::WindowTitle::new(&gettext("Grab"), &gettext("Download Manager")),
+        Some("title"),
+    );
+    let search = gtk4::SearchEntry::builder()
+        .placeholder_text(gettext("Search downloads"))
+        .hexpand(true)
+        .build();
+    title_stack.add_named(&search, Some("search"));
+    header.set_title_widget(Some(&title_stack));
 
     let menu = gio::Menu::new();
     menu.append(Some(&gettext("New Download")), Some("app.add-download"));
@@ -357,10 +366,6 @@ pub fn build_window(
     // empty sections collapse as usual.
     let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     let status_sel: Rc<Cell<u32>> = Rc::new(Cell::new(0));
-    let search = gtk4::SearchEntry::builder()
-        .placeholder_text(gettext("Search downloads"))
-        .hexpand(true)
-        .build();
     // Status filter as a segmented control pinned above the sections: one
     // mutually-exclusive choice, always visible. Order must match
     // status_filter_bucket: 0 = All, 1 = Active, 2 = Queued, 3 = Downloaded.
@@ -384,16 +389,33 @@ pub fn build_window(
     ))]);
     seg_wrap.append(&seg);
     content.prepend(&seg_wrap);
-    // HIG search pattern: a header toggle reveals a GtkSearchBar.
-    let search_bar = gtk4::SearchBar::builder().show_close_button(true).build();
-    search_bar.set_child(Some(&search));
-    search_bar.connect_entry(&search);
-    search_bar.set_key_capture_widget(Some(&window));
-    search_toggle
-        .bind_property("active", &search_bar, "search-mode-enabled")
-        .bidirectional()
-        .sync_create()
-        .build();
+    // The toggle swaps the header title for the search entry (and back);
+    // Escape in the entry closes it too.
+    {
+        let stack = title_stack.clone();
+        let entry = search.clone();
+        search_toggle.connect_toggled(move |btn| {
+            if btn.is_active() {
+                stack.set_visible_child_name("search");
+                entry.grab_focus();
+            } else {
+                stack.set_visible_child_name("title");
+            }
+        });
+    }
+    {
+        let toggle = search_toggle.clone();
+        let esc = gtk4::EventControllerKey::new();
+        esc.connect_key_pressed(move |_, keyval, _, _| {
+            if keyval == gtk4::gdk::Key::Escape {
+                toggle.set_active(false);
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        search.add_controller(esc);
+    }
     content.append(&active_section);
     content.append(&queued_section);
     content.append(&downloaded_section);
@@ -626,7 +648,6 @@ pub fn build_window(
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
-    toolbar.add_top_bar(&search_bar);
     toolbar.add_top_bar(&banner);
     toolbar.add_top_bar(add_card.widget());
     toolbar.set_content(Some(&stack));
@@ -673,7 +694,7 @@ pub fn build_window(
         hook();
     }
 
-    (window, search_bar, add_card)
+    (window, search_toggle, add_card)
 }
 
 #[cfg(test)]

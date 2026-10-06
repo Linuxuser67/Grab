@@ -1150,8 +1150,17 @@ impl DownloadManager {
                 return;
             }
         };
+        let client = match http_client_for(proxy.as_ref()) {
+            Ok(c) => c,
+            Err(e) => {
+                item.set_detail(e);
+                item.set_status(DownloadStatus::Failed);
+                self.changed();
+                return;
+            }
+        };
         let ctx = FetchCtx {
-            client: http_client_for(proxy.as_ref()),
+            client,
             url,
             dest,
             opts,

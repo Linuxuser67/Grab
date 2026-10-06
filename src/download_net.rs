@@ -282,27 +282,71 @@ impl DownloadOptions {
     }
 }
 
-pub(crate) fn http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| client_builder().build().expect("http client"))
+pub(crate) fn http_client() -> Result<&'static reqwest::Client, String> {
+    // Cached for the process lifetime, including failure: backend init
+    // (TLS roots) does not heal mid-process, and retrying would re-log the same error.
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| client_builder().build().map_err(|e| e.to_string()))
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 /// Client honoring this attempt's proxy; proxied configs share one pooled client per config.
-pub(crate) fn http_client_for(proxy: Option<&ResolvedProxy>) -> reqwest::Client {
+pub(crate) fn http_client_for(proxy: Option<&ResolvedProxy>) -> Result<reqwest::Client, String> {
     let Some(proxy) = proxy else {
-        return http_client().clone();
+        return http_client().cloned();
     };
     let cache = PROXIED.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     if let Some(client) = lock_recover(cache).get(&proxy.cache_key) {
-        return client.clone();
+        return Ok(client.clone());
     }
     let mut builder = client_builder();
     for p in &proxy.proxies {
         builder = builder.proxy(p.clone());
     }
-    let client = builder.build().expect("proxied http client");
+    let client = builder.build().map_err(|e| e.to_string())?;
     lock_recover(cache).insert(proxy.cache_key.clone(), client.clone());
-    client
+    Ok(client)
+}
+
+/// Read-only view of a cookie jar for reqwest's cookie provider: staged
+/// cookies are sent on every request (including redirect hops), but
+/// `Set-Cookie` responses are never written back — the shared jar stays a
+/// read-only browser snapshot, so a browser logout takes effect at the next
+/// TTL refresh.
+struct ReadOnlyJar(std::sync::Arc<reqwest::cookie::Jar>);
+
+impl reqwest::cookie::CookieStore for ReadOnlyJar {
+    // Deliberate no-op: the jar is a snapshot, not a store.
+    fn set_cookies(
+        &self,
+        _: &mut dyn Iterator<Item = &reqwest::header::HeaderValue>,
+        _: &url::Url,
+    ) {
+    }
+
+    fn cookies(&self, url: &url::Url) -> Option<reqwest::header::HeaderValue> {
+        self.0.cookies(url)
+    }
+}
+
+/// Client applying staged cookies via a provider: reqwest re-applies
+/// in-scope cookies on every redirect hop, while a manually-stamped `Cookie`
+/// header is stripped when a redirect changes host, port or scheme.
+/// Unpooled (one per attempt): cookie-bearing downloads don't share the
+/// global client's connection pool.
+pub(crate) fn http_client_with_jar(
+    proxy: Option<&ResolvedProxy>,
+    jar: std::sync::Arc<reqwest::cookie::Jar>,
+) -> Result<reqwest::Client, String> {
+    let mut b = client_builder().cookie_provider(std::sync::Arc::new(ReadOnlyJar(jar)));
+    if let Some(p) = proxy {
+        for x in &p.proxies {
+            b = b.proxy(x.clone());
+        }
+    }
+    b.build().map_err(|e| e.to_string())
 }
 
 static PROXIED: OnceLock<Mutex<std::collections::HashMap<String, reqwest::Client>>> =
@@ -312,6 +356,43 @@ static PROXIED: OnceLock<Mutex<std::collections::HashMap<String, reqwest::Client
 #[cfg(test)]
 pub(crate) fn proxied_pool_len() -> usize {
     lock_recover(PROXIED.get_or_init(|| Mutex::new(std::collections::HashMap::new()))).len()
+}
+
+/// Whether a hostname targets this computer or a private network: literal IPs
+/// (v4/v6) and `localhost`/`.local`/`.internal` names only. No DNS is
+/// consulted, so a public name resolving to a private address is NOT caught
+/// (a resolving check would be TOCTOU-raced against the connect anyway).
+pub(crate) fn is_local_or_private_host(host: &str) -> bool {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    fn private_v4(a: Ipv4Addr) -> bool {
+        a.is_loopback()
+            || a.is_private()
+            || a.is_link_local()
+            || a.is_unspecified()
+            || (a.octets()[0] == 100 && (a.octets()[1] & 0xC0) == 64) // CGNAT 100.64/10
+    }
+    fn private_v6(a: Ipv6Addr) -> bool {
+        a.is_loopback()
+            || a.is_unspecified()
+            || (a.segments()[0] & 0xFE00) == 0xFC00 // fc00::/7
+            || (a.segments()[0] & 0xFFC0) == 0xFE80 // fe80::/10
+    }
+    let h = host
+        .trim_matches(|c| c == '[' || c == ']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if h == "localhost"
+        || h.ends_with(".localhost")
+        || h.ends_with(".local")
+        || h.ends_with(".internal")
+    {
+        return true;
+    }
+    match h.parse::<IpAddr>() {
+        Ok(IpAddr::V4(a)) => private_v4(a),
+        Ok(IpAddr::V6(a)) => a.to_ipv4_mapped().map_or_else(|| private_v6(a), private_v4),
+        Err(_) => false,
+    }
 }
 
 /// Shared redirect policy: bounded hops, no https->http downgrades.
@@ -324,7 +405,19 @@ fn redirect_policy() -> reqwest::redirect::Policy {
             .last()
             .is_some_and(|u| u.scheme() == "https")
             && attempt.url().scheme() == "http";
-        if attempt.previous().len() > 5 || downgrade {
+        // A hostile page must not bounce a download into the LAN: refuse a
+        // hop from a public host to a local/private one. Private-to-private
+        // (LAN CDN) and private-to-public hops stay allowed.
+        let to_private = attempt
+            .url()
+            .host_str()
+            .is_some_and(is_local_or_private_host);
+        let from_private = attempt
+            .previous()
+            .last()
+            .and_then(|u| u.host_str())
+            .is_some_and(is_local_or_private_host);
+        if attempt.previous().len() > 5 || downgrade || (to_private && !from_private) {
             attempt.stop()
         } else {
             attempt.follow()
@@ -381,4 +474,77 @@ pub(crate) fn tool_client_builder() -> reqwest::ClientBuilder {
         // A stalled server must not hang the install indefinitely.
         .connect_timeout(std::time::Duration::from_secs(15))
         .read_timeout(std::time::Duration::from_secs(60))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_or_private_host;
+
+    #[test]
+    fn local_or_private_host_classification() {
+        // Loopback and private v4.
+        for h in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "10.0.0.5",
+            "172.16.4.9",
+            "192.168.1.1",
+            "169.254.10.20",
+            "0.0.0.0",
+            "100.64.0.1",  // CGNAT
+            "100.127.9.9", // CGNAT
+        ] {
+            assert!(is_local_or_private_host(h), "private: {h}");
+        }
+        // Public v4, including CGNAT-adjacent ranges.
+        for h in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "203.0.113.7",
+        ] {
+            assert!(!is_local_or_private_host(h), "public: {h}");
+        }
+        // v6: loopback, ULA, link-local, mapped v4.
+        for h in [
+            "::1",
+            "[::1]",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+            "::ffff:192.168.0.1",
+        ] {
+            assert!(is_local_or_private_host(h), "private v6: {h}");
+        }
+        assert!(
+            !is_local_or_private_host("2606:4700:4700::1111"),
+            "public v6"
+        );
+        assert!(
+            !is_local_or_private_host("::ffff:8.8.8.8"),
+            "mapped public v4"
+        );
+        // Names: localhost family and mDNS/internal suffixes.
+        for h in [
+            "localhost",
+            "LOCALHOST",
+            "localhost.",
+            "foo.localhost",
+            "printer.local",
+            "db.internal",
+        ] {
+            assert!(is_local_or_private_host(h), "local name: {h}");
+        }
+        // Public names, and lookalikes that must NOT match the suffix rules.
+        for h in [
+            "example.com",
+            "example.local.evil.com",
+            "localhost.evil.com",
+        ] {
+            assert!(!is_local_or_private_host(h), "public name: {h}");
+        }
+        // No DNS: a public name resolving to a private address is not caught.
+        assert!(!is_local_or_private_host("internal.example.com"));
+    }
 }

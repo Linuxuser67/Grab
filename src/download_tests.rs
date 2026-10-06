@@ -3495,7 +3495,7 @@ fn piece_rejects_changed_file_version() {
     } = spawn_fixture("verc", "v.bin", 300_000, "0", &[], 43);
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = FetchCtx {
-        client: http_client().clone(),
+        client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
         opts: DownloadOptions {
@@ -4680,30 +4680,96 @@ fn cookies_secure_flag_is_scheme_aware() {
 }
 
 #[test]
-fn cookies_stamp_request_headers() {
-    let (jar, _) =
-        crate::cookies::jar_from_export(".example.com\tTRUE\t/\tFALSE\t9999999999\tsid\tabc123\n");
+fn stamp_request_never_stamps_cookies() {
+    // Cookies ride the client's provider, not the request: reqwest strips a
+    // manually-set Cookie header on cross-host redirects, so stamp_request
+    // must not set one at all.
+    // Mutation: re-add the Cookie branch → this assertion fails.
     let built = stamp_request(
-        http_client().get("https://example.com/v"),
+        http_client()
+            .expect("http client")
+            .get("https://example.com/v"),
         "Grab-test/1.0",
-        Some(&jar),
-        "https://example.com/v",
     )
     .build()
     .unwrap();
     assert_eq!(built.headers()["user-agent"], "Grab-test/1.0");
-    assert_eq!(built.headers()["cookie"], "sid=abc123");
-    // No jar, no Cookie header (plain rows unchanged).
-    let built = stamp_request(
-        http_client().get("https://example.com/v"),
-        "",
-        None,
-        "https://example.com/v",
-    )
-    .build()
-    .unwrap();
     assert!(!built.headers().contains_key("cookie"));
-    assert!(!built.headers().contains_key("user-agent"));
+}
+
+#[test]
+fn cookies_reapplied_after_cross_host_redirect() {
+    // localhost -> 127.0.0.1 is a cross-host redirect: reqwest strips a
+    // stamped Cookie header there. The jar provider must re-apply in-scope
+    // cookies for the new host on the second hop.
+    // Mutation: build the client without the provider and stamp the Cookie
+    // manually → the second-hop assertion fails.
+    use std::io::{Read, Write};
+
+    let port = test_port(910);
+    let listener = std::net::TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
+    type SeenHops = std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+    let seen: SeenHops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_srv = seen.clone();
+    let server = std::thread::spawn(move || {
+        for stream in listener.incoming().take(2) {
+            let mut stream = stream.unwrap();
+            // Read the request headers before responding: unread data plus
+            // an early exit makes the kernel RST the connection (see
+            // AGENTS.md), racing the client's request write.
+            let mut buf = Vec::new();
+            let mut one = [0u8; 1];
+            while !buf.ends_with(b"\r\n\r\n") && buf.len() < 8192 {
+                if stream.read(&mut one).unwrap_or(0) == 0 {
+                    break;
+                }
+                buf.push(one[0]);
+            }
+            let head = String::from_utf8_lossy(&buf).into_owned();
+            let request_line = head.lines().next().unwrap_or("").to_string();
+            let cookie = head
+                .lines()
+                .filter_map(|l| {
+                    let (name, value) = l.split_once(':')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("cookie")
+                        .then(|| value.trim().to_string())
+                })
+                .next();
+            seen_srv.lock().unwrap().push((request_line, cookie));
+            let body = if head.contains("/start ") || head.contains("/start?") {
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_string()
+            };
+            stream.write_all(body.as_bytes()).ok();
+        }
+    });
+
+    let jar = std::sync::Arc::new(reqwest::cookie::Jar::default());
+    jar.add_cookie_str("sid=loc123", &"http://localhost/".parse().unwrap());
+    jar.add_cookie_str("sid=ip456", &"http://127.0.0.1/".parse().unwrap());
+    let client = crate::download_net::http_client_with_jar(None, jar).expect("jar client");
+    let resp = crate::runtime::tokio_rt()
+        .block_on(client.get(format!("http://localhost:{port}/start")).send())
+        .expect("redirect fetch");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    server.join().unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "expected start + final hops: {seen:?}");
+    assert!(
+        seen[0].1.as_deref().unwrap_or("").contains("sid=loc123"),
+        "first hop carries the localhost cookie: {:?}",
+        seen[0]
+    );
+    assert!(
+        seen[1].1.as_deref().unwrap_or("").contains("sid=ip456"),
+        "second hop re-applies the 127.0.0.1 cookie: {:?}",
+        seen[1]
+    );
 }
 
 #[test]
@@ -4826,7 +4892,7 @@ fn direct_mode_ignores_proxy_env() {
     let _env = EnvGuard;
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = FetchCtx {
-        client: http_client().clone(),
+        client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
         opts: DownloadOptions {
@@ -4910,7 +4976,7 @@ fn single_connection_skips_probe() {
     } = spawn_fixture("noprobe", "v.bin", 20_000, "0", &[], 45);
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = FetchCtx {
-        client: http_client().clone(),
+        client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
         opts: DownloadOptions {
@@ -4937,22 +5003,22 @@ fn single_connection_skips_probe() {
 #[test]
 fn stamp_request_sends_no_referer() {
     // No Referer is sent: a manually-stamped Referer would persist across
-    // redirects (reqwest doesn't strip custom headers), leaking the origin
+    // redirects (reqwest doesn't strip it), leaking the origin
     // to cross-origin targets.
     let built = stamp_request(
-        http_client().get("http://127.0.0.1:8080/a/b?token=secret"),
+        http_client()
+            .expect("http client")
+            .get("http://127.0.0.1:8080/a/b?token=secret"),
         "",
-        None,
-        "http://127.0.0.1:8080/a/b?token=secret",
     )
     .build()
     .unwrap();
     assert!(!built.headers().contains_key("referer"));
     let built = stamp_request(
-        http_client().get("https://example.com/v"),
+        http_client()
+            .expect("http client")
+            .get("https://example.com/v"),
         "",
-        None,
-        "https://example.com/v",
     )
     .build()
     .unwrap();
@@ -6464,7 +6530,7 @@ fn piece_sends_if_range_when_validator_set() {
     let if_range = std::sync::Arc::new(std::sync::OnceLock::new());
     let _ = if_range.set("\"test-etag-123\"".to_string());
     let ctx = FetchCtx {
-        client: http_client().clone(),
+        client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
         opts: DownloadOptions {
@@ -6515,7 +6581,7 @@ fn piece_rejects_200_after_if_range_mismatch() {
     // Our validator differs from the server's ETag.
     let _ = if_range.set("\"client-etag\"".to_string());
     let ctx = FetchCtx {
-        client: http_client().clone(),
+        client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
         opts: DownloadOptions {
@@ -6572,7 +6638,7 @@ fn piece_rejects_206_with_mismatched_validator() {
     // Our validator differs from the server's ETag ("server-etag-v2").
     let _ = if_range.set("\"client-etag-v1\"".to_string());
     let ctx = FetchCtx {
-        client: http_client().clone(),
+        client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
         opts: DownloadOptions {
@@ -6616,7 +6682,7 @@ fn probe_validator_sent_before_workers() {
     );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = FetchCtx {
-        client: http_client().clone(),
+        client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
         opts: DownloadOptions {

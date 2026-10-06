@@ -201,11 +201,16 @@ fn grab_handoff_needs_confirm(uri: &url::Url) -> bool {
     !handoff_goes_to_card(uri)
 }
 
-/// Whether a `grab:` handoff shows the "Add this download?" dialog: only
-/// for handoffs that would enqueue on their own, and only when auto-add
-/// is off (the toggle opts out of the explicit-OK protection).
+/// Whether a `grab:` handoff shows the "Add this download?" dialog: for
+/// handoffs that would enqueue on their own when auto-add is off (the toggle
+/// opts out of the explicit-OK protection) — and always for links to this
+/// computer or a private network, since any web page can fire a `grab:` link
+/// at the LAN.
 fn handoff_should_confirm(via_grab: bool, uri: &url::Url, auto_add: bool) -> bool {
-    via_grab && grab_handoff_needs_confirm(uri) && !auto_add
+    let private = uri
+        .host_str()
+        .is_some_and(crate::download_net::is_local_or_private_host);
+    via_grab && (private || (grab_handoff_needs_confirm(uri) && !auto_add))
 }
 
 /// `grab:` handoffs bypass the intake's URL normalization, so re-apply its
@@ -248,7 +253,13 @@ fn route_open_uri(
                     return;
                 }
             };
-        let client = crate::download_net::http_client_for(proxy.as_ref());
+        let client = match crate::download_net::http_client_for(proxy.as_ref()) {
+            Ok(c) => c,
+            Err(e) => {
+                toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+                return;
+            }
+        };
         glib::spawn_future_local(intake_remote_torrent(
             manager, toasts, add_card, client, url, file_name,
         ));
@@ -1130,5 +1141,31 @@ mod tests {
         // Video pages go to the card (its Add button is the confirmation).
         let video = "https://example.com/watch?v=1".parse::<url::Url>().unwrap();
         assert!(!handoff_should_confirm(true, &video, false));
+    }
+
+    #[test]
+    fn handoff_private_host_always_confirms() {
+        // A grab: link at the LAN always asks, even with auto-add on:
+        // any web page can fire grab: links.
+        // Mutation: drop the `private ||` → these assertions fail.
+        for raw in [
+            "http://192.168.1.1/file.zip",
+            "http://10.0.0.9:8080/file.zip",
+            "http://localhost/file.zip",
+            "http://printer.local/file.zip",
+            "http://[::1]/file.zip",
+        ] {
+            let uri = raw.parse::<url::Url>().unwrap();
+            assert!(handoff_should_confirm(true, &uri, true), "input: {raw}");
+        }
+        // Public hosts keep the old behavior: auto-add skips the dialog.
+        let public = "https://example.com/file.zip".parse::<url::Url>().unwrap();
+        assert!(!handoff_should_confirm(true, &public, true));
+        // Magnets have no host: unchanged.
+        let magnet = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709"
+            .parse::<url::Url>()
+            .unwrap();
+        assert!(handoff_should_confirm(true, &magnet, false));
+        assert!(!handoff_should_confirm(true, &magnet, true));
     }
 }

@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.6.0" date="2026-10-07">
+      <description>
+        <ul>
+          <li>Security fixes: atomic ffmpeg/ffprobe installs, ETag/Last-Modified compared only with their own kind, private-host detection gaps closed, torrent '..' paths rejected, canonical URL in the confirm dialog, subtitle-language keys validated.</li>
+          <li>Search button moved next to the menu button; the title/search swap animates with the default slide transition.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.5.2-beta.1" date="2026-10-07">
       <description>
         <ul>

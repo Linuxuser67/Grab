@@ -232,9 +232,15 @@ pub fn build_window(
     let search_bar = gtk4::SearchBar::builder()
         .child(&search)
         .show_close_button(true)
+        .build();
+    // Match the New Download card's width: capped at 600px on wide windows
+    // via AdwClamp, full width below the threshold.
+    let search_clamp = adw::Clamp::builder()
+        .maximum_size(600)
         .margin_start(12)
         .margin_end(12)
         .build();
+    search_clamp.set_child(Some(&search_bar));
 
     let menu = gio::Menu::new();
     menu.append(Some(&gettext("New Download")), Some("app.add-download"));
@@ -662,7 +668,7 @@ pub fn build_window(
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
-    toolbar.add_top_bar(&search_bar);
+    toolbar.add_top_bar(&search_clamp);
     toolbar.add_top_bar(&banner);
     toolbar.add_top_bar(add_card.widget());
     toolbar.set_content(Some(&stack));

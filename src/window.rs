@@ -226,15 +226,15 @@ pub fn build_window(
     let search = gtk4::SearchEntry::builder()
         .placeholder_text(gettext("Search downloads"))
         .hexpand(true)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
         .build();
     let search_bar = gtk4::SearchBar::builder()
         .child(&search)
         .show_close_button(true)
         .build();
-    search_bar.set_margin_top(12);
-    search_bar.set_margin_bottom(12);
-    search_bar.set_margin_start(12);
-    search_bar.set_margin_end(12);
 
     let menu = gio::Menu::new();
     menu.append(Some(&gettext("New Download")), Some("app.add-download"));

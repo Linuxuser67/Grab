@@ -50,14 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="5.6.5" date="2026-10-07">
+    <release version="5.6.6-beta.1" date="2026-10-07">
       <description>
         <ul>
-          <li>Search bar width now matches the New Download card (600px cap).</li>
+          <li>Format selection by height instead of unstable IDs; fixes "Requested format is not available" for HLS.</li>
+          <li>Search bar in a PreferencesGroup, aligned with the New Download card rows.</li>
         </ul>
       </description>
     </release>
-    <release version="5.6.4" date="2026-10-07"/>
+    <release version="5.6.5" date="2026-10-07"/>
     <release version="5.6.0" date="2026-10-07">
       <description>
         <ul>

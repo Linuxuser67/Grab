@@ -989,34 +989,10 @@ pub(crate) fn spawn_recording_watcher(
     out: std::path::PathBuf,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // For HLS with separate video/audio, yt-dlp writes to format-specific
-        // parts like `video.f232.mp4.part`, not the plain `.part` shell.
-        // Derive the stem to scan for those too.
-        let stem = shell
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .trim_end_matches(".part")
-            .to_string();
-        let dir = shell.parent().map(|p| p.to_path_buf());
         for _ in 0..1200 {
             let mut bytes = 0u64;
             for p in [&shell, &out] {
                 bytes = bytes.max(tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0));
-            }
-            // Scan for format-specific parts (e.g., `stem.f232.mp4.part`).
-            if let (Some(d), false) = (dir.as_ref(), stem.is_empty()) {
-                if let Ok(mut entries) = tokio::fs::read_dir(d).await {
-                    while let Ok(Some(e)) = entries.next_entry().await {
-                        if let Some(name) = e.file_name().to_str() {
-                            if name.starts_with(&stem) && name.ends_with(".part") {
-                                if let Ok(m) = e.metadata().await {
-                                    bytes = bytes.max(m.len());
-                                }
-                            }
-                        }
-                    }
-                }
             }
             if bytes > 0 {
                 tx.send(crate::engine_msg::EngineMsg::Phase(gettext("Recording…")))

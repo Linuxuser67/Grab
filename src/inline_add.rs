@@ -58,9 +58,8 @@ struct ProbeState {
 
 impl ProbeState {
     /// Start a resolve for `url`: returns the new generation, or `None`
-    /// when a twin resolve for this exact URL is already running for the
-    /// current generation (suppressed — the twin's result would lose the
-    /// generation race anyway).
+    /// when a probe is already in flight (the user must wait for the
+    /// current lookup to finish before starting a new one).
     fn kick(&mut self, url: String, probe_unlisted: bool) -> Option<u64> {
         if inflight_suppresses(&self.inflight, &url, self.generation, probe_unlisted) {
             return None;
@@ -71,8 +70,7 @@ impl ProbeState {
         Some(my)
     }
 
-    /// Twin check without starting: is a resolve for this exact URL already
-    /// running for the current generation?
+    /// Twin check without starting: is a resolve already running?
     fn is_inflight(&self, url: &str, probe_unlisted: bool) -> bool {
         inflight_suppresses(&self.inflight, url, self.generation, probe_unlisted)
     }
@@ -112,13 +110,14 @@ impl ProbeState {
 /// kick, so it is never suppressed by one.
 fn inflight_suppresses(
     marker: &Option<(String, u64, bool)>,
-    url: &str,
-    generation: u64,
-    probe_unlisted: bool,
+    _url: &str,
+    _generation: u64,
+    _probe_unlisted: bool,
 ) -> bool {
-    marker
-        .as_ref()
-        .is_some_and(|(u, g, p)| u == url && *g == generation && *p == probe_unlisted)
+    // Any in-flight probe suppresses a new one: a second URL pasted while a
+    // lookup runs would race the shared ProbeState and the Add button would
+    // grab the first probe's title. The user waits for the lookup to finish.
+    marker.is_some()
 }
 
 /// Item-count label for a probed collection, kind-aware ("3 stories"). The
@@ -2623,12 +2622,11 @@ mod tests {
             .kick("https://youtu.be/a".to_string(), false)
             .expect("first kick runs");
         assert_eq!(my, 1);
-        // Twin: same URL, generation and probe mode — suppressed.
+        // Any in-flight probe suppresses a new kick: same URL, different
+        // URL, or different probe mode — all must wait for the lookup.
         assert!(st.kick("https://youtu.be/a".to_string(), false).is_none());
-        // A different URL is never a twin.
-        assert!(st.kick("https://youtu.be/b".to_string(), false).is_some());
-        // Same URL but the other probe mode is a different resolve.
-        assert!(st.kick("https://youtu.be/a".to_string(), true).is_some());
+        assert!(st.kick("https://youtu.be/b".to_string(), false).is_none());
+        assert!(st.kick("https://youtu.be/a".to_string(), true).is_none());
     }
 
     #[test]

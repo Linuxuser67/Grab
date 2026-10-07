@@ -3784,7 +3784,8 @@ fn live_argv_pins_planner_id_in_mpegts() {
     pinned.video_format_id = Some("h720".into());
     let argv = live_capture_argv(&pinned, "h720", out, None);
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
-    assert_eq!(argv[f + 1], "h720+ba/b");
+    // Pins are ignored even when set; height-based selection.
+    assert_eq!(argv[f + 1], "bv*[height<=720]+ba/b");
 }
 
 #[test]

@@ -55,7 +55,6 @@
         <ul>
           <li>Clear the entry spinner when a playlist lookup finishes.</li>
           <li>The search button now opens the search field in the header bar, where the title was.</li>
-          <li>Schedule download shows the date and time pickers in a single row.</li>
         </ul>
       </description>
     </release>

@@ -227,20 +227,20 @@ pub fn build_window(
         .placeholder_text(gettext("Search downloads"))
         .hexpand(true)
         .build();
-    // Custom close button inside the padded box, so the whole row (entry +
-    // button) gets the same 12px internal inset as AdwPreferencesGroup rows.
+    // In a PreferencesGroup like the torrent/save cards: same 12px internal
+    // padding, same card styling, automatic alignment.
     let search_close = gtk4::Button::builder()
         .icon_name("window-close-symbolic")
         .css_classes(["flat", "circular"])
         .valign(gtk4::Align::Center)
         .tooltip_text(gettext("Close search"))
         .build();
-    let search_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-    search_box.set_margin_start(12);
-    search_box.set_margin_end(12);
-    search_box.append(&search);
-    search_box.append(&search_close);
-    let search_bar = gtk4::SearchBar::builder().child(&search_box).build();
+    let search_row = adw::ActionRow::new();
+    search_row.set_child(Some(&search));
+    search_row.add_suffix(&search_close);
+    let search_group = adw::PreferencesGroup::new();
+    search_group.add(&search_row);
+    let search_bar = gtk4::SearchBar::builder().child(&search_group).build();
     // The card's 600px includes its action buttons; 646px gives the search
     // entry the same width as the URL entry.
     let search_clamp = adw::Clamp::builder()

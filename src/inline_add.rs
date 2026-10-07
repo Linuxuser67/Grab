@@ -103,11 +103,9 @@ impl ProbeState {
     }
 }
 
-/// Twin suppression: a resolve for this exact URL is already running for the
-/// current generation (Add pressed twice while the lookup is in flight is
-/// the usual trigger). The marker carries the kick's unlisted-probe flag: an
-/// explicit Add/Enter kick probes unlisted URLs, a different resolve from
-/// kick, so it is never suppressed by one.
+/// Suppression: a probe is already in flight. Any new kick (same URL, different
+/// URL, or different probe mode) must wait — a second probe would race the
+/// shared ProbeState and Add could grab the first probe's title.
 fn inflight_suppresses(
     marker: &Option<(String, u64, bool)>,
     _url: &str,

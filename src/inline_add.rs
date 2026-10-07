@@ -676,28 +676,20 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
     header
 }
 
-/// A picker grid: `GtkFlowBox` as the wrapping container, cells as toggle
+/// A picker grid: `AdwWrapBox` as the wrapping container, cells as toggle
 /// pills with the simple Button API. All entries start active, matching the
 /// old checked-by-default rows. Returns the box and the pills for the caller
 /// to wire.
 ///
-/// `homogeneous(true)` gives every pill an equal share of the row width, so
-/// full rows fill the available space instead of leaving ragged gaps. A
-/// partial final row keeps its empty slots (stock `GtkFlowBox` behavior —
-/// its allocator reuses the same cell size for every row); stretching the
-/// leftovers would need a custom layout manager.
-fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::FlowBox, Vec<gtk4::ToggleButton>) {
+/// Pills size to their titles (no homogeneous mode): short titles get small
+/// pills, and the last row has no phantom empty slots.
+fn picker_list(entries: Rc<Vec<(String, String)>>) -> (adw::WrapBox, Vec<gtk4::ToggleButton>) {
     // Flowing grid of toggle pills: the simple Button API
     // (set_active/is_active/toggled), native selected styling, no selection
-    // model. FlowBox is only the wrapping container.
-    let flowbox = gtk4::FlowBox::builder()
-        .selection_mode(gtk4::SelectionMode::None)
-        .homogeneous(true)
-        // Four-column cap: without it homogeneous pills flow to the toolkit
-        // default on wide cards. Min stays default so narrow cards degrade.
-        .max_children_per_line(4)
-        .column_spacing(12)
-        .row_spacing(12)
+    // model. WrapBox is only the wrapping container.
+    let wrapbox = adw::WrapBox::builder()
+        .child_spacing(12)
+        .line_spacing(12)
         .valign(gtk4::Align::Start)
         .build();
     let mut buttons = Vec::with_capacity(entries.len());
@@ -715,10 +707,10 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (gtk4::FlowBox, Vec<gtk4::
             label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
             label.set_max_width_chars(24);
         }
-        flowbox.append(&btn);
+        wrapbox.append(&btn);
         buttons.push(btn);
     }
-    (flowbox, buttons)
+    (wrapbox, buttons)
 }
 
 /// Wire the pickers' bottom action bar to the toggle pills: the action counts
@@ -801,7 +793,7 @@ fn push_playlist_items_page(
             })
             .collect(),
     );
-    let (flowbox, picks) = picker_list(Rc::clone(&entries));
+    let (wrapbox, picks) = picker_list(Rc::clone(&entries));
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -824,7 +816,7 @@ fn push_playlist_items_page(
             .build();
         list_box.append(&notice);
     }
-    list_box.append(&flowbox);
+    list_box.append(&wrapbox);
     // The error caption lives under the list, like the old row list.
     let error_caption = gtk4::Label::builder()
         .label("")
@@ -1028,7 +1020,7 @@ fn push_torrent_picker_page(
             })
             .collect(),
     );
-    let (flowbox, picks) = picker_list(list_entries);
+    let (wrapbox, picks) = picker_list(list_entries);
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -1039,7 +1031,7 @@ fn push_torrent_picker_page(
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
-    list_box.append(&flowbox);
+    list_box.append(&wrapbox);
     let error_caption = gtk4::Label::builder()
         .label("")
         .css_classes(["error", "caption"])

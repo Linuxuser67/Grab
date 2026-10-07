@@ -12,8 +12,8 @@ path = "src/bin/grab_native_host.rs"
 
 [dependencies]
 # Version features must match the system libs (GTK 4.18+ / Adw 1.8+ API used).
-gtk4 = { version = "0.11", features = ["v4_10", "v4_12", "v4_14", "v4_16", "v4_18"] }
-libadwaita = { version = "0.9", features = ["v1_4", "v1_5", "v1_6", "v1_7", "v1_8"] }
+gtk4 = { version = "0.11", features = ["v4_10", "v4_12", "v4_14", "v4_16", "v4_18", "v4_20", "v4_22"] }
+libadwaita = { version = "0.9", features = ["v1_4", "v1_5", "v1_6", "v1_7", "v1_8", "v1_9"] }
 # Direct deps for backend API replacements (format_size, uri_unescape_string,
 # File::measure_disk_usage, File::move_/copy); versions match the transitive
 # pins pulled in by gtk4/libadwaita.

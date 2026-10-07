@@ -227,10 +227,20 @@ pub fn build_window(
         .placeholder_text(gettext("Search downloads"))
         .hexpand(true)
         .build();
-    let search_bar = gtk4::SearchBar::builder()
-        .child(&search)
-        .show_close_button(true)
+    // Custom close button inside the padded box, so the whole row (entry +
+    // button) gets the same 12px internal inset as AdwPreferencesGroup rows.
+    let search_close = gtk4::Button::builder()
+        .icon_name("window-close-symbolic")
+        .css_classes(["flat", "circular"])
+        .valign(gtk4::Align::Center)
+        .tooltip_text(gettext("Close search"))
         .build();
+    let search_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    search_box.set_margin_start(12);
+    search_box.set_margin_end(12);
+    search_box.append(&search);
+    search_box.append(&search_close);
+    let search_bar = gtk4::SearchBar::builder().child(&search_box).build();
     // The card's 600px includes its action buttons; 646px gives the search
     // entry the same width as the URL entry.
     let search_clamp = adw::Clamp::builder()
@@ -424,8 +434,14 @@ pub fn build_window(
         });
         search.add_controller(esc);
     }
-    // Keep the toggle in sync when the search bar's own close button exits
-    // search mode.
+    // Custom close button exits search mode via the toggle.
+    {
+        let toggle = search_toggle.clone();
+        search_close.connect_clicked(move |_| {
+            toggle.set_active(false);
+        });
+    }
+    // Keep the toggle in sync when Escape exits search mode.
     {
         let toggle = search_toggle.clone();
         search_bar.connect_search_mode_enabled_notify(move |bar| {

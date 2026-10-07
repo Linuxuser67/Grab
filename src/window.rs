@@ -226,8 +226,6 @@ pub fn build_window(
     let search = gtk4::SearchEntry::builder()
         .placeholder_text(gettext("Search downloads"))
         .hexpand(true)
-        .margin_top(12)
-        .margin_bottom(12)
         .build();
     let search_bar = gtk4::SearchBar::builder()
         .child(&search)

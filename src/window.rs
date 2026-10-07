@@ -216,21 +216,25 @@ pub fn build_window(
     // Inline New Download card, pinned under the header above the list (and
     // the empty state). The queue stays usable underneath it.
     let add_card = crate::inline_add::build_add_card(Rc::clone(&manager));
-    // Search lives in the header title slot (Nautilus-style): the search
-    // toggle swaps the window title for a search entry in place, with the
-    // stack's slide transition so it expands from the button.
-    let title_stack = gtk4::Stack::new();
-    title_stack.set_transition_type(gtk4::StackTransitionType::SlideRight);
-    title_stack.add_named(
-        &adw::WindowTitle::new(&gettext("Grab"), &gettext("Download Manager")),
-        Some("title"),
-    );
+    // HIG search: the toggle button lives in the header; the search bar
+    // slides down below it (GtkSearchBar's built-in animation), sized to
+    // match the inline New Download card (12px margins).
+    header.set_title_widget(Some(&adw::WindowTitle::new(
+        &gettext("Grab"),
+        &gettext("Download Manager"),
+    )));
     let search = gtk4::SearchEntry::builder()
         .placeholder_text(gettext("Search downloads"))
         .hexpand(true)
         .build();
-    title_stack.add_named(&search, Some("search"));
-    header.set_title_widget(Some(&title_stack));
+    let search_bar = gtk4::SearchBar::builder()
+        .child(&search)
+        .show_close_button(true)
+        .build();
+    search_bar.set_margin_top(12);
+    search_bar.set_margin_bottom(12);
+    search_bar.set_margin_start(12);
+    search_bar.set_margin_end(12);
 
     let menu = gio::Menu::new();
     menu.append(Some(&gettext("New Download")), Some("app.add-download"));
@@ -391,17 +395,15 @@ pub fn build_window(
     ))]);
     seg_wrap.append(&seg);
     content.prepend(&seg_wrap);
-    // The toggle swaps the header title for the search entry (and back);
+    // The toggle shows/hides the search bar below the header (HIG pattern);
     // Escape in the entry closes it too.
     {
-        let stack = title_stack.clone();
+        let bar = search_bar.clone();
         let entry = search.clone();
         search_toggle.connect_toggled(move |btn| {
+            bar.set_search_mode(btn.is_active());
             if btn.is_active() {
-                stack.set_visible_child_name("search");
                 entry.grab_focus();
-            } else {
-                stack.set_visible_child_name("title");
             }
         });
     }
@@ -417,6 +419,16 @@ pub fn build_window(
             }
         });
         search.add_controller(esc);
+    }
+    // Keep the toggle in sync when the search bar's own close button exits
+    // search mode.
+    {
+        let toggle = search_toggle.clone();
+        search_bar.connect_search_mode_notify(move |bar| {
+            if !bar.is_search_mode() {
+                toggle.set_active(false);
+            }
+        });
     }
     content.append(&active_section);
     content.append(&queued_section);
@@ -650,6 +662,7 @@ pub fn build_window(
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
+    toolbar.add_top_bar(&search_bar);
     toolbar.add_top_bar(&banner);
     toolbar.add_top_bar(add_card.widget());
     toolbar.set_content(Some(&stack));

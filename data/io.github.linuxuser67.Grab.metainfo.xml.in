@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.6.1" date="2026-10-07">
+      <description>
+        <ul>
+          <li>Fix the header search swap sliding in from the wrong side; it now expands from the search button.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.6.0" date="2026-10-07">
       <description>
         <ul>

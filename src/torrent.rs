@@ -141,6 +141,8 @@ pub fn archive_path_for_url(url: &str) -> Option<PathBuf> {
     let path = PathBuf::from(path);
     // Existence is part of validity: intake rejects doodled pseudo-URLs fast.
     (path.is_absolute()
+        // `starts_with` is lexical: `<dir>/../x.torrent` would pass it.
+        && !path.components().any(|c| matches!(c, std::path::Component::ParentDir))
         && path.starts_with(torrents_dir())
         && path.extension().is_some_and(|e| e == "torrent")
         && path.exists())

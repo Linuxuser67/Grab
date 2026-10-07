@@ -6812,3 +6812,22 @@ fn persist_task_loop_delivers_final_value_before_close() {
         "final value must be last write"
     );
 }
+
+#[test]
+fn validator_changed_compares_same_kind_only() {
+    use crate::download_fetch::validator_changed;
+    let lm = "Wed, 21 Oct 2026 07:28:00 GMT";
+    // Same kind, same value: unchanged. Same kind, different value: changed.
+    assert!(!validator_changed("\"abc\"", Some("\"abc\""), None));
+    assert!(validator_changed("\"abc\"", Some("\"def\""), None));
+    assert!(!validator_changed(lm, None, Some(lm)));
+    assert!(validator_changed(
+        lm,
+        None,
+        Some("Thu, 22 Oct 2026 07:28:00 GMT")
+    ));
+    // Mixed kinds must never read as a change (edge nodes differ in which validators they send).
+    assert!(!validator_changed("\"abc\"", None, Some(lm)));
+    assert!(!validator_changed("\"abc\"", Some("W/\"zzz\""), Some(lm)));
+    assert!(!validator_changed(lm, Some("\"abc\""), None));
+}

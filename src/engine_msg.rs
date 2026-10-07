@@ -29,9 +29,13 @@ pub(crate) enum EngineMsg {
     PieceDone(u64),
     /// Multi failed terminally: shrink to completed prefix (bitmap stays valid for retry).
     TruncatePrefix,
-    /// Fresh multi probe succeeded; UI thread creates the resume bitmap.
+    /// Fresh multi probe succeeded; UI thread creates the resume bitmap and
+    /// queues a persist, then acks. The engine waits (bounded) for the ack
+    /// before preallocating the full-size file, so a crash can never leave a
+    /// full-size file on disk with no bitmap in the queue file.
     SegmentsInit {
         total: u64,
+        ack: tokio::sync::mpsc::Sender<()>,
     },
     /// Server throttling parallel connections: shrink to prefix, drop bitmap, ack to continue single-stream; handshake so pause/resume never sees bitmap without file.
     FallbackSingle {

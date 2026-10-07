@@ -50,7 +50,7 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="5.6.6-beta.1" date="2026-10-07">
+    <release version="5.6.6-beta.2" date="2026-10-07">
       <description>
         <ul>
           <li>Format selection by height instead of unstable IDs; fixes "Requested format is not available" for HLS.</li>

@@ -151,6 +151,11 @@
       <summary>Browser for video page cookies</summary>
       <description>Read cookies straight from this browser's profile for age-gated or member-only video pages. 'none' disables it.</description>
     </key>
+    <key name="last-auto-paste" type="s">
+      <default>''</default>
+      <summary>Last URL inserted by clipboard auto-paste</summary>
+      <description>Prevents a stale clipboard link from pasting again on every fresh open, across restarts.</description>
+    </key>
     <key name="browser-extension-ids" type="s">
       <default>''</default>
       <summary>Browser extension IDs for native messaging</summary>

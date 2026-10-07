@@ -2442,8 +2442,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let open_state = Rc::clone(&open_state);
         let url_entry = url_entry.clone();
         // The last URL the clipboard auto-paste inserted: a stale clipboard
-        // link pastes once, not on every fresh open.
-        let last_auto_paste: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        // link pastes once, not on every fresh open. Persisted so a restart
+        // doesn't forget and re-paste the stale link.
+        let last_auto_paste: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new({
+            let saved = manager.settings().last_auto_paste();
+            if saved.is_empty() { None } else { Some(saved) }
+        }));
         Rc::new(move |initial_url: Option<String>| {
             let already = open_state.is_open();
             reveal();
@@ -2473,7 +2477,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             return;
                         }
                         url_entry.set_text(&normalized);
-                        *last_auto_paste.borrow_mut() = Some(normalized);
+                        *last_auto_paste.borrow_mut() = Some(normalized.clone());
+                        // Persist so a restart doesn't re-paste the stale link.
+                        // The manager Rc isn't available in this async block;
+                        // settings are global via the default AppSettings.
+                        crate::settings::AppSettings::new().set_last_auto_paste(&normalized);
                     }
                 });
             }

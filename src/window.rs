@@ -235,9 +235,13 @@ pub fn build_window(
         .valign(gtk4::Align::Center)
         .tooltip_text(gettext("Close search"))
         .build();
-    let search_row = adw::ActionRow::new();
-    search_row.set_child(Some(&search));
-    search_row.add_suffix(&search_close);
+    let search_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    search_row.set_margin_top(12);
+    search_row.set_margin_bottom(12);
+    search_row.set_margin_start(12);
+    search_row.set_margin_end(12);
+    search_row.append(&search);
+    search_row.append(&search_close);
     let search_group = adw::PreferencesGroup::new();
     search_group.add(&search_row);
     let search_bar = gtk4::SearchBar::builder().child(&search_group).build();

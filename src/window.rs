@@ -217,8 +217,10 @@ pub fn build_window(
     // the empty state). The queue stays usable underneath it.
     let add_card = crate::inline_add::build_add_card(Rc::clone(&manager));
     // Search lives in the header title slot (Nautilus-style): the search
-    // toggle swaps the window title for a search entry in place.
+    // toggle swaps the window title for a search entry in place, with the
+    // stack's slide transition so it expands from the button.
     let title_stack = gtk4::Stack::new();
+    title_stack.set_transition_type(gtk4::StackTransitionType::SlideLeft);
     title_stack.add_named(
         &adw::WindowTitle::new(&gettext("Grab"), &gettext("Download Manager")),
         Some("title"),
@@ -259,7 +261,7 @@ pub fn build_window(
         .tooltip_text(gettext("Search (Ctrl+F)"))
         .build();
     search_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext("Search"))]);
-    header.pack_end(&search_toggle);
+    header.pack_start(&search_toggle);
 
     // Stateful toggle: reflects the card's open state (set_on_state_changed
     // mirrors Escape / successful-add / toggle closes too), so the button

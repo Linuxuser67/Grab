@@ -231,10 +231,11 @@ pub fn build_window(
         .child(&search)
         .show_close_button(true)
         .build();
-    // Match the New Download card's width: capped at 600px on wide windows
-    // via AdwClamp, full width below the threshold.
+    // Match the New Download card's entry width: the card's 600px clamp
+    // includes its action buttons, so the search clamp is wider to give
+    // the search entry the same width.
     let search_clamp = adw::Clamp::builder()
-        .maximum_size(600)
+        .maximum_size(680)
         .margin_start(12)
         .margin_end(12)
         .build();

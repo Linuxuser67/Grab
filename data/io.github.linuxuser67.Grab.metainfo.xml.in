@@ -50,23 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="5.6.3" date="2026-10-07">
+    <release version="5.6.4" date="2026-10-07">
       <description>
         <ul>
-          <li>Search now uses the HIG pattern: the toggle stays in the header, the search bar slides down below it.</li>
-          <li>Playlist/torrent picker now uses AdwWrapBox: pills size to their titles instead of a uniform grid.</li>
-          <li>Build against newer GTK (4.22) and libadwaita (1.9) APIs.</li>
-          <li>Clipboard auto-paste remembers the last pasted link across restarts.</li>
+          <li>Search bar sizing: matches the New Download card width, no dead space when collapsed.</li>
         </ul>
       </description>
     </release>
-    <release version="5.6.1" date="2026-10-07">
-      <description>
-        <ul>
-          <li>Fix the header search swap sliding in from the wrong side; it now expands from the search button.</li>
-        </ul>
-      </description>
-    </release>
+    <release version="5.6.3" date="2026-10-07"/>
     <release version="5.6.0" date="2026-10-07">
       <description>
         <ul>

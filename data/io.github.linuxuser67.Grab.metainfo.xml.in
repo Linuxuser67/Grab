@@ -50,6 +50,17 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.5.2-beta.1" date="2026-10-07">
+      <description>
+        <ul>
+          <li>Atomic ffmpeg/ffprobe installs: extract to temporary names, rename into place only after every entry succeeds, and refuse symlinked destinations.</li>
+          <li>Compare ETag only with ETag and Last-Modified only with Last-Modified when detecting changed downloads.</li>
+          <li>Close private-host detection gaps: NAT64, IPv4-compatible addresses, site-local IPv6, zone IDs, CGNAT and benchmarking ranges.</li>
+          <li>Reject '..' components in torrent archive paths.</li>
+          <li>Confirm dialog enqueues the canonical URL it displays; subtitle-language keys are validated.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.5.1" date="2026-10-06">
       <description>
         <ul>

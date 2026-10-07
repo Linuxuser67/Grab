@@ -50,14 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="5.6.4" date="2026-10-07">
+    <release version="5.6.5" date="2026-10-07">
       <description>
         <ul>
-          <li>Search bar sizing: matches the New Download card width, no dead space when collapsed.</li>
+          <li>Search bar width now matches the New Download card (600px cap).</li>
         </ul>
       </description>
     </release>
-    <release version="5.6.3" date="2026-10-07"/>
+    <release version="5.6.4" date="2026-10-07"/>
     <release version="5.6.0" date="2026-10-07">
       <description>
         <ul>

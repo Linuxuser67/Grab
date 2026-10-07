@@ -103,19 +103,17 @@ impl ProbeState {
     }
 }
 
-/// Suppression: a probe is already in flight. Any new kick (same URL, different
-/// URL, or different probe mode) must wait — a second probe would race the
-/// shared ProbeState and Add could grab the first probe's title.
+/// Suppression: a probe is already in flight for the current generation. Any
+/// new kick (same URL, different URL, or different probe mode) must wait —
+/// a second probe would race the shared ProbeState and Add could grab the
+/// first probe's title. A stale marker (older generation) never suppresses.
 fn inflight_suppresses(
     marker: &Option<(String, u64, bool)>,
     _url: &str,
-    _generation: u64,
+    generation: u64,
     _probe_unlisted: bool,
 ) -> bool {
-    // Any in-flight probe suppresses a new one: a second URL pasted while a
-    // lookup runs would race the shared ProbeState and the Add button would
-    // grab the first probe's title. The user waits for the lookup to finish.
-    marker.is_some()
+    marker.as_ref().is_some_and(|(_, g, _)| *g == generation)
 }
 
 /// Item-count label for a probed collection, kind-aware ("3 stories"). The
@@ -2673,26 +2671,19 @@ mod tests {
     fn twin_kick_for_current_generation_is_suppressed() {
         let marker = Some(("https://youtu.be/a".to_string(), 2, false));
         assert!(inflight_suppresses(&marker, "https://youtu.be/a", 2, false));
-        // A different URL is never a twin.
-        assert!(!inflight_suppresses(
-            &marker,
-            "https://youtu.be/b",
-            2,
-            false
-        ));
+        // A different URL is also suppressed while a probe is in flight.
+        assert!(inflight_suppresses(&marker, "https://youtu.be/b", 2, false));
         // No marker, no suppression.
         assert!(!inflight_suppresses(&None, "https://youtu.be/a", 2, false));
     }
 
     #[test]
     fn explicit_unlisted_kick_is_not_suppressed_by_plain_kick() {
-        // A plain kick (probe_unlisted=false) in flight must not suppress an
-        // explicit unlisted Add/Enter/retry kick (probe_unlisted=true) for
-        // the same URL: the explicit kick's unlisted probe is a different
-        // resolve, and suppressing it would show a preview without the
-        // unlisted formats the user explicitly asked for.
+        // An explicit unlisted kick is also suppressed while a plain probe
+        // is in flight for the current generation: any second probe would
+        // race the shared state.
         let marker = Some(("https://youtu.be/a".to_string(), 2, false));
-        assert!(!inflight_suppresses(&marker, "https://youtu.be/a", 2, true));
+        assert!(inflight_suppresses(&marker, "https://youtu.be/a", 2, true));
         // Identical kicks still suppress: no double yt-dlp.
         let marker = Some(("https://youtu.be/a".to_string(), 2, true));
         assert!(inflight_suppresses(&marker, "https://youtu.be/a", 2, true));

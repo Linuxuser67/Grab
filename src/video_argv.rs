@@ -87,27 +87,20 @@ fn selector_id(id: &str) -> Option<&str> {
 /// Single-invocation `-f` spec for direct downloads, plus whether yt-dlp will merge. Pure.
 pub(crate) fn unified_format_spec(
     _video_id: Option<&str>,
-    audio_id: &str,
+    _audio_id: &str,
     quality: &str,
     audio_only: bool,
 ) -> (String, bool) {
     let vfb = part_fallback_spec(quality, true, false);
     let afb = part_fallback_spec(quality, false, true);
-    let aid = selector_id(audio_id);
     if audio_only {
-        return match aid {
-            Some(a) => (format!("{a}/ba/b"), false),
-            None => ("ba/b".to_string(), false),
-        };
+        return ("ba/b".to_string(), false);
     }
-    // Never pin the exact video format ID: YouTube's HLS IDs are unstable
-    // between probe and download (worse for live, where the manifest updates
-    // continuously). Select by height instead; the user picked a resolution,
-    // not a specific encode.
-    match aid {
-        Some(a) => (format!("{vfb}+{a}/{vfb}+{afb}"), true),
-        None => (format!("{vfb}+{afb}"), true),
-    }
+    // Never pin exact format IDs: YouTube's HLS IDs are unstable between
+    // probe and download (worse for live, where the manifest updates
+    // continuously). Select by height for video and best for audio; the user
+    // picked a resolution, not a specific encode.
+    (format!("{vfb}+{afb}"), true)
 }
 
 /// Merge container: the video ext when supported, mp4 otherwise. Pure.

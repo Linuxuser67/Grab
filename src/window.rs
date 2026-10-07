@@ -228,12 +228,12 @@ pub fn build_window(
         .hexpand(true)
         .margin_top(12)
         .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
         .build();
     let search_bar = gtk4::SearchBar::builder()
         .child(&search)
         .show_close_button(true)
+        .margin_start(12)
+        .margin_end(12)
         .build();
 
     let menu = gio::Menu::new();

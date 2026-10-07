@@ -86,7 +86,7 @@ fn selector_id(id: &str) -> Option<&str> {
 
 /// Single-invocation `-f` spec for direct downloads, plus whether yt-dlp will merge. Pure.
 pub(crate) fn unified_format_spec(
-    video_id: Option<&str>,
+    _video_id: Option<&str>,
     audio_id: &str,
     quality: &str,
     audio_only: bool,
@@ -100,15 +100,13 @@ pub(crate) fn unified_format_spec(
             None => ("ba/b".to_string(), false),
         };
     }
-    match video_id {
-        None => match aid {
-            Some(a) => (format!("{a}/b"), false),
-            None => ("b".to_string(), false),
-        },
-        Some(raw) => match (selector_id(raw), aid) {
-            (Some(vid), Some(a)) => (format!("{vid}+{a}/{vfb}+{a}/{vfb}+{afb}"), true),
-            _ => (format!("{vfb}+{afb}"), true),
-        },
+    // Never pin the exact video format ID: YouTube's HLS IDs are unstable
+    // between probe and download (worse for live, where the manifest updates
+    // continuously). Select by height instead; the user picked a resolution,
+    // not a specific encode.
+    match aid {
+        Some(a) => (format!("{vfb}+{a}/{vfb}+{afb}"), true),
+        None => (format!("{vfb}+{afb}"), true),
     }
 }
 
@@ -281,10 +279,10 @@ pub(crate) fn unified_download_argv(
 }
 
 /// yt-dlp `-f` spec for one HLS attempt over the page URL (muxed files win over lower splits).
-pub(crate) fn hls_format_spec(quality: &str, pinned: Option<&str>) -> String {
-    if let Some(id) = pinned.and_then(selector_id) {
-        return format!("{id}+ba/b");
-    }
+pub(crate) fn hls_format_spec(quality: &str, _pinned: Option<&str>) -> String {
+    // Never pin the exact HLS format ID: the manifest updates continuously
+    // (especially for live), so IDs go stale between probe and download.
+    // Select by height instead.
     match quality_height(quality) {
         Some(h) => format!("bv*[height<={h}]+ba/b"),
         None => "bv*+ba/b".to_string(),

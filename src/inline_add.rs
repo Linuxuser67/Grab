@@ -2440,6 +2440,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let reveal = Rc::clone(&reveal);
         let open_state = Rc::clone(&open_state);
         let url_entry = url_entry.clone();
+        let probe = Rc::clone(&probe);
         // The last URL the clipboard auto-paste inserted: a stale clipboard
         // link pastes once, not on every fresh open. Persisted so a restart
         // doesn't forget and re-paste the stale link.
@@ -2450,6 +2451,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         Rc::new(move |initial_url: Option<String>| {
             let already = open_state.is_open();
             reveal();
+            // A new URL via context menu/share replaces any in-flight lookup:
+            // bump the generation so the stale probe's result is discarded,
+            // clear the state so Add can't grab the old title.
+            if initial_url.is_some() {
+                probe.borrow_mut().reset();
+            }
             // Dropped/opened URLs land here pre-filled: setting the text syncs the form, and the
             // lookup itself starts on Add/Enter like any other entry.
             if let Some(raw) = initial_url {

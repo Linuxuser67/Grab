@@ -1923,10 +1923,14 @@ fn explicit_nulls_parse_to_defaults() {
 #[test]
 fn hls_format_spec_names_height_and_pin() {
     // bv* leads so direct muxed files win; trailing /b catches audio-only pages.
+    // Pins are ignored: HLS IDs go stale between probe and download.
     assert_eq!(hls_format_spec("best", None), "bv*+ba/b");
     assert_eq!(hls_format_spec("1080p", None), "bv*[height<=1080]+ba/b");
     assert_eq!(hls_format_spec("mystery", None), "bv*[height<=1080]+ba/b");
-    assert_eq!(hls_format_spec("1080p", Some("hls-99")), "hls-99+ba/b");
+    assert_eq!(
+        hls_format_spec("1080p", Some("hls-99")),
+        "bv*[height<=1080]+ba/b"
+    );
     assert_eq!(
         hls_format_spec("1080p", Some("   ")),
         "bv*[height<=1080]+ba/b"
@@ -3760,10 +3764,10 @@ fn live_test_job() -> VideoJob {
 fn live_argv_pins_planner_id_in_mpegts() {
     let job = live_test_job();
     let out = std::path::Path::new("/tmp/staging/grab-1.mp4");
-    // Planner-resolved id rides along verbatim; yt-dlp's sort never gets a second vote.
+    // Pins are ignored; height-based selection instead.
     let argv = live_capture_argv(&job, "h1080", out, None);
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
-    assert_eq!(argv[f + 1], "h1080+ba/b");
+    assert_eq!(argv[f + 1], "bv*[height<=720]+ba/b");
     assert!(argv.contains(&"--hls-use-mpegts".to_string()));
     assert!(
         argv.windows(2)
@@ -6147,7 +6151,7 @@ exit 0
 
 #[test]
 fn vod_hls_pins_planner_variant_id() {
-    // Best-match with no pin still downloads the planner's pick verbatim.
+    // Height-based selection, no pin.
     let dir = std::env::temp_dir().join(format!("grab-fakehls-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -6206,7 +6210,7 @@ fn vod_hls_pins_planner_variant_id() {
         .expect("has -f");
     assert_eq!(
         logged.split_whitespace().nth(f + 1).expect("spec"),
-        "h1080+ba/b",
+        "bv*+ba/b",
         "{logged}"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -6297,7 +6301,7 @@ fn format_lines_survive_split_reads() {
 
 #[test]
 fn hls_format_spec_rejects_hostile_pins() {
-    // Hostile pins (`,`, `[]`, `()`) fall through to the height rule instead of widening `-f`.
+    // All pins are ignored (HLS IDs go stale); height rule always wins.
     assert_eq!(
         hls_format_spec("1080p", Some("hls-99,hls-720")),
         "bv*[height<=1080]+ba/b"
@@ -6310,10 +6314,9 @@ fn hls_format_spec_rejects_hostile_pins() {
         hls_format_spec("1080p", Some("(hls-99)")),
         "bv*[height<=1080]+ba/b"
     );
-    // Dashes, underscores and colons are legitimate extractor id chars.
     assert_eq!(
         hls_format_spec("1080p", Some("hls-720_p:1")),
-        "hls-720_p:1+ba/b"
+        "bv*[height<=1080]+ba/b"
     );
 }
 
@@ -9334,32 +9337,27 @@ exit 0
 
 #[test]
 fn unified_format_spec_matrix() {
-    // Split: planner pair, then preset-video with the exact audio (so a lone
-    // stale video id doesn't throw away good audio), then the full preset pair.
+    // No ID pinning: height-based video + best audio, always.
     assert_eq!(
         unified_format_spec(Some("v123"), "a456", "1080p", false),
-        (
-            "v123+a456/bv*[height<=1080]+a456/bv*[height<=1080]+ba/b".to_string(),
-            true
-        )
+        ("bv*[height<=1080]+ba/b".to_string(), true)
     );
     // Best quality (no height cap): unbounded video fallback.
     assert_eq!(
         unified_format_spec(Some("v1"), "a2", "best", false),
-        ("v1+a2/bv*+a2/bv*+ba/b".to_string(), true)
+        ("bv*+ba/b".to_string(), true)
     );
-    // Adopted single file: exact id, best-single fallback (never audio).
+    // Adopted single file: height-based video + best audio.
     assert_eq!(
         unified_format_spec(None, "m789", "1080p", false),
-        ("m789/b".to_string(), false)
+        ("bv*[height<=1080]+ba/b".to_string(), true)
     );
-    // Dialog audio-only choice: exact audio track, audio fallback;
-    // never merges, never drifts into video.
+    // Dialog audio-only choice: best audio, never merges, never drifts into video.
     assert_eq!(
         unified_format_spec(Some("v123"), "a456", "1080p", true),
-        ("a456/ba/b".to_string(), false)
+        ("ba/b".to_string(), false)
     );
-    // Hostile ids degrade to preset chains instead of widening `-f`.
+    // IDs are ignored entirely.
     assert_eq!(
         unified_format_spec(Some("v1/a2"), "a456", "1080p", false),
         ("bv*[height<=1080]+ba/b".to_string(), true)
@@ -9374,7 +9372,7 @@ fn unified_format_spec_matrix() {
     );
     assert_eq!(
         unified_format_spec(None, "a,456", "1080p", false),
-        ("b".to_string(), false)
+        ("bv*[height<=1080]+ba/b".to_string(), true)
     );
 }
 

@@ -234,7 +234,7 @@ pub fn build_window(
     // Both the search bar and the New Download card span 600px including
     // their buttons.
     let search_clamp = adw::Clamp::builder()
-        .maximum_size(600)
+        .maximum_size(680)
         .margin_start(12)
         .margin_end(12)
         .build();

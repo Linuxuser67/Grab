@@ -74,16 +74,6 @@ pub(crate) fn part_fallback_spec(quality: &str, video_part: bool, prefer_audio: 
     }
 }
 
-/// Allowlist extractor ids to selector-safe chars (a hostile id must not widen the `-f` set).
-fn selector_id(id: &str) -> Option<&str> {
-    let id = id.trim();
-    (!id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':'))
-    .then_some(id)
-}
-
 /// Single-invocation `-f` spec for direct downloads, plus whether yt-dlp will merge. Pure.
 pub(crate) fn unified_format_spec(
     _video_id: Option<&str>,

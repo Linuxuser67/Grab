@@ -220,7 +220,7 @@ pub fn build_window(
     // toggle swaps the window title for a search entry in place, with the
     // stack's slide transition so it expands from the button.
     let title_stack = gtk4::Stack::new();
-    title_stack.set_transition_type(gtk4::StackTransitionType::SlideLeft);
+    title_stack.set_transition_type(gtk4::StackTransitionType::SlideRight);
     title_stack.add_named(
         &adw::WindowTitle::new(&gettext("Grab"), &gettext("Download Manager")),
         Some("title"),

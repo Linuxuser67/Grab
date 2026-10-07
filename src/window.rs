@@ -289,9 +289,14 @@ pub fn build_window(
     }
     {
         let weak = add_btn.downgrade();
+        let search = search_toggle.clone();
         add_card.set_on_state_changed(move |open| {
             if let Some(btn) = weak.upgrade() {
                 btn.set_active(open);
+            }
+            // The New Download card and search are mutually exclusive.
+            if open {
+                search.set_active(false);
             }
         });
     }
@@ -400,9 +405,12 @@ pub fn build_window(
     {
         let bar = search_bar.clone();
         let entry = search.clone();
+        let add = add_btn.clone();
         search_toggle.connect_toggled(move |btn| {
             bar.set_search_mode(btn.is_active());
             if btn.is_active() {
+                // Search and the New Download card are mutually exclusive.
+                add.set_active(false);
                 entry.grab_focus();
             }
         });

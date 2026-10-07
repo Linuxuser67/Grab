@@ -169,7 +169,7 @@ pub async fn fetch_video_infos(
         tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
         // quickjs-ng is the JS runtime Grab pins for YouTube; make sure it's
         // installed before a YouTube spawn that may need to solve JS challenges.
-        crate::video_tools::ensure_quickjs(&url).await?;
+        crate::video_tools::ensure_quickjs(&url, fetch_proxy.is_some()).await?;
         let out = staging_root();
         ensure_staging_dir(&out)?;
         let mut value = match tokio::time::timeout(

@@ -160,7 +160,16 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                     if plan_pieces(total, connections).is_empty() {
                         single_loop(&ctx, &mut tries, Some(total), true).await;
                     } else {
-                        ctx.tx.send(EngineMsg::SegmentsInit { total }).ok();
+                        let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<()>(1);
+                        if ctx
+                            .tx
+                            .send(EngineMsg::SegmentsInit { total, ack: ack_tx })
+                            .is_ok()
+                        {
+                            // Bounded: a consumer that never acks (tests, torn-down row) must not hang the engine.
+                            let _ =
+                                tokio::time::timeout(Duration::from_secs(2), ack_rx.recv()).await;
+                        }
                         if multi_loop(&ctx, total, None, connections, &mut tries).await {
                             let mut single_tries = 3;
                             single_loop(&ctx, &mut single_tries, Some(total), false).await;
@@ -736,6 +745,20 @@ async fn execute_with_timeout(
 /// Extract the validator from a response: strong ETag preferred, Last-Modified
 /// fallback. Weak ETags are skipped (never valid for If-Range).
 /// Returns the If-Range value to send.
+/// True only when the response carries the same kind of validator as the session one and it differs. A strong ETag is quoted; anything else is a Last-Modified date. Comparing across kinds (or against a weak ETag) would report a false change and delete a good partial.
+pub(crate) fn validator_changed(
+    session: &str,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) -> bool {
+    let candidate = if session.starts_with('"') {
+        etag.filter(|e| !e.starts_with("W/"))
+    } else {
+        last_modified
+    };
+    candidate.is_some_and(|c| c != session)
+}
+
 fn response_validator(resp: &reqwest::Response) -> Option<String> {
     response_validators(resp).0
 }
@@ -910,10 +933,8 @@ pub(crate) async fn fetch_piece(
         // mid-download but the server didn't honor If-Range (returned 206
         // anyway). Treat as Changed to avoid splicing versions.
         if let Some(session_validator) = ctx.if_range.get() {
-            let mismatch = response_validator(&resp)
-                .map(|rv| rv != *session_validator)
-                .unwrap_or(false);
-            if mismatch {
+            let (_, etag, last_modified) = response_validators(&resp);
+            if validator_changed(session_validator, etag.as_deref(), last_modified.as_deref()) {
                 return Err(Changed(gettext("File changed on server")));
             }
         }

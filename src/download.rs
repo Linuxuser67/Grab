@@ -1121,7 +1121,18 @@ impl DownloadManager {
                 }
             }
             None => match std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) {
-                0 => StartMode::Fresh,
+                0 => {
+                    // Our own empty leftover (an attempt created the file and
+                    // failed before any byte): the fresh run's create_new would
+                    // refuse it as foreign forever. Only for rows that started.
+                    if self.started.borrow().contains(&item.id())
+                        && std::fs::symlink_metadata(&dest)
+                            .is_ok_and(|m| m.is_file() && m.len() == 0)
+                    {
+                        let _ = std::fs::remove_file(&dest);
+                    }
+                    StartMode::Fresh
+                }
                 // Parabolic-style dedup: a row that never started refuses an
                 // existing destination instead of truncating or renaming it.
                 // Restored/retried rows carry `started` and resume their own
@@ -1482,10 +1493,17 @@ impl DownloadManager {
                         done = true;
                         break;
                     }
-                    EngineMsg::SegmentsInit { total } => {
+                    EngineMsg::SegmentsInit { total, ack } => {
                         this.segment_state
                             .borrow_mut()
                             .insert(id, SegmentState::new(total));
+                        // Queue the bitmap before the engine preallocates the
+                        // full-size file (it waits for this ack): a crash in
+                        // between would otherwise restore a full-size file with
+                        // no bitmap, and a 416 would pass it off as complete on
+                        // filesystems that zero-fill instead of leaving holes.
+                        this.persist_queue();
+                        ack.send(()).await.ok();
                     }
                     EngineMsg::PieceDone(idx) => {
                         if let Some(st) = this.segment_state.borrow_mut().get_mut(&id) {

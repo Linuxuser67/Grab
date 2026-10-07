@@ -592,24 +592,11 @@ pub fn show(
 
     // Video pages resolve via yt-dlp tools; this page holds defaults plus tool setup.
     fn tool_first_line(binary: &std::path::Path, version_arg: &str) -> Option<String> {
-        let out = std::process::Command::new(binary)
-            .arg(version_arg)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let first = String::from_utf8(out.stdout)
-            .ok()?
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if first.is_empty() {
-            return None;
-        }
-        Some(first)
+        crate::video_tools::probe_first_line(
+            binary,
+            version_arg,
+            crate::video_tools::TOOL_PROBE_TIMEOUT,
+        )
     }
     fn tool_version(binary: &std::path::Path, version_arg: &str) -> Option<String> {
         let first = tool_first_line(binary, version_arg)?;
@@ -682,7 +669,15 @@ pub fn show(
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
     ) {
         spin.set_visible(false);
-        paint_tools_state(row, btn, action, installed_tool_versions());
+        // Probe off the GTK thread (three subprocesses), then paint.
+        let (row, btn, action) = (row.clone(), btn.clone(), action.clone());
+        gtk4::glib::spawn_future_local(async move {
+            let probed = gio::spawn_blocking(installed_tool_versions)
+                .await
+                .ok()
+                .flatten();
+            paint_tools_state(&row, &btn, &action, probed);
+        });
     }
     let video_page = adw::PreferencesPage::builder()
         .title(gettext("Media"))

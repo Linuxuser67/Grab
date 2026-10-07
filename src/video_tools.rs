@@ -636,6 +636,18 @@ pub(crate) fn find_quickjs() -> Option<PathBuf> {
 /// UI can stage it separately; await off the GTK thread like the other
 /// installers.
 pub async fn install_quickjs() -> Result<PathBuf, VideoError> {
+    let _guard = quickjs_install_lock().lock().await;
+    install_quickjs_locked().await
+}
+
+/// One lock for every quickjs install path: both use the fixed `qjs.part`.
+fn quickjs_install_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Install with `quickjs_install_lock` already held by the caller.
+async fn install_quickjs_locked() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
     let handle = crate::runtime::tokio_rt().spawn(async move { install_quickjs_binary(dir).await });
     match handle.await {
@@ -826,17 +838,22 @@ where
 /// after waiting. No-op off YouTube (nothing else needs it) and on
 /// architectures quickjs-ng doesn't ship: yt-dlp then falls back to its own
 /// runtime discovery.
-pub(crate) async fn ensure_quickjs(page_url: &str) -> Result<(), VideoError> {
+pub(crate) async fn ensure_quickjs(page_url: &str, proxied: bool) -> Result<(), VideoError> {
     if !is_youtube_url(page_url) || find_quickjs().is_some() || !quickjs_arch_supported() {
         return Ok(());
     }
-    static INSTALL_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let lock = INSTALL_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
-    let _guard = lock.lock().await;
+    // The silent download is Flatpak-only (elsewhere the settings button guides
+    // a manual install), and never runs while an app proxy is configured: the
+    // installer's client does not use it, so the fetch would go out direct and
+    // reveal the machine's address to GitHub mid-download.
+    if proxied || !in_flatpak() {
+        return Ok(());
+    }
+    let _guard = quickjs_install_lock().lock().await;
     if find_quickjs().is_some() {
         return Ok(());
     }
-    install_quickjs().await.map(|_| ())
+    install_quickjs_locked().await.map(|_| ())
 }
 
 /// Download one boul2gom/ffmpeg-builds archive and extract `ffmpeg` + `ffprobe`
@@ -917,6 +934,7 @@ fn extract_entries(
     let mut zip =
         zip::ZipArchive::new(file).map_err(|e| format!("couldn't read ffmpeg archive: {e}"))?;
     let mut ffmpeg_path = None;
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
     for i in 0..zip.len() {
         let entry = zip
             .by_index(i)
@@ -929,7 +947,10 @@ fn extract_entries(
             Some("ffprobe") => "ffprobe",
             _ => continue,
         };
-        let dest = dir.join(tool);
+        // Stage under a temp name: the live binary stays in place until every
+        // entry extracted fine, so a failed update never leaves no ffmpeg.
+        let final_dest = dir.join(tool);
+        let dest = dir.join(format!(".{tool}.new"));
         // A planted symlink would divert the extracted binary (and the
         // chmod) onto an arbitrary file: refuse instead of following it.
         clear_dest_refusing_symlink(&dest)?;
@@ -956,9 +977,32 @@ fn extract_entries(
         }
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("couldn't mark {} executable: {e}", dest.display()))?;
+        staged.push((dest, final_dest.clone()));
         if tool == "ffmpeg" {
-            ffmpeg_path = Some(dest);
+            ffmpeg_path = Some(final_dest);
         }
+    }
+    if ffmpeg_path.is_none() {
+        return Err("ffmpeg binary not found in the downloaded archive".to_string());
+    }
+    // Refuse to install over a symlink at the final destination: rename(2)
+    // would replace it atomically, but a planted symlink is not ours to
+    // remove, and the old code refused rather than diverting.
+    for (_, fin) in &staged {
+        if std::fs::symlink_metadata(fin)
+            .map(|m| m.is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "refusing to install over symlink {}",
+                fin.display()
+            ));
+        }
+    }
+    // rename(2) replaces atomically and never follows a symlink at the target.
+    for (tmp, fin) in &staged {
+        std::fs::rename(tmp, fin)
+            .map_err(|e| format!("couldn't install {}: {e}", fin.display()))?;
     }
     ffmpeg_path.ok_or_else(|| "ffmpeg binary not found in the downloaded archive".to_string())
 }
@@ -1491,19 +1535,55 @@ pub async fn latest_quickjs_release() -> Option<(String, Option<String>)> {
 /// context entered) can call it.
 async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<String> {
     crate::runtime::tokio_rt()
-        .spawn_blocking(move || {
-            std::process::Command::new(&binary)
-                .arg(version_arg)
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.lines().next().unwrap_or("").trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
+        .spawn_blocking(move || probe_first_line(&binary, version_arg, TOOL_PROBE_TIMEOUT))
         .await
         .ok()
         .flatten()
+}
+
+/// A hung or wedged tool binary must not stall every lookup or the settings page.
+pub(crate) const TOOL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// First stdout line of `binary version_arg`, or `None` on spawn failure, non-zero exit, empty output or timeout (the child is killed on timeout). Blocking: call off the GTK thread.
+pub(crate) fn probe_first_line(
+    binary: &Path,
+    version_arg: &str,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(binary)
+        .arg(version_arg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        stdout.read_to_string(&mut text).ok().map(|_| text)
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    let text = reader.join().ok()??;
+    let first = text.lines().next()?.trim();
+    (!first.is_empty()).then(|| first.to_string())
 }
 
 /// Display-ready version line for an installed tool binary: yt-dlp's

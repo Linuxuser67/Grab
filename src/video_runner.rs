@@ -71,7 +71,7 @@ pub async fn run_video_download(
     let (yt_version, ff_version) = ensure_tool_versions(&libs).await?;
     // quickjs-ng is the JS runtime Grab pins for YouTube; make sure it's
     // installed before a YouTube spawn that may need to solve JS challenges.
-    crate::video_tools::ensure_quickjs(&job.page_url).await?;
+    crate::video_tools::ensure_quickjs(&job.page_url, job.proxy.is_some()).await?;
     tracing::debug!(
         item_id = job.item_id,
         host = %page_host(&job.page_url),
@@ -833,6 +833,15 @@ const MERGE_WALL_CLOCK: Duration = Duration::from_secs(3600);
 /// the first candidate the video offers, accepting a region variant (`en`
 /// matches `en-us`). Returns the concrete offered key so `--sub-langs`
 /// matches exactly. Pure.
+/// A site-supplied subtitle key is only passed to `--sub-langs` when it is a plain language tag: that option takes comma-separated regexes and a leading `-` means "exclude".
+fn is_plain_lang_key(key: &str) -> bool {
+    key.len() <= 35
+        && key.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 pub(crate) fn pick_subtitle_lang(
     available: &std::collections::HashSet<String>,
     candidates: &[&str],
@@ -842,7 +851,8 @@ pub(crate) fn pick_subtitle_lang(
             return Some(cand.to_string());
         }
         if let Some(hit) = available.iter().find(|a| {
-            a.len() > cand.len()
+            is_plain_lang_key(a)
+                && a.len() > cand.len()
                 && a.starts_with(*cand)
                 && matches!(a.as_bytes()[cand.len()], b'-' | b'_')
         }) {
@@ -893,6 +903,9 @@ pub(crate) async fn resolve_subtitle_lang(
     ));
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(&argv);
+    // Only stdout is drained below; a piped-but-unread stderr would block
+    // yt-dlp once its warnings fill the pipe buffer.
+    cmd.stderr(std::process::Stdio::null());
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
     let mut child = match cmd.spawn() {
         Ok(child) => child,

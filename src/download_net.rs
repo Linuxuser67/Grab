@@ -365,22 +365,38 @@ pub(crate) fn proxied_pool_len() -> usize {
 pub(crate) fn is_local_or_private_host(host: &str) -> bool {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     fn private_v4(a: Ipv4Addr) -> bool {
+        let o = a.octets();
         a.is_loopback()
             || a.is_private()
             || a.is_link_local()
             || a.is_unspecified()
-            || (a.octets()[0] == 100 && (a.octets()[1] & 0xC0) == 64) // CGNAT 100.64/10
+            || o[0] == 0 // 0.0.0.0/8
+            || (o[0] == 100 && (o[1] & 0xC0) == 64) // CGNAT 100.64/10
+            || (o[0] == 198 && (o[1] & 0xFE) == 18) // benchmarking 198.18/15
+            || o[0] >= 240 // reserved 240/4 incl. broadcast
+    }
+    /// IPv4 tucked into an IPv6 literal: NAT64 `64:ff9b::/96` and the deprecated IPv4-compatible `::a.b.c.d`.
+    fn embedded_v4(a: Ipv6Addr) -> Option<Ipv4Addr> {
+        let s = a.segments();
+        let tail = Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
+        (s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || s[..6] == [0; 6]).then_some(tail)
     }
     fn private_v6(a: Ipv6Addr) -> bool {
         a.is_loopback()
             || a.is_unspecified()
             || (a.segments()[0] & 0xFE00) == 0xFC00 // fc00::/7
             || (a.segments()[0] & 0xFFC0) == 0xFE80 // fe80::/10
+            || (a.segments()[0] & 0xFFC0) == 0xFEC0 // deprecated site-local fec0::/10
+            || embedded_v4(a).is_some_and(private_v4)
     }
-    let h = host
+    let mut h = host
         .trim_matches(|c| c == '[' || c == ']')
         .trim_end_matches('.')
         .to_ascii_lowercase();
+    // An IPv6 zone id ("fe80::1%eth0") is not part of the syntax Rust parses.
+    if let Some((addr, _zone)) = h.split_once('%') {
+        h = addr.to_string();
+    }
     if h == "localhost"
         || h.ends_with(".localhost")
         || h.ends_with(".local")
@@ -391,7 +407,8 @@ pub(crate) fn is_local_or_private_host(host: &str) -> bool {
     match h.parse::<IpAddr>() {
         Ok(IpAddr::V4(a)) => private_v4(a),
         Ok(IpAddr::V6(a)) => a.to_ipv4_mapped().map_or_else(|| private_v6(a), private_v4),
-        Err(_) => false,
+        // A dotless name ("router", "nas") resolves through the local search domain or hosts file, never the public DNS.
+        Err(_) => !h.is_empty() && !h.contains('.') && !h.contains(':'),
     }
 }
 
@@ -525,6 +542,35 @@ mod tests {
             !is_local_or_private_host("::ffff:8.8.8.8"),
             "mapped public v4"
         );
+        // Embedded v4 (NAT64, IPv4-compatible), site-local, zone ids, newer v4 ranges.
+        for h in [
+            "64:ff9b::7f00:1",
+            "64:ff9b::a00:1",
+            "::127.0.0.1",
+            "::7f00:1",
+            "fec0::1",
+            "fe80::1%eth0",
+            "198.18.0.1",
+            "198.19.255.255",
+            "240.0.0.1",
+            "255.255.255.255",
+            "0.1.2.3",
+        ] {
+            assert!(is_local_or_private_host(h), "private (extended): {h}");
+        }
+        for h in [
+            "64:ff9b::808:808",
+            "198.20.0.1",
+            "239.255.255.255",
+            "8.8.8.8",
+        ] {
+            assert!(!is_local_or_private_host(h), "public (extended): {h}");
+        }
+        // Dotless names resolve locally; dotted public names do not.
+        for h in ["router", "nas", "intranet"] {
+            assert!(is_local_or_private_host(h), "dotless: {h}");
+        }
+        assert!(!is_local_or_private_host("example.com"));
         // Names: localhost family and mDNS/internal suffixes.
         for h in [
             "localhost",

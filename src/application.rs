@@ -367,6 +367,8 @@ pub fn setup(app: &adw::Application) {
                             }
                         };
                         let shown: url::Url = canonical.parse().unwrap_or_else(|_| uri.clone());
+                        // Enqueue the URL the dialog displays, not the raw one.
+                        let approved = shown.clone();
                         confirm_download(&window, &shown, move || {
                             // The dialog may invoke this more than once in
                             // theory; clone per call so the closure stays Fn.
@@ -375,7 +377,7 @@ pub fn setup(app: &adw::Application) {
                                 toasts.clone(),
                                 add_card.clone(),
                                 settings.clone(),
-                                uri.clone(),
+                                approved.clone(),
                             );
                         });
                         continue;

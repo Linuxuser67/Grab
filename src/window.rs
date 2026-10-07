@@ -424,7 +424,7 @@ pub fn build_window(
     // search mode.
     {
         let toggle = search_toggle.clone();
-        search_bar.connect_search_mode_notify(move |bar| {
+        search_bar.connect_search_mode_enabled_notify(move |bar| {
             if !bar.is_search_mode() {
                 toggle.set_active(false);
             }

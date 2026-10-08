@@ -474,12 +474,11 @@ pub(crate) async fn run_unified_ytdlp(
     let Some(()) = done else {
         // User abort: on Preserve, try merging partial DASH parts into a
         // single file instead of abandoning them.
-        if matches!(abort_intent, Some(StopIntent::Preserve)) {
-            if let Some(merged) =
+        if matches!(abort_intent, Some(StopIntent::Preserve))
+            && let Some(merged) =
                 try_merge_dash_partials(ffmpeg_bin, staging, &job.dest, &job.page_url).await
-            {
-                return Ok(Some(merged));
-            }
+        {
+            return Ok(Some(merged));
         }
         return Ok(None);
     };

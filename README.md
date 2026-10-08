@@ -107,9 +107,11 @@ root, install the tools from your distribution instead.
 
 Send browser downloads and links straight to Grab with the
 [Grab browser extension](https://github.com/Linuxuser67/Grab-browser-extension)
-(for Chromium-based browsers): automatic download interception with a
+(for Chromium-based browsers and Firefox): automatic download interception with a
 configurable minimum size, toolbar button, `Alt+G` shortcut, and a right-click
 menu.
+
+[![Get it for Firefox](assets/get-it-on-firefox.png)](https://addons.mozilla.org/en-US/firefox/addon/grab-extension/)
 
 ## Notes for packagers
 

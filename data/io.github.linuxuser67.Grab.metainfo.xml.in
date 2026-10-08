@@ -50,15 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="5.6.6" date="2026-10-07">
+    <release version="5.6.7-beta.1" date="2026-10-08">
       <description>
         <ul>
-          <li>Format selection by height instead of unstable IDs; fixes "Requested format is not available" for HLS.</li>
-          <li>Search bar in a PreferencesGroup, aligned with the New Download card rows.</li>
+          <li>Rapid adds during a lookup are queued; context menu URLs cancel in-flight lookups.</li>
+          <li>Dependency updates.</li>
         </ul>
       </description>
     </release>
-    <release version="5.6.5" date="2026-10-07"/>
+    <release version="5.6.6" date="2026-10-07"/>
     <release version="5.6.0" date="2026-10-07">
       <description>
         <ul>

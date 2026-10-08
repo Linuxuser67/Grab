@@ -709,15 +709,12 @@ pub(crate) enum StartMode {
     Resume(SegmentState),
 }
 
-/// Stamp one outbound request like a browser (User-Agent); single choke point for all requests.
-/// Note: no Referer is sent. The client builder disables reqwest's automatic
-/// Referer (it leaks URLs/tokens), and a manually-stamped Referer would persist
-/// across redirects (reqwest doesn't strip it), leaking the origin
-/// to cross-origin targets. Hotlink guards requiring Referer are not supported.
-/// Cookies are not stamped here either: reqwest strips a manually-set Cookie
-/// header when a redirect changes host, port or scheme, so cookie-bearing
-/// downloads use a client with the jar as provider instead (see
-/// `http_client_with_jar`), which re-applies in-scope cookies on every hop.
+/// Stamp one outbound request like a browser (User-Agent); single choke point
+/// for all requests. No Referer is sent: reqwest doesn't strip a manual one
+/// across redirects, leaking origin to cross-origin targets (hotlink guards
+/// requiring Referer are not supported). No Cookie either: cookie-bearing
+/// downloads use a client with the jar as provider (see `http_client_with_jar`),
+/// which re-applies in-scope cookies on every hop.
 pub(crate) fn stamp_request(
     mut req: reqwest::RequestBuilder,
     user_agent: &str,

@@ -76,13 +76,10 @@ pub(crate) fn grid_needs_rebuild(grid_total: Option<u64>, total: u64) -> bool {
 }
 
 /// Whether a collapsed HLS estimate invalidates the current denominator.
-/// `total_bytes_estimate` can spike to ~2x the true total mid-download and
-/// then revise sharply down; keeping the spike sizes the bar for a phantom
-/// total it can never fill (the bar stalls half-lit while the download runs
-/// to completion). A downward revision beyond wobble adopts the correction:
-/// the old denominator was wrong, the new estimate is yt-dlp's best current
-/// guess. Applies to within-leg wobble only; leg transitions come from
-/// `finished`, not from total movement.
+/// `total_bytes_estimate` can spike to ~2x the true total then revise sharply
+/// down; keeping the spike sizes the bar for a phantom total it can never
+/// fill. A downward revision beyond wobble adopts the correction.
+/// Within-leg wobble only; leg transitions come from `finished`.
 pub(crate) fn estimate_collapsed(max_total: Option<u64>, total: u64) -> bool {
     match max_total {
         Some(m) if m > 0 => total > 0 && total.saturating_mul(4) < m.saturating_mul(3),
@@ -90,21 +87,13 @@ pub(crate) fn estimate_collapsed(max_total: Option<u64>, total: u64) -> bool {
     }
 }
 
-/// Canonical progress state for one HLS attempt across format legs.
+/// Progress state for one HLS attempt across format legs.
 ///
-/// yt-dlp reports each leg (video, audio, …) with leg-local byte counts, so a
-/// running sticky max freezes the bar when a small leg starts — and a bitmap
-/// grid rebuilt per estimate redefines every cell. Instead this banks each
-/// finished leg's actual bytes once and reports cumulative
-/// `(completed + leg)` numbers, from which the bar and the fraction-derived
-/// grid both render. One value, two views; they cannot disagree.
-///
-/// Leg boundaries come only from yt-dlp's `finished` status (one per completed
-/// format leg): banking is edge-triggered via `leg_seen`, so a boundary
-/// fires exactly once and duplicate `finished` lines are no-ops. Same-leg
-/// wobble reuses [`grid_needs_rebuild`] (growth) and [`estimate_collapsed`]
-/// with containment (sharp drops), mirroring the old grid policy byte-for-byte
-/// in fraction space.
+/// yt-dlp reports leg-local byte counts, which freeze a sticky-max bar when a
+/// small leg starts. Instead each finished leg's bytes are banked once and the
+/// bar/grid both render from cumulative `(completed + leg)` numbers — one
+/// value, two views. Leg boundaries come only from yt-dlp's `finished` status
+/// and fire exactly once via `leg_seen`; duplicate `finished` lines are no-ops.
 #[derive(Default)]
 pub(crate) struct HlsProgress {
     /// Actual bytes banked from finished legs (capped per leg, see `update`).

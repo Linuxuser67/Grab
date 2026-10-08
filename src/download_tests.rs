@@ -6830,4 +6830,8 @@ fn validator_changed_compares_same_kind_only() {
     assert!(!validator_changed("\"abc\"", None, Some(lm)));
     assert!(!validator_changed("\"abc\"", Some("W/\"zzz\""), Some(lm)));
     assert!(!validator_changed(lm, Some("\"abc\""), None));
+    // Servers that send bare (unquoted) ETags: still an ETag, never a date.
+    assert!(!validator_changed("abc123", Some("abc123"), Some(lm)));
+    assert!(validator_changed("abc123", Some("def456"), Some(lm)));
+    assert!(!validator_changed("abc123", None, Some(lm)));
 }

@@ -60,8 +60,8 @@
         </ul>
       </description>
     </release>
-    <release version="5.6.7-beta.3" date="2026-10-08"/>
-    <release version="5.6.7-beta.2" date="2026-10-08"/>
+    <release version="5.6.7~beta.3" date="2026-10-08"/>
+    <release version="5.6.7~beta.2" date="2026-10-08"/>
     <release version="5.6.6" date="2026-10-07"/>
     <release version="5.6.0" date="2026-10-07">
       <description>
@@ -71,7 +71,7 @@
         </ul>
       </description>
     </release>
-    <release version="5.5.2-beta.1" date="2026-10-07">
+    <release version="5.5.2~beta.1" date="2026-10-07">
       <description>
         <ul>
           <li>Atomic ffmpeg/ffprobe installs: extract to temporary names, rename into place only after every entry succeeds, and refuse symlinked destinations.</li>
@@ -137,7 +137,7 @@
         </ul>
       </description>
     </release>
-    <release version="5.3.2-beta.1" date="2026-10-05">
+    <release version="5.3.2~beta.1" date="2026-10-05">
       <description>
         <ul>
           <li>Verify the yt-dlp download against its published SHA-256 checksum before installing it.</li>
@@ -254,28 +254,28 @@
         </ul>
       </description>
     </release>
-    <release version="5.0.1-beta.4" date="2026-10-03">
+    <release version="5.0.1~beta.4" date="2026-10-03">
       <description>
         <ul>
           <li>Beta release for the 5.0 series.</li>
         </ul>
       </description>
     </release>
-    <release version="5.0.1-beta.3" date="2026-10-03">
+    <release version="5.0.1~beta.3" date="2026-10-03">
       <description>
         <ul>
           <li>Beta release for the 5.0 series.</li>
         </ul>
       </description>
     </release>
-    <release version="5.0.1-beta.2" date="2026-10-03">
+    <release version="5.0.1~beta.2" date="2026-10-03">
       <description>
         <ul>
           <li>Beta release for the 5.0 series.</li>
         </ul>
       </description>
     </release>
-    <release version="5.0.1-beta.1" date="2026-10-03">
+    <release version="5.0.1~beta.1" date="2026-10-03">
       <description>
         <ul>
           <li>Beta release for the 5.0 series.</li>
@@ -412,7 +412,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.4-beta.1" date="2026-09-30">
+    <release version="4.5.4~beta.1" date="2026-09-30">
       <description>
         <ul>
           <li>The URL bar is now a proper text entry with the action buttons beside it.</li>
@@ -438,7 +438,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.2-beta.1" date="2026-09-29">
+    <release version="4.5.2~beta.1" date="2026-09-29">
       <description>
         <ul>
           <li>Schedule downloads for a later time: pick a date and time when adding, or let overdue items start on launch.</li>
@@ -453,14 +453,14 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.1-beta.1" date="2026-09-29">
+    <release version="4.5.1~beta.1" date="2026-09-29">
       <description>
         <ul>
           <li>Filenames, paths, URLs, and error messages containing &amp;, &lt;, or &gt; no longer break toast and dialog labels.</li>
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.20" date="2026-09-29">
+    <release version="4.5.0~beta.20" date="2026-09-29">
       <description>
         <ul>
           <li>Restored finished video downloads keep their video icon after restart.</li>
@@ -468,7 +468,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.19" date="2026-09-29">
+    <release version="4.5.0~beta.19" date="2026-09-29">
       <description>
         <ul>
           <li>Playlist and torrent picker entries are now toggle pills with 12px HIG padding; the grid wraps automatically with no horizontal scrolling.</li>
@@ -477,14 +477,14 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.18" date="2026-09-29">
+    <release version="4.5.0~beta.18" date="2026-09-29">
       <description>
         <ul>
           <li>Playlist and torrent picker entries are now toggle pills with 12px HIG padding; the grid wraps automatically with no horizontal scrolling.</li>
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.17" date="2026-09-29">
+    <release version="4.5.0~beta.17" date="2026-09-29">
       <description>
         <ul>
           <li>Audio-only is now an option inside the Media format picker instead of a separate switch; playlists no longer show a format row and always queue video.</li>
@@ -492,7 +492,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.16" date="2026-09-29">
+    <release version="4.5.0~beta.16" date="2026-09-29">
       <description>
         <ul>
           <li>Playlist and torrent pickers: entries are now hug-sized cards in a grid — rounded, spaced, and sized to their text.</li>
@@ -500,21 +500,21 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.15" date="2026-09-29">
+    <release version="4.5.0~beta.15" date="2026-09-29">
       <description>
         <ul>
           <li>Playlist and torrent pickers: grid columns adapt to the item count so no row is left with an empty slot, with HIG spacing between cells.</li>
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.14" date="2026-09-29">
+    <release version="4.5.0~beta.14" date="2026-09-29">
       <description>
         <ul>
           <li>Playlist and torrent pickers: dropped the custom selection tick; selected items now use the native highlight only.</li>
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.13" date="2026-09-29">
+    <release version="4.5.0~beta.13" date="2026-09-29">
       <description>
         <ul>
           <li>Playlist and torrent pickers now lay out in a grid (up to 4 columns), with a tick marking selected items.</li>
@@ -522,14 +522,14 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.12" date="2026-09-29">
+    <release version="4.5.0~beta.12" date="2026-09-29">
       <description>
         <ul>
           <li>Fix a build failure in the probe-error card.</li>
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.11" date="2026-09-29">
+    <release version="4.5.0~beta.11" date="2026-09-29">
       <description>
         <ul>
           <li>Probe errors render as plain text: messages containing markup-like characters (e.g. &lt;HTTPError 403&gt;) no longer fail to display.</li>
@@ -538,7 +538,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.10" date="2026-09-29">
+    <release version="4.5.0~beta.10" date="2026-09-29">
       <description>
         <ul>
           <li>Playlist and torrent pickers redesigned: native single-column list with compact single-line rows.</li>
@@ -548,7 +548,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.9" date="2026-09-28">
+    <release version="4.5.0~beta.9" date="2026-09-28">
       <description>
         <ul>
           <li>Failure dialog shows the actual error instead of stale status text.</li>
@@ -558,7 +558,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.8" date="2026-09-28">
+    <release version="4.5.0~beta.8" date="2026-09-28">
       <description>
         <ul>
           <li>Inline New Download UI uses HIG AdwPreferencesGroup with native row padding; download entries use GtkListBox with .boxed-list-separate.</li>
@@ -566,7 +566,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.7" date="2026-09-28">
+    <release version="4.5.0~beta.7" date="2026-09-28">
       <description>
         <ul>
           <li>New Download card: the Add (✓) button stays visible after the lookup, so a second press adds the download.</li>
@@ -575,7 +575,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.6" date="2026-09-28">
+    <release version="4.5.0~beta.6" date="2026-09-28">
       <description>
         <ul>
           <li>New Download URL row uses HIG AdwPreferencesGroup → AdwEntryRow with apply button as the Add action.</li>
@@ -583,7 +583,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.5" date="2026-09-28">
+    <release version="4.5.0~beta.5" date="2026-09-28">
       <description>
         <ul>
           <li>New Download card uses HIG AdwPreferencesPage/Group/EntryRow with apply button for the URL field.</li>
@@ -591,7 +591,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.2" date="2026-09-28">
+    <release version="4.5.0~beta.2" date="2026-09-28">
       <description>
         <ul>
           <li>The New Download card no longer stretches full-width; it is centered with proper spacing, and its URL field and buttons are vertically aligned.</li>
@@ -599,7 +599,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.5.0-beta.1" date="2026-09-28">
+    <release version="4.5.0~beta.1" date="2026-09-28">
       <description>
         <ul>
           <li>Byte sizes now use the system locale's formatting.</li>
@@ -608,7 +608,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.20" date="2026-09-28">
+    <release version="4.4.4~beta.20" date="2026-09-28">
       <description>
         <ul>
           <li>The New Download card now toggles open and closed from the + button, Ctrl+N, or the empty-state button, and its header is one compact row: URL field, Add Download, options gear, and close.</li>
@@ -617,7 +617,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.19" date="2026-09-28">
+    <release version="4.4.4~beta.19" date="2026-09-28">
       <description>
         <ul>
           <li>Download rows now show a media-type icon (video, audio, playlist, torrent, or file), and the status filter is a segmented control that appears only when there are downloads to filter.</li>
@@ -627,7 +627,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.18" date="2026-09-28">
+    <release version="4.4.4~beta.18" date="2026-09-28">
       <description>
         <ul>
           <li>The New Download dialog is now an inline card pinned under the header bar. It opens in place, so the download queue stays visible and usable while it is open.</li>
@@ -635,28 +635,28 @@
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.17" date="2026-09-27">
+    <release version="4.4.4~beta.17" date="2026-09-27">
       <description>
         <ul>
           <li>Live captures now stage their in-progress files in the hidden <code>.grab-video</code> folder next to the destination, like regular downloads. If a recording fails but the media is kept, the failure message now names the folder it was kept in.</li>
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.16" date="2026-09-27">
+    <release version="4.4.4~beta.16" date="2026-09-27">
       <description>
         <ul>
           <li>Unified downloads now stage their in-progress files in a hidden <code>.grab-video</code> folder next to the destination instead of <code>/tmp</code>, so large downloads no longer fill up tmpfs.</li>
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.15" date="2026-09-27">
+    <release version="4.4.4~beta.15" date="2026-09-27">
       <description>
         <ul>
           <li>Live captures with the from-start toggle on now fall back to recording from the live edge when the stream doesn't support from-start, instead of failing.</li>
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.14" date="2026-09-27">
+    <release version="4.4.4~beta.14" date="2026-09-27">
       <description>
         <ul>
           <li>Merged MP4s now place the moov atom at the front, so playback can start before the whole file has arrived.</li>
@@ -666,14 +666,14 @@
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.13" date="2026-09-27">
+    <release version="4.4.4~beta.13" date="2026-09-27">
       <description>
         <ul>
           <li>Live captures now pass timestamp-alignment flags to the downloader, keeping split audio and video tracks in sync without re-encoding.</li>
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.12" date="2026-09-27">
+    <release version="4.4.4~beta.12" date="2026-09-27">
       <description>
         <ul>
           <li>Playlists and multi-item stories now download into a folder named after the collection.</li>
@@ -682,7 +682,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.11" date="2026-09-26">
+    <release version="4.4.4~beta.11" date="2026-09-26">
       <description>
         <ul>
           <li>Playlist rows now download the entry you picked instead of the playlist's first entry repeating.</li>
@@ -690,7 +690,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.10" date="2026-09-26">
+    <release version="4.4.4~beta.10" date="2026-09-26">
       <description>
         <ul>
           <li>The quickjs download is now verified against pinned SHA-256 checksums with a size cap.</li>
@@ -700,28 +700,28 @@
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.9" date="2026-09-26">
+    <release version="4.4.4~beta.9" date="2026-09-26">
       <description>
         <ul>
           <li>The tarball install prompt now installs quickjs-ng with a single distro command line alongside yt-dlp and ffmpeg.</li>
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.8" date="2026-09-26">
+    <release version="4.4.4~beta.8" date="2026-09-26">
       <description>
         <ul>
           <li>The tarball install prompt now covers quickjs alongside yt-dlp and ffmpeg: no distro packages it, so its row installs Grab's pinned binary with one click instead of a terminal command.</li>
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.7" date="2026-09-26">
+    <release version="4.4.4~beta.7" date="2026-09-26">
       <description>
         <ul>
           <li>Subtitles are now resolved with a best-effort probe before the download: the configured language when offered, otherwise English, otherwise none. yt-dlp embeds them directly on the media invocation, so a subtitle fetch failure can no longer sink the download.</li>
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.6" date="2026-09-26">
+    <release version="4.4.4~beta.6" date="2026-09-26">
       <description>
         <ul>
           <li>Unknown-container downloads now adopt the tallest in-cap file instead of the first in extractor order, so Best no longer lands on a low resolution when a site lists direct files with no codec info.</li>
@@ -730,14 +730,14 @@
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.5" date="2026-09-26">
+    <release version="4.4.4~beta.5" date="2026-09-26">
       <description>
         <ul>
           <li>HLS downloads now rebuild the progress block grid whenever the reported total grows, so the grid no longer fills up while the download is still in progress.</li>
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.4" date="2026-09-26">
+    <release version="4.4.4~beta.4" date="2026-09-26">
       <description>
         <ul>
           <li>Stalled video downloads are now detected and stopped instead of hanging until the whole-attempt timeout: a watchdog watches piece throughput and aborts downloads that stop making progress.</li>
@@ -746,14 +746,14 @@
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.3" date="2026-09-26">
+    <release version="4.4.4~beta.3" date="2026-09-26">
       <description>
         <ul>
           <li>Fixes downloads landing on the lowest quality after picking a higher one: formats that carry a video height are no longer eligible as the audio track, so the HLS quality preset is reached instead of being suppressed by a misclassified direct file.</li>
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.2" date="2026-09-26">
+    <release version="4.4.4~beta.2" date="2026-09-26">
       <description>
         <ul>
           <li>Restores the secrets permission in the Flatpak manifests: the yt-dlp subprocess needs Secret Service over D-Bus to decrypt Chromium-based browser cookies, and without it cookie probing failed.</li>
@@ -763,7 +763,7 @@
         </ul>
       </description>
     </release>
-    <release version="4.4.4-beta.1" date="2026-09-26">
+    <release version="4.4.4~beta.1" date="2026-09-26">
       <description>
         <p>The Flatpak no longer bundles Deno or requests the secrets permission, and grants no browser-profile access by default. Preferences now shows the exact read-only flatpak override command for the selected browser when its profile is unreachable in the sandbox, re-checking while visible so the row dismisses itself once the override lands. Also adds a Flathub submission manifest variant.</p>
       </description>
@@ -790,7 +790,7 @@
         <p>Stopping a live recording now says so: the row button reads Stop Recording and confirms the recording is kept. The tools install progress uses a proper loading indicator that no longer freezes or misaligns.</p>
       </description>
     </release>
-    <release version="4.4.0-beta.1" date="2026-09-25">
+    <release version="4.4.0~beta.1" date="2026-09-25">
       <description>
         <p>Beta: video filenames no longer carry the video id (<em>Title [id].mp4</em> becomes <em>Title.mp4</em>); the id is stored in the file's comment metadata instead. Every download now embeds metadata tags, and the "Audio quality" preference is gone — audio-only downloads always use yt-dlp's default quality.</p>
         <p>Removing a video that is still downloading is now safe: the worker is stopped first and its temporary files are cleaned up only after it has exited, so a new download can no longer collide with the cleanup. Interrupted live recordings are kept rather than deleted, and retries no longer destroy them.</p>
@@ -829,7 +829,7 @@
         <p>Non-video Drive links fall back to direct download, Add works on short and unlisted video links, yt-dlp fragments run serially, and the HLS block map no longer flashes on estimate wobble.</p>
       </description>
     </release>
-    <release version="4.0.6-beta.1" date="2026-09-22">
+    <release version="4.0.6~beta.1" date="2026-09-22">
       <description>
         <p>Beta: non-video Drive links fall back to direct download, Add works on short and unlisted video links that probe video-shaped, and yt-dlp fragment downloads return to the serial default.</p>
       </description>
@@ -1099,67 +1099,67 @@
         <p>First stable release: segmented downloads with smart auto-resume, pause/resume, download history, live preferences, and a native HIG-compliant interface.</p>
       </description>
     </release>
-    <release version="0.3.0-beta.1" date="2026-09-08">
+    <release version="0.3.0~beta.1" date="2026-09-08">
       <description>
         <p>First beta: native HTTP backend with pause/resume, segmented downloads, download history, and HIG-compliant UI.</p>
       </description>
     </release>
-    <release version="0.2.1-alpha.13" date="2026-09-08">
+    <release version="0.2.1~alpha.13" date="2026-09-08">
       <description>
         <p>Security hardening: capped split sizes, failed engine tasks report instead of stalling, stricter filenames.</p>
       </description>
     </release>
-    <release version="0.2.1-alpha.12" date="2026-09-08">
+    <release version="0.2.1~alpha.12" date="2026-09-08">
       <description>
         <p>Progress rows show downloaded-of-total amounts; background notice only while transferring.</p>
       </description>
     </release>
-    <release version="0.2.1-alpha.11" date="2026-09-08">
+    <release version="0.2.1~alpha.11" date="2026-09-08">
       <description>
         <p>Download speed measures new bytes only, so resumed downloads read correctly.</p>
       </description>
     </release>
-    <release version="0.2.1-alpha.10" date="2026-09-08">
+    <release version="0.2.1~alpha.10" date="2026-09-08">
       <description>
         <p>Segmented downloads resume across restarts instead of starting over.</p>
       </description>
     </release>
-    <release version="0.2.1-alpha.9" date="2026-09-08">
+    <release version="0.2.1~alpha.9" date="2026-09-08">
       <description>
         <p>Survives killed segmented downloads without corrupting files; leaner engine and test helpers.</p>
       </description>
     </release>
-    <release version="0.2.1-alpha.8" date="2026-09-08">
+    <release version="0.2.1~alpha.8" date="2026-09-08">
       <description>
         <p>Survives throttling hosts by dropping to one stream; fixes segmented resume corrupting finished files.</p>
       </description>
     </release>
-    <release version="0.2.1-alpha.7" date="2026-09-07">
+    <release version="0.2.1~alpha.7" date="2026-09-07">
       <description>
         <p>Downloads take the server-advertised filename, so video links save with the right extension.</p>
       </description>
     </release>
-    <release version="0.2.1-alpha.6" date="2026-09-07">
+    <release version="0.2.1~alpha.6" date="2026-09-07">
       <description>
         <p>Finished downloads show their final size where the speed was.</p>
       </description>
     </release>
-    <release version="0.2.1-alpha.5" date="2026-09-07">
+    <release version="0.2.1~alpha.5" date="2026-09-07">
       <description>
         <p>URL length limit, CI checks on every push, and contributor documentation.</p>
       </description>
     </release>
-    <release version="0.2.1-alpha.4" date="2026-09-07">
+    <release version="0.2.1~alpha.4" date="2026-09-07">
       <description>
         <p>New Download keeps its pill shape but sizes to its text instead of stretching full-width.</p>
       </description>
     </release>
-    <release version="0.2.1-alpha.3" date="2026-09-07">
+    <release version="0.2.1~alpha.3" date="2026-09-07">
       <description>
         <p>Smaller New Download button; header add button only shows alongside the download list.</p>
       </description>
     </release>
-    <release version="0.2.1-alpha.2" date="2026-09-07">
+    <release version="0.2.1~alpha.2" date="2026-09-07">
       <description>
         <p>HIG compliance pass: failure banner, undo for removals, keyboard shortcuts, screen-reader labels, and release hardening.</p>
       </description>

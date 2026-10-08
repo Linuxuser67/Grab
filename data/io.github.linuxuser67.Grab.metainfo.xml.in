@@ -50,10 +50,12 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="5.6.7-beta.1" date="2026-10-08">
+    <release version="5.6.7-beta.2" date="2026-10-08">
       <description>
         <ul>
-          <li>Rapid adds during a lookup are queued; context menu URLs cancel in-flight lookups.</li>
+          <li>Rapid adds during a lookup are queued and start automatically when it finishes.</li>
+          <li>Resume validation compares ETags only with ETags and dates only with dates.</li>
+          <li>Clipboard auto-paste remembers a hash of the link, not the link itself.</li>
           <li>Dependency updates.</li>
         </ul>
       </description>

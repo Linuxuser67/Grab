@@ -27,10 +27,57 @@ use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 /// Multi-file torrent picker opener: file name, raw bytes, parsed entries.
 type TorrentPickerOpener = Rc<dyn Fn(String, Vec<u8>, Vec<crate::torrent::TorrentFileEntry>)>;
+
+/// Lowercase hex SHA-256 of a pasted link: what the "paste once" check stores
+/// instead of the link (dconf is plain text and often synced or backed up).
+fn paste_fingerprint(url: &str) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(url.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Starts the next queued link once the finished lookup's marker is cleared.
+/// The start is deferred to an idle callback so it never re-enters the task
+/// that is still unwinding, and it is skipped while a ready preview or picker
+/// waits on the user (the queued links stay queued instead of replacing it).
+struct DrainPending {
+    probe: Rc<RefCell<ProbeState>>,
+    pending: Rc<RefCell<VecDeque<String>>>,
+    start: Rc<dyn Fn(String)>,
+}
+
+impl Drop for DrainPending {
+    fn drop(&mut self) {
+        if self.pending.borrow().is_empty() {
+            return;
+        }
+        let (probe, pending, start) = (
+            Rc::clone(&self.probe),
+            Rc::clone(&self.pending),
+            Rc::clone(&self.start),
+        );
+        glib::idle_add_local_once(move || {
+            let busy = {
+                let st = probe.borrow();
+                st.inflight.is_some() || st.info.is_some()
+            };
+            if busy {
+                return;
+            }
+            let next = pending.borrow_mut().pop_front();
+            if let Some(next) = next {
+                start(next);
+            }
+        });
+    }
+}
 
 /// Owns the in-flight probe marker: every exit clears it for the owning
 /// generation, so a stale kick's marker never suppresses a re-kick.
@@ -1709,7 +1756,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let probe = Rc::new(RefCell::new(ProbeState::default()));
     // Queued URL from context menu/share while a probe is in flight: the
     // open() handler stores it here, and the probe completion auto-starts it.
-    let pending_url: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let pending_url: Rc<RefCell<VecDeque<String>>> = Rc::new(RefCell::new(VecDeque::new()));
     // The form's Add button, desensitized while a lookup is in flight (a
     // dead button says so upfront). Every terminal state re-enables it.
     let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
@@ -1823,6 +1870,20 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 pending_kick.clone(),
             );
             glib::spawn_future_local(async move {
+                // Declared BEFORE the guard so it drops AFTER it (reverse
+                // declaration order): every exit, early returns included, starts
+                // the next queued link with the in-flight marker already clear.
+                let _drain = DrainPending {
+                    probe: Rc::clone(&probe_b),
+                    pending: Rc::clone(&pending_b),
+                    start: {
+                        let url_entry = url_b.clone();
+                        Rc::new(move |next: String| {
+                            url_entry.set_text(&next);
+                            url_entry.activate();
+                        })
+                    },
+                };
                 // Owns the in-flight marker: every exit below clears it for
                 // this generation (a stale generation leaves a newer marker).
                 let _guard = InflightGuard {
@@ -2073,12 +2134,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             }
                         }
                     }
-                }
-                // Auto-queue: if a URL was queued via open() during this probe,
-                // start its lookup now (the guard has dropped, clearing inflight).
-                if let Some(pending) = pending_b.borrow_mut().take() {
-                    url_b.set_text(&pending);
-                    url_b.activate();
                 }
             });
         })
@@ -2453,6 +2508,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         // The last URL the clipboard auto-paste inserted: a stale clipboard
         // link pastes once, not on every fresh open. Persisted so a restart
         // doesn't forget and re-paste the stale link.
+        // Only a digest is kept: a clipboard link can carry a token, and
+        // "same link as last time" needs nothing more.
         let last_auto_paste: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new({
             let saved = manager.settings().last_auto_paste();
             if saved.is_empty() { None } else { Some(saved) }
@@ -2467,7 +2524,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if let Some(raw) = initial_url {
                 if let Ok(normalized) = crate::download::normalize_url(raw.trim()) {
                     if probe.borrow().inflight.is_some() {
-                        *pending_url.borrow_mut() = Some(normalized);
+                        // FIFO: rapid sends must not overwrite each other.
+                        let mut queue = pending_url.borrow_mut();
+                        if !queue.contains(&normalized) {
+                            queue.push_back(normalized);
+                        }
                         return;
                     }
                     url_entry.set_text(&normalized);
@@ -2488,15 +2549,16 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     let pasted = text.trim().to_string();
                     if let Ok(normalized) = crate::download::normalize_url(&pasted) {
                         // Paste once: skip a link this auto-paste already inserted.
-                        if last_auto_paste.borrow().as_deref() == Some(normalized.as_str()) {
+                        let fingerprint = paste_fingerprint(&normalized);
+                        if last_auto_paste.borrow().as_deref() == Some(fingerprint.as_str()) {
                             return;
                         }
                         url_entry.set_text(&normalized);
-                        *last_auto_paste.borrow_mut() = Some(normalized.clone());
+                        *last_auto_paste.borrow_mut() = Some(fingerprint.clone());
                         // Persist so a restart doesn't re-paste the stale link.
                         // The manager Rc isn't available in this async block;
                         // settings are global via the default AppSettings.
-                        crate::settings::AppSettings::new().set_last_auto_paste(&normalized);
+                        crate::settings::AppSettings::new().set_last_auto_paste(&fingerprint);
                     }
                 });
             }

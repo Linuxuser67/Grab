@@ -50,17 +50,17 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="5.6.7-beta.3" date="2026-10-08">
+    <release version="5.6.7" date="2026-10-08">
       <description>
         <ul>
-          <li>Context-menu links queue even when the first link hasn't started looking up yet.</li>
-          <li>Rapid adds during a lookup are queued and start automatically when it finishes.</li>
+          <li>Links added during a lookup are queued and start automatically when it finishes, instead of replacing or cancelling.</li>
           <li>Resume validation compares ETags only with ETags and dates only with dates.</li>
           <li>Clipboard auto-paste remembers a hash of the link, not the link itself.</li>
           <li>Dependency updates.</li>
         </ul>
       </description>
     </release>
+    <release version="5.6.7-beta.3" date="2026-10-08"/>
     <release version="5.6.7-beta.2" date="2026-10-08"/>
     <release version="5.6.6" date="2026-10-07"/>
     <release version="5.6.0" date="2026-10-07">

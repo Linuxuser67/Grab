@@ -333,14 +333,10 @@ fn output_folder_for(
     dest.join(dir)
 }
 
-/// Guard a torrent output folder at write time: `folder` is either the dest
-/// dir itself (flat download) or `dest/<leaf>`. The engine follows its
-/// output folder blindly, so a symlink planted at the leaf — after intake,
-/// or while the row sat queued — would divert the writes outside the
-/// download dir. The leaf goes through the same atomic create-and-dedupe as
-/// collection subfolders: a squatted name lands in a fresh folder instead
-/// of being followed, and an existing real dir is reused so resume keeps
-/// working.
+/// Guard a torrent output folder at write time: a symlink planted at the
+/// leaf would divert the engine's writes outside the download dir. The leaf
+/// goes through the same atomic create-and-dedupe as collection subfolders —
+/// a squatted name lands in a fresh folder instead of being followed.
 pub(crate) fn guard_output_folder(
     dest: &std::path::Path,
     folder: std::path::PathBuf,
@@ -452,15 +448,10 @@ fn is_hostile_entry(path: &str) -> bool {
 }
 
 /// Remove a file, then prune parents left empty (never removing `folder`).
-/// Refuses if any intermediate component under `folder` is a symlink:
-/// a pre-existing symlinked subdirectory would otherwise divert the
-/// deletion outside the torrent folder.
-///
-/// TOCTOU note: the symlink check and the remove are not atomic. A symlink
-/// swapped in between could divert the delete. Exploiting this requires
-/// write access to the download directory, so the risk is low. For the
-/// file itself we use `unlinkat` with `O_NOFOLLOW` on the parent fd, which
-/// closes the window for the final component.
+/// Refuses if any intermediate component under `folder` is a symlink, which
+/// would otherwise divert the deletion outside the torrent folder. The file
+/// itself goes through `unlinkat` with `O_NOFOLLOW` on the parent fd, closing
+/// the swap-in window for the final component.
 fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Path) {
     // Bail if any intermediate component is a symlink or escapes `folder`.
     if path_has_symlink_component(path, folder) {

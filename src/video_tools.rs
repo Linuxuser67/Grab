@@ -262,15 +262,11 @@ pub fn user_lib_dir() -> PathBuf {
     }
 }
 
-/// Create the library dir for an install. Called at install time (the getter stays
-/// side-effect free). Components are created 0700. The `/tmp` fallback root
-/// (`grab-fallback-data-<pid>`, used only when `XDG_DATA_HOME` and `HOME` are both
-/// unset) is validated after creation: owned by us, not a symlink, not group- or
-/// world-writable, so a pre-planted directory is refused instead of written into.
-///
-/// Synchronous: mkdir + metadata checks are fast, and this must work from
-/// `glib::spawn_future_local` (GTK main loop), where `tokio::task::spawn_blocking`
-/// would panic with "no reactor running".
+/// Create the install library dir (0700). The `/tmp` fallback root (only when
+/// `XDG_DATA_HOME` and `HOME` are both unset) is validated after creation —
+/// owned by us, not a symlink, not group/world-writable — so a pre-planted
+/// directory is refused. Synchronous: must work from the GTK main loop, where
+/// `spawn_blocking` would panic with "no reactor running".
 pub(crate) fn ensure_lib_dir(dir: &Path) -> Result<(), VideoError> {
     ensure_lib_dir_blocking(dir).map_err(VideoError::install)
 }
@@ -349,15 +345,11 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
 /// Cached `--impersonate` support per yt-dlp binary path.
 static IMPERSONATE_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
 
-/// Whether `--impersonate chrome` is known-supported for this binary.
-///
-/// Sync and never blocks an async worker: returns the cached probe result,
-/// or `false` (the safe default) while the probe is still running. The first
-/// call for a binary kicks the probe off on the blocking pool — the probe can
-/// take up to ~15 s on a wedged binary, so the download proceeds without the
-/// flag rather than parking a worker; the next download gets the cached
-/// answer. Outside a Tokio runtime (unit tests) the probe runs inline; the
-/// test fakes answer immediately.
+/// Whether `--impersonate chrome` is known-supported for this binary. Sync,
+/// never blocks a worker: returns the cached probe result, or `false` (the
+/// safe default) while the probe is still running. The first call kicks the
+/// probe off on the blocking pool so a wedged binary (up to ~15 s) doesn't
+/// park the download; the next download gets the cached answer.
 pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
     let cache = IMPERSONATE_SUPPORT.get_or_init(|| Mutex::new(HashMap::new()));
     // A poisoned cache must never panic the caller: skip the read and fall
@@ -563,17 +555,11 @@ pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
     }
 }
 
-/// quickjs-ng is Grab's JS runtime for YouTube. It is pinned on YouTube spawns
-/// (see `ytdlp_identity_args`) so a system runtime (e.g. deno, which yt-dlp
-/// prefers and enables by default) can never shadow it there. quickjs-ng ships
-/// tiny (~2.5MB) official linux x86_64 and aarch64 binaries; the deno
-/// alternative is ~40x larger. The installed release follows the quickjs-ng
-/// latest tag so the update check and the installer agree on the source of
-/// truth. GitHub provides a SHA-256 digest per release asset; installs fail
-/// closed if it's absent, and the hash is verified while streaming.
-/// Hard cap on the quickjs download: the asset is ~2.5MB, so anything larger
-/// is not the released binary. Enforced while streaming, before the bytes are
-/// trusted.
+/// quickjs-ng is Grab's pinned JS runtime for YouTube (a system runtime like
+/// deno, which yt-dlp prefers by default, must never shadow it). The release
+/// follows the quickjs-ng latest tag; installs fail closed without GitHub's
+/// per-asset SHA-256 digest, verified while streaming. Hard cap on the
+/// download: the asset is ~2.5MB, so anything larger is not the released binary.
 const QUICKJS_MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Whether this build's arch has a quickjs-ng release to fetch. Gate for the
@@ -1401,13 +1387,9 @@ pub(crate) fn ytdlp_identity_args(
     // youtube extractor: a no-op for other sites.
     args.push("--extractor-args".to_string());
     args.push("youtube:player_client=-web".to_string());
-    // quickjs-ng is Grab's JS runtime for YouTube: pin it so a system runtime
-    // (e.g. deno, which yt-dlp prefers and enables by default) can never
-    // shadow it where the player-client challenges need it. Only deno is
-    // enabled by default, so the pin must also disable the other runtimes.
-    // Scoped to YouTube: other sites keep yt-dlp's own runtime discovery.
-    // Skipped where quickjs-ng ships no release; yt-dlp then keeps its own
-    // runtime discovery.
+    // Pin quickjs-ng for YouTube (disabling other runtimes, since only deno is
+    // on by default). Scoped to YouTube; skipped where quickjs-ng ships no
+    // release, where yt-dlp keeps its own runtime discovery.
     if is_youtube_url(page_url) && quickjs_arch_supported() {
         args.push("--no-js-runtimes".to_string());
         args.push("--js-runtimes".to_string());

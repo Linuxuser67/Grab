@@ -1833,15 +1833,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let scheduled_at_kick = Rc::clone(&scheduled_at);
         let pending_kick = Rc::clone(&pending_url);
         Rc::new(move |probe_unlisted: bool| {
-            // Twin suppression: a resolve for this exact URL is already
-            // running for the current generation (Add pressed twice while
-            // the lookup is still in flight is the usual trigger). The twin's
-            // result would lose the generation race anyway — don't spawn a
-            // second yt-dlp. The marker carries the owning kick's generation
-            // so a stale marker — its resolve already doomed by a generation
-            // bump — never suppresses a re-kick for the same URL. It also
-            // carries the kick's unlisted-probe flag: an explicit Add/Enter
-            // kick probes unlisted URLs.
+            // Twin suppression: a resolve for this URL is already running for the
+            // current generation (Add pressed twice is the usual trigger) — don't
+            // spawn a second yt-dlp, the twin would lose the generation race anyway.
+            // The marker carries the owning generation so a stale marker never
+            // suppresses a re-kick, plus the unlisted-probe flag.
             let url = url_entry2.text().trim().to_string();
             let Some(my) = probe.borrow_mut().kick(url, probe_unlisted) else {
                 return;

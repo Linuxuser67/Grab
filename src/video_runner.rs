@@ -1410,13 +1410,11 @@ pub(crate) async fn run_live_ytdlp(
             }
         };
         let _ = join_drain(progress).await;
-        // A discard is not a stop. With no row left to deliver to, the finalize
-        // path below must not run: adopting and remuxing would place a file at
-        // a destination with no row behind it. Only the direct child is reaped
-        // here; group descendants may still be writing (quiescence wait below).
-        // The scratch is deliberately left too: the manager reclaims it only
-        // after this task returns -- sweeping from inside a running task is the
-        // race this avoids.
+        // A discard is not a stop: with no row left, the finalize path must not
+        // run (adopting would place a file with no row behind it). Only the direct
+        // child is reaped here; group descendants may still be writing. The
+        // scratch is left too — the manager reclaims it after this task returns,
+        // since sweeping from inside a running task is the race being avoided.
         if discarded {
             logs.abort();
             // The guard only *signalled* the group, so a descendant may still be

@@ -91,14 +91,12 @@ pub(crate) struct StreamPlan {
 
 /// Resolve which streams an attempt fetches, in priority order:
 ///
-/// 1. A dialog-pinned HLS id resolves first — [`find_usable_format`] takes
-///    only plain HTTPS, so without this the pin would be dropped and then
-///    shadowed by the muxed adoption below (x.com VODs).
+/// 1. A dialog-pinned HLS id (else the pin would be dropped by
+///    [`find_usable_format`]'s HTTPS-only filter and shadowed by muxed
+///    adoption).
 /// 2. Direct splits: pinned HTTPS id, else the quality preset.
-/// 3. Single-part adoption for a still-missing side, skipped once a pinned
-///    HLS resolved or the request already holds both splits.
-/// 4. The HLS preset is the last resort, except when the preset is taller
-///    yet within the cap: Best match means best across transports.
+/// 3. Single-part adoption for a still-missing side.
+/// 4. The HLS preset as last resort — best across transports.
 pub(crate) fn plan_streams(
     video: &Video,
     quality: &str,

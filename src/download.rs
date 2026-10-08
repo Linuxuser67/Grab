@@ -131,16 +131,11 @@ fn parent_contained_in_dest(parent: &std::path::Path, dest_dir: &str) -> bool {
     }
 }
 
-/// Create the download's parent dir, refusing a planted symlink instead of
-/// following it. An existing parent is containment-checked *before* any
-/// filesystem touch — the old create-then-check ran create_dir_all first,
-/// which is a no-op on an existing path but needlessly touched the link —
-/// while a missing parent is created, then verified (it can't harbor a link,
-/// but a link can be swapped in for the name mid-call). `symlink_metadata`
-/// sees even a dangling link, where `exists` would not.
-///
-/// A `create_dir_all` failure is `Err`, not a containment refusal, so the
-/// caller reports it distinctly instead of blaming the download folder.
+/// Create the download's parent dir, refusing a planted symlink. An existing
+/// parent is containment-checked before any filesystem touch; a missing one
+/// is created then verified (a link can be swapped in mid-call).
+/// `symlink_metadata` sees even dangling links. A `create_dir_all` failure
+/// is `Err`, not a containment refusal, so callers report it distinctly.
 fn ensure_contained_parent(
     parent: &std::path::Path,
     dest_dir: &str,
@@ -453,14 +448,10 @@ impl DownloadManager {
         }
     }
 
-    /// Recount queued rows and refresh the UI. Deferred while a batch is
-    /// open, exactly like `persist_queue`: the recount and `finished_count`
-    /// walk the whole store, the window hook walks it again in `sync()` plus
-    /// once per status predicate, and every step is a GObject ref, a downcast
-    /// and a property read per element. Per row that adds up, so a 500-entry
-    /// import did it 500 times over. Every batch opener already ends with its
-    /// own refresh — the [`BatchGuard`] close here, `restore_queue` and the picker
-    /// at the close of their loops — so nothing is lost by waiting.
+    /// Recount queued rows and refresh the UI. Deferred while a batch is open
+    /// (like `persist_queue`): each step walks the whole store at GObject-ref
+    /// cost per element, so a 500-entry import would pay it 500 times. Every
+    /// batch opener ends with its own refresh, so nothing is lost by waiting.
     fn changed(&self) {
         if self.batch.get() > 0 {
             return;

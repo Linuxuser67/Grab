@@ -149,14 +149,12 @@ pub(crate) fn unified_staging_prefix(dest: &Path, item_id: u64) -> String {
     format!("{}.{item_id}.", &stem[..cut])
 }
 
-/// Stable `-o` template inside the row's staging dir (yt-dlp resumes its `.part` beside it).
-/// Named after the row's destination stem plus the item id: `dest` is fixed for the row's life,
-/// so a title that changes between attempts (live streams, edits) cannot rename the `.part`
-/// and break resume. The id keeps the template distinct from `dest` itself — without it,
-/// a finished download would land exactly on `dest` and the claim rename would fail with
-/// "file exists". Staging names are internal (the claim renames to `dest`), so a fullwidth
-/// percent sign replaces `%` in the stem and sidesteps `-o` escaping. The stem is capped to
-/// leave room for yt-dlp's `.f<id>.<ext>.part` suffix under the 255-byte name limit. Pure.
+/// Stable `-o` template in the row's staging dir: destination stem plus item id.
+/// The id keeps the template distinct from `dest` (a finished download would
+/// otherwise land on `dest` and the claim rename would fail), and `dest` is
+/// fixed for the row's life so a title change can't rename the `.part` and
+/// break resume. Fullwidth percent replaces `%` to sidestep `-o` escaping; the
+/// stem is capped under the 255-byte limit. Pure.
 pub(crate) fn unified_output_template(staging: &Path, dest: &Path, item_id: u64) -> PathBuf {
     staging.join(format!("{}%(ext)s", unified_staging_prefix(dest, item_id)))
 }

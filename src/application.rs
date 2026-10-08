@@ -1057,7 +1057,8 @@ mod tests {
     /// Version tuple for comparison (numeric parts, stable flag, prerelease
     /// identifiers last).
     fn version_key(v: &str) -> (u32, u32, u32, bool, Vec<PreId>) {
-        let (core, suffix) = match v.split_once(['-', '+']) {
+        // AppStream uses '~' for prereleases (5.6.7~beta.3 < 5.6.7); Cargo uses '-'.
+        let (core, suffix) = match v.split_once(['-', '+', '~']) {
             Some((c, s)) => (c, s),
             None => (v, ""),
         };

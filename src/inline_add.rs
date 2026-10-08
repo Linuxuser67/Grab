@@ -2521,9 +2521,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             // lookup itself starts on Add/Enter like any other entry.
             // If a probe is already in flight, queue the URL: it auto-starts
             // when the current probe finishes (see the completion handler).
+            // Also queue if the entry holds an unprobed URL: replacing it
+            // would lose the first link.
             if let Some(raw) = initial_url {
                 if let Ok(normalized) = crate::download::normalize_url(raw.trim()) {
-                    if probe.borrow().inflight.is_some() {
+                    let st = probe.borrow();
+                    let busy = st.inflight.is_some();
+                    let has_unprobed = !busy
+                        && st.info.is_none()
+                        && !url_entry.text().trim().is_empty()
+                        && url_entry.text().trim() != normalized;
+                    drop(st);
+                    if busy || has_unprobed {
                         // FIFO: rapid sends must not overwrite each other.
                         let mut queue = pending_url.borrow_mut();
                         if !queue.contains(&normalized) {

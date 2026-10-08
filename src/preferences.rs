@@ -55,15 +55,12 @@ fn mark_rate_row(live: &adw::EntryRow) {
     live.connect_changed(mark);
 }
 
-/// Flatpak-only row under "Cookies from Browser": the manifest grants no
-/// browser profile access, so when the picked browser's profile is unreachable
-/// in the sandbox, show the `flatpak override` command as a copyable action
-/// row (the HIG pattern from `install_help::command_row` — no raw command
-/// dump). Re-runs on dialog open and `COOKIES_BROWSER` changes. Overrides only
-/// apply at sandbox startup, so a running app can never observe the grant —
-/// instead of polling, a companion row tells the user to restart. Takes
-/// `&gio::Settings` because `connect_changed` hands the signal a
-/// `&gio::Settings`, and deref coercion cannot go back up to `AppSettings`.
+/// Flatpak-only row under "Cookies from Browser": when the picked profile is
+/// unreachable in the sandbox, show the `flatpak override` command as a
+/// copyable action row. Re-runs on dialog open and `COOKIES_BROWSER` changes;
+/// overrides apply only at sandbox startup, so a companion row tells the user
+/// to restart. Takes `&gio::Settings` because that is what `connect_changed`
+/// hands the signal.
 fn sync_cookies_override_row(
     row: &adw::ActionRow,
     restart_row: &adw::ActionRow,

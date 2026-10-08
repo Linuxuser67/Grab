@@ -273,15 +273,9 @@ pub(crate) fn drop_empty_staging_root(root: &Path) {
     let _ = std::fs::remove_dir(canon);
 }
 
-/// Reclaim one orphan staging dir: the scratch goes, completed `final.*`
-/// recordings stay (do not delete the user's only copy). The dir itself is
-/// removed only if nothing worth keeping remains, so it stays skipped by the
-/// id allocator.
-/// Reclaim per-item staging dirs with no live row (crash/kill leftovers: only
-/// restored rows reuse their ids, so nothing swept can resume). Only numeric
-/// dir names are touched — the `grab-cookies-*.txt` files and anything else
-/// under the root are left alone. Runs at startup after the queue is restored,
-/// before any worker starts, so nothing live is removed.
+/// Reclaim an orphan staging dir: scratch goes, completed `final.*` recordings
+/// stay. Only numeric dir names; runs at startup after queue restore, so
+/// nothing live is touched.
 /// Sweep one destination's staging files: files for item IDs with no live row
 /// are reclaimed. A missing dest dir is a no-op.
 ///

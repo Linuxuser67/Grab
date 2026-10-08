@@ -244,17 +244,11 @@ fn is_squatter(p: &std::path::Path) -> bool {
 }
 
 /// Atomically create `base/name` as a real directory, reusing an existing
-/// real dir but never following a planted symlink into place.
-///
-/// `create_dir` (not `_all`) is the atomic check-and-create: a symlink
-/// planted between the dedupe scan and the create fails with
-/// `AlreadyExists`, and the name dedupes to a fresh one. A post-create
-/// `symlink_metadata` re-check closes the residual gap after our own
-/// create. Retries are bounded: a persistent squatter can't spin us forever.
-///
-/// Returns the directory to use. On unrecoverable I/O errors (base
-/// unwritable etc.) it keeps the old best-effort behavior and returns the
-/// path; the write then fails loudly at its own site.
+/// real dir but never following a planted symlink into place. `create_dir`
+/// (not `_all`) is the atomic check-and-create; a post-create
+/// `symlink_metadata` re-check closes the residual race, and retries are
+/// bounded so a persistent squatter can't spin forever. On unrecoverable I/O
+/// errors returns the path and lets the write fail at its own site.
 pub(crate) fn create_guarded_dir(base: &std::path::Path, name: &str) -> std::path::PathBuf {
     // Keep the old ensure-parents behavior; only the leaf is guarded.
     let _ = std::fs::create_dir_all(base);
@@ -290,13 +284,10 @@ pub(crate) fn create_guarded_dir(base: &std::path::Path, name: &str) -> std::pat
     base.join(tried.pop().unwrap_or_else(|| name.to_string()))
 }
 
-/// Titled subfolder for a multi-item collection (playlist, stories,
-/// highlights), torrent-style: sanitized, created eagerly, and reused when the
-/// same collection is added again (duplicate files then fail Parabolic-style
-/// at start instead of scattering ` (1)` copies). Never follows a
-/// pre-existing symlink into place: a planted link with the collection name
-/// would redirect downloads outside the download dir, so a symlink — or any
-/// non-dir squatter — dedupes to a fresh name instead. The create itself is
+/// Titled subfolder for a multi-item collection, created eagerly and reused
+/// when the collection is added again. Never follows a pre-existing symlink:
+/// a planted link — or any non-dir squatter — dedupes to a fresh name
+/// instead of redirecting downloads outside the download dir. The create is
 /// atomic, closing the dedupe-then-create race.
 pub(crate) fn collection_subdir(dir: &str, title: &str) -> String {
     let folder = shorten_filename(&sanitize_folder_name(title));

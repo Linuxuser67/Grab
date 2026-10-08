@@ -5917,27 +5917,27 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/zerocopy/zerocopy-0.8.61.crate",
-        "sha256": "879fb705ce98c32e41ebdb970fbe1204f8492423b314c6ab0354c3e7b5542866",
-        "dest": "cargo/zerocopy-0.8.61"
+        "url": "https://static.crates.io/crates/zerocopy/zerocopy-0.8.62.crate",
+        "sha256": "86502bf56ac7c77571a32e2647bb2a15894565e981fb2a48d7bde2d91c965a9d",
+        "dest": "cargo/zerocopy-0.8.62"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"879fb705ce98c32e41ebdb970fbe1204f8492423b314c6ab0354c3e7b5542866\", \"files\": {}}",
-        "dest": "cargo/zerocopy-0.8.61",
+        "contents": "{\"package\": \"86502bf56ac7c77571a32e2647bb2a15894565e981fb2a48d7bde2d91c965a9d\", \"files\": {}}",
+        "dest": "cargo/zerocopy-0.8.62",
         "dest-filename": ".cargo-checksum.json"
     },
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/zerocopy-derive/zerocopy-derive-0.8.61.crate",
-        "sha256": "708882a28301d604fa039cc7727607a98d04c4b86dc76ec9cc683f805d709759",
-        "dest": "cargo/zerocopy-derive-0.8.61"
+        "url": "https://static.crates.io/crates/zerocopy-derive/zerocopy-derive-0.8.62.crate",
+        "sha256": "5457206954b06561e2608c7e19cf58b1926586d999c246eebe4502f7e2039d1a",
+        "dest": "cargo/zerocopy-derive-0.8.62"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"708882a28301d604fa039cc7727607a98d04c4b86dc76ec9cc683f805d709759\", \"files\": {}}",
-        "dest": "cargo/zerocopy-derive-0.8.61",
+        "contents": "{\"package\": \"5457206954b06561e2608c7e19cf58b1926586d999c246eebe4502f7e2039d1a\", \"files\": {}}",
+        "dest": "cargo/zerocopy-derive-0.8.62",
         "dest-filename": ".cargo-checksum.json"
     },
     {

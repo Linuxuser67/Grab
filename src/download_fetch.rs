@@ -742,23 +742,28 @@ async fn execute_with_timeout(
     }
 }
 
-/// Extract the validator from a response: strong ETag preferred, Last-Modified
-/// fallback. Weak ETags are skipped (never valid for If-Range).
-/// Returns the If-Range value to send.
-/// True only when the response carries the same kind of validator as the session one and it differs. A strong ETag is quoted; anything else is a Last-Modified date. Comparing across kinds (or against a weak ETag) would report a false change and delete a good partial.
+/// True only when the response carries the same kind of validator as the
+/// session one and it differs. The kind follows the value's shape: an
+/// IMF-fixdate (always ends in "GMT") is a Last-Modified, anything else is an
+/// ETag, quoted or not (some servers send them bare). Comparing across kinds
+/// or against a weak ETag would report a false change and delete a good
+/// partial; a response without the matching kind never reads as a change.
 pub(crate) fn validator_changed(
     session: &str,
     etag: Option<&str>,
     last_modified: Option<&str>,
 ) -> bool {
-    let candidate = if session.starts_with('"') {
-        etag.filter(|e| !e.starts_with("W/"))
-    } else {
+    let candidate = if session.ends_with("GMT") {
         last_modified
+    } else {
+        etag.filter(|e| !e.starts_with("W/"))
     };
     candidate.is_some_and(|c| c != session)
 }
 
+/// Extract the validator from a response: strong ETag preferred, Last-Modified
+/// fallback. Weak ETags are skipped (never valid for If-Range).
+/// Returns the If-Range value to send.
 fn response_validator(resp: &reqwest::Response) -> Option<String> {
     response_validators(resp).0
 }

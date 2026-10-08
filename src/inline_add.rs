@@ -1784,6 +1784,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let dest_kick = dest_dir.clone();
         let close_kick = close_card.clone();
         let scheduled_at_kick = Rc::clone(&scheduled_at);
+        let pending_kick = Rc::clone(&pending_url);
         Rc::new(move |probe_unlisted: bool| {
             // Twin suppression: a resolve for this exact URL is already
             // running for the current generation (Add pressed twice while
@@ -1819,7 +1820,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 dest_kick.clone(),
                 close_kick.clone(),
                 scheduled_at_kick.clone(),
-                pending_url.clone(),
+                pending_kick.clone(),
             );
             glib::spawn_future_local(async move {
                 // Owns the in-flight marker: every exit below clears it for

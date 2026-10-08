@@ -5,10 +5,10 @@ use crate::attempt_gate::AttemptGate;
 use crate::file_names::is_url_derived_name;
 use crate::runtime::lock_recover;
 use crate::video_argv::{
-    VideoJob, apply_proxy_env, container_truth_name, fallback_to_live_edge, hls_download_argv,
-    live_capture_argv, live_from_start_unsupported, live_remux_argv, merge_output_ext,
-    playlist_scope_args, proxy_cli_args, unified_download_argv, unified_format_spec,
-    unified_output_template, unified_staging_prefix, write_manifest,
+    VideoJob, apply_proxy_env, container_truth_name, dash_merge_argv, fallback_to_live_edge,
+    hls_download_argv, live_capture_argv, live_from_start_unsupported, live_remux_argv,
+    merge_output_ext, playlist_scope_args, proxy_cli_args, unified_download_argv,
+    unified_format_spec, unified_output_template, unified_staging_prefix, write_manifest,
 };
 use crate::video_plan::{StreamPlan, plan_streams};
 use crate::video_probe::page_host;
@@ -333,6 +333,65 @@ pub async fn run_video_download(
 
 /// One direct download through a single yt-dlp invocation: Grab claims the output into place (EXDEV-safe, no clobber) and wipes staging.
 /// Returns the finished size, or `None` on user abort (the caller stays quiet).
+/// On Preserve abort of a DASH download, partial video+audio are merged into
+/// a single file instead of being abandoned.
+async fn try_merge_dash_partials(
+    ffmpeg_bin: &Path,
+    staging: &Path,
+    dest: &Path,
+    page_url: &str,
+) -> Option<u64> {
+    // Find .part files in staging, largest two are likely video+audio.
+    let mut parts: Vec<(PathBuf, u64)> = std::fs::read_dir(staging)
+        .ok()?
+        .filter_map(|e| e.ok().map(|x| x.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("part"))
+        .filter_map(|p| std::fs::metadata(&p).ok().map(|m| (p, m.len())))
+        .filter(|(_, len)| *len > 1024) // Ignore tiny fragments.
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    parts.sort_by_key(|(_, len)| std::cmp::Reverse(*len));
+
+    // Single part (audio-only): just rename into place, no merge needed.
+    if parts.len() == 1 {
+        let (part, _) = &parts[0];
+        let size = std::fs::metadata(part).ok()?.len();
+        std::fs::rename(part, dest).ok()?;
+        return Some(size);
+    }
+
+    let (video_part, _) = &parts[0];
+    let (audio_part, _) = &parts[1];
+
+    // Merge into dest with a .tmp suffix, then rename.
+    let mut merged_tmp = dest.to_path_buf();
+    merged_tmp.set_extension("merged.tmp");
+    let argv = dash_merge_argv(video_part, audio_part, &merged_tmp, page_url);
+    let mut cmd = tokio::process::Command::new(ffmpeg_bin);
+    cmd.args(&argv);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let status = cmd.status().await.ok()?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&merged_tmp);
+        return None;
+    }
+    let size = std::fs::metadata(&merged_tmp).ok()?.len();
+    if size == 0 {
+        let _ = std::fs::remove_file(&merged_tmp);
+        return None;
+    }
+    // Move into place.
+    std::fs::rename(&merged_tmp, dest).ok()?;
+    // Clean up the parts we merged.
+    let _ = std::fs::remove_file(video_part);
+    let _ = std::fs::remove_file(audio_part);
+    Some(size)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_unified_ytdlp(
     youtube_bin: &Path,
@@ -397,7 +456,7 @@ pub(crate) async fn run_unified_ytdlp(
             }
         })
     };
-    let (done, after_move) = run_ytdlp_attempt(
+    let (done, after_move, abort_intent) = run_ytdlp_attempt(
         youtube_bin,
         &argv,
         report,
@@ -413,6 +472,15 @@ pub(crate) async fn run_unified_ytdlp(
     )
     .await?;
     let Some(()) = done else {
+        // User abort: on Preserve, try merging partial DASH parts into a
+        // single file instead of abandoning them.
+        if matches!(abort_intent, Some(StopIntent::Preserve)) {
+            if let Some(merged) =
+                try_merge_dash_partials(ffmpeg_bin, staging, &job.dest, &job.page_url).await
+            {
+                return Ok(Some(merged));
+            }
+        }
         return Ok(None);
     };
     let final_tmp = discover_unified_output(staging, after_move.as_deref());
@@ -495,7 +563,7 @@ async fn run_ytdlp_attempt(
     proxy: Option<&crate::net_types::ResolvedProxy>,
     abort: &mut oneshot::Receiver<StopIntent>,
     timeout: Duration,
-) -> Result<(Option<()>, Option<String>), VideoError> {
+) -> Result<(Option<()>, Option<String>, Option<StopIntent>), VideoError> {
     use tokio::io::AsyncBufReadExt as _;
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(argv);
@@ -575,11 +643,13 @@ async fn run_ytdlp_attempt(
         let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
         tokio::select! {
             biased;
-            _ = &mut *abort => {
+            intent = &mut *abort => {
                 reap_child(&mut child, &mut group).await;
                 progress.abort();
                 logs.abort();
-                return Ok((None, None));
+                // Preserve the abort intent: the caller may merge partials on Preserve.
+                let intent = intent.ok();
+                return Ok((None, None, intent));
             }
             waited = await_child(&mut child, merging_snapshot, remaining, MERGE_WALL_CLOCK) => match waited {
                 Ok(Ok(status)) => {
@@ -640,7 +710,7 @@ async fn run_ytdlp_attempt(
         let detail = last_log_line(&log_tail, "yt-dlp reported failure");
         return Err(VideoError::part_failed(detail));
     }
-    Ok((Some(()), after_move))
+    Ok((Some(()), after_move, None))
 }
 
 /// Remux a stopped live capture into place. ffmpeg writes `<dest>.part` and the result is renamed to `dest` only on success: a bare `final.<n>.<ext>` is always worth keeping, a `.part` never is.

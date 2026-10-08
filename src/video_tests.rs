@@ -6,10 +6,11 @@ use crate::media_types::{
     quality_value,
 };
 use crate::video_argv::{
-    YTDLP_PROGRESS_TEMPLATE, apply_proxy_env, container_truth_name, fallback_to_live_edge,
-    hls_download_argv, hls_format_spec, live_capture_argv, live_from_start_unsupported,
-    live_remux_argv, merge_output_ext, part_fallback_spec, playlist_scope_args, proxy_cli_args,
-    unified_download_argv, unified_format_spec, unified_output_template,
+    YTDLP_PROGRESS_TEMPLATE, apply_proxy_env, container_truth_name, dash_merge_argv,
+    fallback_to_live_edge, hls_download_argv, hls_format_spec, live_capture_argv,
+    live_from_start_unsupported, live_remux_argv, merge_output_ext, part_fallback_spec,
+    playlist_scope_args, proxy_cli_args, unified_download_argv, unified_format_spec,
+    unified_output_template,
 };
 use crate::video_plan::{
     StreamSel, find_hls_format, find_usable_format, plan_streams, select_audio_original_first,
@@ -10144,4 +10145,30 @@ fn ytdlp_command_skips_impersonate_when_unsupported() {
         .collect();
     assert!(!args.iter().any(|a| a == "--impersonate"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dash_merge_argv_maps_video_audio_and_copies() {
+    let argv = dash_merge_argv(
+        std::path::Path::new("/tmp/st/title.f137.mp4.part"),
+        std::path::Path::new("/tmp/st/title.f140.m4a.part"),
+        std::path::Path::new("/tmp/st/title.mp4"),
+        "https://www.youtube.com/watch?v=abc123",
+    );
+    // Two inputs.
+    assert_eq!(argv.iter().filter(|a| *a == "-i").count(), 2);
+    // Maps video from first input, audio from second.
+    assert!(argv.windows(2).any(|w| w == ["-map", "0:v:0"]));
+    assert!(argv.windows(2).any(|w| w == ["-map", "1:a:0"]));
+    // Stream-copy, no re-encode.
+    assert!(argv.windows(2).any(|w| w == ["-c", "copy"]));
+    assert!(argv.windows(2).any(|w| w == ["-movflags", "+faststart"]));
+    // Provenance.
+    assert!(
+        argv.iter()
+            .any(|a| a == "comment=https://www.youtube.com/watch?v=abc123")
+    );
+    // Output is last.
+    assert_eq!(argv[argv.len() - 2], "--");
+    assert_eq!(argv[argv.len() - 1], "/tmp/st/title.mp4");
 }

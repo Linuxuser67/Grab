@@ -584,11 +584,14 @@ async fn attempt_once(
             .map_err(|e| format!("Cannot write file: {e}"))?
         } else if claim {
             // Retries truncate our own bytes (see the `claim` parameter).
-            match tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&ctx.dest)
-                .await
+            // Use O_NOFOLLOW: a dangling symlink must not have its target created.
+            match open_nofollow(
+                |o| {
+                    o.write(true).create_new(true);
+                },
+                &ctx.dest,
+            )
+            .await
             {
                 Ok(f) => f,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -733,9 +736,21 @@ async fn ensure_sized(
     // A fresh download must atomically claim a missing path.
     // Retries and resumes may open the existing file, but never create it.
     let file_result = if claim_destination {
-        open_nofollow(|options| options.write(true).create_new(true), dest).await
+        open_nofollow(
+            |options| {
+                options.write(true).create_new(true);
+            },
+            dest,
+        )
+        .await
     } else {
-        open_nofollow(|options| options.write(true), dest).await
+        open_nofollow(
+            |options| {
+                options.write(true);
+            },
+            dest,
+        )
+        .await
     };
 
     let file = file_result.map_err(|error| {

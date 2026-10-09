@@ -113,8 +113,17 @@ menu.
 
 [![Get it for Firefox](assets/get-it-on-firefox.png)](https://addons.mozilla.org/en-US/firefox/addon/grab-extension/)
 
-No setup needed — the extension hands URLs to Grab via the `grab://` scheme
-handler registered by the app. Works with the Flatpak out of the box.
+The extension tries the native messaging host first (direct launch, no tab),
+falling back to `grab://` URLs if the host isn't installed.
+
+To install the host (recommended, avoids the browser's external-protocol prompt):
+
+```bash
+grab --install-browser-host --chromium-id <extension-id>
+```
+
+Find the extension ID on your browser's extensions page (Developer mode).
+For Firefox, the host is registered automatically via the manifest.
 
 ## Notes for packagers
 

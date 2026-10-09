@@ -434,7 +434,10 @@ fn content_disposition_star_strips_encoded_directories() {
         Some("file.zip".to_string())
     );
     // Pure traversal reduces to nothing usable: falls back to `filename`, else None.
-    assert_eq!(filename_from_content_disposition("attachment; filename*=UTF-8''..%2F..%2F"), None);
+    assert_eq!(
+        filename_from_content_disposition("attachment; filename*=UTF-8''..%2F..%2F"),
+        None
+    );
     assert_eq!(
         filename_from_content_disposition(
             "attachment; filename=\"ok.bin\"; filename*=UTF-8''..%2F"

@@ -24,19 +24,24 @@ pub async fn serve() {
         .parse()
         .expect("valid bind address");
 
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("Extension HTTP server couldn't bind {addr}: {e}");
+            return;
+        }
+    };
+
     tracing::info!("Extension HTTP server listening on {addr}");
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("bind extension server");
-
-    axum::serve(listener, app)
-        .await
-        .expect("serve extension server");
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::warn!("Extension HTTP server error: {e}");
+    }
 }
 
-async fn handle_add(Json(req): Json<AddRequest>) -> &'static str {
+async fn handle_add(Json(req): Json<AddRequest>) -> axum::http::StatusCode {
     tracing::info!("Extension handoff: {}", req.url);
     // TODO: enqueue the URL in the download manager.
-    "ok"
+    // Return 501 so the extension falls back to grab:// until wired up.
+    axum::http::StatusCode::NOT_IMPLEMENTED
 }

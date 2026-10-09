@@ -732,8 +732,9 @@ async fn download_to_file(
     // Refuse a planted symlink before any I/O: it would divert the download
     // (and the later chmod) onto an arbitrary file.
     clear_dest_refusing_symlink(dest)?;
-    // Tool installs use the proxy-honoring client: the user explicitly clicked
-    // install, and a corporate proxy may be the only route to GitHub.
+    // Env proxies only (a corporate proxy may be the only route to GitHub); the
+    // app-configured proxy is not applied here, so callers refuse to install
+    // while one is active (`app_proxy_blocks_tool_install`).
     let client = tool_client_builder()
         .build()
         .map_err(|e| format!("couldn't build HTTP client: {e}"))?;
@@ -921,6 +922,9 @@ fn extract_entries(
         zip::ZipArchive::new(file).map_err(|e| format!("couldn't read ffmpeg archive: {e}"))?;
     let mut ffmpeg_path = None;
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // [ffmpeg, ffprobe]: each may appear once. Entries match by file name, so a
+    // second hit would silently replace the first via the shared `.{tool}.new`.
+    let mut seen = [false; 2];
     for i in 0..zip.len() {
         let entry = zip
             .by_index(i)
@@ -928,11 +932,16 @@ fn extract_entries(
         if entry.is_dir() {
             continue;
         }
-        let tool = match Path::new(entry.name()).file_name().and_then(|n| n.to_str()) {
-            Some("ffmpeg") => "ffmpeg",
-            Some("ffprobe") => "ffprobe",
+        let (tool, slot) = match Path::new(entry.name()).file_name().and_then(|n| n.to_str()) {
+            Some("ffmpeg") => ("ffmpeg", 0),
+            Some("ffprobe") => ("ffprobe", 1),
             _ => continue,
         };
+        if std::mem::replace(&mut seen[slot], true) {
+            return Err(format!(
+                "the ffmpeg archive has more than one `{tool}` entry; refusing an ambiguous install"
+            ));
+        }
         // Stage under a temp name: the live binary stays in place until every
         // entry extracted fine, so a failed update never leaves no ffmpeg.
         let final_dest = dir.join(tool);

@@ -1,0 +1,8 @@
+# The suite is serial by contract: tests share one glib MainContext and some
+# mutate the process environment (see `NoVideoTools` in src/video.rs). Make
+# a bare `cargo test` honor that instead of relying on a CI-only flag.
+[alias]
+t = "test -- --test-threads=1"
+
+[env]
+RUST_TEST_THREADS = "1"

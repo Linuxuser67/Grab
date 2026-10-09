@@ -1046,9 +1046,12 @@ pub fn filename_from_content_disposition(value: &str) -> Option<String> {
         };
         if pname.trim().eq_ignore_ascii_case("filename*") {
             let data = pval.split('\'').next_back().unwrap_or("").trim();
-            let name = percent_decode(basename(data));
-            if sane_filename(&name) {
-                return Some(name);
+            // Decode first: `%2F` / `%5C` must be stripped as directory
+            // separators like the plain `filename` form, not rejected whole.
+            let decoded = percent_decode(data);
+            let name = basename(&decoded);
+            if sane_filename(name) {
+                return Some(name.to_string());
             }
         } else if pname.trim().eq_ignore_ascii_case("filename") && fallback.is_none() {
             let name = basename(pval);

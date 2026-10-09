@@ -21,16 +21,25 @@ Threading rule: network I/O runs on a dedicated tokio runtime and only sends
 ```bash
 cargo fmt --check          # must be clean
 cargo clippy --all-targets -- -D warnings   # must be zero warnings
-cargo test -- --test-threads=1   # serial: parallel runs abort when one
-                                  # test's loop polls another's glib source
-                                  # (thread-bound futures, shared context)
+cargo t                    # = cargo test -- --test-threads=1. Serial: parallel runs
+                           # abort when one test's loop polls another's glib source,
+                           # and some tests mutate the process env (unsafe set_var).
+                           # .cargo/config.toml also sets RUST_TEST_THREADS=1.
+./build-aux/check-file-sizes.py   # files over 1000 lines may not grow (see below)
 ```
 
 Disk cleanup: `target/` and `build/` are safe to delete anytime (regenerable).
 Keep `.flatpak-builder/` — it caches vendored crate downloads, so the
 next Flatpak build skips the ~10 min re-download.
 
-CI (`.github/workflows/ci.yml`) runs all three on push/PR.
+CI (`.github/workflows/ci.yml`) runs all of these on push/PR.
+
+### File size ratchet
+
+Files over 1000 lines are recorded in `build-aux/file-size-baseline.json` and
+may not grow; every other file must stay at or under 1000 lines. When you
+shrink or split a baselined file, run `./build-aux/check-file-sizes.py --update`
+to lower its recorded size. Do not raise a baseline: split the file instead.
 
 ## UI changes
 

@@ -422,6 +422,28 @@ fn content_disposition_star_case_insensitive() {
 }
 
 #[test]
+fn content_disposition_star_strips_encoded_directories() {
+    // `%2F` and `%5C` decode to separators; the name is reduced to its basename
+    // (same as the plain `filename` form) instead of falling through.
+    assert_eq!(
+        filename_from_content_disposition("attachment; filename*=UTF-8''dir%2Ffile.zip"),
+        Some("file.zip".to_string())
+    );
+    assert_eq!(
+        filename_from_content_disposition("attachment; filename*=UTF-8''C%3A%5Cdl%5Cfile.zip"),
+        Some("file.zip".to_string())
+    );
+    // Pure traversal reduces to nothing usable: falls back to `filename`, else None.
+    assert_eq!(filename_from_content_disposition("attachment; filename*=UTF-8''..%2F..%2F"), None);
+    assert_eq!(
+        filename_from_content_disposition(
+            "attachment; filename=\"ok.bin\"; filename*=UTF-8''..%2F"
+        ),
+        Some("ok.bin".to_string())
+    );
+}
+
+#[test]
 fn dedupe_caps_iterations() {
     // Everything taken: must still return (not stat the disk forever).
     let name = dedupe_filename("f.iso", |_| true);

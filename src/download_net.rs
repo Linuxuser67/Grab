@@ -481,9 +481,28 @@ pub(crate) fn validate_secure_dir(_dir: &std::path::Path) -> bool {
     true
 }
 
+/// Whether a proxy resolution means tool installs / update probes must not run:
+/// their clients cannot take the app proxy, so a direct fetch would reveal the
+/// machine's address to GitHub. A manual proxy that fails to resolve counts as
+/// active (fail closed): the user asked for a proxy, never fall back to direct.
+pub(crate) fn proxy_blocks_tool_fetch(resolved: &Result<Option<ResolvedProxy>, String>) -> bool {
+    match resolved {
+        Ok(proxy) => proxy.is_some(),
+        Err(_) => true,
+    }
+}
+
+/// `proxy_blocks_tool_fetch` for the current settings.
+pub(crate) fn app_proxy_blocks_tool_install(settings: &crate::settings::AppSettings) -> bool {
+    proxy_blocks_tool_fetch(&DownloadOptions::from_settings(settings).proxy_config())
+}
+
 /// Client builder for tool installs (ffmpeg, quickjs, yt-dlp): honors env
 /// proxies, unlike `client_builder()`. Tool installs are explicit user actions;
 /// a user behind a corporate proxy needs the env proxy to reach GitHub.
+/// It does NOT apply the proxy configured in Grab (neither does the `yt-dlp`
+/// crate's release lookup/fetcher), so installs must be refused while an app
+/// proxy is active: see `app_proxy_blocks_tool_install`.
 pub(crate) fn tool_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .referer(false)
@@ -592,5 +611,21 @@ mod tests {
         }
         // No DNS: a public name resolving to a private address is not caught.
         assert!(!is_local_or_private_host("internal.example.com"));
+    }
+
+    #[test]
+    fn proxy_blocks_tool_fetch_fails_closed() {
+        use super::proxy_blocks_tool_fetch;
+        use crate::net_types::ResolvedProxy;
+        assert!(!proxy_blocks_tool_fetch(&Ok(None)));
+        // A manual proxy that cannot resolve must not degrade to a direct fetch.
+        assert!(proxy_blocks_tool_fetch(&Err("bad proxy".to_string())));
+        let p = ResolvedProxy {
+            proxies: Vec::new(),
+            cli_url: "socks5h://127.0.0.1:9050".to_string(),
+            no_proxy_env: String::new(),
+            cache_key: "k".to_string(),
+        };
+        assert!(proxy_blocks_tool_fetch(&Ok(Some(p))));
     }
 }

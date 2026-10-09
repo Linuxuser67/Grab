@@ -1,0 +1,14 @@
+{
+  "src/application.rs": 1175,
+  "src/download.rs": 3115,
+  "src/download_fetch.rs": 1067,
+  "src/download_tests.rs": 6859,
+  "src/inline_add.rs": 2867,
+  "src/preferences.rs": 1119,
+  "src/torrent.rs": 1267,
+  "src/video_runner.rs": 1902,
+  "src/video_staging.rs": 1467,
+  "src/video_tests.rs": 10193,
+  "src/video_tools.rs": 2013,
+  "src/window_rows.rs": 1189
+}

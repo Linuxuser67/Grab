@@ -969,11 +969,8 @@ pub fn show(
                 gtk4::glib::spawn_future_local(async move {
                     // The update probe cannot go through the proxy: a proxied check
                     // would leak the machine IP to GitHub, so skip loudly.
-                    let proxied = crate::download::DownloadOptions::from_settings(&settings_c)
-                        .proxy_config()
-                        .map(|p| p.is_some())
-                        .unwrap_or(false);
-                    if proxied {
+                    // Fail closed: an unresolvable manual proxy also skips the probe.
+                    if crate::download_net::app_proxy_blocks_tool_install(&settings_c) {
                         if dialog_b.upgrade().is_none() {
                             return;
                         }

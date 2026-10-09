@@ -2927,6 +2927,25 @@ fn extract_ffmpeg_toolchain_inner_accepts_entry_at_cap() {
 }
 
 #[test]
+fn extract_ffmpeg_toolchain_inner_rejects_duplicate_tool_entries() {
+    use crate::video_tools::extract_ffmpeg_toolchain_inner;
+
+    let base = std::env::temp_dir().join(format!("grab-fftools-dup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("out");
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    // Two entries share the base name `ffmpeg`: ambiguous, so nothing installs.
+    make_tool_zip(&archive, &[("bin/ffmpeg", b"first"), ("extras/ffmpeg", b"second")]);
+    let err =
+        extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).expect_err("duplicate must fail");
+    assert!(err.contains("more than one `ffmpeg`"), "unexpected error: {err}");
+    assert!(!dir.join("ffmpeg").exists(), "no live binary may be written");
+    assert!(!dir.join(".ffmpeg.new").exists(), "partial must be cleaned up");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
 fn extract_ffmpeg_toolchain_inner_cleans_up_partial_on_cap_trip() {
     use crate::video_tools::extract_ffmpeg_toolchain_inner;
 

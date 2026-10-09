@@ -76,6 +76,16 @@ jobs:
           echo "3237f80fe20d54aad4deefa8a143f0d60543bb5d2d6ad891eb42432f155725a6  /usr/local/bin/sentrux" | sha256sum -c -
           chmod +x /usr/local/bin/sentrux
       - run: sentrux check
+  # Ratchet: files over 1000 lines may not grow past the size recorded in
+  # build-aux/file-size-baseline.json; no new file may exceed 1000. Python
+  # stdlib only, seconds.
+  file-size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: ./build-aux/check-file-sizes.py
   # Guards the offline Flatpak build: a Cargo.lock stale against
   # Cargo.toml heals silently wherever cargo has network (local builds,
   # the tarball job) but is fatal under --offline, and an unregenerated

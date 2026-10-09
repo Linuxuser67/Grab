@@ -138,6 +138,15 @@ pub fn run(
 ) {
     let btn = button.clone();
 
+    // The installers' clients cannot use the proxy configured in Grab; going out
+    // direct would leak the machine's address to GitHub, so refuse up front
+    // (same rule as the update probe and the lazy quickjs install).
+    if crate::download_net::app_proxy_blocks_tool_install(&crate::settings::AppSettings::new()) {
+        on_error(gettext(
+            "Tools can't be installed while a proxy is configured. Set Proxy to Direct and retry, or install them manually.",
+        ));
+        return;
+    }
     // Already running: re-open its popover at the clicked button.
     if RUNNING.with(|r| r.get()) {
         SESSION.with(|s| {

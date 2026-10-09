@@ -165,6 +165,7 @@ pub async fn run_video_download(
         job.video_format_id.as_deref(),
         job.newest_codecs,
         job.item_id,
+        job.is_live,
     );
     if let Some(hls) = hls_sel {
         // An abort during resolve is stop-before-start: for live rows nobody waits on a message, so report instead of going quiet (the pump tail would fail the row either way).

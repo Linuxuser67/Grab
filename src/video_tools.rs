@@ -1111,15 +1111,13 @@ fn extract_entries(
 }
 
 fn restore_ffmpeg_backups(backups: &[(std::path::PathBuf, std::path::PathBuf)]) -> Vec<String> {
-    use std::io::ErrorKind::NotFound;
-
     let mut errors = Vec::new();
 
     // Restore in reverse order.
     for (backup, original) in backups.iter().rev() {
         match crate::file_names::rename_noreplace(backup, original) {
             Ok(()) => {}
-            Err(error) if error.kind() == NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => errors.push(format!(
                 "couldn't restore {} from {}: {error}",
                 original.display(),
@@ -1135,15 +1133,13 @@ fn rollback_ffmpeg_install(
     backups: &[(std::path::PathBuf, std::path::PathBuf)],
     installed: &[std::path::PathBuf],
 ) -> Vec<String> {
-    use std::io::ErrorKind::NotFound;
-
     let mut errors = Vec::new();
 
     // Remove binaries installed by this transaction before restoring backups.
     for path in installed.iter().rev() {
         match std::fs::remove_file(path) {
             Ok(()) => {}
-            Err(error) if error.kind() == NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => errors.push(format!(
                 "couldn't remove partially installed {}: {error}",
                 path.display()

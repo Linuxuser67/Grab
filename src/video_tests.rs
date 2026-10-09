@@ -3245,7 +3245,7 @@ fn plan_pinned_hls_wins_over_muxed_adoption() {
     // The x.com shadowing bug: the pin was dropped by the HTTPS-only
     // lookup and the muxed adoption then vetoed the HLS path.
     let video = x_like_video();
-    let plan = plan_streams(&video, "720p", false, Some("hls-720"), true, 1, false);
+    let plan = plan_streams(&video, "720p", false, Some("hls-720"), true, 1);
     assert!(plan.video_sel.is_none());
     assert!(plan.audio_sel.is_none());
     let hls = plan.hls_sel.expect("pinned hls");
@@ -3316,7 +3316,7 @@ fn plan_stale_hls_pin_degrades_to_muxed_adoption() {
     // A vanished HLS pin behaves like no pin: preset, then adoption
     // (at the dialog-picked height, not the lowest listing).
     let video = x_like_video();
-    let plan = plan_streams(&video, "1080p", false, Some("gone"), true, 1, false);
+    let plan = plan_streams(&video, "1080p", false, Some("gone"), true, 1);
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-720");
     assert!(plan.hls_sel.is_none());
 }
@@ -6490,7 +6490,7 @@ fn plan_stale_pin_to_unlisted_id_resolves_as_split() {
         !listed.contains(&"v1080-avc".to_string()),
         "fixture must keep the pin unlisted: {listed:?}"
     );
-    let plan = plan_streams(&video, "1080p", false, Some("v1080-avc"), true, 1, false);
+    let plan = plan_streams(&video, "1080p", false, Some("v1080-avc"), true, 1);
     let v = plan.video_sel.expect("stale pin resolves");
     assert_eq!(v.format_id, "v1080-avc");
     assert!(plan.audio_sel.is_some(), "split pairs with audio");

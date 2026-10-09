@@ -286,6 +286,7 @@ pub fn setup(app: &adw::Application) {
         app.connect_startup(move |app| {
             // Browser extension integration is now via HTTP (see extension_server);
             // no native host manifests to install.
+            let settings = AppSettings::new();
             let store = gio::ListStore::new::<crate::download::DownloadItem>();
             let manager = DownloadManager::new(store, settings.clone());
             manager.restore_queue();

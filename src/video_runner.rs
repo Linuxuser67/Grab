@@ -341,11 +341,22 @@ async fn try_merge_dash_partials(
     dest: &Path,
     page_url: &str,
 ) -> Option<u64> {
-    // Find .part files in staging, largest two are likely video+audio.
+    // Find DASH format files in staging: both in-progress (.part) and
+    // completed (.f137.mp4 without .part). yt-dlp renames completed formats,
+    // so a Stop after video finished leaves a mix.
     let mut parts: Vec<(PathBuf, u64)> = std::fs::read_dir(staging)
         .ok()?
         .filter_map(|e| e.ok().map(|x| x.path()))
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("part"))
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // Match .f<id>.ext or .f<id>.ext.part (DASH format files).
+            let is_format_file = name.contains(".f")
+                && name
+                    .split(".f")
+                    .nth(1)
+                    .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()));
+            is_format_file
+        })
         .filter_map(|p| std::fs::metadata(&p).ok().map(|m| (p, m.len())))
         .filter(|(_, len)| *len > 1024) // Ignore tiny fragments.
         .collect();

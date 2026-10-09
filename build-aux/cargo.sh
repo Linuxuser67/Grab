@@ -29,4 +29,3 @@ cargo build --offline $profile_flag \
   ${CARGO_TARGET_DIR:+--target-dir "$CARGO_TARGET_DIR"}
 target_dir="${CARGO_TARGET_DIR:-$src/target}/$profile"
 cp "$target_dir/grab" "$out1"
-cp "$target_dir/grab-native-host" "$out2"

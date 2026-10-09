@@ -28,6 +28,7 @@ import tomllib
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CARGO_TOML = ROOT / "Cargo.toml"
 CARGO_LOCK = ROOT / "Cargo.lock"
+MESON_BUILD = ROOT / "meson.build"
 METAINFO = ROOT / "data" / "io.github.linuxuser67.Grab.metainfo.xml.in"
 FLATPAK = ROOT / "build-aux" / "io.github.linuxuser67.Grab.json"
 
@@ -54,6 +55,17 @@ def lock_version() -> str:
         if pkg["name"] == "grab":
             return str(pkg["version"])
     raise fail("Cargo.lock has no grab package")
+
+
+def meson_project_version() -> str:
+    text = MESON_BUILD.read_text(encoding="utf-8")
+    match = re.search(
+        r"""project\(\s*['"]grab['"][\s\S]*?\bversion\s*:\s*['"]([^'"]+)['"]""",
+        text,
+    )
+    if match is None:
+        raise fail("meson.build has no readable Grab project version")
+    return match.group(1)
 
 
 def metainfo_release_versions() -> list[str]:
@@ -113,6 +125,11 @@ def check(expected: str | None, manifest: pathlib.Path) -> list[str]:
     if version != lock:
         raise fail(f"Cargo.toml version {version} != Cargo.lock version {lock}")
     notes.append(f"cargo version {version} (toml + lock agree)")
+
+    meson = meson_project_version()
+    if meson != version:
+        raise fail(f"meson.build version {meson} != Cargo.toml version {version}")
+    notes.append(f"meson version {meson} matches cargo version")
 
     releases = metainfo_release_versions()
     newest = max(releases, key=version_key)

@@ -6099,14 +6099,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/zstd-sys/zstd-sys-2.1.0+zstd.1.5.7.crate",
-        "sha256": "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0",
-        "dest": "cargo/zstd-sys-2.1.0+zstd.1.5.7"
+        "url": "https://static.crates.io/crates/zstd-sys/zstd-sys-2.1.1+zstd.1.5.7.crate",
+        "sha256": "aeec9eaf2dffbbd09201e23bd0ffcbaa33bb8e9266a10734fd7ed90a85eca078",
+        "dest": "cargo/zstd-sys-2.1.1+zstd.1.5.7"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0\", \"files\": {}}",
-        "dest": "cargo/zstd-sys-2.1.0+zstd.1.5.7",
+        "contents": "{\"package\": \"aeec9eaf2dffbbd09201e23bd0ffcbaa33bb8e9266a10734fd7ed90a85eca078\", \"files\": {}}",
+        "dest": "cargo/zstd-sys-2.1.1+zstd.1.5.7",
         "dest-filename": ".cargo-checksum.json"
     },
     {

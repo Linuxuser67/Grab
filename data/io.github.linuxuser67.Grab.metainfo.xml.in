@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.6.8~beta.4" date="2026-10-09">
+      <description>
+        <ul>
+          <li>Live streams now prefer HLS formats: single playable file while recording instead of DASH fragments.</li>
+          <li>VOD HLS downloads (e.g. Twitter) use a single file instead of fragments.</li>
+          <li>Stopping a DASH download merges parts into a single file.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.6.8~beta.3" date="2026-10-09">
       <description>
         <ul>

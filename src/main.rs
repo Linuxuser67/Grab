@@ -1,6 +1,5 @@
 mod application;
 mod attempt_gate;
-mod browser_integration;
 mod cookies;
 mod download;
 mod download_fetch;
@@ -100,62 +99,18 @@ fn ensure_schema_dir() {
     }
 }
 
-/// Chromium extension IDs are 32 lowercase letters a-p (Chrome Web Store
-/// format). Reject anything else: the ID is interpolated into
-/// `chrome-extension://{id}/` origins and re-trusted at every startup.
-fn valid_chromium_id(id: &str) -> bool {
-    id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))
-}
-
 fn main() -> glib::ExitCode {
     // Schema dir first: the installer branch below reads GSettings, and the
     // schema may not be in the default source (tarball/uninstalled run).
     ensure_schema_dir();
     // Browser native-host installer: runs before GTK init, no display needed.
     let args: Vec<String> = std::env::args().collect();
-    if let Some(pos) = args.iter().position(|a| a == "--install-browser-host") {
-        let mut ids: Vec<String> = Vec::new();
-        let mut i = pos + 1;
-        while i < args.len() {
-            if args[i] == "--chromium-id" {
-                let Some(id) = args.get(i + 1) else {
-                    eprintln!("error: --chromium-id needs a value");
-                    return glib::ExitCode::FAILURE;
-                };
-                if !valid_chromium_id(id) {
-                    eprintln!("error: invalid Chromium extension ID: {id}");
-                    return glib::ExitCode::FAILURE;
-                }
-                ids.push(id.clone());
-                i += 2;
-            } else {
-                i += 1;
-            }
-        }
-        match browser_integration::install(&ids) {
-            Ok(written) => {
-                for p in &written {
-                    println!("wrote {}", p.display());
-                }
-                // Remember Chromium IDs so startup re-installs manifests after upgrades.
-                if !ids.is_empty() {
-                    let settings = crate::settings::AppSettings::new();
-                    let mut stored = settings.browser_extension_ids();
-                    for id in &ids {
-                        if !stored.contains(id) {
-                            stored.push(id.clone());
-                        }
-                    }
-                    settings.set_browser_extension_ids(&stored);
-                }
-                println!("done");
-                return glib::ExitCode::SUCCESS;
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                return glib::ExitCode::FAILURE;
-            }
-        }
+    // Note: --install-browser-host was removed in 5.7.0; the extension now
+    // uses grab:// URLs directly, no native host needed.
+    if args.iter().any(|a| a == "--install-browser-host") {
+        eprintln!("error: --install-browser-host was removed in Grab 5.7.0.");
+        eprintln!("The browser extension now uses grab:// URLs directly — no setup needed.");
+        return glib::ExitCode::FAILURE;
     }
     tracing_subscriber::fmt::init();
     // Register before dialogs open; corrupt bundle only loses release notes (About guards the missing case).

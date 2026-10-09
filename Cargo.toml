@@ -6,10 +6,6 @@ rust-version = "1.98"
 description = "A GNOME download manager (GTK 4 / libadwaita, reqwest backend)"
 license = "GPL-3.0-only"
 
-[[bin]]
-name = "grab-native-host"
-path = "src/bin/grab_native_host.rs"
-
 [dependencies]
 # Version features must match the system libs (GTK 4.22+ / Adw 1.9+, GNOME 51 runtime).
 gtk4 = { version = "0.11", features = ["v4_10", "v4_12", "v4_14", "v4_16", "v4_18", "v4_20", "v4_22"] }

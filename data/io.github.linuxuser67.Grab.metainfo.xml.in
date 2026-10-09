@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.6.8" date="2026-10-09">
+      <description>
+        <ul>
+          <li>Stopping a DASH download merges parts into a single file.</li>
+          <li>VOD HLS downloads use a single file instead of fragments.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.6.8~beta.5" date="2026-10-09">
       <description>
         <ul>

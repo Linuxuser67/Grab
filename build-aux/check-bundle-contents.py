@@ -140,9 +140,10 @@ def main(argv: list[str] | None = None) -> int:
         metainfo = repo_file(args.repo, commit, INSTALLED_METAINFO)
         releases = metainfo_versions(metainfo)
         newest = max(releases, key=version_key)
-        if newest != version:
+        # Normalize -beta. to ~beta.: metainfo uses AppStream's ~, tags use -.
+        if version_key(newest) != version_key(version):
             raise fail(f"bundle metainfo newest release {newest} != version {version}")
-        if releases[0] != version:
+        if version_key(releases[0]) != version_key(version):
             raise fail(
                 f"bundle metainfo lists {releases[0]} first, newest is {version}"
             )

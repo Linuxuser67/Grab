@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.6.8~beta.1" date="2026-10-08">
+      <description>
+        <ul>
+          <li>Stopping a DASH download now merges the downloaded parts into a single file instead of leaving fragments behind.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.6.7" date="2026-10-08">
       <description>
         <ul>

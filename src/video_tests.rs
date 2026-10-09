@@ -3192,7 +3192,7 @@ fn plan_adopts_unknown_video_despite_separate_audio() {
     // The TikTok gating bug: both fallbacks keyed off audio absence, so
     // the music track suppressed them and only the music survived.
     let video = tiktok_like_video();
-    let plan = plan_streams(&video, "1080p", false, None, true, 1, false);
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "dl");
     assert!(plan.hls_sel.is_none());
@@ -3234,7 +3234,7 @@ fn plan_adopts_story_mp4_with_absent_acodec() {
     // video-only for the missing acodec, so the muxed adoption skipped
     // them and the row failed with "No suitable formats found".
     let video = instagram_story_like_video();
-    let plan = plan_streams(&video, "1080p", false, None, true, 1, false);
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "s1080");
     assert!(plan.hls_sel.is_none());
@@ -3257,7 +3257,7 @@ fn plan_muxed_only_still_adopts_without_pin() {
     // No pin, no splits: the muxed file adopts as before (HLS precedence
     // unchanged) — but at the requested height, not first-in-extractor-order.
     let video = x_like_video();
-    let plan = plan_streams(&video, "1080p", false, None, true, 1, false);
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-720");
     assert!(plan.hls_sel.is_none());
@@ -3302,7 +3302,7 @@ fn plan_muxed_adoption_honors_height_cap() {
         ("720p", "m720"),
         ("480p", "m720"),
     ] {
-        let plan = plan_streams(&video, quality, false, None, true, 1, false);
+        let plan = plan_streams(&video, quality, false, None, true, 1);
         assert_eq!(
             plan.audio_sel.expect("adopted").format_id,
             want,
@@ -3327,7 +3327,7 @@ fn plan_splits_stay_split() {
         test_format_full("v", "avc1.640028", "none", Some(1080), None, "https", false),
         test_format_full("a", "none", "mp4a.40.2", None, None, "https", false),
     ]));
-    let plan = plan_streams(&video, "1080p", false, None, true, 1, false);
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert_eq!(plan.video_sel.expect("video").format_id, "v");
     assert_eq!(plan.audio_sel.expect("audio").format_id, "a");
     assert!(plan.hls_sel.is_none());
@@ -3349,7 +3349,7 @@ fn plan_audio_only_request_skips_video() {
             false
         ),
     ]));
-    let plan = plan_streams(&video, "1080p", true, None, true, 1, false);
+    let plan = plan_streams(&video, "1080p", true, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("audio").format_id, "a");
     assert!(plan.hls_sel.is_none());
@@ -3377,7 +3377,7 @@ fn plan_hls_preset_still_serves_hls_only_pages() {
             false
         ),
     ]));
-    let plan = plan_streams(&video, "720p", false, None, true, 1, false);
+    let plan = plan_streams(&video, "720p", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert!(plan.audio_sel.is_none());
     assert_eq!(plan.hls_sel.expect("preset hls").height, Some(1080));
@@ -3407,7 +3407,7 @@ fn plan_audio_only_request_reaches_hls() {
             false
         ),
     ]));
-    let plan = plan_streams(&video, "720p", true, None, true, 1, false);
+    let plan = plan_streams(&video, "720p", true, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert!(plan.audio_sel.is_none());
     assert_eq!(plan.hls_sel.expect("hls for extract").height, Some(1080));
@@ -3668,7 +3668,7 @@ fn muxed_below_hls_video() -> yt_dlp::model::Video {
 #[test]
 fn plan_best_prefers_taller_hls_over_muxed() {
     let video = muxed_below_hls_video();
-    let plan = plan_streams(&video, "best", false, None, true, 1, false);
+    let plan = plan_streams(&video, "best", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert!(plan.audio_sel.is_none(), "adoption yields to the variant");
     assert_eq!(plan.hls_sel.expect("hls wins").height, Some(1080));
@@ -3678,10 +3678,10 @@ fn plan_best_prefers_taller_hls_over_muxed() {
 fn plan_cap_blocks_taller_hls() {
     // Capped 720p leaves the direct 720p file standing; capped 1080p lets the taller variant win.
     let video = muxed_below_hls_video();
-    let plan = plan_streams(&video, "720p", false, None, true, 1, false);
+    let plan = plan_streams(&video, "720p", false, None, true, 1);
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "m720");
     assert!(plan.hls_sel.is_none());
-    let plan = plan_streams(&video, "1080p", false, None, true, 1, false);
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.audio_sel.is_none());
     assert_eq!(plan.hls_sel.expect("hls wins").height, Some(1080));
 }
@@ -3690,7 +3690,7 @@ fn plan_cap_blocks_taller_hls() {
 fn plan_tie_keeps_direct_muxed() {
     // Equal heights: direct-file precedence is unchanged.
     let video = x_like_video();
-    let plan = plan_streams(&video, "best", false, None, true, 1, false);
+    let plan = plan_streams(&video, "best", false, None, true, 1);
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-720");
     assert!(plan.hls_sel.is_none());
 }
@@ -6374,7 +6374,7 @@ fn plan_unknown_adoption_is_first_match() {
         }),
         test_format_full("music", "none", "mp4a.40.2", None, None, "https", false),
     ]));
-    let plan = plan_streams(&video, "1080p", false, None, true, 1, false);
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "low");
 }
@@ -6428,7 +6428,7 @@ fn plan_unknown_adoption_picks_tallest() {
             false
         ),
     ]));
-    let plan = plan_streams(&video, "best", false, None, true, 1, false);
+    let plan = plan_streams(&video, "best", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     // Tallest direct file wins; the equal-height variant does not override it.
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "720p");
@@ -6460,7 +6460,7 @@ fn plan_unknown_short_direct_loses_to_taller_hls() {
             false
         ),
     ]));
-    let plan = plan_streams(&video, "best", false, None, true, 1, false);
+    let plan = plan_streams(&video, "best", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert!(plan.audio_sel.is_none());
     assert_eq!(plan.hls_sel.expect("hls wins").height, Some(720));
@@ -6759,7 +6759,7 @@ fn sanitize_missing_codec_fields_still_parse() {
     sanitize_video_json(&mut value);
     let video: yt_dlp::model::Video = serde_json::from_value(value).expect("sparse parses");
     assert_eq!(video.formats.len(), 1);
-    let plan = plan_streams(&video, "best", false, None, true, 1, false);
+    let plan = plan_streams(&video, "best", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "dl");
 }

@@ -988,7 +988,7 @@ fn extract_entries(
     // rename(2) replaces atomically and never follows a symlink at the target.
     // Three-phase transaction: back up, install, clean up. Any failure
     // restores the previous toolchain instead of leaving a mixed install.
-    use std::io::ErrorKind::{AlreadyExists, NotFound};
+    use std::io::ErrorKind::AlreadyExists;
 
     let mut backups: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
 
@@ -997,7 +997,7 @@ fn extract_entries(
     for (_, final_path) in &staged {
         let metadata = match std::fs::symlink_metadata(final_path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == NotFound => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
                 let rollback_errors = restore_ffmpeg_backups(&backups);
                 return Err(format!(

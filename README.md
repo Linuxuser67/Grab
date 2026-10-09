@@ -113,29 +113,8 @@ menu.
 
 [![Get it for Firefox](assets/get-it-on-firefox.png)](https://addons.mozilla.org/en-US/firefox/addon/grab-extension/)
 
-### Native messaging host
-
-The extension talks to Grab via a native messaging host. Install it with:
-
-```bash
-grab --install-browser-host --chromium-id <extension-id>
-```
-
-(Get the extension ID from `chrome://extensions` with Developer mode on. Firefox
-uses a fixed add-on ID, so its manifest is always written.)
-
-**Flatpak:** the sandbox cannot write browser config dirs directly. Run the same
-command via Flatpak — it stages the manifests and wrapper script at
-`~/.var/app/io.github.linuxuser67.Grab/data/native-messaging-hosts/` and prints
-the `cp` commands to run on the host:
-
-```bash
-flatpak run --command=grab io.github.linuxuser67.Grab --install-browser-host --chromium-id <extension-id>
-# then copy the manifests as printed, e.g.:
-mkdir -p ~/.config/chromium/NativeMessagingHosts
-cp ~/.var/app/io.github.linuxuser67.Grab/data/native-messaging-hosts/chromium-io.github.linuxuser67.grab.json \
-   ~/.config/chromium/NativeMessagingHosts/
-```
+No setup needed — the extension hands URLs to Grab via the `grab://` scheme
+handler registered by the app. Works with the Flatpak out of the box.
 
 ## Notes for packagers
 

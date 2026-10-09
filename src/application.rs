@@ -284,6 +284,7 @@ pub fn setup(app: &adw::Application) {
     {
         let st = Rc::clone(&state);
         app.connect_startup(move |app| {
+            let settings = AppSettings::new();
             let store = gio::ListStore::new::<crate::download::DownloadItem>();
             let manager = DownloadManager::new(store, settings.clone());
             manager.restore_queue();

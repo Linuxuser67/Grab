@@ -495,28 +495,53 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
 
 /// Trash all files listed in the torrent metadata (not the whole folder).
 /// Skips hostile entries and U+FFFD paths. Returns true if the folder is empty afterwards.
-/// Whether any intermediate component of `path` under `folder` is a symlink
-/// or escapes `folder`. Used to refuse trashing through a symlinked directory.
+/// Whether `path` is unsafe to trash: the root must be a real directory,
+/// the target must remain underneath it, and no intermediate component
+/// may be a symlink. Lookup errors are treated as unsafe (fail closed).
 fn path_has_symlink_component(path: &std::path::Path, folder: &std::path::Path) -> bool {
-    // The folder itself must not be a symlink: a swapped-in symlink would
-    // redirect the trash operation outside the intended directory.
-    if std::fs::symlink_metadata(folder).is_ok_and(|m| m.file_type().is_symlink()) {
+    let Some(parent) = path.parent() else {
+        return true;
+    };
+
+    // The root must exist and be a real directory, not a symlink.
+    let Ok(root_meta) = std::fs::symlink_metadata(folder) else {
+        return true;
+    };
+
+    if root_meta.file_type().is_symlink() || !root_meta.is_dir() {
         return true;
     }
-    let mut current = path.parent();
-    while let Some(dir) = current {
-        if dir == folder {
-            return false;
-        }
-        if !dir.starts_with(folder) {
-            return true;
-        }
-        if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
-            return true;
-        }
-        current = dir.parent();
+
+    // Resolve the parent to ensure the destination remains inside the
+    // resolved download directory.
+    let (Ok(root_real), Ok(parent_real)) = (folder.canonicalize(), parent.canonicalize()) else {
+        return true;
+    };
+
+    if !parent_real.starts_with(&root_real) {
+        return true;
     }
-    true
+
+    // Walk the lexical path beneath the root without following links.
+    let Ok(relative_parent) = parent.strip_prefix(folder) else {
+        return true;
+    };
+
+    let mut current = folder.to_path_buf();
+
+    for component in relative_parent.components() {
+        current.push(component);
+
+        let Ok(metadata) = std::fs::symlink_metadata(&current) else {
+            return true;
+        };
+
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return true;
+        }
+    }
+
+    false
 }
 
 pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> Result<bool, String> {

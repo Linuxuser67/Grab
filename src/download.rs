@@ -1111,32 +1111,26 @@ impl DownloadManager {
                     StartMode::Resume(st)
                 }
             }
-            None => match std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) {
-                0 => {
-                    // Our own empty leftover (an attempt created the file and
-                    // failed before any byte): the fresh run's create_new would
-                    // refuse it as foreign forever. Only for rows that started.
-                    if self.started.borrow().contains(&item.id())
-                        && std::fs::symlink_metadata(&dest)
-                            .is_ok_and(|m| m.is_file() && m.len() == 0)
-                    {
-                        let _ = std::fs::remove_file(&dest);
+            None => match std::fs::metadata(&dest) {
+                // A missing destination is a fresh download. An existing
+                // destination — even zero bytes — is refused: it may not be
+                // ours, and silently deleting it could destroy foreign data.
+                Err(_) => StartMode::Fresh,
+                Ok(_) => {
+                    // Parabolic-style dedup: refuse an existing destination
+                    // instead of truncating or renaming it. Restored/retried
+                    // rows carry `started` and resume their own partials
+                    // below (progress alone can't tell: a crash before the
+                    // first tick restores at 0.0 with bytes on disk).
+                    if !self.started.borrow().contains(&item.id()) {
+                        item.set_detail(DEST_EXISTS.to_string());
+                        item.set_status(DownloadStatus::Failed);
+                        self.changed();
+                        self.notify_finished(&item, Err(DEST_EXISTS.to_string()));
+                        return;
                     }
-                    StartMode::Fresh
+                    StartMode::Single
                 }
-                // Parabolic-style dedup: a row that never started refuses an
-                // existing destination instead of truncating or renaming it.
-                // Restored/retried rows carry `started` and resume their own
-                // partials below (progress alone can't tell: a crash before
-                // the first tick restores at 0.0 with bytes on disk).
-                _ if !self.started.borrow().contains(&item.id()) => {
-                    item.set_detail(DEST_EXISTS.to_string());
-                    item.set_status(DownloadStatus::Failed);
-                    self.changed();
-                    self.notify_finished(&item, Err(DEST_EXISTS.to_string()));
-                    return;
-                }
-                _ => StartMode::Single,
             },
         };
         let generation = self.epoch.borrow().get(&item.id()).cloned().unwrap_or(0) + 1;

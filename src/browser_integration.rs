@@ -297,13 +297,12 @@ pub fn ensure_chromium_hosts(ids: &[String]) -> bool {
 /// installs get a generated ID). The Firefox add-on ID is fixed, so its
 /// manifest is always written.
 pub fn install(chromium_ids: &[String]) -> Result<Vec<PathBuf>, String> {
+    if in_flatpak() {
+        return Err(flatpak_instructions().to_string());
+    }
     let home = home_dir().ok_or_else(|| "HOME is not set".to_string())?;
     let (host_bin, _) = install_binary()?;
     let host_path = host_bin.to_string_lossy().into_owned();
-
-    if in_flatpak() {
-        return install_flatpak(&home, &host_path, chromium_ids);
-    }
 
     let chromium_origins: Vec<String> = chromium_ids
         .iter()
@@ -365,98 +364,6 @@ fn flatpak_instructions() -> &'static str {
      On the host, run:\n  \
      flatpak run --command=grab io.github.linuxuser67.Grab --install-browser-host --chromium-id <id>\n\
      (get the extension ID from chrome://extensions with Developer mode on)"
-}
-
-/// Flatpak mode: write manifests to a host-accessible staging dir and print
-/// copy instructions. The sandbox cannot write ~/.config directly.
-fn install_flatpak(
-    home: &Path,
-    _host_path: &str,
-    chromium_ids: &[String],
-) -> Result<Vec<PathBuf>, String> {
-    // Host-accessible staging: ~/.var/app/<id>/data/ maps to the same path on host.
-    let stage = home.join(".var/app/io.github.linuxuser67.Grab/data/native-messaging-hosts");
-    fs::create_dir_all(&stage).map_err(|e| format!("create {stage:?}: {e}"))?;
-
-    let wrapper = "#!/bin/sh\n\
-exec flatpak run --command=grab-native-host io.github.linuxuser67.Grab \"$@\"\n";
-    let wrapper_path = stage.join("grab-native-host-wrapper.sh");
-    fs::write(&wrapper_path, wrapper).map_err(|e| format!("write wrapper: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut perms = fs::metadata(&wrapper_path)
-            .map_err(|e| e.to_string())?
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&wrapper_path, perms).map_err(|e| e.to_string())?;
-    }
-
-    let mut written = Vec::new();
-    let manifest_name = format!("{HOST_NAME}.json");
-
-    // Chromium manifest
-    if !chromium_ids.is_empty() {
-        let manifest = serde_json::json!({
-            "name": HOST_NAME,
-            "description": DESCRIPTION,
-            "path": wrapper_path.to_string_lossy(),
-            "type": "stdio",
-            "allowed_origins": chromium_ids.iter().map(|id| format!("chrome-extension://{id}/")).collect::<Vec<_>>(),
-        });
-        let p = stage.join(format!("chromium-{manifest_name}"));
-        fs::write(
-            &p,
-            serde_json::to_string_pretty(&manifest).unwrap_or_default(),
-        )
-        .map_err(|e| format!("write {p:?}: {e}"))?;
-        written.push(p);
-    }
-
-    // Firefox manifest (always, fixed addon ID)
-    let ff_manifest = serde_json::json!({
-        "name": HOST_NAME,
-        "description": DESCRIPTION,
-        "path": wrapper_path.to_string_lossy(),
-        "type": "stdio",
-        "allowed_extensions": [FIREFOX_ADDON_ID],
-    });
-    let p = stage.join(format!("firefox-{manifest_name}"));
-    fs::write(
-        &p,
-        serde_json::to_string_pretty(&ff_manifest).unwrap_or_default(),
-    )
-    .map_err(|e| format!("write {p:?}: {e}"))?;
-    written.push(p);
-
-    println!("Flatpak mode: manifests staged at {}", stage.display());
-    println!();
-    println!("Copy them to your browser config dirs on the host:");
-    println!();
-    if !chromium_ids.is_empty() {
-        println!("  mkdir -p ~/.config/chromium/NativeMessagingHosts");
-        println!(
-            "  cp {} ~/.config/chromium/NativeMessagingHosts/{manifest_name}",
-            stage.join(format!("chromium-{manifest_name}")).display()
-        );
-        println!("  mkdir -p ~/.config/google-chrome/NativeMessagingHosts");
-        println!(
-            "  cp {} ~/.config/google-chrome/NativeMessagingHosts/{manifest_name}",
-            stage.join(format!("chromium-{manifest_name}")).display()
-        );
-    }
-    println!("  mkdir -p ~/.mozilla/native-messaging-hosts");
-    println!(
-        "  cp {} ~/.mozilla/native-messaging-hosts/{manifest_name}",
-        stage.join(format!("firefox-{manifest_name}")).display()
-    );
-    println!();
-    println!(
-        "The wrapper script at {} calls the Flatpak host binary.",
-        wrapper_path.display()
-    );
-
-    Ok(written)
 }
 
 #[cfg(test)]

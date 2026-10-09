@@ -235,10 +235,25 @@ async fn multi_loop(
     max_workers: usize,
     tries: &mut i32,
 ) -> bool {
+    let mut claim_destination = saved.is_none();
+    let mut expected_identity: Option<FileIdentity> = None;
     let mut st = saved.unwrap_or_else(|| SegmentState::new(total));
     let mut failures: u32 = 0;
     loop {
-        match attempt_multi(ctx, total, &mut st, max_workers).await {
+        let result = attempt_multi(
+            ctx,
+            total,
+            &mut st,
+            max_workers,
+            claim_destination,
+            &mut expected_identity,
+        )
+        .await;
+
+        // Only the first attempt may create the destination.
+        claim_destination = false;
+
+        match result {
             Ok(()) => {
                 let size = tokio::fs::metadata(&ctx.dest)
                     .await
@@ -260,6 +275,13 @@ async fn multi_loop(
                 return false;
             }
             Err(AttemptFail::Retryable(e)) => {
+                // A foreign destination is terminal, not something to retry
+                // by reopening or modifying the path.
+                if e == DEST_EXISTS {
+                    ctx.tx.send(EngineMsg::Failed(e)).ok();
+                    return false;
+                }
+
                 *tries -= 1;
                 if *tries <= 0 {
                     ctx.tx.send(EngineMsg::TruncatePrefix).ok();
@@ -281,6 +303,8 @@ async fn attempt_multi(
     total: u64,
     st: &mut SegmentState,
     max_workers: usize,
+    claim_destination: bool,
+    expected_identity: &mut Option<FileIdentity>,
 ) -> Result<(), AttemptFail> {
     if st.total != total {
         return Err(AttemptFail::Retryable(gettext("File changed on server")));
@@ -291,7 +315,7 @@ async fn attempt_multi(
     }
     let expect_bytes: u64 = missing.iter().map(|(_, s, e)| e - s + 1).sum();
     // Size without truncating: completed pieces are already on disk.
-    ensure_sized(&ctx.dest, total).await?;
+    let output_file = ensure_sized(&ctx.dest, total, claim_destination, expected_identity).await?;
     let queue: Arc<Mutex<VecDeque<(u64, u64, u64)>>> =
         Arc::new(Mutex::new(missing.into_iter().collect()));
     let failed = Arc::new(AtomicBool::new(false));
@@ -357,11 +381,7 @@ async fn attempt_multi(
         let dest = ctx.dest.clone();
         let st = &mut *st;
         async move {
-            let mut file = tokio::fs::OpenOptions::new()
-                .write(true)
-                .open(&dest)
-                .await
-                .map_err(|e| format!("Cannot write file: {e}"))?;
+            let mut file = output_file;
             let mut downloaded = st.completed_bytes();
             ctx.tx.send(progress_msg(downloaded, Some(total))).ok();
             let pace_start = Instant::now();
@@ -392,6 +412,20 @@ async fn attempt_multi(
             file.flush()
                 .await
                 .map_err(|e| format!("Cannot write file: {e}"))?;
+            // Verify the path still references the file being written: a
+            // swap during transfer must not go unnoticed.
+            let fd_metadata = file
+                .metadata()
+                .await
+                .map_err(|e| format!("Cannot inspect downloaded file: {e}"))?;
+            let path_metadata = tokio::fs::symlink_metadata(&dest)
+                .await
+                .map_err(|e| format!("Cannot verify download destination: {e}"))?;
+            if path_metadata.file_type().is_symlink()
+                || file_identity(&fd_metadata) != file_identity(&path_metadata)
+            {
+                return Err("Destination file was replaced during download".to_string());
+            }
             ctx.tx.send(progress_msg(downloaded, Some(total))).ok();
             Ok::<u64, String>(written)
         }
@@ -550,11 +584,14 @@ async fn attempt_once(
             .map_err(|e| format!("Cannot write file: {e}"))?
         } else if claim {
             // Retries truncate our own bytes (see the `claim` parameter).
-            match tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&ctx.dest)
-                .await
+            // Use O_NOFOLLOW: a dangling symlink must not have its target created.
+            match open_nofollow(
+                |o| {
+                    o.write(true).create_new(true);
+                },
+                &ctx.dest,
+            )
+            .await
             {
                 Ok(f) => f,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -673,29 +710,87 @@ async fn open_nofollow(
     std_open_nofollow(configure, path).map(tokio::fs::File::from_std)
 }
 
-async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptFail> {
-    let file = open_nofollow(
-        |o| {
-            o.write(true).create(true);
-        },
-        dest,
-    )
-    .await
-    .map_err(|e| AttemptFail::Retryable(format!("Cannot write file: {e}")))?;
-    if file.metadata().await.map(|m| m.len()).unwrap_or(u64::MAX) != total
-        && let Err(e) = file.set_len(total).await
-    {
-        use std::io::ErrorKind::{FileTooLarge, StorageFull};
-        // No room for full-size staging: downgrade to single-stream (which preallocates nothing).
-        let msg = format!("Cannot write file: {e}");
-        let storage = matches!(e.kind(), StorageFull | FileTooLarge);
-        return Err(if storage {
-            AttemptFail::Throttled(msg)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
+    use std::os::unix::fs::MetadataExt as _;
+
+    FileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    }
+}
+
+async fn ensure_sized(
+    dest: &std::path::Path,
+    total: u64,
+    claim_destination: bool,
+    expected_identity: &mut Option<FileIdentity>,
+) -> Result<tokio::fs::File, AttemptFail> {
+    use std::io::ErrorKind::{AlreadyExists, FileTooLarge, StorageFull};
+
+    // A fresh download must atomically claim a missing path.
+    // Retries and resumes may open the existing file, but never create it.
+    let file_result = if claim_destination {
+        open_nofollow(
+            |options| {
+                options.write(true).create_new(true);
+            },
+            dest,
+        )
+        .await
+    } else {
+        open_nofollow(
+            |options| {
+                options.write(true);
+            },
+            dest,
+        )
+        .await
+    };
+
+    let file = file_result.map_err(|error| {
+        if claim_destination && error.kind() == AlreadyExists {
+            AttemptFail::Retryable(DEST_EXISTS.to_string())
         } else {
-            AttemptFail::Retryable(msg)
+            AttemptFail::Retryable(format!("Cannot write file: {error}"))
+        }
+    })?;
+
+    // Verify the opened inode before changing its length.
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|e| AttemptFail::Retryable(format!("Cannot inspect file: {e}")))?;
+
+    let actual_identity = file_identity(&metadata);
+
+    match *expected_identity {
+        Some(expected) if expected != actual_identity => {
+            return Err(AttemptFail::Retryable(
+                "Destination file was replaced during download".to_string(),
+            ));
+        }
+        None => *expected_identity = Some(actual_identity),
+        _ => {}
+    }
+
+    if metadata.len() != total
+        && let Err(error) = file.set_len(total).await
+    {
+        let message = format!("Cannot write file: {error}");
+        return Err(if matches!(error.kind(), StorageFull | FileTooLarge) {
+            AttemptFail::Throttled(message)
+        } else {
+            AttemptFail::Retryable(message)
         });
     }
-    Ok(())
+
+    Ok(file)
 }
 
 /// How the engine task should start this download.

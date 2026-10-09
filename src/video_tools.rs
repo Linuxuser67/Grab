@@ -986,33 +986,169 @@ fn extract_entries(
         }
     }
     // rename(2) replaces atomically and never follows a symlink at the target.
-    // Back up existing finals first: if a later rename fails, restore the
-    // ones already replaced so we don't leave a mixed installation.
+    // Three-phase transaction: back up, install, clean up. Any failure
+    // restores the previous toolchain instead of leaving a mixed install.
+    use std::io::ErrorKind::AlreadyExists;
+
     let mut backups: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
-    for (_, fin) in &staged {
-        if fin.exists() {
-            let backup = fin.with_extension(format!("backup-{}", std::process::id()));
-            std::fs::rename(fin, &backup)
-                .map_err(|e| format!("couldn't back up {}: {e}", fin.display()))?;
-            backups.push((backup, fin.clone()));
-        }
-    }
-    for (tmp, fin) in &staged {
-        if let Err(e) = std::fs::rename(tmp, fin) {
-            // Roll back: restore all backups to their originals. For finals
-            // already replaced, this overwrites the new binary with the old;
-            // for not-yet-replaced finals, this just moves the backup back.
-            for (backup, orig) in &backups {
-                let _ = std::fs::rename(backup, orig);
+
+    // Phase 1: back up every existing binary.
+    // No live executable is replaced during this phase.
+    for (_, final_path) in &staged {
+        let metadata = match std::fs::symlink_metadata(final_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                let rollback_errors = restore_ffmpeg_backups(&backups);
+                return Err(format!(
+                    "couldn't inspect {}: {error}{}",
+                    final_path.display(),
+                    if rollback_errors.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; rollback failed: {}", rollback_errors.join("; "))
+                    }
+                ));
             }
-            return Err(format!("couldn't install {}: {e}", fin.display()));
+        };
+
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            let rollback_errors = restore_ffmpeg_backups(&backups);
+            return Err(format!(
+                "refusing to replace non-regular tool destination {}{}",
+                final_path.display(),
+                if rollback_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!("; rollback failed: {}", rollback_errors.join("; "))
+                }
+            ));
+        }
+
+        let name = final_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("ffmpeg-tool");
+
+        let mut moved = false;
+
+        // Use an atomic no-replace operation rather than `exists()` followed
+        // by `rename()`. A collision must never overwrite an older backup.
+        for sequence in 0..128 {
+            let backup = final_path
+                .with_file_name(format!(".{name}.backup-{}-{sequence}", std::process::id()));
+
+            match crate::file_names::rename_noreplace(final_path, &backup) {
+                Ok(()) => {
+                    backups.push((backup, final_path.clone()));
+                    moved = true;
+                    break;
+                }
+                Err(error) if error.kind() == AlreadyExists => continue,
+                Err(error) => {
+                    let rollback_errors = restore_ffmpeg_backups(&backups);
+                    return Err(format!(
+                        "couldn't back up {}: {error}{}",
+                        final_path.display(),
+                        if rollback_errors.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; rollback failed: {}", rollback_errors.join("; "))
+                        }
+                    ));
+                }
+            }
+        }
+
+        if !moved {
+            let rollback_errors = restore_ffmpeg_backups(&backups);
+            return Err(format!(
+                "couldn't allocate a unique backup name for {}{}",
+                final_path.display(),
+                if rollback_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!("; rollback failed: {}", rollback_errors.join("; "))
+                }
+            ));
         }
     }
-    // Success: clean up backups.
-    for (backup, _) in &backups {
-        let _ = std::fs::remove_file(backup);
+
+    // Phase 2: install the complete staged toolchain.
+    // rename_noreplace refuses a destination that appeared after the backup phase.
+    let mut installed: Vec<std::path::PathBuf> = Vec::new();
+
+    for (staged_path, final_path) in &staged {
+        if let Err(error) = crate::file_names::rename_noreplace(staged_path, final_path) {
+            let rollback_errors = rollback_ffmpeg_install(&backups, &installed);
+            return Err(format!(
+                "couldn't install {}: {error}{}",
+                final_path.display(),
+                if rollback_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!("; rollback failed: {}", rollback_errors.join("; "))
+                }
+            ));
+        }
+
+        installed.push(final_path.clone());
     }
+
+    // Phase 3: the complete new installation is present.
+    // Only now is it safe to remove the backups.
+    for (backup, _) in &backups {
+        if let Err(error) = std::fs::remove_file(backup) {
+            tracing::warn!(
+                "installed FFmpeg successfully but couldn't remove backup {}: {}",
+                backup.display(),
+                error
+            );
+        }
+    }
+
     ffmpeg_path.ok_or_else(|| "ffmpeg binary not found in the downloaded archive".to_string())
+}
+
+fn restore_ffmpeg_backups(backups: &[(std::path::PathBuf, std::path::PathBuf)]) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    // Restore in reverse order.
+    for (backup, original) in backups.iter().rev() {
+        match crate::file_names::rename_noreplace(backup, original) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => errors.push(format!(
+                "couldn't restore {} from {}: {error}",
+                original.display(),
+                backup.display()
+            )),
+        }
+    }
+
+    errors
+}
+
+fn rollback_ffmpeg_install(
+    backups: &[(std::path::PathBuf, std::path::PathBuf)],
+    installed: &[std::path::PathBuf],
+) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    // Remove binaries installed by this transaction before restoring backups.
+    for path in installed.iter().rev() {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => errors.push(format!(
+                "couldn't remove partially installed {}: {error}",
+                path.display()
+            )),
+        }
+    }
+
+    errors.extend(restore_ffmpeg_backups(backups));
+    errors
 }
 
 /// Minimum accepted yt-dlp version by release date. Older binaries predate the

@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.0~beta.1" date="2026-10-09">
+      <description>
+        <ul>
+          <li>Browser extension now uses grab:// URLs directly — no native messaging host installation needed.</li>
+          <li>Removed the native messaging host binary and installer.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.6.8" date="2026-10-09">
       <description>
         <ul>

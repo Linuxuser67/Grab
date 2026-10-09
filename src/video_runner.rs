@@ -351,12 +351,11 @@ async fn try_merge_dash_partials(
         .filter(|p| {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
             // Match .f<id>.ext or .f<id>.ext.part (DASH format files).
-            let is_format_file = name.contains(".f")
+            name.contains(".f")
                 && name
                     .split(".f")
                     .nth(1)
-                    .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()));
-            is_format_file
+                    .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
         })
         .filter_map(|p| std::fs::metadata(&p).ok().map(|m| (p, m.len())))
         .filter(|(_, len)| *len > 1024) // Ignore tiny fragments.

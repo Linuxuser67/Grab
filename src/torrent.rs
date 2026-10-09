@@ -498,6 +498,11 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
 /// Whether any intermediate component of `path` under `folder` is a symlink
 /// or escapes `folder`. Used to refuse trashing through a symlinked directory.
 fn path_has_symlink_component(path: &std::path::Path, folder: &std::path::Path) -> bool {
+    // The folder itself must not be a symlink: a swapped-in symlink would
+    // redirect the trash operation outside the intended directory.
+    if std::fs::symlink_metadata(folder).is_ok_and(|m| m.file_type().is_symlink()) {
+        return true;
+    }
     let mut current = path.parent();
     while let Some(dir) = current {
         if dir == folder {

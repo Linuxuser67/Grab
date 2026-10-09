@@ -986,9 +986,31 @@ fn extract_entries(
         }
     }
     // rename(2) replaces atomically and never follows a symlink at the target.
+    // Back up existing finals first: if a later rename fails, restore the
+    // ones already replaced so we don't leave a mixed installation.
+    let mut backups: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for (_, fin) in &staged {
+        if fin.exists() {
+            let backup = fin.with_extension(format!("backup-{}", std::process::id()));
+            std::fs::rename(fin, &backup)
+                .map_err(|e| format!("couldn't back up {}: {e}", fin.display()))?;
+            backups.push((backup, fin.clone()));
+        }
+    }
     for (tmp, fin) in &staged {
-        std::fs::rename(tmp, fin)
-            .map_err(|e| format!("couldn't install {}: {e}", fin.display()))?;
+        if let Err(e) = std::fs::rename(tmp, fin) {
+            // Roll back: restore all backups to their originals. For finals
+            // already replaced, this overwrites the new binary with the old;
+            // for not-yet-replaced finals, this just moves the backup back.
+            for (backup, orig) in &backups {
+                let _ = std::fs::rename(backup, orig);
+            }
+            return Err(format!("couldn't install {}: {e}", fin.display()));
+        }
+    }
+    // Success: clean up backups.
+    for (backup, _) in &backups {
+        let _ = std::fs::remove_file(backup);
     }
     ffmpeg_path.ok_or_else(|| "ffmpeg binary not found in the downloaded archive".to_string())
 }

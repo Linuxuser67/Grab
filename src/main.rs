@@ -100,13 +100,6 @@ fn ensure_schema_dir() {
     }
 }
 
-/// Chromium extension IDs are 32 lowercase letters a-p (Chrome Web Store
-/// format). Reject anything else: the ID is interpolated into
-/// `chrome-extension://{id}/` origins and re-trusted at every startup.
-fn valid_chromium_id(id: &str) -> bool {
-    id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))
-}
-
 fn main() -> glib::ExitCode {
     // Schema dir first: the installer branch below reads GSettings, and the
     // schema may not be in the default source (tarball/uninstalled run).

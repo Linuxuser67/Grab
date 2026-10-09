@@ -731,7 +731,7 @@ async fn ensure_sized(
     claim_destination: bool,
     expected_identity: &mut Option<FileIdentity>,
 ) -> Result<tokio::fs::File, AttemptFail> {
-    use std::io::ErrorKind::{AlreadyExists, FileTooLarge, NotFound, StorageFull};
+    use std::io::ErrorKind::{AlreadyExists, FileTooLarge, StorageFull};
 
     // A fresh download must atomically claim a missing path.
     // Retries and resumes may open the existing file, but never create it.

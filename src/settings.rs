@@ -34,6 +34,7 @@ pub mod key {
     pub const EMBED_SUBS: &str = "embed-subs";
     pub const COOKIES_BROWSER: &str = "cookies-browser";
     pub const LAST_AUTO_PASTE: &str = "last-auto-paste";
+    pub const BROWSER_EXTENSION_IDS: &str = "browser-extension-ids";
     pub const SPONSORBLOCK_REMOVE: &str = "sponsorblock-remove";
     pub const SPONSORBLOCK_MARK: &str = "sponsorblock-mark";
     pub const REMUX_VIDEO: &str = "remux-video";
@@ -156,6 +157,20 @@ impl AppSettings {
     }
     pub fn set_last_auto_paste(&self, url: &str) {
         let _ = self.0.set_string(key::LAST_AUTO_PASTE, url);
+    }
+    /// Chromium extension IDs allowed for native messaging (stored once).
+    pub fn browser_extension_ids(&self) -> Vec<String> {
+        self.0
+            .string(key::BROWSER_EXTENSION_IDS)
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    }
+    pub fn set_browser_extension_ids(&self, ids: &[String]) {
+        self.0
+            .set_string(key::BROWSER_EXTENSION_IDS, &ids.join(","))
+            .ok();
     }
     /// Cut SponsorBlock-flagged sponsor segments out of yt-dlp downloads.
     pub fn sponsorblock_remove(&self) -> bool {

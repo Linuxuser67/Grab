@@ -426,6 +426,9 @@ pub(crate) fn hls_download_argv(
         "--embed-metadata".to_string(),
         "-f".to_string(),
         hls_format_spec(&job.quality, Some(hls_format_id)),
+        // Single growing .ts file instead of fragments: playable while
+        // downloading, and Stop just adopts it (no merge needed).
+        "--hls-use-mpegts".to_string(),
         "-o".to_string(),
         ytdlp_output_template(&out_template),
         "--ffmpeg-location".to_string(),

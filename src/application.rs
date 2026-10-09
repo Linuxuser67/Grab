@@ -1102,7 +1102,8 @@ mod tests {
             .max_by_key(|v| version_key(v))
             .expect("at least one release")
             .clone();
-        assert_eq!(newest, env!("CARGO_PKG_VERSION"));
+        // Normalize AppStream's '~' to Cargo's '-': 5.6.8~beta.1 == 5.6.8-beta.1.
+        assert_eq!(newest.replace('~', "-"), env!("CARGO_PKG_VERSION"));
     }
 
     /// The newest entry must also be first: `from_appdata` reads the leading
@@ -1111,8 +1112,9 @@ mod tests {
     fn metainfo_lists_newest_release_first() {
         let xml = include_str!("../data/io.github.linuxuser67.Grab.metainfo.xml.in");
         let versions = metainfo_release_versions(xml);
+        // Normalize AppStream's '~' to Cargo's '-'.
         assert_eq!(
-            versions.first().map(String::as_str),
+            versions.first().map(|s| s.replace('~', "-")).as_deref(),
             Some(env!("CARGO_PKG_VERSION"))
         );
     }

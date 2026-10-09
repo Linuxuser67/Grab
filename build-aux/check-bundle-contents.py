@@ -54,12 +54,16 @@ def fail(msg: str) -> Mismatch:
 
 
 def version_key(version: str) -> tuple:
-    core = re.split(r"[-+]", version)[0]
-    parts = tuple(int(part) if part.isdigit() else 0 for part in core.split("."))
-    # A stable release outranks its own pre-releases, matching the
-    # metainfo test in src/application.rs: without the flag, `4.4.0` and
-    # `4.4.0-beta.1` tie and max() keeps the last tie -- the beta.
-    return parts + (not re.search(r"[-+]", version),)
+    # AppStream ordering: '~' sorts before everything, so 5.6.7~beta.3 < 5.6.7.
+    # Normalize Cargo's '-' prerelease separator to AppStream's '~'.
+    version = version.replace("-beta.", "~beta.").replace("-alpha.", "~alpha.")
+    if "~" in version:
+        core, pre = version.split("~", 1)
+        core_tuple = tuple(int(p) if p.isdigit() else 0 for p in core.split("."))
+        pre_parts = tuple(int(p) if p.isdigit() else p for p in pre.split("."))
+        return (core_tuple, 0, pre_parts)
+    core_tuple = tuple(int(p) if p.isdigit() else 0 for p in version.split("."))
+    return (core_tuple, 1, ())
 
 
 def package_version() -> str:

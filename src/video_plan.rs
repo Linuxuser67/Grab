@@ -104,7 +104,6 @@ pub(crate) fn plan_streams(
     video_format_id: Option<&str>,
     newest_codecs: bool,
     item_id: u64,
-    is_live: bool,
 ) -> StreamPlan {
     use yt_dlp::VideoSelection as _;
     // Pins and presets resolve for audio-only rows too: with no direct audio
@@ -230,9 +229,7 @@ pub(crate) fn plan_streams(
         audio_sel = pre_audio_sel;
     }
     let hls_sel: Option<HlsSel> = pinned_hls.or_else(|| {
-        // Live streams prefer HLS: single growing .ts file via --hls-use-mpegts,
-        // playable while downloading, no merge needed on Stop.
-        if is_live || hls_wins || audio_sel.is_none() {
+        if hls_wins || audio_sel.is_none() {
             hls_preset.clone()
         } else {
             None

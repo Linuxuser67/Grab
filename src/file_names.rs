@@ -1,36 +1,6 @@
 //! File-name primitives: sanitize, split, dedupe, derive, atomic rename, piece sizing, byte formatting.
 
 use gio::prelude::FileExt as _;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Counter for unique temp file names (process-unique via PID + counter).
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Atomically replace a file's contents: write to a uniquely-named temp file
-/// (created exclusively with `create_new`, so a pre-existing symlink can't
-/// divert the write), fsync, then rename over the target. Cleans up on failure.
-pub(crate) fn atomic_replace_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
-    let tmp_path = path.with_extension(format!(
-        "tmp-{}-{}",
-        std::process::id(),
-        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp_path)?;
-    let result = (|| -> std::io::Result<()> {
-        use std::io::Write;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp_path, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-    result
-}
 
 /// Split stem and extension (last dot only; leading dot is stem). Pure.
 fn split_stem_ext(name: &str) -> (&str, Option<&str>) {

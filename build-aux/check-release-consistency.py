@@ -116,12 +116,14 @@ def check(expected: str | None, manifest: pathlib.Path) -> list[str]:
 
     releases = metainfo_release_versions()
     newest = max(releases, key=version_key)
-    if newest != version:
+    # Normalize -beta. to ~beta. for comparison: metainfo uses AppStream's ~
+    # while Cargo uses -.
+    if version_key(newest) != version_key(version):
         raise fail(
             f"metainfo newest release {newest} != package version {version} "
             "(add or fix the release entry before tagging)"
         )
-    if releases[0] != version:
+    if version_key(releases[0]) != version_key(version):
         raise fail(
             f"metainfo lists {releases[0]} first, but the newest is {version}; "
             "from_appdata reads the leading <release>"

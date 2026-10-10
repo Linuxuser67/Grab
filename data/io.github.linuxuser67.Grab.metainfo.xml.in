@@ -50,6 +50,20 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.1" date="2026-10-10">
+      <description>
+        <ul>
+          <li>Security fixes: Host/Origin validation on extension server, bounded handoff queue (429 when full), DNS guard at connect time.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="5.7.0" date="2026-10-10">
+      <description>
+        <ul>
+          <li>Browser extension integration over local HTTP (replaces native messaging).</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.0~beta.2" date="2026-10-09">
       <description>
         <ul>

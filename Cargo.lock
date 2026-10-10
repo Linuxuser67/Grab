@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "grab"
-version = "5.7.0-beta.2"
+version = "5.7.1"
 dependencies = [
  "axum",
  "futures-util",

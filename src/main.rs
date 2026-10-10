@@ -114,8 +114,6 @@ fn main() -> glib::ExitCode {
         return glib::ExitCode::FAILURE;
     }
     tracing_subscriber::fmt::init();
-    // Start the browser extension HTTP server (replaces native messaging).
-    crate::runtime::tokio_rt().spawn(crate::extension_server::serve());
     // Register before dialogs open; corrupt bundle only loses release notes (About guards the missing case).
     if let Ok(res) = gio::Resource::from_data(&glib::Bytes::from_static(GRESOURCE_DATA)) {
         gio::resources_register(&res);

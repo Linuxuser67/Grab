@@ -4,9 +4,11 @@
 //! `http://127.0.0.1:9412/add` instead of using a native messaging host.
 //! No manifest installation, no extension IDs, works from Flatpak.
 
-use axum::{Json, Router, routing::post};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use serde::Deserialize;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 
 const BIND_ADDR: &str = "127.0.0.1";
 const PORT: u16 = 9412;
@@ -16,9 +18,16 @@ struct AddRequest {
     url: String,
 }
 
-/// Start the extension integration server. Runs until the process exits.
-pub async fn serve() {
-    let app = Router::new().route("/add", post(handle_add));
+type SharedTx = Arc<UnboundedSender<String>>;
+
+/// Start the extension integration server. `tx` carries URLs to the GTK
+/// thread, which enqueues them in the download manager. Runs until the
+/// process exits.
+pub async fn serve(tx: UnboundedSender<String>) {
+    let state: SharedTx = Arc::new(tx);
+    let app = Router::new()
+        .route("/add", post(handle_add))
+        .with_state(state);
 
     let addr: SocketAddr = format!("{BIND_ADDR}:{PORT}")
         .parse()
@@ -39,9 +48,10 @@ pub async fn serve() {
     }
 }
 
-async fn handle_add(Json(req): Json<AddRequest>) -> axum::http::StatusCode {
+async fn handle_add(State(tx): State<SharedTx>, Json(req): Json<AddRequest>) -> StatusCode {
     tracing::info!("Extension handoff: {}", req.url);
-    // TODO: enqueue the URL in the download manager.
-    // Return 501 so the extension falls back to grab:// until wired up.
-    axum::http::StatusCode::NOT_IMPLEMENTED
+    match tx.send(req.url) {
+        Ok(()) => StatusCode::OK,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }

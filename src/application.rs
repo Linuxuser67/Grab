@@ -284,13 +284,27 @@ pub fn setup(app: &adw::Application) {
     {
         let st = Rc::clone(&state);
         app.connect_startup(move |app| {
-            // Browser extension integration is now via HTTP (see extension_server);
-            // no native host manifests to install.
+            // Browser extension integration via HTTP (see extension_server):
+            // the server forwards URLs here, and we enqueue them like
+            // pasted links.
             let settings = AppSettings::new();
             let store = gio::ListStore::new::<crate::download::DownloadItem>();
             let manager = DownloadManager::new(store, settings.clone());
             manager.restore_queue();
             manager.start_scheduler();
+
+            // Extension HTTP server -> download queue bridge.
+            let (ext_tx, mut ext_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            crate::runtime::tokio_rt().spawn(crate::extension_server::serve(ext_tx));
+            let enqueue_manager = manager.clone();
+            glib::spawn_future_local(async move {
+                while let Some(url) = ext_rx.recv().await {
+                    // Enqueue like a pasted link; failures are logged, not fatal.
+                    if let Err(e) = enqueue_manager.enqueue(&url, None, None) {
+                        tracing::warn!("Extension URL rejected: {url}: {e}");
+                    }
+                }
+            });
 
             let toasts = Rc::new(adw::ToastOverlay::new());
             register_actions(app, &st);

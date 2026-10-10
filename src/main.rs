@@ -101,18 +101,9 @@ fn ensure_schema_dir() {
 }
 
 fn main() -> glib::ExitCode {
-    // Schema dir first: the installer branch below reads GSettings, and the
-    // schema may not be in the default source (tarball/uninstalled run).
+    // Schema dir first: the schema may not be in the default source
+    // (tarball/uninstalled run).
     ensure_schema_dir();
-    // Browser extension integration is now via HTTP (see extension_server);
-    // the native-messaging installer is removed.
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(_pos) = args.iter().position(|a| a == "--install-browser-host") {
-        eprintln!(
-            "--install-browser-host is no longer supported; the browser extension now uses HTTP on 127.0.0.1:9412"
-        );
-        return glib::ExitCode::FAILURE;
-    }
     tracing_subscriber::fmt::init();
     // Register before dialogs open; corrupt bundle only loses release notes (About guards the missing case).
     if let Ok(res) = gio::Resource::from_data(&glib::Bytes::from_static(GRESOURCE_DATA)) {

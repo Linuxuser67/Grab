@@ -5,6 +5,7 @@ use crate::runtime::lock_recover;
 use gettextrs::gettext;
 use gtk4::gio;
 use gtk4::gio::prelude::*;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Default)]
@@ -358,37 +359,48 @@ pub(crate) fn proxied_pool_len() -> usize {
     lock_recover(PROXIED.get_or_init(|| Mutex::new(std::collections::HashMap::new()))).len()
 }
 
+fn private_v4(a: Ipv4Addr) -> bool {
+    let o = a.octets();
+    a.is_loopback()
+        || a.is_private()
+        || a.is_link_local()
+        || a.is_unspecified()
+        || o[0] == 0 // 0.0.0.0/8
+        || (o[0] == 100 && (o[1] & 0xC0) == 64) // CGNAT 100.64/10
+        || (o[0] == 198 && (o[1] & 0xFE) == 18) // benchmarking 198.18/15
+        || o[0] >= 240 // reserved 240/4 incl. broadcast
+}
+
+/// IPv4 tucked into an IPv6 literal: NAT64 `64:ff9b::/96` and the deprecated IPv4-compatible `::a.b.c.d`.
+fn embedded_v4(a: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = a.segments();
+    let tail = Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
+    (s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || s[..6] == [0; 6]).then_some(tail)
+}
+
+fn private_v6(a: Ipv6Addr) -> bool {
+    a.is_loopback()
+        || a.is_unspecified()
+        || (a.segments()[0] & 0xFE00) == 0xFC00 // fc00::/7
+        || (a.segments()[0] & 0xFFC0) == 0xFE80 // fe80::/10
+        || (a.segments()[0] & 0xFFC0) == 0xFEC0 // deprecated site-local fec0::/10
+        || embedded_v4(a).is_some_and(private_v4)
+}
+
+/// Whether an address is loopback, private, link-local, CGNAT, reserved or
+/// ULA, including IPv4 carried inside IPv6 (mapped, NAT64, IPv4-compatible).
+pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(a) => private_v4(a),
+        IpAddr::V6(a) => a.to_ipv4_mapped().map_or_else(|| private_v6(a), private_v4),
+    }
+}
+
 /// Whether a hostname targets this computer or a private network: literal IPs
 /// (v4/v6) and `localhost`/`.local`/`.internal` names only. No DNS is
-/// consulted, so a public name resolving to a private address is NOT caught
-/// (a resolving check would be TOCTOU-raced against the connect anyway).
+/// consulted here: a public name resolving to a private address is caught at
+/// connect time by [`GuardedResolver`] instead (see [`require_public_resolution`]).
 pub(crate) fn is_local_or_private_host(host: &str) -> bool {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    fn private_v4(a: Ipv4Addr) -> bool {
-        let o = a.octets();
-        a.is_loopback()
-            || a.is_private()
-            || a.is_link_local()
-            || a.is_unspecified()
-            || o[0] == 0 // 0.0.0.0/8
-            || (o[0] == 100 && (o[1] & 0xC0) == 64) // CGNAT 100.64/10
-            || (o[0] == 198 && (o[1] & 0xFE) == 18) // benchmarking 198.18/15
-            || o[0] >= 240 // reserved 240/4 incl. broadcast
-    }
-    /// IPv4 tucked into an IPv6 literal: NAT64 `64:ff9b::/96` and the deprecated IPv4-compatible `::a.b.c.d`.
-    fn embedded_v4(a: Ipv6Addr) -> Option<Ipv4Addr> {
-        let s = a.segments();
-        let tail = Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
-        (s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || s[..6] == [0; 6]).then_some(tail)
-    }
-    fn private_v6(a: Ipv6Addr) -> bool {
-        a.is_loopback()
-            || a.is_unspecified()
-            || (a.segments()[0] & 0xFE00) == 0xFC00 // fc00::/7
-            || (a.segments()[0] & 0xFFC0) == 0xFE80 // fe80::/10
-            || (a.segments()[0] & 0xFFC0) == 0xFEC0 // deprecated site-local fec0::/10
-            || embedded_v4(a).is_some_and(private_v4)
-    }
     let mut h = host
         .trim_matches(|c| c == '[' || c == ']')
         .trim_end_matches('.')
@@ -405,10 +417,83 @@ pub(crate) fn is_local_or_private_host(host: &str) -> bool {
         return true;
     }
     match h.parse::<IpAddr>() {
-        Ok(IpAddr::V4(a)) => private_v4(a),
-        Ok(IpAddr::V6(a)) => a.to_ipv4_mapped().map_or_else(|| private_v6(a), private_v4),
+        Ok(ip) => is_private_ip(ip),
         // A dotless name ("router", "nas") resolves through the local search domain or hosts file, never the public DNS.
         Err(_) => !h.is_empty() && !h.contains('.') && !h.contains(':'),
+    }
+}
+
+/// Hostnames whose DNS answers must be public. A hostile page can point a
+/// public-looking name at 127.0.0.1 or the LAN, which no string check on the
+/// URL can see. Names land here when the request did not come from an
+/// explicit user action: an unconfirmed browser handoff, or a redirect hop to
+/// a different host. Typed and pasted URLs are not listed, so a user's own
+/// split-horizon name (`nas.example.com` -> 192.168.x.x) keeps working.
+static PUBLIC_ONLY_HOSTS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+const PUBLIC_ONLY_HOSTS_CAP: usize = 4096;
+
+fn host_key(host: &str) -> String {
+    host.trim_matches(|c| c == '[' || c == ']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+/// Require `host` to resolve to public addresses only, for the rest of the
+/// session. IP literals and local-looking names are ignored: the former never
+/// touch DNS, the latter are intentionally local.
+pub(crate) fn require_public_resolution(host: &str) {
+    let key = host_key(host);
+    if key.is_empty() || key.parse::<IpAddr>().is_ok() || is_local_or_private_host(&key) {
+        return;
+    }
+    let mut set = lock_recover(PUBLIC_ONLY_HOSTS.get_or_init(Default::default));
+    // Bounded against a flood of distinct names; hosts already connected keep their connection.
+    if set.len() >= PUBLIC_ONLY_HOSTS_CAP {
+        set.clear();
+    }
+    set.insert(key);
+}
+
+fn requires_public_resolution(host: &str) -> bool {
+    lock_recover(PUBLIC_ONLY_HOSTS.get_or_init(Default::default)).contains(&host_key(host))
+}
+
+/// Drop private addresses from a DNS answer; a mixed answer keeps its public part.
+fn retain_public(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    addrs
+        .into_iter()
+        .filter(|a| !is_private_ip(a.ip()))
+        .collect()
+}
+
+async fn lookup_filtered(host: &str, public_only: bool) -> Result<Vec<SocketAddr>, String> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, 0))
+        .await
+        .map_err(|e| e.to_string())?
+        .collect();
+    if !public_only || addrs.is_empty() {
+        return Ok(addrs);
+    }
+    let kept = retain_public(addrs);
+    if kept.is_empty() {
+        return Err(format!(
+            "{host} resolves to a local or private address; refusing to connect"
+        ));
+    }
+    Ok(kept)
+}
+
+/// DNS resolver for the shared clients. Filtering the answer that the socket
+/// then connects to leaves no check/connect gap for DNS rebinding.
+struct GuardedResolver;
+
+impl reqwest::dns::Resolve for GuardedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addrs = lookup_filtered(&host, requires_public_resolution(&host)).await?;
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
     }
 }
 
@@ -437,6 +522,13 @@ fn redirect_policy() -> reqwest::redirect::Policy {
         if attempt.previous().len() > 5 || downgrade || (to_private && !from_private) {
             attempt.stop()
         } else {
+            // A hop to a different host was chosen by the server, not the
+            // user: its name must not resolve into local space either.
+            if let Some(target) = attempt.url().host_str()
+                && attempt.previous().last().and_then(|u| u.host_str()) != Some(target)
+            {
+                require_public_resolution(target);
+            }
             attempt.follow()
         }
     })
@@ -449,6 +541,7 @@ pub(crate) fn client_builder() -> reqwest::ClientBuilder {
         .no_proxy()
         .referer(false)
         .redirect(redirect_policy())
+        .dns_resolver(std::sync::Arc::new(GuardedResolver))
 }
 
 /// Validate a directory is safe for sensitive use: not a symlink, owned by us,
@@ -495,7 +588,53 @@ pub(crate) fn tool_client_builder() -> reqwest::ClientBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::is_local_or_private_host;
+    use super::{
+        is_local_or_private_host, is_private_ip, lookup_filtered, require_public_resolution,
+        requires_public_resolution, retain_public,
+    };
+    use std::net::SocketAddr;
+
+    fn sa(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn private_ip_classification_matches_host_check() {
+        for a in ["127.0.0.1", "10.1.2.3", "::1", "::ffff:10.0.0.1", "fd00::1"] {
+            assert!(is_private_ip(a.parse().unwrap()), "private: {a}");
+        }
+        for a in ["8.8.8.8", "2606:4700:4700::1111", "::ffff:8.8.8.8"] {
+            assert!(!is_private_ip(a.parse().unwrap()), "public: {a}");
+        }
+    }
+
+    #[test]
+    fn retain_public_drops_private_answers_only() {
+        let kept = retain_public(vec![sa("127.0.0.1:0"), sa("8.8.8.8:0"), sa("[fd00::1]:0")]);
+        assert_eq!(kept, vec![sa("8.8.8.8:0")]);
+        assert!(retain_public(vec![sa("192.168.1.5:0")]).is_empty());
+    }
+
+    #[test]
+    fn public_resolution_marks_names_only() {
+        require_public_resolution("Marked-Name.EXAMPLE.");
+        assert!(requires_public_resolution("marked-name.example"));
+        // Literals and local-looking names are never listed.
+        for h in ["127.0.0.1", "[::1]", "localhost", "printer.local", "nas"] {
+            require_public_resolution(h);
+            assert!(!requires_public_resolution(h), "must not mark {h}");
+        }
+        assert!(!requires_public_resolution("never-marked.example"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lookup_blocks_private_answer_only_when_required() {
+        // `localhost` resolves to loopback via the hosts file: no network needed.
+        let err = lookup_filtered("localhost", true).await.unwrap_err();
+        assert!(err.contains("refusing to connect"), "{err}");
+        let ok = lookup_filtered("localhost", false).await.unwrap();
+        assert!(!ok.is_empty() && ok.iter().all(|a| a.ip().is_loopback()));
+    }
 
     #[test]
     fn local_or_private_host_classification() {

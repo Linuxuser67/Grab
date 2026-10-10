@@ -284,8 +284,9 @@ pub fn setup(app: &adw::Application) {
     {
         let st = Rc::clone(&state);
         app.connect_startup(move |app| {
-            // Browser extension integration is now via HTTP (see extension_server);
-            // no native host manifests to install.
+            // Browser extension integration via HTTP (see extension_server):
+            // the server forwards URLs here, and we enqueue them like
+            // pasted links.
             let settings = AppSettings::new();
             let store = gio::ListStore::new::<crate::download::DownloadItem>();
             let manager = DownloadManager::new(store, settings.clone());
@@ -303,6 +304,69 @@ pub fn setup(app: &adw::Application) {
                 search_toggle: win.1,
                 add_card: win.2,
             }));
+
+            // Extension HTTP server -> download queue bridge. Routes through
+            // the same confirm dialog and route_open_uri as grab:// handoffs.
+            let bridge_state = st.clone();
+            let (ext_tx, mut ext_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            crate::runtime::tokio_rt().spawn(crate::extension_server::serve(ext_tx));
+            glib::spawn_future_local(async move {
+                while let Some(url_text) = ext_rx.recv().await {
+                    let s = match bridge_state.borrow().as_ref().cloned() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    // The extension sends the real URL (it unwraps grab:// in JS).
+                    let Ok(uri) = url_text.parse::<url::Url>() else {
+                        s.toasts
+                            .add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&format!(
+                                "Invalid URL from extension: {url_text}"
+                            ))));
+                        continue;
+                    };
+                    if !matches!(uri.scheme(), "http" | "https" | "magnet") {
+                        continue;
+                    }
+                    // Extension handoffs that would enqueue on their own need
+                    // an explicit OK first (same as grab://). The auto-add
+                    // toggle opts out of this protection.
+                    if handoff_should_confirm(true, &uri, s.settings.auto_add_downloads()) {
+                        let window = s.window.clone();
+                        let (manager, toasts, add_card, settings) = (
+                            s.manager.clone(),
+                            s.toasts.clone(),
+                            s.add_card.clone(),
+                            s.settings.clone(),
+                        );
+                        let canonical = match crate::download_intake::normalize_url(uri.as_str()) {
+                            Ok(u) => u,
+                            Err(e) => {
+                                toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+                                continue;
+                            }
+                        };
+                        let shown: url::Url = canonical.parse().unwrap_or_else(|_| uri.clone());
+                        let approved = shown.clone();
+                        confirm_download(&window, &shown, move || {
+                            route_open_uri(
+                                manager.clone(),
+                                toasts.clone(),
+                                add_card.clone(),
+                                settings.clone(),
+                                approved.clone(),
+                            );
+                        });
+                        continue;
+                    }
+                    route_open_uri(
+                        s.manager.clone(),
+                        s.toasts.clone(),
+                        s.add_card.clone(),
+                        s.settings.clone(),
+                        uri,
+                    );
+                }
+            });
 
             app.set_accels_for_action("app.add-download", &["<Control>n"]);
             app.set_accels_for_action("app.search", &["<Control>f"]);

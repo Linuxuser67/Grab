@@ -156,11 +156,6 @@
       <summary>Digest of the last link inserted by clipboard auto-paste</summary>
       <description>SHA-256 of the link, not the link itself. Prevents a stale clipboard link from pasting again on every fresh open, across restarts.</description>
     </key>
-    <key name="browser-extension-ids" type="s">
-      <default>''</default>
-      <summary>Browser extension IDs for native messaging</summary>
-      <description>Comma-separated Chromium extension IDs (from chrome://extensions) allowed to use the Grab native messaging host. Stored once via --install-browser-host; manifests are re-installed automatically on startup.</description>
-    </key>
     <key name="sponsorblock-remove" type="b">
       <default>false</default>
       <summary>Remove sponsored segments</summary>

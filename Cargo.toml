@@ -19,14 +19,13 @@ url = "2"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Browser native-messaging host: wire protocol framing + manifest installer.
 # HTTP-date parser for the keep-server-date option (Last-Modified header).
 httpdate = "1"
 # Local HTTP server for browser extension integration (replaces native messaging).
 axum = { version = "0.8", features = ["json"] }
 # SHA-256 for verifying downloaded tool binaries against GitHub release digests.
 sha2 = "0.11"
-tokio = { version = "1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "fs", "io-util", "macros", "process"] }
+tokio = { version = "1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "fs", "io-util", "macros", "net", "process"] }
 futures-util = "0.3.34"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "socks", "cookies", "gzip", "brotli", "deflate"] }
 tracing = "0.1"

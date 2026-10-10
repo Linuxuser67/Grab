@@ -7,7 +7,6 @@
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use serde::Deserialize;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
 const BIND_ADDR: &str = "127.0.0.1";
@@ -18,16 +17,15 @@ struct AddRequest {
     url: String,
 }
 
-type SharedTx = Arc<UnboundedSender<String>>;
-
 /// Start the extension integration server. `tx` carries URLs to the GTK
 /// thread, which enqueues them in the download manager. Runs until the
 /// process exits.
+///
+/// Binds to 127.0.0.1 only: any local process can POST, but nothing remote.
+/// CSRF from websites is mitigated by CORS preflight (axum rejects the
+/// `application/json` POST from web origins by default).
 pub async fn serve(tx: UnboundedSender<String>) {
-    let state: SharedTx = Arc::new(tx);
-    let app = Router::new()
-        .route("/add", post(handle_add))
-        .with_state(state);
+    let app = Router::new().route("/add", post(handle_add)).with_state(tx);
 
     let addr: SocketAddr = format!("{BIND_ADDR}:{PORT}")
         .parse()
@@ -48,8 +46,11 @@ pub async fn serve(tx: UnboundedSender<String>) {
     }
 }
 
-async fn handle_add(State(tx): State<SharedTx>, Json(req): Json<AddRequest>) -> StatusCode {
-    tracing::info!("Extension handoff: {}", req.url);
+async fn handle_add(
+    State(tx): State<UnboundedSender<String>>,
+    Json(req): Json<AddRequest>,
+) -> StatusCode {
+    tracing::debug!("Extension handoff received");
     match tx.send(req.url) {
         Ok(()) => StatusCode::OK,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,

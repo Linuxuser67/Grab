@@ -914,6 +914,7 @@ async fn poll_loop(
     let mut finished_at: Option<std::time::Instant> = None;
     // Per-piece haves borrow the session only, polled on the same 500ms tick (a failed poll just skips a frame).
     let api = Api::new(session.clone(), None);
+    let mut last_phase: Option<String> = None;
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let stats = handle.stats();
@@ -928,6 +929,33 @@ async fn poll_loop(
                     break;
                 }
             }
+        }
+        // Report init phase on change only: metadata fetch vs peer discovery.
+        // The Phase label owns the detail text while initializing; Progress
+        // ticks skip their detail update until then (see download.rs).
+        if matches!(stats.state, TorrentStatsState::Initializing { .. }) {
+            let phase = if handle.name().is_none() {
+                gettext("Fetching metadata…")
+            } else {
+                let peer_count = stats
+                    .live
+                    .as_ref()
+                    .map(|l| l.snapshot.peer_stats.live as usize)
+                    .unwrap_or(0);
+                if peer_count == 0 {
+                    gettext("Finding peers…")
+                } else {
+                    gettext("Starting torrent…")
+                }
+            };
+            if last_phase.as_deref() != Some(phase.as_str()) {
+                last_phase = Some(phase.clone());
+                if tx.send(EngineMsg::Phase(phase)).is_err() {
+                    break;
+                }
+            }
+        } else {
+            last_phase = None;
         }
         let total = (stats.total_bytes > 0).then_some(stats.total_bytes);
         if tx

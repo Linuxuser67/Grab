@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.3" date="2026-10-11">
+      <description>
+        <ul>
+          <li>Fixed torrent status showing "Starting torrent…" after pausing and resuming a download that was already in progress.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.2" date="2026-10-11">
       <description>
         <ul>

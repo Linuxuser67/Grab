@@ -1236,6 +1236,9 @@ impl DownloadManager {
         let mut base: Option<(u64, Instant)> = None;
         // Set on Finished/Failed. If the channel closes first the engine died without reporting: fail the row instead of stranding it.
         let mut done = false;
+        // Phase owns the detail text while set (torrent init: metadata/peers).
+        // Progress ticks preserve it until bytes flow, then resume normal detail.
+        let mut phase_owned = false;
         // Row URL and file filter are fixed at intake: hoist both out of the per-tick path.
         let url = item.url().to_string();
         let sel_suffix = match crate::torrent::get_selection(&url) {
@@ -1261,6 +1264,11 @@ impl DownloadManager {
                     } => {
                         if item.status() != DownloadStatus::Downloading {
                             continue;
+                        }
+                        // Phase owns the detail text until bytes flow; then
+                        // Progress resumes normal detail.
+                        if phase_owned && downloaded > 0 {
+                            phase_owned = false;
                         }
                         let (d0, tb) = match base {
                             Some((d0, tb)) if downloaded >= d0 => (d0, tb),
@@ -1290,29 +1298,33 @@ impl DownloadManager {
                             Some(t) if t > 0 => {
                                 let frac = (downloaded as f64 / t as f64).clamp(0.0, 1.0);
                                 item.set_progress(frac);
-                                let eta = if bps > 0.0 {
-                                    fmt_eta((t.saturating_sub(downloaded) as f64 / bps) as u64)
-                                } else {
-                                    "—".to_string()
-                                };
-                                item.set_detail(
-                                    gettext("{pct}% ({amounts}) • {speed} • About {eta} left{filter}{up}")
-                                        .replace("{pct}", &((frac * 100.0) as u64).to_string())
-                                        .replace("{amounts}", &format_amounts(downloaded, t))
-                                        .replace("{speed}", &speed)
-                                        .replace("{eta}", &eta)
-                                        .replace("{filter}", &sel_suffix)
-                                        .replace("{up}", &up_suffix),
-                                );
+                                if !phase_owned {
+                                    let eta = if bps > 0.0 {
+                                        fmt_eta((t.saturating_sub(downloaded) as f64 / bps) as u64)
+                                    } else {
+                                        "—".to_string()
+                                    };
+                                    item.set_detail(
+                                        gettext("{pct}% ({amounts}) • {speed} • About {eta} left{filter}{up}")
+                                            .replace("{pct}", &((frac * 100.0) as u64).to_string())
+                                            .replace("{amounts}", &format_amounts(downloaded, t))
+                                            .replace("{speed}", &speed)
+                                            .replace("{eta}", &eta)
+                                            .replace("{filter}", &sel_suffix)
+                                            .replace("{up}", &up_suffix),
+                                    );
+                                }
                             }
                             _ => {
-                                item.set_detail(
-                                    gettext("{done} • {speed}{filter}{up}")
-                                        .replace("{done}", &fmt_bytes(downloaded))
-                                        .replace("{speed}", &speed)
-                                        .replace("{filter}", &sel_suffix)
-                                        .replace("{up}", &up_suffix),
-                                );
+                                if !phase_owned {
+                                    item.set_detail(
+                                        gettext("{done} • {speed}{filter}{up}")
+                                            .replace("{done}", &fmt_bytes(downloaded))
+                                            .replace("{speed}", &speed)
+                                            .replace("{filter}", &sel_suffix)
+                                            .replace("{up}", &up_suffix),
+                                    );
+                                }
                             }
                         }
                     }
@@ -1501,6 +1513,7 @@ impl DownloadManager {
                     EngineMsg::Phase(detail) => {
                         if item.status() == DownloadStatus::Downloading {
                             item.set_detail(detail);
+                            phase_owned = true;
                         }
                     }
                     EngineMsg::TruncatePrefix => {

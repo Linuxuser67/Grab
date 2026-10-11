@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.2" date="2026-10-11">
+      <description>
+        <ul>
+          <li>Torrent downloads now show what they're doing while starting: fetching metadata, finding peers, or connecting.</li>
+          <li>Dependency updates.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.1" date="2026-10-10">
       <description>
         <ul>

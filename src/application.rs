@@ -278,6 +278,54 @@ fn route_open_uri(
     }
 }
 
+/// Single policy gate for an http(s)/magnet URI that arrived from outside the
+/// window: browser-extension POSTs and `grab:` links (`via_grab`) come from
+/// pages the user does not control; system-handler opens do not.
+///
+/// - Handoffs that would enqueue on their own show the confirm dialog first,
+///   unless the auto-add toggle opted out of that protection.
+/// - A handoff that skips the dialog has no explicit user approval behind it,
+///   so its host must resolve to public addresses only: a name pointing at
+///   127.0.0.1 or the LAN is refused at connect time.
+fn dispatch_handoff(s: &State, uri: url::Url, via_grab: bool) {
+    let (manager, toasts, add_card, settings) = (
+        s.manager.clone(),
+        s.toasts.clone(),
+        s.add_card.clone(),
+        s.settings.clone(),
+    );
+    if !handoff_should_confirm(via_grab, &uri, settings.auto_add_downloads()) {
+        if via_grab && let Some(host) = uri.host_str() {
+            crate::download_net::require_public_resolution(host);
+        }
+        route_open_uri(manager, toasts, add_card, settings, uri);
+        return;
+    }
+    // Validate before the dialog: the user should approve the canonical URL,
+    // not a raw string that enqueue would reject (overlong, userinfo, etc.).
+    let canonical = match crate::download_intake::normalize_url(uri.as_str()) {
+        Ok(u) => u,
+        Err(e) => {
+            toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+            return;
+        }
+    };
+    let shown: url::Url = canonical.parse().unwrap_or_else(|_| uri.clone());
+    // Enqueue the URL the dialog displays, not the raw one.
+    let approved = shown.clone();
+    confirm_download(&s.window, &shown, move || {
+        // The dialog may invoke this more than once in theory; clone per call
+        // so the closure stays Fn.
+        route_open_uri(
+            manager.clone(),
+            toasts.clone(),
+            add_card.clone(),
+            settings.clone(),
+            approved.clone(),
+        );
+    });
+}
+
 pub fn setup(app: &adw::Application) {
     let state: Rc<RefCell<Option<Rc<State>>>> = Rc::new(RefCell::new(None));
 
@@ -308,7 +356,10 @@ pub fn setup(app: &adw::Application) {
             // Extension HTTP server -> download queue bridge. Routes through
             // the same confirm dialog and route_open_uri as grab:// handoffs.
             let bridge_state = st.clone();
-            let (ext_tx, mut ext_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            // Bounded: a flood of handoffs gets 429 from the server instead of
+            // piling up confirm dialogs or memory here.
+            let (ext_tx, mut ext_rx) =
+                tokio::sync::mpsc::channel::<String>(crate::extension_server::QUEUE_DEPTH);
             crate::runtime::tokio_rt().spawn(crate::extension_server::serve(ext_tx));
             glib::spawn_future_local(async move {
                 while let Some(url_text) = ext_rx.recv().await {
@@ -317,54 +368,17 @@ pub fn setup(app: &adw::Application) {
                         None => continue,
                     };
                     // The extension sends the real URL (it unwraps grab:// in JS).
+                    // The text is not echoed: it is attacker-controllable.
                     let Ok(uri) = url_text.parse::<url::Url>() else {
-                        s.toasts
-                            .add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&format!(
-                                "Invalid URL from extension: {url_text}"
-                            ))));
+                        s.toasts.add_toast(adw::Toast::new(&gettext(
+                            "Couldn't read the link sent by the browser extension",
+                        )));
                         continue;
                     };
                     if !matches!(uri.scheme(), "http" | "https" | "magnet") {
                         continue;
                     }
-                    // Extension handoffs that would enqueue on their own need
-                    // an explicit OK first (same as grab://). The auto-add
-                    // toggle opts out of this protection.
-                    if handoff_should_confirm(true, &uri, s.settings.auto_add_downloads()) {
-                        let window = s.window.clone();
-                        let (manager, toasts, add_card, settings) = (
-                            s.manager.clone(),
-                            s.toasts.clone(),
-                            s.add_card.clone(),
-                            s.settings.clone(),
-                        );
-                        let canonical = match crate::download_intake::normalize_url(uri.as_str()) {
-                            Ok(u) => u,
-                            Err(e) => {
-                                toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
-                                continue;
-                            }
-                        };
-                        let shown: url::Url = canonical.parse().unwrap_or_else(|_| uri.clone());
-                        let approved = shown.clone();
-                        confirm_download(&window, &shown, move || {
-                            route_open_uri(
-                                manager.clone(),
-                                toasts.clone(),
-                                add_card.clone(),
-                                settings.clone(),
-                                approved.clone(),
-                            );
-                        });
-                        continue;
-                    }
-                    route_open_uri(
-                        s.manager.clone(),
-                        s.toasts.clone(),
-                        s.add_card.clone(),
-                        s.settings.clone(),
-                        uri,
-                    );
+                    dispatch_handoff(&s, uri, true);
                 }
             });
 
@@ -406,50 +420,7 @@ pub fn setup(app: &adw::Application) {
                 if let Ok(uri) = uri_text.parse::<url::Url>()
                     && matches!(uri.scheme(), "http" | "https" | "magnet")
                 {
-                    // Extension handoffs that would enqueue on their own need
-                    // an explicit OK first: any web page can fire grab: links.
-                    // The auto-add toggle opts out of this protection.
-                    if handoff_should_confirm(via_grab, &uri, s.settings.auto_add_downloads()) {
-                        let window = s.window.clone();
-                        let (manager, toasts, add_card, settings) = (
-                            s.manager.clone(),
-                            s.toasts.clone(),
-                            s.add_card.clone(),
-                            s.settings.clone(),
-                        );
-                        // Validate before the dialog: the user should approve
-                        // the canonical URL, not a raw string that enqueue
-                        // would reject (overlong, userinfo, etc.).
-                        let canonical = match crate::download_intake::normalize_url(uri.as_str()) {
-                            Ok(u) => u,
-                            Err(e) => {
-                                toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
-                                continue;
-                            }
-                        };
-                        let shown: url::Url = canonical.parse().unwrap_or_else(|_| uri.clone());
-                        // Enqueue the URL the dialog displays, not the raw one.
-                        let approved = shown.clone();
-                        confirm_download(&window, &shown, move || {
-                            // The dialog may invoke this more than once in
-                            // theory; clone per call so the closure stays Fn.
-                            route_open_uri(
-                                manager.clone(),
-                                toasts.clone(),
-                                add_card.clone(),
-                                settings.clone(),
-                                approved.clone(),
-                            );
-                        });
-                        continue;
-                    }
-                    route_open_uri(
-                        s.manager.clone(),
-                        s.toasts.clone(),
-                        s.add_card.clone(),
-                        s.settings.clone(),
-                        uri,
-                    );
+                    dispatch_handoff(&s, uri, via_grab);
                     continue;
                 }
                 if let Some(path) = f.path() {

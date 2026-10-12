@@ -845,10 +845,10 @@ pub(crate) async fn ensure_quickjs(page_url: &str, proxied: bool) -> Result<(), 
 /// Download one boul2gom/ffmpeg-builds archive and extract `ffmpeg` + `ffprobe`
 /// into `dir`; returns the ffmpeg path. Await off the GTK thread.
 async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
-    use yt_dlp::client::deps::ffmpeg::BuildFetcher;
+    use yt_dlp::client::deps::ffmpeg::FfmpegFetcher;
 
     ensure_lib_dir(&dir)?;
-    let release = BuildFetcher::new()
+    let release = FfmpegFetcher::default()
         .fetch_binary()
         .await
         .map_err(VideoError::install)?;

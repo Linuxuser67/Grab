@@ -269,6 +269,13 @@ fn test_audio(overrides: serde_json::Value) -> yt_dlp::model::format::Format {
     test_format(base)
 }
 
+/// A [`test_video`] carrying caller-built formats, for the audio-leg tests.
+fn test_video_with(formats: Vec<yt_dlp::model::format::Format>) -> yt_dlp::model::Video {
+    let mut video = test_video(serde_json::json!([]));
+    video.formats = formats;
+    video
+}
+
 #[test]
 fn audio_prefers_original_over_higher_bitrate_dub() {
     // Auto-dub shape: higher-bitrate dub loses to the original's preference.
@@ -280,9 +287,9 @@ fn audio_prefers_original_over_higher_bitrate_dub() {
         "format_id": "251-21", "abr": 127.412,
         "language": "en", "language_preference": 10,
     }));
-    let formats = vec![dub, original];
+    let video = test_video_with(vec![dub, original]);
     assert_eq!(
-        select_audio_original_first(&formats).map(|f| f.format_id.as_str()),
+        select_audio_original_first(&video).map(|f| f.format_id.as_str()),
         Some("251-21")
     );
 }
@@ -292,9 +299,9 @@ fn audio_untagged_falls_back_to_bitrate() {
     // Extractors without language scores tie at 0: today's ranking.
     let low = test_audio(serde_json::json!({"format_id": "140", "abr": 129.0}));
     let high = test_audio(serde_json::json!({"format_id": "251", "abr": 135.0}));
-    let formats = vec![low, high];
+    let video = test_video_with(vec![low, high]);
     assert_eq!(
-        select_audio_original_first(&formats).map(|f| f.format_id.as_str()),
+        select_audio_original_first(&video).map(|f| f.format_id.as_str()),
         Some("251")
     );
 }
@@ -306,9 +313,9 @@ fn audio_untagged_beats_explicit_dub() {
         "format_id": "d", "abr": 200.0, "language_preference": -1,
     }));
     let plain = test_audio(serde_json::json!({"format_id": "p", "abr": 48.0}));
-    let formats = vec![dub, plain];
+    let video = test_video_with(vec![dub, plain]);
     assert_eq!(
-        select_audio_original_first(&formats).map(|f| f.format_id.as_str()),
+        select_audio_original_first(&video).map(|f| f.format_id.as_str()),
         Some("p")
     );
 }
@@ -326,17 +333,17 @@ fn audio_skips_hls_and_drm_tracks() {
     let direct = test_audio(serde_json::json!({
         "format_id": "d", "language_preference": -1,
     }));
-    let formats = vec![hls, drm, direct];
+    let video = test_video_with(vec![hls, drm, direct]);
     assert_eq!(
-        select_audio_original_first(&formats).map(|f| f.format_id.as_str()),
+        select_audio_original_first(&video).map(|f| f.format_id.as_str()),
         Some("d")
     );
     // All unfetchable degrades to None for the HLS preset path.
-    let formats = vec![
+    let video = test_video_with(vec![
         test_audio(serde_json::json!({"format_id": "h", "protocol": "m3u8_native"})),
         test_audio(serde_json::json!({"format_id": "x", "has_drm": true})),
-    ];
-    assert_eq!(select_audio_original_first(&formats), None);
+    ]);
+    assert_eq!(select_audio_original_first(&video), None);
 }
 
 #[test]
@@ -356,13 +363,16 @@ fn audio_skips_video_sized_unknown_codec_formats() {
     let real = test_audio(serde_json::json!({"format_id": "140"}));
     // Bogus last: max_by keeps the last maximal element on ties, so without
     // the height filter this selects "240p".
-    let formats = vec![real, bogus.clone()];
+    let video = test_video_with(vec![real, bogus.clone()]);
     assert_eq!(
-        select_audio_original_first(&formats).map(|f| f.format_id.as_str()),
+        select_audio_original_first(&video).map(|f| f.format_id.as_str()),
         Some("140")
     );
     // Alone, the bogus format degrades to None for the HLS preset.
-    assert_eq!(select_audio_original_first(&[bogus]), None);
+    assert_eq!(
+        select_audio_original_first(&test_video_with(vec![bogus])),
+        None
+    );
 }
 
 #[test]

@@ -4,6 +4,7 @@
 use crate::video_quality::{quality_height, selector_for_quality};
 use crate::video_tools::VideoError;
 use crate::video_types::{HlsSel, codec_preference, filesize_of};
+use yt_dlp::VideoSelection as _;
 use yt_dlp::model::format::{Extension, Format, FormatType, Protocol};
 use yt_dlp::model::{DrmStatus, Video};
 
@@ -105,7 +106,6 @@ pub(crate) fn plan_streams(
     newest_codecs: bool,
     item_id: u64,
 ) -> StreamPlan {
-    use yt_dlp::VideoSelection as _;
     // Pins and presets resolve for audio-only rows too: with no direct audio
     // they feed the HLS extract path instead of failing the row.
     let pinned_hls: Option<HlsSel> =
@@ -139,7 +139,7 @@ pub(crate) fn plan_streams(
             .and_then(|f| StreamSel::from_format(f).ok())
     };
     let mut audio_sel: Option<StreamSel> =
-        select_audio_original_first(&video.formats).and_then(|f| StreamSel::from_format(f).ok());
+        select_audio_original_first(video).and_then(|f| StreamSel::from_format(f).ok());
     // Muxed-only sources (one file, both tracks): adopt it rather than fail on
     // the missing split. Unclassified video containers are the last resort
     // (TikTok-style sparse extractors) — only video extensions qualify, so
@@ -298,43 +298,19 @@ impl StreamSel {
 
 /// Best direct audio track, original language first.
 ///
-/// YouTube ships auto-dubbed audio as separate tracks, and the crate's
-/// `select_audio_format(Best, …)` has no language awareness, so a
-/// higher-bitrate dub beats the original. Ranking `language_preference`
-/// above the same quality/bitrate/rate/channel order — as upstream yt-dlp
-/// does — keeps untagged extractors tying straight through unchanged.
-/// Pure for tests.
-pub(crate) fn select_audio_original_first(formats: &[Format]) -> Option<&Format> {
-    formats
+/// YouTube ships auto-dubbed audio as separate tracks; the ranking comes from
+/// the crate's `VideoSelection::compare_audio_formats` (language preference
+/// first since their #316 fix), so the old hand-rolled key is gone. The
+/// filters stay Grab-side: some extractors' direct MP4s report no video codec
+/// (the crate then calls them audio) while carrying a height — a height means
+/// a video stream, and such a bogus track must never win the audio leg,
+/// otherwise it suppresses the HLS preset downstream. Pure for tests.
+pub(crate) fn select_audio_original_first(video: &Video) -> Option<&Format> {
+    video
+        .formats
         .iter()
         .filter(|f| {
-            // A video height means a video stream: some extractors' direct
-            // MP4s report no video codec (the crate then calls them audio)
-            // while carrying heights, and must never win the audio leg,
-            // otherwise the bogus track suppresses the HLS preset downstream.
             f.is_audio() && f.video_resolution.height.is_none() && StreamSel::from_format(f).is_ok()
         })
-        .max_by(|a, b| {
-            let (al, aq, ab, aa, ac) = audio_rank_key(a);
-            let (bl, bq, bb, ba, bc) = audio_rank_key(b);
-            al.cmp(&bl)
-                .then_with(|| aq.total_cmp(&bq))
-                .then_with(|| ab.total_cmp(&bb))
-                .then_with(|| aa.cmp(&ba))
-                .then_with(|| ac.cmp(&bc))
-        })
-}
-
-/// Audio rank key in yt-dlp `lang`-first order (language, quality, bitrate,
-/// sample rate, channels). Missing fields score neutral, so untagged tracks
-/// fall back to bitrate. The comparator keeps `total_cmp` on the float lanes
-/// so the ordering stays total even though NaN cannot appear. Pure.
-fn audio_rank_key(f: &Format) -> (i64, f64, f64, i64, i64) {
-    (
-        f.language_preference.unwrap_or(0),
-        f.quality_info.quality.map(|q| *q).unwrap_or(0.0),
-        f.rates_info.audio_rate.map(|r| *r).unwrap_or(0.0),
-        f.codec_info.asr.unwrap_or(0),
-        f.codec_info.audio_channels.unwrap_or(0),
-    )
+        .max_by(|a, b| video.compare_audio_formats(a, b))
 }

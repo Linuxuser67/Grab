@@ -933,7 +933,12 @@ async fn poll_loop(
         // Report init phase on change only: metadata fetch vs peer discovery.
         // The Phase label owns the detail text while initializing; Progress
         // ticks skip their detail update until then (see download.rs).
-        if matches!(stats.state, TorrentStatsState::Initializing { .. }) {
+        // Skip on resume: if bytes were already downloaded, librqbit's brief
+        // post-unpause Initializing (re-finding peers) must not clobber the
+        // progress display with "Starting torrent…".
+        if matches!(stats.state, TorrentStatsState::Initializing { .. })
+            && stats.progress_bytes == 0
+        {
             let phase = if handle.name().is_none() {
                 gettext("Fetching metadata…")
             } else {

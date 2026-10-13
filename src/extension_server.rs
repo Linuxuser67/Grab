@@ -47,7 +47,10 @@ static HANDOFF_COOKIES: std::sync::Mutex<std::collections::HashMap<String, std::
 
 /// Write extension-provided cookies to a temp file for yt-dlp's `--cookies`.
 /// Returns the path, or None if there are no cookies or the write fails.
-pub(crate) fn write_handoff_cookies(url: &str, cookies: &[(String, String)]) -> Option<std::path::PathBuf> {
+pub(crate) fn write_handoff_cookies(
+    url: &str,
+    cookies: &[(String, String)],
+) -> Option<std::path::PathBuf> {
     if cookies.is_empty() {
         return None;
     }
@@ -66,7 +69,11 @@ pub(crate) fn write_handoff_cookies(url: &str, cookies: &[(String, String)]) -> 
     let mut path = std::env::temp_dir();
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    path.push(format!("grab-handoff-cookies-{}-{}", std::process::id(), count));
+    path.push(format!(
+        "grab-handoff-cookies-{}-{}",
+        std::process::id(),
+        count
+    ));
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -196,7 +203,8 @@ async fn handle_add(State(tx): State<Sender<Handoff>>, Json(req): Json<AddReques
     if req.cookies.len() > 100 {
         return StatusCode::BAD_REQUEST;
     }
-    let cookies: Vec<(String, String)> = req.cookies.into_iter().map(|c| (c.name, c.value)).collect();
+    let cookies: Vec<(String, String)> =
+        req.cookies.into_iter().map(|c| (c.name, c.value)).collect();
     // Write cookies to a temp file now; the video lookup picks it up by URL.
     if let Some(path) = write_handoff_cookies(&req.url, &cookies) {
         store_handoff_cookies(req.url.clone(), path);

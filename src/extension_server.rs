@@ -267,6 +267,10 @@ fn handoff_staging_dir() -> Option<PathBuf> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(_) => return None,
     }
+    #[cfg(unix)]
+    if !crate::download_net::validate_secure_dir(&dir) {
+        return None;
+    }
     Some(dir)
 }
 

@@ -740,8 +740,8 @@ async fn handle_add(
     };
     let mut req: AddRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
-        Err(e) if e.is_data() => return StatusCode::UNPROCESSABLE_ENTITY,
-        Err(_) => return StatusCode::BAD_REQUEST,
+        Err(e) if e.is_data() => return StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
     if req.url.trim().is_empty() {
         return StatusCode::BAD_REQUEST.into_response();

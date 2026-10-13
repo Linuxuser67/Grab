@@ -321,22 +321,33 @@ pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<Pat
         }
         // Preserve the browser's scope when the extension sends it; otherwise
         // fall back to the previous behavior (tailmatch on the URL host).
-        // A leading dot marks subdomain cookies in the browser; the tailmatch
-        // flag (field 2) is what yt-dlp actually honors, so strip it.
-        let domain = cookie
-            .domain
-            .as_deref()
-            .map(|d| d.strip_prefix('.').unwrap_or(d))
-            .unwrap_or(&fallback_domain);
-        if !valid_cookie_domain(domain) || !domain_covers_host(domain, &fallback_domain) {
-            continue;
-        }
+        // Netscape format requires the leading dot when tailmatch is TRUE
+        // (Python's cookiejar rejects the whole file otherwise), and no
+        // leading dot when FALSE.
         let tailmatch = match cookie.host_only {
             Some(true) => "FALSE",
             // Old extension sent no attributes: keep the previous tailmatch
             // default so those handoffs keep working.
             _ => "TRUE",
         };
+        let raw_domain = cookie.domain.as_deref().unwrap_or(&fallback_domain);
+        let domain = if tailmatch == "TRUE" {
+            // Domain cookie: ensure the leading dot.
+            match raw_domain.strip_prefix('.') {
+                Some(stripped) => format!(".{stripped}"),
+                None => format!(".{raw_domain}"),
+            }
+        } else {
+            // Host-only: no leading dot.
+            raw_domain
+                .strip_prefix('.')
+                .unwrap_or(raw_domain)
+                .to_string()
+        };
+        let domain = domain.as_str();
+        if !valid_cookie_domain(domain) || !domain_covers_host(domain, &fallback_domain) {
+            continue;
+        }
         let path = cookie.path.as_deref().unwrap_or("/");
         if !valid_cookie_path(path) {
             continue;
@@ -920,8 +931,8 @@ mod tests {
         assert_eq!(
             rows,
             [
-                "example.com\tTRUE\t/\tFALSE\t0\tsession\tabc123",
-                "example.com\tTRUE\t/\tFALSE\t0\twerd\tabc",
+                ".example.com\tTRUE\t/\tFALSE\t0\tsession\tabc123",
+                ".example.com\tTRUE\t/\tFALSE\t0\twerd\tabc",
             ],
             "{text}"
         );

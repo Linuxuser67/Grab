@@ -51,9 +51,27 @@ pub enum StopIntent {
 /// Run one attempt: resolve → download parts → merge → rename into place.
 /// Returns the final size, or `None` when aborted (the pauser/canceller already set the row status).
 ///
+/// A finished download discards its extension handoff cookies: they have
+/// served their purpose. Failures and aborts keep the staged entry (bounded)
+/// so a retry or resume still passes the challenge.
+///
 /// # Errors
 /// Returns a display-ready [`VideoError`]; the caller reports it as Failed.
 pub async fn run_video_download(
+    job: VideoJob,
+    gate: &std::sync::Arc<AttemptGate>,
+    abort: oneshot::Receiver<StopIntent>,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
+) -> Result<VideoOutcome, VideoError> {
+    let page_url = job.page_url.clone();
+    let outcome = run_video_download_inner(job, gate, abort, tx).await;
+    if matches!(outcome, Ok(VideoOutcome::Finished(_))) {
+        crate::extension_server::discard_handoff_cookies(&page_url);
+    }
+    outcome
+}
+
+async fn run_video_download_inner(
     mut job: VideoJob,
     gate: &std::sync::Arc<AttemptGate>,
     mut abort: oneshot::Receiver<StopIntent>,
@@ -975,6 +993,9 @@ pub(crate) async fn resolve_subtitle_lang(
     argv.extend(playlist_scope_args(playlist_index));
     argv.extend(["--skip-download".to_string(), "--dump-json".to_string()]);
     argv.extend(proxy_cli_args(job.proxy.as_ref()));
+    // The subtitle probe extracts too, so it needs the handoff cookies like
+    // every other leg. Before the identity args (`-- <url>` terminates argv).
+    argv.extend(crate::extension_server::handoff_cookie_args(&job.page_url));
     argv.extend(ytdlp_identity_args(
         &job.cookies_browser,
         None,

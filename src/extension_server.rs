@@ -22,8 +22,11 @@ use axum::{
     routing::post,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 
@@ -34,40 +37,93 @@ const MAX_BODY_BYTES: usize = 32 * 1024;
 pub(crate) const QUEUE_DEPTH: usize = 16;
 
 #[derive(Deserialize)]
-struct Cookie {
-    name: String,
-    value: String,
+pub(crate) struct Cookie {
+    pub name: String,
+    pub value: String,
+    /// Backwards compatible: the extension originally sent only name/value.
+    /// When present, these preserve the browser's cookie scope so host-only
+    /// cookies aren't silently widened to subdomains.
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub host_only: Option<bool>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub secure: Option<bool>,
+    #[serde(default)]
+    pub expiration_date: Option<f64>,
 }
 
-/// Cookie files handed off from the extension, keyed by URL. The video
-/// lookup writes them via `--cookies` and deletes them after.
-static HANDOFF_COOKIES: std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>> =
-    std::sync::Mutex::new(std::collections::HashMap::new());
-static COOKIE_FILE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Cookie files handed off from the extension, keyed by canonical URL. Every
+/// yt-dlp spawn for the URL peeks the entry (probe, subtitle probe and media
+/// download each spawn separately, and every leg must pass the challenge);
+/// the finished download discards it. Bounded so abandoned handoffs (a card
+/// opened but never added, a direct file that never probes) can't pile up.
+static HANDOFF_COOKIES: LazyLock<Mutex<HashMap<String, PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Cap on staged handoff entries; past it an arbitrary entry is evicted with
+/// its file. Matches the handoff queue depth: at most that many handoffs can
+/// be in flight ahead of the GTK thread.
+const MAX_HANDOFF_ENTRIES: usize = QUEUE_DEPTH;
+static COOKIE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Canonical map key for a handoff URL: the `url::Url` serialization, so the
+/// raw extension string and the intake-normalized form hit the same entry
+/// (`https://example.com` and `https://example.com/` are one key).
+fn handoff_key(url: &str) -> Option<String> {
+    url::Url::parse(url).ok().map(|u| u.as_str().to_owned())
+}
 
 /// Write extension-provided cookies to a temp file for yt-dlp's `--cookies`.
 /// Returns the path, or None if there are no cookies or the write fails.
-pub(crate) fn write_handoff_cookies(
-    url: &str,
-    cookies: &[(String, String)],
-) -> Option<std::path::PathBuf> {
+pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<PathBuf> {
     if cookies.is_empty() {
         return None;
     }
     // Netscape cookie file format.
     let mut content = String::from("# Netscape HTTP Cookie File\n");
-    let domain = url::Url::parse(url).ok()?.host_str()?.to_string();
-    for (name, value) in cookies {
+    let fallback_domain = url::Url::parse(url).ok()?.host_str()?.to_string();
+    let mut written = 0;
+    for cookie in cookies {
         // Sanitize: no tabs/newlines in Netscape format.
-        let n = name.replace(['\t', '\n', '\r'], "");
-        let v = value.replace(['\t', '\n', '\r'], "");
+        let n = cookie.name.replace(['\t', '\n', '\r'], "");
+        let v = cookie.value.replace(['\t', '\n', '\r'], "");
         if n.is_empty() {
             continue;
         }
-        content.push_str(&format!("{domain}\tTRUE\t/\tFALSE\t0\t{n}\t{v}\n"));
+        // Preserve the browser's scope when the extension sends it; otherwise
+        // fall back to the previous behavior (tailmatch on the URL host).
+        // A leading dot marks subdomain cookies in the browser; the tailmatch
+        // flag (field 2) is what yt-dlp actually honors, so strip it.
+        let domain = cookie
+            .domain
+            .as_deref()
+            .map(|d| d.strip_prefix('.').unwrap_or(d))
+            .unwrap_or(&fallback_domain);
+        let tailmatch = match cookie.host_only {
+            Some(true) => "FALSE",
+            // Old extension sent no attributes: keep the previous tailmatch
+            // default so those handoffs keep working.
+            _ => "TRUE",
+        };
+        let path = cookie.path.as_deref().unwrap_or("/");
+        let secure = if cookie.secure.unwrap_or(false) {
+            "TRUE"
+        } else {
+            "FALSE"
+        };
+        let expiry = cookie.expiration_date.map(|e| e as i64).unwrap_or(0);
+        content.push_str(&format!(
+            "{domain}\t{tailmatch}\t{path}\t{secure}\t{expiry}\t{n}\t{v}\n"
+        ));
+        written += 1;
+    }
+    if written == 0 {
+        return None;
     }
     let mut path = std::env::temp_dir();
-    let count = COOKIE_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let count = COOKIE_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     path.push(format!(
         "grab-handoff-cookies-{}-{}",
         std::process::id(),
@@ -86,19 +142,58 @@ pub(crate) fn write_handoff_cookies(
     Some(path)
 }
 
-/// Store a cookie file for a URL. Called by the extension handoff.
-pub(crate) fn store_handoff_cookies(url: String, path: std::path::PathBuf) {
-    if let Ok(mut map) = HANDOFF_COOKIES.lock() {
-        // Replace any existing: delete the old file to avoid leaks.
-        if let Some(old) = map.insert(url, path) {
-            let _ = std::fs::remove_file(old);
-        }
+/// Store a cookie file for a URL. Called by the extension handoff once the
+/// handoff is accepted. Replaces any existing entry (deleting its file);
+/// past [`MAX_HANDOFF_ENTRIES`] an arbitrary entry is evicted with its file.
+pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf) {
+    let Some(key) = handoff_key(url) else { return };
+    let Ok(mut map) = HANDOFF_COOKIES.lock() else {
+        return;
+    };
+    if let Some(old) = map.insert(key.clone(), path) {
+        let _ = std::fs::remove_file(old);
+        return;
+    }
+    if map.len() > MAX_HANDOFF_ENTRIES
+        && let Some(evict) = map.keys().find(|k| *k != &key).cloned()
+        && let Some(old) = map.remove(&evict)
+    {
+        let _ = std::fs::remove_file(old);
     }
 }
 
-/// Take (and remove) the cookie file for a URL, if any.
-pub(crate) fn take_handoff_cookies(url: &str) -> Option<std::path::PathBuf> {
-    HANDOFF_COOKIES.lock().ok()?.remove(url)
+/// `--cookies` argv for a URL's staged handoff cookies, if any. Peeks: the
+/// entry stays staged until the download finishes (or is evicted), because
+/// the probe, the subtitle probe and the media download each spawn yt-dlp
+/// separately and every leg must pass the challenge. Add BEFORE
+/// `ytdlp_identity_args` — that helper terminates argv with `-- <url>`, past
+/// which yt-dlp reads positionals.
+pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
+    let path = handoff_key(url).and_then(|key| {
+        HANDOFF_COOKIES
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&key).cloned())
+    });
+    match path {
+        Some(p) => vec!["--cookies".to_string(), p.to_string_lossy().into_owned()],
+        None => Vec::new(),
+    }
+}
+
+/// Drop a URL's staged handoff cookies and delete the file. Called when its
+/// download finishes; failures and aborts keep the entry (bounded) so a retry
+/// or resume still passes the challenge.
+pub(crate) fn discard_handoff_cookies(url: &str) {
+    let path = handoff_key(url).and_then(|key| {
+        HANDOFF_COOKIES
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(&key))
+    });
+    if let Some(p) = path {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 #[derive(Deserialize)]
@@ -109,12 +204,13 @@ struct AddRequest {
 }
 
 /// A URL handed off from the extension. Cookies (if any) are stored
-/// separately in HANDOFF_COOKIES, keyed by URL, for the video lookup.
+/// separately in HANDOFF_COOKIES, keyed by canonical URL, for the video
+/// probe and every yt-dlp download leg.
 pub(crate) struct Handoff {
     pub url: String,
 }
 
-/// Start the extension integration server. `tx` carries URLs to the GTK
+/// Start the extension integration server. `tx` carries handoffs to the GTK
 /// thread, which enqueues them in the download manager. Runs until the
 /// process exits.
 pub async fn serve(tx: Sender<Handoff>) {
@@ -130,7 +226,7 @@ pub async fn serve(tx: Sender<Handoff>) {
     serve_listener(listener, tx).await;
 }
 
-async fn serve_listener(listener: TcpListener, tx: Sender<String>) {
+async fn serve_listener(listener: TcpListener, tx: Sender<Handoff>) {
     let port = match listener.local_addr() {
         Ok(a) => a.port(),
         Err(e) => {
@@ -143,7 +239,7 @@ async fn serve_listener(listener: TcpListener, tx: Sender<String>) {
     }
 }
 
-fn router(tx: Sender<String>, port: u16) -> Router {
+fn router(tx: Sender<Handoff>, port: u16) -> Router {
     let hosts: Arc<[String]> =
         Arc::from([format!("127.0.0.1:{port}"), format!("localhost:{port}")]);
     Router::new()
@@ -204,15 +300,18 @@ async fn handle_add(State(tx): State<Sender<Handoff>>, Json(req): Json<AddReques
     if req.cookies.len() > 100 {
         return StatusCode::BAD_REQUEST;
     }
-    let cookies: Vec<(String, String)> =
-        req.cookies.into_iter().map(|c| (c.name, c.value)).collect();
-    // Write cookies to a temp file now; the video lookup picks it up by URL.
-    if let Some(path) = write_handoff_cookies(&req.url, &cookies) {
-        store_handoff_cookies(req.url.clone(), path);
-    }
-    let handoff = Handoff { url: req.url };
+    let handoff = Handoff {
+        url: req.url.clone(),
+    };
     match tx.try_send(handoff) {
-        Ok(()) => StatusCode::OK,
+        Ok(()) => {
+            // Stage the cookies only for an accepted handoff; the video probe
+            // and every download leg pick them up by URL.
+            if let Some(path) = write_handoff_cookies(&req.url, &req.cookies) {
+                store_handoff_cookies(&req.url, path);
+            }
+            StatusCode::OK
+        }
         Err(TrySendError::Full(_)) => StatusCode::TOO_MANY_REQUESTS,
         Err(TrySendError::Closed(_)) => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -226,7 +325,7 @@ mod tests {
 
     struct Server {
         port: u16,
-        rx: Receiver<String>,
+        rx: Receiver<Handoff>,
     }
 
     async fn start(depth: usize) -> Server {
@@ -266,10 +365,8 @@ mod tests {
         let host = format!("127.0.0.1:{}", srv.port);
         let r = request(srv.port, &[("Host", &host), JSON], BODY).await;
         assert_eq!(status(&r), "200", "{r}");
-        assert_eq!(
-            srv.rx.recv().await.as_deref(),
-            Some("https://example.com/file.zip")
-        );
+        let handoff = srv.rx.recv().await.expect("handoff");
+        assert_eq!(handoff.url, "https://example.com/file.zip");
     }
 
     #[tokio::test]
@@ -371,5 +468,233 @@ mod tests {
         assert!(srv.rx.recv().await.is_some());
         let r = request(srv.port, &[("Host", &host), JSON], BODY).await;
         assert_eq!(status(&r), "200", "queue drains: {r}");
+    }
+
+    /// Clear staged entries and delete their files: keeps map tests
+    /// independent of each other.
+    fn clear_handoff_cookies() {
+        let paths: Vec<PathBuf> = HANDOFF_COOKIES
+            .lock()
+            .map(|mut map| map.drain().map(|(_, p)| p).collect())
+            .unwrap_or_default();
+        for p in paths {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// Minimal cookie as the original extension sent it (name/value only).
+    fn cookie(name: &str, value: &str) -> Cookie {
+        Cookie {
+            name: name.to_string(),
+            value: value.to_string(),
+            domain: None,
+            host_only: None,
+            path: None,
+            secure: None,
+            expiration_date: None,
+        }
+    }
+
+    #[test]
+    fn write_handoff_cookies_netscape_format() {
+        let cookies = vec![
+            cookie("session", "abc123"),
+            // Tabs/newlines would corrupt the tab-separated format.
+            cookie("we\trd", "a\nb\rc"),
+            // Empty names carry nothing.
+            cookie("", "skip"),
+        ];
+        let path = write_handoff_cookies("https://example.com/watch?v=1", &cookies).expect("path");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "cookie file must be owner-only");
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("# Netscape HTTP Cookie File"));
+        let rows: Vec<&str> = lines.collect();
+        assert_eq!(
+            rows,
+            [
+                "example.com\tTRUE\t/\tFALSE\t0\tsession\tabc123",
+                "example.com\tTRUE\t/\tFALSE\t0\twerd\tabc",
+            ],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn write_handoff_cookies_rejects_empty_and_bad_url() {
+        assert!(write_handoff_cookies("https://example.com/", &[]).is_none());
+        assert!(write_handoff_cookies("not a url", &[cookie("a", "b")]).is_none());
+    }
+
+    #[test]
+    fn write_handoff_cookies_preserves_browser_scope() {
+        // Host-only cookie: must not widen to subdomains.
+        let cookies = vec![Cookie {
+            name: "sess".to_string(),
+            value: "s3cr3t".to_string(),
+            domain: Some("videos.example.com".to_string()),
+            host_only: Some(true),
+            path: Some("/watch".to_string()),
+            secure: Some(true),
+            expiration_date: Some(1893456000.0),
+        }];
+        let path =
+            write_handoff_cookies("https://videos.example.com/watch/1", &cookies).expect("path");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(
+            rows,
+            ["videos.example.com\tFALSE\t/watch\tTRUE\t1893456000\tsess\ts3cr3t"],
+            "{text}"
+        );
+
+        // Subdomain cookie with leading dot: tailmatch, dot stripped.
+        let cookies = vec![Cookie {
+            name: "prefs".to_string(),
+            value: "dark".to_string(),
+            domain: Some(".example.com".to_string()),
+            host_only: Some(false),
+            path: None,
+            secure: None,
+            expiration_date: None,
+        }];
+        let path = write_handoff_cookies("https://www.example.com/", &cookies).expect("path");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(
+            rows,
+            ["example.com\tTRUE\t/\tFALSE\t0\tprefs\tdark"],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn handoff_cookie_args_match_canonical_url_forms() {
+        clear_handoff_cookies();
+        // Stored under the bare domain; the intake hands the probe the
+        // slash-terminated canonical form. One entry must serve both.
+        let path = write_handoff_cookies("https://example.com", &[cookie("c", "v")]).expect("path");
+        store_handoff_cookies("https://example.com", path.clone());
+        for url in ["https://example.com", "https://example.com/"] {
+            let args = handoff_cookie_args(url);
+            assert_eq!(args.len(), 2, "{url}: {args:?}");
+            assert_eq!(args[0], "--cookies");
+            assert_eq!(args[1], path.to_string_lossy());
+        }
+        assert!(handoff_cookie_args("https://other.example/").is_empty());
+        assert!(handoff_cookie_args("https://example.com/other").is_empty());
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn discard_handoff_cookies_removes_entry_and_file() {
+        clear_handoff_cookies();
+        let path =
+            write_handoff_cookies("https://example.com/item", &[cookie("c", "v")]).expect("path");
+        store_handoff_cookies("https://example.com/item", path.clone());
+        assert!(path.exists());
+        discard_handoff_cookies("https://example.com/item");
+        assert!(!path.exists(), "file must be deleted");
+        assert!(
+            handoff_cookie_args("https://example.com/item").is_empty(),
+            "entry must be gone"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn store_handoff_cookies_evicts_past_cap() {
+        clear_handoff_cookies();
+        let mut paths = Vec::new();
+        for i in 0..=(MAX_HANDOFF_ENTRIES + 2) {
+            let url = format!("https://example.com/evict-{i}");
+            let path = write_handoff_cookies(&url, &[cookie("c", "v")]).expect("path");
+            store_handoff_cookies(&url, path.clone());
+            paths.push(path);
+        }
+        let len = HANDOFF_COOKIES.lock().unwrap().len();
+        assert_eq!(len, MAX_HANDOFF_ENTRIES, "map must stay bounded");
+        // Eviction is arbitrary, so assert on the count: every evicted
+        // entry's file must be deleted, staged ones must survive.
+        let surviving = paths.iter().filter(|p| p.exists()).count();
+        assert_eq!(
+            surviving, MAX_HANDOFF_ENTRIES,
+            "evicted entries' files must be deleted"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[tokio::test]
+    async fn handle_add_with_cookies_stages_file_for_probe() {
+        clear_handoff_cookies();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body =
+            r#"{"url":"https://example.com/watch?v=7","cookies":[{"name":"cf","value":"abc"}]}"#;
+        let r = request(srv.port, &[("Host", &host), JSON], body).await;
+        assert_eq!(status(&r), "200", "{r}");
+        let handoff = srv.rx.recv().await.expect("handoff");
+        assert_eq!(handoff.url, "https://example.com/watch?v=7");
+        // The probe (and later the download legs) resolve the same args.
+        let args = handoff_cookie_args(&handoff.url);
+        assert_eq!(args.len(), 2, "{args:?}");
+        assert_eq!(args[0], "--cookies");
+        let staged = PathBuf::from(&args[1]);
+        assert!(staged.exists(), "staged file must exist");
+        let text = std::fs::read_to_string(&staged).unwrap();
+        assert!(
+            text.contains("example.com\tTRUE\t/\tFALSE\t0\tcf\tabc"),
+            "{text}"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[tokio::test]
+    async fn handle_add_rejects_too_many_cookies() {
+        clear_handoff_cookies();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let cookies: Vec<String> = (0..101)
+            .map(|i| format!(r#"{{"name":"c{i}","value":"v"}}"#))
+            .collect();
+        let body = format!(
+            r#"{{"url":"https://example.com/","cookies":[{}]}}"#,
+            cookies.join(",")
+        );
+        let r = request(srv.port, &[("Host", &host), JSON], &body).await;
+        assert_eq!(status(&r), "400", "{r}");
+        assert!(srv.rx.try_recv().is_err());
+        assert!(
+            handoff_cookie_args("https://example.com/").is_empty(),
+            "rejected handoff must stage nothing"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[tokio::test]
+    async fn handle_add_429_stages_nothing() {
+        clear_handoff_cookies();
+        let srv = start(1).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = r#"{"url":"https://example.com/a","cookies":[{"name":"c","value":"v"}]}"#;
+        let r = request(srv.port, &[("Host", &host), JSON], body).await;
+        assert_eq!(status(&r), "200", "{r}");
+        // Queue full: the handoff is refused, so its cookies must not linger.
+        let body2 = r#"{"url":"https://example.com/b","cookies":[{"name":"c","value":"v"}]}"#;
+        let r = request(srv.port, &[("Host", &host), JSON], body2).await;
+        assert_eq!(status(&r), "429", "{r}");
+        assert!(
+            handoff_cookie_args("https://example.com/b").is_empty(),
+            "refused handoff must stage nothing"
+        );
+        clear_handoff_cookies();
     }
 }

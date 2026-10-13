@@ -45,16 +45,6 @@ async fn read_bounded(
 }
 
 /// Fetch one page's raw `--dump-single-json`, then parse leniently. `flat_playlist` lists collection stubs; false runs full extraction.
-/// Deletes a temp cookie file when dropped. Ensures cleanup even on early return.
-struct CookieFileGuard(Option<std::path::PathBuf>);
-impl Drop for CookieFileGuard {
-    fn drop(&mut self) {
-        if let Some(p) = self.0.take() {
-            let _ = std::fs::remove_file(p);
-        }
-    }
-}
-
 pub(crate) async fn fetch_raw_dump_json(
     youtube_bin: &Path,
     url: &str,
@@ -69,15 +59,13 @@ pub(crate) async fn fetch_raw_dump_json(
     }
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(fetch_proxy));
+    // Extension handoff cookies (Cloudflare bypass): staged by the handoff
+    // receiver, peeked here. The entry outlives the probe — the subtitle
+    // probe and the media download spawn yt-dlp separately and need it too;
+    // the finished download discards it. Before the identity args: those end
+    // argv with `-- <url>`, past which yt-dlp reads positionals.
+    args.extend(crate::extension_server::handoff_cookie_args(url));
     args.extend(ytdlp_identity_args(cookies_browser, None, url));
-    // Extension handoff cookies (Cloudflare bypass): written to a temp file
-    // by the handoff receiver, consumed here, deleted after via the guard.
-    let handoff_cookie_file = crate::extension_server::take_handoff_cookies(url);
-    if let Some(path) = handoff_cookie_file.as_ref() {
-        args.push("--cookies".to_string());
-        args.push(path.to_string_lossy().to_string());
-    }
-    let _cookie_guard = CookieFileGuard(handoff_cookie_file);
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(&args);

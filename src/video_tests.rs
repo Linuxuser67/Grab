@@ -7077,6 +7077,60 @@ fn unified_download_argv_escapes_percent_in_staging_path() {
 }
 
 #[test]
+fn download_argv_carries_handoff_cookies_before_url_terminator() {
+    // The extension stages site cookies so yt-dlp can pass bot challenges;
+    // every media leg spawns yt-dlp separately, so each argv must carry
+    // `--cookies` — placed before the `-- <url>` terminator, past which
+    // yt-dlp reads positionals.
+    let job = direct_test_job();
+    crate::extension_server::discard_handoff_cookies(&job.page_url);
+    let path = crate::extension_server::write_handoff_cookies(
+        &job.page_url,
+        &[crate::extension_server::Cookie {
+            name: "c".to_string(),
+            value: "v".to_string(),
+            domain: None,
+            host_only: None,
+            path: None,
+            secure: None,
+            expiration_date: None,
+        }],
+    )
+    .expect("stage");
+    crate::extension_server::store_handoff_cookies(&job.page_url, path.clone());
+    let out = std::path::Path::new("/tmp/staging/video.mp4");
+    let ff = std::path::Path::new("/usr/bin/ffmpeg");
+    for argv in [
+        unified_download_argv(&job, "b", false, "", ff, out, None),
+        hls_download_argv(&job, "h720", ff, out, None),
+        live_capture_argv(&job, "h720", out, None),
+    ] {
+        let cookie = argv
+            .iter()
+            .position(|a| a == "--cookies")
+            .expect("--cookies");
+        let dash = argv.iter().position(|a| a == "--").expect("--");
+        assert!(
+            cookie < dash,
+            "--cookies must precede the `-- <url>` terminator: {argv:?}"
+        );
+        assert_eq!(argv[cookie + 1], path.to_string_lossy());
+        assert!(
+            std::path::Path::new(&argv[cookie + 1]).exists(),
+            "staged cookie file must exist for the leg"
+        );
+    }
+    // A finished download discards the entry: no file, no argv flag.
+    crate::extension_server::discard_handoff_cookies(&job.page_url);
+    assert!(!path.exists(), "discard must delete the file");
+    let argv = unified_download_argv(&job, "b", false, "", ff, out, None);
+    assert!(
+        !argv.iter().any(|a| a == "--cookies"),
+        "no staged entry, no --cookies: {argv:?}"
+    );
+}
+
+#[test]
 fn picked_row_download_argv_scopes_to_its_entry() {
     // Regression: highlight rows re-resolve the tray URL, so `--no-playlist`
     // downloaded the tray's first story for every row (N byte-identical

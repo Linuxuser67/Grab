@@ -23,25 +23,93 @@ use axum::{
 };
 use serde::Deserialize;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 
 const PORT: u16 = 9412;
 /// A URL plus JSON framing; the intake itself caps URLs at `download_intake::MAX_URL_LEN`.
-const MAX_BODY_BYTES: usize = 8 * 1024;
+const MAX_BODY_BYTES: usize = 32 * 1024;
 /// Handoffs waiting for the GTK thread; beyond this the extension gets 429.
 pub(crate) const QUEUE_DEPTH: usize = 16;
 
 #[derive(Deserialize)]
+struct Cookie {
+    name: String,
+    value: String,
+}
+
+/// Cookie files handed off from the extension, keyed by URL. The video
+/// lookup writes them via `--cookies` and deletes them after.
+static HANDOFF_COOKIES: std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>> =
+    std::sync::Mutex::new(std::collections::HashMap::new());
+
+/// Write extension-provided cookies to a temp file for yt-dlp's `--cookies`.
+/// Returns the path, or None if there are no cookies or the write fails.
+pub(crate) fn write_handoff_cookies(url: &str, cookies: &[(String, String)]) -> Option<std::path::PathBuf> {
+    if cookies.is_empty() {
+        return None;
+    }
+    // Netscape cookie file format.
+    let mut content = String::from("# Netscape HTTP Cookie File\n");
+    let domain = url::Url::parse(url).ok()?.host_str()?.to_string();
+    for (name, value) in cookies {
+        // Sanitize: no tabs/newlines in Netscape format.
+        let n = name.replace(['\t', '\n', '\r'], "");
+        let v = value.replace(['\t', '\n', '\r'], "");
+        if n.is_empty() {
+            continue;
+        }
+        content.push_str(&format!("{domain}\tTRUE\t/\tFALSE\t0\t{n}\t{v}\n"));
+    }
+    let mut path = std::env::temp_dir();
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    path.push(format!("grab-handoff-cookies-{}-{}", std::process::id(), count));
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .ok()?;
+    file.write_all(content.as_bytes()).ok()?;
+    Some(path)
+}
+
+/// Store a cookie file for a URL. Called by the extension handoff.
+pub(crate) fn store_handoff_cookies(url: String, path: std::path::PathBuf) {
+    if let Ok(mut map) = HANDOFF_COOKIES.lock() {
+        // Replace any existing: delete the old file to avoid leaks.
+        if let Some(old) = map.insert(url, path) {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+}
+
+/// Take (and remove) the cookie file for a URL, if any.
+pub(crate) fn take_handoff_cookies(url: &str) -> Option<std::path::PathBuf> {
+    HANDOFF_COOKIES.lock().ok()?.remove(url)
+}
+
+#[derive(Deserialize)]
 struct AddRequest {
     url: String,
+    #[serde(default)]
+    cookies: Vec<Cookie>,
+}
+
+/// A URL handed off from the extension. Cookies (if any) are stored
+/// separately in HANDOFF_COOKIES, keyed by URL, for the video lookup.
+pub(crate) struct Handoff {
+    pub url: String,
 }
 
 /// Start the extension integration server. `tx` carries URLs to the GTK
 /// thread, which enqueues them in the download manager. Runs until the
 /// process exits.
-pub async fn serve(tx: Sender<String>) {
+pub async fn serve(tx: Sender<Handoff>) {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, PORT));
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -116,7 +184,7 @@ fn is_extension_origin(origin: &str) -> bool {
         .any(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
 }
 
-async fn handle_add(State(tx): State<Sender<String>>, Json(req): Json<AddRequest>) -> StatusCode {
+async fn handle_add(State(tx): State<Sender<Handoff>>, Json(req): Json<AddRequest>) -> StatusCode {
     tracing::debug!("Extension handoff received");
     if req.url.trim().is_empty() {
         return StatusCode::BAD_REQUEST;
@@ -124,7 +192,17 @@ async fn handle_add(State(tx): State<Sender<String>>, Json(req): Json<AddRequest
     if req.url.len() > crate::download_intake::MAX_URL_LEN {
         return StatusCode::URI_TOO_LONG;
     }
-    match tx.try_send(req.url) {
+    // Bound cookie count: each is a small name/value pair.
+    if req.cookies.len() > 100 {
+        return StatusCode::BAD_REQUEST;
+    }
+    let cookies: Vec<(String, String)> = req.cookies.into_iter().map(|c| (c.name, c.value)).collect();
+    // Write cookies to a temp file now; the video lookup picks it up by URL.
+    if let Some(path) = write_handoff_cookies(&req.url, &cookies) {
+        store_handoff_cookies(req.url.clone(), path);
+    }
+    let handoff = Handoff { url: req.url };
+    match tx.try_send(handoff) {
         Ok(()) => StatusCode::OK,
         Err(TrySendError::Full(_)) => StatusCode::TOO_MANY_REQUESTS,
         Err(TrySendError::Closed(_)) => StatusCode::INTERNAL_SERVER_ERROR,

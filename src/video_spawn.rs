@@ -60,6 +60,22 @@ pub(crate) async fn fetch_raw_dump_json(
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(fetch_proxy));
     args.extend(ytdlp_identity_args(cookies_browser, None, url));
+    // Extension handoff cookies (Cloudflare bypass): written to a temp file
+    // by the handoff receiver, consumed here, deleted after via the guard.
+    let handoff_cookie_file = crate::extension_server::take_handoff_cookies(url);
+    struct CookieFileGuard(Option<std::path::PathBuf>);
+    impl Drop for CookieFileGuard {
+        fn drop(&mut self) {
+            if let Some(p) = self.0.take() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    let _cookie_guard = CookieFileGuard(handoff_cookie_file.clone());
+    if let Some(ref path) = handoff_cookie_file {
+        args.push("--cookies".to_string());
+        args.push(path.to_string_lossy().to_string());
+    }
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(&args);

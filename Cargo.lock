@@ -1331,6 +1331,7 @@ dependencies = [
  "gio",
  "glib",
  "gtk4",
+ "hmac",
  "httpdate",
  "libadwaita",
  "libc",

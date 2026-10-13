@@ -110,7 +110,7 @@ pub(crate) fn jar_from_export(text: &str) -> (Arc<reqwest::cookie::Jar>, usize) 
 /// the home dir is not world-writable, so the `/tmp` pre-created-parent
 /// TOCTOU does not apply. Verifies uid ownership so a pre-created directory
 /// by another user is rejected.
-fn cookie_staging_dir() -> Option<PathBuf> {
+pub(crate) fn cookie_staging_dir() -> Option<PathBuf> {
     let base = match std::env::var("XDG_RUNTIME_DIR") {
         Ok(s) if !s.is_empty() => PathBuf::from(s),
         _ => {
@@ -191,9 +191,10 @@ pub(crate) fn sweep_cookie_staging() {
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name();
             let name = name.to_str().unwrap_or("");
-            // Only our cookie dumps; never touch anything else.
-            if name.starts_with("grab-cookies-")
-                && name.ends_with(".txt")
+            // Only our cookie dumps and extension-handoff cookie files (the
+            // latter are staged here too); never touch anything else.
+            if ((name.starts_with("grab-cookies-") && name.ends_with(".txt"))
+                || name.starts_with("grab-handoff-cookies-"))
                 && owned_by_me(&entry.path())
             {
                 let _ = std::fs::remove_file(entry.path());

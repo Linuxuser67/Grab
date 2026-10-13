@@ -59,6 +59,12 @@ pub(crate) async fn fetch_raw_dump_json(
     }
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(fetch_proxy));
+    // Extension handoff cookies (Cloudflare bypass): staged by the handoff
+    // receiver, peeked here. The entry outlives the probe — the subtitle
+    // probe and the media download spawn yt-dlp separately and need it too;
+    // the finished download discards it. Before the identity args: those end
+    // argv with `-- <url>`, past which yt-dlp reads positionals.
+    args.extend(crate::extension_server::handoff_cookie_args(url));
     args.extend(ytdlp_identity_args(cookies_browser, None, url));
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin);

@@ -359,10 +359,11 @@ pub fn setup(app: &adw::Application) {
             // Bounded: a flood of handoffs gets 429 from the server instead of
             // piling up confirm dialogs or memory here.
             let (ext_tx, mut ext_rx) =
-                tokio::sync::mpsc::channel::<String>(crate::extension_server::QUEUE_DEPTH);
+                tokio::sync::mpsc::channel::<crate::extension_server::Handoff>(crate::extension_server::QUEUE_DEPTH);
             crate::runtime::tokio_rt().spawn(crate::extension_server::serve(ext_tx));
             glib::spawn_future_local(async move {
-                while let Some(url_text) = ext_rx.recv().await {
+                while let Some(handoff) = ext_rx.recv().await {
+                    let url_text = handoff.url;
                     let s = match bridge_state.borrow().as_ref().cloned() {
                         Some(s) => s,
                         None => continue,

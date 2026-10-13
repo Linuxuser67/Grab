@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.5~beta" date="2026-10-13">
+      <description>
+        <ul>
+          <li>Extension async confirm: the handoff no longer holds a 130s connection, fixing MV3 worker timeouts.</li>
+          <li>LL-HLS timestamp hygiene on all HLS downloads, fixing intermittent ffmpeg failures.</li>
+          <li>Cookie handoff hardening: truncate to 100 instead of rejecting, stage before queueing.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.4" date="2026-10-13">
       <description>
         <ul>

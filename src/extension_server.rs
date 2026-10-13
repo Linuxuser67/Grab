@@ -1110,7 +1110,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_add_rejects_too_many_cookies() {
+    async fn handle_add_truncates_too_many_cookies() {
         let _g = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
@@ -1122,12 +1122,9 @@ mod tests {
             cookies.join(",")
         );
         let r = request(srv.port, &[("Host", &host), JSON], &body).await;
-        assert_eq!(status(&r), "400", "{r}");
-        assert!(srv.rx.try_recv().is_err());
-        assert!(
-            handoff_cookie_args("https://example.com/").is_empty(),
-            "rejected handoff must stage nothing"
-        );
+        // Oversize jars truncate to 100 instead of rejecting: the handoff survives.
+        assert_eq!(status(&r), "200", "{r}");
+        assert!(srv.rx.try_recv().is_ok());
         clear_handoff_cookies();
     }
 

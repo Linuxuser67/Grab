@@ -409,6 +409,58 @@ pub fn show(
     page.add(&sched_group);
     page.add(&power_group);
     page.add(&notif_group);
+    // Pairing code for the browser extension: without it the extension sends
+    // links only, never cookies (see extension_server).
+    if let (Some(pairing), Some(pairing_path)) = (
+        crate::extension_server::pairing(),
+        crate::extension_server::pairing_path(),
+    ) {
+        let ext_group = adw::PreferencesGroup::builder()
+            .title(gettext("Browser extension"))
+            .description(gettext(
+                "Enter this code in the extension's settings. Without it the extension sends links only, never cookies.",
+            ))
+            .build();
+        let code_row = adw::ActionRow::builder()
+            .title(gettext("Pairing code"))
+            .subtitle(pairing.code())
+            .subtitle_selectable(true)
+            .build();
+        let copy_btn = gtk4::Button::builder()
+            .icon_name("edit-copy-symbolic")
+            .valign(gtk4::Align::Center)
+            .tooltip_text(gettext("Copy"))
+            .css_classes(["flat"])
+            .build();
+        copy_btn.update_property(&[gtk4::accessible::Property::Label(&gettext(
+            "Copy pairing code",
+        ))]);
+        {
+            let pairing = pairing.clone();
+            copy_btn.connect_clicked(move |btn| btn.clipboard().set_text(&pairing.code()));
+        }
+        let regen_btn = gtk4::Button::builder()
+            .icon_name("view-refresh-symbolic")
+            .valign(gtk4::Align::Center)
+            .tooltip_text(gettext("Generate a new code"))
+            .css_classes(["flat"])
+            .build();
+        regen_btn.update_property(&[gtk4::accessible::Property::Label(&gettext(
+            "Generate a new pairing code",
+        ))]);
+        {
+            let row = code_row.clone();
+            regen_btn.connect_clicked(move |_| {
+                if let Ok(code) = pairing.regenerate(&pairing_path) {
+                    row.set_subtitle(&code);
+                }
+            });
+        }
+        code_row.add_suffix(&copy_btn);
+        code_row.add_suffix(&regen_btn);
+        ext_group.add(&code_row);
+        advanced_page.add(&ext_group);
+    }
     dialog.add(&page);
 
     net_page.add(&net_group);

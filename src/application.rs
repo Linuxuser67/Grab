@@ -287,7 +287,18 @@ fn route_open_uri(
 /// - A handoff that skips the dialog has no explicit user approval behind it,
 ///   so its host must resolve to public addresses only: a name pointing at
 ///   127.0.0.1 or the LAN is refused at connect time.
-fn dispatch_handoff(s: &State, uri: url::Url, via_grab: bool) {
+///
+/// `decision` is set for extension handoffs that asked to be told the outcome
+/// (`/add?confirm=1`): it is answered `true` once Grab has taken the URL over
+/// and `false` when the user declines, so the extension cancels the browser's
+/// own download only after Grab really has it. Dropping it unanswered counts
+/// as declined.
+fn dispatch_handoff(
+    s: &State,
+    uri: url::Url,
+    via_grab: bool,
+    decision: Option<tokio::sync::oneshot::Sender<bool>>,
+) {
     let (manager, toasts, add_card, settings) = (
         s.manager.clone(),
         s.toasts.clone(),
@@ -299,6 +310,7 @@ fn dispatch_handoff(s: &State, uri: url::Url, via_grab: bool) {
             crate::download_net::require_public_resolution(host);
         }
         route_open_uri(manager, toasts, add_card, settings, uri);
+        answer_handoff(decision, true);
         return;
     }
     // Validate before the dialog: the user should approve the canonical URL,
@@ -307,23 +319,43 @@ fn dispatch_handoff(s: &State, uri: url::Url, via_grab: bool) {
         Ok(u) => u,
         Err(e) => {
             toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+            answer_handoff(decision, false);
             return;
         }
     };
     let shown: url::Url = canonical.parse().unwrap_or_else(|_| uri.clone());
     // Enqueue the URL the dialog displays, not the raw one.
     let approved = shown.clone();
-    confirm_download(&s.window, &shown, move || {
-        // The dialog may invoke this more than once in theory; clone per call
-        // so the closure stays Fn.
-        route_open_uri(
-            manager.clone(),
-            toasts.clone(),
-            add_card.clone(),
-            settings.clone(),
-            approved.clone(),
-        );
-    });
+    // The dialog callbacks are `Fn`, so the one-shot sender sits in a shared
+    // slot that the first answer empties. Closing the dialog some other way
+    // drops the slot, and with it the sender: the extension sees a decline.
+    let decision = std::rc::Rc::new(RefCell::new(decision));
+    let on_cancel_decision = std::rc::Rc::clone(&decision);
+    confirm_download(
+        &s.window,
+        &shown,
+        move || {
+            answer_handoff(decision.borrow_mut().take(), true);
+            // The dialog may invoke this more than once in theory; clone per
+            // call so the closure stays Fn.
+            route_open_uri(
+                manager.clone(),
+                toasts.clone(),
+                add_card.clone(),
+                settings.clone(),
+                approved.clone(),
+            );
+        },
+        move || answer_handoff(on_cancel_decision.borrow_mut().take(), false),
+    );
+}
+
+/// Tell a waiting extension request whether Grab took the handoff over.
+fn answer_handoff(decision: Option<tokio::sync::oneshot::Sender<bool>>, accepted: bool) {
+    if let Some(tx) = decision {
+        // The request may have timed out already; nobody is left to tell.
+        let _ = tx.send(accepted);
+    }
 }
 
 pub fn setup(app: &adw::Application) {
@@ -363,7 +395,8 @@ pub fn setup(app: &adw::Application) {
             crate::runtime::tokio_rt().spawn(crate::extension_server::serve(ext_tx));
             glib::spawn_future_local(async move {
                 while let Some(handoff) = ext_rx.recv().await {
-                    let url_text = handoff.url;
+                    // Early `continue`s below drop `decision`: a decline.
+                    let (url_text, decision) = (handoff.url, handoff.decision);
                     let s = match bridge_state.borrow().as_ref().cloned() {
                         Some(s) => s,
                         None => continue,
@@ -379,7 +412,7 @@ pub fn setup(app: &adw::Application) {
                     if !matches!(uri.scheme(), "http" | "https" | "magnet") {
                         continue;
                     }
-                    dispatch_handoff(&s, uri, true);
+                    dispatch_handoff(&s, uri, true, decision);
                 }
             });
 
@@ -421,7 +454,7 @@ pub fn setup(app: &adw::Application) {
                 if let Ok(uri) = uri_text.parse::<url::Url>()
                     && matches!(uri.scheme(), "http" | "https" | "magnet")
                 {
-                    dispatch_handoff(&s, uri, via_grab);
+                    dispatch_handoff(&s, uri, via_grab, None);
                     continue;
                 }
                 if let Some(path) = f.path() {
@@ -494,6 +527,8 @@ pub fn setup(app: &adw::Application) {
             if let Some(s) = st.borrow().as_ref() {
                 s.manager.shutdown();
             }
+            // Staged extension cookies only live in memory; delete their files.
+            crate::extension_server::purge_handoff_cookies();
         });
     }
 }
@@ -535,6 +570,7 @@ fn confirm_download(
     parent: &impl gtk4::glib::object::IsA<gtk4::Widget>,
     uri: &url::Url,
     on_confirm: impl Fn() + 'static,
+    on_cancel: impl Fn() + 'static,
 ) {
     let dialog = adw::AlertDialog::builder()
         .heading(gettext("Add this download?"))
@@ -548,6 +584,8 @@ fn confirm_download(
     dialog.connect_response(None, move |_, response| {
         if response == "download" {
             on_confirm();
+        } else {
+            on_cancel();
         }
     });
     dialog.present(Some(parent));

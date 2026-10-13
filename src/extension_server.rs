@@ -12,29 +12,196 @@
 //! (always sent by browsers on POST) must belong to a browser extension.
 //! Bodies and queue depth are bounded so a flood cannot exhaust memory or
 //! bury the user in dialogs.
+//!
+//! Pairing: the guard cannot tell *which* extension is calling, nor can the
+//! extension tell that the listener on 9412 is really Grab (any local process
+//! may bind the port first). Grab therefore keeps a random 256-bit secret
+//! (`extension-pairing` in its config dir) that the user copies from
+//! Preferences into the extension. With it:
+//! - `GET /hello?n=<nonce>` proves Grab knows the secret
+//!   (`HMAC(secret, "grab-server\0" || nonce)`), so the extension can refuse to
+//!   talk to an impostor before sending anything sensitive;
+//! - `POST /add` carries `X-Grab-Token = HMAC(secret, "grab-client\0" || body)`.
+//!
+//! Cookies are accepted only on a request with a valid token. An unpaired
+//! request still hands off its URL (the confirm dialog protects it), but its
+//! cookies are dropped. A wrong token is refused outright.
+//!
+//! Confirmation: `POST /add?confirm=1` holds the response until the user has
+//! answered Grab's dialog (`200` approved, `409` declined, `408` no answer
+//! in [`CONFIRM_WAIT`]), so the extension cancels the browser's own download
+//! only once Grab has really taken over.
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Request, State},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
+use hmac::{Hmac, KeyInit as _, Mac};
 use serde::Deserialize;
-use std::collections::HashMap;
+use sha2::Sha256;
+use std::collections::{HashMap, VecDeque};
+use std::io::Read as _;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
+use tokio::sync::oneshot;
 
 const PORT: u16 = 9412;
 /// A URL plus JSON framing; the intake itself caps URLs at `download_intake::MAX_URL_LEN`.
 const MAX_BODY_BYTES: usize = 32 * 1024;
 /// Handoffs waiting for the GTK thread; beyond this the extension gets 429.
 pub(crate) const QUEUE_DEPTH: usize = 16;
+/// How long `/add?confirm=1` waits for the user to answer the dialog. The
+/// extension's own timeout must be longer.
+pub(crate) const CONFIRM_WAIT: Duration = Duration::from_secs(120);
+
+// --- Pairing ---------------------------------------------------------------
+
+const SECRET_LEN: usize = 32;
+const SERVER_CONTEXT: &[u8] = b"grab-server\0";
+const CLIENT_CONTEXT: &[u8] = b"grab-client\0";
+type HmacSha256 = Hmac<Sha256>;
+
+/// The shared secret between Grab and a paired extension.
+pub(crate) struct Pairing {
+    secret: RwLock<[u8; SECRET_LEN]>,
+}
+
+impl Pairing {
+    fn from_secret(secret: [u8; SECRET_LEN]) -> Self {
+        Self {
+            secret: RwLock::new(secret),
+        }
+    }
+
+    /// Load the secret at `path`, creating it (0600) when missing or unreadable.
+    pub(crate) fn load_or_create(path: &Path) -> std::io::Result<Self> {
+        if let Some(secret) = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| decode_secret(t.trim()))
+        {
+            return Ok(Self::from_secret(secret));
+        }
+        let secret = random_secret()?;
+        write_secret(path, &secret)?;
+        Ok(Self::from_secret(secret))
+    }
+
+    fn current(&self) -> [u8; SECRET_LEN] {
+        *self.secret.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The pairing code shown in Preferences (lowercase hex).
+    pub(crate) fn code(&self) -> String {
+        hex_encode(&self.current())
+    }
+
+    /// Replace the secret: every extension must be paired again.
+    pub(crate) fn regenerate(&self, path: &Path) -> std::io::Result<String> {
+        let secret = random_secret()?;
+        write_secret(path, &secret)?;
+        *self.secret.write().unwrap_or_else(|e| e.into_inner()) = secret;
+        Ok(self.code())
+    }
+
+    fn mac(&self, context: &[u8], message: &[u8]) -> HmacSha256 {
+        let mut mac =
+            HmacSha256::new_from_slice(&self.current()).expect("HMAC accepts keys of any length");
+        mac.update(context);
+        mac.update(message);
+        mac
+    }
+
+    /// Proof for `GET /hello`: only a holder of the secret can produce it.
+    fn proof(&self, nonce: &str) -> String {
+        hex_encode(
+            &self
+                .mac(SERVER_CONTEXT, nonce.as_bytes())
+                .finalize()
+                .into_bytes(),
+        )
+    }
+
+    /// Constant-time check of an `X-Grab-Token` over the raw request body.
+    fn verify_token(&self, body: &[u8], token_hex: &str) -> bool {
+        hex_decode(token_hex)
+            .is_some_and(|tag| self.mac(CLIENT_CONTEXT, body).verify_slice(&tag).is_ok())
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) || !text.is_ascii() {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+        .collect()
+}
+
+fn decode_secret(text: &str) -> Option<[u8; SECRET_LEN]> {
+    hex_decode(text)?.try_into().ok()
+}
+
+fn random_secret() -> std::io::Result<[u8; SECRET_LEN]> {
+    let mut secret = [0u8; SECRET_LEN];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut secret)?;
+    Ok(secret)
+}
+
+/// Write the secret 0600 via a temp file and rename, so a crash never leaves a
+/// truncated secret and no moment exists where the file is world-readable.
+fn write_secret(path: &Path, secret: &[u8; SECRET_LEN]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+    let dir = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let tmp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    file.write_all(hex_encode(secret).as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Where the secret lives: `$XDG_CONFIG_HOME/grab/extension-pairing`.
+pub(crate) fn pairing_path() -> Option<PathBuf> {
+    let base = match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(s) if !s.is_empty() => PathBuf::from(s),
+        _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
+    };
+    Some(base.join("grab").join("extension-pairing"))
+}
+
+static PAIRING: OnceLock<Arc<Pairing>> = OnceLock::new();
+
+/// The running server's pairing state (for Preferences); `None` until the
+/// server has started or when the secret could not be stored.
+pub(crate) fn pairing() -> Option<Arc<Pairing>> {
+    PAIRING.get().cloned()
+}
+
+// --- Handoff cookies -------------------------------------------------------
 
 #[derive(Deserialize)]
 pub(crate) struct Cookie {
@@ -55,18 +222,53 @@ pub(crate) struct Cookie {
     pub expiration_date: Option<f64>,
 }
 
+/// Staged cookie files keyed by canonical URL, oldest first.
+#[derive(Default)]
+struct HandoffStore {
+    by_key: HashMap<String, PathBuf>,
+    /// Insertion order, so a full store evicts the oldest handoff instead of
+    /// an arbitrary one (which could belong to a download still running).
+    order: VecDeque<String>,
+}
+
 /// Cookie files handed off from the extension, keyed by canonical URL. Every
 /// yt-dlp spawn for the URL peeks the entry (probe, subtitle probe and media
 /// download each spawn separately, and every leg must pass the challenge);
 /// the finished download discards it. Bounded so abandoned handoffs (a card
 /// opened but never added, a direct file that never probes) can't pile up.
-static HANDOFF_COOKIES: LazyLock<Mutex<HashMap<String, PathBuf>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-/// Cap on staged handoff entries; past it an arbitrary entry is evicted with
+static HANDOFF_COOKIES: LazyLock<Mutex<HandoffStore>> =
+    LazyLock::new(|| Mutex::new(HandoffStore::default()));
+/// Cap on staged handoff entries; past it the oldest entry is evicted with
 /// its file. Matches the handoff queue depth: at most that many handoffs can
 /// be in flight ahead of the GTK thread.
 const MAX_HANDOFF_ENTRIES: usize = QUEUE_DEPTH;
 static COOKIE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Private 0700 staging dir for handoff cookie files. Duplicates the
+/// directory logic from `crate::cookies::cookie_staging_dir` to avoid a
+/// module cycle (`cookies` -> `video_spawn` -> `extension_server` -> `cookies`).
+/// Uses the same `grab-cookies` directory so the startup sweep in `cookies`
+/// cleans up stale handoff files.
+fn handoff_staging_dir() -> Option<PathBuf> {
+    let base = match std::env::var("XDG_RUNTIME_DIR") {
+        Ok(s) if !s.is_empty() => PathBuf::from(s),
+        _ => match std::env::var("XDG_CACHE_HOME") {
+            Ok(s) if !s.is_empty() => PathBuf::from(s),
+            _ => PathBuf::from(std::env::var_os("HOME")?).join(".cache"),
+        },
+    };
+    let dir = base.join("grab-cookies");
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::os::unix::fs::DirBuilderExt as _;
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    Some(dir)
+}
 
 /// Canonical map key for a handoff URL: the `url::Url` serialization, so the
 /// raw extension string and the intake-normalized form hit the same entry
@@ -75,8 +277,33 @@ fn handoff_key(url: &str) -> Option<String> {
     url::Url::parse(url).ok().map(|u| u.as_str().to_owned())
 }
 
-/// Write extension-provided cookies to a temp file for yt-dlp's `--cookies`.
-/// Returns the path, or None if there are no cookies or the write fails.
+/// Cookie `domain` as a Netscape-file host: letters, digits and `.-_:[]` only.
+/// The field is written unescaped between tabs, so anything else could add
+/// columns or whole lines to the file.
+fn valid_cookie_domain(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && domain.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':' | b'[' | b']')
+        })
+}
+
+/// A cookie may only be sent for the URL's own host or one of its parents.
+fn domain_covers_host(domain: &str, host: &str) -> bool {
+    let (domain, host) = (domain.to_ascii_lowercase(), host.to_ascii_lowercase());
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
+/// Cookie `path` as a Netscape-file field: no control characters (tab and
+/// newline included) and anchored at the root.
+fn valid_cookie_path(path: &str) -> bool {
+    path.starts_with('/') && !path.chars().any(char::is_control)
+}
+
+/// Write extension-provided cookies to a staging file for yt-dlp's `--cookies`.
+/// Returns the path, or None if there are no usable cookies or the write fails.
+/// Cookies whose domain or path is malformed, or whose domain does not cover
+/// the URL's host, are dropped.
 pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<PathBuf> {
     if cookies.is_empty() {
         return None;
@@ -101,6 +328,9 @@ pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<Pat
             .as_deref()
             .map(|d| d.strip_prefix('.').unwrap_or(d))
             .unwrap_or(&fallback_domain);
+        if !valid_cookie_domain(domain) || !domain_covers_host(domain, &fallback_domain) {
+            continue;
+        }
         let tailmatch = match cookie.host_only {
             Some(true) => "FALSE",
             // Old extension sent no attributes: keep the previous tailmatch
@@ -108,6 +338,9 @@ pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<Pat
             _ => "TRUE",
         };
         let path = cookie.path.as_deref().unwrap_or("/");
+        if !valid_cookie_path(path) {
+            continue;
+        }
         let secure = if cookie.secure.unwrap_or(false) {
             "TRUE"
         } else {
@@ -122,7 +355,9 @@ pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<Pat
     if written == 0 {
         return None;
     }
-    let mut path = std::env::temp_dir();
+    // The private 0700 staging dir (`XDG_RUNTIME_DIR`), the one the startup
+    // sweep cleans; no usable dir means no cookies, never a fall back to /tmp.
+    let mut path = handoff_staging_dir()?;
     let count = COOKIE_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     path.push(format!(
         "grab-handoff-cookies-{}-{}",
@@ -144,21 +379,28 @@ pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<Pat
 
 /// Store a cookie file for a URL. Called by the extension handoff once the
 /// handoff is accepted. Replaces any existing entry (deleting its file);
-/// past [`MAX_HANDOFF_ENTRIES`] an arbitrary entry is evicted with its file.
+/// past [`MAX_HANDOFF_ENTRIES`] the oldest entry is evicted with its file.
 pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf) {
-    let Some(key) = handoff_key(url) else { return };
-    let Ok(mut map) = HANDOFF_COOKIES.lock() else {
+    let Some(key) = handoff_key(url) else {
+        let _ = std::fs::remove_file(path);
         return;
     };
-    if let Some(old) = map.insert(key.clone(), path) {
-        let _ = std::fs::remove_file(old);
+    let Ok(mut store) = HANDOFF_COOKIES.lock() else {
+        let _ = std::fs::remove_file(path);
         return;
-    }
-    if map.len() > MAX_HANDOFF_ENTRIES
-        && let Some(evict) = map.keys().find(|k| *k != &key).cloned()
-        && let Some(old) = map.remove(&evict)
-    {
+    };
+    if let Some(old) = store.by_key.insert(key.clone(), path) {
         let _ = std::fs::remove_file(old);
+        store.order.retain(|k| k != &key);
+    }
+    store.order.push_back(key);
+    while store.by_key.len() > MAX_HANDOFF_ENTRIES {
+        let Some(oldest) = store.order.pop_front() else {
+            break;
+        };
+        if let Some(old) = store.by_key.remove(&oldest) {
+            let _ = std::fs::remove_file(old);
+        }
     }
 }
 
@@ -173,7 +415,7 @@ pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
         HANDOFF_COOKIES
             .lock()
             .ok()
-            .and_then(|map| map.get(&key).cloned())
+            .and_then(|store| store.by_key.get(&key).cloned())
     });
     match path {
         Some(p) => vec!["--cookies".to_string(), p.to_string_lossy().into_owned()],
@@ -186,12 +428,28 @@ pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
 /// or resume still passes the challenge.
 pub(crate) fn discard_handoff_cookies(url: &str) {
     let path = handoff_key(url).and_then(|key| {
-        HANDOFF_COOKIES
-            .lock()
-            .ok()
-            .and_then(|mut map| map.remove(&key))
+        HANDOFF_COOKIES.lock().ok().and_then(|mut store| {
+            store.order.retain(|k| k != &key);
+            store.by_key.remove(&key)
+        })
     });
     if let Some(p) = path {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// Delete every staged cookie file. Called at shutdown: the entries only live
+/// in memory, so files left behind would never be cleaned until the next
+/// startup sweep.
+pub(crate) fn purge_handoff_cookies() {
+    let paths: Vec<PathBuf> = HANDOFF_COOKIES
+        .lock()
+        .map(|mut store| {
+            store.order.clear();
+            store.by_key.drain().map(|(_, p)| p).collect()
+        })
+        .unwrap_or_default();
+    for p in paths {
         let _ = std::fs::remove_file(p);
     }
 }
@@ -208,6 +466,17 @@ struct AddRequest {
 /// probe and every yt-dlp download leg.
 pub(crate) struct Handoff {
     pub url: String,
+    /// Set for `/add?confirm=1`: the GTK side answers `true` once Grab has
+    /// taken the URL over (approved, or no dialog needed) and `false` when the
+    /// user declined. Dropping it unanswered counts as declined.
+    pub decision: Option<oneshot::Sender<bool>>,
+}
+
+#[derive(Clone)]
+struct AppState {
+    tx: Sender<Handoff>,
+    pairing: Option<Arc<Pairing>>,
+    confirm_wait: Duration,
 }
 
 /// Start the extension integration server. `tx` carries handoffs to the GTK
@@ -223,10 +492,25 @@ pub async fn serve(tx: Sender<Handoff>) {
         }
     };
     tracing::info!("Extension HTTP server listening on {addr}");
-    serve_listener(listener, tx).await;
+    let pairing = pairing_path().and_then(|path| match Pairing::load_or_create(&path) {
+        Ok(p) => Some(Arc::new(p)),
+        Err(e) => {
+            tracing::warn!("Extension pairing secret unavailable ({path:?}): {e}");
+            None
+        }
+    });
+    if let Some(p) = &pairing {
+        let _ = PAIRING.set(Arc::clone(p));
+    }
+    serve_listener(listener, tx, pairing, CONFIRM_WAIT).await;
 }
 
-async fn serve_listener(listener: TcpListener, tx: Sender<Handoff>) {
+async fn serve_listener(
+    listener: TcpListener,
+    tx: Sender<Handoff>,
+    pairing: Option<Arc<Pairing>>,
+    confirm_wait: Duration,
+) {
     let port = match listener.local_addr() {
         Ok(a) => a.port(),
         Err(e) => {
@@ -234,20 +518,26 @@ async fn serve_listener(listener: TcpListener, tx: Sender<Handoff>) {
             return;
         }
     };
-    if let Err(e) = axum::serve(listener, router(tx, port)).await {
+    let state = AppState {
+        tx,
+        pairing,
+        confirm_wait,
+    };
+    if let Err(e) = axum::serve(listener, router(state, port)).await {
         tracing::warn!("Extension HTTP server error: {e}");
     }
 }
 
-fn router(tx: Sender<Handoff>, port: u16) -> Router {
+fn router(state: AppState, port: u16) -> Router {
     let hosts: Arc<[String]> =
         Arc::from([format!("127.0.0.1:{port}"), format!("localhost:{port}")]);
     Router::new()
         .route("/add", post(handle_add))
+        .route("/hello", get(handle_hello))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         // Outermost: rejected before the body is read.
         .layer(middleware::from_fn_with_state(hosts, guard))
-        .with_state(tx)
+        .with_state(state)
 }
 
 /// Reject requests that are not addressed to this server by name or that a
@@ -271,7 +561,9 @@ fn host_allowed(headers: &HeaderMap, hosts: &[String]) -> bool {
 }
 
 /// No `Origin` means not a browser request (curl, scripts): the same trust as
-/// any local process. A present `Origin` must be a browser extension's.
+/// any local process. A present `Origin` must be a browser extension's. The
+/// scheme does not say *which* extension: pairing (see the module docs) is
+/// what authenticates the caller.
 fn origin_allowed(headers: &HeaderMap) -> bool {
     let mut values = headers.get_all(header::ORIGIN).iter();
     match (values.next(), values.next()) {
@@ -288,8 +580,62 @@ fn is_extension_origin(origin: &str) -> bool {
         .any(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
 }
 
-async fn handle_add(State(tx): State<Sender<Handoff>>, Json(req): Json<AddRequest>) -> StatusCode {
+/// `GET /hello?n=<16-64 hex chars>`: prove this server holds the pairing secret.
+async fn handle_hello(
+    State(st): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(pairing) = &st.pairing else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let nonce = q
+        .get("n")
+        .filter(|n| (16..=64).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_hexdigit()));
+    let Some(nonce) = nonce else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    Json(serde_json::json!({ "proof": pairing.proof(nonce) })).into_response()
+}
+
+fn is_json_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"))
+}
+
+async fn handle_add(
+    State(st): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
     tracing::debug!("Extension handoff received");
+    if !is_json_content_type(&headers) {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE;
+    }
+    // A token, when sent, must verify: a stale pairing is an error the
+    // extension should see, not something to quietly downgrade.
+    let authenticated = match headers.get("x-grab-token") {
+        None => false,
+        Some(token) => {
+            let valid = st
+                .pairing
+                .as_ref()
+                .zip(token.to_str().ok())
+                .is_some_and(|(p, t)| p.verify_token(&body, t));
+            if !valid {
+                return StatusCode::FORBIDDEN;
+            }
+            true
+        }
+    };
+    let req: AddRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) if e.is_data() => return StatusCode::UNPROCESSABLE_ENTITY,
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
     if req.url.trim().is_empty() {
         return StatusCode::BAD_REQUEST;
     }
@@ -300,24 +646,49 @@ async fn handle_add(State(tx): State<Sender<Handoff>>, Json(req): Json<AddReques
     if req.cookies.len() > 100 {
         return StatusCode::BAD_REQUEST;
     }
+    let wait = q.get("confirm").is_some_and(|v| v == "1");
+    let (decision, answer) = if wait {
+        let (tx, rx) = oneshot::channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
     let handoff = Handoff {
         url: req.url.clone(),
+        decision,
     };
-    match tx.try_send(handoff) {
+    match st.tx.try_send(handoff) {
         Ok(()) => {
-            // Stage the cookies only for an accepted handoff; the video probe
-            // and every download leg pick them up by URL.
-            if let Some(path) = write_handoff_cookies(&req.url, &req.cookies) {
+            // Stage the cookies only for an accepted handoff from a paired
+            // extension; the video probe and every download leg pick them up
+            // by URL.
+            if authenticated && let Some(path) = write_handoff_cookies(&req.url, &req.cookies) {
                 store_handoff_cookies(&req.url, path);
             }
-            StatusCode::OK
         }
-        Err(TrySendError::Full(_)) => StatusCode::TOO_MANY_REQUESTS,
-        Err(TrySendError::Closed(_)) => StatusCode::INTERNAL_SERVER_ERROR,
+        Err(TrySendError::Full(_)) => return StatusCode::TOO_MANY_REQUESTS,
+        Err(TrySendError::Closed(_)) => return StatusCode::INTERNAL_SERVER_ERROR,
+    }
+    let Some(answer) = answer else {
+        return StatusCode::OK;
+    };
+    match tokio::time::timeout(st.confirm_wait, answer).await {
+        Ok(Ok(true)) => StatusCode::OK,
+        outcome => {
+            // Declined, dropped unanswered or timed out: the extension keeps
+            // the browser download, so the staged cookies have no user.
+            discard_handoff_cookies(&req.url);
+            if outcome.is_err() {
+                StatusCode::REQUEST_TIMEOUT
+            } else {
+                StatusCode::CONFLICT
+            }
+        }
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -328,17 +699,39 @@ mod tests {
         rx: Receiver<Handoff>,
     }
 
+    const TEST_SECRET: [u8; SECRET_LEN] = [7; SECRET_LEN];
+
+    fn test_pairing() -> Option<Arc<Pairing>> {
+        Some(Arc::new(Pairing::from_secret(TEST_SECRET)))
+    }
+
     async fn start(depth: usize) -> Server {
+        start_with(depth, test_pairing(), Duration::from_secs(5)).await
+    }
+
+    async fn start_with(depth: usize, pairing: Option<Arc<Pairing>>, wait: Duration) -> Server {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = channel(depth);
-        tokio::spawn(serve_listener(listener, tx));
+        tokio::spawn(serve_listener(listener, tx, pairing, wait));
         Server { port, rx }
     }
 
+    /// `X-Grab-Token` value a paired extension would send for `body`.
+    fn token(body: &str) -> String {
+        let mac = Pairing::from_secret(TEST_SECRET).mac(CLIENT_CONTEXT, body.as_bytes());
+        hex_encode(&mac.finalize().into_bytes())
+    }
+
     /// One request on a fresh connection; returns the raw response.
-    async fn request(port: u16, headers: &[(&str, &str)], body: &str) -> String {
-        let mut req = String::from("POST /add HTTP/1.1\r\nConnection: close\r\n");
+    async fn request_to(
+        port: u16,
+        method: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> String {
+        let mut req = format!("{method} {target} HTTP/1.1\r\nConnection: close\r\n");
         for (k, v) in headers {
             req.push_str(&format!("{k}: {v}\r\n"));
         }
@@ -350,6 +743,11 @@ mod tests {
         let mut out = Vec::new();
         let _ = s.read_to_end(&mut out).await;
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// `POST /add` on a fresh connection.
+    async fn request(port: u16, headers: &[(&str, &str)], body: &str) -> String {
+        request_to(port, "POST", "/add", headers, body).await
     }
 
     fn status(resp: &str) -> &str {
@@ -470,16 +868,19 @@ mod tests {
         assert_eq!(status(&r), "200", "queue drains: {r}");
     }
 
-    /// Clear staged entries and delete their files: keeps map tests
-    /// independent of each other.
+    /// The staging map is process-global: tests that touch it run one at a
+    /// time, and start from an empty store.
+    static STORE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        let guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        purge_handoff_cookies();
+        guard
+    }
+
+    /// Clear staged entries and delete their files.
     fn clear_handoff_cookies() {
-        let paths: Vec<PathBuf> = HANDOFF_COOKIES
-            .lock()
-            .map(|mut map| map.drain().map(|(_, p)| p).collect())
-            .unwrap_or_default();
-        for p in paths {
-            let _ = std::fs::remove_file(p);
-        }
+        purge_handoff_cookies();
     }
 
     /// Minimal cookie as the original extension sent it (name/value only).
@@ -578,7 +979,7 @@ mod tests {
 
     #[test]
     fn handoff_cookie_args_match_canonical_url_forms() {
-        clear_handoff_cookies();
+        let _g = exclusive();
         // Stored under the bare domain; the intake hands the probe the
         // slash-terminated canonical form. One entry must serve both.
         let path = write_handoff_cookies("https://example.com", &[cookie("c", "v")]).expect("path");
@@ -596,7 +997,7 @@ mod tests {
 
     #[test]
     fn discard_handoff_cookies_removes_entry_and_file() {
-        clear_handoff_cookies();
+        let _g = exclusive();
         let path =
             write_handoff_cookies("https://example.com/item", &[cookie("c", "v")]).expect("path");
         store_handoff_cookies("https://example.com/item", path.clone());
@@ -612,7 +1013,7 @@ mod tests {
 
     #[test]
     fn store_handoff_cookies_evicts_past_cap() {
-        clear_handoff_cookies();
+        let _g = exclusive();
         let mut paths = Vec::new();
         for i in 0..=(MAX_HANDOFF_ENTRIES + 2) {
             let url = format!("https://example.com/evict-{i}");
@@ -620,26 +1021,34 @@ mod tests {
             store_handoff_cookies(&url, path.clone());
             paths.push(path);
         }
-        let len = HANDOFF_COOKIES.lock().unwrap().len();
+        let len = HANDOFF_COOKIES.lock().unwrap().by_key.len();
         assert_eq!(len, MAX_HANDOFF_ENTRIES, "map must stay bounded");
-        // Eviction is arbitrary, so assert on the count: every evicted
-        // entry's file must be deleted, staged ones must survive.
-        let surviving = paths.iter().filter(|p| p.exists()).count();
-        assert_eq!(
-            surviving, MAX_HANDOFF_ENTRIES,
-            "evicted entries' files must be deleted"
-        );
+        // Oldest first: the earliest handoffs are the ones evicted, with
+        // their files; the newest MAX_HANDOFF_ENTRIES survive.
+        let evicted = paths.len() - MAX_HANDOFF_ENTRIES;
+        for (i, path) in paths.iter().enumerate() {
+            assert_eq!(path.exists(), i >= evicted, "entry {i}");
+        }
+        assert!(handoff_cookie_args("https://example.com/evict-0").is_empty());
+        let newest = format!("https://example.com/evict-{}", paths.len() - 1);
+        assert_eq!(handoff_cookie_args(&newest).len(), 2);
         clear_handoff_cookies();
     }
 
     #[tokio::test]
     async fn handle_add_with_cookies_stages_file_for_probe() {
-        clear_handoff_cookies();
+        let _g = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body =
             r#"{"url":"https://example.com/watch?v=7","cookies":[{"name":"cf","value":"abc"}]}"#;
-        let r = request(srv.port, &[("Host", &host), JSON], body).await;
+        let tok = token(body);
+        let r = request(
+            srv.port,
+            &[("Host", &host), ("X-Grab-Token", &tok), JSON],
+            body,
+        )
+        .await;
         assert_eq!(status(&r), "200", "{r}");
         let handoff = srv.rx.recv().await.expect("handoff");
         assert_eq!(handoff.url, "https://example.com/watch?v=7");
@@ -659,7 +1068,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_add_rejects_too_many_cookies() {
-        clear_handoff_cookies();
+        let _g = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let cookies: Vec<String> = (0..101)
@@ -681,20 +1090,324 @@ mod tests {
 
     #[tokio::test]
     async fn handle_add_429_stages_nothing() {
-        clear_handoff_cookies();
+        let _g = exclusive();
         let srv = start(1).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = r#"{"url":"https://example.com/a","cookies":[{"name":"c","value":"v"}]}"#;
-        let r = request(srv.port, &[("Host", &host), JSON], body).await;
+        let tok = token(body);
+        let r = request(
+            srv.port,
+            &[("Host", &host), ("X-Grab-Token", &tok), JSON],
+            body,
+        )
+        .await;
         assert_eq!(status(&r), "200", "{r}");
         // Queue full: the handoff is refused, so its cookies must not linger.
         let body2 = r#"{"url":"https://example.com/b","cookies":[{"name":"c","value":"v"}]}"#;
-        let r = request(srv.port, &[("Host", &host), JSON], body2).await;
+        let tok2 = token(body2);
+        let r = request(
+            srv.port,
+            &[("Host", &host), ("X-Grab-Token", &tok2), JSON],
+            body2,
+        )
+        .await;
         assert_eq!(status(&r), "429", "{r}");
         assert!(
             handoff_cookie_args("https://example.com/b").is_empty(),
             "refused handoff must stage nothing"
         );
         clear_handoff_cookies();
+    }
+
+    // --- pairing -----------------------------------------------------------
+
+    #[tokio::test]
+    async fn hello_proves_knowledge_of_the_secret() {
+        let srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let nonce = "00112233445566778899aabbccddeeff";
+        let r = request_to(
+            srv.port,
+            "GET",
+            &format!("/hello?n={nonce}"),
+            &[("Host", &host)],
+            "",
+        )
+        .await;
+        assert_eq!(status(&r), "200", "{r}");
+        let expected = Pairing::from_secret(TEST_SECRET).proof(nonce);
+        assert!(r.contains(&expected), "{r}");
+        // A different secret yields a different proof: an impostor cannot fake it.
+        let other = Pairing::from_secret([9; SECRET_LEN]).proof(nonce);
+        assert!(!r.contains(&other));
+    }
+
+    #[tokio::test]
+    async fn hello_rejects_bad_nonce_unpaired_server_and_bad_host() {
+        let srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        for target in [
+            "/hello",
+            "/hello?n=zz",
+            "/hello?n=abcd",
+            "/hello?n=xyzxyzxyzxyzxyzxyz",
+        ] {
+            let r = request_to(srv.port, "GET", target, &[("Host", &host)], "").await;
+            assert_eq!(status(&r), "400", "{target}: {r}");
+        }
+        let r = request_to(
+            srv.port,
+            "GET",
+            "/hello?n=00112233445566778899aabbccddeeff",
+            &[("Host", "evil.example")],
+            "",
+        )
+        .await;
+        assert_eq!(status(&r), "403", "{r}");
+
+        let unpaired = start_with(4, None, Duration::from_secs(5)).await;
+        let host = format!("127.0.0.1:{}", unpaired.port);
+        let r = request_to(
+            unpaired.port,
+            "GET",
+            "/hello?n=00112233445566778899aabbccddeeff",
+            &[("Host", &host)],
+            "",
+        )
+        .await;
+        assert_eq!(status(&r), "503", "{r}");
+    }
+
+    #[tokio::test]
+    async fn unpaired_request_hands_off_url_but_drops_cookies() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = r#"{"url":"https://example.com/p","cookies":[{"name":"s","value":"v"}]}"#;
+        let r = request(srv.port, &[("Host", &host), JSON], body).await;
+        assert_eq!(status(&r), "200", "{r}");
+        assert_eq!(
+            srv.rx.recv().await.expect("handoff").url,
+            "https://example.com/p"
+        );
+        assert!(
+            handoff_cookie_args("https://example.com/p").is_empty(),
+            "cookies without a valid token must never be staged"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_or_unverifiable_token_is_refused() {
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let tok_other_body = token(r#"{"url":"https://example.com/other"}"#);
+        let wrong_secret = hex_encode(
+            &Pairing::from_secret([9; SECRET_LEN])
+                .mac(CLIENT_CONTEXT, BODY.as_bytes())
+                .finalize()
+                .into_bytes(),
+        );
+        for tok in [tok_other_body.as_str(), wrong_secret.as_str(), "zz", ""] {
+            let r = request(
+                srv.port,
+                &[("Host", &host), ("X-Grab-Token", tok), JSON],
+                BODY,
+            )
+            .await;
+            assert_eq!(status(&r), "403", "token {tok:?}: {r}");
+        }
+        // A server with no secret cannot verify anything, so it refuses too.
+        let unpaired = start_with(4, None, Duration::from_secs(5)).await;
+        let host = format!("127.0.0.1:{}", unpaired.port);
+        let tok = token(BODY);
+        let r = request(
+            unpaired.port,
+            &[("Host", &host), ("X-Grab-Token", &tok), JSON],
+            BODY,
+        )
+        .await;
+        assert_eq!(status(&r), "403", "{r}");
+        assert!(srv.rx.try_recv().is_err(), "nothing may reach the queue");
+    }
+
+    #[test]
+    fn regenerate_changes_the_secret_and_persists_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("grab-pairing-test-{}", std::process::id()));
+        let path = dir.join("nested").join("extension-pairing");
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = Pairing::load_or_create(&path).unwrap();
+        let code = first.code();
+        assert_eq!(code.len(), SECRET_LEN * 2);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "secret file must be owner-only");
+        // Reloading yields the same secret; regenerating a new one, on disk too.
+        assert_eq!(Pairing::load_or_create(&path).unwrap().code(), code);
+        let fresh = first.regenerate(&path).unwrap();
+        assert_ne!(fresh, code);
+        assert_eq!(Pairing::load_or_create(&path).unwrap().code(), fresh);
+        // A corrupt file is replaced rather than trusted.
+        std::fs::write(&path, "not hex").unwrap();
+        assert_eq!(
+            Pairing::load_or_create(&path).unwrap().code().len(),
+            SECRET_LEN * 2
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- cookie file hardening --------------------------------------------
+
+    fn scoped(name: &str, domain: &str, path: &str) -> Cookie {
+        Cookie {
+            name: name.to_string(),
+            value: "v".to_string(),
+            domain: Some(domain.to_string()),
+            host_only: Some(true),
+            path: Some(path.to_string()),
+            secure: None,
+            expiration_date: None,
+        }
+    }
+
+    #[test]
+    fn write_handoff_cookies_refuses_field_injection() {
+        let url = "https://example.com/";
+        for bad in [
+            scoped("a", "example.com\nevil.com\tTRUE\t/\tFALSE\t0\tx\ty", "/"),
+            scoped("a", "example.com\tTRUE", "/"),
+            scoped("a", "example.com", "/p\tq"),
+            scoped("a", "example.com", "/p\nq"),
+            scoped("a", "example.com", "no-leading-slash"),
+            scoped("a", "", "/"),
+        ] {
+            assert!(write_handoff_cookies(url, &[bad]).is_none());
+        }
+    }
+
+    #[test]
+    fn write_handoff_cookies_refuses_other_domains_keeps_valid_ones() {
+        let cookies = vec![
+            scoped("good", "example.com", "/"),
+            // Another site's cookie, a sibling and a lookalike suffix.
+            scoped("evil", "evil.com", "/"),
+            scoped("sibling", "other.example.com", "/"),
+            scoped("suffix", "ample.com", "/"),
+        ];
+        let path = write_handoff_cookies("https://www.example.com/x", &cookies).expect("path");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(rows, ["example.com\tFALSE\t/\tFALSE\t0\tgood\tv"], "{text}");
+    }
+
+    #[test]
+    fn purge_handoff_cookies_deletes_every_staged_file() {
+        let _g = exclusive();
+        let mut paths = Vec::new();
+        for i in 0..3 {
+            let url = format!("https://example.com/purge-{i}");
+            let path = write_handoff_cookies(&url, &[cookie("c", "v")]).expect("path");
+            store_handoff_cookies(&url, path.clone());
+            paths.push(path);
+        }
+        assert!(paths.iter().all(|p| p.exists()));
+        purge_handoff_cookies();
+        assert!(paths.iter().all(|p| !p.exists()), "files must be deleted");
+        assert!(handoff_cookie_args("https://example.com/purge-0").is_empty());
+    }
+
+    #[test]
+    fn store_handoff_cookies_deletes_the_file_when_the_url_has_no_key() {
+        let _g = exclusive();
+        let path =
+            write_handoff_cookies("https://example.com/k", &[cookie("c", "v")]).expect("path");
+        store_handoff_cookies("not a url", path.clone());
+        assert!(
+            !path.exists(),
+            "an unkeyable handoff must not leave its file behind"
+        );
+    }
+
+    // --- confirm=1 ---------------------------------------------------------
+
+    /// `POST /add?confirm=1` in the background; the test answers the dialog.
+    fn add_confirming(port: u16) -> tokio::task::JoinHandle<String> {
+        let host = format!("127.0.0.1:{port}");
+        tokio::spawn(async move {
+            request_to(
+                port,
+                "POST",
+                "/add?confirm=1",
+                &[("Host", &host), JSON],
+                BODY,
+            )
+            .await
+        })
+    }
+
+    #[tokio::test]
+    async fn confirm_waits_for_the_answer_and_reports_approval() {
+        let mut srv = start(4).await;
+        let task = add_confirming(srv.port);
+        let handoff = srv.rx.recv().await.expect("handoff");
+        assert!(!task.is_finished(), "must wait for the dialog");
+        handoff
+            .decision
+            .expect("confirm handoff carries a decision")
+            .send(true)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "200");
+    }
+
+    #[tokio::test]
+    async fn confirm_reports_decline_and_drops_cookies() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = r#"{"url":"https://example.com/d","cookies":[{"name":"c","value":"v"}]}"#;
+        let tok = token(body);
+        let (port, h2) = (srv.port, host.clone());
+        let task = tokio::spawn(async move {
+            request_to(
+                port,
+                "POST",
+                "/add?confirm=1",
+                &[("Host", &h2), ("X-Grab-Token", &tok), JSON],
+                body,
+            )
+            .await
+        });
+        let handoff = srv.rx.recv().await.expect("handoff");
+        handoff.decision.unwrap().send(false).unwrap();
+        assert_eq!(status(&task.await.unwrap()), "409");
+        assert!(
+            handoff_cookie_args("https://example.com/d").is_empty(),
+            "a declined handoff must not keep its cookies"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_treats_an_unanswered_decision_as_declined() {
+        let mut srv = start(4).await;
+        let task = add_confirming(srv.port);
+        drop(srv.rx.recv().await.expect("handoff").decision);
+        assert_eq!(status(&task.await.unwrap()), "409");
+    }
+
+    #[tokio::test]
+    async fn confirm_times_out_when_nobody_answers() {
+        let mut srv = start_with(4, test_pairing(), Duration::from_millis(50)).await;
+        let task = add_confirming(srv.port);
+        let _pending = srv.rx.recv().await.expect("handoff");
+        assert_eq!(status(&task.await.unwrap()), "408");
+    }
+
+    #[tokio::test]
+    async fn without_confirm_the_answer_is_immediate() {
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let r = request(srv.port, &[("Host", &host), JSON], BODY).await;
+        assert_eq!(status(&r), "200", "{r}");
+        assert!(srv.rx.recv().await.expect("handoff").decision.is_none());
     }
 }

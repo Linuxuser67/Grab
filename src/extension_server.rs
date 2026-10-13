@@ -23,7 +23,6 @@ use axum::{
 };
 use serde::Deserialize;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -75,12 +74,14 @@ pub(crate) fn write_handoff_cookies(
         count
     ));
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-        .ok()?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(&path).ok()?;
     file.write_all(content.as_bytes()).ok()?;
     Some(path)
 }

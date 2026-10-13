@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.4~beta.2" date="2026-10-13">
+      <description>
+        <ul>
+          <li>Browser extension pairing: the extension now verifies Grab via a shared secret before sending cookies, so session cookies only go to the real Grab. Pairing code is in Preferences → Advanced.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.4~beta.1" date="2026-10-13">
       <description>
         <ul>

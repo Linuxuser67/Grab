@@ -99,14 +99,14 @@ fn set_decision(id: &str, state: Decision) {
     let now = Instant::now();
     // Drop anything past its TTL, then bound the map by evicting the oldest.
     m.retain(|_, e| now.duration_since(e.changed_at) < DECISION_TTL);
-    if m.len() >= MAX_DECISIONS && !m.contains_key(id) {
-        if let Some(oldest) = m
+    if m.len() >= MAX_DECISIONS
+        && !m.contains_key(id)
+        && let Some(oldest) = m
             .iter()
             .min_by_key(|(_, e)| e.changed_at)
             .map(|(k, _)| k.clone())
-        {
-            m.remove(&oldest);
-        }
+    {
+        m.remove(&oldest);
     }
     m.insert(
         id.to_owned(),

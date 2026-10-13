@@ -50,7 +50,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tokio::sync::oneshot;
@@ -63,6 +63,98 @@ pub(crate) const QUEUE_DEPTH: usize = 16;
 /// How long `/add?confirm=1` waits for the user to answer the dialog. The
 /// extension's own timeout must be longer.
 pub(crate) const CONFIRM_WAIT: Duration = Duration::from_secs(120);
+
+// --- Async confirm decisions -----------------------------------------------
+// For `?confirm=async`: the server returns 202 immediately with an id, and the
+// extension polls `/status?id=`. This avoids holding one fetch open for 130s,
+// which MV3 service workers may not survive.
+
+/// How long `/status` holds the request waiting for a decision.
+const STATUS_LONG_POLL: Duration = Duration::from_secs(20);
+/// Poll interval while the decision is pending.
+const STATUS_TICK: Duration = Duration::from_millis(250);
+/// How long a decision entry lives after its last update.
+const DECISION_TTL: Duration = Duration::from_secs(300);
+/// Bound on the decision map size.
+const MAX_DECISIONS: usize = 256;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    Pending,
+    Approved,
+    Declined,
+    TimedOut,
+}
+
+struct DecisionEntry {
+    state: Decision,
+    changed_at: Instant,
+}
+
+static DECISIONS: LazyLock<Mutex<HashMap<String, DecisionEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn set_decision(id: &str, state: Decision) {
+    let Ok(mut m) = DECISIONS.lock() else { return };
+    let now = Instant::now();
+    // Drop anything past its TTL, then bound the map by evicting the oldest.
+    m.retain(|_, e| now.duration_since(e.changed_at) < DECISION_TTL);
+    if m.len() >= MAX_DECISIONS && !m.contains_key(id) {
+        if let Some(oldest) = m
+            .iter()
+            .min_by_key(|(_, e)| e.changed_at)
+            .map(|(k, _)| k.clone())
+        {
+            m.remove(&oldest);
+        }
+    }
+    m.insert(
+        id.to_owned(),
+        DecisionEntry {
+            state,
+            changed_at: now,
+        },
+    );
+}
+
+fn decision_state(id: &str) -> Option<Decision> {
+    DECISIONS.lock().ok()?.get(id).map(|e| e.state)
+}
+
+/// Ids are 32 lowercase hex chars from `random_secret`. Reject anything else
+/// before it reaches the map.
+fn is_valid_decision_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn decision_name(d: Decision) -> &'static str {
+    match d {
+        Decision::Pending => "pending",
+        Decision::Approved => "approved",
+        Decision::Declined => "declined",
+        Decision::TimedOut => "timeout",
+    }
+}
+
+/// Holds the request up to STATUS_LONG_POLL, returning as soon as the decision
+/// leaves `pending`. Returns only the state: never the URL, cookies or paths.
+async fn handle_status(Query(q): Query<HashMap<String, String>>) -> Response {
+    let Some(id) = q.get("id").filter(|id| is_valid_decision_id(id)) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let deadline = Instant::now() + STATUS_LONG_POLL;
+    loop {
+        match decision_state(id) {
+            None => return StatusCode::NOT_FOUND.into_response(),
+            Some(Decision::Pending) if Instant::now() < deadline => {
+                tokio::time::sleep(STATUS_TICK).await;
+            }
+            Some(state) => {
+                return Json(serde_json::json!({ "state": decision_name(state) })).into_response();
+            }
+        }
+    }
+}
 
 // --- Pairing ---------------------------------------------------------------
 
@@ -547,6 +639,7 @@ fn router(state: AppState, port: u16) -> Router {
     Router::new()
         .route("/add", post(handle_add))
         .route("/hello", get(handle_hello))
+        .route("/status", get(handle_status))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         // Outermost: rejected before the body is read.
         .layer(middleware::from_fn_with_state(hosts, guard))
@@ -607,7 +700,8 @@ async fn handle_hello(
     let Some(nonce) = nonce else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    Json(serde_json::json!({ "proof": pairing.proof(nonce) })).into_response()
+    Json(serde_json::json!({ "proof": pairing.proof(nonce), "confirm_async": true }))
+        .into_response()
 }
 
 fn is_json_content_type(headers: &HeaderMap) -> bool {
@@ -623,10 +717,10 @@ async fn handle_add(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: Bytes,
-) -> StatusCode {
+) -> Response {
     tracing::debug!("Extension handoff received");
     if !is_json_content_type(&headers) {
-        return StatusCode::UNSUPPORTED_MEDIA_TYPE;
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
     // A token, when sent, must verify: a stale pairing is an error the
     // extension should see, not something to quietly downgrade.
@@ -639,7 +733,7 @@ async fn handle_add(
                 .zip(token.to_str().ok())
                 .is_some_and(|(p, t)| p.verify_token(&body, t));
             if !valid {
-                return StatusCode::FORBIDDEN;
+                return StatusCode::FORBIDDEN.into_response();
             }
             true
         }
@@ -650,16 +744,18 @@ async fn handle_add(
         Err(_) => return StatusCode::BAD_REQUEST,
     };
     if req.url.trim().is_empty() {
-        return StatusCode::BAD_REQUEST;
+        return StatusCode::BAD_REQUEST.into_response();
     }
     if req.url.len() > crate::download_intake::MAX_URL_LEN {
-        return StatusCode::URI_TOO_LONG;
+        return StatusCode::URI_TOO_LONG.into_response();
     }
     // Bound cookie count: truncate instead of rejecting, so an oversize
     // jar degrades to a smaller one rather than losing the handoff.
     req.cookies.truncate(100);
-    let wait = q.get("confirm").is_some_and(|v| v == "1");
-    let (decision, answer) = if wait {
+    let confirm_mode = q.get("confirm").map(|v| v.as_str());
+    let wait = confirm_mode == Some("1");
+    let async_mode = confirm_mode == Some("async");
+    let (decision, answer) = if wait || async_mode {
         let (tx, rx) = oneshot::channel();
         (Some(tx), Some(rx))
     } else {
@@ -683,26 +779,50 @@ async fn handle_add(
         Ok(()) => {}
         Err(TrySendError::Full(_)) => {
             discard_handoff_cookies(&req.url);
-            return StatusCode::TOO_MANY_REQUESTS;
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
         }
         Err(TrySendError::Closed(_)) => {
             discard_handoff_cookies(&req.url);
-            return StatusCode::INTERNAL_SERVER_ERROR;
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
     let Some(answer) = answer else {
-        return StatusCode::OK;
+        return StatusCode::OK.into_response();
     };
+    // Async mode: return 202 immediately with an id. The extension polls
+    // /status?id=. Set Pending before returning so the poll never 404s.
+    if async_mode {
+        let id = match random_secret() {
+            Ok(secret) => hex_encode(&secret[..16]),
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        set_decision(&id, Decision::Pending);
+        let url = req.url.clone();
+        let wait_for = st.confirm_wait;
+        let task_id = id.clone();
+        tokio::spawn(async move {
+            let outcome = match tokio::time::timeout(wait_for, answer).await {
+                Ok(Ok(true)) => Decision::Approved,
+                Ok(_) => Decision::Declined,
+                Err(_) => Decision::TimedOut,
+            };
+            if outcome != Decision::Approved {
+                discard_handoff_cookies(&url);
+            }
+            set_decision(&task_id, outcome);
+        });
+        return (StatusCode::ACCEPTED, Json(serde_json::json!({ "id": id }))).into_response();
+    }
     match tokio::time::timeout(st.confirm_wait, answer).await {
-        Ok(Ok(true)) => StatusCode::OK,
+        Ok(Ok(true)) => StatusCode::OK.into_response(),
         outcome => {
             // Declined, dropped unanswered or timed out: the extension keeps
             // the browser download, so the staged cookies have no user.
             discard_handoff_cookies(&req.url);
             if outcome.is_err() {
-                StatusCode::REQUEST_TIMEOUT
+                StatusCode::REQUEST_TIMEOUT.into_response()
             } else {
-                StatusCode::CONFLICT
+                StatusCode::CONFLICT.into_response()
             }
         }
     }

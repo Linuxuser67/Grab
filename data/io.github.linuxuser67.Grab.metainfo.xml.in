@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.4~beta.1" date="2026-10-13">
+      <description>
+        <ul>
+          <li>The browser extension can now send site cookies with a download handoff, letting yt-dlp pass Cloudflare bot challenges. Cookie scope (host-only, path, secure, expiry) is preserved.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.3" date="2026-10-11">
       <description>
         <ul>

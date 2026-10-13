@@ -459,7 +459,7 @@ pub fn show(
         code_row.add_suffix(&copy_btn);
         code_row.add_suffix(&regen_btn);
         ext_group.add(&code_row);
-        page.add(&ext_group);
+        advanced_page.add(&ext_group);
     }
     dialog.add(&page);
 

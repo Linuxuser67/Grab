@@ -244,6 +244,32 @@ static HANDOFF_COOKIES: LazyLock<Mutex<HandoffStore>> =
 const MAX_HANDOFF_ENTRIES: usize = QUEUE_DEPTH;
 static COOKIE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Private 0700 staging dir for handoff cookie files. Duplicates the
+/// directory logic from `crate::cookies::cookie_staging_dir` to avoid a
+/// module cycle (`cookies` -> `video_spawn` -> `extension_server` -> `cookies`).
+/// Uses the same `grab-cookies` directory so the startup sweep in `cookies`
+/// cleans up stale handoff files.
+fn handoff_staging_dir() -> Option<PathBuf> {
+    let base = match std::env::var("XDG_RUNTIME_DIR") {
+        Ok(s) if !s.is_empty() => PathBuf::from(s),
+        _ => match std::env::var("XDG_CACHE_HOME") {
+            Ok(s) if !s.is_empty() => PathBuf::from(s),
+            _ => PathBuf::from(std::env::var_os("HOME")?).join(".cache"),
+        },
+    };
+    let dir = base.join("grab-cookies");
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::os::unix::fs::DirBuilderExt as _;
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    Some(dir)
+}
+
 /// Canonical map key for a handoff URL: the `url::Url` serialization, so the
 /// raw extension string and the intake-normalized form hit the same entry
 /// (`https://example.com` and `https://example.com/` are one key).
@@ -331,7 +357,7 @@ pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<Pat
     }
     // The private 0700 staging dir (`XDG_RUNTIME_DIR`), the one the startup
     // sweep cleans; no usable dir means no cookies, never a fall back to /tmp.
-    let mut path = crate::cookies::cookie_staging_dir()?;
+    let mut path = handoff_staging_dir()?;
     let count = COOKIE_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     path.push(format!(
         "grab-handoff-cookies-{}-{}",

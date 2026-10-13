@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.4" date="2026-10-13">
+      <description>
+        <ul>
+          <li>Browser extension pairing: the extension now verifies Grab via a shared secret before sending cookies, so session cookies only go to the real Grab. Pairing code is in Preferences → Advanced.</li>
+          <li>Extension cookie handoff: the browser extension can now hand off site cookies with downloads, fixing logins on protected sites.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.4~beta.2" date="2026-10-13">
       <description>
         <ul>

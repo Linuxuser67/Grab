@@ -644,7 +644,7 @@ async fn handle_add(
             true
         }
     };
-    let req: AddRequest = match serde_json::from_slice(&body) {
+    let mut req: AddRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) if e.is_data() => return StatusCode::UNPROCESSABLE_ENTITY,
         Err(_) => return StatusCode::BAD_REQUEST,

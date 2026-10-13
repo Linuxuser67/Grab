@@ -44,6 +44,7 @@ struct Cookie {
 /// lookup writes them via `--cookies` and deletes them after.
 static HANDOFF_COOKIES: std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>> =
     std::sync::Mutex::new(std::collections::HashMap::new());
+static COOKIE_FILE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Write extension-provided cookies to a temp file for yt-dlp's `--cookies`.
 /// Returns the path, or None if there are no cookies or the write fails.
@@ -67,8 +68,7 @@ pub(crate) fn write_handoff_cookies(
         content.push_str(&format!("{domain}\tTRUE\t/\tFALSE\t0\t{n}\t{v}\n"));
     }
     let mut path = std::env::temp_dir();
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let count = COOKIE_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     path.push(format!(
         "grab-handoff-cookies-{}-{}",
         std::process::id(),

@@ -71,11 +71,11 @@ pub(crate) async fn fetch_raw_dump_json(
             }
         }
     }
-    let _cookie_guard = CookieFileGuard(handoff_cookie_file.clone());
-    if let Some(ref path) = handoff_cookie_file {
+    if let Some(path) = handoff_cookie_file.as_ref() {
         args.push("--cookies".to_string());
         args.push(path.to_string_lossy().to_string());
     }
+    let _cookie_guard = CookieFileGuard(handoff_cookie_file);
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(&args);

@@ -437,7 +437,22 @@ pub fn show(
         ))]);
         {
             let pairing = pairing.clone();
-            copy_btn.connect_clicked(move |btn| btn.clipboard().set_text(&pairing.code()));
+            copy_btn.connect_clicked(move |btn| {
+                btn.clipboard().set_text(&pairing.code());
+                // HIG: show the copy happened by swapping to a checkmark,
+                // then revert after a beat.
+                btn.set_icon_name("object-select-symbolic");
+                glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(1000),
+                    glib::clone!(
+                        #[weak]
+                        btn,
+                        move || {
+                            btn.set_icon_name("edit-copy-symbolic");
+                        }
+                    ),
+                );
+            });
         }
         let regen_btn = gtk4::Button::builder()
             .icon_name("view-refresh-symbolic")

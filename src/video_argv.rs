@@ -258,6 +258,11 @@ pub(crate) fn unified_download_argv(
         args.push("--remux-video".to_string());
         args.push(fmt.to_string());
     }
+    // LL-HLS timestamp hygiene for yt-dlp's ffmpeg downloader (same as live
+    // captures): split A/V manifests drift when the broadcaster drops frames.
+    // No-ops on clean streams. Scoped `ffmpeg:` so native HLS ignores it.
+    args.push("--downloader-args".to_string());
+    args.push(crate::video_tools::LIVE_DOWNLOADER_ARGS.to_string());
     push_vod_tail_args(&mut args, job);
     args
 }
@@ -478,6 +483,12 @@ pub(crate) fn hls_download_argv(
         args.push("--remux-video".to_string());
         args.push(fmt.to_string());
     }
+    // LL-HLS timestamp hygiene for yt-dlp's ffmpeg downloader (same as live
+    // captures and unified downloads): split A/V manifests drift when the
+    // broadcaster drops frames. No-ops on clean streams. Scoped `ffmpeg:` so
+    // native HLS ignores it.
+    args.push("--downloader-args".to_string());
+    args.push(crate::video_tools::LIVE_DOWNLOADER_ARGS.to_string());
     push_vod_tail_args(&mut args, job);
     args
 }

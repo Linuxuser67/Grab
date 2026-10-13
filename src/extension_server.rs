@@ -655,10 +655,9 @@ async fn handle_add(
     if req.url.len() > crate::download_intake::MAX_URL_LEN {
         return StatusCode::URI_TOO_LONG;
     }
-    // Bound cookie count: each is a small name/value pair.
-    if req.cookies.len() > 100 {
-        return StatusCode::BAD_REQUEST;
-    }
+    // Bound cookie count: truncate instead of rejecting, so an oversize
+    // jar degrades to a smaller one rather than losing the handoff.
+    req.cookies.truncate(100);
     let wait = q.get("confirm").is_some_and(|v| v == "1");
     let (decision, answer) = if wait {
         let (tx, rx) = oneshot::channel();
@@ -670,17 +669,26 @@ async fn handle_add(
         url: req.url.clone(),
         decision,
     };
+    // Stage cookies before queueing: with auto-add the GTK side can start
+    // the probe before the file exists if we stage after try_send.
+    let staged = if authenticated {
+        write_handoff_cookies(&req.url, &req.cookies)
+    } else {
+        None
+    };
+    if let Some(path) = staged {
+        store_handoff_cookies(&req.url, path);
+    }
     match st.tx.try_send(handoff) {
-        Ok(()) => {
-            // Stage the cookies only for an accepted handoff from a paired
-            // extension; the video probe and every download leg pick them up
-            // by URL.
-            if authenticated && let Some(path) = write_handoff_cookies(&req.url, &req.cookies) {
-                store_handoff_cookies(&req.url, path);
-            }
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            discard_handoff_cookies(&req.url);
+            return StatusCode::TOO_MANY_REQUESTS;
         }
-        Err(TrySendError::Full(_)) => return StatusCode::TOO_MANY_REQUESTS,
-        Err(TrySendError::Closed(_)) => return StatusCode::INTERNAL_SERVER_ERROR,
+        Err(TrySendError::Closed(_)) => {
+            discard_handoff_cookies(&req.url);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
     }
     let Some(answer) = answer else {
         return StatusCode::OK;
@@ -991,7 +999,7 @@ mod tests {
             "{text}"
         );
 
-        // Subdomain cookie with leading dot: tailmatch, dot stripped.
+        // Subdomain cookie with leading dot: tailmatch, dot kept for TRUE.
         let cookies = vec![Cookie {
             name: "prefs".to_string(),
             value: "dark".to_string(),
@@ -1007,7 +1015,7 @@ mod tests {
         let rows: Vec<&str> = text.lines().skip(1).collect();
         assert_eq!(
             rows,
-            ["example.com\tTRUE\t/\tFALSE\t0\tprefs\tdark"],
+            [".example.com\tTRUE\t/\tFALSE\t0\tprefs\tdark"],
             "{text}"
         );
     }
@@ -1095,7 +1103,7 @@ mod tests {
         assert!(staged.exists(), "staged file must exist");
         let text = std::fs::read_to_string(&staged).unwrap();
         assert!(
-            text.contains("example.com\tTRUE\t/\tFALSE\t0\tcf\tabc"),
+            text.contains(".example.com\tTRUE\t/\tFALSE\t0\tcf\tabc"),
             "{text}"
         );
         clear_handoff_cookies();

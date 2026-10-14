@@ -2,7 +2,7 @@
 //!
 //! These tests read real-world files from `corpus/` (committed to the repo)
 //! instead of synthetic inline fixtures. Run with:
-//!   cargo test --features corpus -- --test-threads=1
+//!   cargo nextest run --features corpus -E 'test(corpus_)'
 //!
 //! Without the feature, this module compiles to nothing.
 
@@ -58,7 +58,11 @@ fn corpus_content_disposition_no_panic_no_traversal() {
         }
         let result = crate::download_fetch::filename_from_content_disposition(line);
         if let Some(name) = result {
-            assert!(!name.is_empty(), "line {} returned empty filename", lineno + 1);
+            assert!(
+                !name.is_empty(),
+                "line {} returned empty filename",
+                lineno + 1
+            );
             assert!(
                 !name.contains('/') && !name.contains('\\'),
                 "line {} returned filename with path separator: {name:?}",

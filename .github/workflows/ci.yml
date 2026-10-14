@@ -106,8 +106,15 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      # Serial: same glib MainContext constraint as the check job.
-      - run: cargo test --features corpus corpus_ -- --test-threads=1
+      - name: Install cargo-nextest
+        run: |
+          # Pinned hash: a swapped release asset fails here instead of running unverified.
+          curl -sSL --fail https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.148/cargo-nextest-0.9.148-x86_64-unknown-linux-gnu.tar.gz -o /tmp/nextest.tar.gz
+          echo "223ba936714cc861a9cdedad5a8eb664dfdd69d6fbdf6cea6aa8184f523290dc  /tmp/nextest.tar.gz" | sha256sum -c -
+          tar --no-same-owner -xz -C ~/.cargo/bin -f /tmp/nextest.tar.gz
+          cargo nextest --version
+      # Serial: same glib MainContext constraint as the check job (see .config/nextest.toml).
+      - run: cargo nextest run --features corpus -E 'test(corpus_)'
   # Read-only secret and supply-chain scanning: gitleaks over the full
   # history plus cargo-audit against the RustSec advisory DB. No system
   # deps, no behavior risk — fails only when a secret or a

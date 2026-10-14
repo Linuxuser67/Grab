@@ -50,7 +50,7 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="5.7.5~beta" date="2026-10-13">
+    <release version="5.7.5~beta.1" date="2026-10-13">
       <description>
         <ul>
           <li>Extension async confirm: the handoff no longer holds a 130s connection, fixing MV3 worker timeouts.</li>

@@ -1,7 +1,12 @@
-//! Real-file corpus tests, gated behind the `corpus` cargo feature.
+//! Real-world-shaped corpus tests, gated behind the `corpus` cargo feature.
 //!
-//! These tests read real-world files from `corpus/` (committed to the repo)
-//! instead of synthetic inline fixtures. Run with:
+//! These tests use fixture files in `corpus/` (committed to the repo) that
+//! capture real-world parser edge cases: null-vs-missing keys, wild
+//! Content-Disposition headers, hostile torrent paths, adversarial Unicode
+//! titles. They are synthetic but modeled on documented wild behavior,
+//! not on-the-wire captures.
+//!
+//! Run with:
 //!   cargo nextest run --features corpus -E 'test(corpus_)'
 //!
 //! Without the feature, this module compiles to nothing.
@@ -14,9 +19,10 @@ fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("corpus")
 }
 
-/// yt-dlp JSON corpus: every file in corpus/ytdlp/ must survive
-/// `sanitize_video_json` without panicking, and must still parse as JSON
-/// afterwards. This catches unhandled shapes from real extractors.
+/// yt-dlp JSON corpus: every file in corpus/ytdlp/*.json is run through
+/// `sanitize_video_json`. The test asserts the sanitizer actually
+/// repaired the input: required keys exist with correct types afterwards.
+/// A no-op sanitizer would fail these.
 #[test]
 fn corpus_ytdlp_json_sanitizes_cleanly() {
     let dir = corpus_dir().join("ytdlp");
@@ -33,21 +39,38 @@ fn corpus_ytdlp_json_sanitizes_cleanly() {
             .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", path.display()));
         // Must not panic on real-world shapes.
         crate::video_probe::sanitize_video_json(&mut value);
-        // Must still be valid JSON-serializable afterwards.
-        let _ = serde_json::to_string(&value)
-            .unwrap_or_else(|e| panic!("{} failed to re-serialize: {e}", path.display()));
+        let obj = value
+            .as_object()
+            .unwrap_or_else(|| panic!("{}: root is not an object after sanitize", path.display()));
+        // The sanitizer must have filled these (proves it wasn't a no-op).
+        for key in ["id", "title", "extractor", "live_status"] {
+            assert!(
+                obj.get(key).is_some_and(|v| v.is_string()),
+                "{}: missing or non-string {key:?} after sanitize",
+                path.display()
+            );
+        }
+        assert!(
+            obj.get("formats").is_some_and(|v| v.is_array()),
+            "{}: formats is not an array after sanitize",
+            path.display()
+        );
+        assert!(
+            obj.get("thumbnails").is_some_and(|v| v.is_array()),
+            "{}: thumbnails is not an array after sanitize",
+            path.display()
+        );
         count += 1;
     }
     assert!(count > 0, "corpus/ytdlp contained no JSON files");
 }
 
-/// Content-Disposition corpus: every non-empty line in
-/// corpus/content-disposition/headers.txt is fed to
-/// `filename_from_content_disposition`. It must not panic, and when it
-/// returns Some, the filename must be non-empty and contain no path
-/// separators (traversal defense).
+/// Content-Disposition corpus: each line in
+/// corpus/content-disposition/headers.txt is `input ||| expected`, where
+/// expected is the filename or NONE. The test asserts exact output —
+/// a parser returning None for everything would fail.
 #[test]
-fn corpus_content_disposition_no_panic_no_traversal() {
+fn corpus_content_disposition_expected_values() {
     let path = corpus_dir().join("content-disposition/headers.txt");
     let raw = std::fs::read_to_string(&path).expect("corpus headers.txt missing");
     let mut count = 0;
@@ -56,38 +79,53 @@ fn corpus_content_disposition_no_panic_no_traversal() {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let result = crate::download_fetch::filename_from_content_disposition(line);
-        if let Some(name) = result {
-            assert!(
-                !name.is_empty(),
-                "line {} returned empty filename",
-                lineno + 1
-            );
-            assert!(
-                !name.contains('/') && !name.contains('\\'),
-                "line {} returned filename with path separator: {name:?}",
-                lineno + 1
-            );
-        }
+        let (input, expected) = line
+            .split_once(" ||| ")
+            .unwrap_or_else(|| panic!("line {} missing ' ||| ' separator", lineno + 1));
+        let expected = if expected == "NONE" {
+            None
+        } else {
+            Some(expected.to_string())
+        };
+        let actual = crate::download_fetch::filename_from_content_disposition(input);
+        assert_eq!(
+            actual,
+            expected,
+            "line {} mismatch for {input:?}",
+            lineno + 1
+        );
         count += 1;
     }
     assert!(count > 0, "corpus headers.txt had no testable lines");
 }
 
-/// Netscape cookie corpus: every non-comment line in
-/// corpus/cookies/netscape.txt is fed to `parse_netscape_line`. It must
-/// not panic. Malformed lines must return None (not garbage).
+/// Netscape cookie corpus: each line in corpus/cookies/netscape.txt is
+/// `input ||| expected`, where expected is SOME or NONE. Well-formed
+/// lines must parse; malformed ones (bad expiry, short lines) must
+/// return None, not panic or produce garbage.
 #[test]
-fn corpus_cookies_parse_without_panic() {
+fn corpus_cookies_parse_expected() {
     let path = corpus_dir().join("cookies/netscape.txt");
     let raw = std::fs::read_to_string(&path).expect("corpus netscape.txt missing");
     let mut count = 0;
     for (lineno, line) in raw.lines().enumerate() {
-        if line.is_empty() || (line.starts_with('#') && !line.starts_with("#HttpOnly_")) {
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        // Must not panic on real-world edge cases (huge expiries, bad numbers, short lines).
-        let _ = crate::cookies::parse_netscape_line(line);
+        let (input, expected) = line
+            .split_once(" ||| ")
+            .unwrap_or_else(|| panic!("line {} missing ' ||| ' separator", lineno + 1));
+        let expect_some = expected == "SOME";
+        // Must not panic on real-world edge cases (huge expiries, bad numbers).
+        let actual = crate::cookies::parse_netscape_line(input);
+        assert_eq!(
+            actual.is_some(),
+            expect_some,
+            "line {}: expected {} for {input:?}, got {:?}",
+            lineno + 1,
+            if expect_some { "SOME" } else { "NONE" },
+            actual.is_some()
+        );
         count += 1;
     }
     assert!(count > 0, "corpus netscape.txt had no testable lines");

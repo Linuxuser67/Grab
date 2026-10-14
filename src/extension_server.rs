@@ -671,7 +671,11 @@ async fn handle_add(
     if req.cookies.len() > 100 {
         return StatusCode::BAD_REQUEST;
     }
-    let wait = q.get("confirm").is_some_and(|v| v == "1");
+    // Unauthenticated callers always wait for the user's answer: any local
+    // process can POST without a token, so silent queuing would let
+    // arbitrary software start downloads. The confirm dialog is the
+    // authorization for callers without a pairing.
+    let wait = q.get("confirm").is_some_and(|v| v == "1") || !authenticated;
     let (decision, answer) = if wait {
         let (tx, rx) = oneshot::channel();
         (Some(tx), Some(rx))
@@ -798,10 +802,14 @@ mod tests {
     async fn accepts_loopback_host_without_origin() {
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
-        let r = request(srv.port, &[("Host", &host), JSON], BODY).await;
-        assert_eq!(status(&r), "200", "{r}");
+        // Unauthenticated: waits for the user's confirmation.
+        let task = tokio::spawn(async move {
+            request_to(srv.port, "POST", "/add", &[("Host", &host), JSON], BODY).await
+        });
         let handoff = srv.rx.recv().await.expect("handoff");
         assert_eq!(handoff.url, "https://example.com/file.zip");
+        handoff.decision.expect("decision").send(true).unwrap();
+        assert_eq!(status(&task.await.unwrap()), "200");
     }
 
     #[tokio::test]
@@ -812,9 +820,24 @@ mod tests {
             "moz-extension://8f1c2a4e-1b2c-4d5e-9f00-aabbccddeeff",
             "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
         ] {
-            let r = request(srv.port, &[("Host", &host), ("Origin", origin), JSON], BODY).await;
+            // Unauthenticated: waits for the user's confirmation.
+            let task = tokio::spawn({
+                let host = host.clone();
+                async move {
+                    request_to(
+                        srv.port,
+                        "POST",
+                        "/add",
+                        &[("Host", &host), ("Origin", origin), JSON],
+                        BODY,
+                    )
+                    .await
+                }
+            });
+            let handoff = srv.rx.recv().await.expect("handoff");
+            handoff.decision.expect("decision").send(true).unwrap();
+            let r = task.await.unwrap();
             assert_eq!(status(&r), "200", "{origin}: {r}");
-            assert!(srv.rx.recv().await.is_some());
         }
     }
 
@@ -896,12 +919,33 @@ mod tests {
     async fn full_queue_answers_429_instead_of_growing() {
         let mut srv = start(1).await;
         let host = format!("127.0.0.1:{}", srv.port);
-        let r = request(srv.port, &[("Host", &host), JSON], BODY).await;
-        assert_eq!(status(&r), "200", "{r}");
+        // First request waits for confirmation (unauthenticated), occupying
+        // the single queue slot.
+        let task = tokio::spawn({
+            let host = host.clone();
+            async move { request_to(srv.port, "POST", "/add", &[("Host", &host), JSON], BODY).await }
+        });
+        // Give it a moment to queue.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !task.is_finished(),
+            "first request must wait for the dialog"
+        );
+        // Queue full: second request gets 429 immediately.
         let r = request(srv.port, &[("Host", &host), JSON], BODY).await;
         assert_eq!(status(&r), "429", "{r}");
-        assert!(srv.rx.recv().await.is_some());
-        let r = request(srv.port, &[("Host", &host), JSON], BODY).await;
+        // Answer the first dialog: it completes, queue drains.
+        let handoff = srv.rx.recv().await.expect("handoff");
+        handoff.decision.expect("decision").send(true).unwrap();
+        assert_eq!(status(&task.await.unwrap()), "200");
+        // Queue drained: third request is accepted (and waits for its dialog).
+        let task3 = tokio::spawn({
+            let host = host.clone();
+            async move { request_to(srv.port, "POST", "/add", &[("Host", &host), JSON], BODY).await }
+        });
+        let handoff = srv.rx.recv().await.expect("handoff");
+        handoff.decision.expect("decision").send(true).unwrap();
+        let r = task3.await.unwrap();
         assert_eq!(status(&r), "200", "queue drains: {r}");
     }
 
@@ -1238,21 +1282,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unpaired_request_hands_off_url_but_drops_cookies() {
+    async fn unpaired_request_waits_for_confirmation_and_drops_cookies() {
         let _g = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = r#"{"url":"https://example.com/p","cookies":[{"name":"s","value":"v"}]}"#;
-        let r = request(srv.port, &[("Host", &host), JSON], body).await;
-        assert_eq!(status(&r), "200", "{r}");
-        assert_eq!(
-            srv.rx.recv().await.expect("handoff").url,
-            "https://example.com/p"
+        // Unauthenticated: waits for the user's confirmation.
+        let task = tokio::spawn({
+            let host = host.clone();
+            async move { request_to(srv.port, "POST", "/add", &[("Host", &host), JSON], body).await }
+        });
+        let handoff = srv.rx.recv().await.expect("handoff");
+        assert_eq!(handoff.url, "https://example.com/p");
+        assert!(
+            handoff.decision.is_some(),
+            "unpaired handoff must carry a decision"
         );
         assert!(
             handoff_cookie_args("https://example.com/p").is_empty(),
             "cookies without a valid token must never be staged"
         );
+        handoff.decision.unwrap().send(true).unwrap();
+        let r = task.await.unwrap();
+        assert_eq!(status(&r), "200", "{r}");
     }
 
     #[tokio::test]
@@ -1419,6 +1471,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unauthenticated_handoff_waits_for_confirmation() {
+        // No token, no ?confirm=1: must still wait for the user's answer.
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let task = tokio::spawn(async move {
+            request_to(srv.port, "POST", "/add", &[("Host", &host), JSON], BODY).await
+        });
+        // Give the server a moment to receive and queue.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !task.is_finished(),
+            "unauthenticated handoff must wait for the dialog"
+        );
+        let handoff = srv.rx.recv().await.expect("handoff");
+        handoff
+            .decision
+            .expect("unauthenticated handoff carries a decision")
+            .send(true)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "200");
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_handoff_decline_returns_conflict() {
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let task = tokio::spawn(async move {
+            request_to(srv.port, "POST", "/add", &[("Host", &host), JSON], BODY).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let handoff = srv.rx.recv().await.expect("handoff");
+        handoff
+            .decision
+            .expect("unauthenticated handoff carries a decision")
+            .send(false)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "409");
+    }
+
+    #[tokio::test]
     async fn confirm_reports_decline_and_drops_cookies() {
         let _g = exclusive();
         let mut srv = start(4).await;
@@ -1463,9 +1555,18 @@ mod tests {
 
     #[tokio::test]
     async fn without_confirm_the_answer_is_immediate() {
+        // The fast path still exists, but only for authenticated (paired)
+        // callers. Unauthenticated callers always wait (see
+        // unauthenticated_handoff_waits_for_confirmation).
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
-        let r = request(srv.port, &[("Host", &host), JSON], BODY).await;
+        let tok = token(BODY);
+        let r = request(
+            srv.port,
+            &[("Host", &host), ("X-Grab-Token", &tok), JSON],
+            BODY,
+        )
+        .await;
         assert_eq!(status(&r), "200", "{r}");
         assert!(srv.rx.recv().await.expect("handoff").decision.is_none());
     }

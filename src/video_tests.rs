@@ -2453,10 +2453,10 @@ fn sanitize_video_json_table() {
     sanitize_video_json(&mut v);
     assert_eq!(v["live_status"], serde_json::json!(""));
 
-    // Numeric field as string: coerced.
+    // Numeric field as string: left alone (only JSON numbers are coerced).
     let mut v = serde_json::json!({"id": "x", "duration": "3600", "formats": []});
     sanitize_video_json(&mut v);
-    assert_eq!(v["duration"], serde_json::json!(3600));
+    assert_eq!(v["duration"], serde_json::json!("3600"));
 
     // Formats absent → empty array.
     let mut v = serde_json::json!({"id": "x"});

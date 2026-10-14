@@ -153,13 +153,15 @@ fn corpus_torrents_parse_without_panic() {
             std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
         // librqbit must not panic; invalid files return Err.
         if let Ok(meta) = librqbit::torrent_from_bytes(&bytes) {
-            let name = meta.info.data.name.as_ref();
-            let display = crate::torrent::sanitize_display_path(name);
-            assert!(
-                !display.contains(".."),
-                "{}: sanitized name contains ..: {display:?}",
-                path.display()
-            );
+            if let Some(name) = meta.info.data.name.as_ref() {
+                let name_str = String::from_utf8_lossy(name.as_ref());
+                let display = crate::torrent::sanitize_display_path(&name_str);
+                assert!(
+                    !display.contains(".."),
+                    "{}: sanitized name contains ..: {display:?}",
+                    path.display()
+                );
+            }
         }
         count += 1;
     }

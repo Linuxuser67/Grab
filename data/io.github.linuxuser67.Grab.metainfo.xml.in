@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.6" date="2026-10-14">
+      <description>
+        <ul>
+          <li>Torrent rows now use the MIME-type icon.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.5" date="2026-10-14">
       <description>
         <ul>

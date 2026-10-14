@@ -6944,8 +6944,8 @@ mod proptest_cd {
             let result = filename_from_content_disposition(&s);
             if let Some(name) = result {
                 prop_assert!(!name.is_empty());
-                prop_assert_ne!(name, ".");
-                prop_assert_ne!(name, "..");
+                prop_assert!(name != ".");
+                prop_assert!(name != "..");
                 prop_assert!(!name.contains('/') && !name.contains('\\') && !name.contains('\0'));
                 prop_assert!(!name.chars().any(|c| c.is_control()));
             }

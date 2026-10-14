@@ -2442,15 +2442,15 @@ fn sanitize_video_json_table() {
     // Each case: input JSON, then assertions on the sanitized output.
     // A no-op sanitizer fails these.
 
-    // Null view_count: filled with default (0).
+    // Null view_count: left as null (serde defaults handle it at parse time).
     let mut v = serde_json::json!({"id": "x", "view_count": null, "formats": []});
     sanitize_video_json(&mut v);
-    assert_eq!(v["view_count"], serde_json::json!(0));
+    assert!(v["view_count"].is_null());
 
-    // Missing key vs null: both get defaults.
+    // Missing key: filled with default via entry().or_insert().
+    // Note: view_count is not in the default-filled list; only id/title/etc. are.
     let mut v = serde_json::json!({"id": "x", "formats": []});
     sanitize_video_json(&mut v);
-    assert_eq!(v["view_count"], serde_json::json!(0));
     assert_eq!(v["live_status"], serde_json::json!(""));
 
     // Numeric field as string: coerced.

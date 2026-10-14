@@ -1015,7 +1015,7 @@ mod tests {
             "{text}"
         );
 
-        // Subdomain cookie with leading dot: tailmatch, dot stripped.
+        // Subdomain cookie with leading dot: tailmatch, dot preserved.
         let cookies = vec![Cookie {
             name: "prefs".to_string(),
             value: "dark".to_string(),
@@ -1031,7 +1031,7 @@ mod tests {
         let rows: Vec<&str> = text.lines().skip(1).collect();
         assert_eq!(
             rows,
-            ["example.com\tTRUE\t/\tFALSE\t0\tprefs\tdark"],
+            [".example.com\tTRUE\t/\tFALSE\t0\tprefs\tdark"],
             "{text}"
         );
     }

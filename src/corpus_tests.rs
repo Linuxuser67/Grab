@@ -30,9 +30,15 @@ fn corpus_ytdlp_json_sanitizes_cleanly() {
     for entry in std::fs::read_dir(&dir).expect("corpus/ytdlp missing") {
         let entry = entry.unwrap();
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
+        // Fail on unexpected files instead of silently skipping them —
+        // a misnamed fixture (.JSON, no extension) would otherwise never run.
+        let ext = path.extension().and_then(|e| e.to_str());
+        assert_eq!(
+            ext,
+            Some("json"),
+            "unexpected file in corpus/ytdlp: {}",
+            path.display()
+        );
         let raw = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
         let mut value: serde_json::Value = serde_json::from_str(&raw)

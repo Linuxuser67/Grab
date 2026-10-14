@@ -114,7 +114,7 @@ jobs:
           tar --no-same-owner -xz -C ~/.cargo/bin -f /tmp/nextest.tar.gz
           cargo nextest --version
       # Serial: same glib MainContext constraint as the check job (see .config/nextest.toml).
-      - run: cargo nextest run --features corpus -E 'test(corpus_)'
+      - run: cargo nextest run --locked --features corpus -E 'test(corpus_)'
   # Read-only secret and supply-chain scanning: gitleaks over the full
   # history plus cargo-audit against the RustSec advisory DB. No system
   # deps, no behavior risk — fails only when a secret or a

@@ -331,23 +331,21 @@ pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<Pat
             _ => "TRUE",
         };
         let raw_domain = cookie.domain.as_deref().unwrap_or(&fallback_domain);
-        let domain = if tailmatch == "TRUE" {
-            // Domain cookie: ensure the leading dot.
-            match raw_domain.strip_prefix('.') {
-                Some(stripped) => format!(".{stripped}"),
-                None => format!(".{raw_domain}"),
-            }
-        } else {
-            // Host-only: no leading dot.
-            raw_domain
-                .strip_prefix('.')
-                .unwrap_or(raw_domain)
-                .to_string()
-        };
-        let domain = domain.as_str();
-        if !valid_cookie_domain(domain) || !domain_covers_host(domain, &fallback_domain) {
+        // Validate the undotted form (the validators expect no leading dot).
+        let undotted = raw_domain.strip_prefix('.').unwrap_or(raw_domain);
+        if !valid_cookie_domain(undotted) || !domain_covers_host(undotted, &fallback_domain) {
             continue;
         }
+        // Netscape format requires the leading dot when tailmatch is TRUE
+        // (Python's cookiejar rejects the whole file otherwise), and no
+        // leading dot when FALSE. Add it only for the output line, after
+        // validation.
+        let domain = if tailmatch == "TRUE" {
+            format!(".{undotted}")
+        } else {
+            undotted.to_string()
+        };
+        let domain = domain.as_str();
         let path = cookie.path.as_deref().unwrap_or("/");
         if !valid_cookie_path(path) {
             continue;
@@ -915,6 +913,26 @@ mod tests {
             cookie("we\trd", "a\nb\rc"),
             // Empty names carry nothing.
             cookie("", "skip"),
+            // Host-only cookies get FALSE with no leading dot.
+            Cookie {
+                name: "hostonly".to_string(),
+                value: "xyz".to_string(),
+                domain: Some("example.com".to_string()),
+                host_only: Some(true),
+                path: None,
+                secure: None,
+                expiration_date: None,
+            },
+            // Pre-dotted domain from the extension is handled.
+            Cookie {
+                name: "dotted".to_string(),
+                value: "123".to_string(),
+                domain: Some(".example.com".to_string()),
+                host_only: Some(false),
+                path: None,
+                secure: None,
+                expiration_date: None,
+            },
         ];
         let path = write_handoff_cookies("https://example.com/watch?v=1", &cookies).expect("path");
         #[cfg(unix)]
@@ -933,6 +951,8 @@ mod tests {
             [
                 ".example.com\tTRUE\t/\tFALSE\t0\tsession\tabc123",
                 ".example.com\tTRUE\t/\tFALSE\t0\twerd\tabc",
+                "example.com\tFALSE\t/\tFALSE\t0\thostonly\txyz",
+                ".example.com\tTRUE\t/\tFALSE\t0\tdotted\t123",
             ],
             "{text}"
         );

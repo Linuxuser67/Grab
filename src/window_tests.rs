@@ -206,7 +206,7 @@ fn row_media_icon_names_are_real_adwaita_symbolic_names() {
     // name would render a broken-image icon in every row.
     assert_eq!(RowMedia::Live.icon_name(), "media-record-symbolic");
     assert_eq!(RowMedia::Audio.icon_name(), "audio-headphones-symbolic");
-    assert_eq!(RowMedia::Torrent.icon_name(), "emblem-shared-symbolic");
+    assert_eq!(RowMedia::Torrent.icon_name(), "network-workgroup-symbolic");
     assert_eq!(RowMedia::Video.icon_name(), "video-display-symbolic");
     assert_eq!(RowMedia::Image.icon_name(), "image-x-generic-symbolic");
     assert_eq!(RowMedia::VideoFile.icon_name(), "video-x-generic-symbolic");

@@ -245,7 +245,7 @@ impl RowMedia {
         match self {
             RowMedia::Live => "media-record-symbolic",
             RowMedia::Audio => "audio-headphones-symbolic",
-            RowMedia::Torrent => "application-x-bittorrent-symbolic",
+            RowMedia::Torrent => "network-workgroup-symbolic",
             RowMedia::Video => "video-display-symbolic",
             RowMedia::Image => "image-x-generic-symbolic",
             RowMedia::VideoFile => "video-x-generic-symbolic",

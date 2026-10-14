@@ -482,7 +482,7 @@ pub fn show(
 
     let torrent_page = adw::PreferencesPage::builder()
         .title(gettext("Torrent"))
-        .icon_name("emblem-shared-symbolic")
+        .icon_name("network-workgroup-symbolic")
         .build();
 
     let share_group = adw::PreferencesGroup::builder()

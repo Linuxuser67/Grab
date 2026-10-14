@@ -509,9 +509,10 @@ struct AddRequest {
 /// probe and every yt-dlp download leg.
 pub(crate) struct Handoff {
     pub url: String,
-    /// Set for `/add?confirm=1`: the GTK side answers `true` once Grab has
-    /// taken the URL over (approved, or no dialog needed) and `false` when the
-    /// user declined. Dropping it unanswered counts as declined.
+    /// Set for `/add?confirm=1`: the GTK side answers `true` only once the
+    /// download is really queued, and `false` when the user declined, the
+    /// enqueue failed, or only the inline card was opened. Dropping it
+    /// unanswered counts as declined.
     pub decision: Option<oneshot::Sender<bool>>,
 }
 
@@ -700,17 +701,29 @@ async fn handle_add(
         url: req.url.clone(),
         decision,
     };
+    // Stage before queuing: the GTK side may start a probe the moment the
+    // handoff is received, and every probe leg looks the cookies up by URL.
+    let staged = if authenticated && let Some(path) = write_handoff_cookies(&req.url, &req.cookies)
+    {
+        store_handoff_cookies(&req.url, path);
+        true
+    } else {
+        false
+    };
     match st.tx.try_send(handoff) {
-        Ok(()) => {
-            // Stage the cookies only for an accepted handoff from a paired
-            // extension; the video probe and every download leg pick them up
-            // by URL.
-            if authenticated && let Some(path) = write_handoff_cookies(&req.url, &req.cookies) {
-                store_handoff_cookies(&req.url, path);
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            if staged {
+                discard_handoff_cookies(&req.url);
             }
+            return StatusCode::TOO_MANY_REQUESTS;
         }
-        Err(TrySendError::Full(_)) => return StatusCode::TOO_MANY_REQUESTS,
-        Err(TrySendError::Closed(_)) => return StatusCode::INTERNAL_SERVER_ERROR,
+        Err(TrySendError::Closed(_)) => {
+            if staged {
+                discard_handoff_cookies(&req.url);
+            }
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
     }
     let Some(answer) = answer else {
         return StatusCode::OK;

@@ -48,11 +48,7 @@ zip = "8"
 
 [dev-dependencies]
 pretty_assertions = "1"
-
-[features]
-# Real-file corpus tests: reads from corpus/ (committed to the repo).
-# Default cargo test skips these; CI runs them with --features corpus.
-corpus = []
+proptest = "1"
 
 [profile.release]
 opt-level = 3

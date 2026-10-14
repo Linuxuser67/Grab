@@ -25,7 +25,7 @@ fn jar_cache() -> &'static Mutex<std::collections::HashMap<String, CachedJar>> {
 /// Returns (domain, Set-Cookie value) preserving the browser's scope:
 /// host-only cookies (subdomain flag FALSE) omit `Domain`, path and expiry
 /// are kept so cookies don't leak to sibling subdomains or paths.
-pub(crate) fn parse_netscape_line(line: &str) -> Option<(String, String)> {
+fn parse_netscape_line(line: &str) -> Option<(String, String)> {
     let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
     if line.is_empty() || line.starts_with('#') {
         return None;

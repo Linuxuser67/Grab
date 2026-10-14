@@ -242,7 +242,7 @@ pub(crate) fn has_archive(url: &str) -> bool {
 }
 
 /// Parse `.torrent` bytes into a display list for the file picker (display strips bidi/controls and caps length; selection is index-based).
-pub(crate) fn sanitize_display_path(path: &str) -> String {
+fn sanitize_display_path(path: &str) -> String {
     const MAX_CHARS: usize = 120;
     let mut out: String = path
         .chars()

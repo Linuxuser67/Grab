@@ -695,6 +695,102 @@ fn parses_content_disposition() {
 }
 
 #[test]
+fn content_disposition_table() {
+    // Traversal invariant: every Some(name) must be non-empty, not "." or
+    // "..", free of '/', '\', NUL, and control characters.
+    fn assert_traversal_safe(name: &str, idx: usize) {
+        assert!(!name.is_empty(), "row {idx}: empty filename");
+        assert_ne!(name, ".", "row {idx}: dot filename");
+        assert_ne!(name, "..", "row {idx}: dot-dot filename");
+        assert!(
+            !name.contains('/') && !name.contains('\\') && !name.contains('\0'),
+            "row {idx}: path separator in {name:?}"
+        );
+        assert!(
+            !name.chars().any(|c| c.is_control()),
+            "row {idx}: control char in {name:?}"
+        );
+    }
+
+    let cases: &[(&str, Option<&str>)] = &[
+        // Basic forms.
+        ("attachment; filename=\"report.pdf\"", Some("report.pdf")),
+        ("attachment; filename=report.pdf", Some("report.pdf")),
+        (
+            "attachment; filename=\"my report (final).pdf\"",
+            Some("my report (final).pdf"),
+        ),
+        // RFC 5987 encoded.
+        (
+            "attachment; filename*=UTF-8''%E2%82%AC%20rates.pdf",
+            Some("€ rates.pdf"),
+        ),
+        // Semicolon inside quotes is not a separator.
+        (
+            "attachment; filename=\"file;name.pdf\"",
+            Some("file;name.pdf"),
+        ),
+        // RFC 6266: filename* wins over filename.
+        (
+            "attachment; filename*=UTF-8''%C3%A9%C3%A8.pdf; filename=\"fallback.pdf\"",
+            Some("éè.pdf"),
+        ),
+        // Case-insensitive.
+        ("ATTACHMENT; FILENAME=\"upper.pdf\"", Some("upper.pdf")),
+        // First filename wins.
+        (
+            "attachment; filename=\"a.pdf\"; filename=\"b.pdf\"",
+            Some("a.pdf"),
+        ),
+        // inline disposition also carries filenames.
+        ("inline; filename=\"image.png\"", Some("image.png")),
+        // Single quotes are not special per RFC 6266; kept literally.
+        (
+            "attachment; filename='single-quoted.pdf'",
+            Some("'single-quoted.pdf'"),
+        ),
+        // Unterminated quote: split_params still yields the part.
+        (
+            "attachment; filename=\"unterminated.pdf",
+            Some("unterminated.pdf"),
+        ),
+        // Empty first value skipped, second used.
+        (
+            "attachment; filename=; filename=\"empty-first.pdf\"",
+            Some("empty-first.pdf"),
+        ),
+        // Windows path: basename stripped.
+        (
+            "attachment; filename=C:\\fakepath\\document.pdf",
+            Some("document.pdf"),
+        ),
+        // Dot and dot-dot rejected by sane_filename.
+        ("attachment; filename=\"..\"", None),
+        ("attachment; filename=\".\"", None),
+        // Traversal: basename stripped, not rejected (existing behavior;
+        // changing to None would break downloads with unusual headers).
+        ("attachment; filename=\"../../etc/passwd\"", Some("passwd")),
+        // Encoded separators decoded then rejected by sane_filename.
+        ("attachment; filename*=UTF-8''..%2F..%2Fx", None),
+        // Controls rejected.
+        ("attachment; filename=\"a\x00b\"", None),
+        ("attachment; filename=\"a\r\nb\"", None),
+        // Missing/empty.
+        ("attachment", None),
+        ("", None),
+    ];
+
+    for (idx, (input, expected)) in cases.iter().enumerate() {
+        let actual = filename_from_content_disposition(input);
+        let expected = expected.map(|s| s.to_string());
+        assert_eq!(actual, expected, "row {idx} mismatch for {input:?}");
+        if let Some(name) = &actual {
+            assert_traversal_safe(name, idx);
+        }
+    }
+}
+
+#[test]
 fn detects_sparse_holes() {
     let dir = std::env::temp_dir().join(format!("grab-holes-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -6834,4 +6930,25 @@ fn validator_changed_compares_same_kind_only() {
     assert!(!validator_changed("abc123", Some("abc123"), Some(lm)));
     assert!(validator_changed("abc123", Some("def456"), Some(lm)));
     assert!(!validator_changed("abc123", None, Some(lm)));
+}
+
+#[cfg(test)]
+mod proptest_cd {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        // Never panics on arbitrary input; Some results satisfy traversal invariant.
+        #[test]
+        fn content_disposition_never_panics(s in ".*") {
+            let result = filename_from_content_disposition(&s);
+            if let Some(name) = result {
+                prop_assert!(!name.is_empty());
+                prop_assert_ne!(name, ".");
+                prop_assert_ne!(name, "..");
+                prop_assert!(!name.contains('/') && !name.contains('\\') && !name.contains('\0'));
+                prop_assert!(!name.chars().any(|c| c.is_control()));
+            }
+        }
+    }
 }

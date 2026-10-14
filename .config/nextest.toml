@@ -1,7 +1,0 @@
-# Serial: the suite shares one glib default MainContext across test
-# threads within the binary, and glib futures are bound to their spawning
-# thread, so parallel runs abort when one test's loop polls another's
-# source. (Nextest runs each test binary as its own process, but tests
-# within our single binary still share threads.)
-[profile.default]
-test-threads = 1

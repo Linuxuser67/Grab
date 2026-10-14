@@ -26,12 +26,6 @@ cargo test -- --test-threads=1   # serial: parallel runs abort when one
                                   # (thread-bound futures, shared context)
 ```
 
-Corpus tests (parser edge cases from `corpus/`) are gated behind a
-cargo feature so the default run stays offline-capable:
-```bash
-cargo nextest run --features corpus -E 'test(corpus_)'
-```
-
 Disk cleanup: `target/` and `build/` are safe to delete anytime (regenerable).
 Keep `.flatpak-builder/` — it caches vendored crate downloads, so the
 next Flatpak build skips the ~10 min re-download.

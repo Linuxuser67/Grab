@@ -2438,6 +2438,58 @@ fn sparse_x_com_json_parses_to_video() {
 }
 
 #[test]
+fn sanitize_video_json_table() {
+    // Each case: input JSON, then assertions on the sanitized output.
+    // A no-op sanitizer fails these.
+
+    // Null view_count: filled with default (0).
+    let mut v = serde_json::json!({"id": "x", "view_count": null, "formats": []});
+    sanitize_video_json(&mut v);
+    assert_eq!(v["view_count"], serde_json::json!(0));
+
+    // Missing key vs null: both get defaults.
+    let mut v = serde_json::json!({"id": "x", "formats": []});
+    sanitize_video_json(&mut v);
+    assert_eq!(v["view_count"], serde_json::json!(0));
+    assert_eq!(v["live_status"], serde_json::json!(""));
+
+    // Numeric field as string: coerced.
+    let mut v = serde_json::json!({"id": "x", "duration": "3600", "formats": []});
+    sanitize_video_json(&mut v);
+    assert_eq!(v["duration"], serde_json::json!(3600));
+
+    // Formats absent → empty array.
+    let mut v = serde_json::json!({"id": "x"});
+    sanitize_video_json(&mut v);
+    assert_eq!(v["formats"], serde_json::json!([]));
+
+    // Thumbnails null → empty array (TikTok shape).
+    let mut v = serde_json::json!({"id": "x", "thumbnails": null, "formats": []});
+    sanitize_video_json(&mut v);
+    assert_eq!(v["thumbnails"], serde_json::json!([]));
+
+    // Float-valued ints coerced.
+    let mut v = serde_json::json!({"id": "x", "view_count": 1000000.0, "formats": []});
+    sanitize_video_json(&mut v);
+    assert_eq!(v["view_count"], serde_json::json!(1000000));
+
+    // Live stream: duration null stays null (live has no duration).
+    let mut v = serde_json::json!({"id": "x", "is_live": true, "duration": null, "formats": []});
+    sanitize_video_json(&mut v);
+    assert!(v["duration"].is_null());
+
+    // Playlist payload: _type preserved.
+    let mut v = serde_json::json!({"id": "x", "_type": "playlist", "entries": [], "formats": []});
+    sanitize_video_json(&mut v);
+    assert_eq!(v["_type"], serde_json::json!("playlist"));
+
+    // Unicode title preserved.
+    let mut v = serde_json::json!({"id": "x", "title": "日本語タイトル 🎬", "formats": []});
+    sanitize_video_json(&mut v);
+    assert_eq!(v["title"], serde_json::json!("日本語タイトル 🎬"));
+}
+
+#[test]
 fn cookies_browser_spec_falls_back_to_bare_name() {
     // Hermetic: an empty config dir, so no real dev-machine profile leaks into
     // the assertion and the spec stays the bare name yt-dlp resolves itself.

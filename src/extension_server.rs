@@ -437,33 +437,14 @@ pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
 }
 
 /// Cookie jar for a URL's staged handoff cookies, if any. For reqwest-handled
-/// downloads (direct files): parses the staged Netscape file into a Jar so
-/// the cookies ride the request. Returns None if no cookies are staged.
-pub(crate) fn handoff_cookie_jar(url: &str) -> Option<std::sync::Arc<reqwest::cookie::Jar>> {
-    let path = handoff_key(url).and_then(|key| {
-        HANDOFF_COOKIES
-            .lock()
-            .ok()
-            .and_then(|store| store.by_key.get(&key).cloned())
-    })?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let jar = reqwest::cookie::Jar::default();
-    let url = url::Url::parse(url).ok()?;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        // Netscape format: domain, tailmatch, path, secure, expiry, name, value
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() != 7 {
-            continue;
-        }
-        let cookie_str = format!("{}={}", parts[5], parts[6]);
-        // Jar::add_cookie_str expects a Set-Cookie style string
-        jar.add_cookie_str(&cookie_str, &url);
-    }
-    Some(std::sync::Arc::new(jar))
+/// Path of the staged cookie file for `url`, if any. Peeks: the entry stays
+/// until the download finishes or is evicted.
+pub(crate) fn handoff_cookie_path(url: &str) -> Option<PathBuf> {
+    let key = handoff_key(url)?;
+    HANDOFF_COOKIES
+        .lock()
+        .ok()
+        .and_then(|store| store.by_key.get(&key).cloned())
 }
 
 /// Drop a URL's staged handoff cookies and delete the file. Called when its

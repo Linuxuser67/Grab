@@ -1146,25 +1146,14 @@ impl DownloadManager {
                 return;
             }
         };
-        let client = match crate::extension_server::handoff_cookie_jar(&url) {
-            Some(jar) => match crate::download_net::http_client_with_jar(proxy.as_ref(), jar) {
-                Ok(c) => c,
-                Err(e) => {
-                    item.set_detail(e);
-                    item.set_status(DownloadStatus::Failed);
-                    self.changed();
-                    return;
-                }
-            },
-            None => match http_client_for(proxy.as_ref()) {
-                Ok(c) => c,
-                Err(e) => {
-                    item.set_detail(e);
-                    item.set_status(DownloadStatus::Failed);
-                    self.changed();
-                    return;
-                }
-            },
+        let client = match http_client_for(proxy.as_ref()) {
+            Ok(c) => c,
+            Err(e) => {
+                item.set_detail(e);
+                item.set_status(DownloadStatus::Failed);
+                self.changed();
+                return;
+            }
         };
         let ctx = FetchCtx {
             client,

@@ -38,6 +38,10 @@ mod video_types;
 mod window;
 mod window_rows;
 
+#[cfg(test)]
+#[path = "corpus_tests.rs"]
+mod corpus_tests;
+
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;

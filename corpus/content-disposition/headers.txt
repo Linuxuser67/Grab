@@ -1,0 +1,13 @@
+attachment; filename="report.pdf"
+attachment; filename=report.pdf
+attachment; filename="my report (final).pdf"
+attachment; filename*=UTF-8''%E2%82%AC%20rates.pdf
+attachment; filename="file;name.pdf"
+attachment; filename='single-quoted.pdf'
+attachment; filename=C:\fakepath\document.pdf
+inline; filename="image.png"
+attachment; filename="a.pdf"; filename="b.pdf"
+attachment; filename*=UTF-8''%C3%A9%C3%A8.pdf; filename="fallback.pdf"
+attachment; filename="unterminated.pdf
+attachment; filename=; filename="empty-first.pdf"
+ATTACHMENT; FILENAME="upper.pdf"

@@ -92,6 +92,22 @@ jobs:
       # --locked fails when the lock would need re-resolution; read-only otherwise.
       - run: cargo metadata --locked --format-version 1 >/dev/null
       - run: ./build-aux/gen-cargo-sources.py --check
+  # Real-file corpus tests: parsers run against committed real-world files
+  # in corpus/ (yt-dlp JSON outputs, Content-Disposition headers) instead
+  # of only synthetic fixtures. Gated behind --features corpus so the
+  # default test run stays offline-capable.
+  corpus:
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Install system dependencies
+        run: dnf install -y git gcc pkg-config gtk4-devel libadwaita-devel python3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      # Serial: same glib MainContext constraint as the check job.
+      - run: cargo test --features corpus corpus_ -- --test-threads=1
   # Read-only secret and supply-chain scanning: gitleaks over the full
   # history plus cargo-audit against the RustSec advisory DB. No system
   # deps, no behavior risk — fails only when a secret or a

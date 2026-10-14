@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.5~beta.2" date="2026-10-14">
+      <description>
+        <ul>
+          <li>Unauthenticated handoffs now wait for the user's confirmation instead of queueing silently.</li>
+          <li>Handoff cookies: direct downloads use handoff cookies, staged before queueing to avoid races.</li>
+          <li>Extension only gets acceptance once Grab actually queues the URL.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.5~beta.1" date="2026-10-13">
       <description>
         <ul>

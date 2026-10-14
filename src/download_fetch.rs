@@ -94,8 +94,21 @@ pub(crate) struct FetchCtx {
 pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
     let timeout = Duration::from_secs(30);
     let mut tries = 3;
+    // Handoff cookies (this exact URL's browser session) win over the
+    // Preferences export.
+    if let Some(path) = crate::extension_server::handoff_cookie_path(&ctx.url)
+        && let Ok(text) = tokio::fs::read_to_string(&path).await
+    {
+        let (jar, count) = crate::cookies::jar_from_export(&text);
+        if count > 0 {
+            ctx.cookies = Some(jar);
+        }
+    }
     // One export per attempt (jars are cheap next to downloads).
-    if !ctx.opts.cookies_browser.is_empty() && ctx.opts.cookies_browser != "none" {
+    if ctx.cookies.is_none()
+        && !ctx.opts.cookies_browser.is_empty()
+        && ctx.opts.cookies_browser != "none"
+    {
         let youtube_bin = crate::video::resolve_libraries()
             .map(|libs| libs.youtube)
             .ok();
@@ -203,6 +216,7 @@ async fn single_loop(ctx: &FetchCtx, tries: &mut i32, expected: Option<u64>, cla
                     .await
                     .map(|m| m.len())
                     .unwrap_or(0);
+                crate::extension_server::discard_handoff_cookies(&ctx.url);
                 ctx.tx.send(EngineMsg::Finished { size }).ok();
                 return;
             }
@@ -259,6 +273,7 @@ async fn multi_loop(
                     .await
                     .map(|m| m.len())
                     .unwrap_or(0);
+                crate::extension_server::discard_handoff_cookies(&ctx.url);
                 ctx.tx.send(EngineMsg::Finished { size }).ok();
                 return false;
             }

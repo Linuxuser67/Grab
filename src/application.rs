@@ -226,19 +226,30 @@ fn check_remote_torrent_uri(uri: &url::Url) -> Result<(), String> {
 /// Route one opened URI: remote .torrent fetch, video card pre-fill, or plain
 /// enqueue. Extracted from `connect_open` so the extension-handoff confirm
 /// dialog can run it after the user approves.
+/// What `route_open_uri` did with a URI.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Routed {
+    /// Enqueued, or an async intake was started.
+    Queued,
+    /// Only the inline card was opened; nothing is downloading yet.
+    OpenedCard,
+    /// Rejected; the user already saw a toast.
+    Failed,
+}
+
 fn route_open_uri(
     manager: Rc<DownloadManager>,
     toasts: Rc<adw::ToastOverlay>,
     add_card: crate::inline_add::AddCard,
     settings: AppSettings,
     uri: url::Url,
-) {
+) -> Routed {
     // Remote .torrent files: fetch the bytes and run the
     // torrent intake instead of saving the .torrent itself.
     if is_remote_torrent_url(&uri) {
         if let Err(e) = check_remote_torrent_uri(&uri) {
             toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
-            return;
+            return Routed::Failed;
         }
         let url = uri.as_str().to_string();
         // Decode percent-encoding and sanitize: the raw path would keep
@@ -250,20 +261,22 @@ fn route_open_uri(
                 Ok(p) => p,
                 Err(e) => {
                     toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
-                    return;
+                    return Routed::Failed;
                 }
             };
         let client = match crate::download_net::http_client_for(proxy.as_ref()) {
             Ok(c) => c,
             Err(e) => {
                 toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
-                return;
+                return Routed::Failed;
             }
         };
         glib::spawn_future_local(intake_remote_torrent(
             manager, toasts, add_card, client, url, file_name,
         ));
-        return;
+        // Note: the fetch may fail later; the browser copy is already gone.
+        // Closing this needs intake_remote_torrent to report its result back.
+        return Routed::Queued;
     }
     // Anything over http(s) that isn't obviously a direct file takes the
     // inline card path (pre-filled): the card probes it with yt-dlp exactly
@@ -271,10 +284,14 @@ fn route_open_uri(
     // — as a file.
     if handoff_goes_to_card(&uri) {
         add_card.open(Some(uri.as_str().to_string()));
-        return;
+        return Routed::OpenedCard;
     }
-    if let Err(e) = manager.enqueue(uri.as_str(), None, None) {
-        toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+    match manager.enqueue(uri.as_str(), None, None) {
+        Ok(_) => Routed::Queued,
+        Err(e) => {
+            toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+            Routed::Failed
+        }
     }
 }
 
@@ -309,8 +326,8 @@ fn dispatch_handoff(
         if via_grab && let Some(host) = uri.host_str() {
             crate::download_net::require_public_resolution(host);
         }
-        route_open_uri(manager, toasts, add_card, settings, uri);
-        answer_handoff(decision, true);
+        let routed = route_open_uri(manager, toasts, add_card, settings, uri);
+        answer_handoff(decision, routed == Routed::Queued);
         return;
     }
     // Validate before the dialog: the user should approve the canonical URL,
@@ -335,16 +352,16 @@ fn dispatch_handoff(
         &s.window,
         &shown,
         move || {
-            answer_handoff(decision.borrow_mut().take(), true);
-            // The dialog may invoke this more than once in theory; clone per
-            // call so the closure stays Fn.
-            route_open_uri(
+            // Route first, then answer: the extension deletes the browser
+            // copy only if Grab really queued it.
+            let routed = route_open_uri(
                 manager.clone(),
                 toasts.clone(),
                 add_card.clone(),
                 settings.clone(),
                 approved.clone(),
             );
+            answer_handoff(decision.borrow_mut().take(), routed == Routed::Queued);
         },
         move || answer_handoff(on_cancel_decision.borrow_mut().take(), false),
     );

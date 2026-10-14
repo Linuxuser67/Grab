@@ -50,10 +50,11 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="5.7.6" date="2026-10-14">
+    <release version="5.7.7" date="2026-10-14">
       <description>
         <ul>
-          <li>Torrent rows now use the MIME-type icon.</li>
+          <li>Dependency refresh to latest stable.</li>
+          <li>Torrent preferences page uses a plain symbolic icon.</li>
         </ul>
       </description>
     </release>

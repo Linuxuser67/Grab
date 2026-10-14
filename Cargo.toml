@@ -48,6 +48,7 @@ zip = "8"
 
 [dev-dependencies]
 pretty_assertions = "1"
+proptest = "1"
 
 [profile.release]
 opt-level = 3

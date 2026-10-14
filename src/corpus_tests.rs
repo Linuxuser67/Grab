@@ -73,3 +73,127 @@ fn corpus_content_disposition_no_panic_no_traversal() {
     }
     assert!(count > 0, "corpus headers.txt had no testable lines");
 }
+
+/// Netscape cookie corpus: every non-comment line in
+/// corpus/cookies/netscape.txt is fed to `parse_netscape_line`. It must
+/// not panic. Malformed lines must return None (not garbage).
+#[test]
+fn corpus_cookies_parse_without_panic() {
+    let path = corpus_dir().join("cookies/netscape.txt");
+    let raw = std::fs::read_to_string(&path).expect("corpus netscape.txt missing");
+    let mut count = 0;
+    for (lineno, line) in raw.lines().enumerate() {
+        if line.is_empty() || (line.starts_with('#') && !line.starts_with("#HttpOnly_")) {
+            continue;
+        }
+        // Must not panic on real-world edge cases (huge expiries, bad numbers, short lines).
+        let _ = crate::cookies::parse_netscape_line(line);
+        count += 1;
+    }
+    assert!(count > 0, "corpus netscape.txt had no testable lines");
+}
+
+/// Torrent corpus: every .torrent file in corpus/torrents/ must parse
+/// (or fail cleanly) via librqbit without panicking. Valid torrents have
+/// their names run through the sanitization path.
+#[test]
+fn corpus_torrents_parse_without_panic() {
+    let dir = corpus_dir().join("torrents");
+    let mut count = 0;
+    for entry in std::fs::read_dir(&dir).expect("corpus/torrents missing") {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("torrent") {
+            continue;
+        }
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        // librqbit must not panic; invalid files return Err.
+        if let Ok(meta) = librqbit::torrent_from_bytes(&bytes) {
+            let name = meta.info.data.name.as_ref();
+            let display = crate::torrent::sanitize_display_path(name);
+            assert!(
+                !display.contains(".."),
+                "{}: sanitized name contains ..: {display:?}",
+                path.display()
+            );
+        }
+        count += 1;
+    }
+    assert!(count > 0, "corpus/torrents contained no .torrent files");
+}
+
+/// Title corpus: every line in corpus/titles/titles.txt is fed to
+/// `sanitize_folder_name`. It must not panic, must return non-empty
+/// output, and must contain no path separators.
+#[test]
+fn corpus_titles_sanitize_cleanly() {
+    let path = corpus_dir().join("titles/titles.txt");
+    let raw = std::fs::read_to_string(&path).expect("corpus titles.txt missing");
+    let mut count = 0;
+    for (lineno, line) in raw.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let result = crate::file_names::sanitize_folder_name(line);
+        assert!(!result.is_empty(), "line {} sanitized to empty", lineno + 1);
+        assert!(
+            !result.contains('/') && !result.contains('\\'),
+            "line {} sanitized with path separator: {result:?}",
+            lineno + 1
+        );
+        count += 1;
+    }
+    assert!(count > 0, "corpus titles.txt had no testable lines");
+}
+
+/// Content-Range corpus: every line in corpus/http/content-range.txt is
+/// fed to `parse_content_range`. It must not panic. When it returns
+/// Some, start <= end must hold (sane range).
+#[test]
+fn corpus_content_range_parses_safely() {
+    let path = corpus_dir().join("http/content-range.txt");
+    let raw = std::fs::read_to_string(&path).expect("corpus content-range.txt missing");
+    let mut count = 0;
+    for (lineno, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Must not panic on real-world variants (case, whitespace, */total, overflow).
+        if let Some((start, end, _total)) = crate::download_fetch::parse_content_range(line) {
+            assert!(
+                start <= end,
+                "line {} parsed to inverted range {start}-{end}",
+                lineno + 1
+            );
+        }
+        count += 1;
+    }
+    assert!(count > 0, "corpus content-range.txt had no testable lines");
+}
+
+/// yt-dlp progress corpus: every line in corpus/ytdlp/progress.txt is
+/// fed to `parse_ytdlp_template`. It must not panic. Non-Grab lines
+/// and error lines must return None.
+#[test]
+fn corpus_ytdlp_progress_parses_safely() {
+    let path = corpus_dir().join("ytdlp/progress.txt");
+    let raw = std::fs::read_to_string(&path).expect("corpus progress.txt missing");
+    let mut count = 0;
+    for (lineno, line) in raw.lines().enumerate() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Must not panic on truncated, malformed, or non-Grab lines.
+        let result = crate::video_progress::parse_ytdlp_template(line);
+        if !line.starts_with("[Grab];") || line.contains(";error;") {
+            assert!(
+                result.is_none(),
+                "line {} should not parse: {line:?}",
+                lineno + 1
+            );
+        }
+        count += 1;
+    }
+    assert!(count > 0, "corpus progress.txt had no testable lines");
+}

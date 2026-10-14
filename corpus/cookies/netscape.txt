@@ -1,0 +1,15 @@
+# Netscape cookie file corpus: edge cases from real browser exports.
+# Format: domain, domain_specified, path, secure, expiry, name, value (tab-separated)
+# Lines starting with # are comments, except #HttpOnly_ prefix which is part of the format.
+
+.example.com	TRUE	/	FALSE	1893456000	sessionid	abc123
+#HttpOnly_.example.com	TRUE	/	TRUE	1893456000	secure_token	xyz789
+.example.com	TRUE	/	FALSE	99999999999	far_future	huge_expiry
+.example.com	TRUE	/	FALSE	0	expired_session	old
+.example.com	TRUE	/	FALSE	1893456000	empty_value	
+.example.com	TRUE	/	FALSE	1893456000	semicolon_val	a;b;c
+.example.com	TRUE	/	FALSE	1893456000	unicode_val	héllo wörld
+# This is a comment and should be skipped
+.example.com	TRUE	/	FALSE	invalid_expiry	bad_number	test
+short	line
+.example.com	TRUE	/	FALSE	1893456000	tab_in_value	a	b

@@ -193,7 +193,7 @@ pub(crate) fn fmt_item_duration(secs: i64) -> String {
 /// Automatic row (the global preference, no pin) when nothing is pinnable,
 /// or the Audio only row (no pin, audio-only download).
 #[derive(Clone)]
-struct FormatOption {
+pub(crate) struct FormatOption {
     /// Row title: the pin label ("1080p"), "Automatic", or "Audio only".
     label: String,
     /// Resolved yt-dlp format id; `None` for the Automatic and Audio only rows.

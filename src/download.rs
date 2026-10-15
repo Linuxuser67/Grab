@@ -174,6 +174,9 @@ pub struct DownloadManager {
     /// Video-page source by row (in-memory only, like the maps above):
     /// persisted on [`StoredItem`] and re-staged on restore.
     video_sources: RefCell<HashMap<u64, crate::media_types::VideoSource>>,
+    /// Gallery jobs by row id. Stored at enqueue time (carries the user's
+    /// filter selection); consumed by spawn_gallery.
+    gallery_jobs: RefCell<HashMap<u64, crate::gallery_argv::GalleryJob>>,
     /// Abort senders for resolver workers, by row. Signalled from pause/park/cancel so extractor streams stop promptly.
     video_abort: RefCell<HashMap<u64, tokio::sync::oneshot::Sender<crate::video::StopIntent>>>,
     /// Delivery decision per video attempt, by row. Manager and worker arbitrate on this one object.
@@ -358,6 +361,7 @@ impl DownloadManager {
             torrent_pieces: RefCell::new(HashMap::new()),
             server_mtime: RefCell::new(HashMap::new()),
             video_sources: RefCell::new(HashMap::new()),
+            gallery_jobs: RefCell::new(HashMap::new()),
             video_abort: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
             reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),
@@ -725,8 +729,10 @@ impl DownloadManager {
         item.set_gallery_files_done(0);
         item.set_gallery_url(url);
         item.set_detail(format!("Gallery • {} files", job.file_count.unwrap_or(0)));
-        // TODO: persist GalleryJob for restore (phase 11b).
-        // TODO: start the gallery runner (phase 12).
+        // Store the job (carries the filter); spawn_gallery consumes it.
+        self.gallery_jobs
+            .borrow_mut()
+            .insert(item.id(), job.clone());
         Ok(self.insert(item))
     }
 
@@ -1910,70 +1916,98 @@ impl DownloadManager {
     }
 
     /// Spawn a gallery download via gallery-dl.
-    /// Updates the item's progress as files complete; sets Done/Failed on finish.
+    /// Runs on the tokio runtime (the runner needs tokio::process); progress
+    /// is bridged to the glib main thread via a channel. The handle is
+    /// registered in `running` for cancel/concurrency/shutdown.
     fn spawn_gallery(self: &Rc<Self>, item: DownloadItem) {
         item.set_status(DownloadStatus::Downloading);
         self.changed();
 
-        // Build the GalleryJob from the item's properties.
-        // The filter is stored in the job; for now we use All (the card's
-        // filter is not persisted yet — phase 14).
-        let job = crate::gallery_argv::GalleryJob {
-            item_id: item.id(),
-            page_url: item.gallery_url().to_string(),
-            title: item.filename().to_string(),
-            file_count: Some(item.gallery_file_count()),
-            dest_dir: std::path::PathBuf::from(item.dest_dir().to_string()),
-            filter: crate::gallery_argv::GalleryFilter::All,
-            cookies_file: None,
-            speed_limit: None,
+        // Get the job (carries the user's filter); remove from map.
+        let job = match self.gallery_jobs.borrow_mut().remove(&item.id()) {
+            Some(j) => j,
+            None => {
+                item.set_status(DownloadStatus::Failed);
+                item.set_detail("Gallery job not found".to_string());
+                self.changed();
+                self.start_next();
+                return;
+            }
         };
 
-        let this = self.clone();
-        let item_c = item.clone();
-        gtk4::glib::spawn_future_local(async move {
+        // Channel for progress/finished messages (tokio -> glib).
+        #[derive(Debug)]
+        enum GalleryMsg {
+            Progress(u32),
+            Finished(Result<crate::gallery_runner::GalleryResult, String>),
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<GalleryMsg>();
+
+        // Spawn the download on the tokio runtime.
+        let handle = tokio_rt().spawn(async move {
             let tool = match crate::gallery_argv::resolve_tool() {
                 Ok(t) => t,
                 Err(e) => {
-                    item_c.set_status(DownloadStatus::Failed);
-                    item_c.set_detail(e);
-                    this.changed();
-                    this.start_next();
+                    let _ = tx.send(GalleryMsg::Finished(Err(e)));
                     return;
                 }
             };
             let result = crate::gallery_runner::run_gallery_download(&job, &tool, |update| {
-                let done = update.files_completed;
-                let total = item_c.gallery_file_count();
-                item_c.set_gallery_files_done(done);
-                if total > 0 {
-                    item_c.set_progress(done as f64 / total as f64);
-                }
-                item_c.set_detail(format!("Gallery • {done}/{total} files"));
-                this.changed();
+                let _ = tx.send(GalleryMsg::Progress(update.files_completed));
             })
             .await;
-            match result {
-                Ok(r) => {
-                    item_c.set_status(DownloadStatus::Done);
-                    item_c.set_gallery_files_done(r.files.len() as u32);
-                    item_c.set_progress(1.0);
-                    item_c.set_detail(format!("Gallery • {} files", r.files.len()));
-                    tracing::info!(
-                        files = r.files.len(),
-                        skipped = r.skipped,
-                        "gallery download complete"
-                    );
-                }
-                Err(e) => {
-                    item_c.set_status(DownloadStatus::Failed);
-                    item_c.set_detail(format!("Gallery failed: {e}"));
-                    tracing::error!(error = %e, "gallery download failed");
+            let _ = tx.send(GalleryMsg::Finished(result.map_err(|e| e.to_string())));
+        });
+
+        // Register for cancel/concurrency/shutdown.
+        self.running.borrow_mut().insert(item.id(), handle);
+
+        // Glib-side: recv messages and update the UI.
+        let this = self.clone();
+        let item_c = item.clone();
+        let total = item.gallery_file_count();
+        gtk4::glib::spawn_future_local(async move {
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    GalleryMsg::Progress(done) => {
+                        item_c.set_gallery_files_done(done);
+                        if total > 0 {
+                            item_c.set_progress(done as f64 / total as f64);
+                        }
+                        item_c.set_detail(format!("Gallery \u{2022} {done}/{total} files"));
+                        this.changed();
+                    }
+                    GalleryMsg::Finished(result) => {
+                        // Remove from running registry.
+                        this.running.borrow_mut().remove(&item_c.id());
+                        match result {
+                            Ok(r) => {
+                                item_c.set_status(DownloadStatus::Done);
+                                item_c.set_gallery_files_done(r.files.len() as u32);
+                                item_c.set_progress(1.0);
+                                item_c.set_detail(format!(
+                                    "Gallery \u{2022} {} files",
+                                    r.files.len()
+                                ));
+                                tracing::info!(
+                                    files = r.files.len(),
+                                    skipped = r.skipped,
+                                    "gallery download complete"
+                                );
+                            }
+                            Err(e) => {
+                                item_c.set_status(DownloadStatus::Failed);
+                                item_c.set_detail(format!("Gallery failed: {e}"));
+                                tracing::error!(error = %e, "gallery download failed");
+                            }
+                        }
+                        this.changed();
+                        this.persist_queue();
+                        this.start_next();
+                        break;
+                    }
                 }
             }
-            this.changed();
-            this.persist_queue();
-            this.start_next();
         });
     }
 

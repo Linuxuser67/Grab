@@ -316,6 +316,11 @@ mod tests {
     #[test]
     fn route_sticky_host_preference() {
         let images = vec![item("jpg")];
+        // Sticky gallery wins when both viable.
+        assert_eq!(
+            route(true, Some(&images), Some(StickyMode::Gallery)),
+            ProbeOutcome::Gallery
+        );
         // Sticky video → default Video with toggle.
         assert_eq!(
             route(true, Some(&images), Some(StickyMode::Video)),

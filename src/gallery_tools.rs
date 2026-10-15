@@ -5,6 +5,7 @@
 //! The nightly builds live in the separate `gdl-org/builds` repo
 //! (the Codeberg repo is the source; GitHub hosts the built binaries).
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use crate::video_tools::{download_to_file, ensure_lib_dir, user_lib_dir};
@@ -117,7 +118,7 @@ pub async fn install_gallerydl() -> Result<PathBuf, GalleryError> {
     // GitHub's API alongside the binary; absent means we can't verify.
     let digest = digest.ok_or_else(|| {
         GalleryError::install(
-            "gallery-dl release has no SHA-256 digest; refusing unverified install.",
+            "gallery-dl release has no SHA-256 digest; refusing unverified install",
         )
     })?;
     let dir = user_lib_dir();
@@ -150,7 +151,6 @@ async fn fetch_gallerydl_inner(
     download_to_file(url, part, digest, GALLERYDL_MAX_DOWNLOAD_BYTES)
         .await
         .map_err(GalleryError::install)?;
-    use std::os::unix::fs::PermissionsExt as _;
     tokio::fs::set_permissions(part, std::fs::Permissions::from_mode(0o755))
         .await
         .map_err(|e| {
@@ -161,31 +161,15 @@ async fn fetch_gallerydl_inner(
         .map_err(|e| GalleryError::install(format!("couldn't install {}: {e}", dest.display())))
 }
 
-/// Resolve the gallery-dl binary: user lib dir first, then PATH.
-/// Returns the path, or an error naming what's missing.
+/// Resolve the gallery-dl binary via the standard tool search dirs
+/// (user lib dir → /app/bin → PATH), requiring the executable bit.
 pub fn resolve_gallerydl() -> Result<PathBuf, GalleryError> {
-    let lib_path = user_lib_dir().join("gallery-dl");
-    if lib_path.is_file() {
-        return Ok(lib_path);
-    }
-    // Fall back to PATH (tarball/dev builds where the user installed it).
-    if let Ok(path) = which_gallerydl() {
-        return Ok(path);
-    }
-    Err(GalleryError::install(
-        "gallery-dl not found: install it via Preferences → Check for Updates",
-    ))
-}
-
-fn which_gallerydl() -> Result<PathBuf, ()> {
-    let path_var = std::env::var_os("PATH").ok_or(())?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join("gallery-dl");
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(())
+    crate::video_tools::find_in_dirs("gallery-dl", &crate::video_tools::tool_search_dirs())
+        .ok_or_else(|| {
+            GalleryError::install(
+                "gallery-dl not found: install it via Preferences → Check for Updates",
+            )
+        })
 }
 
 /// `gallery-dl --version` output, trimmed. Used for the Preferences row.
@@ -244,11 +228,30 @@ mod tests {
     }
 
     #[test]
-    fn error_messages_are_lowercase_no_trailing_punct() {
+    fn error_messages_follow_convention() {
         // gtk-rs skill: error strings lowercase, no trailing punctuation.
-        let e = GalleryError::install("test message");
-        let msg = e.to_string();
-        assert!(!msg.is_empty());
-        assert_eq!(msg.chars().next().unwrap(), 't');
+        // Assert on the real messages, not a placeholder.
+        let messages = [
+            GalleryError::install("couldn't determine the latest gallery-dl release").to_string(),
+            GalleryError::install(
+                "gallery-dl release has no SHA-256 digest; refusing unverified install",
+            )
+            .to_string(),
+            GalleryError::install(
+                "gallery-dl not found: install it via Preferences → Check for Updates",
+            )
+            .to_string(),
+        ];
+        for msg in messages {
+            let first = msg.chars().next().unwrap();
+            assert!(
+                first.is_lowercase() || first == '"',
+                "must start lowercase: {msg}"
+            );
+            assert!(
+                !msg.ends_with(['.', '!', '?']),
+                "no trailing punctuation: {msg}"
+            );
+        }
     }
 }

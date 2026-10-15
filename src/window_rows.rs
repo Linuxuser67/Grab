@@ -834,7 +834,7 @@ pub(crate) fn build_row(
             // Gallery rows open the destination folder (not a file).
             if n_press == 2 && it.status() == DownloadStatus::Done {
                 if it.is_gallery() {
-                    open_with_default_app(&it.dest_dir(), &t);
+                    open_with_default_app(std::path::Path::new(&it.dest_dir()), &t);
                 } else {
                     open_with_default_app(&it.display_path(), &t);
                 }
@@ -886,7 +886,7 @@ pub(crate) fn build_row(
             {
                 // Gallery rows open the destination folder.
                 if it.is_gallery() {
-                    open_with_default_app(&it.dest_dir(), &t);
+                    open_with_default_app(std::path::Path::new(&it.dest_dir()), &t);
                 } else {
                     open_with_default_app(&it.display_path(), &t);
                 }

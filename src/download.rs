@@ -1912,7 +1912,7 @@ impl DownloadManager {
     /// Spawn a gallery download via gallery-dl.
     /// Updates the item's progress as files complete; sets Done/Failed on finish.
     fn spawn_gallery(self: &Rc<Self>, item: DownloadItem) {
-        item.set_status(crate::download_row::DownloadStatus::Downloading);
+        item.set_status(DownloadStatus::Downloading);
         self.changed();
 
         // Build the GalleryJob from the item's properties.
@@ -1935,7 +1935,7 @@ impl DownloadManager {
             let tool = match crate::gallery_argv::resolve_tool() {
                 Ok(t) => t,
                 Err(e) => {
-                    item_c.set_status(crate::download_row::DownloadStatus::Failed);
+                    item_c.set_status(DownloadStatus::Failed);
                     item_c.set_detail(e);
                     this.changed();
                     this.start_next();
@@ -1955,7 +1955,7 @@ impl DownloadManager {
             .await;
             match result {
                 Ok(r) => {
-                    item_c.set_status(crate::download_row::DownloadStatus::Done);
+                    item_c.set_status(DownloadStatus::Done);
                     item_c.set_gallery_files_done(r.files.len() as u32);
                     item_c.set_progress(1.0);
                     item_c.set_detail(format!("Gallery • {} files", r.files.len()));
@@ -1966,7 +1966,7 @@ impl DownloadManager {
                     );
                 }
                 Err(e) => {
-                    item_c.set_status(crate::download_row::DownloadStatus::Failed);
+                    item_c.set_status(DownloadStatus::Failed);
                     item_c.set_detail(format!("Gallery failed: {e}"));
                     tracing::error!(error = %e, "gallery download failed");
                 }

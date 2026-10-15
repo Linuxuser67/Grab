@@ -168,12 +168,14 @@ pub async fn run_gallery_download(
             });
         }
         // Total failure: include the stderr tail and a mapped message.
-        let msg = match code {
-            Some(1) => "gallery-dl: general error",
-            Some(2) => "gallery-dl: HTTP error",
-            Some(4) => "gallery-dl: authentication failed",
-            Some(8) => "gallery-dl: resource not found",
-            Some(16) => "gallery-dl: storage error",
+        // gallery-dl exit codes are bit flags (see gallery_dl/exception.py):
+        // 1=general, 4=extraction (incl. HTTP, not found), 8=challenge,
+        // 16=auth, 32=input. Check the most specific bits first.
+        let msg = match code.unwrap_or(0) {
+            c if c & 16 != 0 => "gallery-dl: authentication failed",
+            c if c & 8 != 0 => "gallery-dl: challenge failed (e.g. Cloudflare)",
+            c if c & 32 != 0 => "gallery-dl: invalid input or no extractor",
+            c if c & 4 != 0 => "gallery-dl: extraction failed",
             _ => "gallery-dl failed",
         };
         return Err(GalleryError::runtime(format!(

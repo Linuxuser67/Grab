@@ -3598,6 +3598,7 @@ fn piece_rejects_changed_file_version() {
             ..Default::default()
         },
         cookies: None,
+        user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
         timeout: Duration::from_secs(30),
         tx,
         if_range: std::sync::Arc::new(std::sync::OnceLock::new()),
@@ -4995,6 +4996,7 @@ fn direct_mode_ignores_proxy_env() {
             ..Default::default()
         },
         cookies: None,
+        user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
         timeout: Duration::from_secs(30),
         tx,
         if_range: std::sync::Arc::new(std::sync::OnceLock::new()),
@@ -5079,6 +5081,7 @@ fn single_connection_skips_probe() {
             ..Default::default()
         },
         cookies: None,
+        user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
         timeout: Duration::from_secs(30),
         tx,
         if_range: std::sync::Arc::new(std::sync::OnceLock::new()),
@@ -6633,6 +6636,7 @@ fn piece_sends_if_range_when_validator_set() {
             ..Default::default()
         },
         cookies: None,
+        user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
         timeout: Duration::from_secs(30),
         tx,
         if_range,
@@ -6684,6 +6688,7 @@ fn piece_rejects_200_after_if_range_mismatch() {
             ..Default::default()
         },
         cookies: None,
+        user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
         timeout: Duration::from_secs(30),
         tx,
         if_range,
@@ -6741,6 +6746,7 @@ fn piece_rejects_206_with_mismatched_validator() {
             ..Default::default()
         },
         cookies: None,
+        user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
         timeout: Duration::from_secs(30),
         tx,
         if_range,
@@ -6785,6 +6791,7 @@ fn probe_validator_sent_before_workers() {
             ..Default::default()
         },
         cookies: None,
+        user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
         timeout: Duration::from_secs(30),
         tx,
         if_range: std::sync::Arc::new(std::sync::OnceLock::new()),

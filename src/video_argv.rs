@@ -172,9 +172,10 @@ fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob) {
     // Extension handoff cookies ride every media leg too (the probe's leg is
     // separate). Before the identity args: those end argv with `-- <url>`.
     args.extend(crate::extension_server::handoff_cookie_args(&job.page_url));
+    let handoff_ua = crate::extension_server::handoff_user_agent(&job.page_url);
     args.extend(ytdlp_identity_args(
         &job.cookies_browser,
-        None,
+        handoff_ua.as_deref(),
         &job.page_url,
     ));
 }
@@ -311,9 +312,10 @@ pub(crate) fn live_capture_argv(
     // Extension handoff cookies ride the live capture too. Before the
     // identity args: those end argv with `-- <url>`.
     args.extend(crate::extension_server::handoff_cookie_args(&job.page_url));
+    let handoff_ua = crate::extension_server::handoff_user_agent(&job.page_url);
     args.extend(ytdlp_identity_args(
         &job.cookies_browser,
-        None,
+        handoff_ua.as_deref(),
         &job.page_url,
     ));
     args

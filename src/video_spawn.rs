@@ -65,7 +65,13 @@ pub(crate) async fn fetch_raw_dump_json(
     // the finished download discards it. Before the identity args: those end
     // argv with `-- <url>`, past which yt-dlp reads positionals.
     args.extend(crate::extension_server::handoff_cookie_args(url));
-    args.extend(ytdlp_identity_args(cookies_browser, None, url));
+    // Browser UA travels with the handoff cookies (cf_clearance is UA-bound).
+    let handoff_ua = crate::extension_server::handoff_user_agent(url);
+    args.extend(ytdlp_identity_args(
+        cookies_browser,
+        handoff_ua.as_deref(),
+        url,
+    ));
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(&args);

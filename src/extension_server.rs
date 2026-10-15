@@ -225,10 +225,19 @@ pub(crate) struct Cookie {
 /// Staged cookie files keyed by canonical URL, oldest first.
 #[derive(Default)]
 struct HandoffStore {
-    by_key: HashMap<String, PathBuf>,
+    by_key: HashMap<String, HandoffCookies>,
     /// Insertion order, so a full store evicts the oldest handoff instead of
     /// an arbitrary one (which could belong to a download still running).
     order: VecDeque<String>,
+}
+
+/// Staged cookies plus the browser UA for one handoff. The UA travels with
+/// the cookies because `cf_clearance` is UA-bound: same jar, wrong UA still
+/// fails the challenge.
+#[derive(Clone, Default)]
+struct HandoffCookies {
+    path: PathBuf,
+    user_agent: Option<String>,
 }
 
 /// Cookie files handed off from the extension, keyed by canonical URL. Every
@@ -393,7 +402,7 @@ pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<Pat
 /// Store a cookie file for a URL. Called by the extension handoff once the
 /// handoff is accepted. Replaces any existing entry (deleting its file);
 /// past [`MAX_HANDOFF_ENTRIES`] the oldest entry is evicted with its file.
-pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf) {
+pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option<String>) {
     let Some(key) = handoff_key(url) else {
         let _ = std::fs::remove_file(path);
         return;
@@ -402,8 +411,15 @@ pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf) {
         let _ = std::fs::remove_file(path);
         return;
     };
-    if let Some(old) = store.by_key.insert(key.clone(), path) {
-        let _ = std::fs::remove_file(old);
+    // Sanitize the UA: it goes into a header and an argv; trim whitespace,
+    // drop it if empty, cap length (browsers send < 512 chars).
+    let user_agent = user_agent
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(512).collect());
+    let entry = HandoffCookies { path, user_agent };
+    if let Some(old) = store.by_key.insert(key.clone(), entry) {
+        let _ = std::fs::remove_file(old.path);
         store.order.retain(|k| k != &key);
     }
     store.order.push_back(key);
@@ -412,7 +428,7 @@ pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf) {
             break;
         };
         if let Some(old) = store.by_key.remove(&oldest) {
-            let _ = std::fs::remove_file(old);
+            let _ = std::fs::remove_file(old.path);
         }
     }
 }
@@ -420,17 +436,40 @@ pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf) {
 /// `--cookies` argv for a URL's staged handoff cookies, if any. Peeks: the
 /// entry stays staged until the download finishes (or is evicted), because
 /// the probe, the subtitle probe and the media download each spawn yt-dlp
-/// separately and every leg must pass the challenge. Add BEFORE
-/// `ytdlp_identity_args` — that helper terminates argv with `-- <url>`, past
-/// which yt-dlp reads positionals.
+/// Staged entry for `url`, if any. Exact URL first, then any staged entry
+/// for the same host: playlist items are queued under their own URLs, but
+/// the cookies were staged for the collection page. The cookie file itself
+/// enforces domain/path scoping, so the host fallback can't leak cookies
+/// to a wrong scope.
+fn handoff_entry(url: &str) -> Option<HandoffCookies> {
+    let key = handoff_key(url)?;
+    HANDOFF_COOKIES.lock().ok().and_then(|store| {
+        store.by_key.get(&key).cloned().or_else(|| {
+            let host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
+            store.by_key.iter().find_map(|(k, v)| {
+                let khost = url::Url::parse(k).ok()?.host_str()?.to_ascii_lowercase();
+                (khost == host).then(|| v.clone())
+            })
+        })
+    })
+}
+
+fn handoff_cookie_file(url: &str) -> Option<PathBuf> {
+    handoff_entry(url).map(|e| e.path)
+}
+
+/// Browser UA staged with a handoff's cookies, if any. Same lookup as the
+/// cookies (exact URL, then same-host fallback).
+pub(crate) fn handoff_user_agent(url: &str) -> Option<String> {
+    handoff_entry(url).and_then(|e| e.user_agent)
+}
+
+/// `--cookies` argv for a URL's staged handoff cookies, if any. Peeks: the
+/// entry stays staged until the download finishes (or is evicted), because
+/// the probe, the subtitle probe and the media download each spawn yt-dlp
+/// separately and every leg must pass the challenge.
 pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
-    let path = handoff_key(url).and_then(|key| {
-        HANDOFF_COOKIES
-            .lock()
-            .ok()
-            .and_then(|store| store.by_key.get(&key).cloned())
-    });
-    match path {
+    match handoff_cookie_file(url) {
         Some(p) => vec!["--cookies".to_string(), p.to_string_lossy().into_owned()],
         None => Vec::new(),
     }
@@ -440,11 +479,7 @@ pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
 /// Path of the staged cookie file for `url`, if any. Peeks: the entry stays
 /// until the download finishes or is evicted.
 pub(crate) fn handoff_cookie_path(url: &str) -> Option<PathBuf> {
-    let key = handoff_key(url)?;
-    HANDOFF_COOKIES
-        .lock()
-        .ok()
-        .and_then(|store| store.by_key.get(&key).cloned())
+    handoff_cookie_file(url)
 }
 
 /// Drop a URL's staged handoff cookies and delete the file. Called when its
@@ -454,7 +489,7 @@ pub(crate) fn discard_handoff_cookies(url: &str) {
     let path = handoff_key(url).and_then(|key| {
         HANDOFF_COOKIES.lock().ok().and_then(|mut store| {
             store.order.retain(|k| k != &key);
-            store.by_key.remove(&key)
+            store.by_key.remove(&key).map(|e| e.path)
         })
     });
     if let Some(p) = path {
@@ -470,7 +505,7 @@ pub(crate) fn purge_handoff_cookies() {
         .lock()
         .map(|mut store| {
             store.order.clear();
-            store.by_key.drain().map(|(_, p)| p).collect()
+            store.by_key.drain().map(|(_, e)| e.path).collect()
         })
         .unwrap_or_default();
     for p in paths {
@@ -483,6 +518,9 @@ struct AddRequest {
     url: String,
     #[serde(default)]
     cookies: Vec<Cookie>,
+    /// Browser UA; `cf_clearance` is UA-bound, so it travels with the cookies.
+    #[serde(default)]
+    user_agent: Option<String>,
 }
 
 /// A URL handed off from the extension. Cookies (if any) are stored
@@ -690,7 +728,7 @@ async fn handle_add(
     // handoff is received, and every probe leg looks the cookies up by URL.
     let staged = if authenticated && let Some(path) = write_handoff_cookies(&req.url, &req.cookies)
     {
-        store_handoff_cookies(&req.url, path);
+        store_handoff_cookies(&req.url, path, req.user_agent);
         true
     } else {
         false
@@ -1086,7 +1124,7 @@ mod tests {
         // Stored under the bare domain; the intake hands the probe the
         // slash-terminated canonical form. One entry must serve both.
         let path = write_handoff_cookies("https://example.com", &[cookie("c", "v")]).expect("path");
-        store_handoff_cookies("https://example.com", path.clone());
+        store_handoff_cookies("https://example.com", path.clone(), None);
         for url in ["https://example.com", "https://example.com/"] {
             let args = handoff_cookie_args(url);
             assert_eq!(args.len(), 2, "{url}: {args:?}");
@@ -1094,7 +1132,11 @@ mod tests {
             assert_eq!(args[1], path.to_string_lossy());
         }
         assert!(handoff_cookie_args("https://other.example/").is_empty());
-        assert!(handoff_cookie_args("https://example.com/other").is_empty());
+        // Same-host fallback: a playlist item queued under its own URL finds
+        // the cookies staged for the collection page.
+        let args = handoff_cookie_args("https://example.com/other");
+        assert_eq!(args.len(), 2, "{args:?}");
+        assert_eq!(args[1], path.to_string_lossy());
         clear_handoff_cookies();
     }
 
@@ -1103,7 +1145,7 @@ mod tests {
         let _g = exclusive();
         let path =
             write_handoff_cookies("https://example.com/item", &[cookie("c", "v")]).expect("path");
-        store_handoff_cookies("https://example.com/item", path.clone());
+        store_handoff_cookies("https://example.com/item", path.clone(), None);
         assert!(path.exists());
         discard_handoff_cookies("https://example.com/item");
         assert!(!path.exists(), "file must be deleted");
@@ -1121,7 +1163,7 @@ mod tests {
         for i in 0..=(MAX_HANDOFF_ENTRIES + 2) {
             let url = format!("https://example.com/evict-{i}");
             let path = write_handoff_cookies(&url, &[cookie("c", "v")]).expect("path");
-            store_handoff_cookies(&url, path.clone());
+            store_handoff_cookies(&url, path.clone(), None);
             paths.push(path);
         }
         let len = HANDOFF_COOKIES.lock().unwrap().by_key.len();
@@ -1132,7 +1174,9 @@ mod tests {
         for (i, path) in paths.iter().enumerate() {
             assert_eq!(path.exists(), i >= evicted, "entry {i}");
         }
-        assert!(handoff_cookie_args("https://example.com/evict-0").is_empty());
+        // The evicted URL's own entry is gone; the host fallback still finds
+        // a surviving same-host entry (playlist-item behavior).
+        assert_eq!(handoff_cookie_args("https://example.com/evict-0").len(), 2);
         let newest = format!("https://example.com/evict-{}", paths.len() - 1);
         assert_eq!(handoff_cookie_args(&newest).len(), 2);
         clear_handoff_cookies();
@@ -1418,7 +1462,7 @@ mod tests {
         for i in 0..3 {
             let url = format!("https://example.com/purge-{i}");
             let path = write_handoff_cookies(&url, &[cookie("c", "v")]).expect("path");
-            store_handoff_cookies(&url, path.clone());
+            store_handoff_cookies(&url, path.clone(), None);
             paths.push(path);
         }
         assert!(paths.iter().all(|p| p.exists()));
@@ -1432,7 +1476,7 @@ mod tests {
         let _g = exclusive();
         let path =
             write_handoff_cookies("https://example.com/k", &[cookie("c", "v")]).expect("path");
-        store_handoff_cookies("not a url", path.clone());
+        store_handoff_cookies("not a url", path.clone(), None);
         assert!(
             !path.exists(),
             "an unkeyable handoff must not leave its file behind"

@@ -78,6 +78,11 @@ pub(crate) struct StoredItem {
     pub(crate) etag: Option<String>,
     #[serde(default)]
     pub(crate) last_modified: Option<String>,
+    /// Gallery job payload (raw Value: a bad shape in one entry must not
+    /// quarantine the whole queue). Additive, no version bump.
+    /// `None` = not a gallery row or predates the field.
+    #[serde(default)]
+    pub(crate) gallery: Option<serde_json::Value>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

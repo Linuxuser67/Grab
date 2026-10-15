@@ -592,6 +592,7 @@ fn serde_page_round_trip() {
         is_live: false,
         video_format_id: Some("137".into()),
         playlist_item_id: None,
+        backend: None,
     };
     let json = serde_json::to_string(&src).unwrap();
     let back: VideoSource = serde_json::from_str(&json).unwrap();
@@ -614,6 +615,7 @@ fn serde_page_old_json_gets_defaults() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         }
     );
     // Files that still carry audio_only:true restore as audio rows.
@@ -2295,6 +2297,7 @@ fn video_source_page_carries_format_pin() {
         is_live: false,
         video_format_id: Some("137".into()),
         playlist_item_id: None,
+        backend: None,
     };
     let json = serde_json::to_string(&src).unwrap();
     assert!(json.contains("\"video_format_id\":\"137\""));

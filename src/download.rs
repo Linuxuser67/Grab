@@ -245,6 +245,7 @@ struct PendingRestore {
     item: StoredItem,
     output_dir: Option<String>,
     segments: Option<SegmentState>,
+    gallery_job: Option<crate::gallery_argv::GalleryJob>,
 }
 
 impl Drop for DownloadManager {
@@ -717,11 +718,13 @@ impl DownloadManager {
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(&job.page_url)?;
         let dir = job.dest_dir.to_string_lossy().to_string();
-        // Gallery title is the folder name; filename is not applicable.
+        // Gallery title is the folder name; sanitize it (probe falls back to
+        // the URL, which contains `/` and would fail restore validation).
+        let title = crate::file_names::sanitize_folder_name(&job.title);
         let item = DownloadItem::new(
             self.alloc_id_for(std::path::Path::new(&dir)),
             &url,
-            &job.title,
+            &title,
             &dir,
         );
         item.set_is_gallery(true);
@@ -785,6 +788,7 @@ impl DownloadManager {
                 is_live: choices.is_live,
                 video_format_id: choices.video_format_id,
                 playlist_item_id: choices.playlist_item_id,
+                backend: None,
             },
         );
         Ok(self.insert(item))
@@ -924,6 +928,56 @@ impl DownloadManager {
         // Legacy queue files (started == None) keep the old resume behavior.
         if stored.started.unwrap_or(true) {
             self.started.borrow_mut().insert(item.id());
+        }
+        Ok(self.insert(item))
+    }
+
+    /// Restore a gallery row from a validated stored entry + parsed job.
+    /// Mirrors `enqueue_gallery` but reuses the stored id and status.
+    pub fn restore_existing_gallery(
+        self: &Rc<Self>,
+        stored: &StoredItem,
+        job: Option<crate::gallery_argv::GalleryJob>,
+    ) -> Result<DownloadItem, String> {
+        let mut job = job.ok_or_else(|| "gallery entry missing job".to_string())?;
+        let url = normalize_url(&stored.url)?;
+        if !std::path::Path::new(&stored.dest_dir).is_absolute() {
+            return Err(format!("Invalid destination in queue: {}", stored.dest_dir));
+        }
+        // Title was sanitized at enqueue; re-sanitize defensively.
+        let title = crate::file_names::sanitize_folder_name(&job.title);
+        let id = self.claim_id(stored.id, std::path::Path::new(&stored.dest_dir));
+        job.item_id = id;
+        let item = DownloadItem::new(id, &url, &title, &stored.dest_dir);
+        item.set_is_gallery(true);
+        let file_count = job.file_count.unwrap_or(0);
+        item.set_gallery_file_count(file_count);
+        // Done rows show the full count; others start at 0.
+        let files_done = if stored.status == DownloadStatus::Done {
+            file_count
+        } else {
+            0
+        };
+        item.set_gallery_files_done(files_done);
+        item.set_gallery_url(url.clone());
+        // Done rows show the finished count; others mirror enqueue_gallery's
+        // total-count format (done_label(0) would read "Gallery • 0 files").
+        if stored.status == DownloadStatus::Done {
+            item.set_detail(crate::gallery_runner::done_label(files_done as usize, 0));
+        } else {
+            item.set_detail(format!("Gallery • {file_count} files"));
+        }
+        // Status: Done/Failed/Paused kept; Downloading → Queued via the _ arm.
+        // (Scheduled doesn't apply to galleries.)
+        item.set_status(match stored.status {
+            DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Done => stored.status,
+            _ => DownloadStatus::Queued,
+        });
+        // Insert the job BEFORE self.insert: insert → start_next →
+        // spawn_gallery reads gallery_jobs synchronously.
+        self.gallery_jobs.borrow_mut().insert(id, job);
+        if stored.started.unwrap_or(true) {
+            self.started.borrow_mut().insert(id);
         }
         Ok(self.insert(item))
     }
@@ -2906,10 +2960,32 @@ impl DownloadManager {
         }
         let mut items = Vec::new();
         for it in self.items() {
-            // Cancelled rows carry no intent: never persisted. Gallery rows are
-            // not restorable yet (phase 11b): persisting them without gallery
-            // flags would resurrect them as plain direct downloads on restart.
-            if it.status() != DownloadStatus::Cancelled && !it.is_gallery() {
+            // Cancelled rows carry no intent: never persisted.
+            if it.status() != DownloadStatus::Cancelled {
+                // Gallery rows need their job to restore; a missing job is a
+                // bug — skip the row rather than resurrecting it as a plain
+                // direct download (the old phase-11b hazard).
+                let gallery = if it.is_gallery() {
+                    match self.gallery_jobs.borrow().get(&it.id()) {
+                        Some(job) => match serde_json::to_value(job) {
+                            Ok(v) => Some(v),
+                            Err(e) => {
+                                tracing::warn!("skipping gallery row: job serialize failed: {e}");
+                                None
+                            }
+                        },
+                        None => {
+                            tracing::warn!("skipping gallery row with no job entry");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                // Skip gallery rows that failed to serialize their job.
+                if it.is_gallery() && gallery.is_none() {
+                    continue;
+                }
                 let segments = self.segment_state.borrow().get(&it.id()).cloned();
                 let selected_files = crate::torrent::get_selection(&it.url().to_string());
                 // Empty means "no folder tracked": omit it so old files stay clean and old app versions keep reading new ones.
@@ -2942,6 +3018,7 @@ impl DownloadManager {
                         let lm = it.last_modified();
                         (!lm.is_empty()).then_some(lm.to_string())
                     },
+                    gallery,
                 });
             }
         }
@@ -3042,10 +3119,53 @@ impl DownloadManager {
             }
             _ => None,
         };
+        // Gallery payload: parse per-entry so one bad shape can't quarantine
+        // the whole queue. Unparseable → skip the entry, never fall through
+        // to a plain row.
+        let gallery_job = match &item.gallery {
+            Some(v) => match serde_json::from_value::<crate::gallery_argv::GalleryJob>(v.clone()) {
+                Ok(mut job) => {
+                    // Overwrite identity from the stored item, not the payload.
+                    job.page_url = item.url.clone();
+                    job.dest_dir = std::path::PathBuf::from(&item.dest_dir);
+                    Some(job)
+                }
+                Err(e) => {
+                    tracing::warn!("skipping gallery entry: unparseable job: {e}");
+                    return None;
+                }
+            },
+            None => {
+                // Legacy: pre-B4 rows stored `backend: "gallerydl"` on the
+                // video source. Convert to a gallery job (filter All, no count).
+                if let Some(crate::media_types::VideoSource::Page {
+                    page_url,
+                    backend: Some(backend),
+                    ..
+                }) = &item.video_source
+                    && backend == "gallerydl"
+                {
+                    tracing::info!("converting legacy gallerydl row to gallery");
+                    Some(crate::gallery_argv::GalleryJob {
+                        item_id: 0, // overwritten on restore
+                        page_url: page_url.clone(),
+                        title: item.filename.clone(),
+                        file_count: None,
+                        dest_dir: std::path::PathBuf::from(&item.dest_dir),
+                        filter: crate::gallery_argv::GalleryFilter::All,
+                        cookies_browser: "none".to_string(),
+                        speed_limit: None,
+                    })
+                } else {
+                    None
+                }
+            }
+        };
         Some(PendingRestore {
             item,
             output_dir,
             segments,
+            gallery_job,
         })
     }
 
@@ -3112,15 +3232,27 @@ impl DownloadManager {
                 for p in pending {
                     match p.item.status {
                         DownloadStatus::Done => {
-                            let video_source = p.item.video_source.clone();
-                            self.insert_history(
-                                p.item.url,
-                                p.item.dest_dir,
-                                p.item.filename,
-                                p.item.progress,
-                                p.output_dir,
-                                video_source,
-                            );
+                            // Gallery Done rows need their flags; insert_history
+                            // builds a plain row. restore_existing keeps Done.
+                            if p.gallery_job.is_some() {
+                                let mut restored_item = p.item.clone();
+                                restored_item.segments = p.segments;
+                                // Carry the gallery job through.
+                                match self.restore_existing_gallery(&restored_item, p.gallery_job) {
+                                    Ok(_) => {}
+                                    Err(e) => tracing::warn!("skipping queue entry: {e}"),
+                                }
+                            } else {
+                                let video_source = p.item.video_source.clone();
+                                self.insert_history(
+                                    p.item.url,
+                                    p.item.dest_dir,
+                                    p.item.filename,
+                                    p.item.progress,
+                                    p.output_dir,
+                                    video_source,
+                                );
+                            }
                         }
                         status => {
                             // Re-stage the intake file selection BEFORE restore_existing: insert → start_next → spawn_torrent reads it synchronously, so staging after is too late.
@@ -3132,7 +3264,12 @@ impl DownloadManager {
                             let mut restored_item = p.item.clone();
                             restored_item.status = status;
                             restored_item.segments = p.segments;
-                            match self.restore_existing(&restored_item) {
+                            let result = if let Some(job) = p.gallery_job {
+                                self.restore_existing_gallery(&restored_item, Some(job))
+                            } else {
+                                self.restore_existing(&restored_item)
+                            };
+                            match result {
                                 Ok(restored) => {
                                     // Re-attach the recorded engine folder.
                                     if let Some(dir) = p.output_dir.clone() {

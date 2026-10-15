@@ -58,6 +58,7 @@ fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus)
         scheduled_at: None,
         etag: None,
         last_modified: None,
+        gallery: None,
     }
 }
 
@@ -552,6 +553,7 @@ fn overcap_queue_keeps_active_first() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            gallery: None,
         },
         StoredItem {
             id: None,
@@ -568,6 +570,7 @@ fn overcap_queue_keeps_active_first() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            gallery: None,
         },
     ];
     for i in 0..1000 {
@@ -586,6 +589,7 @@ fn overcap_queue_keeps_active_first() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            gallery: None,
         });
     }
     let queue = StoredQueue {
@@ -1226,6 +1230,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            gallery: None,
         },
         StoredItem {
             id: None,
@@ -1242,6 +1247,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            gallery: None,
         },
     ];
     std::fs::write(
@@ -1350,11 +1356,13 @@ fn mismatched_video_source_dropped_on_restore() {
                 is_live: false,
                 video_format_id: None,
                 playlist_item_id: None,
+                backend: None,
             }),
             started: None,
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            gallery: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -1401,11 +1409,13 @@ fn done_video_keeps_page_source_on_restore() {
                 is_live: false,
                 video_format_id: None,
                 playlist_item_id: None,
+                backend: None,
             }),
             started: None,
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            gallery: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -2568,6 +2578,7 @@ fn expand_playlist_rows_use_titled_subfolder() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         },
     );
     let pl = crate::media_types::PlaylistInfo {
@@ -2724,6 +2735,7 @@ fn queue_roundtrip_and_mapping() {
                 scheduled_at: None,
                 etag: None,
                 last_modified: None,
+                gallery: None,
             },
             StoredItem {
                 id: None,
@@ -2740,6 +2752,7 @@ fn queue_roundtrip_and_mapping() {
                 scheduled_at: None,
                 etag: None,
                 last_modified: None,
+                gallery: None,
             },
         ],
     };
@@ -2910,6 +2923,7 @@ fn batch_restore_hundred_done() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            gallery: None,
         })
         .collect();
     let queue = StoredQueue {
@@ -3121,6 +3135,7 @@ fn restore_preserves_intent() {
         scheduled_at: None,
         etag: None,
         last_modified: None,
+        gallery: None,
     })
     .collect();
     let queue = StoredQueue {
@@ -3839,6 +3854,7 @@ fn killed_segmented_resume_starts_over() {
                 scheduled_at: None,
                 etag: None,
                 last_modified: None,
+                gallery: None,
             }],
         })
         .unwrap(),
@@ -4308,6 +4324,7 @@ fn remove_cleans_video_staging() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         },
     );
     manager.remove(id);
@@ -4360,6 +4377,7 @@ fn remove_cleans_dest_side_video_staging() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         },
     );
     manager.remove(id);
@@ -4479,6 +4497,7 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
             is_live: true,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         },
     );
     manager.live_rows.borrow_mut().insert(id);
@@ -5405,6 +5424,7 @@ fn delete_download_trashes_video_sidecars() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         },
     );
     let plain = DownloadItem::new(
@@ -5552,6 +5572,7 @@ fn a_video_attempt_gets_a_gate_and_a_plain_row_does_not() {
         is_live: false,
         video_format_id: None,
         playlist_item_id: None,
+        backend: None,
     });
     let item = manager.restore_existing(&row).expect("video row");
     assert!(
@@ -5596,6 +5617,7 @@ fn a_removal_claims_the_gate_before_the_worker_can_commit() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         },
     );
     manager.epoch.borrow_mut().insert(id, 1);
@@ -5653,6 +5675,7 @@ fn a_finalizer_removes_the_orphan_a_lost_commit_left_behind() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         },
     );
     manager.epoch.borrow_mut().insert(id, 1);
@@ -5719,6 +5742,7 @@ fn removing_a_settled_video_row_keeps_the_users_finished_file() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         },
     );
     manager.epoch.borrow_mut().insert(id, 1);
@@ -6000,6 +6024,7 @@ fn released_reservation_wakes_parked_unremoved_row() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         }),
         started: false,
     };
@@ -6078,6 +6103,7 @@ fn an_unremove_of_a_settled_row_stays_settled_while_reserved() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         }),
         started: false,
     };
@@ -6123,6 +6149,7 @@ fn a_finalizer_releases_the_reservation_after_the_worker() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         },
     );
     manager.epoch.borrow_mut().insert(id, 1);
@@ -6183,6 +6210,7 @@ fn removing_a_never_spawned_video_row_releases_synchronously() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         },
     );
     manager.remove(id);
@@ -6223,6 +6251,7 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            backend: None,
         },
     );
     manager.epoch.borrow_mut().insert(id, 1);
@@ -6967,4 +6996,239 @@ mod proptest_cd {
             }
         }
     }
+}
+
+// ── R6: gallery queue persistence ─────────────────────────────────────
+
+fn gallery_job_fixture() -> crate::gallery_argv::GalleryJob {
+    crate::gallery_argv::GalleryJob {
+        item_id: 0,
+        page_url: "https://example.com/gallery".to_string(),
+        title: "Test Gallery".to_string(),
+        file_count: Some(5),
+        dest_dir: std::path::PathBuf::from("/tmp/dl"),
+        filter: crate::gallery_argv::GalleryFilter::All,
+        cookies_browser: "none".to_string(),
+        speed_limit: None,
+    }
+}
+
+fn gallery_stored_item(status: DownloadStatus, job: Option<serde_json::Value>) -> StoredItem {
+    StoredItem {
+        id: None,
+        url: "https://example.com/gallery".to_string(),
+        dest_dir: "/tmp/dl".to_string(),
+        filename: "Test Gallery".to_string(),
+        status,
+        progress: 0.0,
+        segments: None,
+        selected_files: None,
+        output_dir: None,
+        video_source: None,
+        started: None,
+        scheduled_at: None,
+        etag: None,
+        last_modified: None,
+        gallery: job,
+    }
+}
+
+#[test]
+fn gallery_round_trip_queued() {
+    let (_lock, _loop) = test_locks();
+    let qf = test_queue_file("gallery-queued");
+    let settings = test_settings();
+    let job = gallery_job_fixture();
+    let job_value = serde_json::to_value(&job).unwrap();
+    // Paused: Queued would auto-spawn via start_next and leak threads into
+    // the next test (glib thread guard). The restore path is identical.
+    let items = vec![gallery_stored_item(DownloadStatus::Paused, Some(job_value))];
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items,
+    };
+    std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.restore_queue();
+    assert_eq!(m.store().n_items(), 1);
+    let item = m.store().item(0).and_downcast::<DownloadItem>().unwrap();
+    assert!(item.is_gallery());
+    assert_eq!(item.status(), DownloadStatus::Paused);
+    assert_eq!(item.gallery_file_count(), 5);
+    // Job was inserted before insert() → spawn_gallery could read it.
+    assert!(m.gallery_jobs.borrow().contains_key(&item.id()));
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn gallery_round_trip_done() {
+    let (_lock, _loop) = test_locks();
+    let qf = test_queue_file("gallery-done");
+    let settings = test_settings();
+    let job = gallery_job_fixture();
+    let job_value = serde_json::to_value(&job).unwrap();
+    let items = vec![gallery_stored_item(DownloadStatus::Done, Some(job_value))];
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items,
+    };
+    std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.restore_queue();
+    assert_eq!(m.store().n_items(), 1);
+    let item = m.store().item(0).and_downcast::<DownloadItem>().unwrap();
+    assert!(item.is_gallery());
+    assert_eq!(item.status(), DownloadStatus::Done);
+    assert_eq!(item.gallery_file_count(), 5);
+    assert_eq!(item.gallery_files_done(), 5);
+    drain_sizing(&m);
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn gallery_corrupt_payload_skips_entry() {
+    let (_lock, _loop) = test_locks();
+    let qf = test_queue_file("gallery-corrupt");
+    let settings = test_settings();
+    // Bad shape: not a GalleryJob.
+    let bad = serde_json::json!({"nonsense": 123});
+    let items = vec![
+        gallery_stored_item(DownloadStatus::Paused, Some(bad)),
+        // Good entry survives.
+        gallery_stored_item(
+            DownloadStatus::Paused,
+            Some(serde_json::to_value(gallery_job_fixture()).unwrap()),
+        ),
+    ];
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items,
+    };
+    std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.restore_queue();
+    // Only the good gallery entry restored.
+    assert_eq!(m.store().n_items(), 1);
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn gallery_unknown_filter_falls_back_to_all() {
+    let json = r#"{"item_id": 0, "page_url": "https://example.com/g", "title": "t", "file_count": 1, "dest_dir": "/tmp/dl", "filter": "Bogus", "cookies_browser": "none", "speed_limit": null}"#;
+    let job: crate::gallery_argv::GalleryJob = serde_json::from_str(json).unwrap();
+    assert_eq!(job.filter, crate::gallery_argv::GalleryFilter::All);
+}
+
+#[test]
+fn gallery_title_with_slash_sanitized() {
+    // Probe falls back to the URL as title; the `/` would fail restore
+    // validation. enqueue_gallery sanitizes via sanitize_folder_name.
+    let sanitized = crate::file_names::sanitize_folder_name("a/b\\c");
+    assert!(!sanitized.contains('/'));
+    assert!(!sanitized.contains('\\'));
+    assert!(!sanitized.is_empty());
+}
+
+#[test]
+fn gallery_round_trip_failed() {
+    let (_lock, _loop) = test_locks();
+    let qf = test_queue_file("gallery-failed");
+    let settings = test_settings();
+    let job = gallery_job_fixture();
+    let job_value = serde_json::to_value(&job).unwrap();
+    let items = vec![gallery_stored_item(DownloadStatus::Failed, Some(job_value))];
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items,
+    };
+    std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.restore_queue();
+    assert_eq!(m.store().n_items(), 1);
+    let item = m.store().item(0).and_downcast::<DownloadItem>().unwrap();
+    assert!(item.is_gallery());
+    assert_eq!(item.status(), DownloadStatus::Failed);
+    // Non-Done restores show the total count, not "0 files".
+    assert_eq!(item.detail(), "Gallery • 5 files");
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn gallery_cancelled_not_persisted() {
+    // Cancelled rows carry no intent: serialize_queue_inner skips them.
+    // (Tested via the status filter, not a full enqueue, to avoid the
+    // spawn thread that enqueue_gallery triggers.)
+    let (_lock, _loop) = test_locks();
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    // Manually build a Cancelled gallery item and append to the store
+    // directly (bypassing enqueue_gallery's insert → start_next → spawn).
+    let item = DownloadItem::new(
+        999,
+        "https://example.com/gallery",
+        "Test Gallery",
+        "/tmp/dl",
+    );
+    item.set_is_gallery(true);
+    item.set_status(DownloadStatus::Cancelled);
+    m.store().append(&item);
+    // Also add a Paused gallery via the job map so serialize finds it.
+    let mut job = gallery_job_fixture();
+    job.item_id = 999;
+    m.gallery_jobs.borrow_mut().insert(999, job);
+    let json = m.serialize_queue().unwrap();
+    let queue: StoredQueue = serde_json::from_str(&json).unwrap();
+    // Cancelled gallery not in the persisted queue.
+    assert!(queue.items.is_empty());
+}
+
+#[test]
+fn gallery_legacy_backend_converts() {
+    let (_lock, _loop) = test_locks();
+    // Pre-B4 row: video_source with backend "gallerydl", no gallery field.
+    // Constructed in Rust (not via JSON) because backend is skip_serializing.
+    let video_source = crate::media_types::VideoSource::Page {
+        page_url: "https://example.com/gallery".to_string(),
+        media_url: None,
+        expires_at: None,
+        quality: "1080p".to_string(),
+        audio_only: false,
+        is_live: false,
+        video_format_id: None,
+        playlist_item_id: None,
+        backend: Some("gallerydl".to_string()),
+    };
+    let mut stored = gallery_stored_item(DownloadStatus::Paused, None);
+    stored.video_source = Some(video_source);
+    // validate_stored_item is private; test via restore_queue with a
+    // manually-written queue file that includes the backend in JSON.
+    // Since backend is skip_serializing, we write the JSON manually.
+    let qf = test_queue_file("gallery-legacy");
+    let settings = test_settings();
+    // Build the JSON manually to include backend.
+    let mut json_value = serde_json::to_value(&StoredQueue {
+        version: QUEUE_VERSION,
+        items: vec![stored],
+    })
+    .unwrap();
+    // Inject backend into the video_source.
+    if let Some(items) = json_value.get_mut("items").and_then(|v| v.as_array_mut())
+        && let Some(item) = items.get_mut(0)
+        && let Some(vs) = item.get_mut("video_source")
+        && let Some(page) = vs.get_mut("Page")
+    {
+        page["backend"] = serde_json::Value::String("gallerydl".to_string());
+    }
+    std::fs::write(&qf, serde_json::to_string(&json_value).unwrap()).unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.restore_queue();
+    assert_eq!(m.store().n_items(), 1);
+    let item = m.store().item(0).and_downcast::<DownloadItem>().unwrap();
+    assert!(item.is_gallery());
+    assert_eq!(item.status(), DownloadStatus::Paused);
+    // Job was synthesized from the legacy row.
+    let job = m.gallery_jobs.borrow().get(&item.id()).cloned().unwrap();
+    assert_eq!(job.filter, crate::gallery_argv::GalleryFilter::All);
+    assert_eq!(job.page_url, "https://example.com/gallery");
+    let _ = std::fs::remove_file(&qf);
 }

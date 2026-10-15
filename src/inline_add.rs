@@ -193,7 +193,7 @@ pub(crate) fn fmt_item_duration(secs: i64) -> String {
 /// Automatic row (the global preference, no pin) when nothing is pinnable,
 /// or the Audio only row (no pin, audio-only download).
 #[derive(Clone)]
-struct FormatOption {
+pub(crate) struct FormatOption {
     /// Row title: the pin label ("1080p"), "Automatic", or "Audio only".
     label: String,
     /// Resolved yt-dlp format id; `None` for the Automatic and Audio only rows.
@@ -205,51 +205,51 @@ struct FormatOption {
 /// The video preview block inside the form: exactly one state shows at a
 /// time (ready rows, tools row, or the centered error card), driven by the
 /// probe below.
-struct VideoStep {
+pub(crate) struct VideoStep {
     /// The URL entry itself: its secondary icon is the lookup state machine
     /// (tick → spinner → none), shared with the helpers below.
-    url_entry: gtk4::Entry,
+    pub(crate) url_entry: gtk4::Entry,
     /// Spinner paintable for the entry's secondary icon slot: GTK4 entries
     /// take paintables, not widgets, as icons. Animated by the entry's own
     /// frame clock (the established AdwSpinnerPaintable API).
-    spinner_paintable: adw::SpinnerPaintable,
+    pub(crate) spinner_paintable: adw::SpinnerPaintable,
     /// A lookup is in flight for the current text. Any edit stales it (the
     /// probe generation bump discards its completion), so the changed
     /// handler clears this and the icon follows.
-    looking_up: Cell<bool>,
+    pub(crate) looking_up: Cell<bool>,
     /// Revealer wrapping the Add button: it slides in from the left
     /// (SlideRight) once the lookup resolves, pushing the gear and X
     /// buttons aside; it slides out on enqueue or card close. The slide
     /// uses GtkRevealer, the established API — no hand-rolled animation.
-    action_revealer: gtk4::Revealer,
+    pub(crate) action_revealer: gtk4::Revealer,
     /// Slide-down revealer wrapping the preview block's PreferencesGroup:
     /// the block animates in/out instead of snapping.
-    group_revealer: gtk4::Revealer,
-    name: adw::EntryRow,
-    revert: gtk4::Button,
+    pub(crate) group_revealer: gtk4::Revealer,
+    pub(crate) name: adw::EntryRow,
+    pub(crate) revert: gtk4::Button,
     /// Media-format selector, filled per video on resolve: exact pinnable
     /// formats, tallest first (the preference preselects the closest row),
     /// a single Automatic row when nothing is pinnable, and always an
     /// Audio only row — the whole format decision lives in this one row.
-    format: adw::ComboRow,
+    pub(crate) format: adw::ComboRow,
     /// Index-aligned with the combo's model. Reset on every resolve.
-    options: Rc<RefCell<Vec<FormatOption>>>,
-    tools: adw::ActionRow,
-    error: adw::ActionRow,
+    pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
+    pub(crate) tools: adw::ActionRow,
+    pub(crate) error: adw::ActionRow,
     /// Gallery info row: shown when the probe finds an image gallery.
     /// Title is "Gallery", subtitle is "N files • preview...".
-    gallery_info: adw::ActionRow,
+    pub(crate) gallery_info: adw::ActionRow,
     /// Gallery filter toggle (All/Images/Videos). Shown with gallery_info.
-    gallery_filter: adw::ToggleGroup,
+    pub(crate) gallery_filter: adw::ToggleGroup,
     /// Wrapper for the filter toggle (for visibility control).
-    gallery_filter_wrap: gtk4::Box,
+    pub(crate) gallery_filter_wrap: gtk4::Box,
     /// True when the current preview is a gallery (not a video).
-    is_gallery: Rc<Cell<bool>>,
+    pub(crate) is_gallery: Rc<Cell<bool>>,
     /// The gallery card state (filter, items) when is_gallery is true.
-    gallery_card: Rc<RefCell<Option<crate::gallery_card::GalleryCard>>>,
+    pub(crate) gallery_card: Rc<RefCell<Option<crate::gallery_card::GalleryCard>>>,
     /// The form's Add button: icon-only until a format is picked, then a
     /// labeled "Add" pill (HIG: primary actions carry a text label).
-    add_btn: gtk4::Button,
+    pub(crate) add_btn: gtk4::Button,
 }
 
 /// The URL entry's secondary icon: exactly one state shows at a time.
@@ -279,7 +279,7 @@ fn entry_icon_for(has_text: bool, looking_up: bool, add_shown: bool, blocked: bo
 }
 
 /// Apply the derived icon state to the URL entry.
-fn sync_entry_icon(v: &VideoStep) {
+pub(crate) fn sync_entry_icon(v: &VideoStep) {
     let icon = entry_icon_for(
         !v.url_entry.text().trim().is_empty(),
         v.looking_up.get(),
@@ -310,7 +310,7 @@ fn sync_entry_icon(v: &VideoStep) {
     }
 }
 
-fn hide_video_step(v: &VideoStep) {
+pub(crate) fn hide_video_step(v: &VideoStep) {
     // Slide the preview block closed; the child-revealed handler hides the
     // revealer once the animation finishes, so no dead spacing remains.
     v.group_revealer.set_reveal_child(false);
@@ -395,46 +395,6 @@ fn show_video_ready(v: &VideoStep) {
     sync_entry_icon(v);
 }
 
-/// Show the gallery preview: title, file count, and filenames.
-/// Hides the video-specific rows (format selector).
-fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, title: &str) {
-    hide_video_step(v);
-    v.looking_up.set(false);
-    v.is_gallery.set(true);
-    // Store the card first so the filter handler can access it.
-    *v.gallery_card.borrow_mut() = Some(card);
-    // Reset filter to All.
-    v.gallery_filter.set_active_name(Some("all"));
-    refresh_gallery_info(v, title);
-    v.gallery_info.set_visible(true);
-    v.gallery_filter_wrap.set_visible(true);
-    // Reveal the block.
-    v.action_revealer.set_visible(true);
-    v.action_revealer.set_reveal_child(true);
-    v.group_revealer.set_visible(true);
-    v.group_revealer.set_reveal_child(true);
-    // The Add button earns its text label.
-    v.add_btn.set_icon_name("");
-    v.add_btn.remove_css_class("circular");
-    v.add_btn.set_label(&gettext("Add"));
-    sync_entry_icon(v);
-}
-
-/// Refresh the gallery info row from the current card state.
-fn refresh_gallery_info(v: &VideoStep, title: &str) {
-    if let Some(card) = v.gallery_card.borrow().as_ref() {
-        let count = card.file_count();
-        let preview = card.preview_filenames().join(", ");
-        let subtitle = if count > 5 {
-            format!("{} files • {}, +{} more", count, preview, count - 5)
-        } else {
-            format!("{} files • {}", count, preview)
-        };
-        v.gallery_info.set_title(title);
-        v.gallery_info.set_subtitle(&subtitle);
-    }
-}
-
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
     hide_video_step(v);
     v.looking_up.set(false);
@@ -451,7 +411,7 @@ fn show_video_tools_missing(v: &VideoStep, message: &str) {
     sync_entry_icon(v);
 }
 
-fn show_video_error(v: &VideoStep, message: &str) {
+pub(crate) fn show_video_error(v: &VideoStep, message: &str) {
     hide_video_step(v);
     v.looking_up.set(false);
     // Lookup failed: nothing to add. Slide the Add button out (the
@@ -469,7 +429,7 @@ fn show_video_error(v: &VideoStep, message: &str) {
 
 /// Desensitize the form's Add button while a lookup is in flight (a dead
 /// button says so upfront). Every terminal state re-enables it.
-fn set_lookup_add(cell: &Rc<RefCell<Option<gtk4::Button>>>, enabled: bool) {
+pub(crate) fn set_lookup_add(cell: &Rc<RefCell<Option<gtk4::Button>>>, enabled: bool) {
     if let Some(b) = cell.borrow().as_ref() {
         b.set_sensitive(enabled);
     }
@@ -519,52 +479,6 @@ fn selected_audio_only(step: &VideoStep) -> bool {
         .get(selected)
         .map(|o| o.audio_only)
         .unwrap_or(false)
-}
-
-/// Submit a video URL that yt-dlp can't handle but gallery-dl can.
-/// Queues it as a normal video row with the GalleryDl backend; the runner
-/// branches on the backend. The title comes from the gallery probe.
-#[allow(clippy::too_many_arguments)]
-fn submit_gallery_video(
-    manager: &Rc<DownloadManager>,
-    dest: &Rc<RefCell<String>>,
-    close_card: &Rc<dyn Fn()>,
-    url: &str,
-    items: &[crate::gallery_probe::GalleryItem],
-    scheduled_at: Option<i64>,
-    step: &Rc<VideoStep>,
-    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
-) {
-    let title = items
-        .first()
-        .map(|i| crate::gallery_probe::probe_title(i, url))
-        .unwrap_or_else(|| url.to_string());
-    let settings = manager.settings();
-    enqueue_and_close(
-        manager,
-        dest,
-        close_card,
-        scheduled_at,
-        |d| {
-            manager.enqueue_video(
-                url,
-                d,
-                Some(&title),
-                crate::media_types::VideoChoices {
-                    quality: settings.video_quality(),
-                    audio_only: false,
-                    video_format_id: None,
-                    is_live: false,
-                    playlist_item_id: None,
-                    backend: crate::video::VideoBackend::GalleryDl,
-                },
-            )
-        },
-        |e| {
-            show_video_error(step, e);
-            set_lookup_add(lookup_add, true);
-        },
-    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -715,7 +629,7 @@ fn apply_scheduled_at(item: &DownloadItem, scheduled_at: Option<i64>) {
 /// temporary in a `match` scrutinee would live into the arms, and
 /// `close_card()` re-borrows the same cell mutably to reset the destination —
 /// panicking with "RefCell already borrowed" on every successful Add.
-fn enqueue_and_close(
+pub(crate) fn enqueue_and_close(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
@@ -2172,7 +2086,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     crate::gallery_probe::ProbeOutcome::VideoGalleryDl
                                 ) {
                                     // Submit as video via gallery-dl backend.
-                                    submit_gallery_video(
+                                    crate::inline_gallery::submit_gallery_video(
                                         &manager_b,
                                         &dest_b,
                                         &close_b,
@@ -2210,7 +2124,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                         sticky = ?card.sticky_mode(),
                                         "gallery-dl found image gallery"
                                     );
-                                    show_gallery_ready(&step_b, card, &title);
+                                    crate::inline_gallery::show_gallery_ready(
+                                        &step_b, card, &title,
+                                    );
                                     return;
                                 }
                             }
@@ -2404,7 +2320,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     file_count: Some(file_count),
                     dest_dir: std::path::PathBuf::from(dest),
                     filter,
-                    cookies_file: None, // TODO: staged cookies (phase 14)
+                    cookies_file: None, // TODO: staged cookies (B3)
                     speed_limit: None,
                 };
                 match m.enqueue_gallery(&job) {

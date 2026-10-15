@@ -15,14 +15,17 @@ pub enum GalleryFilter {
 
 impl GalleryFilter {
     /// gallery-dl `--filter` Python expression. `None` for All (no filter).
-    /// Uses the `extension` keyword which every extractor provides.
+    /// Uses the `extension` keyword which every extractor provides;
+    /// case-insensitive via `.lower()`.
     pub fn to_filter_expr(self) -> Option<&'static str> {
         match self {
             Self::All => None,
-            Self::ImagesOnly => {
-                Some("extension in ('jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'bmp', 'svg')")
+            Self::ImagesOnly => Some(
+                "extension.lower() in ('jpg', 'jpeg', 'jpe', 'png', 'webp', 'gif', 'avif', 'bmp', 'svg', 'tiff', 'tif')",
+            ),
+            Self::VideosOnly => {
+                Some("extension.lower() in ('mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi', 'ts')")
             }
-            Self::VideosOnly => Some("extension in ('mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi')"),
         }
     }
 }
@@ -42,6 +45,7 @@ pub fn download_argv(
     dest_dir: &Path,
     cookies_file: Option<&Path>,
     filter: GalleryFilter,
+    speed_limit: Option<u64>,
 ) -> Vec<String> {
     let mut argv = vec![
         tool.to_string_lossy().to_string(),
@@ -60,8 +64,8 @@ pub fn download_argv(
         "output.progress=false".to_string(),
         "-o".to_string(),
         // Custom pipe mode: success lines are bare paths, skip lines are
-        // `# `-prefixed, progress lines are `\r`-prefixed with byte counts.
-        "output.mode={\"success\": \"{}\\n\", \"skip\": \"# {}\\n\", \"progress\": \"\\r{0}/{2}\", \"progress-total\": \"\\r{3}% {0}/{2}\"}".to_string(),
+        // `# `-prefixed. Byte progress is disabled; file counts drive the UI.
+        "output.mode={\"success\": \"{}\\n\", \"skip\": \"# {}\\n\"}".to_string(),
     ];
     if let Some(cookies) = cookies_file {
         argv.push("-C".to_string());
@@ -71,6 +75,12 @@ pub fn download_argv(
         argv.push("--filter".to_string());
         argv.push(expr.to_string());
     }
+    if let Some(limit) = speed_limit {
+        argv.push("-r".to_string());
+        argv.push(limit.to_string());
+    }
+    // `--` guards against URLs starting with `-` being parsed as options.
+    argv.push("--".to_string());
     argv.push(url.to_string());
     argv
 }
@@ -93,6 +103,7 @@ pub fn count_argv(tool: &Path, url: &str, cookies_file: Option<&Path>) -> Vec<St
         argv.push("-C".to_string());
         argv.push(cookies.to_string_lossy().to_string());
     }
+    argv.push("--".to_string());
     argv.push(url.to_string());
     argv
 }
@@ -116,7 +127,7 @@ pub struct GalleryJob {
     pub filter: GalleryFilter,
     /// Staged cookies file path, if the site needs auth.
     pub cookies_file: Option<PathBuf>,
-    /// Per-download speed cap in bytes/sec (`--ratelimit`); `None` = unlimited.
+    /// Per-download speed cap in bytes/sec (`-r`/`--limit-rate`); `None` = unlimited.
     pub speed_limit: Option<u64>,
 }
 
@@ -136,6 +147,7 @@ mod tests {
             Path::new("/tmp/dest"),
             None,
             GalleryFilter::All,
+            None,
         );
         // `-D`, not `-d` (exact dir, no nesting).
         let d_pos = argv.iter().position(|a| a == "-D").unwrap();
@@ -151,6 +163,7 @@ mod tests {
             Path::new("/tmp/dest"),
             None,
             GalleryFilter::All,
+            None,
         );
         let f_pos = argv.iter().position(|a| a == "-f").unwrap();
         assert_eq!(argv[f_pos + 1], "/O");
@@ -164,6 +177,7 @@ mod tests {
             Path::new("/tmp/dest"),
             None,
             GalleryFilter::All,
+            None,
         );
         assert!(argv.contains(&"extractor.directory=[]".to_string()));
     }
@@ -176,6 +190,7 @@ mod tests {
             Path::new("/tmp/dest"),
             Some(Path::new("/tmp/cookies.txt")),
             GalleryFilter::All,
+            None,
         );
         let c_pos = argv.iter().position(|a| a == "-C").unwrap();
         assert_eq!(argv[c_pos + 1], "/tmp/cookies.txt");
@@ -189,6 +204,7 @@ mod tests {
             Path::new("/tmp/dest"),
             None,
             GalleryFilter::ImagesOnly,
+            None,
         );
         let f_pos = argv.iter().position(|a| a == "--filter").unwrap();
         assert!(argv[f_pos + 1].contains("jpg"));
@@ -203,6 +219,7 @@ mod tests {
             Path::new("/tmp/dest"),
             None,
             GalleryFilter::VideosOnly,
+            None,
         );
         let f_pos = argv.iter().position(|a| a == "--filter").unwrap();
         assert!(argv[f_pos + 1].contains("mp4"));
@@ -217,6 +234,7 @@ mod tests {
             Path::new("/tmp/dest"),
             None,
             GalleryFilter::All,
+            None,
         );
         assert!(!argv.iter().any(|a| a == "--filter"));
     }

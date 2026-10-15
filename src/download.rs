@@ -733,6 +733,8 @@ impl DownloadManager {
         self.gallery_jobs
             .borrow_mut()
             .insert(item.id(), job.clone());
+        // One finished record per URL (Parabolic parity): re-downloads replace.
+        self.drop_finished_duplicates(&url, item.id());
         Ok(self.insert(item))
     }
 
@@ -1923,8 +1925,8 @@ impl DownloadManager {
         item.set_status(DownloadStatus::Downloading);
         self.changed();
 
-        // Get the job (carries the user's filter); remove from map.
-        let job = match self.gallery_jobs.borrow_mut().remove(&item.id()) {
+        // Get the job (carries the user's filter). Kept in the map for retry.
+        let job = match self.gallery_jobs.borrow().get(&item.id()).cloned() {
             Some(j) => j,
             None => {
                 item.set_status(DownloadStatus::Failed);
@@ -2313,6 +2315,11 @@ impl DownloadManager {
                     if !self.segment_state.borrow().contains_key(&id) {
                         item.set_progress(0.0);
                     }
+                    // Gallery downloads restart from zero (no resume support yet).
+                    if item.is_gallery() {
+                        item.set_gallery_files_done(0);
+                        item.set_progress(0.0);
+                    }
                     item.set_detail(String::new());
                     item.set_status(DownloadStatus::Queued);
                     self.persist_queue();
@@ -2346,6 +2353,7 @@ impl DownloadManager {
         // The snapshot carries the source for Undo; the live map drops it
         // with the row (cancel keeps it, remove doesn't).
         self.video_sources.borrow_mut().remove(&id);
+        self.gallery_jobs.borrow_mut().remove(&id);
         if let Some(pos) = self.position_of(id) {
             self.store.remove(pos);
         }

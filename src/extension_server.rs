@@ -446,9 +446,16 @@ fn handoff_entry(url: &str) -> Option<HandoffCookies> {
     HANDOFF_COOKIES.lock().ok().and_then(|store| {
         store.by_key.get(&key).cloned().or_else(|| {
             let host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
-            store.by_key.iter().find_map(|(k, v)| {
+            // Newest-first through insertion order: deterministic, and the
+            // most recent handoff on the host is the best guess for the parent
+            // collection (a HashMap walk would be arbitrary).
+            store.order.iter().rev().find_map(|k| {
                 let khost = url::Url::parse(k).ok()?.host_str()?.to_ascii_lowercase();
-                (khost == host).then(|| v.clone())
+                if khost == host {
+                    store.by_key.get(k).cloned()
+                } else {
+                    None
+                }
             })
         })
     })
@@ -1232,6 +1239,30 @@ mod tests {
             handoff_cookie_args("https://example.com/").is_empty(),
             "rejected handoff must stage nothing"
         );
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn handoff_host_fallback_returns_newest_entry() {
+        let _g = exclusive();
+        // Stage two different URLs on the same host; the newer one must win
+        // the host fallback deterministically.
+        let old_url = "https://example.com/old";
+        let new_url = "https://example.com/new";
+        let old_path = write_handoff_cookies(old_url, &[cookie("c", "old")]).expect("path");
+        store_handoff_cookies(old_url, old_path, Some("OldUA/1.0".to_string()));
+        let new_path = write_handoff_cookies(new_url, &[cookie("c", "new")]).expect("path");
+        store_handoff_cookies(new_url, new_path.clone(), Some("NewUA/1.0".to_string()));
+        // Look up a third URL on the same host repeatedly: under HashMap
+        // ordering the winner would vary, but newest-first is deterministic.
+        for _ in 0..50 {
+            let entry = handoff_entry("https://example.com/other").expect("fallback entry");
+            assert_eq!(
+                entry.path, new_path,
+                "host fallback must return the newest entry"
+            );
+            assert_eq!(entry.user_agent.as_deref(), Some("NewUA/1.0"));
+        }
         clear_handoff_cookies();
     }
 

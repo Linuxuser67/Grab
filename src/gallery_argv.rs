@@ -60,8 +60,8 @@ pub fn download_argv(
         "output.progress=false".to_string(),
         "-o".to_string(),
         // Custom pipe mode: success lines are bare paths, skip lines are
-        // `# `-prefixed, progress lines are `\r`-prefixed with byte counts.
-        "output.mode={\"success\": \"{}\\n\", \"skip\": \"# {}\\n\", \"progress\": \"\\r{0}/{2}\", \"progress-total\": \"\\r{3}% {0}/{2}\"}".to_string(),
+        // `# `-prefixed. Byte progress is disabled; file counts drive the UI.
+        "output.mode={\"success\": \"{}\\n\", \"skip\": \"# {}\\n\"}".to_string(),
     ];
     if let Some(cookies) = cookies_file {
         argv.push("-C".to_string());

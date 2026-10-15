@@ -87,7 +87,7 @@ pub async fn run_gallery_download(
         // Only fire the callback for meaningful updates, not log noise.
         let meaningful = matches!(
             parsed,
-            ProgressLine::Completed(_) | ProgressLine::Skipped(_) | ProgressLine::Progress { .. }
+            ProgressLine::Completed(_) | ProgressLine::Skipped(_)
         );
         if let ProgressLine::Completed(path) = &parsed {
             last_completed = Some(path.clone());
@@ -96,19 +96,13 @@ pub async fn run_gallery_download(
             files.push(PathBuf::from(path));
         }
         if meaningful {
-            // Log the overall fraction for debugging; the callback carries
-            // the raw bytes so the UI can compute it too.
-            if let Some(f) = progress.fraction() {
-                tracing::trace!(fraction = f, "gallery-dl progress fraction");
-            }
-            if let Some(cf) = progress.current_file_fraction() {
-                tracing::trace!(current_file_fraction = cf, "gallery-dl current file");
-            }
             on_progress(GalleryProgressUpdate {
                 files_completed: progress.files_completed,
                 files_total: job.file_count,
-                bytes_downloaded: progress.bytes_downloaded,
-                bytes_total: progress.bytes_total,
+                // Byte progress disabled (downloader.http.progress=null);
+                // kept for the video-fallback path until B4 resolves it.
+                bytes_downloaded: 0,
+                bytes_total: None,
                 last_completed_file: last_completed.clone(),
             });
         }

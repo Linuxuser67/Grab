@@ -2320,7 +2320,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     file_count: Some(file_count),
                     dest_dir: std::path::PathBuf::from(dest),
                     filter,
-                    cookies_file: None, // TODO: staged cookies (phase 14)
+                    cookies_file: None, // TODO: staged cookies (B3)
                     speed_limit: None,
                 };
                 match m.enqueue_gallery(&job) {

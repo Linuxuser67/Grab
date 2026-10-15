@@ -1,9 +1,8 @@
 //! Gallery UI helpers for the inline New Download card.
 //!
 //! Pure move from `inline_add.rs` (no behavior change): the gallery preview
-//! (`show_gallery_ready`, `refresh_gallery_info`), the gallery-dl video
-//! fallback submit (`submit_gallery_video`), and the gallery probe branch
-//! (`try_gallery_probe`).
+//! (`show_gallery_ready`, `refresh_gallery_info`) and the gallery-dl video
+//! fallback submit (`submit_gallery_video`).
 
 use crate::download::DownloadManager;
 use crate::inline_add::{

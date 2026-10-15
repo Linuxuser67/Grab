@@ -19,8 +19,8 @@ fn find_gallery_dl() -> Option<PathBuf> {
 }
 
 /// Start the Python gallery test server on an ephemeral port.
-/// Returns (child, port).
-fn start_server() -> (std::process::Child, u16) {
+/// Returns (guard, port). The guard kills the server on drop.
+fn start_server() -> (ServerGuard, u16) {
     // Find a free port.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -38,7 +38,17 @@ fn start_server() -> (std::process::Child, u16) {
         .expect("failed to start gallery_server.py");
     // Give it a moment to bind.
     std::thread::sleep(Duration::from_millis(500));
-    (child, port)
+    (ServerGuard(child), port)
+}
+
+/// Kills the test server on drop (also on panic).
+struct ServerGuard(std::process::Child);
+
+impl Drop for ServerGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 #[tokio::test]

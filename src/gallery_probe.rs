@@ -165,12 +165,12 @@ pub async fn probe_gallery(
         .arg("1-5")
         // Don't let gallery-dl write back to Grab's staged cookies file.
         .arg("-o")
-        .arg("extractor.cookies-update=false")
-        .arg("--")
-        .arg(url);
+        .arg("extractor.cookies-update=false");
     if let Some(cookies) = cookies_file {
         cmd.arg("-C").arg(cookies);
     }
+    // `--` last: guards against URLs starting with `-` being parsed as options.
+    cmd.arg("--").arg(url);
     let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
         .await
         .map_err(|_| GalleryError::install("gallery-dl probe timed out"))?

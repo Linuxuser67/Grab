@@ -1664,9 +1664,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
     gallery_filter.set_active_name(Some("all"));
     gallery_filter.set_visible(false);
-    // AdwToggleGroup doesn't implement GtkAccessible; wrap in a Box with a label
-    // for screen readers (same pattern as window.rs status filter).
+    // AdwToggleGroup doesn't implement GtkAccessible; the label goes on a
+    // wrapper so screen readers announce the filter's purpose.
     let filter_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    filter_wrap.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Filter gallery by type",
+    ))]);
     filter_wrap.append(&gallery_filter);
     filter_wrap.set_visible(false);
     video_group.add(&filter_wrap);
@@ -1687,8 +1690,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         tools: video_tools,
         error: video_error,
         gallery_info,
-        gallery_filter: gallery_filter.clone(),
-        gallery_filter_wrap: filter_wrap.clone(),
+        gallery_filter,
+        gallery_filter_wrap: filter_wrap,
         is_gallery: Rc::new(Cell::new(false)),
         gallery_card: Rc::new(RefCell::new(None)),
         add_btn: add_btn.clone(),
@@ -1698,25 +1701,26 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     {
         let card_rc = step.gallery_card.clone();
         let info = step.gallery_info.clone();
-        gallery_filter.connect_active_name_notify(move |toggle| {
-            if let Some(card_ref) = card_rc.borrow().as_ref() {
-                let filter = match toggle.active_name().as_deref() {
-                    Some("images") => crate::gallery_argv::GalleryFilter::ImagesOnly,
-                    Some("videos") => crate::gallery_argv::GalleryFilter::VideosOnly,
-                    _ => crate::gallery_argv::GalleryFilter::All,
-                };
-                *card_ref.filter.borrow_mut() = filter;
-                // Refresh the info row subtitle.
-                let count = card_ref.file_count();
-                let preview = card_ref.preview_filenames().join(", ");
-                let subtitle = if count > 5 {
-                    format!("{} files • {}, +{} more", count, preview, count - 5)
-                } else {
-                    format!("{} files • {}", count, preview)
-                };
-                info.set_subtitle(&subtitle);
-            }
-        });
+        step.gallery_filter
+            .connect_active_name_notify(move |toggle| {
+                if let Some(card_ref) = card_rc.borrow().as_ref() {
+                    let filter = match toggle.active_name().as_deref() {
+                        Some("images") => crate::gallery_argv::GalleryFilter::ImagesOnly,
+                        Some("videos") => crate::gallery_argv::GalleryFilter::VideosOnly,
+                        _ => crate::gallery_argv::GalleryFilter::All,
+                    };
+                    *card_ref.filter.borrow_mut() = filter;
+                    // Refresh the info row subtitle.
+                    let count = card_ref.file_count();
+                    let preview = card_ref.preview_filenames().join(", ");
+                    let subtitle = if count > 5 {
+                        format!("{} files • {}, +{} more", count, preview, count - 5)
+                    } else {
+                        format!("{} files • {}", count, preview)
+                    };
+                    info.set_subtitle(&subtitle);
+                }
+            });
     }
     // Card-local choices: the format is initialized from Preferences (not
     // bound). Exact picks are per lookup, so nothing persists here.

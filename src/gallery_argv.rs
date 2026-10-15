@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 /// Filters for the gallery download (user's Images/Videos/All picker).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GalleryFilter {
     All,
     ImagesOnly,
@@ -106,10 +106,16 @@ pub fn resolve_tool() -> Result<PathBuf, String> {
 pub struct GalleryJob {
     pub item_id: u64,
     pub page_url: String,
+    /// Display title for the queue row (from probe metadata).
+    pub title: String,
+    /// File count from the probe (`-g` line count), if available.
+    pub file_count: Option<u32>,
     pub dest_dir: PathBuf,
     pub filter: GalleryFilter,
     /// Staged cookies file path, if the site needs auth.
     pub cookies_file: Option<PathBuf>,
+    /// Per-download speed cap in bytes/sec (`--ratelimit`); `None` = unlimited.
+    pub speed_limit: Option<u64>,
 }
 
 #[cfg(test)]

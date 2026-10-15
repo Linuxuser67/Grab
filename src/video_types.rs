@@ -70,7 +70,6 @@ pub fn classify(url: &str) -> crate::media_types::VideoSource {
                     is_live: false,
                     video_format_id: None,
                     playlist_item_id: None,
-                    backend: crate::video::VideoBackend::YtDlp,
                 }
             } else {
                 crate::media_types::VideoSource::Direct

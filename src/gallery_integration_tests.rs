@@ -85,11 +85,11 @@ async fn gallery_integration_probe_count_download() {
         file_count: Some(3),
         dest_dir: dest.clone(),
         filter: crate::gallery_argv::GalleryFilter::All,
-        cookies_file: None,
+        cookies_browser: "none".to_string(),
         speed_limit: None,
     };
     let completed = std::cell::Cell::new(0u32);
-    let result = crate::gallery_runner::run_gallery_download(&job, &tool, |update| {
+    let result = crate::gallery_runner::run_gallery_download(&job, &tool, None, |update| {
         completed.set(update.files_completed);
     })
     .await
@@ -101,7 +101,7 @@ async fn gallery_integration_probe_count_download() {
     }
 
     // 4. Second run reports all as skipped.
-    let result2 = crate::gallery_runner::run_gallery_download(&job, &tool, |_| {})
+    let result2 = crate::gallery_runner::run_gallery_download(&job, &tool, None, |_| {})
         .await
         .expect("second download failed");
     assert_eq!(result2.files.len(), 0, "no new files on second run");
@@ -130,10 +130,10 @@ async fn gallery_integration_filtered_download() {
         file_count: Some(3),
         dest_dir: dest.clone(),
         filter: crate::gallery_argv::GalleryFilter::ImagesOnly,
-        cookies_file: None,
+        cookies_browser: "none".to_string(),
         speed_limit: None,
     };
-    let result = crate::gallery_runner::run_gallery_download(&job, &tool, |_| {})
+    let result = crate::gallery_runner::run_gallery_download(&job, &tool, None, |_| {})
         .await
         .expect("filtered download failed");
     assert_eq!(

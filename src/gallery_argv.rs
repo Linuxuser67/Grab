@@ -125,8 +125,10 @@ pub struct GalleryJob {
     pub file_count: Option<u32>,
     pub dest_dir: PathBuf,
     pub filter: GalleryFilter,
-    /// Staged cookies file path, if the site needs auth.
-    pub cookies_file: Option<PathBuf>,
+    /// Browser spec for cookies (e.g. "chrome", "firefox", "none").
+    /// Resolved to a staged file at spawn time (not enqueue time);
+    /// the staged file is ephemeral.
+    pub cookies_browser: String,
     /// Per-download speed cap in bytes/sec (`-r`/`--limit-rate`); `None` = unlimited.
     pub speed_limit: Option<u64>,
 }

@@ -1060,7 +1060,6 @@ fn enqueue_video_spawns_and_fails_without_tools() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -1108,7 +1107,6 @@ fn enqueue_video_restrict_filenames_folds_name() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -1299,7 +1297,6 @@ fn video_source_survives_restore_and_retry() {
                     video_format_id: None,
                     is_live: false,
                     playlist_item_id: None,
-                    backend: crate::video::VideoBackend::YtDlp,
                 },
             )
             .expect("video enqueue");
@@ -1353,7 +1350,6 @@ fn mismatched_video_source_dropped_on_restore() {
                 is_live: false,
                 video_format_id: None,
                 playlist_item_id: None,
-                backend: crate::video::VideoBackend::YtDlp,
             }),
             started: None,
             scheduled_at: None,
@@ -1405,7 +1401,6 @@ fn done_video_keeps_page_source_on_restore() {
                 is_live: false,
                 video_format_id: None,
                 playlist_item_id: None,
-                backend: crate::video::VideoBackend::YtDlp,
             }),
             started: None,
             scheduled_at: None,
@@ -1458,7 +1453,6 @@ fn unremove_restores_video_source() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -1516,7 +1510,6 @@ fn queue_file_never_carries_cookies() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -2395,7 +2388,6 @@ fn enqueue_video_keeps_name_when_file_exists() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -2561,7 +2553,6 @@ fn expand_playlist_rows_use_titled_subfolder() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("parent enqueue");
@@ -2577,7 +2568,6 @@ fn expand_playlist_rows_use_titled_subfolder() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         },
     );
     let pl = crate::media_types::PlaylistInfo {
@@ -4318,7 +4308,6 @@ fn remove_cleans_video_staging() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         },
     );
     manager.remove(id);
@@ -4371,7 +4360,6 @@ fn remove_cleans_dest_side_video_staging() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         },
     );
     manager.remove(id);
@@ -4491,7 +4479,6 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
             is_live: true,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         },
     );
     manager.live_rows.borrow_mut().insert(id);
@@ -5034,7 +5021,6 @@ fn proxy_argv_precedes_end_of_options() {
     let job = crate::video::VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
-        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
@@ -5369,7 +5355,6 @@ fn enqueue_video_reserves_part_namespaced_stems() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -5420,7 +5405,6 @@ fn delete_download_trashes_video_sidecars() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         },
     );
     let plain = DownloadItem::new(
@@ -5481,7 +5465,6 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -5506,7 +5489,6 @@ fn enqueue_video_accepts_unlisted_url() {
         video_format_id: None,
         is_live: false,
         playlist_item_id: None,
-        backend: crate::video::VideoBackend::YtDlp,
     };
     let item = manager
         .enqueue_video(
@@ -5570,7 +5552,6 @@ fn a_video_attempt_gets_a_gate_and_a_plain_row_does_not() {
         is_live: false,
         video_format_id: None,
         playlist_item_id: None,
-        backend: crate::video::VideoBackend::YtDlp,
     });
     let item = manager.restore_existing(&row).expect("video row");
     assert!(
@@ -5615,7 +5596,6 @@ fn a_removal_claims_the_gate_before_the_worker_can_commit() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         },
     );
     manager.epoch.borrow_mut().insert(id, 1);
@@ -5673,7 +5653,6 @@ fn a_finalizer_removes_the_orphan_a_lost_commit_left_behind() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         },
     );
     manager.epoch.borrow_mut().insert(id, 1);
@@ -5740,7 +5719,6 @@ fn removing_a_settled_video_row_keeps_the_users_finished_file() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         },
     );
     manager.epoch.borrow_mut().insert(id, 1);
@@ -5832,7 +5810,6 @@ fn a_reserved_destination_forces_video_intake_to_dedupe() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -5899,7 +5876,6 @@ fn a_reserved_stem_forces_video_intake_to_dedupe() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -6024,7 +6000,6 @@ fn released_reservation_wakes_parked_unremoved_row() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         }),
         started: false,
     };
@@ -6103,7 +6078,6 @@ fn an_unremove_of_a_settled_row_stays_settled_while_reserved() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         }),
         started: false,
     };
@@ -6149,7 +6123,6 @@ fn a_finalizer_releases_the_reservation_after_the_worker() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         },
     );
     manager.epoch.borrow_mut().insert(id, 1);
@@ -6210,7 +6183,6 @@ fn removing_a_never_spawned_video_row_releases_synchronously() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         },
     );
     manager.remove(id);
@@ -6251,7 +6223,6 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         },
     );
     manager.epoch.borrow_mut().insert(id, 1);

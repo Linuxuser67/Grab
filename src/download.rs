@@ -785,7 +785,6 @@ impl DownloadManager {
                 is_live: choices.is_live,
                 video_format_id: choices.video_format_id,
                 playlist_item_id: choices.playlist_item_id,
-                backend: choices.backend,
             },
         );
         Ok(self.insert(item))
@@ -836,7 +835,6 @@ impl DownloadManager {
                         video_format_id: None,
                         is_live: false,
                         playlist_item_id: None,
-                        backend: crate::video::VideoBackend::YtDlp,
                     },
                     &existing,
                 )
@@ -1120,7 +1118,6 @@ impl DownloadManager {
             is_live,
             video_format_id,
             playlist_item_id,
-            backend,
             ..
         }) = self.video_source(item.id())
         {
@@ -1132,7 +1129,6 @@ impl DownloadManager {
                 video_format_id,
                 is_live,
                 playlist_item_id,
-                backend,
             });
         }
         let connections = (opts.connections.max(1) as usize).min(16);
@@ -1803,7 +1799,6 @@ struct SpawnVideoParams {
     video_format_id: Option<String>,
     is_live: bool,
     playlist_item_id: Option<String>,
-    backend: crate::video::VideoBackend,
 }
 
 impl DownloadManager {
@@ -1817,7 +1812,6 @@ impl DownloadManager {
             video_format_id,
             is_live,
             playlist_item_id,
-            backend,
         } = params;
         let id = item.id();
         let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
@@ -1850,7 +1844,6 @@ impl DownloadManager {
         let job = crate::video::VideoJob {
             item_id: id,
             page_url,
-            backend,
             playlist_item_id,
             quality,
             audio_only,
@@ -1944,6 +1937,8 @@ impl DownloadManager {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<GalleryMsg>();
 
         // Spawn the download on the tokio runtime.
+        // Cookies are resolved at spawn time (not enqueue time): the staged
+        // file is ephemeral, so a path stored at enqueue would be stale on retry.
         let handle = tokio_rt().spawn(async move {
             let tool = match crate::gallery_argv::resolve_tool() {
                 Ok(t) => t,
@@ -1952,10 +1947,35 @@ impl DownloadManager {
                     return;
                 }
             };
-            let result = crate::gallery_runner::run_gallery_download(&job, &tool, |update| {
-                let _ = tx.send(GalleryMsg::Progress(update.files_completed));
-            })
+            // Stage cookies inside the task (async context).
+            let cookies_file = if job.cookies_browser.is_empty() || job.cookies_browser == "none" {
+                None
+            } else if let Some(ytdlp) =
+                crate::video_tools::find_in_dirs("yt-dlp", &crate::video_tools::tool_search_dirs())
+            {
+                crate::cookies::export_cookies_to_file(
+                    &ytdlp,
+                    &job.cookies_browser,
+                    &job.page_url,
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+            } else {
+                None
+            };
+            let result = crate::gallery_runner::run_gallery_download(
+                &job,
+                &tool,
+                cookies_file.as_deref(),
+                |update| {
+                    let _ = tx.send(GalleryMsg::Progress(update.files_completed));
+                },
+            )
             .await;
+            // Clean up the staged cookies file.
+            if let Some(path) = cookies_file {
+                let _ = std::fs::remove_file(path);
+            }
             let _ = tx.send(GalleryMsg::Finished(result.map_err(|e| e.to_string())));
         });
 

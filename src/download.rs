@@ -2315,7 +2315,9 @@ impl DownloadManager {
                     if !self.segment_state.borrow().contains_key(&id) {
                         item.set_progress(0.0);
                     }
-                    // Gallery downloads restart from zero (no resume support yet).
+                    // Gallery downloads: gallery-dl skips existing files on retry
+                    // (file-level resume). Reset the UI counter; the runner
+                    // reports newly completed files via progress updates.
                     if item.is_gallery() {
                         item.set_gallery_files_done(0);
                         item.set_progress(0.0);

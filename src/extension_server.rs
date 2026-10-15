@@ -773,7 +773,13 @@ async fn handle_add(
         outcome => {
             // Declined, dropped unanswered or timed out: the extension keeps
             // the browser download, so the staged cookies have no user.
-            discard_handoff_cookies(&req.url);
+            // Only discard what this request staged: an unauthenticated
+            // decline must not wipe an entry from an earlier handoff, and
+            // the authenticated cookie-less case was already discarded at
+            // stage time (Issue 4).
+            if staged {
+                discard_handoff_cookies(&req.url);
+            }
             if outcome.is_err() {
                 StatusCode::REQUEST_TIMEOUT
             } else {
@@ -1664,6 +1670,53 @@ mod tests {
             handoff_cookie_args("https://example.com/d").is_empty(),
             "a declined handoff must not keep its cookies"
         );
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_decline_does_not_wipe_staged_entry() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let url = "https://example.com/keep";
+        // Authenticated handoff stages cookies for the URL.
+        let body = r#"{"url":"https://example.com/keep","cookies":[{"name":"c","value":"v"}]}"#;
+        let tok = token(body);
+        let r = request(
+            srv.port,
+            &[("Host", &host), ("X-Grab-Token", &tok), JSON],
+            body,
+        )
+        .await;
+        assert_eq!(status(&r), "200", "{r}");
+        let _ = srv.rx.recv().await.expect("handoff");
+        assert_eq!(handoff_cookie_args(url).len(), 2, "entry must be staged");
+        // Unauthenticated confirm=1 for the same URL, declined: the staged
+        // entry belongs to the earlier handoff and must survive.
+        let body2 = r#"{"url":"https://example.com/keep"}"#;
+        let (port, h2) = (srv.port, host.clone());
+        let task = tokio::spawn(async move {
+            request_to(
+                port,
+                "POST",
+                "/add?confirm=1",
+                &[("Host", &h2), JSON],
+                body2,
+            )
+            .await
+        });
+        let handoff = srv.rx.recv().await.expect("handoff");
+        handoff
+            .decision
+            .expect("unauthenticated handoff carries a decision")
+            .send(false)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "409");
+        assert_eq!(
+            handoff_cookie_args(url).len(),
+            2,
+            "declining an unauthenticated handoff must not wipe the staged entry"
+        );
+        clear_handoff_cookies();
     }
 
     #[tokio::test]

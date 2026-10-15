@@ -7149,7 +7149,7 @@ fn download_argv_carries_handoff_cookies_before_url_terminator() {
         }],
     )
     .expect("stage");
-    crate::extension_server::store_handoff_cookies(&job.page_url, path.clone());
+    crate::extension_server::store_handoff_cookies(&job.page_url, path.clone(), None);
     let out = std::path::Path::new("/tmp/staging/video.mp4");
     let ff = std::path::Path::new("/usr/bin/ffmpeg");
     for argv in [

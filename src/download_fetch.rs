@@ -83,6 +83,9 @@ pub(crate) struct FetchCtx {
     pub(crate) opts: DownloadOptions,
     /// Attempt-scoped browser cookie jar, resolved once per attempt.
     pub(crate) cookies: Option<std::sync::Arc<reqwest::cookie::Jar>>,
+    /// Browser UA from the extension handoff (cf_clearance is UA-bound).
+    /// Falls back to DEFAULT_USER_AGENT when no handoff.
+    pub(crate) user_agent: String,
     pub(crate) timeout: Duration,
     pub(crate) tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     /// Session validator for If-Range: ETag preferred, Last-Modified fallback.
@@ -485,7 +488,7 @@ async fn attempt_once(
             .await
             .map(|m| m.len())
             .unwrap_or(0);
-        let mut req = stamp_request(ctx.client.get(&ctx.url), DEFAULT_USER_AGENT);
+        let mut req = stamp_request(ctx.client.get(&ctx.url), &ctx.user_agent);
         if start > 0 {
             req = req.header("Range", format!("bytes={start}-"));
             // If-Range: the server returns 206 only if the object still
@@ -511,7 +514,7 @@ async fn attempt_once(
             }
             if claimed.is_none() && start > 0 && !restarted {
                 // Bare 416 with no usable Content-Range: confirm the length before deleting anything that might be complete.
-                let hreq = stamp_request(ctx.client.head(&ctx.url), DEFAULT_USER_AGENT);
+                let hreq = stamp_request(ctx.client.head(&ctx.url), &ctx.user_agent);
                 if let Ok(hresp) = execute_with_timeout(&ctx.client, hreq, ctx.timeout).await
                     && hresp.status().is_success()
                     && hresp.content_length() == Some(start)
@@ -1014,7 +1017,7 @@ pub(crate) async fn fetch_piece(
         if let Some(v) = ctx.if_range.get() {
             builder = builder.header("If-Range", v);
         }
-        let req = stamp_request(builder, DEFAULT_USER_AGENT);
+        let req = stamp_request(builder, &ctx.user_agent);
         let resp = match execute_with_timeout(&ctx.client, req, timeout).await {
             Ok(r) => r,
             Err(e) => {

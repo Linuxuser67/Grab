@@ -1157,7 +1157,7 @@ impl DownloadManager {
         };
         let ctx = FetchCtx {
             client,
-            url,
+            url: url.clone(),
             dest,
             opts,
             if_range: {
@@ -1179,6 +1179,9 @@ impl DownloadManager {
                 lock
             },
             cookies: None,
+            // Browser UA from the extension handoff (cf_clearance is UA-bound).
+            user_agent: crate::extension_server::handoff_user_agent(&url)
+                .unwrap_or_else(|| crate::download_net::DEFAULT_USER_AGENT.to_string()),
             timeout,
             tx,
         };

@@ -996,9 +996,10 @@ pub(crate) async fn resolve_subtitle_lang(
     // The subtitle probe extracts too, so it needs the handoff cookies like
     // every other leg. Before the identity args (`-- <url>` terminates argv).
     argv.extend(crate::extension_server::handoff_cookie_args(&job.page_url));
+    let handoff_ua = crate::extension_server::handoff_user_agent(&job.page_url);
     argv.extend(ytdlp_identity_args(
         &job.cookies_browser,
-        None,
+        handoff_ua.as_deref(),
         &job.page_url,
     ));
     let mut cmd = ytdlp_command(youtube_bin);

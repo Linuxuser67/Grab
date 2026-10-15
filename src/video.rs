@@ -10,6 +10,7 @@
 /// Facade: the per-attempt delivery decision lives in
 /// [`attempt_gate`](crate::attempt_gate) now.
 pub use crate::attempt_gate::AttemptGate;
+pub use crate::video_argv::VideoBackend;
 /// Facade: attempt inputs + argv builders live in
 /// [`video_argv`](crate::video_argv) now.
 pub use crate::video_argv::VideoJob;

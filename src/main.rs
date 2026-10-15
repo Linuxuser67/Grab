@@ -34,6 +34,9 @@ mod gallery_tools;
 mod gallery_argv;
 #[allow(dead_code)]
 mod gallery_progress;
+// Phase 4: download runner (wired in phase 5).
+#[allow(dead_code)]
+mod gallery_runner;
 // Video-page extraction + resolver worker: card, prefs, queue and engine entry.
 mod video;
 mod video_argv;

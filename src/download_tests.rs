@@ -5021,6 +5021,7 @@ fn proxy_argv_precedes_end_of_options() {
     let job = crate::video::VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
+        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,

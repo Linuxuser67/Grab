@@ -18,11 +18,26 @@ pub(crate) async fn write_manifest(
         .map_err(VideoError::staging)
 }
 
+/// Which backend supplies the video: yt-dlp (default) or gallery-dl
+/// (fallback for sites yt-dlp can't handle, e.g. Instagram stories).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum VideoBackend {
+    #[default]
+    #[serde(rename = "ytdlp")]
+    YtDlp,
+    #[serde(rename = "gallerydl")]
+    GalleryDl,
+}
+
 /// Inputs for one resolver-worker attempt (built on the main thread, no GTK).
 #[derive(Debug, Clone)]
 pub struct VideoJob {
     pub item_id: u64,
     pub page_url: String,
+    /// Which backend downloads this video (yt-dlp default, gallery-dl fallback).
+    /// Read in phase 5 (runner wiring); allow dead_code until then.
+    #[allow(dead_code)]
+    pub backend: VideoBackend,
     /// Playlist entry id this row was picked from, if any (selected on re-resolve).
     pub playlist_item_id: Option<String>,
     pub quality: String,

@@ -25,6 +25,7 @@ pub struct GalleryResult {
 
 /// Progress update from the runner.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields populated for API completeness; row UI uses files_completed for now.
 pub struct GalleryProgressUpdate {
     pub files_completed: u32,
     pub files_total: Option<u32>,

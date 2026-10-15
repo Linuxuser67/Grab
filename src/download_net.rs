@@ -753,7 +753,6 @@ mod tests {
     /// In-memory GSettings for proxy tests; the serial suite makes the
     /// process-global backend safe to mutate.
     fn proxy_test_settings() -> gtk4::gio::Settings {
-        use gtk4::gio::prelude::SettingsExt as _;
         // SAFETY: single-threaded setup phase (cargo runs with --test-threads=1).
         unsafe {
             std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));

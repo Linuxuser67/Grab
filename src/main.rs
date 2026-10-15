@@ -24,19 +24,11 @@ mod torrent;
 mod ui_util;
 // gallery-dl: image galleries + fallback video downloads.
 mod gallery;
-// Phase 2 ships the probe + routing with no non-test callers yet; the card
-// integration (phase 4) wires them in. Allow dead_code until then.
-#[allow(dead_code)]
-mod gallery_probe;
-mod gallery_tools;
-// Phase 3: argv builders + progress parser (wired in phase 5).
-#[allow(dead_code)]
 mod gallery_argv;
-#[allow(dead_code)]
+mod gallery_probe;
 mod gallery_progress;
-// Phase 4: download runner (wired in phase 5).
-#[allow(dead_code)]
 mod gallery_runner;
+mod gallery_tools;
 // Video-page extraction + resolver worker: card, prefs, queue and engine entry.
 mod video;
 mod video_argv;

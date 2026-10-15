@@ -753,6 +753,7 @@ impl DownloadManager {
                 is_live: choices.is_live,
                 video_format_id: choices.video_format_id,
                 playlist_item_id: choices.playlist_item_id,
+                backend: choices.backend,
             },
         );
         Ok(self.insert(item))
@@ -803,6 +804,7 @@ impl DownloadManager {
                         video_format_id: None,
                         is_live: false,
                         playlist_item_id: None,
+                        backend: crate::video::VideoBackend::YtDlp,
                     },
                     &existing,
                 )
@@ -1080,6 +1082,7 @@ impl DownloadManager {
             is_live,
             video_format_id,
             playlist_item_id,
+            backend,
             ..
         }) = self.video_source(item.id())
         {
@@ -1091,6 +1094,7 @@ impl DownloadManager {
                 video_format_id,
                 is_live,
                 playlist_item_id,
+                backend,
             });
         }
         let connections = (opts.connections.max(1) as usize).min(16);
@@ -1761,6 +1765,7 @@ struct SpawnVideoParams {
     video_format_id: Option<String>,
     is_live: bool,
     playlist_item_id: Option<String>,
+    backend: crate::video::VideoBackend,
 }
 
 impl DownloadManager {
@@ -1774,6 +1779,7 @@ impl DownloadManager {
             video_format_id,
             is_live,
             playlist_item_id,
+            backend,
         } = params;
         let id = item.id();
         let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
@@ -1806,7 +1812,7 @@ impl DownloadManager {
         let job = crate::video::VideoJob {
             item_id: id,
             page_url,
-            backend: crate::video::VideoBackend::YtDlp,
+            backend,
             playlist_item_id,
             quality,
             audio_only,

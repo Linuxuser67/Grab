@@ -1060,6 +1060,7 @@ fn enqueue_video_spawns_and_fails_without_tools() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
+                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -1107,6 +1108,7 @@ fn enqueue_video_restrict_filenames_folds_name() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
+                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -1297,6 +1299,7 @@ fn video_source_survives_restore_and_retry() {
                     video_format_id: None,
                     is_live: false,
                     playlist_item_id: None,
+                    backend: crate::video::VideoBackend::YtDlp,
                 },
             )
             .expect("video enqueue");
@@ -1453,6 +1456,7 @@ fn unremove_restores_video_source() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
+                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -1510,6 +1514,7 @@ fn queue_file_never_carries_cookies() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
+                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -2388,6 +2393,7 @@ fn enqueue_video_keeps_name_when_file_exists() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
+                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -2553,6 +2559,7 @@ fn expand_playlist_rows_use_titled_subfolder() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
+                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("parent enqueue");
@@ -5356,6 +5363,7 @@ fn enqueue_video_reserves_part_namespaced_stems() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
+                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -5466,6 +5474,7 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
+                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -5490,6 +5499,7 @@ fn enqueue_video_accepts_unlisted_url() {
         video_format_id: None,
         is_live: false,
         playlist_item_id: None,
+        backend: crate::video::VideoBackend::YtDlp,
     };
     let item = manager
         .enqueue_video(
@@ -5811,6 +5821,7 @@ fn a_reserved_destination_forces_video_intake_to_dedupe() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
+                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");
@@ -5877,6 +5888,7 @@ fn a_reserved_stem_forces_video_intake_to_dedupe() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
+                backend: crate::video::VideoBackend::YtDlp,
             },
         )
         .expect("video enqueue");

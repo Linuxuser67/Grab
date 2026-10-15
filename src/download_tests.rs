@@ -7212,14 +7212,12 @@ fn gallery_legacy_backend_converts() {
     })
     .unwrap();
     // Inject backend into the video_source.
-    if let Some(items) = json_value.get_mut("items").and_then(|v| v.as_array_mut()) {
-        if let Some(item) = items.get_mut(0) {
-            if let Some(vs) = item.get_mut("video_source") {
-                if let Some(page) = vs.get_mut("Page") {
-                    page["backend"] = serde_json::Value::String("gallerydl".to_string());
-                }
-            }
-        }
+    if let Some(items) = json_value.get_mut("items").and_then(|v| v.as_array_mut())
+        && let Some(item) = items.get_mut(0)
+        && let Some(vs) = item.get_mut("video_source")
+        && let Some(page) = vs.get_mut("Page")
+    {
+        page["backend"] = serde_json::Value::String("gallerydl".to_string());
     }
     std::fs::write(&qf, serde_json::to_string(&json_value).unwrap()).unwrap();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);

@@ -727,7 +727,7 @@ impl DownloadManager {
         item.set_is_gallery(true);
         item.set_gallery_file_count(job.file_count.unwrap_or(0));
         item.set_gallery_files_done(0);
-        item.set_gallery_url(url);
+        item.set_gallery_url(url.clone());
         item.set_detail(format!("Gallery • {} files", job.file_count.unwrap_or(0)));
         // Store the job (carries the filter); spawn_gallery consumes it.
         self.gallery_jobs

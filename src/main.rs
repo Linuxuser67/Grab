@@ -22,6 +22,9 @@ mod runtime;
 mod settings;
 mod torrent;
 mod ui_util;
+// gallery-dl: image galleries + fallback video downloads.
+mod gallery;
+mod gallery_tools;
 // Video-page extraction + resolver worker: card, prefs, queue and engine entry.
 mod video;
 mod video_argv;

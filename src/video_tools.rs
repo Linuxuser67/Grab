@@ -723,7 +723,7 @@ fn clear_dest_refusing_symlink(dest: &Path) -> Result<(), String> {
     }
 }
 
-async fn download_to_file(
+pub(crate) async fn download_to_file(
     url: &str,
     dest: &Path,
     expected_sha256: &str,

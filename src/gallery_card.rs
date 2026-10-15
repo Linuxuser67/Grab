@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::gallery_argv::GalleryFilter;
-use crate::gallery_probe::{GalleryItem, StickyMode};
+use crate::gallery_probe::GalleryItem;
 
 /// Gallery card state: filter selection and file list.
 pub struct GalleryCard {
@@ -15,16 +15,13 @@ pub struct GalleryCard {
     pub filter: Rc<RefCell<GalleryFilter>>,
     /// Probe items (for the file list).
     pub items: Vec<GalleryItem>,
-    /// Per-host sticky mode preference.
-    pub sticky: Option<StickyMode>,
 }
 
 impl GalleryCard {
-    pub fn new(items: Vec<GalleryItem>, sticky: Option<StickyMode>) -> Self {
+    pub fn new(items: Vec<GalleryItem>) -> Self {
         Self {
             filter: Rc::new(RefCell::new(GalleryFilter::All)),
             items,
-            sticky,
         }
     }
 
@@ -76,11 +73,6 @@ mod tests {
         *card.filter.borrow_mut() = filter;
     }
 
-    /// Test helper: get sticky mode (UI will call this in phase 7).
-    fn sticky_mode(card: &GalleryCard) -> StickyMode {
-        card.sticky.unwrap_or(StickyMode::Video)
-    }
-
     fn test_item(filename: &str, extension: &str) -> GalleryItem {
         GalleryItem {
             filename: filename.to_string(),
@@ -92,19 +84,13 @@ mod tests {
 
     #[test]
     fn filter_all_shows_everything() {
-        let card = GalleryCard::new(
-            vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")],
-            None,
-        );
+        let card = GalleryCard::new(vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")]);
         assert_eq!(card.file_count(), 2);
     }
 
     #[test]
     fn filter_images_only() {
-        let card = GalleryCard::new(
-            vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")],
-            None,
-        );
+        let card = GalleryCard::new(vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")]);
         set_filter_index(&card, 1);
         assert_eq!(card.file_count(), 1);
         assert_eq!(card.preview_filenames(), vec!["a.jpg".to_string()]);
@@ -112,23 +98,8 @@ mod tests {
 
     #[test]
     fn filter_videos_only() {
-        let card = GalleryCard::new(
-            vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")],
-            None,
-        );
+        let card = GalleryCard::new(vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")]);
         set_filter_index(&card, 2);
         assert_eq!(card.file_count(), 1);
-    }
-
-    #[test]
-    fn sticky_defaults_to_video() {
-        let card = GalleryCard::new(vec![], None);
-        assert_eq!(sticky_mode(&card), StickyMode::Video);
-    }
-
-    #[test]
-    fn sticky_gallery_honored() {
-        let card = GalleryCard::new(vec![], Some(StickyMode::Gallery));
-        assert_eq!(sticky_mode(&card), StickyMode::Gallery);
     }
 }

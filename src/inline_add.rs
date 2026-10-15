@@ -2050,7 +2050,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 let outcome = crate::gallery_probe::route(
                                     false, // yt-dlp found nothing
                                     Some(items.as_slice()),
-                                    None, // no per-host preference on this path
+                                    // Default to video; per-host preference UI is phase 7.
+                                    Some(crate::gallery_probe::StickyMode::Video),
                                 );
                                 if matches!(
                                     outcome,
@@ -2073,21 +2074,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 // gallery UI. Full GTK integration is phase 7;
                                 // for now we log the gallery info.
                                 if matches!(outcome, crate::gallery_probe::ProbeOutcome::Gallery) {
-                                    let card = crate::gallery_card::GalleryCard::new(
-                                        items, None, // TODO: per-host sticky from GSettings
-                                    );
+                                    let card = crate::gallery_card::GalleryCard::new(items);
                                     // Verify count via the lightweight counter.
-                                    if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                                        if let Some(n) = crate::gallery_probe::count_gallery_files(
+                                    if let Ok(tool) = crate::gallery_argv::resolve_tool()
+                                        && let Some(n) = crate::gallery_probe::count_gallery_files(
                                             &tool, &url, None,
                                         )
                                         .await
-                                        {
-                                            tracing::debug!(
-                                                count = n,
-                                                "gallery file count verified"
-                                            );
-                                        }
+                                    {
+                                        tracing::debug!(count = n, "gallery file count verified");
                                     }
                                     tracing::info!(
                                         files = card.file_count(),

@@ -1250,7 +1250,9 @@ mod tests {
         .await;
         assert_eq!(status(&r), "200", "{r}");
         // Queue full: the handoff is refused, so its cookies must not linger.
-        let body2 = r#"{"url":"https://example.com/b","cookies":[{"name":"c","value":"v"}]}"#;
+        // Use a distinct host: the same-host fallback would (correctly) find
+        // the first handoff's cookies.
+        let body2 = r#"{"url":"https://other.example/b","cookies":[{"name":"c","value":"v"}]}"#;
         let tok2 = token(body2);
         let r = request(
             srv.port,
@@ -1260,7 +1262,7 @@ mod tests {
         .await;
         assert_eq!(status(&r), "429", "{r}");
         assert!(
-            handoff_cookie_args("https://example.com/b").is_empty(),
+            handoff_cookie_args("https://other.example/b").is_empty(),
             "refused handoff must stage nothing"
         );
         clear_handoff_cookies();

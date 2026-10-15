@@ -128,18 +128,24 @@ fn playlist_count_label_zero_uses_plural() {
 #[test]
 fn row_media_live_wins_over_everything() {
     // A live audio-only torrent page is still a live capture first.
-    assert_eq!(row_media(true, true, true, true, "f.mp4"), RowMedia::Live);
+    assert_eq!(
+        row_media(true, true, true, true, false, "f.mp4"),
+        RowMedia::Live
+    );
 }
 
 #[test]
 fn row_media_audio_beats_torrent_and_page() {
-    assert_eq!(row_media(false, true, true, true, "f.mp4"), RowMedia::Audio);
+    assert_eq!(
+        row_media(false, true, true, true, false, "f.mp4"),
+        RowMedia::Audio
+    );
 }
 
 #[test]
 fn row_media_torrent_beats_plain_video_page() {
     assert_eq!(
-        row_media(false, false, true, true, "f.mp4"),
+        row_media(false, false, true, true, false, "f.mp4"),
         RowMedia::Torrent
     );
 }
@@ -147,15 +153,28 @@ fn row_media_torrent_beats_plain_video_page() {
 #[test]
 fn row_media_video_page_beats_plain_file() {
     assert_eq!(
-        row_media(false, false, false, true, "f.mp4"),
+        row_media(false, false, false, true, false, "f.mp4"),
         RowMedia::Video
+    );
+}
+
+#[test]
+fn row_media_gallery_takes_priority() {
+    // Gallery flag wins over all other types.
+    assert_eq!(
+        row_media(true, true, true, true, true, "f.mp4"),
+        RowMedia::Gallery
+    );
+    assert_eq!(
+        row_media(false, false, false, false, true, "f.bin"),
+        RowMedia::Gallery
     );
 }
 
 #[test]
 fn row_media_plain_direct_falls_back_to_file() {
     assert_eq!(
-        row_media(false, false, false, false, "f.bin"),
+        row_media(false, false, false, false, false, "f.bin"),
         RowMedia::File
     );
 }
@@ -163,11 +182,11 @@ fn row_media_plain_direct_falls_back_to_file() {
 #[test]
 fn row_media_gif_classified_as_image() {
     assert_eq!(
-        row_media(false, false, false, false, "animation.gif"),
+        row_media(false, false, false, false, false, "animation.gif"),
         RowMedia::Image
     );
     assert_eq!(
-        row_media(false, false, false, false, "photo.PNG"),
+        row_media(false, false, false, false, false, "photo.PNG"),
         RowMedia::Image
     );
 }
@@ -175,7 +194,7 @@ fn row_media_gif_classified_as_image() {
 #[test]
 fn row_media_direct_video_file() {
     assert_eq!(
-        row_media(false, false, false, false, "movie.mkv"),
+        row_media(false, false, false, false, false, "movie.mkv"),
         RowMedia::VideoFile
     );
 }
@@ -183,7 +202,7 @@ fn row_media_direct_video_file() {
 #[test]
 fn row_media_direct_audio_file() {
     assert_eq!(
-        row_media(false, false, false, false, "song.flac"),
+        row_media(false, false, false, false, false, "song.flac"),
         RowMedia::AudioFile
     );
 }
@@ -191,11 +210,11 @@ fn row_media_direct_audio_file() {
 #[test]
 fn row_media_document_and_archive() {
     assert_eq!(
-        row_media(false, false, false, false, "paper.pdf"),
+        row_media(false, false, false, false, false, "paper.pdf"),
         RowMedia::Document
     );
     assert_eq!(
-        row_media(false, false, false, false, "data.zip"),
+        row_media(false, false, false, false, false, "data.zip"),
         RowMedia::Archive
     );
 }
@@ -208,6 +227,7 @@ fn row_media_icon_names_are_real_adwaita_symbolic_names() {
     assert_eq!(RowMedia::Audio.icon_name(), "audio-headphones-symbolic");
     assert_eq!(RowMedia::Torrent.icon_name(), "network-workgroup-symbolic");
     assert_eq!(RowMedia::Video.icon_name(), "video-display-symbolic");
+    assert_eq!(RowMedia::Gallery.icon_name(), "folder-pictures-symbolic");
     assert_eq!(RowMedia::Image.icon_name(), "image-x-generic-symbolic");
     assert_eq!(RowMedia::VideoFile.icon_name(), "video-x-generic-symbolic");
     assert_eq!(RowMedia::AudioFile.icon_name(), "audio-x-generic-symbolic");

@@ -223,6 +223,8 @@ pub(crate) enum RowMedia {
     Torrent,
     /// Ordinary video page.
     Video,
+    /// Image gallery via gallery-dl.
+    Gallery,
     /// Direct image download (gif, png, jpg, …).
     Image,
     /// Direct video file download (mp4, webm, mkv, …).
@@ -247,6 +249,7 @@ impl RowMedia {
             RowMedia::Audio => "audio-headphones-symbolic",
             RowMedia::Torrent => "network-workgroup-symbolic",
             RowMedia::Video => "video-display-symbolic",
+            RowMedia::Gallery => "folder-pictures-symbolic",
             RowMedia::Image => "image-x-generic-symbolic",
             RowMedia::VideoFile => "video-x-generic-symbolic",
             RowMedia::AudioFile => "audio-x-generic-symbolic",
@@ -294,9 +297,12 @@ pub(crate) fn row_media(
     audio_only: bool,
     torrent: bool,
     page: bool,
+    gallery: bool,
     filename: &str,
 ) -> RowMedia {
-    if live {
+    if gallery {
+        RowMedia::Gallery
+    } else if live {
         RowMedia::Live
     } else if audio_only {
         RowMedia::Audio
@@ -645,6 +651,7 @@ pub(crate) fn build_row(
         ),
         crate::torrent::is_torrent(&item.url()),
         matches!(source, Some(crate::media_types::VideoSource::Page { .. })),
+        item.is_gallery(),
         &item.filename(),
     );
     let media_icon = gtk4::Image::builder()
@@ -657,6 +664,7 @@ pub(crate) fn build_row(
         RowMedia::Audio => gettext("Audio"),
         RowMedia::Torrent => gettext("Torrent"),
         RowMedia::Video => gettext("Video"),
+        RowMedia::Gallery => gettext("Gallery"),
         RowMedia::Image => gettext("Image"),
         RowMedia::VideoFile => gettext("Video file"),
         RowMedia::AudioFile => gettext("Audio file"),
@@ -823,8 +831,13 @@ pub(crate) fn build_row(
             };
             // Double-click (or double-tap) a finished row opens the file;
             // only the second press opens, so triple-clicks do nothing.
+            // Gallery rows open the destination folder (not a file).
             if n_press == 2 && it.status() == DownloadStatus::Done {
-                open_with_default_app(&it.display_path(), &t);
+                if it.is_gallery() {
+                    open_with_default_app(std::path::Path::new(&it.dest_dir()), &t);
+                } else {
+                    open_with_default_app(&it.display_path(), &t);
+                }
                 return;
             }
             let live = matches!(
@@ -871,7 +884,12 @@ pub(crate) fn build_row(
             } else if let Some(it) = m.find(id)
                 && it.status() == DownloadStatus::Done
             {
-                open_with_default_app(&it.display_path(), &t);
+                // Gallery rows open the destination folder.
+                if it.is_gallery() {
+                    open_with_default_app(std::path::Path::new(&it.dest_dir()), &t);
+                } else {
+                    open_with_default_app(&it.display_path(), &t);
+                }
             }
             glib::Propagation::Stop
         });

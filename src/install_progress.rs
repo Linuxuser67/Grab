@@ -259,7 +259,9 @@ pub fn run(
                 return;
             }
         };
-        let version = crate::gallery::gallerydl_display_version(&gdl_path).await;
+        let version = crate::gallery::gallerydl_display_version(&gdl_path)
+            .await
+            .ok();
         gdl.set_installed(version);
 
         // Linger on checkmarks so completion registers, then close.

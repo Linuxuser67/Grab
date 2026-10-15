@@ -10,11 +10,6 @@ use std::path::{Path, PathBuf};
 
 use crate::video_tools::{download_to_file, ensure_lib_dir, user_lib_dir};
 
-/// Minimum gallery-dl version Grab supports. `gallery-dl --version` prints
-/// semver-ish `1.32.14` (unlike yt-dlp's date-based `2026.08.19`), so the
-/// parser below handles that shape.
-pub const MIN_GALLERYDL_VERSION: [u32; 3] = [1, 27, 0];
-
 /// Max bytes for the gallery-dl binary download (nightly is ~47MB; cap at 128MB).
 const GALLERYDL_MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -44,38 +39,6 @@ impl GalleryError {
     }
 }
 
-/// Parse `gallery-dl --version` output (`1.32.14`) into `[major, minor, patch]`.
-/// Returns `None` on unparseable output — the caller treats it as "too old".
-pub fn parse_gallerydl_version(output: &str) -> Option<[u32; 3]> {
-    let first_line = output.lines().next()?.trim();
-    // Some builds print "1.32.14" bare; others prefix ("gallery-dl 1.32.14").
-    let version_str = first_line
-        .strip_prefix("gallery-dl")
-        .map(str::trim)
-        .unwrap_or(first_line);
-    let mut parts = version_str.split('.');
-    let major = parts.next()?.parse::<u32>().ok()?;
-    let minor = parts.next()?.parse::<u32>().ok()?;
-    // Patch may carry a suffix ("14-dev"); take leading digits.
-    let patch_str: String = parts
-        .next()
-        .unwrap_or("0")
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    let patch = if patch_str.is_empty() {
-        0
-    } else {
-        patch_str.parse::<u32>().ok()?
-    };
-    Some([major, minor, patch])
-}
-
-/// Whether `version` meets the minimum floor.
-pub fn version_supported(version: [u32; 3]) -> bool {
-    version >= MIN_GALLERYDL_VERSION
-}
-
 /// Whether a gallery-dl update is available. The nightly tag is date-based
 /// (`2026.10.15`) while `gallery-dl --version` prints semver (`1.32.14`),
 /// so the two aren't directly comparable. On the nightly channel any
@@ -88,7 +51,7 @@ pub fn gallerydl_update_available(installed: &str, tag: &str) -> bool {
 /// Latest nightly asset: `(download_url, sha256_digest)`.
 /// `None` on any network/API failure; digest is `None` when the release
 /// metadata lacks one (the installer then fails closed).
-pub async fn latest_gallerydl_asset() -> Option<(String, Option<String>)> {
+async fn latest_gallerydl_asset() -> Option<(String, Option<String>)> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new(BUILDS_OWNER, BUILDS_REPO);
         let release = fetcher.fetch_latest_release(None).await.ok()?;
@@ -202,38 +165,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_version_bare() {
-        assert_eq!(parse_gallerydl_version("1.32.14"), Some([1, 32, 14]));
-    }
-
-    #[test]
-    fn parse_version_prefixed() {
-        assert_eq!(
-            parse_gallerydl_version("gallery-dl 1.32.14"),
-            Some([1, 32, 14])
-        );
-    }
-
-    #[test]
-    fn parse_version_dev_suffix() {
-        // Nightly builds may print "1.33.0-dev".
-        assert_eq!(parse_gallerydl_version("1.33.0-dev"), Some([1, 33, 0]));
-    }
-
-    #[test]
-    fn parse_version_garbage() {
-        assert_eq!(parse_gallerydl_version(""), None);
-        assert_eq!(parse_gallerydl_version("not a version"), None);
-        assert_eq!(parse_gallerydl_version("1.x"), None);
-    }
-
-    #[test]
-    fn version_floor() {
-        assert!(version_supported([1, 27, 0]));
-        assert!(version_supported([1, 32, 14]));
-        assert!(version_supported([2, 0, 0]));
-        assert!(!version_supported([1, 26, 9]));
-        assert!(!version_supported([0, 9, 0]));
+    fn update_available_on_nightly() {
+        // Nightly channel: any fetched tag counts as newer.
+        assert!(gallerydl_update_available(
+            "gallery-dl 1.32.14",
+            "2026.10.15"
+        ));
+        assert!(!gallerydl_update_available("", "2026.10.15"));
+        assert!(!gallerydl_update_available("gallery-dl 1.32.14", ""));
+        assert!(!gallerydl_update_available("", ""));
     }
 
     #[test]

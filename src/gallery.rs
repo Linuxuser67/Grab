@@ -6,7 +6,6 @@
 
 /// Facade: tool provisioning lives in [`gallery_tools`](crate::gallery_tools) now.
 pub use crate::gallery_tools::{
-    GalleryError, MIN_GALLERYDL_VERSION, gallerydl_display_version, gallerydl_update_available,
-    install_gallerydl, latest_gallerydl_asset, latest_gallerydl_tag, parse_gallerydl_version,
-    resolve_gallerydl, version_supported,
+    gallerydl_display_version, gallerydl_update_available, install_gallerydl, latest_gallerydl_tag,
+    resolve_gallerydl,
 };

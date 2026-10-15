@@ -1059,14 +1059,17 @@ pub fn show(
                     }
                     // Probe installed versions off-thread, then ask each tool's
                     // upstream for its latest release tag: yt-dlp/yt-dlp,
-                    // boul2gom/ffmpeg-builds, quickjs-ng/quickjs.
+                    // boul2gom/ffmpeg-builds, quickjs-ng/quickjs, gdl-org/builds.
                     let installed = gio::spawn_blocking(|| {
                         crate::video::resolve_libraries().ok().map(|libs| {
                             let yt = tool_first_line(&libs.youtube, "--version");
                             let ff = tool_first_line(&libs.ffmpeg, "-version");
                             let qjs = crate::video_tools::find_quickjs()
                                 .and_then(|p| tool_first_line(&p, "--version"));
-                            (yt, ff, qjs)
+                            let gdl = crate::gallery::resolve_gallerydl()
+                                .ok()
+                                .and_then(|p| tool_first_line(&p, "--version"));
+                            (yt, ff, qjs, gdl)
                         })
                     })
                     .await

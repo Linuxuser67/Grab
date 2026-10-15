@@ -2074,8 +2074,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 // for now we log the gallery info.
                                 if matches!(outcome, crate::gallery_probe::ProbeOutcome::Gallery) {
                                     let card = crate::gallery_card::GalleryCard::new(
-                                        items.clone(),
-                                        None, // TODO: per-host sticky from GSettings
+                                        items, None, // TODO: per-host sticky from GSettings
                                     );
                                     // Verify count via the lightweight counter.
                                     if let Ok(tool) = crate::gallery_argv::resolve_tool() {

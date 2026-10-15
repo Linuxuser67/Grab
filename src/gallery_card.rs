@@ -60,26 +60,26 @@ impl GalleryCard {
             .map(|item| item.filename.clone())
             .collect()
     }
-
-    /// Set the filter from the UI picker index (0=All, 1=Images, 2=Videos).
-    pub fn set_filter_index(&self, index: u32) {
-        let filter = match index {
-            1 => GalleryFilter::ImagesOnly,
-            2 => GalleryFilter::VideosOnly,
-            _ => GalleryFilter::All,
-        };
-        *self.filter.borrow_mut() = filter;
-    }
-
-    /// Get the sticky mode for this host (for the mode toggle).
-    pub fn sticky_mode(&self) -> StickyMode {
-        self.sticky.unwrap_or(StickyMode::Video)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test helper: set filter by picker index (UI will call this in phase 7).
+    fn set_filter_index(card: &GalleryCard, index: u32) {
+        let filter = match index {
+            1 => GalleryFilter::ImagesOnly,
+            2 => GalleryFilter::VideosOnly,
+            _ => GalleryFilter::All,
+        };
+        *card.filter.borrow_mut() = filter;
+    }
+
+    /// Test helper: get sticky mode (UI will call this in phase 7).
+    fn sticky_mode(card: &GalleryCard) -> StickyMode {
+        card.sticky.unwrap_or(StickyMode::Video)
+    }
 
     fn test_item(filename: &str, extension: &str) -> GalleryItem {
         GalleryItem {
@@ -105,7 +105,7 @@ mod tests {
             vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")],
             None,
         );
-        card.set_filter_index(1);
+        set_filter_index(&card, 1);
         assert_eq!(card.file_count(), 1);
         assert_eq!(card.preview_filenames(), vec!["a.jpg".to_string()]);
     }
@@ -116,19 +116,19 @@ mod tests {
             vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")],
             None,
         );
-        card.set_filter_index(2);
+        set_filter_index(&card, 2);
         assert_eq!(card.file_count(), 1);
     }
 
     #[test]
     fn sticky_defaults_to_video() {
         let card = GalleryCard::new(vec![], None);
-        assert_eq!(card.sticky_mode(), StickyMode::Video);
+        assert_eq!(sticky_mode(&card), StickyMode::Video);
     }
 
     #[test]
     fn sticky_gallery_honored() {
         let card = GalleryCard::new(vec![], Some(StickyMode::Gallery));
-        assert_eq!(card.sticky_mode(), StickyMode::Gallery);
+        assert_eq!(sticky_mode(&card), StickyMode::Gallery);
     }
 }

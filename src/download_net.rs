@@ -312,36 +312,18 @@ pub(crate) fn http_client_for(proxy: Option<&ResolvedProxy>) -> Result<reqwest::
 }
 
 /// Read-only view of a cookie jar for reqwest's cookie provider: staged
-/// cookies are sent on every request (including redirect hops), but
-/// `Set-Cookie` responses are never written back — the shared jar stays a
-/// read-only browser snapshot, so a browser logout takes effect at the next
-/// TTL refresh.
-struct ReadOnlyJar(std::sync::Arc<reqwest::cookie::Jar>);
-
-impl reqwest::cookie::CookieStore for ReadOnlyJar {
-    // Deliberate no-op: the jar is a snapshot, not a store.
-    fn set_cookies(
-        &self,
-        _: &mut dyn Iterator<Item = &reqwest::header::HeaderValue>,
-        _: &url::Url,
-    ) {
-    }
-
-    fn cookies(&self, url: &url::Url) -> Option<reqwest::header::HeaderValue> {
-        self.0.cookies(url)
-    }
-}
-
 /// Client applying staged cookies via a provider: reqwest re-applies
 /// in-scope cookies on every redirect hop, while a manually-stamped `Cookie`
 /// header is stripped when a redirect changes host, port or scheme.
 /// Unpooled (one per attempt): cookie-bearing downloads don't share the
-/// global client's connection pool.
+/// global client's connection pool. The jar is fresh per attempt (built from
+/// the cached export text), so Set-Cookie during the download is accepted —
+/// like a browser — without carrying into the next download.
 pub(crate) fn http_client_with_jar(
     proxy: Option<&ResolvedProxy>,
     jar: std::sync::Arc<reqwest::cookie::Jar>,
 ) -> Result<reqwest::Client, String> {
-    let mut b = client_builder().cookie_provider(std::sync::Arc::new(ReadOnlyJar(jar)));
+    let mut b = client_builder().cookie_provider(jar);
     if let Some(p) = proxy {
         for x in &p.proxies {
             b = b.proxy(x.clone());

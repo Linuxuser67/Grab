@@ -4787,6 +4787,7 @@ fn stamp_request_never_stamps_cookies() {
             .expect("http client")
             .get("https://example.com/v"),
         "Grab-test/1.0",
+        "https://example.com/v",
     )
     .build()
     .unwrap();

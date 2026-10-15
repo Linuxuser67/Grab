@@ -12,7 +12,9 @@ use reqwest::cookie::CookieStore as _;
 const JAR_TTL: Duration = Duration::from_secs(5 * 60);
 
 struct CachedJar {
-    jar: Arc<reqwest::cookie::Jar>,
+    /// Netscape export text; a fresh writable Jar is built from it per
+    /// attempt, so Set-Cookie during one download never carries into the next.
+    text: String,
     at: Instant,
 }
 
@@ -297,6 +299,9 @@ async fn export_cookies(
 }
 
 /// Cookie jar for one browser spec, cached briefly; `None` means plain requests.
+/// The jar is built fresh from the cached export text on each call, so it is
+/// writable per attempt: Set-Cookie during a download stays in that attempt's
+/// jar and never carries into the next download.
 pub(crate) async fn jar_for_browser(
     cookies_browser: &str,
     youtube_bin: &Path,
@@ -309,7 +314,8 @@ pub(crate) async fn jar_for_browser(
         .get(cookies_browser)
         .filter(|c| c.at.elapsed() < JAR_TTL)
     {
-        return Some(cached.jar.clone());
+        let (jar, _) = jar_from_export(&cached.text);
+        return Some(jar);
     }
     // Validated here (not inside the exporter) so an unknown browser still
     // fails closed instead of exporting with no --cookies-from-browser.
@@ -326,7 +332,7 @@ pub(crate) async fn jar_for_browser(
     crate::runtime::lock_recover(jar_cache()).insert(
         cookies_browser.to_string(),
         CachedJar {
-            jar: jar.clone(),
+            text,
             at: Instant::now(),
         },
     );

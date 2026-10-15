@@ -1653,7 +1653,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
         error: video_error,
-        gallery_info: gallery_info.clone(),
+        gallery_info,
         is_gallery: Rc::new(Cell::new(false)),
         gallery_card: Rc::new(RefCell::new(None)),
         add_btn: add_btn.clone(),
@@ -2316,21 +2316,21 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 set_field_error(&url_entry, message);
             };
             // Gallery download: the probe found an image gallery, not a video.
-            if step2.is_gallery.get() {
-                if let Some(card) = step2.gallery_card.borrow().as_ref() {
-                    let url = url_entry.text().trim().to_string();
-                    let dest = dd.borrow().clone();
-                    // TODO: enqueue gallery download via queue (phase 9).
-                    // For now, log and close.
-                    tracing::info!(
-                        url = %url,
-                        dest = %dest,
-                        files = card.file_count(),
-                        "gallery download requested (queue integration phase 9)"
-                    );
-                    close_card();
-                    return;
-                }
+            if step2.is_gallery.get()
+                && let Some(card) = step2.gallery_card.borrow().as_ref()
+            {
+                let url = url_entry.text().trim().to_string();
+                let dest = dd.borrow().clone();
+                // TODO: enqueue gallery download via queue (phase 9).
+                // For now, log and close.
+                tracing::info!(
+                    url = %url,
+                    dest = %dest,
+                    files = card.file_count(),
+                    "gallery download requested (queue integration phase 9)"
+                );
+                close_card();
+                return;
             }
             let url = url_entry.text().trim().to_string();
             if crate::video::is_video_page(&url) {

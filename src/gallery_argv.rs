@@ -8,7 +8,11 @@ use std::path::{Path, PathBuf};
 /// Filters for the gallery download (user's Images/Videos/All picker).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GalleryFilter {
+    /// No filter; used by the gallery filter picker (phase 6).
+    #[allow(dead_code)]
     All,
+    /// Images only; used by the gallery filter picker (phase 6).
+    #[allow(dead_code)]
     ImagesOnly,
     VideosOnly,
 }

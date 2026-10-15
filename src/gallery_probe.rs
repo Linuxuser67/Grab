@@ -70,6 +70,8 @@ pub enum ProbeOutcome {
 /// both were viable. Only honored when both modes are viable now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StickyMode {
+    /// User prefers video mode; used by the mode toggle (phase 6).
+    #[allow(dead_code)]
     Video,
     /// User prefers gallery mode; used by the mode toggle (phase 6).
     #[allow(dead_code)]

@@ -469,6 +469,7 @@ fn selected_audio_only(step: &VideoStep) -> bool {
 /// Submit a video URL that yt-dlp can't handle but gallery-dl can.
 /// Queues it as a normal video row with the GalleryDl backend; the runner
 /// branches on the backend. The title comes from the gallery probe.
+#[allow(clippy::too_many_arguments)]
 fn submit_gallery_video(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,

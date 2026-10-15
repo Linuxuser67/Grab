@@ -28,6 +28,9 @@ pub enum GalleryError {
     /// Background task machinery failed (panic/join) — internal.
     #[error("{0}")]
     Runtime(String),
+    /// Probe failed (timeout, spawn failure, parse error, gallery-dl error).
+    #[error("{0}")]
+    Probe(String),
 }
 
 impl GalleryError {
@@ -36,6 +39,9 @@ impl GalleryError {
     }
     pub(crate) fn runtime(e: impl std::fmt::Display) -> Self {
         Self::Runtime(e.to_string())
+    }
+    pub(crate) fn probe(e: impl std::fmt::Display) -> Self {
+        Self::Probe(e.to_string())
     }
 }
 

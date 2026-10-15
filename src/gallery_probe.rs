@@ -15,22 +15,27 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// One file from `gallery-dl -j` output. Extractors emit wildly different
 /// metadata keys; `filename`/`extension`/`category` are the reliable core,
 /// everything else lands in `extra` for best-effort title derivation.
+/// Some extractors omit `extension`/`category`, hence the defaults.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct GalleryItem {
     pub filename: String,
+    #[serde(default)]
     pub extension: String,
+    #[serde(default)]
     pub category: String,
     #[serde(flatten, default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// A single message from `gallery-dl -j` output. The first message is always
-/// the directory/context object (no filename); file messages follow.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-enum ProbeMessage {
-    File(GalleryItem),
-    Other(serde_json::Value),
+/// gallery-dl `-j` message types (first array element).
+/// Verified against gallery-dl 1.32.16: messages are `[type, ...]` arrays.
+mod msg_type {
+    /// Directory/context message: `[2, {metadata}]`.
+    pub const DIRECTORY: i64 = 2;
+    /// File message: `[3, "url", {metadata}]`.
+    pub const FILE: i64 = 3;
+    /// Error message: `[-1, {error, message}]`.
+    pub const ERROR: i64 = -1;
 }
 
 /// Content type derived from the probe JSON's `extension` field.
@@ -140,7 +145,7 @@ pub fn probe_title(item: &GalleryItem, url: &str) -> String {
     crate::file_names::filename_from_url(url)
 }
 
-/// Run the gallery-dl probe: `gallery-dl --config-ignore -j --no-download --range 1 <url>`.
+/// Run the gallery-dl probe: `gallery-dl --config-ignore -j --no-download --range 1-5 <url>`.
 ///
 /// Returns `Ok(Some(items))` on success, `Ok(None)` when the URL is unsupported
 /// (exit 64) or yields no files. `Err` on timeout, spawn failure, or any other
@@ -156,7 +161,7 @@ pub async fn probe_gallery(
         .arg("-j")
         .arg("--no-download")
         .arg("--range")
-        .arg("1")
+        .arg("1-5")
         // Don't let gallery-dl write back to Grab's staged cookies file.
         .arg("-o")
         .arg("extractor.cookies-update=false")
@@ -180,25 +185,88 @@ pub async fn probe_gallery(
             output.status.code().unwrap_or(-1)
         )));
     }
-    // `-j` emits the directory/context object first, then file objects.
-    // Deserialize tolerantly: directory messages fall through to `Other`.
-    let messages: Vec<ProbeMessage> = serde_json::from_slice(&output.stdout)
-        .map_err(|e| GalleryError::install(format!("couldn't parse gallery-dl output: {e}")))?;
-    let items: Vec<GalleryItem> = messages
-        .into_iter()
-        .filter_map(|m| match m {
-            ProbeMessage::File(item) => Some(item),
-            ProbeMessage::Other(v) => {
-                // Non-file messages (directory info, etc.); skip but log at trace.
-                tracing::trace!(value = ?v, "gallery-dl probe non-file message");
-                None
-            }
-        })
-        .collect();
+    // `-j` emits `[type, ...]` arrays: [2, {dir}] for directory context,
+    // [3, "url", {meta}] for files, [-1, {error, message}] for errors.
+    let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
+    let items = parse_probe_messages(&messages)?;
     if items.is_empty() {
         return Ok(None);
     }
     Ok(Some(items))
+}
+
+/// Parse `gallery-dl -j` message arrays into file items.
+///
+/// Message types (first array element): 2 = directory context, 3 = file,
+/// -1 = error. Directory metadata is inherited by file items lacking
+/// `title`/`user`/`author`. Returns `Err` on a type -1 error message.
+fn parse_probe_messages(messages: &[serde_json::Value]) -> Result<Vec<GalleryItem>, GalleryError> {
+    let mut items = Vec::new();
+    // Directory context from the most recent type-2 message; file items
+    // inherit its title/user when they don't carry their own.
+    let mut dir_ctx: Option<serde_json::Map<String, serde_json::Value>> = None;
+    for m in messages {
+        let t = m.get(0).and_then(|v| v.as_i64());
+        match t {
+            Some(msg_type::FILE) => {
+                let meta = match m.get(2) {
+                    Some(v) => v.clone(),
+                    None => {
+                        tracing::trace!(message = ?m, "gallery-dl probe file message without metadata");
+                        continue;
+                    }
+                };
+                let mut item: GalleryItem = match serde_json::from_value(meta) {
+                    Ok(item) => item,
+                    Err(e) => {
+                        tracing::trace!(error = %e, "gallery-dl probe couldn't parse file metadata");
+                        continue;
+                    }
+                };
+                // Inherit directory title/user when the file lacks them.
+                if let Some(dir) = dir_ctx.as_ref() {
+                    for key in ["title", "user", "author"] {
+                        if !item.extra.contains_key(key)
+                            && let Some(v) = dir.get(key)
+                        {
+                            item.extra.insert(key.to_string(), v.clone());
+                        }
+                    }
+                }
+                // Stash the file URL from m[1] for potential use.
+                if let Some(url) = m.get(1).and_then(|v| v.as_str()) {
+                    item.extra.insert(
+                        "_gallery_dl_url".to_string(),
+                        serde_json::Value::String(url.to_string()),
+                    );
+                }
+                items.push(item);
+            }
+            Some(msg_type::DIRECTORY) => {
+                if let Some(obj) = m.get(1).and_then(|v| v.as_object()) {
+                    dir_ctx = Some(obj.clone());
+                }
+            }
+            Some(msg_type::ERROR) => {
+                let err = m
+                    .get(1)
+                    .and_then(|v| v.get("error"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let msg = m
+                    .get(1)
+                    .and_then(|v| v.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                return Err(GalleryError::probe(format!("gallery-dl: {err}: {msg}")));
+            }
+            _ => {
+                tracing::trace!(message = ?m, "gallery-dl probe unknown message");
+            }
+        }
+    }
+    Ok(items)
 }
 
 /// Count files without downloading: `gallery-dl --config-ignore -g --no-download <url>`.
@@ -406,28 +474,19 @@ mod tests {
     }
 
     #[test]
-    fn probe_json_skips_directory_message() {
-        // Real `gallery-dl -j` output: directory/context object first
-        // (no filename), then file objects.
+    fn probe_json_parses_real_array_format() {
+        // Real `gallery-dl -j` output: [2, {dir}] then [3, "url", {meta}].
         let json = r#"[
-            {"category": "instagram", "subcategory": "posts", "user": "someuser"},
-            {
+            [2, {"category": "instagram", "subcategory": "posts", "user": "someuser"}],
+            [3, "https://example.com/12345.jpg", {
                 "filename": "12345.jpg",
                 "extension": "jpg",
                 "category": "instagram",
-                "title": "Sunset",
-                "user": "someuser"
-            }
+                "title": "Sunset"
+            }]
         ]"#;
-        let messages: Vec<ProbeMessage> = serde_json::from_str(json).unwrap();
-        assert_eq!(messages.len(), 2);
-        let items: Vec<GalleryItem> = messages
-            .into_iter()
-            .filter_map(|m| match m {
-                ProbeMessage::File(item) => Some(item),
-                ProbeMessage::Other(_) => None,
-            })
-            .collect();
+        let messages: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let items = parse_probe_messages(&messages).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].filename, "12345.jpg");
         assert_eq!(
@@ -435,5 +494,57 @@ mod tests {
             GalleryContent::Image
         );
         assert_eq!(probe_title(&items[0], "https://example.com/"), "Sunset");
+        // File URL stashed from m[1].
+        assert_eq!(
+            items[0]
+                .extra
+                .get("_gallery_dl_url")
+                .and_then(|v| v.as_str()),
+            Some("https://example.com/12345.jpg")
+        );
+    }
+
+    #[test]
+    fn probe_json_inherits_directory_user() {
+        // File without user inherits from the directory message.
+        let json = r#"[
+            [2, {"category": "instagram", "user": "someuser"}],
+            [3, "https://example.com/12345.jpg", {
+                "filename": "12345.jpg",
+                "extension": "jpg"
+            }]
+        ]"#;
+        let messages: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let items = parse_probe_messages(&messages).unwrap();
+        assert_eq!(items.len(), 1);
+        // extension/category default when omitted (S7).
+        assert_eq!(items[0].extension, "jpg");
+        assert_eq!(items[0].category, "");
+        assert_eq!(probe_title(&items[0], "https://example.com/"), "someuser");
+    }
+
+    #[test]
+    fn probe_json_error_message_returns_err() {
+        // Type -1 error message becomes GalleryError::Probe.
+        let json = r#"[
+            [-1, {"error": "AuthenticationError", "message": "login required"}]
+        ]"#;
+        let messages: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let err = parse_probe_messages(&messages).unwrap_err();
+        assert!(matches!(err, GalleryError::Probe(_)));
+        assert!(err.to_string().contains("AuthenticationError"));
+    }
+
+    #[test]
+    fn probe_json_route_gallery_for_images() {
+        // End-to-end: real-format messages route to Gallery.
+        let json = r#"[
+            [2, {"category": "test"}],
+            [3, "https://example.com/a.jpg", {"filename": "a.jpg", "extension": "jpg"}],
+            [3, "https://example.com/b.png", {"filename": "b.png", "extension": "png"}]
+        ]"#;
+        let messages: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let items = parse_probe_messages(&messages).unwrap();
+        assert_eq!(route(false, Some(&items), None), ProbeOutcome::Gallery);
     }
 }

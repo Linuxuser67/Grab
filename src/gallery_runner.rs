@@ -21,6 +21,9 @@ pub struct GalleryResult {
     pub files: Vec<PathBuf>,
     /// Files skipped (already existed).
     pub skipped: u32,
+    /// gallery-dl exit code, if it exited non-zero but produced files.
+    /// `None` means clean success.
+    pub exit_code: Option<i32>,
 }
 
 /// Total files handled (downloaded + skipped) for display.
@@ -76,9 +79,10 @@ pub async fn run_gallery_download(
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
-    // Pipe stdout for progress parsing; stderr inherits (gallery-dl logs there).
+    // Pipe stdout for progress parsing; pipe stderr for failure context
+    // (drained in a separate task so gallery-dl can't block on a full pipe).
     cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::piped());
 
     let mut child = cmd
         .spawn()
@@ -90,6 +94,25 @@ pub async fn run_gallery_download(
         .stdout
         .take()
         .ok_or_else(|| GalleryError::runtime("gallery-dl stdout not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| GalleryError::runtime("gallery-dl stderr not piped"))?;
+
+    // Drain stderr into a ring buffer (last 20 lines) in the background.
+    let stderr_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let stderr_lines_clone = stderr_lines.clone();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let mut buf = stderr_lines_clone.lock().unwrap();
+            buf.push(line);
+            if buf.len() > 20 {
+                buf.remove(0);
+            }
+        }
+    });
+
     let mut lines = BufReader::new(stdout).lines();
 
     let mut progress = GalleryProgress::new();
@@ -133,15 +156,36 @@ pub async fn run_gallery_download(
         .map_err(|e| GalleryError::runtime(format!("couldn't wait for gallery-dl: {e}")))?;
 
     if !status.success() {
+        let code = status.code();
+        let stderr_tail = stderr_lines.lock().unwrap().join("\n");
+        // Partial success: files were downloaded/skipped before the failure.
+        // Return Ok with the exit code so the row shows Done with a warning.
+        if !files.is_empty() || progress.files_skipped > 0 {
+            return Ok(GalleryResult {
+                files,
+                skipped: progress.files_skipped,
+                exit_code: code,
+            });
+        }
+        // Total failure: include the stderr tail and a mapped message.
+        let msg = match code {
+            Some(1) => "gallery-dl: general error",
+            Some(2) => "gallery-dl: HTTP error",
+            Some(4) => "gallery-dl: authentication failed",
+            Some(8) => "gallery-dl: resource not found",
+            Some(16) => "gallery-dl: storage error",
+            _ => "gallery-dl failed",
+        };
         return Err(GalleryError::runtime(format!(
-            "gallery-dl failed (exit {})",
-            status.code().unwrap_or(-1)
+            "{msg} (exit {}): {stderr_tail}",
+            code.unwrap_or(-1)
         )));
     }
 
     Ok(GalleryResult {
         files,
         skipped: progress.files_skipped,
+        exit_code: None,
     })
 }
 

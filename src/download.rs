@@ -2010,10 +2010,15 @@ impl DownloadManager {
                                     crate::gallery_runner::done_count(r.files.len(), r.skipped);
                                 item_c.set_gallery_files_done(done);
                                 item_c.set_progress(1.0);
-                                item_c.set_detail(crate::gallery_runner::done_label(
-                                    r.files.len(),
-                                    r.skipped,
-                                ));
+                                let detail = if r.exit_code.is_some() {
+                                    format!(
+                                        "{} \u{2022} some failed",
+                                        crate::gallery_runner::done_label(r.files.len(), r.skipped)
+                                    )
+                                } else {
+                                    crate::gallery_runner::done_label(r.files.len(), r.skipped)
+                                };
+                                item_c.set_detail(detail);
                                 // One finished record per URL (Parabolic parity):
                                 // done here (not at enqueue) so a failed
                                 // re-download keeps the earlier good record.

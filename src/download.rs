@@ -960,7 +960,13 @@ impl DownloadManager {
         };
         item.set_gallery_files_done(files_done);
         item.set_gallery_url(url.clone());
-        item.set_detail(crate::gallery_runner::done_label(files_done as usize, 0));
+        // Done rows show the finished count; others mirror enqueue_gallery's
+        // total-count format (done_label(0) would read "Gallery • 0 files").
+        if stored.status == DownloadStatus::Done {
+            item.set_detail(crate::gallery_runner::done_label(files_done as usize, 0));
+        } else {
+            item.set_detail(format!("Gallery • {file_count} files"));
+        }
         // Status: Done/Failed/Paused kept; Downloading → Queued via the _ arm.
         // (Scheduled doesn't apply to galleries.)
         item.set_status(match stored.status {

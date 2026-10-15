@@ -7128,3 +7128,109 @@ fn gallery_title_with_slash_sanitized() {
     assert!(!sanitized.contains('\\'));
     assert!(!sanitized.is_empty());
 }
+
+#[test]
+fn gallery_round_trip_failed() {
+    let (_lock, _loop) = test_locks();
+    let qf = test_queue_file("gallery-failed");
+    let settings = test_settings();
+    let job = gallery_job_fixture();
+    let job_value = serde_json::to_value(&job).unwrap();
+    let items = vec![gallery_stored_item(DownloadStatus::Failed, Some(job_value))];
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items,
+    };
+    std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.restore_queue();
+    assert_eq!(m.store().n_items(), 1);
+    let item = m.store().item(0).and_downcast::<DownloadItem>().unwrap();
+    assert!(item.is_gallery());
+    assert_eq!(item.status(), DownloadStatus::Failed);
+    // Non-Done restores show the total count, not "0 files".
+    assert_eq!(item.detail(), "Gallery • 5 files");
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn gallery_cancelled_not_persisted() {
+    // Cancelled rows carry no intent: serialize_queue_inner skips them.
+    // (Tested via the status filter, not a full enqueue, to avoid the
+    // spawn thread that enqueue_gallery triggers.)
+    let (_lock, _loop) = test_locks();
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    // Manually build a Cancelled gallery item and append to the store
+    // directly (bypassing enqueue_gallery's insert → start_next → spawn).
+    let item = DownloadItem::new(
+        999,
+        "https://example.com/gallery",
+        "Test Gallery",
+        "/tmp/dl",
+    );
+    item.set_is_gallery(true);
+    item.set_status(DownloadStatus::Cancelled);
+    m.store().append(&item);
+    // Also add a Paused gallery via the job map so serialize finds it.
+    let mut job = gallery_job_fixture();
+    job.item_id = 999;
+    m.gallery_jobs.borrow_mut().insert(999, job);
+    let json = m.serialize_queue().unwrap();
+    let queue: StoredQueue = serde_json::from_str(&json).unwrap();
+    // Cancelled gallery not in the persisted queue.
+    assert!(queue.items.is_empty());
+}
+
+#[test]
+fn gallery_legacy_backend_converts() {
+    let (_lock, _loop) = test_locks();
+    // Pre-B4 row: video_source with backend "gallerydl", no gallery field.
+    // Constructed in Rust (not via JSON) because backend is skip_serializing.
+    let video_source = crate::media_types::VideoSource::Page {
+        page_url: "https://example.com/gallery".to_string(),
+        media_url: None,
+        expires_at: None,
+        quality: "1080p".to_string(),
+        audio_only: false,
+        is_live: false,
+        video_format_id: None,
+        playlist_item_id: None,
+        backend: Some("gallerydl".to_string()),
+    };
+    let mut stored = gallery_stored_item(DownloadStatus::Paused, None);
+    stored.video_source = Some(video_source);
+    // validate_stored_item is private; test via restore_queue with a
+    // manually-written queue file that includes the backend in JSON.
+    // Since backend is skip_serializing, we write the JSON manually.
+    let qf = test_queue_file("gallery-legacy");
+    let settings = test_settings();
+    // Build the JSON manually to include backend.
+    let mut json_value = serde_json::to_value(&StoredQueue {
+        version: QUEUE_VERSION,
+        items: vec![stored],
+    })
+    .unwrap();
+    // Inject backend into the video_source.
+    if let Some(items) = json_value.get_mut("items").and_then(|v| v.as_array_mut()) {
+        if let Some(item) = items.get_mut(0) {
+            if let Some(vs) = item.get_mut("video_source") {
+                if let Some(page) = vs.get_mut("Page") {
+                    page["backend"] = serde_json::Value::String("gallerydl".to_string());
+                }
+            }
+        }
+    }
+    std::fs::write(&qf, serde_json::to_string(&json_value).unwrap()).unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.restore_queue();
+    assert_eq!(m.store().n_items(), 1);
+    let item = m.store().item(0).and_downcast::<DownloadItem>().unwrap();
+    assert!(item.is_gallery());
+    assert_eq!(item.status(), DownloadStatus::Paused);
+    // Job was synthesized from the legacy row.
+    let job = m.gallery_jobs.borrow().get(&item.id()).cloned().unwrap();
+    assert_eq!(job.filter, crate::gallery_argv::GalleryFilter::All);
+    assert_eq!(job.page_url, "https://example.com/gallery");
+    let _ = std::fs::remove_file(&qf);
+}

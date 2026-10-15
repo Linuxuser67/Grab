@@ -62,8 +62,12 @@ pub fn gallerydl_update_available(tag: &str) -> bool {
 
 /// Pure helper: is an update available given the stored vs latest tags?
 fn update_available_for_tags(stored: Option<&str>, latest: &str) -> bool {
+    let latest = latest.trim();
+    if latest.is_empty() {
+        return false;
+    }
     match stored {
-        Some(s) => s.trim() != latest.trim(),
+        Some(s) => s.trim() != latest,
         None => true,
     }
 }

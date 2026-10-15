@@ -276,6 +276,6 @@ mod tests {
             .iter()
             .position(|a| a == "--filter")
             .expect("filter flag");
-        assert!(argv[pos + 1].contains("image"));
+        assert!(argv[pos + 1].contains("jpg"));
     }
 }

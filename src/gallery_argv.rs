@@ -1,0 +1,211 @@
+//! gallery-dl argv builders: pure functions for download and count commands.
+//!
+//! All argv construction is pure (no I/O) for testability. The caller spawns
+//! the process and parses output via [`gallery_progress`](crate::gallery_progress).
+
+use std::path::{Path, PathBuf};
+
+/// Filters for the gallery download (user's Images/Videos/All picker).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GalleryFilter {
+    All,
+    ImagesOnly,
+    VideosOnly,
+}
+
+impl GalleryFilter {
+    /// gallery-dl `--filter` Python expression. `None` for All (no filter).
+    /// Uses the `extension` keyword which every extractor provides.
+    pub fn to_filter_expr(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::ImagesOnly => {
+                Some("extension in ('jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'bmp', 'svg')")
+            }
+            Self::VideosOnly => Some("extension in ('mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi')"),
+        }
+    }
+}
+
+/// Build the gallery-dl download argv.
+///
+/// - `-D`: exact destination directory (not `-d`, which nests under base-directory)
+/// - `-f '/O'`: original filenames (not extractor-specific templates)
+/// - `extractor.directory=[]`: flat output (no category/subcategory nesting)
+/// - `extractor.cookies-update=false`: don't mutate Grab's staged cookies
+/// - `downloader.http.progress=null`: suppress gallery-dl's stderr progress
+/// - `output.progress=false`: disable multi-URL progress indicator
+/// - Custom `output.mode`: parseable pipe format (see gallery_progress)
+pub fn download_argv(
+    tool: &Path,
+    url: &str,
+    dest_dir: &Path,
+    cookies_file: Option<&Path>,
+    filter: GalleryFilter,
+) -> Vec<String> {
+    let mut argv = vec![
+        tool.to_string_lossy().to_string(),
+        "--config-ignore".to_string(),
+        "-D".to_string(),
+        dest_dir.to_string_lossy().to_string(),
+        "-f".to_string(),
+        "/O".to_string(),
+        "-o".to_string(),
+        "extractor.directory=[]".to_string(),
+        "-o".to_string(),
+        "extractor.cookies-update=false".to_string(),
+        "-o".to_string(),
+        "downloader.http.progress=null".to_string(),
+        "-o".to_string(),
+        "output.progress=false".to_string(),
+        "-o".to_string(),
+        // Custom pipe mode: success lines are bare paths, skip lines are
+        // `# `-prefixed, progress lines are `\r`-prefixed with byte counts.
+        "output.mode={\"success\": \"{}\\n\", \"skip\": \"# {}\\n\", \"progress\": \"\\r{0}/{2}\", \"progress-total\": \"\\r{3}% {0}/{2}\"}".to_string(),
+    ];
+    if let Some(cookies) = cookies_file {
+        argv.push("-C".to_string());
+        argv.push(cookies.to_string_lossy().to_string());
+    }
+    if let Some(expr) = filter.to_filter_expr() {
+        argv.push("--filter".to_string());
+        argv.push(expr.to_string());
+    }
+    argv.push(url.to_string());
+    argv
+}
+
+/// Build the gallery-dl count argv (`-g` lists direct URLs, one per line).
+pub fn count_argv(tool: &Path, url: &str, cookies_file: Option<&Path>) -> Vec<String> {
+    let mut argv = vec![
+        tool.to_string_lossy().to_string(),
+        "--config-ignore".to_string(),
+        "-g".to_string(),
+        "--no-download".to_string(),
+        "-o".to_string(),
+        "output.fallback=false".to_string(),
+        "-o".to_string(),
+        "extractor.cookies-update=false".to_string(),
+    ];
+    if let Some(cookies) = cookies_file {
+        argv.push("-C".to_string());
+        argv.push(cookies.to_string_lossy().to_string());
+    }
+    argv.push(url.to_string());
+    argv
+}
+
+/// Resolve the gallery-dl binary path, or the install error message.
+/// Used by the card to decide between "probe" and "install prompt".
+pub fn resolve_tool() -> Result<PathBuf, String> {
+    crate::gallery_tools::resolve_gallerydl().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool() -> PathBuf {
+        PathBuf::from("/tmp/gallery-dl")
+    }
+
+    #[test]
+    fn download_argv_uses_exact_dir() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            GalleryFilter::All,
+        );
+        // `-D`, not `-d` (exact dir, no nesting).
+        let d_pos = argv.iter().position(|a| a == "-D").unwrap();
+        assert_eq!(argv[d_pos + 1], "/tmp/dest");
+        assert!(!argv.iter().any(|a| a == "-d"));
+    }
+
+    #[test]
+    fn download_argv_original_filenames() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            GalleryFilter::All,
+        );
+        let f_pos = argv.iter().position(|a| a == "-f").unwrap();
+        assert_eq!(argv[f_pos + 1], "/O");
+    }
+
+    #[test]
+    fn download_argv_flat_output() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            GalleryFilter::All,
+        );
+        assert!(argv.contains(&"extractor.directory=[]".to_string()));
+    }
+
+    #[test]
+    fn download_argv_cookies() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            Some(Path::new("/tmp/cookies.txt")),
+            GalleryFilter::All,
+        );
+        let c_pos = argv.iter().position(|a| a == "-C").unwrap();
+        assert_eq!(argv[c_pos + 1], "/tmp/cookies.txt");
+    }
+
+    #[test]
+    fn download_argv_filter_images() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            GalleryFilter::ImagesOnly,
+        );
+        let f_pos = argv.iter().position(|a| a == "--filter").unwrap();
+        assert!(argv[f_pos + 1].contains("jpg"));
+        assert!(!argv[f_pos + 1].contains("mp4"));
+    }
+
+    #[test]
+    fn download_argv_filter_videos() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            GalleryFilter::VideosOnly,
+        );
+        let f_pos = argv.iter().position(|a| a == "--filter").unwrap();
+        assert!(argv[f_pos + 1].contains("mp4"));
+        assert!(!argv[f_pos + 1].contains("jpg"));
+    }
+
+    #[test]
+    fn download_argv_no_filter_for_all() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            GalleryFilter::All,
+        );
+        assert!(!argv.iter().any(|a| a == "--filter"));
+    }
+
+    #[test]
+    fn count_argv_no_fallback() {
+        let argv = count_argv(&tool(), "https://example.com/gallery", None);
+        assert!(argv.contains(&"output.fallback=false".to_string()));
+        assert!(argv.contains(&"-g".to_string()));
+    }
+}

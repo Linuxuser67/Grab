@@ -29,6 +29,11 @@ mod gallery;
 #[allow(dead_code)]
 mod gallery_probe;
 mod gallery_tools;
+// Phase 3: argv builders + progress parser (wired in phase 5).
+#[allow(dead_code)]
+mod gallery_argv;
+#[allow(dead_code)]
+mod gallery_progress;
 // Video-page extraction + resolver worker: card, prefs, queue and engine entry.
 mod video;
 mod video_argv;

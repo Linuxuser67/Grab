@@ -2336,7 +2336,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0),
                     page_url: url.clone(),
-                    title: title.clone(),
+                    title,
                     file_count: Some(file_count),
                     dest_dir: std::path::PathBuf::from(dest),
                     filter,

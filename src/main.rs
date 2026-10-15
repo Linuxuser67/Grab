@@ -13,6 +13,7 @@ mod engine_msg;
 mod extension_server;
 mod file_names;
 mod inline_add;
+mod inline_gallery;
 mod install_help;
 mod install_progress;
 mod media_types;

@@ -4787,6 +4787,7 @@ fn stamp_request_never_stamps_cookies() {
             .expect("http client")
             .get("https://example.com/v"),
         "Grab-test/1.0",
+        "https://example.com/v",
     )
     .build()
     .unwrap();
@@ -5100,28 +5101,36 @@ fn single_connection_skips_probe() {
 }
 
 #[test]
-fn stamp_request_sends_no_referer() {
-    // No Referer is sent: a manually-stamped Referer would persist across
-    // redirects (reqwest doesn't strip it), leaking the origin
-    // to cross-origin targets.
+fn stamp_request_sends_origin_only_referer() {
+    // Origin-only Referer (strict-origin-when-cross-origin): the origin
+    // satisfies hotlink guards without leaking path or query (which may
+    // carry tokens).
     let built = stamp_request(
         http_client()
             .expect("http client")
-            .get("http://127.0.0.1:8080/a/b?token=secret"),
+            .get("http://127.0.0.1:8080/a/b?token=<redacted>"),
         "",
+        "http://127.0.0.1:8080/a/b?token=<redacted>",
     )
     .build()
     .unwrap();
-    assert!(!built.headers().contains_key("referer"));
+    assert_eq!(
+        built.headers().get("referer").and_then(|v| v.to_str().ok()),
+        Some("http://127.0.0.1:8080/")
+    );
     let built = stamp_request(
         http_client()
             .expect("http client")
             .get("https://example.com/v"),
         "",
+        "https://example.com/v",
     )
     .build()
     .unwrap();
-    assert!(!built.headers().contains_key("referer"));
+    assert_eq!(
+        built.headers().get("referer").and_then(|v| v.to_str().ok()),
+        Some("https://example.com/")
+    );
 }
 
 #[test]

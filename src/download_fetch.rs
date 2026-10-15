@@ -488,7 +488,7 @@ async fn attempt_once(
             .await
             .map(|m| m.len())
             .unwrap_or(0);
-        let mut req = stamp_request(ctx.client.get(&ctx.url), &ctx.user_agent);
+        let mut req = stamp_request(ctx.client.get(&ctx.url), &ctx.user_agent, &ctx.url);
         if start > 0 {
             req = req.header("Range", format!("bytes={start}-"));
             // If-Range: the server returns 206 only if the object still
@@ -514,7 +514,7 @@ async fn attempt_once(
             }
             if claimed.is_none() && start > 0 && !restarted {
                 // Bare 416 with no usable Content-Range: confirm the length before deleting anything that might be complete.
-                let hreq = stamp_request(ctx.client.head(&ctx.url), &ctx.user_agent);
+                let hreq = stamp_request(ctx.client.head(&ctx.url), &ctx.user_agent, &ctx.url);
                 if let Ok(hresp) = execute_with_timeout(&ctx.client, hreq, ctx.timeout).await
                     && hresp.status().is_success()
                     && hresp.content_length() == Some(start)
@@ -822,18 +822,36 @@ pub(crate) enum StartMode {
     Resume(SegmentState),
 }
 
-/// Stamp one outbound request like a browser (User-Agent); single choke point
-/// for all requests. No Referer is sent: reqwest doesn't strip a manual one
-/// across redirects, leaking origin to cross-origin targets (hotlink guards
-/// requiring Referer are not supported). No Cookie either: cookie-bearing
+/// Origin (scheme + host + port, no path/query) for a Referer header.
+/// Browsers send `strict-origin-when-cross-origin` by default; Grab matches
+/// it. An origin-only Referer satisfies hotlink guards that check the origin
+/// without leaking the page path or query (which may carry tokens).
+fn origin_referer(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    let host = u.host_str()?;
+    let port = match (u.scheme(), u.port()) {
+        ("http", Some(80)) | ("http", None) => String::new(),
+        ("https", Some(443)) | ("https", None) => String::new(),
+        (_, Some(p)) => format!(":{p}"),
+        (_, None) => String::new(),
+    };
+    Some(format!("{}://{host}{port}/", u.scheme()))
+}
+
+/// Stamp one outbound request like a browser (User-Agent + origin-only
+/// Referer); single choke point for all requests. No Cookie: cookie-bearing
 /// downloads use a client with the jar as provider (see `http_client_with_jar`),
 /// which re-applies in-scope cookies on every hop.
 pub(crate) fn stamp_request(
     mut req: reqwest::RequestBuilder,
     user_agent: &str,
+    url: &str,
 ) -> reqwest::RequestBuilder {
     if !user_agent.trim().is_empty() {
         req = req.header("User-Agent", user_agent.trim());
+    }
+    if let Some(referer) = origin_referer(url) {
+        req = req.header("Referer", referer);
     }
     req
 }
@@ -912,6 +930,7 @@ async fn probe_ranges(
     let req = stamp_request(
         client.get(url).header("Range", "bytes=0-0"),
         DEFAULT_USER_AGENT,
+        url,
     );
     let resp = execute_with_timeout(client, req, timeout).await?;
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
@@ -1017,7 +1036,7 @@ pub(crate) async fn fetch_piece(
         if let Some(v) = ctx.if_range.get() {
             builder = builder.header("If-Range", v);
         }
-        let req = stamp_request(builder, &ctx.user_agent);
+        let req = stamp_request(builder, &ctx.user_agent, &ctx.url);
         let resp = match execute_with_timeout(&ctx.client, req, timeout).await {
             Ok(r) => r,
             Err(e) => {

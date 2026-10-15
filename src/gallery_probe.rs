@@ -80,7 +80,7 @@ pub enum StickyMode {
 pub fn route(
     ytdlp_video: bool,
     gallery_items: Option<&[GalleryItem]>,
-    host_sticky: Option<StickyMode>,
+    _host_sticky: Option<StickyMode>,
 ) -> ProbeOutcome {
     // Sticky preference wins when both modes are viable; otherwise the table decides.
     let (has_video, has_images) = gallery_items

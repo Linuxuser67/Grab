@@ -1993,8 +1993,11 @@ impl DownloadManager {
                         item_c.set_gallery_files_done(done);
                         if total > 0 {
                             item_c.set_progress(done as f64 / total as f64);
+                            item_c.set_detail(format!("Gallery \u{2022} {done}/{total} files"));
+                        } else {
+                            // Count unknown: show files done without a total.
+                            item_c.set_detail(format!("Gallery \u{2022} {done} files"));
                         }
-                        item_c.set_detail(format!("Gallery \u{2022} {done}/{total} files"));
                         this.changed();
                     }
                     GalleryMsg::Finished(result) => {
@@ -2003,11 +2006,13 @@ impl DownloadManager {
                         match result {
                             Ok(r) => {
                                 item_c.set_status(DownloadStatus::Done);
-                                item_c.set_gallery_files_done(r.files.len() as u32);
+                                let done =
+                                    crate::gallery_runner::done_count(r.files.len(), r.skipped);
+                                item_c.set_gallery_files_done(done);
                                 item_c.set_progress(1.0);
-                                item_c.set_detail(format!(
-                                    "Gallery \u{2022} {} files",
-                                    r.files.len()
+                                item_c.set_detail(crate::gallery_runner::done_label(
+                                    r.files.len(),
+                                    r.skipped,
                                 ));
                                 // One finished record per URL (Parabolic parity):
                                 // done here (not at enqueue) so a failed

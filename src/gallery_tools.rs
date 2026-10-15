@@ -47,17 +47,31 @@ impl GalleryError {
 
 /// Whether a gallery-dl update is available. The nightly tag is date-based
 /// (`2026.10.15`) while `gallery-dl --version` prints semver (`1.32.14`),
-/// so the two aren't directly comparable. On the nightly channel any
-/// successfully fetched tag is treated as newer than the installed copy —
-/// nightly moves daily, so the installed build is almost certainly older.
-pub fn gallerydl_update_available(installed: &str, tag: &str) -> bool {
-    !installed.trim().is_empty() && !tag.trim().is_empty()
+/// Whether a gallery-dl update is available.
+/// Compares the latest nightly tag against the sidecar written at install time.
+/// Missing sidecar means "update available" (once).
+pub fn gallerydl_update_available(tag: &str) -> bool {
+    let tag = tag.trim();
+    if tag.is_empty() {
+        return false;
+    }
+    let sidecar = user_lib_dir().join("gallery-dl.tag");
+    let stored = std::fs::read_to_string(&sidecar).ok();
+    update_available_for_tags(stored.as_deref(), tag)
 }
 
-/// Latest nightly asset: `(download_url, sha256_digest)`.
+/// Pure helper: is an update available given the stored vs latest tags?
+fn update_available_for_tags(stored: Option<&str>, latest: &str) -> bool {
+    match stored {
+        Some(s) => s.trim() != latest.trim(),
+        None => true,
+    }
+}
+
+/// Latest nightly asset: `(download_url, sha256_digest, tag)`.
 /// `None` on any network/API failure; digest is `None` when the release
 /// metadata lacks one (the installer then fails closed).
-async fn latest_gallerydl_asset() -> Option<(String, Option<String>)> {
+async fn latest_gallerydl_asset() -> Option<(String, Option<String>, String)> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new(BUILDS_OWNER, BUILDS_REPO);
         let release = fetcher.fetch_latest_release(None).await.ok()?;
@@ -67,7 +81,7 @@ async fn latest_gallerydl_asset() -> Option<(String, Option<String>)> {
             .as_deref()
             .and_then(|d| d.strip_prefix("sha256:"))
             .map(str::to_owned);
-        Some((asset.download_url.clone(), digest))
+        Some((asset.download_url.clone(), digest, release.tag_name.clone()))
     });
     handle.await.ok().flatten()
 }
@@ -89,7 +103,7 @@ pub async fn latest_gallerydl_tag() -> Option<String> {
 /// Install (or update) gallery-dl from the nightly channel into the user lib dir.
 /// Fails closed when the release metadata carries no SHA-256 digest.
 pub async fn install_gallerydl() -> Result<PathBuf, GalleryError> {
-    let (url, digest) = latest_gallerydl_asset()
+    let (url, digest, tag) = latest_gallerydl_asset()
         .await
         .ok_or_else(|| GalleryError::install("couldn't determine the latest gallery-dl release"))?;
     // Fail closed: no digest means no verified install. The digest comes from
@@ -114,7 +128,12 @@ pub async fn install_gallerydl() -> Result<PathBuf, GalleryError> {
         result
     });
     match handle.await {
-        Ok(Ok(())) => Ok(dest),
+        Ok(Ok(())) => {
+            // Write the installed tag to the sidecar for the update check.
+            let tag_file = dir.join("gallery-dl.tag");
+            std::fs::write(&tag_file, &tag).ok();
+            Ok(dest)
+        }
         Ok(Err(e)) => Err(e),
         Err(e) => Err(GalleryError::runtime(&e)),
     }
@@ -172,14 +191,15 @@ mod tests {
 
     #[test]
     fn update_available_on_nightly() {
-        // Nightly channel: any fetched tag counts as newer.
-        assert!(gallerydl_update_available(
-            "gallery-dl 1.32.14",
-            "2026.10.15"
-        ));
-        assert!(!gallerydl_update_available("", "2026.10.15"));
-        assert!(!gallerydl_update_available("gallery-dl 1.32.14", ""));
-        assert!(!gallerydl_update_available("", ""));
+        // Same tag: no update.
+        assert!(!update_available_for_tags(Some("2026.10.15"), "2026.10.15"));
+        // Different tag: update available.
+        assert!(update_available_for_tags(Some("2026.10.14"), "2026.10.15"));
+        // Missing sidecar: update available (once).
+        assert!(update_available_for_tags(None, "2026.10.15"));
+        // Empty latest tag: no update.
+        assert!(!update_available_for_tags(Some("2026.10.15"), ""));
+        assert!(!update_available_for_tags(None, ""));
     }
 
     #[test]

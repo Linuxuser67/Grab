@@ -1146,12 +1146,12 @@ pub fn show(
                         // gallery-dl is optional (provisioned for galleries only):
                         // judged when installed, never blocks the check.
                         match (gdl.as_deref(), gdl_tag.as_deref()) {
-                            (Some(installed), Some(tag))
-                                if crate::gallery::gallerydl_update_available(installed, tag) =>
+                            (Some(_installed), Some(tag))
+                                if crate::gallery::gallerydl_update_available(tag) =>
                             {
                                 updates.push(format!(
                                     "gallery-dl {} → {}",
-                                    installed.trim(),
+                                    _installed.trim(),
                                     tag.trim()
                                 ));
                             }

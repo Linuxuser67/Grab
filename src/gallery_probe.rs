@@ -157,6 +157,9 @@ pub async fn probe_gallery(
         .arg("--no-download")
         .arg("--range")
         .arg("1")
+        // Don't let gallery-dl write back to Grab's staged cookies file.
+        .arg("-o")
+        .arg("extractor.cookies-update=false")
         .arg(url);
     if let Some(cookies) = cookies_file {
         cmd.arg("-C").arg(cookies);
@@ -166,8 +169,9 @@ pub async fn probe_gallery(
         .map_err(|_| GalleryError::install("gallery-dl probe timed out"))?
         .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
 
-    // Exit 64 = NoExtractorError: unsupported URL, not a failure.
-    if output.status.code() == Some(64) {
+    // Exit 32 (v1.30.0+) / 64 (older) = NoExtractorError: unsupported URL,
+    // not a failure. v1.30.0 folded NoExtractorError (64) into InputError (32).
+    if matches!(output.status.code(), Some(32) | Some(64)) {
         return Ok(None);
     }
     if !output.status.success() {
@@ -205,6 +209,9 @@ pub async fn count_gallery_files(
     cmd.arg("--config-ignore")
         .arg("-g")
         .arg("--no-download")
+        // Don't double-count fallback URLs.
+        .arg("-o")
+        .arg("output.fallback=false")
         .arg(url);
     if let Some(cookies) = cookies_file {
         cmd.arg("-C").arg(cookies);

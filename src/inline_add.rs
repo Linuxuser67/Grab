@@ -466,6 +466,52 @@ fn selected_audio_only(step: &VideoStep) -> bool {
         .unwrap_or(false)
 }
 
+/// Submit a video URL that yt-dlp can't handle but gallery-dl can.
+/// Queues it as a normal video row with the GalleryDl backend; the runner
+/// branches on the backend. The title comes from the gallery probe.
+#[allow(clippy::too_many_arguments)]
+fn submit_gallery_video(
+    manager: &Rc<DownloadManager>,
+    dest: &Rc<RefCell<String>>,
+    close_card: &Rc<dyn Fn()>,
+    url: &str,
+    items: &[crate::gallery_probe::GalleryItem],
+    scheduled_at: Option<i64>,
+    step: &Rc<VideoStep>,
+    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
+) {
+    let title = items
+        .first()
+        .map(|i| crate::gallery_probe::probe_title(i, url))
+        .unwrap_or_else(|| url.to_string());
+    let settings = manager.settings();
+    enqueue_and_close(
+        manager,
+        dest,
+        close_card,
+        scheduled_at,
+        |d| {
+            manager.enqueue_video(
+                url,
+                d,
+                Some(&title),
+                crate::media_types::VideoChoices {
+                    quality: settings.video_quality(),
+                    audio_only: false,
+                    video_format_id: None,
+                    is_live: false,
+                    playlist_item_id: None,
+                    backend: crate::video::VideoBackend::GalleryDl,
+                },
+            )
+        },
+        |e| {
+            show_video_error(step, e);
+            set_lookup_add(lookup_add, true);
+        },
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn submit_probed_single(
     manager: &Rc<DownloadManager>,
@@ -523,6 +569,7 @@ fn submit_probed_single(
                     video_format_id: format_id,
                     is_live: v.is_live,
                     playlist_item_id: None,
+                    backend: crate::video::VideoBackend::YtDlp,
                 },
             )
         },
@@ -998,6 +1045,7 @@ fn push_playlist_items_page(
                             // segment pages and never need it, but highlights — and anything
                             // unparseable at pick time — re-resolve the tray by this id.
                             playlist_item_id: Some(item.id.to_string()),
+                            backend: crate::video::VideoBackend::YtDlp,
                         },
                         &existing,
                     ) {
@@ -1990,6 +2038,39 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         if !crate::video::is_video_page(&url)
                             && e.to_string().to_lowercase().contains("unsupported url")
                         {
+                            // Try gallery-dl before falling back to direct: it handles
+                            // sites yt-dlp can't (e.g. Instagram stories).
+                            if let Ok(tool) = crate::gallery_argv::resolve_tool()
+                                && let Ok(Some(items)) = crate::gallery_probe::probe_gallery(
+                                    &tool, &url, None, // TODO: staged cookies
+                                )
+                                .await
+                            {
+                                // gallery-dl found something; route it.
+                                let outcome = crate::gallery_probe::route(
+                                    false, // yt-dlp found nothing
+                                    Some(items.as_slice()),
+                                    None, // no per-host preference on this path
+                                );
+                                if matches!(
+                                    outcome,
+                                    crate::gallery_probe::ProbeOutcome::VideoGalleryDl
+                                ) {
+                                    // Submit as video via gallery-dl backend.
+                                    // TODO: full gallery UI for ProbeOutcome::Gallery
+                                    submit_gallery_video(
+                                        &manager_b,
+                                        &dest_b,
+                                        &close_b,
+                                        &url,
+                                        &items,
+                                        scheduled_at_b.get(),
+                                        &step_b,
+                                        &lookup_add_b,
+                                    );
+                                    return;
+                                }
+                            }
                             match queue_plain(
                                 &manager_b,
                                 &dest_b,

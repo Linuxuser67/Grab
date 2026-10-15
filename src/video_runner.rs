@@ -71,6 +71,67 @@ pub async fn run_video_download(
     outcome
 }
 
+/// Run a video download via the gallery-dl backend.
+/// Used when yt-dlp can't handle the site (e.g. Instagram stories).
+async fn run_gallery_backend(
+    job: &VideoJob,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
+) -> Result<VideoOutcome, VideoError> {
+    use crate::engine_msg::EngineMsg;
+
+    let tool = crate::gallery_tools::resolve_gallerydl()
+        .map_err(|e| VideoError::staging(format!("gallery-dl not available: {e}")))?;
+
+    // Destination dir: parent of the job's dest file.
+    let dest_dir = job
+        .dest
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let gallery_job = crate::gallery_argv::GalleryJob {
+        item_id: job.item_id,
+        page_url: job.page_url.clone(),
+        title: job.page_url.clone(), // TODO: use probe title
+        file_count: None,
+        dest_dir,
+        filter: crate::gallery_argv::GalleryFilter::VideosOnly,
+        cookies_file: None, // TODO: staged cookies
+        speed_limit: job.speed_limit,
+    };
+
+    let tx_clone = tx.clone();
+    let result = crate::gallery_runner::run_gallery_download(&gallery_job, &tool, move |update| {
+        // Forward progress as EngineMsg. Files completed/total give the
+        // row its "N/M files" label; bytes drive the progress bar.
+        let _ = tx_clone.send(EngineMsg::Progress {
+            downloaded: update.bytes_downloaded,
+            total: update.bytes_total,
+            uploaded: 0,
+            upload_bps: 0,
+        });
+        // Log file-level progress for debugging (row UI uses bytes for now).
+        tracing::debug!(
+            files_completed = update.files_completed,
+            files_total = update.files_total,
+            last_file = ?update.last_completed_file,
+            "gallery-dl progress"
+        );
+    })
+    .await
+    .map_err(|e| VideoError::staging(format!("gallery-dl failed: {e}")))?;
+
+    // Sum file sizes for the Finished bytes.
+    let mut total_bytes = 0u64;
+    for file in &result.files {
+        if let Ok(meta) = std::fs::metadata(file) {
+            total_bytes += meta.len();
+        }
+    }
+
+    Ok(VideoOutcome::Finished(total_bytes))
+}
+
 async fn run_video_download_inner(
     mut job: VideoJob,
     gate: &std::sync::Arc<AttemptGate>,
@@ -78,6 +139,13 @@ async fn run_video_download_inner(
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<VideoOutcome, VideoError> {
     use crate::engine_msg::EngineMsg;
+
+    // gallery-dl backend: for sites yt-dlp can't handle (e.g. Instagram stories).
+    // Branches here so the yt-dlp-specific setup below (staging, versions, etc.)
+    // doesn't run for gallery downloads.
+    if job.backend == crate::video::VideoBackend::GalleryDl {
+        return run_gallery_backend(&job, tx).await;
+    }
 
     // Stage beside the destination (same filesystem: atomic delivery, no tmpfs
     // pressure). Legacy tmp dirs for rows staged before the move resolve here

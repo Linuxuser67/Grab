@@ -115,7 +115,8 @@ impl GalleryProgress {
     }
 
     /// Overall progress as a fraction (0.0-1.0), if totals are known.
-    /// Uses files completed vs total files seen, falling back to bytes.
+    /// Used by the gallery row UI (phase 6) for the progress bar.
+    #[allow(dead_code)]
     pub fn fraction(&self) -> Option<f64> {
         self.bytes_total
             .filter(|&t| t > 0)
@@ -123,6 +124,8 @@ impl GalleryProgress {
     }
 
     /// Current file's progress fraction (for per-file UI), if known.
+    /// Used by the gallery row UI (phase 6).
+    #[allow(dead_code)]
     pub fn current_file_fraction(&self) -> Option<f64> {
         self.current_file_total
             .filter(|&t| t > 0)

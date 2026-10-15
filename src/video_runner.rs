@@ -129,6 +129,15 @@ async fn run_gallery_backend(
         }
     }
 
+    // Report skipped files (already existed) for the done-row summary.
+    if result.skipped > 0 {
+        tracing::info!(
+            skipped = result.skipped,
+            files = result.files.len(),
+            "gallery-dl finished with skipped files"
+        );
+    }
+
     Ok(VideoOutcome::Finished(total_bytes))
 }
 

@@ -19,8 +19,7 @@ use crate::video_spawn::ProcessGroupGuard;
 pub struct GalleryResult {
     /// Full paths of downloaded files (in completion order).
     pub files: Vec<PathBuf>,
-    /// Files skipped (already existed). Surfaced in the done row (phase 6).
-    #[allow(dead_code)]
+    /// Files skipped (already existed).
     pub skipped: u32,
 }
 
@@ -97,6 +96,14 @@ pub async fn run_gallery_download(
             files.push(PathBuf::from(path));
         }
         if meaningful {
+            // Log the overall fraction for debugging; the callback carries
+            // the raw bytes so the UI can compute it too.
+            if let Some(f) = progress.fraction() {
+                tracing::trace!(fraction = f, "gallery-dl progress fraction");
+            }
+            if let Some(cf) = progress.current_file_fraction() {
+                tracing::trace!(current_file_fraction = cf, "gallery-dl current file");
+            }
             on_progress(GalleryProgressUpdate {
                 files_completed: progress.files_completed,
                 files_total: job.file_count,

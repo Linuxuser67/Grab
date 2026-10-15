@@ -25,6 +25,7 @@ mod ui_util;
 // gallery-dl: image galleries + fallback video downloads.
 mod gallery;
 mod gallery_argv;
+mod gallery_card;
 mod gallery_probe;
 mod gallery_progress;
 mod gallery_runner;

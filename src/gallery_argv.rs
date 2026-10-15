@@ -8,11 +8,7 @@ use std::path::{Path, PathBuf};
 /// Filters for the gallery download (user's Images/Videos/All picker).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GalleryFilter {
-    /// No filter; used by the gallery filter picker (phase 6).
-    #[allow(dead_code)]
     All,
-    /// Images only; used by the gallery filter picker (phase 6).
-    #[allow(dead_code)]
     ImagesOnly,
     VideosOnly,
 }
@@ -81,8 +77,7 @@ pub fn download_argv(
 
 /// Build the gallery-dl count argv (`-g` lists direct URLs, one per line).
 /// Build argv for counting files in a gallery (probe).
-/// Used by the gallery card UI (phase 6) to show "N files" before download.
-#[allow(dead_code)]
+/// Used by the gallery card UI to show "N files" before download.
 pub fn count_argv(tool: &Path, url: &str, cookies_file: Option<&Path>) -> Vec<String> {
     let mut argv = vec![
         tool.to_string_lossy().to_string(),

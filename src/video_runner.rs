@@ -101,15 +101,22 @@ async fn run_gallery_backend(
     };
 
     let tx_clone = tx.clone();
-    let item_id = job.item_id;
     let result = crate::gallery_runner::run_gallery_download(&gallery_job, &tool, move |update| {
-        // Forward progress as EngineMsg.
+        // Forward progress as EngineMsg. Files completed/total give the
+        // row its "N/M files" label; bytes drive the progress bar.
         let _ = tx_clone.send(EngineMsg::Progress {
             downloaded: update.bytes_downloaded,
             total: update.bytes_total,
             uploaded: 0,
             upload_bps: 0,
         });
+        // Log file-level progress for debugging (row UI uses bytes for now).
+        tracing::debug!(
+            files_completed = update.files_completed,
+            files_total = update.files_total,
+            last_file = ?update.last_completed_file,
+            "gallery-dl progress"
+        );
     })
     .await
     .map_err(|e| VideoError::staging(format!("gallery-dl failed: {e}")))?;

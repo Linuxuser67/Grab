@@ -19,7 +19,8 @@ use crate::video_spawn::ProcessGroupGuard;
 pub struct GalleryResult {
     /// Full paths of downloaded files (in completion order).
     pub files: Vec<PathBuf>,
-    /// Files skipped (already existed).
+    /// Files skipped (already existed). Surfaced in the done row (phase 6).
+    #[allow(dead_code)]
     pub skipped: u32,
 }
 

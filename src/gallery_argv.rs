@@ -76,6 +76,9 @@ pub fn download_argv(
 }
 
 /// Build the gallery-dl count argv (`-g` lists direct URLs, one per line).
+/// Build argv for counting files in a gallery (probe).
+/// Used by the gallery card UI (phase 6) to show "N files" before download.
+#[allow(dead_code)]
 pub fn count_argv(tool: &Path, url: &str, cookies_file: Option<&Path>) -> Vec<String> {
     let mut argv = vec![
         tool.to_string_lossy().to_string(),

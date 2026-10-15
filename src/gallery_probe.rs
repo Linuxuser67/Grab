@@ -17,6 +17,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// everything else lands in `extra` for best-effort title derivation.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct GalleryItem {
+    /// Original filename; shown in the gallery file list (phase 6).
+    #[allow(dead_code)]
     pub filename: String,
     pub extension: String,
     pub category: String,
@@ -69,6 +71,8 @@ pub enum ProbeOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StickyMode {
     Video,
+    /// User prefers gallery mode; used by the mode toggle (phase 6).
+    #[allow(dead_code)]
     Gallery,
 }
 

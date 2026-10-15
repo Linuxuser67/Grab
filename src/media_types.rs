@@ -38,8 +38,6 @@ pub struct VideoChoices {
     pub is_live: bool,
     /// Playlist entry id this row was picked from; worker selects by id since collection URLs re-resolve the tray.
     pub playlist_item_id: Option<String>,
-    /// Which backend downloads the video (yt-dlp default, gallery-dl fallback).
-    pub backend: crate::video::VideoBackend,
 }
 
 /// Where a resource comes from; serialized into the queue file, stable across releases.
@@ -65,9 +63,6 @@ pub enum VideoSource {
         /// Playlist entry id (see `VideoChoices`); persisted so restores still resolve the picked story.
         #[serde(default)]
         playlist_item_id: Option<String>,
-        /// Which backend downloads the video; old queue files default to YtDlp.
-        #[serde(default)]
-        backend: crate::video::VideoBackend,
     },
 }
 

@@ -592,7 +592,6 @@ fn serde_page_round_trip() {
         is_live: false,
         video_format_id: Some("137".into()),
         playlist_item_id: None,
-        backend: crate::video::VideoBackend::YtDlp,
     };
     let json = serde_json::to_string(&src).unwrap();
     let back: VideoSource = serde_json::from_str(&json).unwrap();
@@ -615,7 +614,6 @@ fn serde_page_old_json_gets_defaults() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
-            backend: crate::video::VideoBackend::YtDlp,
         }
     );
     // Files that still carry audio_only:true restore as audio rows.
@@ -1015,7 +1013,6 @@ fn resume_attempt_labels_reresolve_as_resuming() {
     let job = VideoJob {
         item_id,
         page_url: "https://vimeo.com/123456".into(),
-        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "1080p".into(),
         audio_only: false,
@@ -1068,7 +1065,6 @@ fn pipeline_reports_missing_tools() {
     let job = VideoJob {
         item_id,
         page_url: "https://vimeo.com/123456".into(),
-        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "1080p".into(),
         audio_only: false,
@@ -2299,7 +2295,6 @@ fn video_source_page_carries_format_pin() {
         is_live: false,
         video_format_id: Some("137".into()),
         playlist_item_id: None,
-        backend: crate::video::VideoBackend::YtDlp,
     };
     let json = serde_json::to_string(&src).unwrap();
     assert!(json.contains("\"video_format_id\":\"137\""));
@@ -3564,7 +3559,6 @@ fn direct_test_job() -> VideoJob {
     VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
-        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "720p".into(),
         audio_only: false,
@@ -3808,7 +3802,6 @@ fn live_test_job() -> VideoJob {
     VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
-        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "720p".into(),
         audio_only: false,
@@ -6231,7 +6224,6 @@ fn vod_hls_pins_planner_variant_id() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
-        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
@@ -6299,7 +6291,6 @@ fn vod_hls_refuses_existing_dest() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
-        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
@@ -8794,7 +8785,6 @@ fn hls_collects_sidecar_beside_finished_file() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
-        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,

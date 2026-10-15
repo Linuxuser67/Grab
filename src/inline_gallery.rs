@@ -61,8 +61,7 @@ pub(crate) fn refresh_gallery_info(v: &VideoStep, title: &str) {
 }
 
 /// Submit a video URL that yt-dlp can't handle but gallery-dl can.
-/// Queues it as a normal video row with the GalleryDl backend; the runner
-/// branches on the backend. The title comes from the gallery probe.
+/// Queues it as a gallery row (option A); the title comes from the gallery probe.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn submit_gallery_video(
     manager: &Rc<DownloadManager>,
@@ -79,25 +78,28 @@ pub(crate) fn submit_gallery_video(
         .map(|i| crate::gallery_probe::probe_title(i, url))
         .unwrap_or_else(|| url.to_string());
     let settings = manager.settings();
+    let cookies_browser = settings.cookies_browser().to_string();
     enqueue_and_close(
         manager,
         dest,
         close_card,
         scheduled_at,
         |d| {
-            manager.enqueue_video(
-                url,
-                d,
-                Some(&title),
-                crate::media_types::VideoChoices {
-                    quality: settings.video_quality(),
-                    audio_only: false,
-                    video_format_id: None,
-                    is_live: false,
-                    playlist_item_id: None,
-                    backend: crate::video::VideoBackend::GalleryDl,
-                },
-            )
+            let job = crate::gallery_argv::GalleryJob {
+                item_id: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+                page_url: url.to_string(),
+                title: title.clone(),
+                file_count: Some(items.len() as u32),
+                dest_dir: std::path::PathBuf::from(d.unwrap_or(".")),
+                // Default to All: a video fallback may still yield images.
+                filter: crate::gallery_argv::GalleryFilter::All,
+                cookies_browser,
+                speed_limit: None,
+            };
+            manager.enqueue_gallery(&job)
         },
         |e| {
             show_video_error(step, e);

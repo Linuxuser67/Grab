@@ -538,7 +538,6 @@ fn submit_probed_single(
                     video_format_id: format_id,
                     is_live: v.is_live,
                     playlist_item_id: None,
-                    backend: crate::video::VideoBackend::YtDlp,
                 },
             )
         },
@@ -1014,7 +1013,6 @@ fn push_playlist_items_page(
                             // segment pages and never need it, but highlights — and anything
                             // unparseable at pick time — re-resolve the tray by this id.
                             playlist_item_id: Some(item.id.to_string()),
-                            backend: crate::video::VideoBackend::YtDlp,
                         },
                         &existing,
                     ) {
@@ -2073,10 +2071,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 let browser = settings_b.cookies_browser();
                                 if browser.is_empty() || browser == "none" {
                                     None
-                                } else if let Ok(ytdlp) = crate::video_tools::resolve_ytdlp() {
+                                } else if let Some(ytdlp) = crate::video_tools::find_in_dirs(
+                                    "yt-dlp",
+                                    &crate::video_tools::tool_search_dirs(),
+                                ) {
                                     crate::cookies::export_cookies_to_file(
                                         &ytdlp,
-                                        browser,
+                                        browser.as_str(),
                                         &url,
                                         std::time::Duration::from_secs(30),
                                     )

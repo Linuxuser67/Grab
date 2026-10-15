@@ -2074,7 +2074,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 // gallery UI. Full GTK integration is phase 7;
                                 // for now we log the gallery info.
                                 if matches!(outcome, crate::gallery_probe::ProbeOutcome::Gallery) {
-                                    let card = crate::gallery_card::GalleryCard::new(items);
+                                    let card = crate::gallery_card::GalleryCard::new(items, None);
                                     // Verify count via the lightweight counter.
                                     if let Ok(tool) = crate::gallery_argv::resolve_tool()
                                         && let Some(n) = crate::gallery_probe::count_gallery_files(

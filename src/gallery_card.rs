@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::gallery_argv::GalleryFilter;
-use crate::gallery_probe::GalleryItem;
+use crate::gallery_probe::{GalleryItem, StickyMode};
 
 /// Gallery card state: filter selection and file list.
 pub struct GalleryCard {
@@ -15,13 +15,16 @@ pub struct GalleryCard {
     pub filter: Rc<RefCell<GalleryFilter>>,
     /// Probe items (for the file list).
     pub items: Vec<GalleryItem>,
+    /// Per-host sticky mode preference.
+    pub sticky: Option<StickyMode>,
 }
 
 impl GalleryCard {
-    pub fn new(items: Vec<GalleryItem>) -> Self {
+    pub fn new(items: Vec<GalleryItem>, sticky: Option<StickyMode>) -> Self {
         Self {
             filter: Rc::new(RefCell::new(GalleryFilter::All)),
             items,
+            sticky,
         }
     }
 
@@ -57,6 +60,11 @@ impl GalleryCard {
             .map(|item| item.filename.clone())
             .collect()
     }
+
+    /// Get the sticky mode for this host (for the mode toggle).
+    pub fn sticky_mode(&self) -> StickyMode {
+        self.sticky.unwrap_or(StickyMode::Video)
+    }
 }
 
 #[cfg(test)]
@@ -84,21 +92,42 @@ mod tests {
 
     #[test]
     fn filter_all_shows_everything() {
-        let card = GalleryCard::new(vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")]);
+        let card = GalleryCard::new(
+            vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")],
+            None,
+        );
         assert_eq!(card.file_count(), 2);
     }
 
     #[test]
     fn filter_images_only() {
-        let card = GalleryCard::new(vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")]);
+        let card = GalleryCard::new(
+            vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")],
+            None,
+        );
         set_filter_index(&card, 1);
         assert_eq!(card.file_count(), 1);
         assert_eq!(card.preview_filenames(), vec!["a.jpg".to_string()]);
     }
 
     #[test]
+    fn sticky_defaults_to_video() {
+        let card = GalleryCard::new(vec![], None);
+        assert_eq!(card.sticky_mode(), StickyMode::Video);
+    }
+
+    #[test]
+    fn sticky_gallery_honored() {
+        let card = GalleryCard::new(vec![], Some(StickyMode::Gallery));
+        assert_eq!(card.sticky_mode(), StickyMode::Gallery);
+    }
+
+    #[test]
     fn filter_videos_only() {
-        let card = GalleryCard::new(vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")]);
+        let card = GalleryCard::new(
+            vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")],
+            None,
+        );
         set_filter_index(&card, 2);
         assert_eq!(card.file_count(), 1);
     }

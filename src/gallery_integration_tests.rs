@@ -78,14 +78,14 @@ async fn gallery_integration_probe_count_download() {
         cookies_file: None,
         speed_limit: None,
     };
-    let mut completed = 0u32;
+    let completed = std::cell::Cell::new(0u32);
     let result = crate::gallery_runner::run_gallery_download(&job, &tool, |update| {
-        completed = update.files_completed;
+        completed.set(update.files_completed);
     })
     .await
     .expect("download failed");
     assert_eq!(result.files.len(), 3, "expected 3 downloaded files");
-    assert_eq!(completed, 3, "progress should report 3 completed");
+    assert_eq!(completed.get(), 3, "progress should report 3 completed");
     for f in &result.files {
         assert!(f.exists(), "downloaded file should exist: {f:?}");
     }

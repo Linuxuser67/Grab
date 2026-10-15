@@ -215,7 +215,6 @@ mod tests {
     #[test]
     fn download_argv_filter_videos() {
         let argv = download_argv(
-            None,
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),

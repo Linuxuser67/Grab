@@ -236,6 +236,13 @@ struct VideoStep {
     options: Rc<RefCell<Vec<FormatOption>>>,
     tools: adw::ActionRow,
     error: adw::ActionRow,
+    /// Gallery info row: shown when the probe finds an image gallery.
+    /// Title is "Gallery", subtitle is "N files • preview...".
+    gallery_info: adw::ActionRow,
+    /// True when the current preview is a gallery (not a video).
+    is_gallery: Rc<Cell<bool>>,
+    /// The gallery card state (filter, items) when is_gallery is true.
+    gallery_card: Rc<RefCell<Option<crate::gallery_card::GalleryCard>>>,
     /// The form's Add button: icon-only until a format is picked, then a
     /// labeled "Add" pill (HIG: primary actions carry a text label).
     add_btn: gtk4::Button,
@@ -315,6 +322,9 @@ fn hide_video_step(v: &VideoStep) {
     v.format.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
+    v.gallery_info.set_visible(false);
+    v.is_gallery.set(false);
+    v.gallery_card.borrow_mut().take();
     // NOTE: the Add button keeps its labeled-pill appearance while sliding
     // out: the revealer is only ever revealed after show_video_ready /
     // show_video_playlist set the label, so the icon-only form is never
@@ -374,6 +384,36 @@ fn show_video_ready(v: &VideoStep) {
     v.group_revealer.set_visible(true);
     v.group_revealer.set_reveal_child(true);
     // Format picked: the Add button earns its text label.
+    v.add_btn.set_icon_name("");
+    v.add_btn.remove_css_class("circular");
+    v.add_btn.set_label(&gettext("Add"));
+    sync_entry_icon(v);
+}
+
+/// Show the gallery preview: title, file count, and filenames.
+/// Hides the video-specific rows (format selector).
+fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, title: &str) {
+    hide_video_step(v);
+    v.looking_up.set(false);
+    v.is_gallery.set(true);
+    let count = card.file_count();
+    let preview = card.preview_filenames().join(", ");
+    let subtitle = if count > 5 {
+        format!("{} files • {}, +{} more", count, preview, count - 5)
+    } else {
+        format!("{} files • {}", count, preview)
+    };
+    v.gallery_info.set_title(title);
+    v.gallery_info.set_subtitle(&subtitle);
+    v.gallery_info.set_visible(true);
+    // Store the card for the Add button handler.
+    *v.gallery_card.borrow_mut() = Some(card);
+    // Reveal the block.
+    v.action_revealer.set_visible(true);
+    v.action_revealer.set_reveal_child(true);
+    v.group_revealer.set_visible(true);
+    v.group_revealer.set_reveal_child(true);
+    // The Add button earns its text label.
     v.add_btn.set_icon_name("");
     v.add_btn.remove_css_class("circular");
     v.add_btn.set_label(&gettext("Add"));
@@ -1590,6 +1630,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_error.add_suffix(&video_retry_btn);
     video_error.set_visible(false);
     video_group.add(&video_error);
+    // Gallery info row: hidden by default, shown when probe finds an image gallery.
+    let gallery_info = adw::ActionRow::builder()
+        .title(gettext("Gallery"))
+        .use_markup(false)
+        .build();
+    gallery_info.set_visible(false);
+    video_group.add(&gallery_info);
     // The preview block slides down like the options section: the revealer
     // owns show/hide.
     let video_revealer = slide_down_revealer();
@@ -1606,6 +1653,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
         error: video_error,
+        gallery_info: gallery_info.clone(),
+        is_gallery: Rc::new(Cell::new(false)),
+        gallery_card: Rc::new(RefCell::new(None)),
         add_btn: add_btn.clone(),
     });
     // Card-local choices: the format is initialized from Preferences (not
@@ -2070,7 +2120,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     );
                                     return;
                                 }
-                                // Gallery (images): build the card state.
+                                // Gallery (images): show the gallery UI.
                                 if matches!(outcome, crate::gallery_probe::ProbeOutcome::Gallery) {
                                     let card = crate::gallery_card::GalleryCard::new(
                                         items,
@@ -2085,14 +2135,19 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     {
                                         tracing::debug!(count = n, "gallery file count verified");
                                     }
+                                    let title = card
+                                        .items
+                                        .first()
+                                        .map(|i| crate::gallery_probe::probe_title(i, &url))
+                                        .unwrap_or_else(|| url.clone());
                                     tracing::info!(
                                         files = card.file_count(),
                                         preview = ?card.preview_filenames(),
                                         sticky = ?card.sticky_mode(),
                                         "gallery-dl found image gallery"
                                     );
-                                    // TODO: show gallery UI section (phase 7b).
-                                    // Fall through to direct download for now.
+                                    show_gallery_ready(&step_b, card, &title);
+                                    return;
                                 }
                             }
                             match queue_plain(
@@ -2260,6 +2315,23 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // entry itself, not in a caption underneath it.
                 set_field_error(&url_entry, message);
             };
+            // Gallery download: the probe found an image gallery, not a video.
+            if step2.is_gallery.get() {
+                if let Some(card) = step2.gallery_card.borrow().as_ref() {
+                    let url = url_entry.text().trim().to_string();
+                    let dest = dd.borrow().clone();
+                    // TODO: enqueue gallery download via queue (phase 9).
+                    // For now, log and close.
+                    tracing::info!(
+                        url = %url,
+                        dest = %dest,
+                        files = card.file_count(),
+                        "gallery download requested (queue integration phase 9)"
+                    );
+                    close_card();
+                    return;
+                }
+            }
             let url = url_entry.text().trim().to_string();
             if crate::video::is_video_page(&url) {
                 // Same freshness gate as the kick skip: the stored page URL is

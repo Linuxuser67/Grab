@@ -45,13 +45,14 @@ pub struct GalleryProgressUpdate {
 pub async fn run_gallery_download(
     job: &GalleryJob,
     tool: &Path,
+    cookies_file: Option<&Path>,
     on_progress: impl Fn(GalleryProgressUpdate),
 ) -> Result<GalleryResult, GalleryError> {
     let argv = download_argv(
         tool,
         &job.page_url,
         &job.dest_dir,
-        job.cookies_file.as_deref(),
+        cookies_file,
         job.filter,
         job.speed_limit,
     );
@@ -142,7 +143,7 @@ mod tests {
             file_count: Some(10),
             dest_dir: PathBuf::from("/tmp/dest"),
             filter: GalleryFilter::ImagesOnly,
-            cookies_file: None,
+            cookies_browser: "none".to_string(),
             speed_limit: None,
         };
         let json = serde_json::to_string(&job).unwrap();

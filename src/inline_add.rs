@@ -2068,9 +2068,28 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         {
                             // Try gallery-dl before falling back to direct: it handles
                             // sites yt-dlp can't (e.g. Instagram stories).
+                            // Stage cookies for the probe (short-lived; deleted after).
+                            let probe_cookies = {
+                                let browser = settings_b.cookies_browser();
+                                if browser.is_empty() || browser == "none" {
+                                    None
+                                } else if let Ok(ytdlp) = crate::video_tools::resolve_ytdlp() {
+                                    crate::cookies::export_cookies_to_file(
+                                        &ytdlp,
+                                        browser,
+                                        &url,
+                                        std::time::Duration::from_secs(30),
+                                    )
+                                    .await
+                                } else {
+                                    None
+                                }
+                            };
                             if let Ok(tool) = crate::gallery_argv::resolve_tool()
                                 && let Ok(Some(items)) = crate::gallery_probe::probe_gallery(
-                                    &tool, &url, None, // TODO: staged cookies
+                                    &tool,
+                                    &url,
+                                    probe_cookies.as_deref(),
                                 )
                                 .await
                             {
@@ -2129,6 +2148,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     );
                                     return;
                                 }
+                            }
+                            // Clean up probe cookies.
+                            if let Some(path) = probe_cookies {
+                                let _ = std::fs::remove_file(path);
                             }
                             match queue_plain(
                                 &manager_b,
@@ -2310,6 +2333,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     .unwrap_or_else(|| url.clone());
                 // Enqueue via DownloadManager (phase 11). The runner integration
                 // (phase 12) will drive the actual download.
+                let cookies_browser = m.settings().cookies_browser().to_string();
                 let job = crate::gallery_argv::GalleryJob {
                     item_id: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -2320,7 +2344,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     file_count: Some(file_count),
                     dest_dir: std::path::PathBuf::from(dest),
                     filter,
-                    cookies_file: None, // TODO: staged cookies (B3)
+                    cookies_browser,
                     speed_limit: None,
                 };
                 match m.enqueue_gallery(&job) {

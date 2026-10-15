@@ -1944,6 +1944,26 @@ impl DownloadManager {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<GalleryMsg>();
 
         // Spawn the download on the tokio runtime.
+        // Resolve cookies at spawn time (not enqueue time): the staged file is
+        // ephemeral, so a path stored at enqueue would be stale on retry.
+        let cookies_file = if job.cookies_browser.is_empty() || job.cookies_browser == "none" {
+            None
+        } else {
+            // Need yt-dlp binary for cookie export.
+            let ytdlp_bin = crate::video_tools::resolve_ytdlp().ok();
+            match ytdlp_bin {
+                Some(bin) => {
+                    crate::cookies::export_cookies_to_file(
+                        &bin,
+                        &job.cookies_browser,
+                        &job.page_url,
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await
+                }
+                None => None,
+            }
+        };
         let handle = tokio_rt().spawn(async move {
             let tool = match crate::gallery_argv::resolve_tool() {
                 Ok(t) => t,
@@ -1952,10 +1972,19 @@ impl DownloadManager {
                     return;
                 }
             };
-            let result = crate::gallery_runner::run_gallery_download(&job, &tool, |update| {
-                let _ = tx.send(GalleryMsg::Progress(update.files_completed));
-            })
+            let result = crate::gallery_runner::run_gallery_download(
+                &job,
+                &tool,
+                cookies_file.as_deref(),
+                |update| {
+                    let _ = tx.send(GalleryMsg::Progress(update.files_completed));
+                },
+            )
             .await;
+            // Clean up the staged cookies file.
+            if let Some(path) = cookies_file {
+                let _ = std::fs::remove_file(path);
+            }
             let _ = tx.send(GalleryMsg::Finished(result.map_err(|e| e.to_string())));
         });
 

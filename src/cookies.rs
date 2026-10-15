@@ -221,12 +221,40 @@ pub(crate) fn sweep_cookie_staging() {
 }
 
 /// Dump one profile's cookies through yt-dlp to a temp file; caller deletes it.
+/// Returns the file path (for gallery-dl's `-C`); the file persists until deleted.
+pub(crate) async fn export_cookies_to_file(
+    youtube_bin: &Path,
+    cookies_browser: &str,
+    page_url: &str,
+    timeout: Duration,
+) -> Option<PathBuf> {
+    // Reuse the same secure temp-file + yt-dlp dump as export_cookies,
+    // but keep the file for the caller instead of reading+deleting.
+    let path = stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await?;
+    Some(path)
+}
+
+/// Dump one profile's cookies through yt-dlp to a temp file; caller deletes it.
 async fn export_cookies(
     youtube_bin: &Path,
     cookies_browser: &str,
     page_url: &str,
     timeout: Duration,
 ) -> Option<String> {
+    let path = stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await?;
+    let text = std::fs::read_to_string(&path).ok();
+    let _ = std::fs::remove_file(&path);
+    text
+}
+
+/// Stage cookies to a secure temp file; returns the path. Caller deletes it.
+/// Shared by `export_cookies` (reads+deletes) and `export_cookies_to_file` (keeps).
+async fn stage_cookie_file(
+    youtube_bin: &Path,
+    cookies_browser: &str,
+    page_url: &str,
+    timeout: Duration,
+) -> Option<PathBuf> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = cookie_staging_dir()?;
@@ -293,9 +321,7 @@ async fn export_cookies(
         let _ = std::fs::remove_file(&path);
         return None;
     }
-    let text = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    text
+    Some(path)
 }
 
 /// Cookie jar for one browser spec, cached briefly; `None` means plain requests.

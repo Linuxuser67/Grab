@@ -200,7 +200,6 @@ mod tests {
     fn download_argv_filter_images() {
         let argv = download_argv(
             &tool(),
-            None,
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,

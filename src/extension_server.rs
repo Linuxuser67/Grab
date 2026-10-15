@@ -733,10 +733,20 @@ async fn handle_add(
     };
     // Stage before queuing: the GTK side may start a probe the moment the
     // handoff is received, and every probe leg looks the cookies up by URL.
-    let staged = if authenticated && let Some(path) = write_handoff_cookies(&req.url, &req.cookies)
-    {
-        store_handoff_cookies(&req.url, path, req.user_agent);
-        true
+    // An authenticated handoff with no usable cookies discards the stale
+    // entry: the new download must not reuse the old jar. Unauthenticated
+    // callers never discard, so a local probe can't wipe entries.
+    let staged = if authenticated {
+        match write_handoff_cookies(&req.url, &req.cookies) {
+            Some(path) => {
+                store_handoff_cookies(&req.url, path, req.user_agent);
+                true
+            }
+            None => {
+                discard_handoff_cookies(&req.url);
+                false
+            }
+        }
     } else {
         false
     };
@@ -1217,6 +1227,48 @@ mod tests {
             text.contains("example.com\tTRUE\t/\tFALSE\t0\tcf\tabc"),
             "{text}"
         );
+        clear_handoff_cookies();
+    }
+
+    #[tokio::test]
+    async fn handle_add_cookieless_handoff_discards_stale_entry() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let url = "https://example.com/watch?v=8";
+        // First: authenticated handoff with cookies stages the entry.
+        let body =
+            r#"{"url":"https://example.com/watch?v=8","cookies":[{"name":"cf","value":"abc"}]}"#;
+        let tok = token(body);
+        let r = request(
+            srv.port,
+            &[("Host", &host), ("X-Grab-Token", &tok), JSON],
+            body,
+        )
+        .await;
+        assert_eq!(status(&r), "200", "{r}");
+        let _ = srv.rx.recv().await.expect("handoff");
+        let args = handoff_cookie_args(url);
+        assert_eq!(args.len(), 2, "{args:?}");
+        let staged = PathBuf::from(&args[1]);
+        assert!(staged.exists(), "staged file must exist");
+        // Second: authenticated handoff for the same URL with no cookies.
+        // The stale entry must be discarded, not reused.
+        let body2 = r#"{"url":"https://example.com/watch?v=8","cookies":[]}"#;
+        let tok2 = token(body2);
+        let r2 = request(
+            srv.port,
+            &[("Host", &host), ("X-Grab-Token", &tok2), JSON],
+            body2,
+        )
+        .await;
+        assert_eq!(status(&r2), "200", "{r2}");
+        let _ = srv.rx.recv().await.expect("handoff");
+        assert!(
+            handoff_cookie_path(url).is_none(),
+            "stale entry must be gone"
+        );
+        assert!(!staged.exists(), "staged file must be deleted");
         clear_handoff_cookies();
     }
 

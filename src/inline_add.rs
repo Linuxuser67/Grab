@@ -239,6 +239,10 @@ struct VideoStep {
     /// Gallery info row: shown when the probe finds an image gallery.
     /// Title is "Gallery", subtitle is "N files • preview...".
     gallery_info: adw::ActionRow,
+    /// Gallery filter toggle (All/Images/Videos). Shown with gallery_info.
+    gallery_filter: adw::ToggleGroup,
+    /// Wrapper for the filter toggle (for visibility control).
+    gallery_filter_wrap: gtk4::Box,
     /// True when the current preview is a gallery (not a video).
     is_gallery: Rc<Cell<bool>>,
     /// The gallery card state (filter, items) when is_gallery is true.
@@ -323,6 +327,7 @@ fn hide_video_step(v: &VideoStep) {
     v.tools.set_visible(false);
     v.error.set_visible(false);
     v.gallery_info.set_visible(false);
+    v.gallery_filter_wrap.set_visible(false);
     v.is_gallery.set(false);
     v.gallery_card.borrow_mut().take();
     // NOTE: the Add button keeps its labeled-pill appearance while sliding
@@ -396,18 +401,13 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     hide_video_step(v);
     v.looking_up.set(false);
     v.is_gallery.set(true);
-    let count = card.file_count();
-    let preview = card.preview_filenames().join(", ");
-    let subtitle = if count > 5 {
-        format!("{} files • {}, +{} more", count, preview, count - 5)
-    } else {
-        format!("{} files • {}", count, preview)
-    };
-    v.gallery_info.set_title(title);
-    v.gallery_info.set_subtitle(&subtitle);
-    v.gallery_info.set_visible(true);
-    // Store the card for the Add button handler.
+    // Store the card first so the filter handler can access it.
     *v.gallery_card.borrow_mut() = Some(card);
+    // Reset filter to All.
+    v.gallery_filter.set_active_name(Some("all"));
+    refresh_gallery_info(v, title);
+    v.gallery_info.set_visible(true);
+    v.gallery_filter_wrap.set_visible(true);
     // Reveal the block.
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
@@ -418,6 +418,21 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     v.add_btn.remove_css_class("circular");
     v.add_btn.set_label(&gettext("Add"));
     sync_entry_icon(v);
+}
+
+/// Refresh the gallery info row from the current card state.
+fn refresh_gallery_info(v: &VideoStep, title: &str) {
+    if let Some(card) = v.gallery_card.borrow().as_ref() {
+        let count = card.file_count();
+        let preview = card.preview_filenames().join(", ");
+        let subtitle = if count > 5 {
+            format!("{} files • {}, +{} more", count, preview, count - 5)
+        } else {
+            format!("{} files • {}", count, preview)
+        };
+        v.gallery_info.set_title(title);
+        v.gallery_info.set_subtitle(&subtitle);
+    }
 }
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
@@ -1637,6 +1652,24 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     gallery_info.set_visible(false);
     video_group.add(&gallery_info);
+    // Gallery filter toggle: All / Images / Videos. Hidden by default.
+    let gallery_filter = adw::ToggleGroup::new();
+    for (name, label) in [
+        ("all", gettext("All")),
+        ("images", gettext("Images")),
+        ("videos", gettext("Videos")),
+    ] {
+        let toggle = adw::Toggle::builder().name(name).label(&label).build();
+        gallery_filter.add(toggle);
+    }
+    gallery_filter.set_active_name(Some("all"));
+    gallery_filter.set_visible(false);
+    // AdwToggleGroup doesn't implement GtkAccessible; wrap in a Box with a label
+    // for screen readers (same pattern as window.rs status filter).
+    let filter_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    filter_wrap.append(&gallery_filter);
+    filter_wrap.set_visible(false);
+    video_group.add(&filter_wrap);
     // The preview block slides down like the options section: the revealer
     // owns show/hide.
     let video_revealer = slide_down_revealer();
@@ -1654,10 +1687,37 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         tools: video_tools,
         error: video_error,
         gallery_info,
+        gallery_filter: gallery_filter.clone(),
+        gallery_filter_wrap: filter_wrap.clone(),
         is_gallery: Rc::new(Cell::new(false)),
         gallery_card: Rc::new(RefCell::new(None)),
         add_btn: add_btn.clone(),
     });
+    // Gallery filter toggle: update the card's filter and refresh the info row.
+    // Connected once; reads the current card from the Rc.
+    {
+        let card_rc = step.gallery_card.clone();
+        let info = step.gallery_info.clone();
+        gallery_filter.connect_active_name_notify(move |toggle| {
+            if let Some(card_ref) = card_rc.borrow().as_ref() {
+                let filter = match toggle.active_name().as_deref() {
+                    Some("images") => crate::gallery_argv::GalleryFilter::ImagesOnly,
+                    Some("videos") => crate::gallery_argv::GalleryFilter::VideosOnly,
+                    _ => crate::gallery_argv::GalleryFilter::All,
+                };
+                *card_ref.filter.borrow_mut() = filter;
+                // Refresh the info row subtitle.
+                let count = card_ref.file_count();
+                let preview = card_ref.preview_filenames().join(", ");
+                let subtitle = if count > 5 {
+                    format!("{} files • {}, +{} more", count, preview, count - 5)
+                } else {
+                    format!("{} files • {}", count, preview)
+                };
+                info.set_subtitle(&subtitle);
+            }
+        });
+    }
     // Card-local choices: the format is initialized from Preferences (not
     // bound). Exact picks are per lookup, so nothing persists here.
     form.append(&video_revealer);

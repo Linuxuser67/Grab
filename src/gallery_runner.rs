@@ -100,9 +100,10 @@ pub async fn run_gallery_download(
         .ok_or_else(|| GalleryError::runtime("gallery-dl stderr not piped"))?;
 
     // Drain stderr into a ring buffer (last 20 lines) in the background.
+    // The JoinHandle is awaited after the child exits so the tail is complete.
     let stderr_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let stderr_lines_clone = stderr_lines.clone();
-    tokio::spawn(async move {
+    let drain_handle = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let mut buf = stderr_lines_clone.lock().unwrap();
@@ -155,6 +156,10 @@ pub async fn run_gallery_download(
         .await
         .map_err(|e| GalleryError::runtime(format!("couldn't wait for gallery-dl: {e}")))?;
 
+    // The child has exited, so the stderr pipe is at EOF; awaiting the drain
+    // guarantees the ring buffer has the complete tail.
+    let _ = drain_handle.await;
+
     if !status.success() {
         let code = status.code();
         let stderr_tail = stderr_lines.lock().unwrap().join("\n");
@@ -168,14 +173,17 @@ pub async fn run_gallery_download(
             });
         }
         // Total failure: include the stderr tail and a mapped message.
-        // gallery-dl exit codes are bit flags (see gallery_dl/exception.py):
-        // 1=general, 4=extraction (incl. HTTP, not found), 8=challenge,
-        // 16=auth, 32=input. Check the most specific bits first.
+        // gallery-dl exit codes are bit flags:
+        // 1=unspecified, 2=cmdline, 4=http, 8=challenge,
+        // 16=auth, 32=input, 128=os. Check the most specific bits first.
         let msg = match code.unwrap_or(0) {
+            c if c & 128 != 0 => "gallery-dl: OS error",
             c if c & 16 != 0 => "gallery-dl: authentication failed",
-            c if c & 8 != 0 => "gallery-dl: challenge failed (e.g. Cloudflare)",
-            c if c & 32 != 0 => "gallery-dl: invalid input or no extractor",
-            c if c & 4 != 0 => "gallery-dl: extraction failed",
+            c if c & 8 != 0 => "gallery-dl: challenge error (Cloudflare/DDoS-Guard)",
+            c if c & 32 != 0 => "gallery-dl: invalid input",
+            c if c & 4 != 0 => "gallery-dl: HTTP error",
+            c if c & 2 != 0 => "gallery-dl: invalid command-line arguments",
+            c if c & 1 != 0 => "gallery-dl: unspecified error",
             _ => "gallery-dl failed",
         };
         return Err(GalleryError::runtime(format!(

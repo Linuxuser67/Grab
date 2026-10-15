@@ -1157,7 +1157,7 @@ impl DownloadManager {
         };
         let ctx = FetchCtx {
             client,
-            url,
+            url: url.clone(),
             dest,
             opts,
             if_range: {

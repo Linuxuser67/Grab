@@ -1806,6 +1806,7 @@ impl DownloadManager {
         let job = crate::video::VideoJob {
             item_id: id,
             page_url,
+            backend: crate::video::VideoBackend::YtDlp,
             playlist_item_id,
             quality,
             audio_only,

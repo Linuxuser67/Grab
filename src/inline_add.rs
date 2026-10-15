@@ -2392,8 +2392,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     .first()
                     .map(|i| crate::gallery_probe::probe_title(i, &url))
                     .unwrap_or_else(|| url.clone());
-                // Spawn the gallery download in the background.
-                // Phase 9: direct spawn (no queue row yet). Phase 10 will integrate with queue.
+                // Enqueue via DownloadManager (phase 11). The runner integration
+                // (phase 12) will drive the actual download.
                 let job = crate::gallery_argv::GalleryJob {
                     item_id: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -2404,34 +2404,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     file_count: Some(file_count),
                     dest_dir: std::path::PathBuf::from(dest),
                     filter,
-                    cookies_file: None, // TODO: staged cookies (phase 12)
+                    cookies_file: None, // TODO: staged cookies (phase 14)
                     speed_limit: None,
                 };
-                gtk4::glib::spawn_future_local(async move {
-                    if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                        let result =
-                            crate::gallery_runner::run_gallery_download(&job, &tool, |update| {
-                                tracing::debug!(?update, "gallery download progress");
-                            })
-                            .await;
-                        match result {
-                            Ok(r) => tracing::info!(
-                                files = r.files.len(),
-                                skipped = r.skipped,
-                                "gallery download complete"
-                            ),
-                            Err(e) => tracing::error!(
-                                error = %e,
-                                "gallery download failed"
-                            ),
-                        }
+                match m.enqueue_gallery(&job) {
+                    Ok(_) => {
+                        tracing::info!(
+                            url = %url,
+                            files = file_count,
+                            "gallery enqueued"
+                        );
                     }
-                });
-                tracing::info!(
-                    url = %url,
-                    files = file_count,
-                    "gallery download started"
-                );
+                    Err(e) => {
+                        fail(&e);
+                        return;
+                    }
+                }
                 close_card();
                 return;
             }

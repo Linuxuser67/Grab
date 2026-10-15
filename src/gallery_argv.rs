@@ -6,11 +6,28 @@
 use std::path::{Path, PathBuf};
 
 /// Filters for the gallery download (user's Images/Videos/All picker).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub enum GalleryFilter {
+    #[default]
     All,
     ImagesOnly,
     VideosOnly,
+}
+
+impl<'de> serde::Deserialize<'de> for GalleryFilter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "ImagesOnly" => Ok(GalleryFilter::ImagesOnly),
+            "VideosOnly" => Ok(GalleryFilter::VideosOnly),
+            // Unknown (or "All") → All. A bad filter value must not
+            // quarantine the queue entry.
+            _ => Ok(GalleryFilter::All),
+        }
+    }
 }
 
 impl GalleryFilter {
@@ -128,6 +145,8 @@ pub fn resolve_tool() -> Result<PathBuf, String> {
 /// Inputs for a gallery download (one queue row per gallery).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GalleryJob {
+    /// Manager id; skipped on serialize (restore assigns a fresh id via claim_id).
+    #[serde(skip, default)]
     pub item_id: u64,
     pub page_url: String,
     /// Display title for the queue row (from probe metadata).

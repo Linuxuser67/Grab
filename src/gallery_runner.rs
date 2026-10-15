@@ -227,7 +227,8 @@ mod tests {
 
     #[test]
     fn gallery_job_serializes() {
-        // Queue store round-trip.
+        // Queue store round-trip. item_id is #[serde(skip)]: restore assigns
+        // a fresh id via claim_id, so it round-trips as 0.
         let job = GalleryJob {
             item_id: 42,
             page_url: "https://example.com/gallery".to_string(),
@@ -239,8 +240,10 @@ mod tests {
             speed_limit: None,
         };
         let json = serde_json::to_string(&job).unwrap();
+        // item_id skipped on serialize.
+        assert!(!json.contains("item_id"));
         let back: GalleryJob = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.item_id, 42);
+        assert_eq!(back.item_id, 0);
         assert_eq!(back.filter, GalleryFilter::ImagesOnly);
         assert_eq!(back.title, "Test Gallery");
         assert_eq!(back.file_count, Some(10));

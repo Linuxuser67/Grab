@@ -63,6 +63,11 @@ pub enum VideoSource {
         /// Playlist entry id (see `VideoChoices`); persisted so restores still resolve the picked story.
         #[serde(default)]
         playlist_item_id: Option<String>,
+        /// Legacy: pre-B4 video backend flag. Deserialize-only; a stored
+        /// `"gallerydl"` row converts to a gallery job on restore (see
+        /// `validate_stored_item`). Never written by current code.
+        #[serde(default, skip_serializing)]
+        backend: Option<String>,
     },
 }
 

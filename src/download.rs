@@ -723,7 +723,7 @@ impl DownloadManager {
         item.set_is_gallery(true);
         item.set_gallery_file_count(job.file_count.unwrap_or(0));
         item.set_gallery_files_done(0);
-        item.set_gallery_url(url.clone());
+        item.set_gallery_url(url);
         item.set_detail(format!("Gallery • {} files", job.file_count.unwrap_or(0)));
         // TODO: persist GalleryJob for restore (phase 11b).
         // TODO: start the gallery runner (phase 12).
@@ -1050,8 +1050,11 @@ impl DownloadManager {
             let next = self
                 .items()
                 // A discard still tearing down owns its destination: the row stays Queued until the reservation clears.
+                // Gallery items are excluded until phase 12 wires the runner (they'd otherwise hit the direct-download engine).
                 .find(|it| {
-                    it.status() == DownloadStatus::Queued && !self.dest_reserved(&it.file_path())
+                    it.status() == DownloadStatus::Queued
+                        && !it.is_gallery()
+                        && !self.dest_reserved(&it.file_path())
                 });
             match next {
                 Some(item) => self.spawn(item),
@@ -2755,8 +2758,10 @@ impl DownloadManager {
         }
         let mut items = Vec::new();
         for it in self.items() {
-            // Cancelled rows carry no intent: never persisted.
-            if it.status() != DownloadStatus::Cancelled {
+            // Cancelled rows carry no intent: never persisted. Gallery rows are
+            // not restorable yet (phase 11b): persisting them without gallery
+            // flags would resurrect them as plain direct downloads on restart.
+            if it.status() != DownloadStatus::Cancelled && !it.is_gallery() {
                 let segments = self.segment_state.borrow().get(&it.id()).cloned();
                 let selected_files = crate::torrent::get_selection(&it.url().to_string());
                 // Empty means "no folder tracked": omit it so old files stay clean and old app versions keep reading new ones.

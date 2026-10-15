@@ -4,10 +4,10 @@
 //! (here) concurrently. This module parses gallery-dl's `-j` output and decides
 //! which mode the New Download card shows, per the routing table in the design.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
-use crate::gallery::GalleryError;
+use crate::gallery_tools::GalleryError;
 
 /// Timeout for the gallery-dl probe (same as the yt-dlp probe).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -140,7 +140,7 @@ pub fn probe_title(item: &GalleryItem, url: &str) -> String {
     crate::file_names::filename_from_url(url)
 }
 
-/// Run the gallery-dl probe: `gallery-dl --config-ignore -j --no-download --range 0 <url>`.
+/// Run the gallery-dl probe: `gallery-dl --config-ignore -j --no-download --range 1 <url>`.
 ///
 /// Returns `Ok(Some(items))` on success, `Ok(None)` when the URL is unsupported
 /// (exit 64) or yields no files. `Err` on timeout, spawn failure, or any other
@@ -156,7 +156,7 @@ pub async fn probe_gallery(
         .arg("-j")
         .arg("--no-download")
         .arg("--range")
-        .arg("0")
+        .arg("1")
         .arg(url);
     if let Some(cookies) = cookies_file {
         cmd.arg("-C").arg(cookies);

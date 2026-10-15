@@ -241,6 +241,7 @@ mod tests {
                 "gallery-dl not found: install it via Preferences → Check for Updates",
             )
             .to_string(),
+            GalleryError::install("gallery-dl --version produced no output").to_string(),
         ];
         for msg in messages {
             let first = msg.chars().next().unwrap();

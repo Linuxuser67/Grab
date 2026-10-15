@@ -2136,7 +2136,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                         if let Ok(tool) = crate::gallery_argv::resolve_tool()
                                             && let Some(n) =
                                                 crate::gallery_probe::count_gallery_files(
-                                                    &tool, &url, None,
+                                                    &tool,
+                                                    &url,
+                                                    None,
+                                                    crate::gallery_argv::GalleryFilter::All,
                                                 )
                                                 .await
                                         {

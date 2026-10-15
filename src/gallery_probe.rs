@@ -278,8 +278,9 @@ pub async fn count_gallery_files(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
+    filter: crate::gallery_argv::GalleryFilter,
 ) -> Option<u32> {
-    let argv = crate::gallery_argv::count_argv(tool, url, cookies_file);
+    let argv = crate::gallery_argv::count_argv(tool, url, cookies_file, filter);
     let mut cmd = tokio::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())

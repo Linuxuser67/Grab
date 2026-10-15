@@ -21,6 +21,25 @@ pub struct GalleryResult {
     pub files: Vec<PathBuf>,
     /// Files skipped (already existed).
     pub skipped: u32,
+    /// gallery-dl exit code, if it exited non-zero but produced files.
+    /// `None` means clean success.
+    pub exit_code: Option<i32>,
+}
+
+/// Total files handled (downloaded + skipped) for display.
+/// Skipped files were already on disk from a previous run.
+pub fn done_count(files: usize, skipped: u32) -> u32 {
+    files as u32 + skipped
+}
+
+/// Detail label for a gallery row: "Gallery • 1 file" / "Gallery • N files".
+pub fn done_label(files: usize, skipped: u32) -> String {
+    let done = done_count(files, skipped);
+    if done == 1 {
+        "Gallery \u{2022} 1 file".to_string()
+    } else {
+        format!("Gallery \u{2022} {done} files")
+    }
 }
 
 /// Progress update from the runner.
@@ -60,9 +79,10 @@ pub async fn run_gallery_download(
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
-    // Pipe stdout for progress parsing; stderr inherits (gallery-dl logs there).
+    // Pipe stdout for progress parsing; pipe stderr for failure context
+    // (drained in a separate task so gallery-dl can't block on a full pipe).
     cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::piped());
 
     let mut child = cmd
         .spawn()
@@ -74,6 +94,26 @@ pub async fn run_gallery_download(
         .stdout
         .take()
         .ok_or_else(|| GalleryError::runtime("gallery-dl stdout not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| GalleryError::runtime("gallery-dl stderr not piped"))?;
+
+    // Drain stderr into a ring buffer (last 20 lines) in the background.
+    // The JoinHandle is awaited after the child exits so the tail is complete.
+    let stderr_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let stderr_lines_clone = stderr_lines.clone();
+    let drain_handle = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let mut buf = stderr_lines_clone.lock().unwrap();
+            buf.push(line);
+            if buf.len() > 20 {
+                buf.remove(0);
+            }
+        }
+    });
+
     let mut lines = BufReader::new(stdout).lines();
 
     let mut progress = GalleryProgress::new();
@@ -116,16 +156,46 @@ pub async fn run_gallery_download(
         .await
         .map_err(|e| GalleryError::runtime(format!("couldn't wait for gallery-dl: {e}")))?;
 
+    // The child has exited, so the stderr pipe is at EOF; awaiting the drain
+    // guarantees the ring buffer has the complete tail.
+    let _ = drain_handle.await;
+
     if !status.success() {
+        let code = status.code();
+        let stderr_tail = stderr_lines.lock().unwrap().join("\n");
+        // Partial success: files were downloaded/skipped before the failure.
+        // Return Ok with the exit code so the row shows Done with a warning.
+        if !files.is_empty() || progress.files_skipped > 0 {
+            return Ok(GalleryResult {
+                files,
+                skipped: progress.files_skipped,
+                exit_code: code,
+            });
+        }
+        // Total failure: include the stderr tail and a mapped message.
+        // gallery-dl exit codes are bit flags:
+        // 1=unspecified, 2=cmdline, 4=http, 8=challenge,
+        // 16=auth, 32=input, 128=os. Check the most specific bits first.
+        let msg = match code.unwrap_or(0) {
+            c if c & 128 != 0 => "gallery-dl: OS error",
+            c if c & 16 != 0 => "gallery-dl: authentication failed",
+            c if c & 8 != 0 => "gallery-dl: challenge error (Cloudflare/DDoS-Guard)",
+            c if c & 32 != 0 => "gallery-dl: invalid input",
+            c if c & 4 != 0 => "gallery-dl: HTTP error",
+            c if c & 2 != 0 => "gallery-dl: invalid command-line arguments",
+            c if c & 1 != 0 => "gallery-dl: unspecified error",
+            _ => "gallery-dl failed",
+        };
         return Err(GalleryError::runtime(format!(
-            "gallery-dl failed (exit {})",
-            status.code().unwrap_or(-1)
+            "{msg} (exit {}): {stderr_tail}",
+            code.unwrap_or(-1)
         )));
     }
 
     Ok(GalleryResult {
         files,
         skipped: progress.files_skipped,
+        exit_code: None,
     })
 }
 
@@ -133,6 +203,27 @@ pub async fn run_gallery_download(
 mod tests {
     use super::*;
     use crate::gallery_argv::GalleryFilter;
+
+    #[test]
+    fn done_label_all_new() {
+        assert_eq!(done_label(5, 0), "Gallery \u{2022} 5 files");
+    }
+
+    #[test]
+    fn done_label_all_skipped() {
+        assert_eq!(done_label(0, 3), "Gallery \u{2022} 3 files");
+    }
+
+    #[test]
+    fn done_label_mixed() {
+        assert_eq!(done_label(2, 3), "Gallery \u{2022} 5 files");
+    }
+
+    #[test]
+    fn done_label_singular() {
+        assert_eq!(done_label(1, 0), "Gallery \u{2022} 1 file");
+        assert_eq!(done_label(0, 1), "Gallery \u{2022} 1 file");
+    }
 
     #[test]
     fn gallery_job_serializes() {

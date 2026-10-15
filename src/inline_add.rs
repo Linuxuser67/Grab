@@ -2086,73 +2086,82 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     None
                                 }
                             };
-                            if let Ok(tool) = crate::gallery_argv::resolve_tool()
-                                && let Ok(Some(items)) = crate::gallery_probe::probe_gallery(
+                            if let Ok(tool) = crate::gallery_argv::resolve_tool() {
+                                let probe_result = crate::gallery_probe::probe_gallery(
                                     &tool,
                                     &url,
                                     probe_cookies.as_deref(),
                                 )
-                                .await
-                            {
-                                // gallery-dl found something; route it.
-                                let outcome = crate::gallery_probe::route(
-                                    false, // yt-dlp found nothing
-                                    Some(items.as_slice()),
-                                    // Default to video; per-host preference UI is phase 7.
-                                    Some(crate::gallery_probe::StickyMode::Video),
-                                );
-                                if matches!(
-                                    outcome,
-                                    crate::gallery_probe::ProbeOutcome::VideoGalleryDl
-                                ) {
-                                    // Submit as video via gallery-dl backend.
-                                    crate::inline_gallery::submit_gallery_video(
-                                        &manager_b,
-                                        &dest_b,
-                                        &close_b,
-                                        &url,
-                                        &items,
-                                        scheduled_at_b.get(),
-                                        &step_b,
-                                        &lookup_add_b,
-                                    );
-                                    return;
+                                .await;
+                                // Delete the staged cookies immediately after the probe;
+                                // routing below may return early.
+                                if let Some(path) = probe_cookies {
+                                    let _ = std::fs::remove_file(path);
                                 }
-                                // Gallery (images): show the gallery UI.
-                                if matches!(outcome, crate::gallery_probe::ProbeOutcome::Gallery) {
-                                    let card = crate::gallery_card::GalleryCard::new(
-                                        items,
-                                        Some(crate::gallery_probe::StickyMode::Gallery),
+                                if let Ok(Some(items)) = probe_result {
+                                    // gallery-dl found something; route it.
+                                    let outcome = crate::gallery_probe::route(
+                                        false, // yt-dlp found nothing
+                                        Some(items.as_slice()),
+                                        // Default to video; per-host preference UI is phase 7.
+                                        Some(crate::gallery_probe::StickyMode::Video),
                                     );
-                                    // Verify count via the lightweight counter.
-                                    if let Ok(tool) = crate::gallery_argv::resolve_tool()
-                                        && let Some(n) = crate::gallery_probe::count_gallery_files(
-                                            &tool, &url, None,
-                                        )
-                                        .await
-                                    {
-                                        tracing::debug!(count = n, "gallery file count verified");
+                                    if matches!(
+                                        outcome,
+                                        crate::gallery_probe::ProbeOutcome::VideoGalleryDl
+                                    ) {
+                                        // Submit as video via gallery-dl backend.
+                                        crate::inline_gallery::submit_gallery_video(
+                                            &manager_b,
+                                            &dest_b,
+                                            &close_b,
+                                            &url,
+                                            &items,
+                                            scheduled_at_b.get(),
+                                            &step_b,
+                                            &lookup_add_b,
+                                        );
+                                        return;
                                     }
-                                    let title = card
-                                        .items
-                                        .first()
-                                        .map(|i| crate::gallery_probe::probe_title(i, &url))
-                                        .unwrap_or_else(|| url.clone());
-                                    tracing::info!(
-                                        files = card.file_count(),
-                                        preview = ?card.preview_filenames(),
-                                        sticky = ?card.sticky_mode(),
-                                        "gallery-dl found image gallery"
-                                    );
-                                    crate::inline_gallery::show_gallery_ready(
-                                        &step_b, card, &title,
-                                    );
-                                    return;
+                                    // Gallery (images): show the gallery UI.
+                                    if matches!(
+                                        outcome,
+                                        crate::gallery_probe::ProbeOutcome::Gallery
+                                    ) {
+                                        let card = crate::gallery_card::GalleryCard::new(
+                                            items,
+                                            Some(crate::gallery_probe::StickyMode::Gallery),
+                                        );
+                                        // Verify count via the lightweight counter.
+                                        if let Ok(tool) = crate::gallery_argv::resolve_tool()
+                                            && let Some(n) =
+                                                crate::gallery_probe::count_gallery_files(
+                                                    &tool, &url, None,
+                                                )
+                                                .await
+                                        {
+                                            tracing::debug!(
+                                                count = n,
+                                                "gallery file count verified"
+                                            );
+                                        }
+                                        let title = card
+                                            .items
+                                            .first()
+                                            .map(|i| crate::gallery_probe::probe_title(i, &url))
+                                            .unwrap_or_else(|| url.clone());
+                                        tracing::info!(
+                                            files = card.file_count(),
+                                            preview = ?card.preview_filenames(),
+                                            sticky = ?card.sticky_mode(),
+                                            "gallery-dl found image gallery"
+                                        );
+                                        crate::inline_gallery::show_gallery_ready(
+                                            &step_b, card, &title,
+                                        );
+                                        return;
+                                    }
                                 }
-                            }
-                            // Clean up probe cookies.
-                            if let Some(path) = probe_cookies {
-                                let _ = std::fs::remove_file(path);
                             }
                             match queue_plain(
                                 &manager_b,

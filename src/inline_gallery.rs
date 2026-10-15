@@ -79,6 +79,7 @@ pub(crate) fn submit_gallery_video(
         .unwrap_or_else(|| url.to_string());
     let settings = manager.settings();
     let cookies_browser = settings.cookies_browser().to_string();
+    let speed_limit = crate::download_rate::parse_rate(settings.speed_limit().trim());
     enqueue_and_close(
         manager,
         dest,
@@ -97,7 +98,7 @@ pub(crate) fn submit_gallery_video(
                 // Default to All: a video fallback may still yield images.
                 filter: crate::gallery_argv::GalleryFilter::All,
                 cookies_browser,
-                speed_limit: None,
+                speed_limit,
             };
             manager.enqueue_gallery(&job)
         },

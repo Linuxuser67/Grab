@@ -1050,14 +1050,17 @@ impl DownloadManager {
             let next = self
                 .items()
                 // A discard still tearing down owns its destination: the row stays Queued until the reservation clears.
-                // Gallery items are excluded until phase 12 wires the runner (they'd otherwise hit the direct-download engine).
                 .find(|it| {
-                    it.status() == DownloadStatus::Queued
-                        && !it.is_gallery()
-                        && !self.dest_reserved(&it.file_path())
+                    it.status() == DownloadStatus::Queued && !self.dest_reserved(&it.file_path())
                 });
             match next {
-                Some(item) => self.spawn(item),
+                Some(item) => {
+                    if item.is_gallery() {
+                        self.spawn_gallery(item);
+                    } else {
+                        self.spawn(item);
+                    }
+                }
                 None => break,
             }
         }
@@ -1904,6 +1907,74 @@ impl DownloadManager {
         });
         self.changed();
         self.pump(item, id, generation, rx);
+    }
+
+    /// Spawn a gallery download via gallery-dl.
+    /// Updates the item's progress as files complete; sets Done/Failed on finish.
+    fn spawn_gallery(self: &Rc<Self>, item: DownloadItem) {
+        item.set_status(crate::download_row::DownloadStatus::Downloading);
+        self.changed();
+
+        // Build the GalleryJob from the item's properties.
+        // The filter is stored in the job; for now we use All (the card's
+        // filter is not persisted yet — phase 14).
+        let job = crate::gallery_argv::GalleryJob {
+            item_id: item.id(),
+            page_url: item.gallery_url().to_string(),
+            title: item.filename().to_string(),
+            file_count: Some(item.gallery_file_count()),
+            dest_dir: std::path::PathBuf::from(item.dest_dir().to_string()),
+            filter: crate::gallery_argv::GalleryFilter::All,
+            cookies_file: None,
+            speed_limit: None,
+        };
+
+        let this = self.clone();
+        let item_c = item.clone();
+        gtk4::glib::spawn_future_local(async move {
+            let tool = match crate::gallery_argv::resolve_tool() {
+                Ok(t) => t,
+                Err(e) => {
+                    item_c.set_status(crate::download_row::DownloadStatus::Failed);
+                    item_c.set_detail(e);
+                    this.changed();
+                    this.start_next();
+                    return;
+                }
+            };
+            let result = crate::gallery_runner::run_gallery_download(&job, &tool, |update| {
+                let done = update.files_completed;
+                let total = item_c.gallery_file_count();
+                item_c.set_gallery_files_done(done);
+                if total > 0 {
+                    item_c.set_progress(done as f64 / total as f64);
+                }
+                item_c.set_detail(format!("Gallery • {done}/{total} files"));
+                this.changed();
+            })
+            .await;
+            match result {
+                Ok(r) => {
+                    item_c.set_status(crate::download_row::DownloadStatus::Done);
+                    item_c.set_gallery_files_done(r.files.len() as u32);
+                    item_c.set_progress(1.0);
+                    item_c.set_detail(format!("Gallery • {} files", r.files.len()));
+                    tracing::info!(
+                        files = r.files.len(),
+                        skipped = r.skipped,
+                        "gallery download complete"
+                    );
+                }
+                Err(e) => {
+                    item_c.set_status(crate::download_row::DownloadStatus::Failed);
+                    item_c.set_detail(format!("Gallery failed: {e}"));
+                    tracing::error!(error = %e, "gallery download failed");
+                }
+            }
+            this.changed();
+            this.persist_queue();
+            this.start_next();
+        });
     }
 
     fn notify_finished(&self, item: &DownloadItem, result: Result<(), String>) {

@@ -314,7 +314,7 @@ const FLATPAK_APP_BIN: &str = "/app/bin";
 /// Tool search dirs, in priority order: the user's own installs first (so Update
 /// takes effect over a bundled copy), then `/app/bin` (Flatpak), then PATH. A
 /// stale user copy cannot pin old tools — the version floor refuses it.
-fn tool_search_dirs() -> Vec<PathBuf> {
+pub(crate) fn tool_search_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![user_lib_dir(), PathBuf::from(FLATPAK_APP_BIN)];
     if let Some(path) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&path).filter(|d| !d.as_os_str().is_empty()));
@@ -723,7 +723,7 @@ fn clear_dest_refusing_symlink(dest: &Path) -> Result<(), String> {
     }
 }
 
-async fn download_to_file(
+pub(crate) async fn download_to_file(
     url: &str,
     dest: &Path,
     expected_sha256: &str,

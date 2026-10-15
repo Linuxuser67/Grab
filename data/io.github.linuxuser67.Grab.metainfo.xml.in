@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.9~beta.1" date="2026-10-15">
+      <description>
+        <ul>
+          <li>Cookie handoff: playlist items use same-host fallback, browser UA applied.</li>
+          <li>Origin-only Referer sent on downloads.</li>
+          <li>Per-attempt cookie jar accepts Set-Cookie.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.8" date="2026-10-14">
       <description>
         <ul>

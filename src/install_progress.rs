@@ -162,6 +162,11 @@ pub fn run(
     let yt = ToolRow::new("yt-dlp", &gettext("yt-dlp install progress"), &active);
     let ff = ToolRow::new("ffmpeg", &gettext("ffmpeg install progress"), &active);
     let js = ToolRow::new("quickjs", &gettext("quickjs install progress"), &active);
+    let gdl = ToolRow::new(
+        "gallery-dl",
+        &gettext("gallery-dl install progress"),
+        &active,
+    );
 
     let rows = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     // HIG card padding: 12, matching the rest of the app (not 18).
@@ -172,6 +177,7 @@ pub fn run(
     rows.append(&yt.widget());
     rows.append(&ff.widget());
     rows.append(&js.widget());
+    rows.append(&gdl.widget());
     let pop = gtk4::Popover::new();
     pop.set_child(Some(&rows));
     pop.set_parent(&btn);
@@ -239,6 +245,22 @@ pub fn run(
         };
         let version = crate::video_tools::tool_display_version(js_path, "--version").await;
         js.set_installed(version);
+
+        // gallery-dl for image galleries and fallback video; installed up front
+        // so gallery pastes never wait on a lazy install.
+        gdl.set_downloading();
+        let gdl_path = match crate::gallery::install_gallerydl().await {
+            Ok(path) => path,
+            Err(e) => {
+                let message = e.to_string();
+                gdl.set_failed(&message);
+                RUNNING.with(|r| r.set(false));
+                on_error(message);
+                return;
+            }
+        };
+        let version = crate::gallery::gallerydl_display_version(&gdl_path).await;
+        gdl.set_installed(version);
 
         // Linger on checkmarks so completion registers, then close.
         glib::timeout_future(Duration::from_millis(1200)).await;

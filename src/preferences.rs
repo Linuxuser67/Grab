@@ -679,7 +679,7 @@ pub fn show(
     /// `None` when the core tools are missing, falling back to the binary path
     /// if `--version` fails. quickjs is `None` when no `qjs` is on hand — it is
     /// only provisioned for YouTube.
-    fn installed_tool_versions() -> Option<(String, String, Option<String>)> {
+    fn installed_tool_versions() -> Option<(String, String, Option<String>, Option<String>)> {
         crate::video::resolve_libraries().ok().map(|libs| {
             let yt = tool_version(&libs.youtube, "--version")
                 .map(|v| format!("yt-dlp {v}"))
@@ -688,7 +688,10 @@ pub fn show(
                 .unwrap_or_else(|| libs.ffmpeg.display().to_string());
             let qjs = crate::video_tools::find_quickjs()
                 .and_then(|p| tool_version(&p, "--version").map(|v| format!("quickjs {v}")));
-            (yt, ff, qjs)
+            let gdl = crate::gallery::resolve_gallerydl()
+                .ok()
+                .and_then(|p| tool_version(&p, "--version").map(|v| format!("gallery-dl {v}")));
+            (yt, ff, qjs, gdl)
         })
     }
     /// What the tools-row button does: Install when tools are missing, Check to
@@ -705,15 +708,18 @@ pub fn show(
         row: &adw::ActionRow,
         btn: &gtk4::Button,
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
-        probed: Option<(String, String, Option<String>)>,
+        probed: Option<(String, String, Option<String>, Option<String>)>,
     ) {
         match probed {
-            Some((yt, ff, qjs)) => {
+            Some((yt, ff, qjs, gdl)) => {
                 let mut subtitle = gettext("Ready • {yt} • {ff}")
                     .replace("{yt}", &yt)
                     .replace("{ff}", &ff);
                 if let Some(qjs) = qjs {
                     subtitle.push_str(&format!(" • {qjs}"));
+                }
+                if let Some(gdl) = gdl {
+                    subtitle.push_str(&format!(" • {gdl}"));
                 }
                 row.set_subtitle(&subtitle);
                 btn.set_label(&gettext("Check for Updates"));
@@ -1066,13 +1072,14 @@ pub fn show(
                     .await
                     .ok()
                     .flatten();
-                    // Probe the three upstreams concurrently: three sequential
-                    // round-trips would triple the wait and burn three times
+                    // Probe the four upstreams concurrently: sequential
+                    // round-trips would quadruple the wait and burn four times
                     // the unauthenticated rate limit per click.
-                    let (yt_tag, ff_tag, qjs_tag) = tokio::join!(
+                    let (yt_tag, ff_tag, qjs_tag, gdl_tag) = tokio::join!(
                         crate::video::latest_ytdlp_tag(),
                         crate::video::latest_ffmpeg_tag(),
-                        crate::video::latest_quickjs_tag()
+                        crate::video::latest_quickjs_tag(),
+                        crate::gallery::latest_gallerydl_tag()
                     );
                     if dialog_b.upgrade().is_none() {
                         return;
@@ -1081,7 +1088,7 @@ pub fn show(
                     let mut updates: Vec<String> = Vec::new();
                     let mut current: Vec<String> = Vec::new();
                     let mut indeterminate = installed.is_none();
-                    if let Some((yt, ff, qjs)) = installed {
+                    if let Some((yt, ff, qjs, gdl)) = installed {
                         match (yt.as_deref(), yt_tag.as_deref()) {
                             (Some(installed), Some(tag))
                                 if crate::video_tools::ytdlp_update_available(installed, tag) =>
@@ -1123,6 +1130,24 @@ pub fn show(
                             }
                             (Some(installed), Some(_)) => {
                                 current.push(format!("quickjs {}", installed.trim()));
+                            }
+                            (None, _) => {}
+                            _ => indeterminate = true,
+                        }
+                        // gallery-dl is optional (provisioned for galleries only):
+                        // judged when installed, never blocks the check.
+                        match (gdl.as_deref(), gdl_tag.as_deref()) {
+                            (Some(installed), Some(tag))
+                                if crate::gallery::gallerydl_update_available(installed, tag) =>
+                            {
+                                updates.push(format!(
+                                    "gallery-dl {} → {}",
+                                    installed.trim(),
+                                    tag.trim()
+                                ));
+                            }
+                            (Some(installed), Some(_)) => {
+                                current.push(format!("gallery-dl {}", installed.trim()));
                             }
                             (None, _) => {}
                             _ => indeterminate = true,

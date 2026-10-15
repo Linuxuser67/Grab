@@ -38,7 +38,7 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
             let group = adw::PreferencesGroup::builder()
                 .title(gettext("Install the tools manually"))
                 .description(gettext(
-                    "Install yt-dlp, ffmpeg and quickjs yourself and make sure they are on your PATH.",
+                    "Install yt-dlp, ffmpeg, quickjs and gallery-dl yourself and make sure they are on your PATH.",
                 ))
                 .build();
             link_row(
@@ -51,6 +51,11 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
                 &group,
                 "quickjs",
                 "https://github.com/quickjs-ng/quickjs/releases",
+            );
+            link_row(
+                &group,
+                "gallery-dl",
+                "https://github.com/gdl-org/builds/releases",
             );
             content.append(&group);
         }

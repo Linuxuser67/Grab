@@ -76,6 +76,15 @@ pub fn version_supported(version: [u32; 3]) -> bool {
     version >= MIN_GALLERYDL_VERSION
 }
 
+/// Whether a gallery-dl update is available. The nightly tag is date-based
+/// (`2026.10.15`) while `gallery-dl --version` prints semver (`1.32.14`),
+/// so the two aren't directly comparable. On the nightly channel any
+/// successfully fetched tag is treated as newer than the installed copy —
+/// nightly moves daily, so the installed build is almost certainly older.
+pub fn gallerydl_update_available(installed: &str, tag: &str) -> bool {
+    !installed.trim().is_empty() && !tag.trim().is_empty()
+}
+
 /// Latest nightly asset: `(download_url, sha256_digest)`.
 /// `None` on any network/API failure; digest is `None` when the release
 /// metadata lacks one (the installer then fails closed).

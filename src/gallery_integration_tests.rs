@@ -72,7 +72,13 @@ async fn gallery_integration_probe_count_download() {
     );
 
     // 2. Count matches.
-    let count = crate::gallery_probe::count_gallery_files(&tool, &url, None).await;
+    let count = crate::gallery_probe::count_gallery_files(
+        &tool,
+        &url,
+        None,
+        crate::gallery_argv::GalleryFilter::All,
+    )
+    .await;
     assert_eq!(count, Some(3), "count should be 3");
 
     // 3. Download produces files.

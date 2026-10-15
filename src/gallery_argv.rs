@@ -71,10 +71,7 @@ pub fn download_argv(
         argv.push("-C".to_string());
         argv.push(cookies.to_string_lossy().to_string());
     }
-    if let Some(expr) = filter.to_filter_expr() {
-        argv.push("--filter".to_string());
-        argv.push(expr.to_string());
-    }
+    push_filter(&mut argv, filter);
     if let Some(limit) = speed_limit {
         argv.push("-r".to_string());
         argv.push(limit.to_string());
@@ -88,7 +85,12 @@ pub fn download_argv(
 /// Build the gallery-dl count argv (`-g` lists direct URLs, one per line).
 /// Build argv for counting files in a gallery (probe).
 /// Used by the gallery card UI to show "N files" before download.
-pub fn count_argv(tool: &Path, url: &str, cookies_file: Option<&Path>) -> Vec<String> {
+pub fn count_argv(
+    tool: &Path,
+    url: &str,
+    cookies_file: Option<&Path>,
+    filter: GalleryFilter,
+) -> Vec<String> {
     let mut argv = vec![
         tool.to_string_lossy().to_string(),
         "--config-ignore".to_string(),
@@ -103,9 +105,18 @@ pub fn count_argv(tool: &Path, url: &str, cookies_file: Option<&Path>) -> Vec<St
         argv.push("-C".to_string());
         argv.push(cookies.to_string_lossy().to_string());
     }
+    push_filter(&mut argv, filter);
     argv.push("--".to_string());
     argv.push(url.to_string());
     argv
+}
+
+/// Append `--filter <expr>` for the given gallery filter, if it has one.
+fn push_filter(argv: &mut Vec<String>, filter: GalleryFilter) {
+    if let Some(expr) = filter.to_filter_expr() {
+        argv.push("--filter".to_string());
+        argv.push(expr.to_string());
+    }
 }
 
 /// Resolve the gallery-dl binary path, or the install error message.
@@ -243,8 +254,28 @@ mod tests {
 
     #[test]
     fn count_argv_no_fallback() {
-        let argv = count_argv(&tool(), "https://example.com/gallery", None);
+        let argv = count_argv(
+            &tool(),
+            "https://example.com/gallery",
+            None,
+            GalleryFilter::All,
+        );
         assert!(argv.contains(&"output.fallback=false".to_string()));
         assert!(argv.contains(&"-g".to_string()));
+    }
+
+    #[test]
+    fn count_argv_applies_filter() {
+        let argv = count_argv(
+            &tool(),
+            "https://example.com/gallery",
+            None,
+            GalleryFilter::ImagesOnly,
+        );
+        let pos = argv
+            .iter()
+            .position(|a| a == "--filter")
+            .expect("filter flag");
+        assert!(argv[pos + 1].contains("image"));
     }
 }

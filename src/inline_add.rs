@@ -2321,13 +2321,52 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             {
                 let url = url_entry.text().trim().to_string();
                 let dest = dd.borrow().clone();
-                // TODO: enqueue gallery download via queue (phase 9).
-                // For now, log and close.
+                let filter = *card.filter.borrow();
+                let file_count = card.file_count() as u32;
+                let title = card
+                    .items
+                    .first()
+                    .map(|i| crate::gallery_probe::probe_title(i, &url))
+                    .unwrap_or_else(|| url.clone());
+                // Spawn the gallery download in the background.
+                // Phase 9: direct spawn (no queue row yet). Phase 10 will integrate with queue.
+                let job = crate::gallery_argv::GalleryJob {
+                    item_id: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0),
+                    page_url: url.clone(),
+                    title: title.clone(),
+                    file_count: Some(file_count),
+                    dest_dir: std::path::PathBuf::from(dest),
+                    filter,
+                    cookies_file: None, // TODO: staged cookies (phase 12)
+                    speed_limit: None,
+                };
+                gtk4::glib::spawn_future_local(async move {
+                    if let Ok(tool) = crate::gallery_argv::resolve_tool() {
+                        let result =
+                            crate::gallery_runner::run_gallery_download(&job, &tool, |update| {
+                                tracing::debug!(?update, "gallery download progress");
+                            })
+                            .await;
+                        match result {
+                            Ok(r) => tracing::info!(
+                                files = r.files.len(),
+                                skipped = r.skipped,
+                                "gallery download complete"
+                            ),
+                            Err(e) => tracing::error!(
+                                error = %e,
+                                "gallery download failed"
+                            ),
+                        }
+                    }
+                });
                 tracing::info!(
                     url = %url,
-                    dest = %dest,
-                    files = card.file_count(),
-                    "gallery download requested (queue integration phase 9)"
+                    files = file_count,
+                    "gallery download started"
                 );
                 close_card();
                 return;

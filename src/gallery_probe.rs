@@ -4,13 +4,15 @@
 //! (here) concurrently. This module parses gallery-dl's `-j` output and decides
 //! which mode the New Download card shows, per the routing table in the design.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use crate::gallery::GalleryError;
 
 /// Timeout for the gallery-dl probe (same as the yt-dlp probe).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// One item from `gallery-dl -j` output. Extractors emit wildly different
+/// One file from `gallery-dl -j` output. Extractors emit wildly different
 /// metadata keys; `filename`/`extension`/`category` are the reliable core,
 /// everything else lands in `extra` for best-effort title derivation.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -20,6 +22,15 @@ pub struct GalleryItem {
     pub category: String,
     #[serde(flatten, default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A single message from `gallery-dl -j` output. The first message is always
+/// the directory/context object (no filename); file messages follow.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum ProbeMessage {
+    File(GalleryItem),
+    Other(serde_json::Value),
 }
 
 /// Content type derived from the probe JSON's `extension` field.
@@ -53,6 +64,14 @@ pub enum ProbeOutcome {
     None,
 }
 
+/// Sticky per-host mode preference: which mode the user picked last time
+/// both were viable. Only honored when both modes are viable now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StickyMode {
+    Video,
+    Gallery,
+}
+
 /// Routing decision from both probe results.
 ///
 /// `ytdlp_video`: whether the yt-dlp probe found a playable video.
@@ -61,42 +80,45 @@ pub enum ProbeOutcome {
 pub fn route(
     ytdlp_video: bool,
     gallery_items: Option<&[GalleryItem]>,
-    host_sticky: Option<ProbeOutcome>,
+    host_sticky: Option<StickyMode>,
 ) -> ProbeOutcome {
     // Sticky preference wins when both modes are viable; otherwise the table decides.
-    let gallery_content: Option<GalleryContent> = gallery_items.and_then(|items| {
-        items
-            .iter()
-            .map(|i| GalleryContent::from_extension(&i.extension))
-            .find(|c| *c != GalleryContent::Unknown)
-    });
+    let (has_video, has_images) = gallery_items
+        .map(|items| {
+            let mut video = false;
+            let mut images = false;
+            for item in items {
+                match GalleryContent::from_extension(&item.extension) {
+                    GalleryContent::Video => video = true,
+                    GalleryContent::Image => images = true,
+                    GalleryContent::Unknown => {}
+                }
+            }
+            (video, images)
+        })
+        .unwrap_or((false, false));
 
-    match (ytdlp_video, gallery_content) {
-        (true, Some(GalleryContent::Image)) => {
+    match (ytdlp_video, has_video, has_images) {
+        (true, _, true) => {
             // Both viable: honor sticky, default Video.
             match host_sticky {
-                Some(ProbeOutcome::Gallery) => ProbeOutcome::Gallery,
+                Some(StickyMode::Gallery) => ProbeOutcome::Gallery,
                 _ => ProbeOutcome::VideoYtDlp {
                     gallery_toggle: true,
                 },
             }
         }
-        (true, _) => ProbeOutcome::VideoYtDlp {
+        (true, _, false) => ProbeOutcome::VideoYtDlp {
             gallery_toggle: false,
         },
-        (false, Some(GalleryContent::Video)) => ProbeOutcome::VideoGalleryDl,
-        (false, Some(GalleryContent::Image)) => match host_sticky {
-            Some(ProbeOutcome::VideoYtDlp { .. }) => ProbeOutcome::VideoYtDlp {
-                gallery_toggle: true,
-            },
-            _ => ProbeOutcome::Gallery,
-        },
-        (false, _) => ProbeOutcome::None,
+        (false, true, _) => ProbeOutcome::VideoGalleryDl,
+        (false, false, true) => ProbeOutcome::Gallery,
+        (false, false, false) => ProbeOutcome::None,
     }
 }
 
 /// Best-effort title from probe metadata. First non-empty wins:
-/// `title` → `user`/`author` → `category` → URL-derived fallback.
+/// `title` → `user`/`author` → `category` → URL-derived filename.
 pub fn probe_title(item: &GalleryItem, url: &str) -> String {
     let str_field = |key: &str| {
         item.extra
@@ -114,28 +136,21 @@ pub fn probe_title(item: &GalleryItem, url: &str) -> String {
     if !item.category.trim().is_empty() {
         return item.category.trim().to_string();
     }
-    // Fallback: last URL path segment, via the url crate (not string splitting).
-    url::Url::parse(url)
-        .ok()
-        .and_then(|u| {
-            u.path_segments()
-                .and_then(|segs| segs.filter(|s| !s.is_empty()).last())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| url.to_string())
+    // Fallback: filename from URL (percent-decoded, validated).
+    crate::file_names::filename_from_url(url)
 }
 
 /// Run the gallery-dl probe: `gallery-dl --config-ignore -j --no-download --range 0 <url>`.
 ///
 /// Returns `Ok(Some(items))` on success, `Ok(None)` when the URL is unsupported
-/// (exit 64) or the probe otherwise yields nothing usable, `Err` on timeout or
-/// spawn failure (the card then offers "Add anyway").
+/// (exit 64) or yields no files. `Err` on timeout, spawn failure, or any other
+/// non-zero exit — the card then shows "couldn't preview" but Add stays enabled
+/// (optimistic path).
 pub async fn probe_gallery(
-    tool: &PathBuf,
+    tool: &Path,
     url: &str,
-    cookies_file: Option<&PathBuf>,
-) -> Result<Option<Vec<GalleryItem>>, crate::gallery::GalleryError> {
-    use crate::gallery::GalleryError;
+    cookies_file: Option<&Path>,
+) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
     let mut cmd = tokio::process::Command::new(tool);
     cmd.arg("--config-ignore")
         .arg("-j")
@@ -156,10 +171,22 @@ pub async fn probe_gallery(
         return Ok(None);
     }
     if !output.status.success() {
-        return Ok(None);
+        return Err(GalleryError::install(format!(
+            "gallery-dl probe failed (exit {})",
+            output.status.code().unwrap_or(-1)
+        )));
     }
-    let items: Vec<GalleryItem> = serde_json::from_slice(&output.stdout)
+    // `-j` emits the directory/context object first, then file objects.
+    // Deserialize tolerantly: directory messages fall through to `Other`.
+    let messages: Vec<ProbeMessage> = serde_json::from_slice(&output.stdout)
         .map_err(|e| GalleryError::install(format!("couldn't parse gallery-dl output: {e}")))?;
+    let items: Vec<GalleryItem> = messages
+        .into_iter()
+        .filter_map(|m| match m {
+            ProbeMessage::File(item) => Some(item),
+            ProbeMessage::Other(_) => None,
+        })
+        .collect();
     if items.is_empty() {
         return Ok(None);
     }
@@ -170,9 +197,9 @@ pub async fn probe_gallery(
 /// Returns the line count of direct file URLs, or `None` on any failure
 /// (the card then shows an indeterminate count).
 pub async fn count_gallery_files(
-    tool: &PathBuf,
+    tool: &Path,
     url: &str,
-    cookies_file: Option<&PathBuf>,
+    cookies_file: Option<&Path>,
 ) -> Option<u32> {
     let mut cmd = tokio::process::Command::new(tool);
     cmd.arg("--config-ignore")
@@ -288,8 +315,15 @@ mod tests {
         let images = vec![item("jpg")];
         // Sticky gallery wins when both viable.
         assert_eq!(
-            route(true, Some(&images), Some(ProbeOutcome::Gallery)),
+            route(true, Some(&images), Some(StickyMode::Gallery)),
             ProbeOutcome::Gallery
+        );
+        // Sticky video → default Video with toggle.
+        assert_eq!(
+            route(true, Some(&images), Some(StickyMode::Video)),
+            ProbeOutcome::VideoYtDlp {
+                gallery_toggle: true
+            }
         );
         // No sticky → default Video.
         assert_eq!(
@@ -297,6 +331,36 @@ mod tests {
             ProbeOutcome::VideoYtDlp {
                 gallery_toggle: true
             }
+        );
+        // Sticky never overrides an unviable mode: yt-dlp found nothing,
+        // so Video is not an option even with a Video preference.
+        assert_eq!(
+            route(false, Some(&images), Some(StickyMode::Video)),
+            ProbeOutcome::Gallery
+        );
+    }
+
+    #[test]
+    fn route_mixed_content() {
+        // Order-independent: video + image → Video with gallery toggle.
+        let mixed = vec![item("mp4"), item("jpg")];
+        assert_eq!(
+            route(true, Some(&mixed), None),
+            ProbeOutcome::VideoYtDlp {
+                gallery_toggle: true
+            }
+        );
+        let mixed_rev = vec![item("jpg"), item("mp4")];
+        assert_eq!(
+            route(true, Some(&mixed_rev), None),
+            ProbeOutcome::VideoYtDlp {
+                gallery_toggle: true
+            }
+        );
+        // yt-dlp found nothing: video wins over images for the fallback.
+        assert_eq!(
+            route(false, Some(&mixed), None),
+            ProbeOutcome::VideoGalleryDl
         );
     }
 
@@ -325,22 +389,42 @@ mod tests {
 
     #[test]
     fn probe_title_falls_back_to_url() {
-        let item = item("jpg");
-        // category is "test" (non-empty), so it wins over the URL.
-        assert_eq!(probe_title(&item, "https://example.com/p/123"), "test");
+        // Empty category and no metadata → URL-derived filename.
+        let item = GalleryItem {
+            filename: "f.jpg".to_string(),
+            extension: "jpg".to_string(),
+            category: String::new(),
+            extra: serde_json::Map::new(),
+        };
+        assert_eq!(
+            probe_title(&item, "https://example.com/p/sunset.jpg"),
+            "sunset.jpg"
+        );
     }
 
     #[test]
-    fn probe_json_parses_real_shape() {
-        // Shape of `gallery-dl -j` output (one item).
-        let json = r#"[{
-            "filename": "12345.jpg",
-            "extension": "jpg",
-            "category": "instagram",
-            "title": "Sunset",
-            "user": "someuser"
-        }]"#;
-        let items: Vec<GalleryItem> = serde_json::from_str(json).unwrap();
+    fn probe_json_skips_directory_message() {
+        // Real `gallery-dl -j` output: directory/context object first
+        // (no filename), then file objects.
+        let json = r#"[
+            {"category": "instagram", "subcategory": "posts", "user": "someuser"},
+            {
+                "filename": "12345.jpg",
+                "extension": "jpg",
+                "category": "instagram",
+                "title": "Sunset",
+                "user": "someuser"
+            }
+        ]"#;
+        let messages: Vec<ProbeMessage> = serde_json::from_str(json).unwrap();
+        assert_eq!(messages.len(), 2);
+        let items: Vec<GalleryItem> = messages
+            .into_iter()
+            .filter_map(|m| match m {
+                ProbeMessage::File(item) => Some(item),
+                ProbeMessage::Other(_) => None,
+            })
+            .collect();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].filename, "12345.jpg");
         assert_eq!(

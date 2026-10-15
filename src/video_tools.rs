@@ -2,7 +2,7 @@
 //! every spawn. Leaf module: the dialog, prefs and engines consume it through the
 //! `video` facade.
 
-use crate::download_net::tool_client_builder;
+use crate::download_net::tool_client_builder_proxied;
 use gettextrs::gettext;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -732,9 +732,10 @@ async fn download_to_file(
     // Refuse a planted symlink before any I/O: it would divert the download
     // (and the later chmod) onto an arbitrary file.
     clear_dest_refusing_symlink(dest)?;
-    // Tool installs use the proxy-honoring client: the user explicitly clicked
-    // install, and a corporate proxy may be the only route to GitHub.
-    let client = tool_client_builder()
+    // Tool installs use the app-proxy-honoring client: a proxy-configured
+    // user's manual install must not go out direct and reveal the machine's
+    // address to GitHub. An invalid manual proxy fails here, loudly.
+    let client = tool_client_builder_proxied()?
         .build()
         .map_err(|e| format!("couldn't build HTTP client: {e}"))?;
     let response = client

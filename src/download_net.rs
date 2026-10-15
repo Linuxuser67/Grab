@@ -575,8 +575,8 @@ pub(crate) fn validate_secure_dir(_dir: &std::path::Path) -> bool {
 }
 
 /// Client builder for tool installs (ffmpeg, quickjs, yt-dlp): honors env
-/// proxies, unlike `client_builder()`. Tool installs are explicit user actions;
-/// a user behind a corporate proxy needs the env proxy to reach GitHub.
+/// proxies via reqwest's default. See `tool_client_builder_proxied` for the
+/// variant that also honors Grab's app proxy (Preferences → Network).
 pub(crate) fn tool_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .referer(false)
@@ -584,6 +584,23 @@ pub(crate) fn tool_client_builder() -> reqwest::ClientBuilder {
         // A stalled server must not hang the install indefinitely.
         .connect_timeout(std::time::Duration::from_secs(15))
         .read_timeout(std::time::Duration::from_secs(60))
+}
+
+/// Tool-install client builder honoring Grab's app proxy, not just env
+/// proxies. A proxy-configured user's manual install must not go out direct
+/// and reveal the machine's address to GitHub. Invalid manual proxy fails
+/// loudly (Err) — never silently route direct around an explicit user
+/// demand, mirroring the download path's discipline.
+pub(crate) fn tool_client_builder_proxied() -> Result<reqwest::ClientBuilder, String> {
+    let opts = DownloadOptions::from_settings(&crate::settings::AppSettings::new());
+    let proxy = opts.proxy_config()?;
+    let mut builder = tool_client_builder();
+    if let Some(p) = proxy {
+        for pr in &p.proxies {
+            builder = builder.proxy(pr.clone());
+        }
+    }
+    Ok(builder)
 }
 
 #[cfg(test)]
@@ -731,5 +748,87 @@ mod tests {
         }
         // No DNS: a public name resolving to a private address is not caught.
         assert!(!is_local_or_private_host("internal.example.com"));
+    }
+
+    /// In-memory GSettings for proxy tests; the serial suite makes the
+    /// process-global backend safe to mutate.
+    fn proxy_test_settings() -> gtk4::gio::Settings {
+        use gtk4::gio::prelude::SettingsExt as _;
+        // SAFETY: single-threaded setup phase (cargo runs with --test-threads=1).
+        unsafe {
+            std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+            std::env::set_var("GSETTINGS_BACKEND", "memory");
+        }
+        gtk4::gio::Settings::new(crate::APP_ID)
+    }
+
+    fn set_manual_proxy(s: &gtk4::gio::Settings, host: &str, port: i32) {
+        use gtk4::gio::prelude::SettingsExt as _;
+        s.set_string("proxy-mode", "manual").unwrap();
+        s.set_string("proxy-type", "http").unwrap();
+        s.set_string("proxy-host", host).unwrap();
+        s.set_int("proxy-port", port).unwrap();
+    }
+
+    fn reset_proxy(s: &gtk4::gio::Settings) {
+        use gtk4::gio::prelude::SettingsExt as _;
+        s.set_string("proxy-mode", "system").unwrap();
+    }
+
+    #[test]
+    fn tool_client_builder_proxied_fails_closed_on_invalid_manual_proxy() {
+        let s = proxy_test_settings();
+        set_manual_proxy(&s, "not a host!!", 8080);
+        let err = super::tool_client_builder_proxied().unwrap_err();
+        assert!(
+            err.contains("invalid characters"),
+            "must fail loudly, never go direct: {err}"
+        );
+        reset_proxy(&s);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tool_client_builder_proxied_routes_through_app_proxy() {
+        // Fake HTTP proxy: records the absolute-form request line, then
+        // answers with a canned body. A direct fetch would fail DNS on
+        // example.invalid; reaching the proxy proves the app proxy was applied.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_clone = seen.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            use tokio::io::AsyncReadExt as _;
+            use tokio::io::AsyncWriteExt as _;
+            let mut buf = vec![0u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+            *seen_clone.lock().unwrap() = request.lines().next().unwrap_or("").to_string();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nproxied")
+                .await
+                .unwrap();
+        });
+
+        let s = proxy_test_settings();
+        set_manual_proxy(&s, "127.0.0.1", proxy_port as i32);
+        let client = super::tool_client_builder_proxied()
+            .expect("valid manual proxy")
+            .build()
+            .expect("client builds");
+        let body = client
+            .get("http://example.invalid/")
+            .send()
+            .await
+            .expect("proxy answers")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "proxied");
+        let request_line = seen.lock().unwrap().clone();
+        assert!(
+            request_line.starts_with("GET http://example.invalid/"),
+            "proxy must see absolute-form URI, got: {request_line}"
+        );
+        reset_proxy(&s);
     }
 }

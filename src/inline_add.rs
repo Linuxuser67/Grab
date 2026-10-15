@@ -2532,6 +2532,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     // here for missing tools has no preview yet.
                     kick_b(true);
                 },
+                None, // Fresh install: show all tools.
             );
         });
     }

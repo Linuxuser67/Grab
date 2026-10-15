@@ -712,14 +712,14 @@ pub fn show(
     ) {
         match probed {
             Some((yt, ff, qjs, gdl)) => {
-                let mut subtitle = gettext("Ready • {yt} • {ff}")
-                    .replace("{yt}", &yt)
-                    .replace("{ff}", &ff);
-                if let Some(qjs) = qjs {
-                    subtitle.push_str(&format!(" • {qjs}"));
-                }
+                // Order: yt-dlp, gallery-dl (under yt-dlp), ffmpeg, quickjs.
+                let mut subtitle = gettext("Ready • {yt}").replace("{yt}", &yt);
                 if let Some(gdl) = gdl {
                     subtitle.push_str(&format!(" • {gdl}"));
+                }
+                subtitle.push_str(&format!(" • {ff}"));
+                if let Some(qjs) = qjs {
+                    subtitle.push_str(&format!(" • {qjs}"));
                 }
                 row.set_subtitle(&subtitle);
                 btn.set_label(&gettext("Check for Updates"));
@@ -978,6 +978,10 @@ pub fn show(
     // Probe off the main thread: spawning cold binaries can jank startup.
     // The row shows Checking until versions (or absence) resolve.
     let tool_action = std::rc::Rc::new(std::cell::Cell::new(ToolAction::Check));
+    // Tools needing update (from the check); passed to install_progress::run
+    // so the popup only shows what's actually downloading.
+    let pending_updates: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     {
         let (row, btn, spin) = (
             video_tools_row.clone(),
@@ -1010,6 +1014,7 @@ pub fn show(
         );
         let dialog_weak = dialog.downgrade();
         let action = tool_action.clone();
+        let pending = pending_updates.clone();
         // Outside Flatpak the button guides through self-install; the
         // automatic download stays Flatpak-only.
         if !crate::video_tools::in_flatpak() {
@@ -1035,6 +1040,7 @@ pub fn show(
                 let (row_b, btn_b, spin_b) = (row.clone(), btn.clone(), spin.clone());
                 let dialog_b = dialog_weak.clone();
                 let action_b = action.clone();
+                let pending_b = pending.clone();
                 let settings_c = settings_b.clone();
                 btn.set_sensitive(false);
                 spin.set_visible(true);
@@ -1157,6 +1163,12 @@ pub fn show(
                         }
                     }
                     if !updates.is_empty() {
+                        // Store tool names for the filtered download popup.
+                        let names: Vec<String> = updates
+                            .iter()
+                            .filter_map(|u| u.split_whitespace().next().map(str::to_string))
+                            .collect();
+                        *pending_b.borrow_mut() = names;
                         row_b.set_subtitle(
                             &gettext("Update available: {list}")
                                 .replace("{list}", &updates.join(", ")),
@@ -1181,6 +1193,14 @@ pub fn show(
             let (row_err, row_ok) = (row.clone(), row.clone());
             let (dialog_err, dialog_ok) = (dialog_weak.clone(), dialog_weak.clone());
             let (btn_b, spin_b, action_b) = (btn.clone(), spin.clone(), action.clone());
+            // For updates, only show the tools actually being downloaded.
+            // For fresh installs, show all (None).
+            let tools_filter = if action.get() == ToolAction::Update {
+                let list = pending.borrow().clone();
+                if list.is_empty() { None } else { Some(list) }
+            } else {
+                None
+            };
             crate::install_progress::run(
                 &btn,
                 move |err| {
@@ -1195,6 +1215,7 @@ pub fn show(
                     }
                     refresh_video_tools(&row_ok, &btn_b, &spin_b, &action_b);
                 },
+                tools_filter,
             );
         });
     }

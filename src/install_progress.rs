@@ -135,6 +135,9 @@ pub fn run(
     button: &gtk4::Button,
     on_error: impl Fn(String) + 'static,
     on_success: impl Fn() + 'static,
+    // Tools to install/update. None = all (fresh install). Some(list) = only
+    // those (update flow: popup shows only what's actually downloading).
+    tools: Option<Vec<String>>,
 ) {
     let btn = button.clone();
 
@@ -159,14 +162,27 @@ pub fn run(
     RUNNING.with(|r| r.set(true));
 
     let active: Rc<RefCell<Option<gtk4::ProgressBar>>> = Rc::new(RefCell::new(None));
+    // Whether to include a tool: None = all (fresh install), Some(list) = only listed.
+    let include = |name: &str| {
+        tools
+            .as_ref()
+            .map(|t| t.iter().any(|n| n == name))
+            .unwrap_or(true)
+    };
+    let do_yt = include("yt-dlp");
+    let do_gdl = include("gallery-dl");
+    let do_ff = include("ffmpeg");
+    let do_js = include("quickjs");
+
+    // Order: yt-dlp, gallery-dl (under yt-dlp), ffmpeg, quickjs.
     let yt = ToolRow::new("yt-dlp", &gettext("yt-dlp install progress"), &active);
-    let ff = ToolRow::new("ffmpeg", &gettext("ffmpeg install progress"), &active);
-    let js = ToolRow::new("quickjs", &gettext("quickjs install progress"), &active);
     let gdl = ToolRow::new(
         "gallery-dl",
         &gettext("gallery-dl install progress"),
         &active,
     );
+    let ff = ToolRow::new("ffmpeg", &gettext("ffmpeg install progress"), &active);
+    let js = ToolRow::new("quickjs", &gettext("quickjs install progress"), &active);
 
     let rows = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     // HIG card padding: 12, matching the rest of the app (not 18).
@@ -174,10 +190,18 @@ pub fn run(
     rows.set_margin_bottom(12);
     rows.set_margin_start(12);
     rows.set_margin_end(12);
-    rows.append(&yt.widget());
-    rows.append(&ff.widget());
-    rows.append(&js.widget());
-    rows.append(&gdl.widget());
+    if do_yt {
+        rows.append(&yt.widget());
+    }
+    if do_gdl {
+        rows.append(&gdl.widget());
+    }
+    if do_ff {
+        rows.append(&ff.widget());
+    }
+    if do_js {
+        rows.append(&js.widget());
+    }
     let pop = gtk4::Popover::new();
     pop.set_child(Some(&rows));
     pop.set_parent(&btn);
@@ -186,12 +210,8 @@ pub fn run(
     SESSION.with(|s| *s.borrow_mut() = Some(pop.clone()));
 
     glib::spawn_future_local(async move {
-        yt.set_downloading();
-        // Pulse driver ticks the active row; started after first row goes active so the first tick can't stop early.
-        // Break-on-None is the teardown stop: `active` is only ever None after
-        // a stage failed or the last stage installed — the set_installed →
-        // set_downloading handoffs hold no await, so the tick can't observe an
-        // empty stage between rows.
+        // Pulse driver ticks the active row. Started here (before any tool)
+        // so it runs regardless of which tools are included.
         {
             let active = active.clone();
             glib::timeout_add_local(Duration::from_millis(100), move || {
@@ -203,66 +223,72 @@ pub fn run(
                 }
             });
         }
-        let yt_path = match crate::video::install_ytdlp().await {
-            Ok(path) => path,
-            Err(e) => {
-                let message = e.to_string();
-                yt.set_failed(&message);
-                RUNNING.with(|r| r.set(false));
-                on_error(message);
-                return;
-            }
-        };
-        let version = crate::video_tools::tool_display_version(yt_path, "--version").await;
-        yt.set_installed(version);
-
-        ff.set_downloading();
-        let ff_path = match crate::video::install_ffmpeg().await {
-            Ok(path) => path,
-            Err(e) => {
-                let message = e.to_string();
-                ff.set_failed(&message);
-                RUNNING.with(|r| r.set(false));
-                on_error(message);
-                return;
-            }
-        };
-        let version = crate::video_tools::tool_display_version(ff_path, "-version").await;
-        ff.set_installed(version);
-
-        // quickjs-ng is the JS runtime Grab pins for YouTube; installed up
-        // front so YouTube spawns never wait on a lazy install.
-        js.set_downloading();
-        let js_path = match crate::video::install_quickjs().await {
-            Ok(path) => path,
-            Err(e) => {
-                let message = e.to_string();
-                js.set_failed(&message);
-                RUNNING.with(|r| r.set(false));
-                on_error(message);
-                return;
-            }
-        };
-        let version = crate::video_tools::tool_display_version(js_path, "--version").await;
-        js.set_installed(version);
-
-        // gallery-dl for image galleries and fallback video; installed up front
-        // so gallery pastes never wait on a lazy install.
-        gdl.set_downloading();
-        let gdl_path = match crate::gallery::install_gallerydl().await {
-            Ok(path) => path,
-            Err(e) => {
-                let message = e.to_string();
-                gdl.set_failed(&message);
-                RUNNING.with(|r| r.set(false));
-                on_error(message);
-                return;
-            }
-        };
-        let version = crate::gallery::gallerydl_display_version(&gdl_path)
-            .await
-            .ok();
-        gdl.set_installed(version);
+        if do_yt {
+            yt.set_downloading();
+            let yt_path = match crate::video::install_ytdlp().await {
+                Ok(path) => path,
+                Err(e) => {
+                    let message = e.to_string();
+                    yt.set_failed(&message);
+                    RUNNING.with(|r| r.set(false));
+                    on_error(message);
+                    return;
+                }
+            };
+            let version = crate::video_tools::tool_display_version(yt_path, "--version").await;
+            yt.set_installed(version);
+        }
+        if do_gdl {
+            // gallery-dl for image galleries and fallback video; installed up front
+            // so gallery pastes never wait on a lazy install.
+            gdl.set_downloading();
+            let gdl_path = match crate::gallery::install_gallerydl().await {
+                Ok(path) => path,
+                Err(e) => {
+                    let message = e.to_string();
+                    gdl.set_failed(&message);
+                    RUNNING.with(|r| r.set(false));
+                    on_error(message);
+                    return;
+                }
+            };
+            let version = crate::gallery::gallerydl_display_version(&gdl_path)
+                .await
+                .ok();
+            gdl.set_installed(version);
+        }
+        if do_ff {
+            ff.set_downloading();
+            let ff_path = match crate::video::install_ffmpeg().await {
+                Ok(path) => path,
+                Err(e) => {
+                    let message = e.to_string();
+                    ff.set_failed(&message);
+                    RUNNING.with(|r| r.set(false));
+                    on_error(message);
+                    return;
+                }
+            };
+            let version = crate::video_tools::tool_display_version(ff_path, "-version").await;
+            ff.set_installed(version);
+        }
+        if do_js {
+            // quickjs-ng is the JS runtime Grab pins for YouTube; installed up
+            // front so YouTube spawns never wait on a lazy install.
+            js.set_downloading();
+            let js_path = match crate::video::install_quickjs().await {
+                Ok(path) => path,
+                Err(e) => {
+                    let message = e.to_string();
+                    js.set_failed(&message);
+                    RUNNING.with(|r| r.set(false));
+                    on_error(message);
+                    return;
+                }
+            };
+            let version = crate::video_tools::tool_display_version(js_path, "--version").await;
+            js.set_installed(version);
+        }
 
         // Linger on checkmarks so completion registers, then close.
         glib::timeout_future(Duration::from_millis(1200)).await;

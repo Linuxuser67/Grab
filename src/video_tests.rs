@@ -1013,6 +1013,7 @@ fn resume_attempt_labels_reresolve_as_resuming() {
     let job = VideoJob {
         item_id,
         page_url: "https://vimeo.com/123456".into(),
+        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "1080p".into(),
         audio_only: false,
@@ -1065,6 +1066,7 @@ fn pipeline_reports_missing_tools() {
     let job = VideoJob {
         item_id,
         page_url: "https://vimeo.com/123456".into(),
+        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "1080p".into(),
         audio_only: false,
@@ -3559,6 +3561,7 @@ fn direct_test_job() -> VideoJob {
     VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
+        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "720p".into(),
         audio_only: false,
@@ -3802,6 +3805,7 @@ fn live_test_job() -> VideoJob {
     VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
+        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "720p".into(),
         audio_only: false,
@@ -6224,6 +6228,7 @@ fn vod_hls_pins_planner_variant_id() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
+        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
@@ -6291,6 +6296,7 @@ fn vod_hls_refuses_existing_dest() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
+        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
@@ -8785,6 +8791,7 @@ fn hls_collects_sidecar_beside_finished_file() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
+        backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,

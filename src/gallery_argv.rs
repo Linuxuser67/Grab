@@ -101,6 +101,17 @@ pub fn resolve_tool() -> Result<PathBuf, String> {
     crate::gallery_tools::resolve_gallerydl().map_err(|e| e.to_string())
 }
 
+/// Inputs for a gallery download (one queue row per gallery).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GalleryJob {
+    pub item_id: u64,
+    pub page_url: String,
+    pub dest_dir: PathBuf,
+    pub filter: GalleryFilter,
+    /// Staged cookies file path, if the site needs auth.
+    pub cookies_file: Option<PathBuf>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -147,6 +147,7 @@ mod tests {
             Path::new("/tmp/dest"),
             None,
             GalleryFilter::All,
+            None,
         );
         // `-D`, not `-d` (exact dir, no nesting).
         let d_pos = argv.iter().position(|a| a == "-D").unwrap();
@@ -162,6 +163,7 @@ mod tests {
             Path::new("/tmp/dest"),
             None,
             GalleryFilter::All,
+            None,
         );
         let f_pos = argv.iter().position(|a| a == "-f").unwrap();
         assert_eq!(argv[f_pos + 1], "/O");
@@ -175,6 +177,7 @@ mod tests {
             Path::new("/tmp/dest"),
             None,
             GalleryFilter::All,
+            None,
         );
         assert!(argv.contains(&"extractor.directory=[]".to_string()));
     }
@@ -187,6 +190,7 @@ mod tests {
             Path::new("/tmp/dest"),
             Some(Path::new("/tmp/cookies.txt")),
             GalleryFilter::All,
+            None,
         );
         let c_pos = argv.iter().position(|a| a == "-C").unwrap();
         assert_eq!(argv[c_pos + 1], "/tmp/cookies.txt");
@@ -196,10 +200,12 @@ mod tests {
     fn download_argv_filter_images() {
         let argv = download_argv(
             &tool(),
+            None,
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             GalleryFilter::ImagesOnly,
+            None,
         );
         let f_pos = argv.iter().position(|a| a == "--filter").unwrap();
         assert!(argv[f_pos + 1].contains("jpg"));
@@ -209,11 +215,13 @@ mod tests {
     #[test]
     fn download_argv_filter_videos() {
         let argv = download_argv(
+            None,
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             GalleryFilter::VideosOnly,
+            None,
         );
         let f_pos = argv.iter().position(|a| a == "--filter").unwrap();
         assert!(argv[f_pos + 1].contains("mp4"));
@@ -228,6 +236,7 @@ mod tests {
             Path::new("/tmp/dest"),
             None,
             GalleryFilter::All,
+            None,
         );
         assert!(!argv.iter().any(|a| a == "--filter"));
     }

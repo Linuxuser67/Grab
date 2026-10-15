@@ -27,6 +27,8 @@ mod ui_util;
 mod gallery;
 mod gallery_argv;
 mod gallery_card;
+#[cfg(test)]
+mod gallery_integration_tests;
 mod gallery_probe;
 mod gallery_progress;
 mod gallery_runner;

@@ -2676,6 +2676,7 @@ impl DownloadManager {
             crate::torrent::forget_download(id);
         }
         self.video_sources.borrow_mut().remove(&id);
+        self.gallery_jobs.borrow_mut().remove(&id);
         self.epoch.borrow_mut().remove(&id);
         if let Some(pos) = self.position_of(id) {
             self.store.remove(pos);

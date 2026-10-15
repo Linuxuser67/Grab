@@ -1653,7 +1653,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
         error: video_error,
-        gallery_info: gallery_info.clone(),
+        gallery_info,
         is_gallery: Rc::new(Cell::new(false)),
         gallery_card: Rc::new(RefCell::new(None)),
         add_btn: add_btn.clone(),

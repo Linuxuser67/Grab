@@ -17,8 +17,6 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// everything else lands in `extra` for best-effort title derivation.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct GalleryItem {
-    /// Original filename; shown in the gallery file list (phase 6).
-    #[allow(dead_code)]
     pub filename: String,
     pub extension: String,
     pub category: String,
@@ -32,7 +30,6 @@ pub struct GalleryItem {
 #[serde(untagged)]
 enum ProbeMessage {
     File(GalleryItem),
-    #[allow(dead_code)]
     Other(serde_json::Value),
 }
 
@@ -69,14 +66,10 @@ pub enum ProbeOutcome {
 
 /// Sticky per-host mode preference: which mode the user picked last time
 /// both were viable. Only honored when both modes are viable now.
+/// Phase 7 (gallery UI) will add the Gallery variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StickyMode {
-    /// User prefers video mode; used by the mode toggle (phase 6).
-    #[allow(dead_code)]
     Video,
-    /// User prefers gallery mode; used by the mode toggle (phase 6).
-    #[allow(dead_code)]
-    Gallery,
 }
 
 /// Routing decision from both probe results.
@@ -87,7 +80,7 @@ pub enum StickyMode {
 pub fn route(
     ytdlp_video: bool,
     gallery_items: Option<&[GalleryItem]>,
-    host_sticky: Option<StickyMode>,
+    _host_sticky: Option<StickyMode>,
 ) -> ProbeOutcome {
     // Sticky preference wins when both modes are viable; otherwise the table decides.
     let (has_video, has_images) = gallery_items
@@ -108,11 +101,9 @@ pub fn route(
     match (ytdlp_video, has_video, has_images) {
         (true, _, true) => {
             // Both viable: honor sticky, default Video.
-            match host_sticky {
-                Some(StickyMode::Gallery) => ProbeOutcome::Gallery,
-                _ => ProbeOutcome::VideoYtDlp {
-                    gallery_toggle: true,
-                },
+            // Phase 7 will add Gallery variant handling.
+            ProbeOutcome::VideoYtDlp {
+                gallery_toggle: true,
             }
         }
         (true, _, false) => ProbeOutcome::VideoYtDlp {
@@ -195,7 +186,11 @@ pub async fn probe_gallery(
         .into_iter()
         .filter_map(|m| match m {
             ProbeMessage::File(item) => Some(item),
-            ProbeMessage::Other(_) => None,
+            ProbeMessage::Other(v) => {
+                // Non-file messages (directory info, etc.); skip but log at trace.
+                tracing::trace!(value = ?v, "gallery-dl probe non-file message");
+                None
+            }
         })
         .collect();
     if items.is_empty() {
@@ -207,24 +202,14 @@ pub async fn probe_gallery(
 /// Count files without downloading: `gallery-dl --config-ignore -g --no-download <url>`.
 /// Returns the line count of direct file URLs, or `None` on any failure
 /// (the card then shows an indeterminate count).
-/// Used by the gallery card UI (phase 6) to show "N files" before download.
-#[allow(dead_code)]
 pub async fn count_gallery_files(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
 ) -> Option<u32> {
-    let mut cmd = tokio::process::Command::new(tool);
-    cmd.arg("--config-ignore")
-        .arg("-g")
-        .arg("--no-download")
-        // Don't double-count fallback URLs.
-        .arg("-o")
-        .arg("output.fallback=false")
-        .arg(url);
-    if let Some(cookies) = cookies_file {
-        cmd.arg("-C").arg(cookies);
-    }
+    let argv = crate::gallery_argv::count_argv(tool, url, cookies_file);
+    let mut cmd = tokio::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
     let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
         .await
         .ok()?
@@ -329,11 +314,6 @@ mod tests {
     #[test]
     fn route_sticky_host_preference() {
         let images = vec![item("jpg")];
-        // Sticky gallery wins when both viable.
-        assert_eq!(
-            route(true, Some(&images), Some(StickyMode::Gallery)),
-            ProbeOutcome::Gallery
-        );
         // Sticky video → default Video with toggle.
         assert_eq!(
             route(true, Some(&images), Some(StickyMode::Video)),

@@ -2,7 +2,7 @@
 //! every spawn. Leaf module: the dialog, prefs and engines consume it through the
 //! `video` facade.
 
-use crate::download_net::tool_client_builder;
+use crate::download_net::tool_client_builder_proxied;
 use gettextrs::gettext;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -732,9 +732,10 @@ async fn download_to_file(
     // Refuse a planted symlink before any I/O: it would divert the download
     // (and the later chmod) onto an arbitrary file.
     clear_dest_refusing_symlink(dest)?;
-    // Tool installs use the proxy-honoring client: the user explicitly clicked
-    // install, and a corporate proxy may be the only route to GitHub.
-    let client = tool_client_builder()
+    // Tool installs use the app-proxy-honoring client: a proxy-configured
+    // user's manual install must not go out direct and reveal the machine's
+    // address to GitHub. An invalid manual proxy fails here, loudly.
+    let client = tool_client_builder_proxied()?
         .build()
         .map_err(|e| format!("couldn't build HTTP client: {e}"))?;
     let response = client
@@ -842,6 +843,10 @@ pub(crate) async fn ensure_quickjs(page_url: &str, proxied: bool) -> Result<(), 
     install_quickjs_locked().await.map(|_| ())
 }
 
+/// Download cap for the ffmpeg archive: the static build is ~75MB, so 128MB
+/// is generous without letting a compromised endpoint fill the disk.
+const FFMPEG_MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
+
 /// Download one boul2gom/ffmpeg-builds archive and extract `ffmpeg` + `ffprobe`
 /// into `dir`; returns the ffmpeg path. Await off the GTK thread.
 async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
@@ -854,16 +859,20 @@ async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
         .map_err(VideoError::install)?;
     // Fail closed: the crate verifies the digest if present, but skips silently
     // if absent. Refuse to download an unverified toolchain.
-    if release.checksum.is_none() {
-        return Err(VideoError::install(
-            "ffmpeg release has no SHA-256 checksum; refusing unverified install",
-        ));
-    }
+    let checksum = release.checksum.clone().ok_or_else(|| {
+        VideoError::install("ffmpeg release has no SHA-256 checksum; refusing unverified install")
+    })?;
     let archive = dir.join(&release.name);
-    release
-        .download(&archive)
-        .await
-        .map_err(VideoError::install)?;
+    // Download via our proxied client, not the crate's: the crate's HTTP
+    // client can't see Grab's app proxy, so the archive fetch would go out
+    // direct and reveal the machine's address. (The metadata fetch above
+    // still uses the crate client — one small API call.)
+    if let Err(e) =
+        download_to_file(&release.url, &archive, &checksum, FFMPEG_MAX_DOWNLOAD_BYTES).await
+    {
+        std::fs::remove_file(&archive).ok();
+        return Err(VideoError::install(e));
+    }
     tokio::task::spawn_blocking(move || extract_ffmpeg_toolchain(&archive, &dir))
         .await
         .map_err(VideoError::runtime)?

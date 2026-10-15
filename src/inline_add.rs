@@ -2040,36 +2040,35 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         {
                             // Try gallery-dl before falling back to direct: it handles
                             // sites yt-dlp can't (e.g. Instagram stories).
-                            if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                                if let Ok(Some(items)) = crate::gallery_probe::probe_gallery(
+                            if let Ok(tool) = crate::gallery_argv::resolve_tool()
+                                && let Ok(Some(items)) = crate::gallery_probe::probe_gallery(
                                     &tool, &url, None, // TODO: staged cookies
                                 )
                                 .await
-                                {
-                                    // gallery-dl found something; route it.
-                                    let outcome = crate::gallery_probe::route(
-                                        false, // yt-dlp found nothing
-                                        Some(items.as_slice()),
-                                        None, // no per-host preference on this path
+                            {
+                                // gallery-dl found something; route it.
+                                let outcome = crate::gallery_probe::route(
+                                    false, // yt-dlp found nothing
+                                    Some(items.as_slice()),
+                                    None, // no per-host preference on this path
+                                );
+                                if matches!(
+                                    outcome,
+                                    crate::gallery_probe::ProbeOutcome::VideoGalleryDl
+                                ) {
+                                    // Submit as video via gallery-dl backend.
+                                    // TODO: full gallery UI for ProbeOutcome::Gallery
+                                    submit_gallery_video(
+                                        &manager_b,
+                                        &dest_b,
+                                        &close_b,
+                                        &url,
+                                        &items,
+                                        scheduled_at_b.get(),
+                                        &step_b,
+                                        &lookup_add_b,
                                     );
-                                    if matches!(
-                                        outcome,
-                                        crate::gallery_probe::ProbeOutcome::VideoGalleryDl
-                                    ) {
-                                        // Submit as video via gallery-dl backend.
-                                        // TODO: full gallery UI for ProbeOutcome::Gallery
-                                        submit_gallery_video(
-                                            &manager_b,
-                                            &dest_b,
-                                            &close_b,
-                                            &url,
-                                            &items,
-                                            scheduled_at_b.get(),
-                                            &step_b,
-                                            &lookup_add_b,
-                                        );
-                                        return;
-                                    }
+                                    return;
                                 }
                             }
                             match queue_plain(

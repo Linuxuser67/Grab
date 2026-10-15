@@ -32,6 +32,7 @@ pub struct GalleryItem {
 #[serde(untagged)]
 enum ProbeMessage {
     File(GalleryItem),
+    #[allow(dead_code)]
     Other(serde_json::Value),
 }
 
@@ -206,6 +207,8 @@ pub async fn probe_gallery(
 /// Count files without downloading: `gallery-dl --config-ignore -g --no-download <url>`.
 /// Returns the line count of direct file URLs, or `None` on any failure
 /// (the card then shows an indeterminate count).
+/// Used by the gallery card UI (phase 6) to show "N files" before download.
+#[allow(dead_code)]
 pub async fn count_gallery_files(
     tool: &Path,
     url: &str,

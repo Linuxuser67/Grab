@@ -1017,7 +1017,6 @@ fn resume_attempt_labels_reresolve_as_resuming() {
         page_url: "https://vimeo.com/123456".into(),
         backend: crate::video::VideoBackend::YtDlp,
         playlist_item_id: None,
-        backend: crate::video::VideoBackend::YtDlp,
         quality: "1080p".into(),
         audio_only: false,
         dest: dir.join("v.mp4"),

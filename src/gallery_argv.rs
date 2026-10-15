@@ -15,14 +15,17 @@ pub enum GalleryFilter {
 
 impl GalleryFilter {
     /// gallery-dl `--filter` Python expression. `None` for All (no filter).
-    /// Uses the `extension` keyword which every extractor provides.
+    /// Uses the `extension` keyword which every extractor provides;
+    /// case-insensitive via `.lower()`.
     pub fn to_filter_expr(self) -> Option<&'static str> {
         match self {
             Self::All => None,
-            Self::ImagesOnly => {
-                Some("extension in ('jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'bmp', 'svg')")
+            Self::ImagesOnly => Some(
+                "extension.lower() in ('jpg', 'jpeg', 'jpe', 'png', 'webp', 'gif', 'avif', 'bmp', 'svg', 'tiff', 'tif')",
+            ),
+            Self::VideosOnly => {
+                Some("extension.lower() in ('mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi', 'ts')")
             }
-            Self::VideosOnly => Some("extension in ('mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi')"),
         }
     }
 }
@@ -42,6 +45,7 @@ pub fn download_argv(
     dest_dir: &Path,
     cookies_file: Option<&Path>,
     filter: GalleryFilter,
+    speed_limit: Option<u64>,
 ) -> Vec<String> {
     let mut argv = vec![
         tool.to_string_lossy().to_string(),
@@ -71,6 +75,12 @@ pub fn download_argv(
         argv.push("--filter".to_string());
         argv.push(expr.to_string());
     }
+    if let Some(limit) = speed_limit {
+        argv.push("-r".to_string());
+        argv.push(limit.to_string());
+    }
+    // `--` guards against URLs starting with `-` being parsed as options.
+    argv.push("--".to_string());
     argv.push(url.to_string());
     argv
 }
@@ -93,6 +103,7 @@ pub fn count_argv(tool: &Path, url: &str, cookies_file: Option<&Path>) -> Vec<St
         argv.push("-C".to_string());
         argv.push(cookies.to_string_lossy().to_string());
     }
+    argv.push("--".to_string());
     argv.push(url.to_string());
     argv
 }
@@ -116,7 +127,7 @@ pub struct GalleryJob {
     pub filter: GalleryFilter,
     /// Staged cookies file path, if the site needs auth.
     pub cookies_file: Option<PathBuf>,
-    /// Per-download speed cap in bytes/sec (`--ratelimit`); `None` = unlimited.
+    /// Per-download speed cap in bytes/sec (`-r`/`--limit-rate`); `None` = unlimited.
     pub speed_limit: Option<u64>,
 }
 

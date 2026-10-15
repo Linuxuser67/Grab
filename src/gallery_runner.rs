@@ -53,6 +53,7 @@ pub async fn run_gallery_download(
         &job.dest_dir,
         job.cookies_file.as_deref(),
         job.filter,
+        job.speed_limit,
     );
 
     let mut cmd = Command::new(&argv[0]);

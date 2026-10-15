@@ -733,8 +733,6 @@ impl DownloadManager {
         self.gallery_jobs
             .borrow_mut()
             .insert(item.id(), job.clone());
-        // One finished record per URL (Parabolic parity): re-downloads replace.
-        self.drop_finished_duplicates(&url, item.id());
         Ok(self.insert(item))
     }
 
@@ -1991,6 +1989,10 @@ impl DownloadManager {
                                     "Gallery \u{2022} {} files",
                                     r.files.len()
                                 ));
+                                // One finished record per URL (Parabolic parity):
+                                // done here (not at enqueue) so a failed
+                                // re-download keeps the earlier good record.
+                                this.drop_finished_duplicates(&item_c.gallery_url(), item_c.id());
                                 tracing::info!(
                                     files = r.files.len(),
                                     skipped = r.skipped,

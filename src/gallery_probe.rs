@@ -49,8 +49,9 @@ pub enum GalleryContent {
 impl GalleryContent {
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_ascii_lowercase().as_str() {
-            "mp4" | "webm" | "mov" | "mkv" | "m4v" => Self::Video,
-            "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" => Self::Image,
+            "mp4" | "webm" | "mov" | "mkv" | "m4v" | "avi" | "ts" => Self::Video,
+            "jpg" | "jpeg" | "jpe" | "png" | "webp" | "gif" | "avif" | "bmp" | "svg" | "tiff"
+            | "tif" => Self::Image,
             _ => Self::Unknown,
         }
     }
@@ -165,6 +166,7 @@ pub async fn probe_gallery(
         // Don't let gallery-dl write back to Grab's staged cookies file.
         .arg("-o")
         .arg("extractor.cookies-update=false")
+        .arg("--")
         .arg(url);
     if let Some(cookies) = cookies_file {
         cmd.arg("-C").arg(cookies);

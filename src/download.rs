@@ -704,6 +704,32 @@ impl DownloadManager {
         self.enqueue_video_staged(page_url, &dir, filename, choices, &existing)
     }
 
+    /// Enqueue a gallery download (image gallery via gallery-dl).
+    /// Creates a DownloadItem with gallery flags set; the actual download
+    /// is driven by the gallery runner (phase 12).
+    pub fn enqueue_gallery(
+        self: &Rc<Self>,
+        job: &crate::gallery_argv::GalleryJob,
+    ) -> Result<DownloadItem, String> {
+        let url = normalize_url(&job.page_url)?;
+        let dir = job.dest_dir.to_string_lossy().to_string();
+        // Gallery title is the folder name; filename is not applicable.
+        let item = DownloadItem::new(
+            self.alloc_id_for(std::path::Path::new(&dir)),
+            &url,
+            &job.title,
+            &dir,
+        );
+        item.set_is_gallery(true);
+        item.set_gallery_file_count(job.file_count.unwrap_or(0));
+        item.set_gallery_files_done(0);
+        item.set_gallery_url(url.clone());
+        item.set_detail(format!("Gallery • {} files", job.file_count.unwrap_or(0)));
+        // TODO: persist GalleryJob for restore (phase 11b).
+        // TODO: start the gallery runner (phase 12).
+        Ok(self.insert(item))
+    }
+
     /// [`DownloadManager::enqueue_video`] with a precomputed directory listing,
     /// for bulk imports that would otherwise readdir once per row. The snapshot
     /// stays correct as rows land: the per-row dedupe also consults the live

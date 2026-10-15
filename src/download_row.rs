@@ -40,6 +40,18 @@ mod imp {
         /// Resume validator fallback: Last-Modified header value (empty = none).
         #[property(get, set)]
         pub last_modified: RefCell<String>,
+        /// True if this is a gallery download (image gallery via gallery-dl).
+        #[property(get, set, builder(false))]
+        pub is_gallery: Cell<bool>,
+        /// Total files in the gallery (0 if not a gallery).
+        #[property(get, set, builder(0))]
+        pub gallery_file_count: Cell<u32>,
+        /// Files downloaded so far (for progress).
+        #[property(get, set, builder(0))]
+        pub gallery_files_done: Cell<u32>,
+        /// Source page URL for the gallery (for retry).
+        #[property(get, set)]
+        pub gallery_url: RefCell<String>,
     }
 
     #[glib::object_subclass]

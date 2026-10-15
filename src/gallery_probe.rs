@@ -66,10 +66,10 @@ pub enum ProbeOutcome {
 
 /// Sticky per-host mode preference: which mode the user picked last time
 /// both were viable. Only honored when both modes are viable now.
-/// Phase 7 (gallery UI) will add the Gallery variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StickyMode {
     Video,
+    Gallery,
 }
 
 /// Routing decision from both probe results.
@@ -80,7 +80,7 @@ pub enum StickyMode {
 pub fn route(
     ytdlp_video: bool,
     gallery_items: Option<&[GalleryItem]>,
-    _host_sticky: Option<StickyMode>,
+    host_sticky: Option<StickyMode>,
 ) -> ProbeOutcome {
     // Sticky preference wins when both modes are viable; otherwise the table decides.
     let (has_video, has_images) = gallery_items
@@ -101,9 +101,11 @@ pub fn route(
     match (ytdlp_video, has_video, has_images) {
         (true, _, true) => {
             // Both viable: honor sticky, default Video.
-            // Phase 7 will add Gallery variant handling.
-            ProbeOutcome::VideoYtDlp {
-                gallery_toggle: true,
+            match host_sticky {
+                Some(StickyMode::Gallery) => ProbeOutcome::Gallery,
+                _ => ProbeOutcome::VideoYtDlp {
+                    gallery_toggle: true,
+                },
             }
         }
         (true, _, false) => ProbeOutcome::VideoYtDlp {
@@ -314,6 +316,11 @@ mod tests {
     #[test]
     fn route_sticky_host_preference() {
         let images = vec![item("jpg")];
+        // Sticky gallery wins when both viable.
+        assert_eq!(
+            route(true, Some(&images), Some(StickyMode::Gallery)),
+            ProbeOutcome::Gallery
+        );
         // Sticky video → default Video with toggle.
         assert_eq!(
             route(true, Some(&images), Some(StickyMode::Video)),

@@ -2070,11 +2070,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     );
                                     return;
                                 }
-                                // Gallery (images): build the card state for the
-                                // gallery UI. Full GTK integration is phase 7;
-                                // for now we log the gallery info.
+                                // Gallery (images): build the card state.
                                 if matches!(outcome, crate::gallery_probe::ProbeOutcome::Gallery) {
-                                    let card = crate::gallery_card::GalleryCard::new(items);
+                                    let card = crate::gallery_card::GalleryCard::new(
+                                        items,
+                                        Some(crate::gallery_probe::StickyMode::Gallery),
+                                    );
                                     // Verify count via the lightweight counter.
                                     if let Ok(tool) = crate::gallery_argv::resolve_tool()
                                         && let Some(n) = crate::gallery_probe::count_gallery_files(
@@ -2087,8 +2088,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     tracing::info!(
                                         files = card.file_count(),
                                         preview = ?card.preview_filenames(),
-                                        "gallery-dl found image gallery (UI phase 7)"
+                                        sticky = ?card.sticky_mode(),
+                                        "gallery-dl found image gallery"
                                     );
+                                    // TODO: show gallery UI section (phase 7b).
                                     // Fall through to direct download for now.
                                 }
                             }
@@ -2529,6 +2532,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     // here for missing tools has no preview yet.
                     kick_b(true);
                 },
+                None, // Fresh install: show all tools.
             );
         });
     }

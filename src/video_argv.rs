@@ -219,13 +219,6 @@ pub(crate) fn unified_download_argv(
         ffmpeg_location_dir(ffmpeg_bin),
         "--print".to_string(),
         "after_move:filepath".to_string(),
-        // Parallel fragment downloads for DASH/HLS (2-4x faster, no new deps).
-        // Modest default; aggressive parallelism can trigger rate limits.
-        "--concurrent-fragments".to_string(),
-        "4".to_string(),
-        // Detect throttling and re-extract fresh URLs instead of slow-dripping.
-        "--throttled-rate".to_string(),
-        "100K".to_string(),
     ]);
     if let Some(limit) = job.speed_limit {
         args.push("--ratelimit".to_string());
@@ -450,13 +443,6 @@ pub(crate) fn hls_download_argv(
         ffmpeg_location_dir(ffmpeg_bin),
         "--print".to_string(),
         "after_move:filepath".to_string(),
-        // Parallel fragment downloads for DASH/HLS (2-4x faster, no new deps).
-        // Modest default; aggressive parallelism can trigger rate limits.
-        "--concurrent-fragments".to_string(),
-        "4".to_string(),
-        // Detect throttling and re-extract fresh URLs instead of slow-dripping.
-        "--throttled-rate".to_string(),
-        "100K".to_string(),
     ]);
     if let Some(limit) = job.speed_limit {
         args.push("--ratelimit".to_string());

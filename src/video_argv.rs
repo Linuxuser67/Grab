@@ -35,8 +35,6 @@ pub struct VideoJob {
     pub item_id: u64,
     pub page_url: String,
     /// Which backend downloads this video (yt-dlp default, gallery-dl fallback).
-    /// Old queue files without the field default to YtDlp (backward compatible).
-    #[serde(default)]
     pub backend: VideoBackend,
     /// Playlist entry id this row was picked from, if any (selected on re-resolve).
     pub playlist_item_id: Option<String>,

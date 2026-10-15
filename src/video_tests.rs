@@ -7561,9 +7561,8 @@ fn live_capture_argv_never_takes_embed_subs() {
 }
 
 #[test]
-fn unified_argv_leaves_fragments_serial() {
-    // yt-dlp legs stay at the serial fragment default even when the app's
-    // own segmented engine runs hot: fragment floods trip 429s.
+fn unified_argv_uses_concurrent_fragments() {
+    // Parallel fragment downloads for DASH/HLS (2-4x faster, no new deps).
     let job = direct_test_job();
     let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
     let argv = unified_download_argv(
@@ -7575,7 +7574,11 @@ fn unified_argv_leaves_fragments_serial() {
         out,
         None,
     );
-    assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
+    let pos = argv
+        .iter()
+        .position(|a| a == "--concurrent-fragments")
+        .unwrap();
+    assert_eq!(argv[pos + 1], "4");
 }
 
 #[test]
@@ -7657,9 +7660,8 @@ fn unified_argv_marks_sponsors_when_enabled() {
 }
 
 #[test]
-fn hls_argv_leaves_fragments_serial() {
-    // Same serial default as every other yt-dlp leg: the connections
-    // setting is the app engine's own.
+fn hls_argv_uses_concurrent_fragments() {
+    // Parallel fragment downloads for DASH/HLS (2-4x faster, no new deps).
     let job = direct_test_job();
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
     let argv = hls_download_argv(
@@ -7669,7 +7671,11 @@ fn hls_argv_leaves_fragments_serial() {
         dest,
         None,
     );
-    assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
+    let pos = argv
+        .iter()
+        .position(|a| a == "--concurrent-fragments")
+        .unwrap();
+    assert_eq!(argv[pos + 1], "4");
 }
 
 #[test]
@@ -7959,6 +7965,7 @@ fn live_capture_argv_never_embeds_chapters() {
 fn vod_and_live_argv_never_emit_removed_tuning_flags() {
     // The old Advanced tuning knobs are gone: all left at yt-dlp defaults,
     // so none of their flags may appear on any leg.
+    // (`--throttled-rate` is back as a fixed 100K default, not a user knob.)
     let gone = [
         "--retries",
         "--retry-sleep",
@@ -7966,7 +7973,6 @@ fn vod_and_live_argv_never_emit_removed_tuning_flags() {
         "--max-sleep-interval",
         "--sleep-requests",
         "--socket-timeout",
-        "--throttled-rate",
         "--extractor-retries",
         "--user-agent",
     ];

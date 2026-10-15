@@ -4,11 +4,6 @@
 //! (here) concurrently. This module parses gallery-dl's `-j` output and decides
 //! which mode the New Download card shows, per the routing table in the design.
 
-// Phase 2 ships the probe + routing with no non-test callers yet; the card
-// integration (phase 4) wires them in. Allow dead_code until then rather than
-// deleting tested code.
-#![allow(dead_code)]
-
 use std::path::Path;
 use std::time::Duration;
 

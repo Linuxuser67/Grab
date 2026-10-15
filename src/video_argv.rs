@@ -35,6 +35,8 @@ pub struct VideoJob {
     pub item_id: u64,
     pub page_url: String,
     /// Which backend downloads this video (yt-dlp default, gallery-dl fallback).
+    /// Read in phase 5 (runner wiring); allow dead_code until then.
+    #[allow(dead_code)]
     pub backend: VideoBackend,
     /// Playlist entry id this row was picked from, if any (selected on re-resolve).
     pub playlist_item_id: Option<String>,

@@ -549,6 +549,17 @@ pub(crate) enum HandoffOutcome {
     Failed,
 }
 
+/// Pure decision: map a handoff outcome to (HTTP status, discard_cookies).
+/// Extracted for unit testing; the async handler uses this.
+pub(crate) fn handoff_outcome_response(outcome: &HandoffOutcome) -> (axum::http::StatusCode, bool) {
+    use axum::http::StatusCode;
+    match outcome {
+        HandoffOutcome::Queued => (StatusCode::OK, false),
+        HandoffOutcome::CardOpened => (StatusCode::ACCEPTED, false),
+        HandoffOutcome::Declined | HandoffOutcome::Failed => (StatusCode::CONFLICT, true),
+    }
+}
+
 pub(crate) struct Handoff {
     pub url: String,
     /// Set for `/add?confirm=1`: the GTK side answers with the outcome.
@@ -783,20 +794,12 @@ async fn handle_add(
         return StatusCode::OK;
     };
     match tokio::time::timeout(st.confirm_wait, answer).await {
-        Ok(Ok(HandoffOutcome::Queued)) => StatusCode::OK,
-        Ok(Ok(HandoffOutcome::CardOpened)) => {
-            // Card opened: user action pending. Retain staged cookies for the
-            // card's probe/download lifecycle. Do NOT discard.
-            StatusCode::ACCEPTED
-        }
-        Ok(Ok(HandoffOutcome::Declined)) | Ok(Ok(HandoffOutcome::Failed)) => {
-            // Declined or failed: the extension keeps the browser download,
-            // so the staged cookies have no user. Only discard what this
-            // request staged.
-            if staged {
+        Ok(Ok(outcome)) => {
+            let (status, discard) = handoff_outcome_response(&outcome);
+            if discard && staged {
                 discard_handoff_cookies(&req.url);
             }
-            StatusCode::CONFLICT
+            status
         }
         outcome => {
             // Dropped unanswered or timed out.
@@ -1862,5 +1865,33 @@ mod tests {
         .await;
         assert_eq!(status(&r), "200", "{r}");
         assert!(srv.rx.recv().await.expect("handoff").decision.is_none());
+    }
+
+    #[test]
+    fn handoff_outcome_queued_maps_to_200_no_discard() {
+        let (status, discard) = handoff_outcome_response(&HandoffOutcome::Queued);
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(!discard);
+    }
+
+    #[test]
+    fn handoff_outcome_card_opened_maps_to_202_no_discard() {
+        let (status, discard) = handoff_outcome_response(&HandoffOutcome::CardOpened);
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+        assert!(!discard);
+    }
+
+    #[test]
+    fn handoff_outcome_declined_maps_to_409_discard() {
+        let (status, discard) = handoff_outcome_response(&HandoffOutcome::Declined);
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert!(discard);
+    }
+
+    #[test]
+    fn handoff_outcome_failed_maps_to_409_discard() {
+        let (status, discard) = handoff_outcome_response(&HandoffOutcome::Failed);
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert!(discard);
     }
 }

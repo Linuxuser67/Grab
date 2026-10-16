@@ -53,7 +53,8 @@
     <release version="5.7.9~beta.6" date="2026-10-16">
       <description>
         <ul>
-          <li>gallery-dl probe now uses the browser extension's cookies ("Download with Grab").</li>
+          <li>Instagram gallery probes and downloads now throttle requests to avoid rate limits.</li>
+          <li>Browser extension handoff now distinguishes queued downloads from opened cards.</li>
         </ul>
       </description>
     </release>

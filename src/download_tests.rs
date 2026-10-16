@@ -5058,6 +5058,7 @@ fn proxy_argv_precedes_end_of_options() {
         remux_video: None,
         embed_chapters: false,
         proxy: Some(proxy),
+        info_json: None,
     };
     for argv in [
         crate::video_argv::unified_download_argv(
@@ -7409,4 +7410,20 @@ fn gallery_enqueue_uses_unique_dir_when_title_collides() {
     drain_engine(&m, item.id());
     drain_engine(&m, item2.id());
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn probe_json_cache_roundtrip() {
+    let (_lock, _loop) = test_locks();
+    let qf = test_queue_file("probe-json");
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let json = serde_json::json!({"id": "abc123", "title": "Test"});
+    m.cache_probe_json("https://example.com/v", json.clone());
+    // Take consumes (single use).
+    assert_eq!(m.take_probe_json("https://example.com/v"), Some(json));
+    assert_eq!(m.take_probe_json("https://example.com/v"), None);
+    // Missing URL returns None.
+    assert_eq!(m.take_probe_json("https://example.com/other"), None);
+    let _ = std::fs::remove_file(&qf);
 }

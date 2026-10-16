@@ -1022,6 +1022,7 @@ fn push_playlist_items_page(
                             // segment pages and never need it, but highlights — and anything
                             // unparseable at pick time — re-resolve the tray by this id.
                             playlist_item_id: Some(item.id.to_string()),
+                            info_json: None,
                         },
                         &existing,
                     ) {
@@ -2614,9 +2615,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         show_video_error(&step_b, &e.to_string());
                         set_lookup_add(&lookup_add_b, true);
                     }
-                    Ok(probe) => {
+                    Ok((probe, raw_json)) => {
                         if probe_b.borrow().generation != my {
                             return;
+                        }
+                        // Cache the raw info JSON for --load-info-json at download time.
+                        // Single videos only; playlists re-probe per entry.
+                        if let Some(json) = raw_json {
+                            manager_b.cache_probe_json(&url, json);
                         }
                         // Resolved but nothing playable, and not a listed video
                         // page: same plain fallback as above.

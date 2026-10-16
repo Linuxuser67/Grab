@@ -57,6 +57,12 @@ pub struct VideoJob {
     pub embed_chapters: bool,
     /// Proxy resolved at spawn time (`None` = direct).
     pub proxy: Option<crate::net_types::ResolvedProxy>,
+    /// Raw `--dump-single-json` from the probe (single videos only).
+    /// The download writes it to a temp file and passes `--load-info-json`
+    /// to skip re-extraction. Memory-only (`#[serde(skip)]`); queue restore
+    /// falls back to normal extraction. `None` = not available.
+    #[serde(skip)]
+    pub info_json: Option<serde_json::Value>,
 }
 
 /// Fallback `-f` spec when the pinned id rotated since the dialog resolve. Pure.

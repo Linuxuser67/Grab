@@ -450,7 +450,7 @@ pub(crate) async fn run_unified_ytdlp(
         Ok(lang) => lang,
         Err(()) => return Ok(None),
     };
-    let argv = unified_download_argv(
+    let mut argv = unified_download_argv(
         &job,
         spec,
         merging,
@@ -459,6 +459,18 @@ pub(crate) async fn run_unified_ytdlp(
         &out_template,
         playlist_index,
     );
+    // Skip re-extraction: the probe's info JSON is reused via --load-info-json.
+    // yt-dlp re-extracts automatically if a loaded format URL 403/404s (safety net),
+    // so stale entries are harmless. The temp file lives in staging (cleaned with it).
+    if let Some(json) = job.info_json.as_ref() {
+        let json_path = staging.join(format!(".grab-info-{}.json", job.item_id));
+        if let Ok(text) = serde_json::to_string(json) {
+            if std::fs::write(&json_path, text).is_ok() {
+                argv.push("--load-info-json".to_string());
+                argv.push(json_path.to_string_lossy().to_string());
+            }
+        }
+    }
     // Single-counter progress with the pump's granularity gate; `done` is capped against the metadata total so the bar never passes 100%.
     let sent = Arc::new(AtomicU64::new(0));
     let report = {

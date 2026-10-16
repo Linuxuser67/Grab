@@ -198,6 +198,11 @@ pub struct DownloadManager {
     /// futures are fire-and-forget, so the test suite drains on this counter
     /// instead of guessing how long GIO's blocking pool takes.
     sizing_inflight: Rc<Cell<usize>>,
+    /// Raw `--dump-single-json` by page URL (single videos only), cached at
+    /// probe time. The spawn takes it to build `--load-info-json`, skipping
+    /// a second extraction. Session-only; never persisted. Stale entries
+    /// are harmless: yt-dlp re-extracts if a loaded format URL 403/404s.
+    probe_json_cache: RefCell<HashMap<String, serde_json::Value>>,
     /// The 30s schedule checker's source, if running. Kept so the
     /// scheduling preference can stop the timer entirely.
     scheduler_source: RefCell<Option<glib::SourceId>>,
@@ -329,6 +334,19 @@ thread_local! {
 
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
+    /// Cache a probe's raw info JSON by page URL for `--load-info-json`.
+    /// Overwrites any earlier entry for the URL.
+    pub(crate) fn cache_probe_json(&self, page_url: &str, json: serde_json::Value) {
+        self.probe_json_cache
+            .borrow_mut()
+            .insert(page_url.to_string(), json);
+    }
+
+    /// Take the cached probe JSON for a URL (single use: the download consumes it).
+    pub(crate) fn take_probe_json(&self, page_url: &str) -> Option<serde_json::Value> {
+        self.probe_json_cache.borrow_mut().remove(page_url)
+    }
+
     /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
     pub fn new(store: gio::ListStore, settings: crate::settings::AppSettings) -> Rc<Self> {
         // Queue persist worker: `watch` keeps only the latest value (coalescing
@@ -370,6 +388,7 @@ impl DownloadManager {
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
             sizing_inflight: Rc::new(Cell::new(0)),
+            probe_json_cache: RefCell::new(HashMap::new()),
             scheduler_source: RefCell::new(None),
             persist_tx: RefCell::new(persist_tx),
             persist_task: RefCell::new(persist_task),
@@ -1925,7 +1944,7 @@ impl DownloadManager {
         };
         let job = crate::video::VideoJob {
             item_id: id,
-            page_url,
+            page_url: page_url.clone(),
             playlist_item_id,
             quality,
             audio_only,
@@ -1955,6 +1974,9 @@ impl DownloadManager {
             },
             embed_chapters: self.settings.embed_chapters(),
             proxy,
+            // Take the probe's raw info JSON if cached (single videos only).
+            // Lets the download use --load-info-json instead of re-extracting.
+            info_json: self.take_probe_json(&page_url),
         };
         let handle = tokio_rt().spawn(async move {
             let worker_tx = tx.clone();

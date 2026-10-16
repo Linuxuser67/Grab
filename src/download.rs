@@ -2045,11 +2045,14 @@ impl DownloadManager {
                 match msg {
                     GalleryMsg::Progress(done) => {
                         item_c.set_gallery_files_done(done);
-                        if total > 0 {
-                            item_c.set_progress(done as f64 / total as f64);
+                        if total > 0 && done <= total {
+                            item_c.set_progress((done as f64 / total as f64).min(1.0));
                             item_c.set_detail(format!("Gallery \u{2022} {done}/{total} files"));
                         } else {
-                            // Count unknown: show files done without a total.
+                            // Count unknown or done exceeded total (count was
+                            // wrong): show files done without a total, and
+                            // don't let the bar exceed 100%.
+                            item_c.set_progress(0.0);
                             item_c.set_detail(format!("Gallery \u{2022} {done} files"));
                         }
                         this.changed();

@@ -199,6 +199,12 @@ pub async fn run_gallery_download(
     })
 }
 
+/// Speed limit for gallery downloads, from settings.
+/// Shared by the card enqueue and the video-fallback path.
+pub fn gallery_speed_limit(settings: &crate::settings::AppSettings) -> Option<u64> {
+    crate::download_rate::parse_rate(settings.speed_limit().trim())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

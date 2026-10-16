@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 /// Filters for the gallery download (user's Images/Videos/All picker).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize)]
 pub enum GalleryFilter {
     #[default]
     All,

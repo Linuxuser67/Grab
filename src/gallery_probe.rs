@@ -123,6 +123,23 @@ pub fn route(
     }
 }
 
+/// Whether a probe error should be surfaced to the user instead of falling
+/// through to the plain-download path. Auth/HTTP errors mean the URL needs
+/// login; "unsupported URL" and timeouts mean gallery-dl just can't handle it.
+pub fn should_surface(e: &GalleryError) -> bool {
+    match e {
+        GalleryError::Probe(msg) => {
+            msg.contains("AuthenticationError")
+                || msg.contains("AuthorizationError")
+                || msg.contains("AuthRequired")
+                || msg.contains("ChallengeError")
+                || msg.contains("HttpError")
+        }
+        // Install/runtime errors (spawn failures, timeouts) fall through.
+        _ => false,
+    }
+}
+
 /// Best-effort title from probe metadata. First non-empty wins:
 /// `title` → `user`/`author` → `category` → URL-derived filename.
 pub fn probe_title(item: &GalleryItem, url: &str) -> String {
@@ -205,6 +222,9 @@ pub async fn probe_gallery(
 /// `title`/`user`/`author`. Returns `Err` on a type -1 error message.
 fn parse_probe_messages(messages: &[serde_json::Value]) -> Result<Vec<GalleryItem>, GalleryError> {
     let mut items = Vec::new();
+    // A `-1` error doesn't discard files already seen; stored here and
+    // returned only if no items were collected.
+    let mut pending_err: Option<GalleryError> = None;
     // Directory context from the most recent type-2 message; file items
     // inherit its title/user when they don't carry their own.
     let mut dir_ctx: Option<serde_json::Map<String, serde_json::Value>> = None;
@@ -261,14 +281,28 @@ fn parse_probe_messages(messages: &[serde_json::Value]) -> Result<Vec<GalleryIte
                     .and_then(|v| v.get("message"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                return Err(GalleryError::probe(format!("gallery-dl: {err}: {msg}")));
+                // Don't discard usable items: store the error and continue.
+                // If we got files, return them; otherwise return the error.
+                pending_err = Some(GalleryError::probe(format!("gallery-dl: {err}: {msg}")));
+                continue;
             }
             _ => {
                 tracing::trace!(message = ?m, "gallery-dl probe unknown message");
             }
         }
     }
-    Ok(items)
+    // If we got items despite an error, return them (log the error).
+    // Otherwise return the pending error, or Ok(empty) if none.
+    if !items.is_empty() {
+        if let Some(e) = pending_err {
+            tracing::warn!(error = %e, "gallery-dl probe had error but returned items");
+        }
+        Ok(items)
+    } else if let Some(e) = pending_err {
+        Err(e)
+    } else {
+        Ok(items)
+    }
 }
 
 /// Count files without downloading: `gallery-dl --config-ignore -g --no-download <url>`.
@@ -300,6 +334,37 @@ pub async fn count_gallery_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_surface_auth_errors() {
+        assert!(should_surface(&GalleryError::probe(
+            "gallery-dl: AuthenticationError: login required"
+        )));
+        assert!(should_surface(&GalleryError::probe(
+            "gallery-dl: AuthorizationError: forbidden"
+        )));
+        assert!(should_surface(&GalleryError::probe(
+            "gallery-dl: AuthRequired: account credentials required"
+        )));
+        assert!(should_surface(&GalleryError::probe(
+            "gallery-dl: ChallengeError: captcha"
+        )));
+        assert!(should_surface(&GalleryError::probe(
+            "gallery-dl: HttpError: 404"
+        )));
+    }
+
+    #[test]
+    fn should_not_surface_other_errors() {
+        assert!(!should_surface(&GalleryError::probe(
+            "gallery-dl: NoExtractorError: unsupported URL"
+        )));
+        assert!(!should_surface(&GalleryError::probe(
+            "gallery-dl: NotFoundError: nothing found"
+        )));
+        assert!(!should_surface(&GalleryError::install("timeout")));
+        assert!(!should_surface(&GalleryError::runtime("spawn failed")));
+    }
 
     fn item(extension: &str) -> GalleryItem {
         GalleryItem {
@@ -536,6 +601,19 @@ mod tests {
         let err = parse_probe_messages(&messages).unwrap_err();
         assert!(matches!(err, GalleryError::Probe(_)));
         assert!(err.to_string().contains("AuthenticationError"));
+    }
+
+    #[test]
+    fn probe_error_after_files_returns_items() {
+        // A -1 error after files doesn't discard them.
+        let json = r#"[
+            [3, "https://example.com/1.jpg", {"filename": "1.jpg", "extension": "jpg"}],
+            [3, "https://example.com/2.jpg", {"filename": "2.jpg", "extension": "jpg"}],
+            [-1, {"error": "HttpError", "message": "404"}]
+        ]"#;
+        let messages: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let items = parse_probe_messages(&messages).unwrap();
+        assert_eq!(items.len(), 2);
     }
 
     #[test]

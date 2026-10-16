@@ -48,13 +48,15 @@ pub(crate) fn show_gallery_ready(
 /// Refresh the gallery info row from the current card state.
 pub(crate) fn refresh_gallery_info(v: &VideoStep, title: &str) {
     if let Some(card) = v.gallery_card.borrow().as_ref() {
-        let count = card.file_count();
+        let filter = *card.filter.borrow();
+        let total = card.total(filter);
+        let count_text = crate::gallery_card::display_count(
+            card.file_count(),
+            5, // probe cap (--range 1-5)
+            total,
+        );
         let preview = card.preview_filenames().join(", ");
-        let subtitle = if count > 5 {
-            format!("{} files • {}, +{} more", count, preview, count - 5)
-        } else {
-            format!("{} files • {}", count, preview)
-        };
+        let subtitle = format!("{count_text} • {preview}");
         v.gallery_info.set_title(title);
         v.gallery_info.set_subtitle(&subtitle);
     }
@@ -79,7 +81,7 @@ pub(crate) fn submit_gallery_video(
         .unwrap_or_else(|| url.to_string());
     let settings = manager.settings();
     let cookies_browser = settings.cookies_browser().to_string();
-    let speed_limit = crate::download_rate::parse_rate(settings.speed_limit().trim());
+    let speed_limit = crate::gallery_runner::gallery_speed_limit(settings);
     enqueue_and_close(
         manager,
         dest,
@@ -93,7 +95,8 @@ pub(crate) fn submit_gallery_video(
                     .unwrap_or(0),
                 page_url: url.to_string(),
                 title: title.clone(),
-                file_count: Some(items.len() as u32),
+                // Probe items are capped at 5; don't report a wrong count.
+                file_count: None,
                 dest_dir: std::path::PathBuf::from(d.unwrap_or(".")),
                 // Default to All: a video fallback may still yield images.
                 filter: crate::gallery_argv::GalleryFilter::All,

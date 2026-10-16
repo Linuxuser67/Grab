@@ -1610,27 +1610,90 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     });
     // Gallery filter toggle: update the card's filter and refresh the info row.
     // Connected once; reads the current card from the Rc.
+    // On filter change, re-count if not cached (async), then refresh.
     {
         let card_rc = step.gallery_card.clone();
         let info = step.gallery_info.clone();
         step.gallery_filter
             .connect_active_name_notify(move |toggle| {
-                if let Some(card_ref) = card_rc.borrow().as_ref() {
-                    let filter = match toggle.active_name().as_deref() {
-                        Some("images") => crate::gallery_argv::GalleryFilter::ImagesOnly,
-                        Some("videos") => crate::gallery_argv::GalleryFilter::VideosOnly,
-                        _ => crate::gallery_argv::GalleryFilter::All,
-                    };
-                    *card_ref.filter.borrow_mut() = filter;
-                    // Refresh the info row subtitle.
-                    let count = card_ref.file_count();
-                    let preview = card_ref.preview_filenames().join(", ");
-                    let subtitle = if count > 5 {
-                        format!("{} files • {}, +{} more", count, preview, count - 5)
+                let filter = match toggle.active_name().as_deref() {
+                    Some("images") => crate::gallery_argv::GalleryFilter::ImagesOnly,
+                    Some("videos") => crate::gallery_argv::GalleryFilter::VideosOnly,
+                    _ => crate::gallery_argv::GalleryFilter::All,
+                };
+                // Check cache first (synchronous).
+                let (needs_count, url) = {
+                    if let Some(card_ref) = card_rc.borrow().as_ref() {
+                        *card_ref.filter.borrow_mut() = filter;
+                        if card_ref.total(filter).is_some() {
+                            // Cached: refresh immediately.
+                            let count_text = crate::gallery_card::display_count(
+                                card_ref.file_count(),
+                                5,
+                                card_ref.total(filter),
+                            );
+                            let preview = card_ref.preview_filenames().join(", ");
+                            info.set_subtitle(&format!("{count_text} • {preview}"));
+                            (false, String::new())
+                        } else {
+                            (true, card_ref.url().to_string())
+                        }
                     } else {
-                        format!("{} files • {}", count, preview)
-                    };
-                    info.set_subtitle(&subtitle);
+                        (false, String::new())
+                    }
+                };
+                // Not cached: count async, cache, refresh.
+                if needs_count {
+                    let card_rc = card_rc.clone();
+                    let info = info.clone();
+                    glib::spawn_future_local(async move {
+                        // Re-stage cookies for the count (auth-gated galleries).
+                        let cookies = {
+                            let settings = crate::settings::AppSettings::new();
+                            let browser = settings.cookies_browser();
+                            if browser.is_empty() || browser == "none" {
+                                None
+                            } else if let Some(ytdlp) = crate::video_tools::find_in_dirs(
+                                "yt-dlp",
+                                &crate::video_tools::tool_search_dirs(),
+                            ) {
+                                crate::cookies::export_cookies_to_file(
+                                    &ytdlp,
+                                    browser.as_str(),
+                                    &url,
+                                    std::time::Duration::from_secs(30),
+                                )
+                                .await
+                            } else {
+                                None
+                            }
+                        };
+                        if let Ok(tool) = crate::gallery_argv::resolve_tool()
+                            && let Some(n) = crate::gallery_probe::count_gallery_files(
+                                &tool,
+                                &url,
+                                cookies.as_deref(),
+                                filter,
+                            )
+                            .await
+                            && let Some(card_ref) = card_rc.borrow().as_ref()
+                        {
+                            card_ref.set_total(filter, n);
+                            // Refresh only if the filter hasn't changed again.
+                            if *card_ref.filter.borrow() == filter {
+                                let count_text = crate::gallery_card::display_count(
+                                    card_ref.file_count(),
+                                    5,
+                                    Some(n),
+                                );
+                                let preview = card_ref.preview_filenames().join(", ");
+                                info.set_subtitle(&format!("{count_text} • {preview}"));
+                            }
+                        }
+                        if let Some(path) = cookies {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    });
                 }
             });
     }
@@ -2093,76 +2156,115 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     probe_cookies.as_deref(),
                                 )
                                 .await;
-                                // Delete the staged cookies immediately after the probe;
-                                // routing below may return early.
-                                if let Some(path) = probe_cookies {
-                                    let _ = std::fs::remove_file(path);
-                                }
-                                if let Ok(Some(items)) = probe_result {
-                                    // gallery-dl found something; route it.
-                                    let outcome = crate::gallery_probe::route(
-                                        false, // yt-dlp found nothing
-                                        Some(items.as_slice()),
-                                        // Default to video; per-host preference UI is phase 7.
-                                        Some(crate::gallery_probe::StickyMode::Video),
-                                    );
-                                    if matches!(
-                                        outcome,
-                                        crate::gallery_probe::ProbeOutcome::VideoGalleryDl
-                                    ) {
-                                        // Submit as video via gallery-dl backend.
-                                        crate::inline_gallery::submit_gallery_video(
-                                            &manager_b,
-                                            &dest_b,
-                                            &close_b,
-                                            &url,
-                                            &items,
-                                            scheduled_at_b.get(),
-                                            &step_b,
-                                            &lookup_add_b,
+                                // Keep probe_cookies for the count below; deleted after.
+                                match probe_result {
+                                    Ok(Some(items)) => {
+                                        // gallery-dl found something; route it.
+                                        let outcome = crate::gallery_probe::route(
+                                            false, // yt-dlp found nothing
+                                            Some(items.as_slice()),
+                                            // Default to video; per-host preference UI is phase 7.
+                                            Some(crate::gallery_probe::StickyMode::Video),
                                         );
-                                        return;
-                                    }
-                                    // Gallery (images): show the gallery UI.
-                                    if matches!(
-                                        outcome,
-                                        crate::gallery_probe::ProbeOutcome::Gallery
-                                    ) {
-                                        let card = crate::gallery_card::GalleryCard::new(
-                                            items,
-                                            Some(crate::gallery_probe::StickyMode::Gallery),
-                                        );
-                                        // Verify count via the lightweight counter.
-                                        if let Ok(tool) = crate::gallery_argv::resolve_tool()
-                                            && let Some(n) =
-                                                crate::gallery_probe::count_gallery_files(
-                                                    &tool,
-                                                    &url,
-                                                    None,
-                                                    crate::gallery_argv::GalleryFilter::All,
-                                                )
-                                                .await
-                                        {
-                                            tracing::debug!(
-                                                count = n,
-                                                "gallery file count verified"
+                                        if matches!(
+                                            outcome,
+                                            crate::gallery_probe::ProbeOutcome::VideoGalleryDl
+                                        ) {
+                                            // Submit as video via gallery-dl backend.
+                                            // Delete staged cookies; submit_gallery_video
+                                            // re-stages if needed.
+                                            if let Some(path) = probe_cookies {
+                                                let _ = std::fs::remove_file(path);
+                                            }
+                                            crate::inline_gallery::submit_gallery_video(
+                                                &manager_b,
+                                                &dest_b,
+                                                &close_b,
+                                                &url,
+                                                &items,
+                                                scheduled_at_b.get(),
+                                                &step_b,
+                                                &lookup_add_b,
                                             );
+                                            return;
                                         }
-                                        let title = card
-                                            .items
-                                            .first()
-                                            .map(|i| crate::gallery_probe::probe_title(i, &url))
-                                            .unwrap_or_else(|| url.clone());
-                                        tracing::info!(
-                                            files = card.file_count(),
-                                            preview = ?card.preview_filenames(),
-                                            sticky = ?card.sticky_mode(),
-                                            "gallery-dl found image gallery"
+                                        // Gallery (images): show the gallery UI.
+                                        if matches!(
+                                            outcome,
+                                            crate::gallery_probe::ProbeOutcome::Gallery
+                                        ) {
+                                            let card = crate::gallery_card::GalleryCard::new(
+                                                items,
+                                                Some(crate::gallery_probe::StickyMode::Gallery),
+                                                url.clone(),
+                                            );
+                                            // Verify count via the lightweight counter, with
+                                            // the staged cookies (auth-gated galleries).
+                                            if let Ok(tool) = crate::gallery_argv::resolve_tool()
+                                                && let Some(n) =
+                                                    crate::gallery_probe::count_gallery_files(
+                                                        &tool,
+                                                        &url,
+                                                        probe_cookies.as_deref(),
+                                                        crate::gallery_argv::GalleryFilter::All,
+                                                    )
+                                                    .await
+                                            {
+                                                card.set_total(
+                                                    crate::gallery_argv::GalleryFilter::All,
+                                                    n,
+                                                );
+                                                tracing::debug!(
+                                                    count = n,
+                                                    "gallery file count verified"
+                                                );
+                                            }
+                                            // Done with staged cookies.
+                                            if let Some(path) = probe_cookies {
+                                                let _ = std::fs::remove_file(path);
+                                            }
+                                            let title = card
+                                                .items
+                                                .first()
+                                                .map(|i| crate::gallery_probe::probe_title(i, &url))
+                                                .unwrap_or_else(|| url.clone());
+                                            tracing::info!(
+                                                files = card.file_count(),
+                                                preview = ?card.preview_filenames(),
+                                                sticky = ?card.sticky_mode(),
+                                                "gallery-dl found image gallery"
+                                            );
+                                            crate::inline_gallery::show_gallery_ready(
+                                                &step_b, card, &title,
+                                            );
+                                            return;
+                                        }
+                                        // Neither video nor gallery (e.g. all unknown
+                                        // extensions): delete cookies, fall through.
+                                        if let Some(path) = probe_cookies {
+                                            let _ = std::fs::remove_file(path);
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        // gallery-dl found nothing; fall through to plain.
+                                        if let Some(path) = probe_cookies {
+                                            let _ = std::fs::remove_file(path);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Some(path) = probe_cookies {
+                                            let _ = std::fs::remove_file(path);
+                                        }
+                                        if crate::gallery_probe::should_surface(&e) {
+                                            show_video_error(&step_b, &e.to_string());
+                                            set_lookup_add(&lookup_add_b, true);
+                                            return;
+                                        }
+                                        // Otherwise fall through to plain download.
+                                        tracing::warn!(
+                                            error = %e,
+                                            "gallery-dl probe failed, falling back to plain"
                                         );
-                                        crate::inline_gallery::show_gallery_ready(
-                                            &step_b, card, &title,
-                                        );
-                                        return;
                                     }
                                 }
                             }
@@ -2338,7 +2440,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let url = url_entry.text().trim().to_string();
                 let dest = dd.borrow().clone();
                 let filter = *card.filter.borrow();
-                let file_count = card.file_count() as u32;
+                // Use the cached total from count_gallery_files, not the
+                // probe length (capped at 5). None when unknown.
+                let file_count = card.total(filter);
                 let title = card
                     .items
                     .first()
@@ -2354,11 +2458,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         .unwrap_or(0),
                     page_url: url.clone(),
                     title,
-                    file_count: Some(file_count),
+                    file_count,
                     dest_dir: std::path::PathBuf::from(dest),
                     filter,
                     cookies_browser,
-                    speed_limit: None,
+                    speed_limit: crate::gallery_runner::gallery_speed_limit(m.settings()),
                 };
                 match m.enqueue_gallery(&job) {
                     Ok(_) => {

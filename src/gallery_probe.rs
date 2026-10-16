@@ -49,12 +49,32 @@ pub enum GalleryContent {
 impl GalleryContent {
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_ascii_lowercase().as_str() {
-            "mp4" | "webm" | "mov" | "mkv" | "m4v" | "avi" | "ts" => Self::Video,
-            "jpg" | "jpeg" | "jpe" | "png" | "webp" | "gif" | "avif" | "bmp" | "svg" | "tiff"
-            | "tif" => Self::Image,
+            "mp4" | "webm" | "mov" | "mkv" | "m4v" | "avi" | "ts" | "flv" | "wmv" | "mpg"
+            | "mpeg" | "3gp" | "3g2" | "ogv" | "m2ts" | "mts" | "asf" | "f4v" => Self::Video,
+            "jpg" | "jpeg" | "jpe" | "jfif" | "png" | "webp" | "gif" | "avif" | "bmp" | "svg"
+            | "tiff" | "tif" | "heic" | "heif" => Self::Image,
             _ => Self::Unknown,
         }
     }
+}
+
+/// Whether a URL points directly to a media file (by extension). Used to skip
+/// the gallery-dl probe when yt-dlp fails: a direct `.mp4` link isn't a gallery
+/// page, so trying gallery-dl is wasted time.
+pub fn url_is_direct_media(url: &str) -> bool {
+    // Also cover audio extensions for direct downloads.
+    const AUDIO: &[&str] = &[
+        "mp3", "m4a", "aac", "ogg", "oga", "opus", "flac", "wav", "wma", "alac", "aiff",
+    ];
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    if ext.is_empty() || ext.contains('/') {
+        return false;
+    }
+    !matches!(
+        GalleryContent::from_extension(&ext),
+        GalleryContent::Unknown
+    ) || AUDIO.contains(&ext.as_str())
 }
 
 /// Where the New Download card should land after both probes complete.
@@ -383,6 +403,9 @@ mod tests {
             GalleryContent::from_extension("webm"),
             GalleryContent::Video
         );
+        assert_eq!(GalleryContent::from_extension("flv"), GalleryContent::Video);
+        assert_eq!(GalleryContent::from_extension("wmv"), GalleryContent::Video);
+        assert_eq!(GalleryContent::from_extension("mpg"), GalleryContent::Video);
         assert_eq!(GalleryContent::from_extension("jpg"), GalleryContent::Image);
         assert_eq!(
             GalleryContent::from_extension("JPEG"),
@@ -393,9 +416,29 @@ mod tests {
             GalleryContent::Image
         );
         assert_eq!(
+            GalleryContent::from_extension("heic"),
+            GalleryContent::Image
+        );
+        assert_eq!(
+            GalleryContent::from_extension("HEIF"),
+            GalleryContent::Image
+        );
+        assert_eq!(
             GalleryContent::from_extension("xyz"),
             GalleryContent::Unknown
         );
+    }
+
+    #[test]
+    fn url_is_direct_media_check() {
+        assert!(url_is_direct_media("https://example.com/video.mp4"));
+        assert!(url_is_direct_media("https://example.com/photo.HEIC"));
+        assert!(url_is_direct_media(
+            "https://example.com/song.mp3?token=abc#frag"
+        ));
+        assert!(!url_is_direct_media("https://example.com/page.html"));
+        assert!(!url_is_direct_media("https://example.com/noext"));
+        assert!(!url_is_direct_media("https://example.com/"));
     }
 
     #[test]

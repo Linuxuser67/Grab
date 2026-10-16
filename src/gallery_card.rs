@@ -17,15 +17,37 @@ pub struct GalleryCard {
     pub items: Vec<GalleryItem>,
     /// Per-host sticky mode preference.
     pub sticky: Option<StickyMode>,
+    /// Total file counts per filter (from `count_gallery_files`).
+    /// `None` = not yet counted.
+    total: RefCell<std::collections::HashMap<GalleryFilter, u32>>,
+    /// Source URL (for filter-toggle recounts).
+    url: String,
 }
 
 impl GalleryCard {
-    pub fn new(items: Vec<GalleryItem>, sticky: Option<StickyMode>) -> Self {
+    pub fn new(items: Vec<GalleryItem>, sticky: Option<StickyMode>, url: String) -> Self {
         Self {
             filter: Rc::new(RefCell::new(GalleryFilter::All)),
             items,
             sticky,
+            total: RefCell::new(std::collections::HashMap::new()),
+            url,
         }
+    }
+
+    /// The gallery URL (for recounts).
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Store the total file count for a filter.
+    pub fn set_total(&self, filter: GalleryFilter, n: u32) {
+        self.total.borrow_mut().insert(filter, n);
+    }
+
+    /// Get the cached total for a filter, if counted.
+    pub fn total(&self, filter: GalleryFilter) -> Option<u32> {
+        self.total.borrow().get(&filter).copied()
     }
 
     /// Filtered items based on the current filter selection.
@@ -95,6 +117,7 @@ mod tests {
         let card = GalleryCard::new(
             vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")],
             None,
+            "https://example.com".to_string(),
         );
         assert_eq!(card.file_count(), 2);
     }
@@ -104,6 +127,7 @@ mod tests {
         let card = GalleryCard::new(
             vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")],
             None,
+            "https://example.com".to_string(),
         );
         set_filter_index(&card, 1);
         assert_eq!(card.file_count(), 1);
@@ -112,13 +136,17 @@ mod tests {
 
     #[test]
     fn sticky_defaults_to_video() {
-        let card = GalleryCard::new(vec![], None);
+        let card = GalleryCard::new(vec![], None, "https://example.com".to_string());
         assert_eq!(card.sticky_mode(), StickyMode::Video);
     }
 
     #[test]
     fn sticky_gallery_honored() {
-        let card = GalleryCard::new(vec![], Some(StickyMode::Gallery));
+        let card = GalleryCard::new(
+            vec![],
+            Some(StickyMode::Gallery),
+            "https://example.com".to_string(),
+        );
         assert_eq!(card.sticky_mode(), StickyMode::Gallery);
     }
 
@@ -127,8 +155,57 @@ mod tests {
         let card = GalleryCard::new(
             vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")],
             None,
+            "https://example.com".to_string(),
         );
         set_filter_index(&card, 2);
         assert_eq!(card.file_count(), 1);
+    }
+}
+
+/// Display rule for the gallery file count.
+/// - `total`: exact count from `count_gallery_files`, if known.
+/// - `items_len`: number of probe items (capped at 5 by `--range 1-5`).
+/// - `cap`: the probe cap (5).
+///
+/// When total is unknown and we've hit the cap, show "5+ files".
+pub fn display_count(items_len: usize, cap: usize, total: Option<u32>) -> String {
+    match total {
+        Some(n) => {
+            if n == 1 {
+                "1 file".to_string()
+            } else {
+                format!("{n} files")
+            }
+        }
+        None if items_len >= cap => format!("{cap}+ files"),
+        None => {
+            if items_len == 1 {
+                "1 file".to_string()
+            } else {
+                format!("{items_len} files")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod display_count_tests {
+    use super::*;
+
+    #[test]
+    fn exact_count() {
+        assert_eq!(display_count(5, 5, Some(42)), "42 files");
+        assert_eq!(display_count(5, 5, Some(1)), "1 file");
+    }
+
+    #[test]
+    fn capped_unknown() {
+        assert_eq!(display_count(5, 5, None), "5+ files");
+    }
+
+    #[test]
+    fn uncapped_unknown() {
+        assert_eq!(display_count(3, 5, None), "3 files");
+        assert_eq!(display_count(1, 5, None), "1 file");
     }
 }

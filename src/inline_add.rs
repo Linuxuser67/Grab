@@ -1663,29 +1663,21 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     &url,
                                     std::time::Duration::from_secs(30),
                                 )
-                                .await
                             } else {
                                 None
                             }
                         };
                         let count_result = if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                            // Run on the Tokio runtime (GTK main loop has no reactor).
-                            let tool_clone = tool.clone();
-                            let url_clone = url.clone();
-                            let cookies_path = cookies.as_ref().map(|c| c.path().to_path_buf());
-                            crate::runtime::tokio_rt()
-                                .spawn(async move {
-                                    crate::gallery_probe::count_gallery_files(
-                                        &tool_clone,
-                                        &url_clone,
-                                        cookies_path.as_deref(),
-                                        filter,
-                                    )
-                                    .await
-                                })
-                                .await
-                                .ok()
-                                .flatten()
+                            // Prefer extension handoff cookies; fall back to the
+                            // browser-exported cookies.
+                            let cookies_path = crate::extension_server::handoff_cookie_path(&url)
+                                .or_else(|| cookies.as_ref().map(|c| c.path().to_path_buf()));
+                            crate::gallery_probe::count_gallery_files(
+                                &tool,
+                                &url,
+                                cookies_path.as_deref(),
+                                filter,
+                            )
                         } else {
                             None
                         };
@@ -2178,7 +2170,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             &url,
                                             std::time::Duration::from_secs(30),
                                         )
-                                        .await
                                     } else {
                                         None
                                     }
@@ -2194,28 +2185,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 let cookies_path = handoff_path.or_else(|| {
                                     probe_cookies.as_ref().map(|c| c.path().to_path_buf())
                                 });
-                                let probe_result = match crate::runtime::tokio_rt()
-                                    .spawn(async move {
-                                        crate::gallery_probe::probe_gallery(
-                                            &tool_clone,
-                                            &url_clone,
-                                            cookies_path.as_deref(),
-                                        )
-                                        .await
-                                    })
-                                    .await
-                                {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            "gallery-dl probe task failed"
-                                        );
-                                        Err(crate::gallery_tools::GalleryError::runtime(
-                                            "probe task failed",
-                                        ))
-                                    }
-                                };
+                                let probe_result = crate::gallery_probe::probe_gallery(
+                                    &tool_clone,
+                                    &url_clone,
+                                    cookies_path.as_deref(),
+                                );
                                 // Keep probe_cookies for the count below; StagedCookies
                                 // drops at block end.
                                 match probe_result {
@@ -2258,7 +2232,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             );
                                             // Verify count via the lightweight counter, with
                                             // the staged cookies (auth-gated galleries).
-                                            // Run on Tokio runtime (GTK main loop has no reactor).
                                             // Prefer extension handoff cookies; fall back to the
                                             // browser-exported probe_cookies.
                                             // Skip the automatic count: the probe's items are

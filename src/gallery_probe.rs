@@ -228,54 +228,60 @@ pub fn probe_title(item: &GalleryItem, url: &str) -> String {
 /// (exit 64) or yields no files. `Err` on timeout, spawn failure, or any other
 /// non-zero exit — the card then shows "couldn't preview" but Add stays enabled
 /// (optimistic path).
-pub async fn probe_gallery(
+pub fn probe_gallery(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
 ) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
-    let mut cmd = tokio::process::Command::new(tool);
-    cmd.arg("--config-ignore")
-        .arg("-j")
-        .arg("--no-download")
-        .arg("--range")
-        .arg("1-5")
-        // Don't let gallery-dl write back to Grab's staged cookies file.
-        .arg("-o")
-        .arg("extractor.cookies-update=false");
-    if let Some(cookies) = cookies_file {
-        cmd.arg("-C").arg(cookies);
-    }
-    // Instagram throttling for extraction requests (probe doesn't download).
-    for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
-        cmd.arg(arg);
-    }
-    // `--` last: guards against URLs starting with `-` being parsed as options.
-    cmd.arg("--").arg(url);
-    let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| GalleryError::install("gallery-dl probe timed out"))?
-        .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
+    // Clone for 'static bound (block_on_sync may spawn a thread).
+    let tool = tool.to_path_buf();
+    let url = url.to_string();
+    let cookies_file = cookies_file.map(|p| p.to_path_buf());
+    crate::runtime::block_on_sync(async move {
+        let mut cmd = tokio::process::Command::new(&tool);
+        cmd.arg("--config-ignore")
+            .arg("-j")
+            .arg("--no-download")
+            .arg("--range")
+            .arg("1-5")
+            // Don't let gallery-dl write back to Grab's staged cookies file.
+            .arg("-o")
+            .arg("extractor.cookies-update=false");
+        if let Some(cookies) = cookies_file.as_deref() {
+            cmd.arg("-C").arg(cookies);
+        }
+        // Instagram throttling for extraction requests (probe doesn't download).
+        for arg in crate::gallery_argv::instagram_throttle_args(&url, false) {
+            cmd.arg(arg);
+        }
+        // `--` last: guards against URLs starting with `-` being parsed as options.
+        cmd.arg("--").arg(&url);
+        let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
+            .await
+            .map_err(|_| GalleryError::install("gallery-dl probe timed out"))?
+            .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
 
-    // Exit 32 (v1.30.0+) / 64 (older) = NoExtractorError: unsupported URL,
-    // not a failure. v1.30.0 folded NoExtractorError (64) into InputError (32).
-    if matches!(output.status.code(), Some(32) | Some(64)) {
-        return Ok(None);
-    }
-    if !output.status.success() {
-        return Err(GalleryError::install(format!(
-            "gallery-dl probe failed (exit {})",
-            output.status.code().unwrap_or(-1)
-        )));
-    }
-    // `-j` emits `[type, ...]` arrays: [2, {dir}] for directory context,
-    // [3, "url", {meta}] for files, [-1, {error, message}] for errors.
-    let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
-        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
-    let items = parse_probe_messages(&messages)?;
-    if items.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(items))
+        // Exit 32 (v1.30.0+) / 64 (older) = NoExtractorError: unsupported URL,
+        // not a failure. v1.30.0 folded NoExtractorError (64) into InputError (32).
+        if matches!(output.status.code(), Some(32) | Some(64)) {
+            return Ok(None);
+        }
+        if !output.status.success() {
+            return Err(GalleryError::install(format!(
+                "gallery-dl probe failed (exit {})",
+                output.status.code().unwrap_or(-1)
+            )));
+        }
+        // `-j` emits `[type, ...]` arrays: [2, {dir}] for directory context,
+        // [3, "url", {meta}] for files, [-1, {error, message}] for errors.
+        let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+            .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
+        let items = parse_probe_messages(&messages)?;
+        if items.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(items))
+    })
 }
 
 /// Parse `gallery-dl -j` message arrays into file items.
@@ -371,27 +377,32 @@ fn parse_probe_messages(messages: &[serde_json::Value]) -> Result<Vec<GalleryIte
 /// Count files without downloading: `gallery-dl --config-ignore -g --no-download <url>`.
 /// Returns the line count of direct file URLs, or `None` on any failure
 /// (the card then shows an indeterminate count).
-pub async fn count_gallery_files(
+pub fn count_gallery_files(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
     filter: crate::gallery_argv::GalleryFilter,
 ) -> Option<u32> {
-    let argv = crate::gallery_argv::count_argv(tool, url, cookies_file, filter);
-    let mut cmd = tokio::process::Command::new(&argv[0]);
-    cmd.args(&argv[1..]);
-    let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let count = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .count();
-    Some(count as u32)
+    let tool = tool.to_path_buf();
+    let url = url.to_string();
+    let cookies_file = cookies_file.map(|p| p.to_path_buf());
+    crate::runtime::block_on_sync(async move {
+        let argv = crate::gallery_argv::count_argv(&tool, &url, cookies_file.as_deref(), filter);
+        let mut cmd = tokio::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
+            .await
+            .ok()?
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let count = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        Some(count as u32)
+    })
 }
 
 #[cfg(test)]
@@ -759,5 +770,45 @@ mod tests {
         let messages: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
         let items = parse_probe_messages(&messages).unwrap();
         assert_eq!(route(false, Some(&items), None), ProbeOutcome::Gallery);
+    }
+
+    /// Regression: probe_gallery must work from a thread without a Tokio
+    /// runtime (e.g. GTK main thread). Uses block_on via the internal
+    /// static runtime; a nonexistent tool should give a proper error,
+    /// not a "no reactor running" panic.
+    #[test]
+    fn probe_gallery_works_without_tokio_runtime() {
+        let result = std::thread::spawn(|| {
+            // No Tokio runtime on this thread.
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            probe_gallery(
+                std::path::Path::new("/nonexistent/gallery-dl"),
+                "https://example.com/",
+                None,
+            )
+        })
+        .join()
+        .expect("thread panicked");
+        // Should be an Err (couldn't spawn), not a panic.
+        assert!(result.is_err());
+    }
+
+    /// Regression: count_gallery_files must work from a thread without
+    /// a Tokio runtime.
+    #[test]
+    fn count_gallery_files_works_without_tokio_runtime() {
+        let result = std::thread::spawn(|| {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            count_gallery_files(
+                std::path::Path::new("/nonexistent/gallery-dl"),
+                "https://example.com/",
+                None,
+                crate::gallery_argv::GalleryFilter::All,
+            )
+        })
+        .join()
+        .expect("thread panicked");
+        // Should be None (failure), not a panic.
+        assert_eq!(result, None);
     }
 }

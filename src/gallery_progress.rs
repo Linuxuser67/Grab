@@ -1,9 +1,7 @@
 //! gallery-dl progress parsing: pipe-mode stdout line parser.
 //!
-//! gallery-dl's pipe output mode (customized via `output.mode` in gallery_argv)
-//! emits:
-//! - Success: `<full-path>\n` (bare path, no prefix)
-//! - Skip: `# <full-path>\n` (`# ` prefix)
+//! gallery-dl's `pipe` output mode (set via `output.mode` in gallery_argv)
+//! emits one file path per line for each downloaded file.
 //!
 //! Byte-level progress is disabled (`downloader.http.progress=null`), so
 //! progress is tracked by file counts only. This is a pure line parser;

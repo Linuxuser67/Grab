@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 /// `include_download_sleep`: also add `--sleep 1.5` (delay before each file
 /// download). Only meaningful for actual downloads, not probes/counts.
 pub fn instagram_throttle_args(url: &str, include_download_sleep: bool) -> Vec<String> {
-    let host = crate::video_probe::page_host(url);
-    if host == "instagram.com" || host.ends_with(".instagram.com") {
+    if is_instagram_url(url) {
         let mut args = vec!["--sleep-request".to_string(), "3".to_string()];
         if include_download_sleep {
             args.push("--sleep".to_string());
@@ -90,12 +89,13 @@ impl GalleryFilter {
 /// - `extractor.cookies-update=false`: don't mutate Grab's staged cookies
 /// - `downloader.http.progress=null`: suppress gallery-dl's stderr progress
 /// - `output.progress=false`: disable multi-URL progress indicator
-/// - Custom `output.mode`: parseable pipe format (see gallery_progress)
+/// - `output.mode=pipe`: one file path per line (see gallery_progress)
 pub fn download_argv(
     tool: &Path,
     url: &str,
     dest_dir: &Path,
     cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
     filter: GalleryFilter,
     speed_limit: Option<u64>,
 ) -> Vec<String> {
@@ -115,13 +115,18 @@ pub fn download_argv(
         "-o".to_string(),
         "output.progress=false".to_string(),
         "-o".to_string(),
-        // Custom pipe mode: success lines are bare paths, skip lines are
-        // `# `-prefixed. Byte progress is disabled; file counts drive the UI.
-        "output.mode={\"success\": \"{}\\n\", \"skip\": \"# {}\\n\"}".to_string(),
+        // Pipe mode: one file path per line. Avoids the custom JSON
+        // output.mode which triggers a gallery-dl internal bug
+        // (AttributeError in output.py _make_func).
+        "output.mode=pipe".to_string(),
     ];
     if let Some(cookies) = cookies_file {
         argv.push("-C".to_string());
         argv.push(cookies.to_string_lossy().to_string());
+    }
+    if let Some(ua) = user_agent {
+        argv.push("--user-agent".to_string());
+        argv.push(ua.to_string());
     }
     push_filter(&mut argv, filter);
     if let Some(limit) = speed_limit {
@@ -134,6 +139,12 @@ pub fn download_argv(
     argv.push("--".to_string());
     argv.push(url.to_string());
     argv
+}
+
+/// Whether a URL is Instagram (rate-limited; skip extra enumerations).
+pub fn is_instagram_url(url: &str) -> bool {
+    let host = crate::video_probe::page_host(url);
+    host == "instagram.com" || host.ends_with(".instagram.com")
 }
 
 /// Build the gallery-dl count argv (`-g` lists direct URLs, one per line).
@@ -241,6 +252,7 @@ mod tests {
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
+            None,
             GalleryFilter::All,
             None,
         );
@@ -257,6 +269,7 @@ mod tests {
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
+            None,
             GalleryFilter::All,
             None,
         );
@@ -271,6 +284,7 @@ mod tests {
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
+            None,
             GalleryFilter::All,
             None,
         );
@@ -284,6 +298,7 @@ mod tests {
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             Some(Path::new("/tmp/cookies.txt")),
+            None,
             GalleryFilter::All,
             None,
         );
@@ -292,11 +307,48 @@ mod tests {
     }
 
     #[test]
+    fn download_argv_user_agent() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            Some("Mozilla/5.0 Test"),
+            GalleryFilter::All,
+            None,
+        );
+        let ua_pos = argv.iter().position(|a| a == "--user-agent").unwrap();
+        assert_eq!(argv[ua_pos + 1], "Mozilla/5.0 Test");
+    }
+
+    #[test]
+    fn download_argv_no_user_agent_by_default() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            None,
+            GalleryFilter::All,
+            None,
+        );
+        assert!(!argv.iter().any(|a| a == "--user-agent"));
+    }
+
+    #[test]
+    fn is_instagram_url_matches() {
+        assert!(is_instagram_url("https://www.instagram.com/p/ABC123/"));
+        assert!(is_instagram_url("https://instagram.com/p/ABC123/"));
+        assert!(!is_instagram_url("https://example.com/gallery"));
+    }
+
+    #[test]
     fn download_argv_filter_images() {
         let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
+            None,
             None,
             GalleryFilter::ImagesOnly,
             None,
@@ -313,6 +365,7 @@ mod tests {
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
+            None,
             GalleryFilter::VideosOnly,
             None,
         );
@@ -327,6 +380,7 @@ mod tests {
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
+            None,
             None,
             GalleryFilter::All,
             None,
@@ -368,6 +422,7 @@ mod tests {
             "https://www.instagram.com/p/ABC123/",
             Path::new("/tmp/dest"),
             None,
+            None,
             GalleryFilter::All,
             None,
         );
@@ -389,6 +444,7 @@ mod tests {
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
+            None,
             None,
             GalleryFilter::All,
             None,

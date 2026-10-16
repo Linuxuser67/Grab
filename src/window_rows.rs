@@ -602,10 +602,14 @@ fn show_failure_dialog(
         .cursor_visible(false)
         .monospace(true)
         .wrap_mode(gtk4::WrapMode::WordChar)
+        .vexpand(true)
+        .hexpand(true)
         .build();
     text.buffer().set_text(&item.detail());
     let scrolled = gtk4::ScrolledWindow::builder()
         .min_content_height(240)
+        .min_content_width(480)
+        .propagate_natural_width(true)
         .child(&text)
         .build();
     dialog.set_extra_child(Some(&scrolled));

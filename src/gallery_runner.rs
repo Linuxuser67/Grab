@@ -64,6 +64,7 @@ pub async fn run_gallery_download(
     job: &GalleryJob,
     tool: &Path,
     cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
     on_progress: impl Fn(GalleryProgressUpdate),
 ) -> Result<GalleryResult, GalleryError> {
     let argv = download_argv(
@@ -71,6 +72,7 @@ pub async fn run_gallery_download(
         &job.page_url,
         &job.dest_dir,
         cookies_file,
+        user_agent,
         job.filter,
         job.speed_limit,
     );
@@ -158,13 +160,8 @@ pub async fn run_gallery_download(
         let code = status.code();
         let stderr_tail = stderr_lines.lock().unwrap().join("\n");
         // Log the full tail at warning level; the user-facing message gets
-        // a truncated version (3 lines / ~300 chars).
+        // the full tail too (the dialog scrolls).
         tracing::warn!(stderr = %stderr_tail, "gallery-dl stderr tail");
-        // Take the LAST 3 lines (where the actual error is), not the first 3.
-        let lines: Vec<&str> = stderr_tail.lines().collect();
-        let start = lines.len().saturating_sub(3);
-        let short_tail: String = lines[start..].join("\n");
-        let short_tail = short_tail.chars().take(300).collect::<String>();
         // Partial success: files were downloaded/skipped before the failure.
         // Return Ok with the exit code so the row shows Done with a warning.
         if !files.is_empty() || progress.files_skipped > 0 {
@@ -174,7 +171,7 @@ pub async fn run_gallery_download(
                 exit_code: code,
             });
         }
-        // Total failure: include the truncated stderr tail and a mapped message.
+        // Total failure: include the full stderr tail and a mapped message.
         // gallery-dl exit codes are bit flags:
         // 1=unspecified, 2=cmdline, 4=http, 8=challenge,
         // 16=auth, 32=input, 128=os. Check the most specific bits first.
@@ -189,7 +186,7 @@ pub async fn run_gallery_download(
             _ => "gallery-dl failed",
         };
         return Err(GalleryError::runtime(format!(
-            "{msg} (exit {}): {short_tail}",
+            "{msg} (exit {}):\n{stderr_tail}",
             code.unwrap_or(-1)
         )));
     }

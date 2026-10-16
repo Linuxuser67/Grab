@@ -2003,6 +2003,7 @@ impl DownloadManager {
         // Spawn the download on the tokio runtime.
         // Cookies are resolved at spawn time (not enqueue time): the staged
         // file is ephemeral, so a path stored at enqueue would be stale on retry.
+        let page_url = job.page_url.clone();
         let handle = tokio_rt().spawn(async move {
             let tool = match crate::gallery_argv::resolve_tool() {
                 Ok(t) => t,
@@ -2012,7 +2013,14 @@ impl DownloadManager {
                 }
             };
             // Stage cookies inside the task (async context).
-            let cookies_file = if job.cookies_browser.is_empty() || job.cookies_browser == "none" {
+            // Prefer the extension's staged cookies ("Download with Grab");
+            // fall back to browser export. Same order as the probe.
+            let handoff_path = crate::extension_server::handoff_cookie_path(&job.page_url);
+            let handoff_ua = crate::extension_server::handoff_user_agent(&job.page_url);
+            let cookies_file: Option<crate::cookies::StagedCookies> = if handoff_path.is_some()
+                || job.cookies_browser.is_empty()
+                || job.cookies_browser == "none"
+            {
                 None
             } else if let Some(ytdlp) =
                 crate::video_tools::find_in_dirs("yt-dlp", &crate::video_tools::tool_search_dirs())
@@ -2030,7 +2038,10 @@ impl DownloadManager {
             let result = crate::gallery_runner::run_gallery_download(
                 &job,
                 &tool,
-                cookies_file.as_ref().map(|c| c.path()),
+                handoff_path
+                    .as_deref()
+                    .or_else(|| cookies_file.as_ref().map(|c| c.path())),
+                handoff_ua.as_deref(),
                 |update| {
                     let _ = tx.send(GalleryMsg::Progress(update.files_completed));
                 },
@@ -2038,6 +2049,9 @@ impl DownloadManager {
             .await;
             // `cookies_file` (StagedCookies) drops at block end, deleting the
             // file. Pause/cancel drops the task, so no leak.
+            // Discard handoff cookies now that the download is done.
+            // (Pause keeps them; the task isn't dropped on pause.)
+            crate::extension_server::discard_handoff_cookies(&page_url);
             let _ = tx.send(GalleryMsg::Finished(result.map_err(|e| e.to_string())));
         });
 

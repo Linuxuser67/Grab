@@ -2261,36 +2261,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             // Run on Tokio runtime (GTK main loop has no reactor).
                                             // Prefer extension handoff cookies; fall back to the
                                             // browser-exported probe_cookies.
-                                            let verified_count = if let Ok(tool) =
-                                                crate::gallery_argv::resolve_tool()
-                                            {
-                                                let tool_clone = tool.clone();
-                                                let url_clone = url.clone();
-                                                let cookies_path =
-                                                    crate::extension_server::handoff_cookie_path(
-                                                        &url,
-                                                    )
-                                                    .or_else(|| {
-                                                        probe_cookies
-                                                            .as_ref()
-                                                            .map(|c| c.path().to_path_buf())
-                                                    });
-                                                crate::runtime::tokio_rt()
-                                                    .spawn(async move {
-                                                        crate::gallery_probe::count_gallery_files(
-                                                            &tool_clone,
-                                                            &url_clone,
-                                                            cookies_path.as_deref(),
-                                                            crate::gallery_argv::GalleryFilter::All,
-                                                        )
-                                                        .await
-                                                    })
-                                                    .await
-                                                    .ok()
-                                                    .flatten()
-                                            } else {
-                                                None
-                                            };
+                                            // Skip the automatic count: the probe's items are
+                                            // shown instead. Counting is an extra full
+                                            // enumeration; the user can trigger it via filter
+                                            // toggle if needed.
+                                            let verified_count: Option<u32> = None;
                                             if let Some(n) = verified_count {
                                                 card.set_total(
                                                     crate::gallery_argv::GalleryFilter::All,

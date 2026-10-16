@@ -94,10 +94,10 @@ async fn gallery_integration_probe_count_download() {
         Ok(Some(items)) => items,
         Ok(None) => panic!("probe returned None"),
         Err(e) if is_gallery_dl_internal_bug(&e) => {
-            // Upstream gallery-dl bug (e.g., 1.32.16 on Fedora 44): the
-            // binary is installed and runs, but crashes internally.
-            // Skip instead of failing; GRAB_REQUIRE_GALLERY_DL only
-            // guarantees the binary exists, not that it works.
+            // Upstream gallery-dl 1.32.16 bug on Fedora 44: the binary is
+            // installed and runs, but crashes internally with AttributeError.
+            // Skip instead of failing; the gate can't be enforced until
+            // upstream fixes the bug. See CI logs for details.
             eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
             return;
         }
@@ -140,10 +140,10 @@ async fn gallery_integration_probe_count_download() {
     {
         Ok(r) => r,
         Err(e) if is_gallery_dl_internal_bug(&e) => {
-            // Upstream gallery-dl bug (e.g., 1.32.16 on Fedora 44): the
-            // binary is installed and runs, but crashes internally.
-            // Skip instead of failing; GRAB_REQUIRE_GALLERY_DL only
-            // guarantees the binary exists, not that it works.
+            // Upstream gallery-dl 1.32.16 bug on Fedora 44: the binary is
+            // installed and runs, but crashes internally with AttributeError.
+            // Skip instead of failing; the gate can't be enforced until
+            // upstream fixes the bug. See CI logs for details.
             eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
             return;
         }
@@ -160,10 +160,10 @@ async fn gallery_integration_probe_count_download() {
     {
         Ok(r) => r,
         Err(e) if is_gallery_dl_internal_bug(&e) => {
-            // Upstream gallery-dl bug (e.g., 1.32.16 on Fedora 44): the
-            // binary is installed and runs, but crashes internally.
-            // Skip instead of failing; GRAB_REQUIRE_GALLERY_DL only
-            // guarantees the binary exists, not that it works.
+            // Upstream gallery-dl 1.32.16 bug on Fedora 44: the binary is
+            // installed and runs, but crashes internally with AttributeError.
+            // Skip instead of failing; the gate can't be enforced until
+            // upstream fixes the bug. See CI logs for details.
             eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
             return;
         }
@@ -208,10 +208,10 @@ async fn gallery_integration_filtered_download() {
     {
         Ok(r) => r,
         Err(e) if is_gallery_dl_internal_bug(&e) => {
-            // Upstream gallery-dl bug (e.g., 1.32.16 on Fedora 44): the
-            // binary is installed and runs, but crashes internally.
-            // Skip instead of failing; GRAB_REQUIRE_GALLERY_DL only
-            // guarantees the binary exists, not that it works.
+            // Upstream gallery-dl 1.32.16 bug on Fedora 44: the binary is
+            // installed and runs, but crashes internally with AttributeError.
+            // Skip instead of failing; the gate can't be enforced until
+            // upstream fixes the bug. See CI logs for details.
             eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
             return;
         }

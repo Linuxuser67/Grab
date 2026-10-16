@@ -7061,6 +7061,60 @@ fn gallery_round_trip_queued() {
 }
 
 #[test]
+fn gallery_round_trip_paused() {
+    // Paused gallery restores with Paused status, 0 progress, and the job
+    // available in gallery_jobs (for resume).
+    let (_lock, _loop) = test_locks();
+    let qf = test_queue_file("gallery-paused");
+    let settings = test_settings();
+    let job = gallery_job_fixture();
+    let job_value = serde_json::to_value(&job).unwrap();
+    let items = vec![gallery_stored_item(DownloadStatus::Paused, Some(job_value))];
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items,
+    };
+    std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.restore_queue();
+    assert_eq!(m.store().n_items(), 1);
+    let item = m.store().item(0).and_downcast::<DownloadItem>().unwrap();
+    assert!(item.is_gallery());
+    assert_eq!(item.status(), DownloadStatus::Paused);
+    assert_eq!(item.progress(), 0.0);
+    assert!(m.gallery_jobs.borrow().contains_key(&item.id()));
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn gallery_id_claim_conflict_allocates_new() {
+    // Two restored galleries with the same stored ID: the second gets a
+    // fresh ID (never shares a staging directory).
+    // Mutation: return stored id unconditionally → both items share id → fails.
+    let (_lock, _loop) = test_locks();
+    let qf = test_queue_file("gallery-id-conflict");
+    let settings = test_settings();
+    let job = gallery_job_fixture();
+    let job_value = serde_json::to_value(&job).unwrap();
+    let mut item1 = gallery_stored_item(DownloadStatus::Paused, Some(job_value.clone()));
+    item1.id = Some(42);
+    let mut item2 = gallery_stored_item(DownloadStatus::Paused, Some(job_value));
+    item2.id = Some(42); // duplicate!
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items: vec![item1, item2],
+    };
+    std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.restore_queue();
+    assert_eq!(m.store().n_items(), 2);
+    let a = m.store().item(0).and_downcast::<DownloadItem>().unwrap();
+    let b = m.store().item(1).and_downcast::<DownloadItem>().unwrap();
+    assert_ne!(a.id(), b.id(), "duplicate IDs must not coexist");
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
 fn gallery_round_trip_done() {
     let (_lock, _loop) = test_locks();
     let qf = test_queue_file("gallery-done");

@@ -2261,12 +2261,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             // Run on Tokio runtime (GTK main loop has no reactor).
                                             // Prefer extension handoff cookies; fall back to the
                                             // browser-exported probe_cookies.
-                                            let verified_count = if let Ok(tool) =
-                                                crate::gallery_argv::resolve_tool()
-                                            {
-                                                let tool_clone = tool.clone();
-                                                let url_clone = url.clone();
-                                                let cookies_path =
+                                            // For Instagram, skip the automatic count: each
+                                            // enumeration costs 3s per request against the
+                                            // rate limit. The probe's items are shown instead.
+                                            let verified_count =
+                                                if crate::gallery_argv::is_instagram_url(&url) {
+                                                    None
+                                                } else if let Ok(tool) =
+                                                    crate::gallery_argv::resolve_tool()
+                                                {
+                                                    let tool_clone = tool.clone();
+                                                    let url_clone = url.clone();
+                                                    let cookies_path =
                                                     crate::extension_server::handoff_cookie_path(
                                                         &url,
                                                     )
@@ -2275,7 +2281,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                                             .as_ref()
                                                             .map(|c| c.path().to_path_buf())
                                                     });
-                                                crate::runtime::tokio_rt()
+                                                    crate::runtime::tokio_rt()
                                                     .spawn(async move {
                                                         crate::gallery_probe::count_gallery_files(
                                                             &tool_clone,
@@ -2288,9 +2294,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                                     .await
                                                     .ok()
                                                     .flatten()
-                                            } else {
-                                                None
-                                            };
+                                                } else {
+                                                    None
+                                                };
                                             if let Some(n) = verified_count {
                                                 card.set_total(
                                                     crate::gallery_argv::GalleryFilter::All,

@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 /// `include_download_sleep`: also add `--sleep 1.5` (delay before each file
 /// download). Only meaningful for actual downloads, not probes/counts.
 pub fn instagram_throttle_args(url: &str, include_download_sleep: bool) -> Vec<String> {
-    let host = crate::video_probe::page_host(url);
-    if host == "instagram.com" || host.ends_with(".instagram.com") {
+    if is_instagram_url(url) {
         let mut args = vec!["--sleep-request".to_string(), "3".to_string()];
         if include_download_sleep {
             args.push("--sleep".to_string());
@@ -139,6 +138,12 @@ pub fn download_argv(
     argv.push("--".to_string());
     argv.push(url.to_string());
     argv
+}
+
+/// Whether a URL is Instagram (rate-limited; skip extra enumerations).
+pub fn is_instagram_url(url: &str) -> bool {
+    let host = crate::video_probe::page_host(url);
+    host == "instagram.com" || host.ends_with(".instagram.com")
 }
 
 /// Build the gallery-dl count argv (`-g` lists direct URLs, one per line).
@@ -327,6 +332,13 @@ mod tests {
             None,
         );
         assert!(!argv.iter().any(|a| a == "--user-agent"));
+    }
+
+    #[test]
+    fn is_instagram_url_matches() {
+        assert!(is_instagram_url("https://www.instagram.com/p/ABC123/"));
+        assert!(is_instagram_url("https://instagram.com/p/ABC123/"));
+        assert!(!is_instagram_url("https://example.com/gallery"));
     }
 
     #[test]

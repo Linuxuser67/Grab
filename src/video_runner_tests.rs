@@ -219,6 +219,7 @@ fn subtitle_probe_drain_times_out_when_pipe_stays_open() {
         remux_video: None,
         embed_chapters: false,
         proxy: None,
+        info_json: None,
     };
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<StopIntent>();
     let start = std::time::Instant::now();
@@ -343,6 +344,7 @@ fn staging_claim_skips_existing_base_file() {
         remux_video: None,
         embed_chapters: false,
         proxy: None,
+        info_json: None,
     };
 
     // Claim a staging name: should skip Title.mp4 (== dest) and Title.1.mp4 (exists),

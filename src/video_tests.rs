@@ -1033,6 +1033,7 @@ fn resume_attempt_labels_reresolve_as_resuming() {
         remux_video: None,
         embed_chapters: false,
         proxy: None,
+        info_json: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
@@ -1085,6 +1086,7 @@ fn pipeline_reports_missing_tools() {
         remux_video: None,
         embed_chapters: false,
         proxy: None,
+        info_json: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
@@ -3580,6 +3582,7 @@ fn direct_test_job() -> VideoJob {
         remux_video: None,
         embed_chapters: false,
         proxy: None,
+        info_json: None,
     }
 }
 #[test]
@@ -3823,6 +3826,7 @@ fn live_test_job() -> VideoJob {
         remux_video: None,
         embed_chapters: false,
         proxy: None,
+        info_json: None,
     }
 }
 
@@ -6245,6 +6249,7 @@ fn vod_hls_pins_planner_variant_id() {
         remux_video: None,
         embed_chapters: false,
         proxy: None,
+        info_json: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
@@ -6312,6 +6317,7 @@ fn vod_hls_refuses_existing_dest() {
         remux_video: None,
         embed_chapters: false,
         proxy: None,
+        info_json: None,
     };
     std::fs::write(&job.dest, b"already").unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -8830,6 +8836,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         remux_video: None,
         embed_chapters: false,
         proxy: None,
+        info_json: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();

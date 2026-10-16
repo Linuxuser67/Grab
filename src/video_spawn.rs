@@ -169,13 +169,16 @@ pub(crate) async fn fetch_video_page(
 }
 
 /// Extract metadata for one URL (the page URL is what survives restarts, not the media URLs).
+/// Returns the parsed result plus the raw `--dump-single-json` for single videos
+/// (used for `--load-info-json` at download time to skip re-extraction).
+/// Playlists return `None` (their entries are re-probed individually).
 pub async fn fetch_video_infos(
     libs: Libraries,
     url: String,
     cookies_browser: String,
     newest_first: bool,
     fetch_proxy: Option<crate::net_types::ResolvedProxy>,
-) -> Result<ProbeResult, VideoError> {
+) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
         tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
@@ -206,15 +209,17 @@ pub async fn fetch_video_infos(
         // Stub entries would choke the strict video model.
         if let Some(mut playlist) = parse_playlist_json(&value, &url) {
             retarget_story_items(&url, &mut playlist);
-            return Ok::<_, VideoError>(ProbeResult::Playlist(playlist));
+            return Ok::<_, VideoError>((ProbeResult::Playlist(playlist), None));
         }
         sanitize_video_json(&mut value);
+        // Clone for --load-info-json: the parse below consumes `value`.
+        // The JSON is ~100KB; one clone per probe is acceptable.
+        let raw_json = value.clone();
         let video: Video = serde_json::from_value(value).map_err(VideoError::fetch)?;
-        Ok::<_, VideoError>(ProbeResult::Single(VideoInfo::from(
-            &video,
-            &url,
-            newest_first,
-        )))
+        Ok::<_, VideoError>((
+            ProbeResult::Single(VideoInfo::from(&video, &url, newest_first)),
+            Some(raw_json),
+        ))
     });
     match handle.await {
         Ok(r) => r,

@@ -8018,6 +8018,8 @@ fn vod_and_live_argv_never_emit_removed_tuning_flags() {
 fn unified_argv_limit_rate_when_set() {
     // Opt-in throttle: the shared speed limit caps VOD legs via
     // `--limit-rate` (plain bytes; yt-dlp accepts the raw rate).
+    // When throttled, --concurrent-fragments is 1 so the limit applies to
+    // the total (yt-dlp applies it per connection).
     let mut job = direct_test_job();
     job.speed_limit = Some(512_000);
     let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
@@ -8031,11 +8033,16 @@ fn unified_argv_limit_rate_when_set() {
         None,
     );
     let pos = argv.iter().position(|a| a == "--limit-rate").expect("flag");
-    // --limit-rate is divided by 4 (concurrent fragments) so the total stays at the cap.
-    assert_eq!(argv[pos + 1], "128000");
+    assert_eq!(argv[pos + 1], "512000");
     let sep = argv.iter().position(|a| a == "--").expect("separator");
     assert!(pos < sep, "limit-rate must precede the URL separator");
-    // Default off: no trace of the flag.
+    // Throttled: concurrent-fragments is 1.
+    let n_pos = argv
+        .iter()
+        .position(|a| a == "--concurrent-fragments")
+        .expect("N flag");
+    assert_eq!(argv[n_pos + 1], "1");
+    // Default off: no trace of the flag, N stays at 4.
     job.speed_limit = None;
     let argv = unified_download_argv(
         &job,
@@ -8047,6 +8054,11 @@ fn unified_argv_limit_rate_when_set() {
         None,
     );
     assert!(!argv.iter().any(|a| a == "--limit-rate"));
+    let n_pos = argv
+        .iter()
+        .position(|a| a == "--concurrent-fragments")
+        .expect("N flag");
+    assert_eq!(argv[n_pos + 1], "4");
 }
 
 #[test]
@@ -8095,11 +8107,16 @@ fn hls_argv_limit_rate_when_set() {
         None,
     );
     let pos = argv.iter().position(|a| a == "--limit-rate").expect("flag");
-    // --limit-rate is divided by 4 (concurrent fragments) so the total stays at the cap.
-    assert_eq!(argv[pos + 1], "524288");
+    assert_eq!(argv[pos + 1], "2097152");
     let sep = argv.iter().position(|a| a == "--").expect("separator");
     assert!(pos < sep, "limit-rate must precede the URL separator");
-    // Default off: no trace of the flag.
+    // Throttled: concurrent-fragments is 1.
+    let n_pos = argv
+        .iter()
+        .position(|a| a == "--concurrent-fragments")
+        .expect("N flag");
+    assert_eq!(argv[n_pos + 1], "1");
+    // Default off: no trace of the flag, N stays at 4.
     job.speed_limit = None;
     let argv = hls_download_argv(
         &job,
@@ -8109,6 +8126,11 @@ fn hls_argv_limit_rate_when_set() {
         None,
     );
     assert!(!argv.iter().any(|a| a == "--limit-rate"));
+    let n_pos = argv
+        .iter()
+        .position(|a| a == "--concurrent-fragments")
+        .expect("N flag");
+    assert_eq!(argv[n_pos + 1], "4");
 }
 
 #[test]

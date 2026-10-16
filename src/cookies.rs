@@ -237,21 +237,30 @@ impl Drop for StagedCookies {
     }
 }
 
-pub(crate) fn export_cookies_to_file(
+pub(crate) async fn export_cookies_to_file(
     youtube_bin: &Path,
     cookies_browser: &str,
     page_url: &str,
     timeout: Duration,
 ) -> Option<StagedCookies> {
-    // Run on the Tokio runtime: callers may be on the GTK main loop
-    // (glib::spawn_future_local) which has no reactor for tokio::process.
+    let path = stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await?;
+    Some(StagedCookies(path))
+}
+
+/// Sync wrapper for `export_cookies_to_file` for true sync callers.
+#[allow(dead_code)]
+pub(crate) fn export_cookies_to_file_sync(
+    youtube_bin: &Path,
+    cookies_browser: &str,
+    page_url: &str,
+    timeout: Duration,
+) -> Option<StagedCookies> {
     let youtube_bin = youtube_bin.to_path_buf();
     let cookies_browser = cookies_browser.to_string();
     let page_url = page_url.to_string();
-    let path = crate::runtime::block_on_sync(async move {
-        stage_cookie_file(&youtube_bin, &cookies_browser, &page_url, timeout).await
-    })?;
-    Some(StagedCookies(path))
+    crate::runtime::block_on_sync(async move {
+        export_cookies_to_file(&youtube_bin, &cookies_browser, &page_url, timeout).await
+    })
 }
 
 /// Dump one profile's cookies through yt-dlp to a temp file; caller deletes it.

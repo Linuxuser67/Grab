@@ -92,51 +92,59 @@ async fn latest_gallerydl_asset() -> Option<(String, Option<String>, String)> {
 
 /// Latest nightly tag without downloading anything: one user-initiated
 /// GitHub API call. `None` on any network/API failure.
-pub fn latest_gallerydl_tag() -> Option<String> {
-    crate::runtime::block_on_sync(async move {
-        let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new(BUILDS_OWNER, BUILDS_REPO);
-        fetcher
-            .fetch_latest_release(None)
-            .await
-            .ok()
-            .map(|release| release.tag_name)
-    })
+pub async fn latest_gallerydl_tag() -> Option<String> {
+    let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new(BUILDS_OWNER, BUILDS_REPO);
+    fetcher
+        .fetch_latest_release(None)
+        .await
+        .ok()
+        .map(|release| release.tag_name)
+}
+
+/// Sync wrapper for `latest_gallerydl_tag` for true sync callers.
+#[allow(dead_code)]
+pub fn latest_gallerydl_tag_sync() -> Option<String> {
+    crate::runtime::block_on_sync(latest_gallerydl_tag())
 }
 
 /// Install (or update) gallery-dl from the nightly channel into the user lib dir.
 /// Fails closed when the release metadata carries no SHA-256 digest.
-pub fn install_gallerydl() -> Result<PathBuf, GalleryError> {
-    crate::runtime::block_on_sync(async move {
-        let (url, digest, tag) = latest_gallerydl_asset().await.ok_or_else(|| {
-            GalleryError::install("couldn't determine the latest gallery-dl release")
-        })?;
-        // Fail closed: no digest means no verified install. The digest comes from
-        // GitHub's API alongside the binary; absent means we can't verify.
-        let digest = digest.ok_or_else(|| {
-            GalleryError::install(
-                "gallery-dl release has no SHA-256 digest; refusing unverified install",
-            )
-        })?;
-        let dir = user_lib_dir();
-        ensure_lib_dir(&dir).map_err(GalleryError::install)?;
-        // Download straight to `gallery-dl.part`: a failed download must never leave a
-        // half-written `gallery-dl` behind.
-        let dest = dir.join("gallery-dl");
-        let part = dir.join("gallery-dl.part");
-        let result = fetch_gallerydl_inner(&url, &part, &dest, &digest).await;
-        if result.is_err() {
-            std::fs::remove_file(&part).ok();
+pub async fn install_gallerydl() -> Result<PathBuf, GalleryError> {
+    let (url, digest, tag) = latest_gallerydl_asset()
+        .await
+        .ok_or_else(|| GalleryError::install("couldn't determine the latest gallery-dl release"))?;
+    // Fail closed: no digest means no verified install. The digest comes from
+    // GitHub's API alongside the binary; absent means we can't verify.
+    let digest = digest.ok_or_else(|| {
+        GalleryError::install(
+            "gallery-dl release has no SHA-256 digest; refusing unverified install",
+        )
+    })?;
+    let dir = user_lib_dir();
+    ensure_lib_dir(&dir).map_err(GalleryError::install)?;
+    // Download straight to `gallery-dl.part`: a failed download must never leave a
+    // half-written `gallery-dl` behind.
+    let dest = dir.join("gallery-dl");
+    let part = dir.join("gallery-dl.part");
+    let result = fetch_gallerydl_inner(&url, &part, &dest, &digest).await;
+    if result.is_err() {
+        std::fs::remove_file(&part).ok();
+    }
+    match result {
+        Ok(()) => {
+            // Write the installed tag to the sidecar for the update check.
+            let tag_file = dir.join("gallery-dl.tag");
+            std::fs::write(&tag_file, &tag).ok();
+            Ok(dest)
         }
-        match result {
-            Ok(()) => {
-                // Write the installed tag to the sidecar for the update check.
-                let tag_file = dir.join("gallery-dl.tag");
-                std::fs::write(&tag_file, &tag).ok();
-                Ok(dest)
-            }
-            Err(e) => Err(e),
-        }
-    })
+        Err(e) => Err(e),
+    }
+}
+
+/// Sync wrapper for `install_gallerydl` for true sync callers.
+#[allow(dead_code)]
+pub fn install_gallerydl_sync() -> Result<PathBuf, GalleryError> {
+    crate::runtime::block_on_sync(install_gallerydl())
 }
 
 async fn fetch_gallerydl_inner(
@@ -170,23 +178,26 @@ pub fn resolve_gallerydl() -> Result<PathBuf, GalleryError> {
 }
 
 /// `gallery-dl --version` output, trimmed. Used for the Preferences row.
-/// Runs on the Tokio runtime: callers may be on the GTK main loop.
-pub fn gallerydl_display_version(path: &Path) -> Result<String, GalleryError> {
+pub async fn gallerydl_display_version(path: &Path) -> Result<String, GalleryError> {
+    let out = tokio::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .await
+        .map_err(|e| GalleryError::install(format!("couldn't run gallery-dl: {e}")))?;
+    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if version.is_empty() {
+        return Err(GalleryError::install(
+            "gallery-dl --version produced no output",
+        ));
+    }
+    Ok(version)
+}
+
+/// Sync wrapper for `gallerydl_display_version` for true sync callers.
+#[allow(dead_code)]
+pub fn gallerydl_display_version_sync(path: &Path) -> Result<String, GalleryError> {
     let path = path.to_path_buf();
-    crate::runtime::block_on_sync(async move {
-        let out = tokio::process::Command::new(&path)
-            .arg("--version")
-            .output()
-            .await
-            .map_err(|e| GalleryError::install(format!("couldn't run gallery-dl: {e}")))?;
-        let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if version.is_empty() {
-            return Err(GalleryError::install(
-                "gallery-dl --version produced no output",
-            ));
-        }
-        Ok(version)
-    })
+    crate::runtime::block_on_sync(async move { gallerydl_display_version(&path).await })
 }
 
 #[cfg(test)]
@@ -241,7 +252,7 @@ mod tests {
     fn gallerydl_display_version_works_without_tokio_runtime() {
         let result = std::thread::spawn(|| {
             assert!(tokio::runtime::Handle::try_current().is_err());
-            gallerydl_display_version(std::path::Path::new("/nonexistent/gallery-dl"))
+            gallerydl_display_version_sync(std::path::Path::new("/nonexistent/gallery-dl"))
         })
         .join()
         .expect("thread panicked");

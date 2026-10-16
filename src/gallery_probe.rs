@@ -173,32 +173,6 @@ pub fn should_surface(e: &GalleryError) -> bool {
 /// geo-blocks, and private/removed videos are not worth the probe delay
 /// (up to 45s: 30s cookie export + 15s probe).
 /// Pure for tests.
-pub fn ytdlp_error_worth_gallery_dl(error: &str) -> bool {
-    let lower = error.to_lowercase();
-    // YouTube bot check: gallery-dl won't help. Must come first because the
-    // message also carries a --cookies-from-browser hint.
-    if lower.contains("confirm you're not a bot") {
-        return false;
-    }
-    // Unsupported URL: yt-dlp doesn't know this site.
-    if lower.contains("unsupported url") {
-        return true;
-    }
-    // Login required for content access.
-    // Covers: "You need to log in to access this content" (Instagram),
-    // "This video is only available for registered users" (yt-dlp default),
-    // "redirected to the login page", "locked behind the login page".
-    if lower.contains("log in to access")
-        || lower.contains("login required")
-        || lower.contains("registered users")
-        || lower.contains("login page")
-        || lower.contains("locked behind the login")
-    {
-        return true;
-    }
-    false
-}
-
 /// Best-effort title from probe metadata. First non-empty wins:
 /// `title` → `user`/`author` → `category` → URL-derived filename.
 pub fn probe_title(item: &GalleryItem, url: &str) -> String {
@@ -228,64 +202,117 @@ pub fn probe_title(item: &GalleryItem, url: &str) -> String {
 /// (exit 64) or yields no files. `Err` on timeout, spawn failure, or any other
 /// non-zero exit — the card then shows "couldn't preview" but Add stays enabled
 /// (optimistic path).
-pub fn probe_gallery(
+pub async fn probe_gallery(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
     user_agent: Option<&str>,
 ) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
-    // Clone for 'static bound (block_on_sync may spawn a thread).
+    let mut cmd = tokio::process::Command::new(tool);
+    cmd.arg("--config-ignore")
+        .arg("-j")
+        .arg("--no-download")
+        .arg("--range")
+        .arg("1-5")
+        // Don't let gallery-dl write back to Grab's staged cookies file.
+        .arg("-o")
+        .arg("extractor.cookies-update=false");
+    if let Some(cookies) = cookies_file {
+        cmd.arg("-C").arg(cookies);
+    }
+    if let Some(ua) = user_agent {
+        cmd.arg("--user-agent").arg(ua);
+    }
+    // Instagram throttling for extraction requests (probe doesn't download).
+    for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
+        cmd.arg(arg);
+    }
+    // `--` last: guards against URLs starting with `-` being parsed as options.
+    cmd.arg("--").arg(url);
+    let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| GalleryError::install("gallery-dl probe timed out"))?
+        .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
+
+    // Exit 32 (v1.30.0+) / 64 (older) = NoExtractorError: unsupported URL,
+    // not a failure. v1.30.0 folded NoExtractorError (64) into InputError (32).
+    if matches!(output.status.code(), Some(32) | Some(64)) {
+        return Ok(None);
+    }
+    if !output.status.success() {
+        return Err(GalleryError::install(format!(
+            "gallery-dl probe failed (exit {})",
+            output.status.code().unwrap_or(-1)
+        )));
+    }
+    // `-j` emits `[type, ...]` arrays: [2, {dir}] for directory context,
+    // [3, "url", {meta}] for files, [-1, {error, message}] for errors.
+    let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
+    let items = parse_probe_messages(&messages)?;
+    if items.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(items))
+}
+
+/// Enumerate ALL files in a gallery (no range limit). Used for the file picker.
+/// Returns the full list of items in download order. This can be slow for large
+/// galleries; callers should show progress.
+#[allow(dead_code)]
+pub async fn enumerate_gallery_files(
+    tool: &Path,
+    url: &str,
+    cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
+) -> Result<Vec<GalleryItem>, GalleryError> {
+    let mut cmd = tokio::process::Command::new(tool);
+    cmd.arg("--config-ignore")
+        .arg("-j")
+        .arg("--no-download")
+        // No --range: enumerate everything.
+        .arg("-o")
+        .arg("extractor.cookies-update=false");
+    if let Some(cookies) = cookies_file {
+        cmd.arg("-C").arg(cookies);
+    }
+    if let Some(ua) = user_agent {
+        cmd.arg("--user-agent").arg(ua);
+    }
+    for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
+        cmd.arg(arg);
+    }
+    cmd.arg("--").arg(url);
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
+    if !output.status.success() {
+        return Err(GalleryError::install(format!(
+            "gallery-dl enumerate failed (exit {})",
+            output.status.code().unwrap_or(-1)
+        )));
+    }
+    let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
+    let items = parse_probe_messages(&messages)?;
+    Ok(items)
+}
+
+/// Sync wrapper for `probe_gallery` for true sync callers. Uses `block_on_sync`.
+#[allow(dead_code)]
+pub fn probe_gallery_sync(
+    tool: &Path,
+    url: &str,
+    cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
+) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
     let tool = tool.to_path_buf();
     let url = url.to_string();
     let cookies_file = cookies_file.map(|p| p.to_path_buf());
     let user_agent = user_agent.map(|s| s.to_string());
     crate::runtime::block_on_sync(async move {
-        let mut cmd = tokio::process::Command::new(&tool);
-        cmd.arg("--config-ignore")
-            .arg("-j")
-            .arg("--no-download")
-            .arg("--range")
-            .arg("1-5")
-            // Don't let gallery-dl write back to Grab's staged cookies file.
-            .arg("-o")
-            .arg("extractor.cookies-update=false");
-        if let Some(cookies) = cookies_file.as_deref() {
-            cmd.arg("-C").arg(cookies);
-        }
-        if let Some(ua) = user_agent.as_deref() {
-            cmd.arg("--user-agent").arg(ua);
-        }
-        // Instagram throttling for extraction requests (probe doesn't download).
-        for arg in crate::gallery_argv::instagram_throttle_args(&url, false) {
-            cmd.arg(arg);
-        }
-        // `--` last: guards against URLs starting with `-` being parsed as options.
-        cmd.arg("--").arg(&url);
-        let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
-            .await
-            .map_err(|_| GalleryError::install("gallery-dl probe timed out"))?
-            .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
-
-        // Exit 32 (v1.30.0+) / 64 (older) = NoExtractorError: unsupported URL,
-        // not a failure. v1.30.0 folded NoExtractorError (64) into InputError (32).
-        if matches!(output.status.code(), Some(32) | Some(64)) {
-            return Ok(None);
-        }
-        if !output.status.success() {
-            return Err(GalleryError::install(format!(
-                "gallery-dl probe failed (exit {})",
-                output.status.code().unwrap_or(-1)
-            )));
-        }
-        // `-j` emits `[type, ...]` arrays: [2, {dir}] for directory context,
-        // [3, "url", {meta}] for files, [-1, {error, message}] for errors.
-        let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
-            .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
-        let items = parse_probe_messages(&messages)?;
-        if items.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(items))
+        probe_gallery(&tool, &url, cookies_file.as_deref(), user_agent.as_deref()).await
     })
 }
 
@@ -382,7 +409,34 @@ fn parse_probe_messages(messages: &[serde_json::Value]) -> Result<Vec<GalleryIte
 /// Count files without downloading: `gallery-dl --config-ignore -g --no-download <url>`.
 /// Returns the line count of direct file URLs, or `None` on any failure
 /// (the card then shows an indeterminate count).
-pub fn count_gallery_files(
+pub async fn count_gallery_files(
+    tool: &Path,
+    url: &str,
+    cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
+    filter: crate::gallery_argv::GalleryFilter,
+) -> Option<u32> {
+    let argv = crate::gallery_argv::count_argv(tool, url, cookies_file, user_agent, filter);
+    let mut cmd = tokio::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let count = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    Some(count as u32)
+}
+
+/// Sync wrapper for `count_gallery_files` for true sync callers (e.g. tests,
+/// non-async contexts). Uses `block_on_sync` internally.
+#[allow(dead_code)]
+pub fn count_gallery_files_sync(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
@@ -394,27 +448,14 @@ pub fn count_gallery_files(
     let cookies_file = cookies_file.map(|p| p.to_path_buf());
     let user_agent = user_agent.map(|s| s.to_string());
     crate::runtime::block_on_sync(async move {
-        let argv = crate::gallery_argv::count_argv(
+        count_gallery_files(
             &tool,
             &url,
             cookies_file.as_deref(),
             user_agent.as_deref(),
             filter,
-        );
-        let mut cmd = tokio::process::Command::new(&argv[0]);
-        cmd.args(&argv[1..]);
-        let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
-            .await
-            .ok()?
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let count = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .count();
-        Some(count as u32)
+        )
+        .await
     })
 }
 
@@ -451,49 +492,6 @@ mod tests {
         )));
         assert!(!should_surface(&GalleryError::install("timeout")));
         assert!(!should_surface(&GalleryError::runtime("spawn failed")));
-    }
-
-    #[test]
-    fn ytdlp_error_worth_gallery_dl_cases() {
-        // Unsupported URL: worth trying gallery-dl.
-        assert!(ytdlp_error_worth_gallery_dl(
-            "ERROR: [generic] Unsupported URL: https://example.com/gallery"
-        ));
-        // Login required for content: worth trying (e.g. Instagram stories).
-        assert!(ytdlp_error_worth_gallery_dl(
-            "ERROR: [instagram:story] You need to log in to access this content."
-        ));
-        assert!(ytdlp_error_worth_gallery_dl(
-            "ERROR: Login required to access this content"
-        ));
-        // yt-dlp default login message.
-        assert!(ytdlp_error_worth_gallery_dl(
-            "ERROR: This video is only available for registered users. Use --cookies-from-browser or --username"
-        ));
-        // Instagram login-page redirects.
-        assert!(ytdlp_error_worth_gallery_dl(
-            "ERROR: [instagram] The webpage request was redirected to the login page"
-        ));
-        assert!(ytdlp_error_worth_gallery_dl(
-            "ERROR: [instagram] Main webpage is locked behind the login page"
-        ));
-        // YouTube bot check: not worth it (gallery-dl won't help).
-        // Must stay false even though the message carries a cookies hint.
-        assert!(!ytdlp_error_worth_gallery_dl(
-            "ERROR: [youtube] Sign in to confirm you're not a bot. Use --cookies-from-browser"
-        ));
-        // Network errors: not worth the probe delay.
-        assert!(!ytdlp_error_worth_gallery_dl(
-            "ERROR: Unable to download webpage: <urlopen error [Errno -2] Name or service not known>"
-        ));
-        // Private video: not worth it.
-        assert!(!ytdlp_error_worth_gallery_dl(
-            "ERROR: [youtube] Private video. Sign in if you've been granted access to this video"
-        ));
-        // Removed video: not worth it.
-        assert!(!ytdlp_error_worth_gallery_dl(
-            "ERROR: [youtube] Video unavailable"
-        ));
     }
 
     fn item(extension: &str) -> GalleryItem {
@@ -794,7 +792,7 @@ mod tests {
         let result = std::thread::spawn(|| {
             // No Tokio runtime on this thread.
             assert!(tokio::runtime::Handle::try_current().is_err());
-            probe_gallery(
+            probe_gallery_sync(
                 std::path::Path::new("/nonexistent/gallery-dl"),
                 "https://example.com/",
                 None,
@@ -813,7 +811,7 @@ mod tests {
     fn count_gallery_files_works_without_tokio_runtime() {
         let result = std::thread::spawn(|| {
             assert!(tokio::runtime::Handle::try_current().is_err());
-            count_gallery_files(
+            count_gallery_files_sync(
                 std::path::Path::new("/nonexistent/gallery-dl"),
                 "https://example.com/",
                 None,

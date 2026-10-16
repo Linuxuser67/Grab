@@ -233,7 +233,7 @@ pub fn probe_gallery(
     url: &str,
     cookies_file: Option<&Path>,
 ) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
-    crate::runtime::tokio_rt().block_on(async {
+    crate::runtime::block_on_sync(async {
         let mut cmd = tokio::process::Command::new(tool);
         cmd.arg("--config-ignore")
             .arg("-j")
@@ -379,7 +379,7 @@ pub fn count_gallery_files(
     cookies_file: Option<&Path>,
     filter: crate::gallery_argv::GalleryFilter,
 ) -> Option<u32> {
-    crate::runtime::tokio_rt().block_on(async {
+    crate::runtime::block_on_sync(async {
         let argv = crate::gallery_argv::count_argv(tool, url, cookies_file, filter);
         let mut cmd = tokio::process::Command::new(&argv[0]);
         cmd.args(&argv[1..]);

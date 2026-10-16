@@ -248,7 +248,7 @@ pub(crate) fn export_cookies_to_file(
     let youtube_bin = youtube_bin.to_path_buf();
     let cookies_browser = cookies_browser.to_string();
     let page_url = page_url.to_string();
-    let path = crate::runtime::tokio_rt().block_on(async move {
+    let path = crate::runtime::block_on_sync(async move {
         stage_cookie_file(&youtube_bin, &cookies_browser, &page_url, timeout).await
     })?;
     Some(StagedCookies(path))

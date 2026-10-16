@@ -97,7 +97,7 @@ async fn intake_remote_torrent(
     client: reqwest::Client,
     url: String,
     file_name: String,
-) -> bool {
+) -> Routed {
     let fail = |msg: String| {
         toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&msg)));
     };
@@ -105,7 +105,7 @@ async fn intake_remote_torrent(
         Ok(b) => b,
         Err(TorrentFetchError::TooLarge) => {
             fail(gettext("That .torrent link is too large"));
-            return false;
+            return Routed::Failed;
         }
         Err(TorrentFetchError::TimedOut) => {
             fail(format!(
@@ -113,14 +113,14 @@ async fn intake_remote_torrent(
                 gettext("Could not fetch that .torrent link"),
                 gettext("timed out")
             ));
-            return false;
+            return Routed::Failed;
         }
         Err(TorrentFetchError::Failed(e)) => {
             fail(format!(
                 "{}: {e}",
                 gettext("Could not fetch that .torrent link")
             ));
-            return false;
+            return Routed::Failed;
         }
     };
     let stem = std::path::Path::new(&file_name)
@@ -132,19 +132,22 @@ async fn intake_remote_torrent(
     match crate::torrent::torrent_file_list(&bytes) {
         Ok((_, entries)) if entries.len() > 1 => {
             add_card.open_torrent_picker(file_name, bytes, entries);
+            // Picker opened, not queued: return OpenedCard (202) so the
+            // extension keeps the browser copy until the user chooses.
+            Routed::OpenedCard
         }
         Ok(_) => {
             if let Err(e) = manager.enqueue_torrent_file(bytes, &stem, None, None) {
                 fail(e);
-                return false;
+                return Routed::Failed;
             }
+            Routed::Queued
         }
         Err(e) => {
             fail(e);
-            return false;
+            Routed::Failed
         }
     }
-    true
 }
 
 /// Restore the original URL from a browser-extension handoff.
@@ -276,15 +279,10 @@ async fn route_open_uri(
                 return Routed::Failed;
             }
         };
-        // Fetch the torrent first; only acknowledge (200) if we actually
-        // queued it. The extension deletes the browser copy on 200.
-        let success =
-            intake_remote_torrent(manager, toasts, add_card, client, url, file_name).await;
-        return if success {
-            Routed::Queued
-        } else {
-            Routed::Failed
-        };
+        // Fetch the torrent first; the intake returns the appropriate Routed
+        // outcome (Queued/OpenedCard/Failed). The extension deletes the browser
+        // copy only on 200 (Queued).
+        return intake_remote_torrent(manager, toasts, add_card, client, url, file_name).await;
     }
     // Anything over http(s) that isn't obviously a direct file takes the
     // inline card path (pre-filled): the card probes it with yt-dlp exactly

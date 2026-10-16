@@ -2213,6 +2213,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     .await
                                     .ok()
                                     .unwrap_or((Ok(None), None));
+                                // Discard stale results: the user may have changed
+                                // the URL while the worker was running.
+                                if probe_b.borrow().generation != my {
+                                    return;
+                                }
                                 // Keep probe_cookies for the count below; StagedCookies
                                 // drops at block end.
                                 match probe_result {

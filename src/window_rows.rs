@@ -666,7 +666,7 @@ pub(crate) fn build_row(
     );
     let media_icon = gtk4::Image::builder()
         .icon_name(media.icon_name())
-        .pixel_size(32)
+        .pixel_size(16)
         .valign(gtk4::Align::Center)
         .build();
     // Done badge: HIG emblem overlay — a small checkmark in the corner

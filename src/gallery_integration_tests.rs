@@ -27,7 +27,7 @@ fn find_gallery_dl() -> Option<PathBuf> {
 /// If so, return true to skip the test.
 fn is_gallery_dl_internal_bug(err: &crate::gallery_tools::GalleryError) -> bool {
     let msg = format!("{err:?}");
-    msg.contains("AttributeError: 'NoneType' object has no attribute")
+    msg.contains("'NoneType' object has no attribute")
 }
 
 /// Start the Python gallery test server on port 80.

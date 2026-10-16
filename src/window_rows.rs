@@ -623,11 +623,11 @@ fn show_failure_dialog(
     dialog.set_close_response("close");
 
     {
-        let detail = item.detail();
         let clipboard = parent.clipboard();
         dialog.connect_response(None, move |_dialog, response| {
             if response == "copy" {
-                clipboard.set_text(&detail);
+                // Copy what is displayed, not the summary.
+                clipboard.set_text(&display);
             }
         });
     }

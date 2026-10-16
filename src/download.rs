@@ -2134,11 +2134,13 @@ impl DownloadManager {
                                 );
                             }
                             Err(e) => {
-                                item_c.set_status(DownloadStatus::Failed);
-                                // Card shows summary; dialog shows full log via error_log.
+                                // Set detail/error_log BEFORE status: the status
+                                // notify fires synchronously and opens the dialog,
+                                // which reads these fields.
                                 let summary = e.lines().next().unwrap_or(&e).trim();
                                 item_c.set_detail(format!("Gallery failed: {summary}"));
                                 item_c.set_error_log(e.clone());
+                                item_c.set_status(DownloadStatus::Failed);
                                 tracing::error!(error = %e, "gallery download failed");
                             }
                         }
@@ -2624,8 +2626,7 @@ impl DownloadManager {
                     }
                 }
             }
-            // Remove the gallery job record.
-            self.gallery_jobs.borrow_mut().remove(&id);
+            // remove() discards handoff cookies and drops the job record.
             self.remove(id);
             return Ok(());
         }

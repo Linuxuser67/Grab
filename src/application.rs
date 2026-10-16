@@ -314,7 +314,7 @@ fn dispatch_handoff(
     s: &State,
     uri: url::Url,
     via_grab: bool,
-    decision: Option<tokio::sync::oneshot::Sender<bool>>,
+    decision: Option<tokio::sync::oneshot::Sender<crate::extension_server::HandoffOutcome>>,
 ) {
     let (manager, toasts, add_card, settings) = (
         s.manager.clone(),
@@ -327,7 +327,7 @@ fn dispatch_handoff(
             crate::download_net::require_public_resolution(host);
         }
         let routed = route_open_uri(manager, toasts, add_card, settings, uri);
-        answer_handoff(decision, routed == Routed::Queued);
+        answer_handoff(decision, routed.into());
         return;
     }
     // Validate before the dialog: the user should approve the canonical URL,
@@ -336,7 +336,7 @@ fn dispatch_handoff(
         Ok(u) => u,
         Err(e) => {
             toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
-            answer_handoff(decision, false);
+            answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
             return;
         }
     };
@@ -361,17 +361,36 @@ fn dispatch_handoff(
                 settings.clone(),
                 approved.clone(),
             );
-            answer_handoff(decision.borrow_mut().take(), routed == Routed::Queued);
+            answer_handoff(decision.borrow_mut().take(), routed.into());
         },
-        move || answer_handoff(on_cancel_decision.borrow_mut().take(), false),
+        move || {
+            answer_handoff(
+                on_cancel_decision.borrow_mut().take(),
+                crate::extension_server::HandoffOutcome::Declined,
+            )
+        },
     );
 }
 
-/// Tell a waiting extension request whether Grab took the handoff over.
-fn answer_handoff(decision: Option<tokio::sync::oneshot::Sender<bool>>, accepted: bool) {
+/// Tell a waiting extension request the handoff outcome.
+fn answer_handoff(
+    decision: Option<tokio::sync::oneshot::Sender<crate::extension_server::HandoffOutcome>>,
+    outcome: crate::extension_server::HandoffOutcome,
+) {
     if let Some(tx) = decision {
         // The request may have timed out already; nobody is left to tell.
-        let _ = tx.send(accepted);
+        let _ = tx.send(outcome);
+    }
+}
+
+/// Map the internal routing result to the handoff outcome.
+impl From<Routed> for crate::extension_server::HandoffOutcome {
+    fn from(routed: Routed) -> Self {
+        match routed {
+            Routed::Queued => crate::extension_server::HandoffOutcome::Queued,
+            Routed::OpenedCard => crate::extension_server::HandoffOutcome::CardOpened,
+            Routed::Failed => crate::extension_server::HandoffOutcome::Failed,
+        }
     }
 }
 

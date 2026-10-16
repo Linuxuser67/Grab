@@ -533,13 +533,27 @@ struct AddRequest {
 /// A URL handed off from the extension. Cookies (if any) are stored
 /// separately in HANDOFF_COOKIES, keyed by canonical URL, for the video
 /// probe and every yt-dlp download leg.
+/// Outcome of routing a handoff URL on the GTK side.
+/// Replaces the old boolean: the extension needs to distinguish "card opened"
+/// (cookies must be retained) from "declined" (cookies can be cleaned up).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum HandoffOutcome {
+    /// Download was queued (or async intake started).
+    Queued,
+    /// New Download card was opened; user action still pending.
+    /// Cookies must be retained for the card's probe/download lifecycle.
+    CardOpened,
+    /// User explicitly declined the request.
+    Declined,
+    /// Routing or enqueueing failed.
+    Failed,
+}
+
 pub(crate) struct Handoff {
     pub url: String,
-    /// Set for `/add?confirm=1`: the GTK side answers `true` only once the
-    /// download is really queued, and `false` when the user declined, the
-    /// enqueue failed, or only the inline card was opened. Dropping it
-    /// unanswered counts as declined.
-    pub decision: Option<oneshot::Sender<bool>>,
+    /// Set for `/add?confirm=1`: the GTK side answers with the outcome.
+    /// Dropping it unanswered counts as declined.
+    pub decision: Option<oneshot::Sender<HandoffOutcome>>,
 }
 
 #[derive(Clone)]
@@ -769,14 +783,23 @@ async fn handle_add(
         return StatusCode::OK;
     };
     match tokio::time::timeout(st.confirm_wait, answer).await {
-        Ok(Ok(true)) => StatusCode::OK,
+        Ok(Ok(HandoffOutcome::Queued)) => StatusCode::OK,
+        Ok(Ok(HandoffOutcome::CardOpened)) => {
+            // Card opened: user action pending. Retain staged cookies for the
+            // card's probe/download lifecycle. Do NOT discard.
+            StatusCode::ACCEPTED
+        }
+        Ok(Ok(HandoffOutcome::Declined)) | Ok(Ok(HandoffOutcome::Failed)) => {
+            // Declined or failed: the extension keeps the browser download,
+            // so the staged cookies have no user. Only discard what this
+            // request staged.
+            if staged {
+                discard_handoff_cookies(&req.url);
+            }
+            StatusCode::CONFLICT
+        }
         outcome => {
-            // Declined, dropped unanswered or timed out: the extension keeps
-            // the browser download, so the staged cookies have no user.
-            // Only discard what this request staged: an unauthenticated
-            // decline must not wipe an entry from an earlier handoff, and
-            // the authenticated cookie-less case was already discarded at
-            // stage time (Issue 4).
+            // Dropped unanswered or timed out.
             if staged {
                 discard_handoff_cookies(&req.url);
             }
@@ -869,7 +892,11 @@ mod tests {
         });
         let handoff = srv.rx.recv().await.expect("handoff");
         assert_eq!(handoff.url, "https://example.com/file.zip");
-        handoff.decision.expect("decision").send(true).unwrap();
+        handoff
+            .decision
+            .expect("decision")
+            .send(HandoffOutcome::Queued)
+            .unwrap();
         assert_eq!(status(&task.await.unwrap()), "200");
     }
 
@@ -896,7 +923,11 @@ mod tests {
                 }
             });
             let handoff = srv.rx.recv().await.expect("handoff");
-            handoff.decision.expect("decision").send(true).unwrap();
+            handoff
+                .decision
+                .expect("decision")
+                .send(HandoffOutcome::Queued)
+                .unwrap();
             let r = task.await.unwrap();
             assert_eq!(status(&r), "200", "{origin}: {r}");
         }
@@ -997,7 +1028,11 @@ mod tests {
         assert_eq!(status(&r), "429", "{r}");
         // Answer the first dialog: it completes, queue drains.
         let handoff = srv.rx.recv().await.expect("handoff");
-        handoff.decision.expect("decision").send(true).unwrap();
+        handoff
+            .decision
+            .expect("decision")
+            .send(HandoffOutcome::Queued)
+            .unwrap();
         assert_eq!(status(&task.await.unwrap()), "200");
         // Queue drained: third request is accepted (and waits for its dialog).
         let task3 = tokio::spawn({
@@ -1005,7 +1040,11 @@ mod tests {
             async move { request_to(srv.port, "POST", "/add", &[("Host", &host), JSON], BODY).await }
         });
         let handoff = srv.rx.recv().await.expect("handoff");
-        handoff.decision.expect("decision").send(true).unwrap();
+        handoff
+            .decision
+            .expect("decision")
+            .send(HandoffOutcome::Queued)
+            .unwrap();
         let r = task3.await.unwrap();
         assert_eq!(status(&r), "200", "queue drains: {r}");
     }
@@ -1437,7 +1476,11 @@ mod tests {
             handoff_cookie_args("https://example.com/p").is_empty(),
             "cookies without a valid token must never be staged"
         );
-        handoff.decision.unwrap().send(true).unwrap();
+        handoff
+            .decision
+            .unwrap()
+            .send(HandoffOutcome::Queued)
+            .unwrap();
         let r = task.await.unwrap();
         assert_eq!(status(&r), "200", "{r}");
     }
@@ -1600,9 +1643,73 @@ mod tests {
         handoff
             .decision
             .expect("confirm handoff carries a decision")
-            .send(true)
+            .send(HandoffOutcome::Queued)
             .unwrap();
         assert_eq!(status(&task.await.unwrap()), "200");
+    }
+
+    #[tokio::test]
+    async fn confirm_card_opened_returns_accepted_and_keeps_cookies() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let url = "https://example.com/card";
+        let body = r#"{"url":"https://example.com/card","cookies":[{"name":"c","value":"v"}]}"#;
+        let tok = token(body);
+        let (port, h2) = (srv.port, host.clone());
+        let task = tokio::spawn(async move {
+            request_to(
+                port,
+                "POST",
+                "/add?confirm=1",
+                &[("Host", &h2), ("X-Grab-Token", &tok), JSON],
+                body,
+            )
+            .await
+        });
+        let handoff = srv.rx.recv().await.expect("handoff");
+        handoff
+            .decision
+            .expect("confirm handoff carries a decision")
+            .send(HandoffOutcome::CardOpened)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "202");
+        assert_eq!(
+            handoff_cookie_args(url).len(),
+            2,
+            "card-opened must retain staged cookies for the probe/download"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_failed_returns_conflict_and_drops_cookies() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = r#"{"url":"https://example.com/f","cookies":[{"name":"c","value":"v"}]}"#;
+        let tok = token(body);
+        let (port, h2) = (srv.port, host.clone());
+        let task = tokio::spawn(async move {
+            request_to(
+                port,
+                "POST",
+                "/add?confirm=1",
+                &[("Host", &h2), ("X-Grab-Token", &tok), JSON],
+                body,
+            )
+            .await
+        });
+        let handoff = srv.rx.recv().await.expect("handoff");
+        handoff
+            .decision
+            .unwrap()
+            .send(HandoffOutcome::Failed)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "409");
+        assert!(
+            handoff_cookie_args("https://example.com/f").is_empty(),
+            "a failed handoff must not keep its cookies"
+        );
     }
 
     #[tokio::test]
@@ -1623,7 +1730,7 @@ mod tests {
         handoff
             .decision
             .expect("unauthenticated handoff carries a decision")
-            .send(true)
+            .send(HandoffOutcome::Queued)
             .unwrap();
         assert_eq!(status(&task.await.unwrap()), "200");
     }
@@ -1640,7 +1747,7 @@ mod tests {
         handoff
             .decision
             .expect("unauthenticated handoff carries a decision")
-            .send(false)
+            .send(HandoffOutcome::Declined)
             .unwrap();
         assert_eq!(status(&task.await.unwrap()), "409");
     }
@@ -1664,7 +1771,11 @@ mod tests {
             .await
         });
         let handoff = srv.rx.recv().await.expect("handoff");
-        handoff.decision.unwrap().send(false).unwrap();
+        handoff
+            .decision
+            .unwrap()
+            .send(HandoffOutcome::Declined)
+            .unwrap();
         assert_eq!(status(&task.await.unwrap()), "409");
         assert!(
             handoff_cookie_args("https://example.com/d").is_empty(),
@@ -1708,7 +1819,7 @@ mod tests {
         handoff
             .decision
             .expect("unauthenticated handoff carries a decision")
-            .send(false)
+            .send(HandoffOutcome::Declined)
             .unwrap();
         assert_eq!(status(&task.await.unwrap()), "409");
         assert_eq!(

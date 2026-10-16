@@ -2133,15 +2133,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         if probe_b.borrow().generation != my {
                             return;
                         }
-                        // Gallery-dl is tried when yt-dlp fails (not just on
-                        // "unsupported url"): it handles sites yt-dlp can't
-                        // (e.g. Instagram stories needing login).
+                        // Gallery-dl is tried for unsupported-URL and login-required
+                        // errors: it handles sites yt-dlp can't (e.g. Instagram
+                        // stories). Skipped for network errors, rate limits, etc.
+                        // to avoid the probe delay (up to 45s).
                         // Skipped for direct media URLs (e.g. .mp4): those aren't
                         // gallery pages, so gallery-dl would just waste time.
                         // If gallery-dl finds nothing, plain fallback runs only for
                         // non-video pages with "unsupported url"; otherwise the
                         // original yt-dlp error shows with retry.
-                        if !crate::gallery_probe::url_is_direct_media(&url) {
+                        if !crate::gallery_probe::url_is_direct_media(&url)
+                            && crate::gallery_probe::ytdlp_error_worth_gallery_dl(&e.to_string())
+                        {
                             // Try gallery-dl before falling back to direct: it handles
                             // sites yt-dlp can't (e.g. Instagram stories).
                             // Resolve gallery-dl first; only stage cookies if it exists.

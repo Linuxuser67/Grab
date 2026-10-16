@@ -2137,10 +2137,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         // only when extraction says unsupported; transient failures keep
                         // the error row with retry.
                         if !crate::video::is_video_page(&url)
+                            && !crate::gallery_probe::url_is_direct_media(&url)
                             && e.to_string().to_lowercase().contains("unsupported url")
                         {
                             // Try gallery-dl before falling back to direct: it handles
                             // sites yt-dlp can't (e.g. Instagram stories).
+                            // Skipped for direct media URLs (e.g. .mp4): those aren't
+                            // gallery pages, so gallery-dl would just waste time.
                             // Resolve gallery-dl first; only stage cookies if it exists.
                             if let Ok(tool) = crate::gallery_argv::resolve_tool() {
                                 // Stage cookies for the probe (StagedCookies drops at block end).

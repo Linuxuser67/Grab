@@ -58,6 +58,25 @@ impl GalleryContent {
     }
 }
 
+/// Whether a URL points directly to a media file (by extension). Used to skip
+/// the gallery-dl probe when yt-dlp fails: a direct `.mp4` link isn't a gallery
+/// page, so trying gallery-dl is wasted time.
+pub fn url_is_direct_media(url: &str) -> bool {
+    // Also cover audio extensions for direct downloads.
+    const AUDIO: &[&str] = &[
+        "mp3", "m4a", "aac", "ogg", "oga", "opus", "flac", "wav", "wma", "alac", "aiff",
+    ];
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    if ext.is_empty() || ext.contains('/') {
+        return false;
+    }
+    !matches!(
+        GalleryContent::from_extension(&ext),
+        GalleryContent::Unknown
+    ) || AUDIO.contains(&ext.as_str())
+}
+
 /// Where the New Download card should land after both probes complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeOutcome {
@@ -408,6 +427,18 @@ mod tests {
             GalleryContent::from_extension("xyz"),
             GalleryContent::Unknown
         );
+    }
+
+    #[test]
+    fn url_is_direct_media_check() {
+        assert!(url_is_direct_media("https://example.com/video.mp4"));
+        assert!(url_is_direct_media("https://example.com/photo.HEIC"));
+        assert!(url_is_direct_media(
+            "https://example.com/song.mp3?token=abc#frag"
+        ));
+        assert!(!url_is_direct_media("https://example.com/page.html"));
+        assert!(!url_is_direct_media("https://example.com/noext"));
+        assert!(!url_is_direct_media("https://example.com/"));
     }
 
     #[test]

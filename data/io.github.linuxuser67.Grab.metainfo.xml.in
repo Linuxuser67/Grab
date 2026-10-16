@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.9~beta.3" date="2026-10-16">
+      <description>
+        <ul>
+          <li>Check for Updates now offers to install missing tools (gallery-dl, quickjs).</li>
+          <li>Completed downloads show a checkmark badge on the row icon.</li>
+          <li>gallery-dl now probes when yt-dlp fails with unsupported-URL or login-required errors (e.g. Instagram stories).</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.9~beta.2" date="2026-10-16">
       <description>
         <ul>

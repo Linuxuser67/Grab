@@ -1672,7 +1672,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             && let Some(n) = crate::gallery_probe::count_gallery_files(
                                 &tool,
                                 &url,
-                                cookies.as_deref(),
+                                cookies.as_ref().map(|c| c.path()),
                                 filter,
                             )
                             .await
@@ -1690,9 +1690,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 info.set_subtitle(&format!("{count_text} • {preview}"));
                             }
                         }
-                        if let Some(path) = cookies {
-                            let _ = std::fs::remove_file(path);
-                        }
+                        // `cookies` (StagedCookies) drops here, deleting the file.
                     });
                 }
             });
@@ -2129,34 +2127,36 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         {
                             // Try gallery-dl before falling back to direct: it handles
                             // sites yt-dlp can't (e.g. Instagram stories).
-                            // Stage cookies for the probe (short-lived; deleted after).
-                            let probe_cookies = {
-                                let browser = settings_b.cookies_browser();
-                                if browser.is_empty() || browser == "none" {
-                                    None
-                                } else if let Some(ytdlp) = crate::video_tools::find_in_dirs(
-                                    "yt-dlp",
-                                    &crate::video_tools::tool_search_dirs(),
-                                ) {
-                                    crate::cookies::export_cookies_to_file(
-                                        &ytdlp,
-                                        browser.as_str(),
-                                        &url,
-                                        std::time::Duration::from_secs(30),
-                                    )
-                                    .await
-                                } else {
-                                    None
-                                }
-                            };
+                            // Resolve gallery-dl first; only stage cookies if it exists.
                             if let Ok(tool) = crate::gallery_argv::resolve_tool() {
+                                // Stage cookies for the probe (StagedCookies drops at block end).
+                                let probe_cookies = {
+                                    let browser = settings_b.cookies_browser();
+                                    if browser.is_empty() || browser == "none" {
+                                        None
+                                    } else if let Some(ytdlp) = crate::video_tools::find_in_dirs(
+                                        "yt-dlp",
+                                        &crate::video_tools::tool_search_dirs(),
+                                    ) {
+                                        crate::cookies::export_cookies_to_file(
+                                            &ytdlp,
+                                            browser.as_str(),
+                                            &url,
+                                            std::time::Duration::from_secs(30),
+                                        )
+                                        .await
+                                    } else {
+                                        None
+                                    }
+                                };
                                 let probe_result = crate::gallery_probe::probe_gallery(
                                     &tool,
                                     &url,
-                                    probe_cookies.as_deref(),
+                                    probe_cookies.as_ref().map(|c| c.path()),
                                 )
                                 .await;
-                                // Keep probe_cookies for the count below; deleted after.
+                                // Keep probe_cookies for the count below; StagedCookies
+                                // drops at block end.
                                 match probe_result {
                                     Ok(Some(items)) => {
                                         // gallery-dl found something; route it.
@@ -2171,11 +2171,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             crate::gallery_probe::ProbeOutcome::VideoGalleryDl
                                         ) {
                                             // Submit as video via gallery-dl backend.
-                                            // Delete staged cookies; submit_gallery_video
+                                            // StagedCookies drops; submit_gallery_video
                                             // re-stages if needed.
-                                            if let Some(path) = probe_cookies {
-                                                let _ = std::fs::remove_file(path);
-                                            }
                                             crate::inline_gallery::submit_gallery_video(
                                                 &manager_b,
                                                 &dest_b,
@@ -2205,7 +2202,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                                     crate::gallery_probe::count_gallery_files(
                                                         &tool,
                                                         &url,
-                                                        probe_cookies.as_deref(),
+                                                        probe_cookies.as_ref().map(|c| c.path()),
                                                         crate::gallery_argv::GalleryFilter::All,
                                                     )
                                                     .await
@@ -2219,10 +2216,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                                     "gallery file count verified"
                                                 );
                                             }
-                                            // Done with staged cookies.
-                                            if let Some(path) = probe_cookies {
-                                                let _ = std::fs::remove_file(path);
-                                            }
+                                            // StagedCookies drops after this block.
                                             let title = card
                                                 .items
                                                 .first()
@@ -2240,21 +2234,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             return;
                                         }
                                         // Neither video nor gallery (e.g. all unknown
-                                        // extensions): delete cookies, fall through.
-                                        if let Some(path) = probe_cookies {
-                                            let _ = std::fs::remove_file(path);
-                                        }
+                                        // extensions): StagedCookies drops, fall through.
                                     }
                                     Ok(None) => {
-                                        // gallery-dl found nothing; fall through to plain.
-                                        if let Some(path) = probe_cookies {
-                                            let _ = std::fs::remove_file(path);
-                                        }
+                                        // gallery-dl found nothing; StagedCookies drops,
+                                        // fall through to plain.
                                     }
                                     Err(e) => {
-                                        if let Some(path) = probe_cookies {
-                                            let _ = std::fs::remove_file(path);
-                                        }
+                                        // StagedCookies drops; no explicit delete needed.
                                         if crate::gallery_probe::should_surface(&e) {
                                             show_video_error(&step_b, &e.to_string());
                                             set_lookup_add(&lookup_add_b, true);

@@ -220,18 +220,33 @@ pub(crate) fn sweep_cookie_staging() {
     }
 }
 
-/// Dump one profile's cookies through yt-dlp to a temp file; caller deletes it.
-/// Returns the file path (for gallery-dl's `-C`); the file persists until deleted.
+/// RAII guard for a staged cookie file. Dropping it deletes the file
+/// (ignoring errors). Keeps the guard alive in the spawned future so
+/// pause/cancel drops it and never leaks the file.
+pub(crate) struct StagedCookies(PathBuf);
+
+impl StagedCookies {
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for StagedCookies {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 pub(crate) async fn export_cookies_to_file(
     youtube_bin: &Path,
     cookies_browser: &str,
     page_url: &str,
     timeout: Duration,
-) -> Option<PathBuf> {
+) -> Option<StagedCookies> {
     // Reuse the same secure temp-file + yt-dlp dump as export_cookies,
     // but keep the file for the caller instead of reading+deleting.
     let path = stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await?;
-    Some(path)
+    Some(StagedCookies(path))
 }
 
 /// Dump one profile's cookies through yt-dlp to a temp file; caller deletes it.
@@ -379,7 +394,28 @@ pub(crate) fn cookie_header_for(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_netscape_line;
+    use super::{StagedCookies, parse_netscape_line};
+
+    #[test]
+    fn staged_cookies_drop_deletes_file() {
+        // Create a temp file, wrap it, drop the guard: file must be gone.
+        // Mutation: Drop does nothing → file still exists → assertion fails.
+        let path = std::env::temp_dir().join(format!(
+            "grab-test-staged-{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "test").unwrap();
+        assert!(path.exists());
+        {
+            let guard = StagedCookies(path.clone());
+            assert_eq!(guard.path(), path.as_path());
+            // guard drops here
+        }
+        assert!(!path.exists());
+    }
 
     #[test]
     fn netscape_host_only_omits_domain() {

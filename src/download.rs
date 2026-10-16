@@ -717,7 +717,9 @@ impl DownloadManager {
         job: &crate::gallery_argv::GalleryJob,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(&job.page_url)?;
-        let dir = job.dest_dir.to_string_lossy().to_string();
+        // Resolve the destination: empty/"." fall back to the download dir;
+        // relative paths are rejected (would resolve against the launcher CWD).
+        let dir = self.resolve_dir(Some(&job.dest_dir.to_string_lossy()));
         // Gallery title is the folder name; sanitize it (probe falls back to
         // the URL, which contains `/` and would fail restore validation).
         let title = crate::file_names::sanitize_folder_name(&job.title);
@@ -732,10 +734,12 @@ impl DownloadManager {
         item.set_gallery_files_done(0);
         item.set_gallery_url(url.clone());
         item.set_detail(format!("Gallery • {} files", job.file_count.unwrap_or(0)));
-        // Store the job (carries the filter); spawn_gallery consumes it.
-        self.gallery_jobs
-            .borrow_mut()
-            .insert(item.id(), job.clone());
+        // Store a resolved copy: absolute dest_dir and the real row ID.
+        // (The caller's job keeps its placeholder ID.)
+        let mut stored_job = job.clone();
+        stored_job.dest_dir = std::path::PathBuf::from(&dir);
+        stored_job.item_id = item.id();
+        self.gallery_jobs.borrow_mut().insert(item.id(), stored_job);
         Ok(self.insert(item))
     }
 
@@ -972,6 +976,12 @@ impl DownloadManager {
         item.set_status(match stored.status {
             DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Done => stored.status,
             _ => DownloadStatus::Queued,
+        });
+        // Done restores with a full bar; everything else starts at 0.
+        item.set_progress(if stored.status == DownloadStatus::Done {
+            1.0
+        } else {
+            0.0
         });
         // Insert the job BEFORE self.insert: insert → start_next →
         // spawn_gallery reads gallery_jobs synchronously.
@@ -2020,16 +2030,14 @@ impl DownloadManager {
             let result = crate::gallery_runner::run_gallery_download(
                 &job,
                 &tool,
-                cookies_file.as_deref(),
+                cookies_file.as_ref().map(|c| c.path()),
                 |update| {
                     let _ = tx.send(GalleryMsg::Progress(update.files_completed));
                 },
             )
             .await;
-            // Clean up the staged cookies file.
-            if let Some(path) = cookies_file {
-                let _ = std::fs::remove_file(path);
-            }
+            // `cookies_file` (StagedCookies) drops at block end, deleting the
+            // file. Pause/cancel drops the task, so no leak.
             let _ = tx.send(GalleryMsg::Finished(result.map_err(|e| e.to_string())));
         });
 

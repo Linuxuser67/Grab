@@ -7081,6 +7081,8 @@ fn gallery_round_trip_done() {
     assert_eq!(item.status(), DownloadStatus::Done);
     assert_eq!(item.gallery_file_count(), 5);
     assert_eq!(item.gallery_files_done(), 5);
+    // Done restores with a full progress bar.
+    assert_eq!(item.progress(), 1.0);
     drain_sizing(&m);
     let _ = std::fs::remove_file(&qf);
 }
@@ -7127,6 +7129,40 @@ fn gallery_title_with_slash_sanitized() {
     assert!(!sanitized.contains('/'));
     assert!(!sanitized.contains('\\'));
     assert!(!sanitized.is_empty());
+}
+
+#[test]
+fn enqueue_gallery_resolves_dest_and_id() {
+    // Empty and "." destinations resolve to the download dir (not "" or ".").
+    // The stored job gets the absolute dir and the real row ID.
+    // Mutation: skip resolve_dir → dest is "" or "." → first assertions fail.
+    // Mutation: don't overwrite item_id → stored.item_id is 0 → last assertion fails.
+    let (_lock, _loop) = test_locks();
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    for dest in ["", "."] {
+        let mut job = gallery_job_fixture();
+        job.dest_dir = std::path::PathBuf::from(dest);
+        job.item_id = 0; // placeholder
+        let item = m.enqueue_gallery(&job).expect("enqueue");
+        // Destination resolved to an absolute path.
+        assert!(std::path::Path::new(&item.dest_dir()).is_absolute());
+        assert!(!item.dest_dir().is_empty());
+        assert_ne!(item.dest_dir(), ".");
+        // Stored job has the resolved dir and the real ID.
+        let stored = m
+            .gallery_jobs
+            .borrow()
+            .get(&item.id())
+            .cloned()
+            .expect("job");
+        assert_eq!(stored.dest_dir.to_string_lossy(), item.dest_dir());
+        assert_eq!(stored.item_id, item.id());
+        assert_ne!(stored.item_id, 0);
+        // Drain the spawned gallery task so it doesn't trip the next test's
+        // glib thread guard.
+        drain_engine(&m, item.id());
+    }
 }
 
 #[test]

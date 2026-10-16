@@ -259,12 +259,16 @@ pub async fn probe_gallery(
 /// Enumerate ALL files in a gallery (no range limit). Used for the file picker.
 /// Returns the full list of items in download order. This can be slow for large
 /// galleries; callers should show progress.
-#[allow(dead_code)]
+///
+/// The `filter` must match the download's filter: gallery-dl applies `--range`
+/// to the filtered results, so picker indices only line up when both sides
+/// filter identically.
 pub async fn enumerate_gallery_files(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
     user_agent: Option<&str>,
+    filter: crate::gallery_argv::GalleryFilter,
 ) -> Result<Vec<GalleryItem>, GalleryError> {
     let mut cmd = tokio::process::Command::new(tool);
     cmd.arg("--config-ignore")
@@ -278,6 +282,12 @@ pub async fn enumerate_gallery_files(
     }
     if let Some(ua) = user_agent {
         cmd.arg("--user-agent").arg(ua);
+    }
+    // Mirror the download's filter so --range indices match.
+    let mut filter_argv = Vec::new();
+    crate::gallery_argv::push_filter(&mut filter_argv, filter);
+    for arg in filter_argv {
+        cmd.arg(arg);
     }
     for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
         cmd.arg(arg);

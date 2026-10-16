@@ -65,7 +65,8 @@ pub async fn run_gallery_download(
     tool: &Path,
     cookies_file: Option<&Path>,
     user_agent: Option<&str>,
-    on_progress: impl Fn(GalleryProgressUpdate),
+    jobs: u32,
+    on_progress: impl Fn(GalleryProgressUpdate) + Send,
 ) -> Result<GalleryResult, GalleryError> {
     let argv = download_argv(
         tool,
@@ -75,6 +76,7 @@ pub async fn run_gallery_download(
         user_agent,
         job.filter,
         job.speed_limit,
+        jobs,
     );
 
     let mut cmd = Command::new(&argv[0]);

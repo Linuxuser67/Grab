@@ -134,23 +134,30 @@ async fn gallery_integration_probe_count_download() {
         cookies_browser: "none".to_string(),
         speed_limit: None,
     };
-    let completed = std::cell::Cell::new(0u32);
-    let result =
-        match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |update| {
-            completed.set(update.files_completed);
-        })
-        .await
-        {
-            Ok(r) => r,
-            Err(e) if is_gallery_dl_internal_bug(&e) => {
-                if std::env::var("GRAB_REQUIRE_GALLERY_DL").as_deref() == Ok("1") {
-                    panic!("gallery-dl internal bug (GRAB_REQUIRE_GALLERY_DL=1): {e:?}");
-                }
-                eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
-                return;
+    let completed = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+    let completed_c = completed.clone();
+    let result = match crate::gallery_runner::run_gallery_download(
+        &job,
+        &tool,
+        None,
+        None,
+        1,
+        move |update| {
+            *completed_c.lock().unwrap() = update.files_completed;
+        },
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) if is_gallery_dl_internal_bug(&e) => {
+            if std::env::var("GRAB_REQUIRE_GALLERY_DL").as_deref() == Ok("1") {
+                panic!("gallery-dl internal bug (GRAB_REQUIRE_GALLERY_DL=1): {e:?}");
             }
-            Err(e) => panic!("download failed: {e:?}"),
-        };
+            eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
+            return;
+        }
+        Err(e) => panic!("download failed: {e:?}"),
+    };
     assert_eq!(result.files.len(), 3, "expected 3 downloaded files");
     assert_eq!(completed.get(), 3, "progress should report 3 completed");
     for f in &result.files {
@@ -159,7 +166,8 @@ async fn gallery_integration_probe_count_download() {
 
     // 4. Second run reports all as skipped.
     let result2 =
-        match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |_| {}).await {
+        match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, 1, |_| {}).await
+        {
             Ok(r) => r,
             Err(e) if is_gallery_dl_internal_bug(&e) => {
                 if std::env::var("GRAB_REQUIRE_GALLERY_DL").as_deref() == Ok("1") {
@@ -206,7 +214,8 @@ async fn gallery_integration_filtered_download() {
         speed_limit: None,
     };
     let result =
-        match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |_| {}).await {
+        match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, 1, |_| {}).await
+        {
             Ok(r) => r,
             Err(e) if is_gallery_dl_internal_bug(&e) => {
                 if std::env::var("GRAB_REQUIRE_GALLERY_DL").as_deref() == Ok("1") {

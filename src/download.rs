@@ -2049,6 +2049,7 @@ impl DownloadManager {
                     .as_deref()
                     .or_else(|| cookies_file.as_ref().map(|c| c.path())),
                 handoff_ua.as_deref(),
+                self.max_concurrent() as u32,
                 |update| {
                     let _ = tx.send(GalleryMsg::Progress(update.files_completed));
                 },

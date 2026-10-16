@@ -98,6 +98,7 @@ pub fn download_argv(
     user_agent: Option<&str>,
     filter: GalleryFilter,
     speed_limit: Option<u64>,
+    jobs: u32,
 ) -> Vec<String> {
     let mut argv = vec![
         tool.to_string_lossy().to_string(),
@@ -127,6 +128,12 @@ pub fn download_argv(
     if let Some(ua) = user_agent {
         argv.push("--user-agent".to_string());
         argv.push(ua.to_string());
+    }
+    // Parallel downloads within the gallery (matches Grab's simultaneous
+    // download preference).
+    if jobs > 1 {
+        argv.push("--jobs".to_string());
+        argv.push(jobs.to_string());
     }
     push_filter(&mut argv, filter);
     if let Some(limit) = speed_limit {
@@ -260,11 +267,43 @@ mod tests {
             None,
             GalleryFilter::All,
             None,
+            1,
         );
         // `-D`, not `-d` (exact dir, no nesting).
         let d_pos = argv.iter().position(|a| a == "-D").unwrap();
         assert_eq!(argv[d_pos + 1], "/tmp/dest");
         assert!(!argv.iter().any(|a| a == "-d"));
+    }
+
+    #[test]
+    fn download_argv_jobs_flag() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            None,
+            GalleryFilter::All,
+            None,
+            4,
+        );
+        let j_pos = argv.iter().position(|a| a == "--jobs").unwrap();
+        assert_eq!(argv[j_pos + 1], "4");
+    }
+
+    #[test]
+    fn download_argv_no_jobs_flag_when_one() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            None,
+            GalleryFilter::All,
+            None,
+            1,
+        );
+        assert!(!argv.iter().any(|a| a == "--jobs"));
     }
 
     #[test]
@@ -277,6 +316,7 @@ mod tests {
             None,
             GalleryFilter::All,
             None,
+            1,
         );
         let f_pos = argv.iter().position(|a| a == "-f").unwrap();
         assert_eq!(argv[f_pos + 1], "/O");
@@ -292,6 +332,7 @@ mod tests {
             None,
             GalleryFilter::All,
             None,
+            1,
         );
         assert!(argv.contains(&"extractor.directory=[]".to_string()));
     }
@@ -306,6 +347,7 @@ mod tests {
             None,
             GalleryFilter::All,
             None,
+            1,
         );
         let c_pos = argv.iter().position(|a| a == "-C").unwrap();
         assert_eq!(argv[c_pos + 1], "/tmp/cookies.txt");
@@ -321,6 +363,7 @@ mod tests {
             Some("Mozilla/5.0 Test"),
             GalleryFilter::All,
             None,
+            1,
         );
         let ua_pos = argv.iter().position(|a| a == "--user-agent").unwrap();
         assert_eq!(argv[ua_pos + 1], "Mozilla/5.0 Test");
@@ -336,6 +379,7 @@ mod tests {
             None,
             GalleryFilter::All,
             None,
+            1,
         );
         assert!(!argv.iter().any(|a| a == "--user-agent"));
     }
@@ -357,6 +401,7 @@ mod tests {
             None,
             GalleryFilter::ImagesOnly,
             None,
+            1,
         );
         let f_pos = argv.iter().position(|a| a == "--filter").unwrap();
         assert!(argv[f_pos + 1].contains("jpg"));
@@ -373,6 +418,7 @@ mod tests {
             None,
             GalleryFilter::VideosOnly,
             None,
+            1,
         );
         let f_pos = argv.iter().position(|a| a == "--filter").unwrap();
         assert!(argv[f_pos + 1].contains("mp4"));
@@ -389,6 +435,7 @@ mod tests {
             None,
             GalleryFilter::All,
             None,
+            1,
         );
         assert!(!argv.iter().any(|a| a == "--filter"));
     }
@@ -432,6 +479,7 @@ mod tests {
             None,
             GalleryFilter::All,
             None,
+            1,
         );
         let pos = argv
             .iter()
@@ -455,6 +503,7 @@ mod tests {
             None,
             GalleryFilter::All,
             None,
+            1,
         );
         assert!(!argv.iter().any(|a| a == "--sleep-request"));
     }

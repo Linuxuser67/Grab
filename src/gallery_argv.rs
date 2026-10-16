@@ -154,6 +154,7 @@ pub fn count_argv(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
     filter: GalleryFilter,
 ) -> Vec<String> {
     let mut argv = vec![
@@ -169,6 +170,10 @@ pub fn count_argv(
     if let Some(cookies) = cookies_file {
         argv.push("-C".to_string());
         argv.push(cookies.to_string_lossy().to_string());
+    }
+    if let Some(ua) = user_agent {
+        argv.push("--user-agent".to_string());
+        argv.push(ua.to_string());
     }
     push_filter(&mut argv, filter);
     // Instagram throttling for the extraction requests (no --sleep: count
@@ -394,6 +399,7 @@ mod tests {
             &tool(),
             "https://example.com/gallery",
             None,
+            None,
             GalleryFilter::All,
         );
         assert!(argv.contains(&"output.fallback=false".to_string()));
@@ -405,6 +411,7 @@ mod tests {
         let argv = count_argv(
             &tool(),
             "https://example.com/gallery",
+            None,
             None,
             GalleryFilter::ImagesOnly,
         );
@@ -483,6 +490,7 @@ mod tests {
         let argv = count_argv(
             &tool(),
             "https://www.instagram.com/p/ABC123/",
+            None,
             None,
             GalleryFilter::All,
         );

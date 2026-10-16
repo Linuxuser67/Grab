@@ -2163,8 +2163,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 ),
                 None => return,
             };
-            // Disable the button while enumerating; the picker replaces it.
+            // Disable the button and show a loading label while enumerating;
+            // the picker replaces it on success.
+            let loading_label = gettext("Loading…");
+            let orig_label = step2.gallery_select_btn.label().unwrap_or_default();
             step2.gallery_select_btn.set_sensitive(false);
+            step2.gallery_select_btn.set_label(&loading_label);
             let step3 = step2.clone();
             let nav3 = nav2.clone();
             let manager3 = manager2.clone();
@@ -2172,13 +2176,25 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             let close3 = close2.clone();
             let scheduled3 = scheduled2.clone();
             glib::spawn_future_local(async move {
+                let restore_btn = || {
+                    step3.gallery_select_btn.set_sensitive(true);
+                    step3.gallery_select_btn.set_label(Some(&orig_label));
+                };
+                // Surface enumeration failures on the gallery row instead of
+                // only logging: the user clicked a button and deserves feedback.
+                let show_error = |msg: &str| {
+                    step3.gallery_info.set_subtitle(msg);
+                };
                 let handoff_path = crate::extension_server::handoff_cookie_path(&url);
                 let handoff_ua = crate::extension_server::handoff_user_agent(&url);
                 let tool = match crate::gallery_argv::resolve_tool() {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::warn!("gallery picker: no gallery-dl: {e}");
-                        step3.gallery_select_btn.set_sensitive(true);
+                        restore_btn();
+                        show_error(&gettext(
+                            "Could not list files: gallery-dl is not installed",
+                        ));
                         return;
                     }
                 };
@@ -2195,7 +2211,19 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         .await
                     })
                     .await;
-                step3.gallery_select_btn.set_sensitive(true);
+                // Stale guard: the card may have been closed or a new URL
+                // pasted while enumerating; don't touch the UI or push a
+                // picker for the old gallery onto the new card's nav stack.
+                let still_current = step3
+                    .gallery_card
+                    .borrow()
+                    .as_ref()
+                    .map(|card| card.url() == url)
+                    .unwrap_or(false);
+                if !still_current {
+                    return;
+                }
+                restore_btn();
                 match result {
                     Ok(Ok(items)) if !items.is_empty() => {
                         push_gallery_picker_page(
@@ -2210,8 +2238,16 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             items,
                         );
                     }
-                    _ => {
-                        tracing::warn!("gallery picker: enumeration failed or empty");
+                    Ok(Ok(_)) => {
+                        show_error(&gettext("No files found"));
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("gallery picker: enumeration failed: {e:?}");
+                        show_error(&gettext("Could not list files"));
+                    }
+                    Err(e) => {
+                        tracing::warn!("gallery picker: enumeration task failed: {e:?}");
+                        show_error(&gettext("Could not list files"));
                     }
                 }
             });

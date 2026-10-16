@@ -90,6 +90,46 @@ impl GalleryFilter {
 /// - `downloader.http.progress=null`: suppress gallery-dl's stderr progress
 /// - `output.progress=false`: disable multi-URL progress indicator
 /// - `output.mode=pipe`: one file path per line (see gallery_progress)
+///
+/// Build a gallery-dl `--range` spec from 0-based selected indices.
+/// gallery-dl uses 1-based indices; consecutive runs compress to `a-b`.
+/// Empty input returns `None` (caller should reject empty selections).
+/// Example: [0, 1, 2, 4, 6, 7] -> "1-3,5,7-8".
+pub fn range_spec(selected: &[usize]) -> Option<String> {
+    if selected.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<usize> = selected.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut parts = Vec::new();
+    let mut run_start = sorted[0];
+    let mut run_end = sorted[0];
+    for &i in &sorted[1..] {
+        if i == run_end + 1 {
+            run_end = i;
+        } else {
+            parts.push(format_range(run_start, run_end));
+            run_start = i;
+            run_end = i;
+        }
+    }
+    parts.push(format_range(run_start, run_end));
+    Some(parts.join(","))
+}
+
+/// Format one 0-based inclusive run as a 1-based gallery-dl range.
+fn format_range(start: usize, end: usize) -> String {
+    // gallery-dl indices are 1-based.
+    let s = start + 1;
+    let e = end + 1;
+    if s == e {
+        s.to_string()
+    } else {
+        format!("{s}-{e}")
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn download_argv(
     tool: &Path,
@@ -192,7 +232,7 @@ pub fn count_argv(
 }
 
 /// Append `--filter <expr>` for the given gallery filter, if it has one.
-fn push_filter(argv: &mut Vec<String>, filter: GalleryFilter) {
+pub(crate) fn push_filter(argv: &mut Vec<String>, filter: GalleryFilter) {
     if let Some(expr) = filter.to_filter_expr() {
         argv.push("--filter".to_string());
         argv.push(expr);
@@ -501,6 +541,36 @@ mod tests {
             None,
         );
         assert!(!argv.iter().any(|a| a == "--range"));
+    }
+
+    #[test]
+    fn range_spec_empty_is_none() {
+        assert_eq!(range_spec(&[]), None);
+    }
+
+    #[test]
+    fn range_spec_single() {
+        assert_eq!(range_spec(&[0]), Some("1".to_string()));
+        assert_eq!(range_spec(&[4]), Some("5".to_string()));
+    }
+
+    #[test]
+    fn range_spec_consecutive_compresses() {
+        assert_eq!(range_spec(&[0, 1, 2]), Some("1-3".to_string()));
+    }
+
+    #[test]
+    fn range_spec_mixed() {
+        assert_eq!(
+            range_spec(&[0, 1, 2, 4, 6, 7]),
+            Some("1-3,5,7-8".to_string())
+        );
+    }
+
+    #[test]
+    fn range_spec_unsorted_and_dupes() {
+        // Picker indices arrive ascending, but be robust.
+        assert_eq!(range_spec(&[7, 6, 0, 6]), Some("1,7-8".to_string()));
     }
 
     #[test]

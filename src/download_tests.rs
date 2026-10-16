@@ -7403,5 +7403,9 @@ fn gallery_enqueue_uses_unique_dir_when_title_collides() {
     let item2 = m.enqueue_gallery(&job).expect("enqueue second");
     assert_ne!(item2.filename(), item.filename());
     assert_ne!(item2.filename(), "Test Gallery");
+    // Drain both spawned engines so no woken tail trips a later test's
+    // glib thread guard (SIGABRT in quiesce).
+    drain_engine(&m, item.id());
+    drain_engine(&m, item2.id());
     let _ = std::fs::remove_dir_all(&tmp);
 }

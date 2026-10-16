@@ -49,9 +49,10 @@ pub enum GalleryContent {
 impl GalleryContent {
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_ascii_lowercase().as_str() {
-            "mp4" | "webm" | "mov" | "mkv" | "m4v" | "avi" | "ts" => Self::Video,
-            "jpg" | "jpeg" | "jpe" | "png" | "webp" | "gif" | "avif" | "bmp" | "svg" | "tiff"
-            | "tif" => Self::Image,
+            "mp4" | "webm" | "mov" | "mkv" | "m4v" | "avi" | "ts" | "flv" | "wmv" | "mpg"
+            | "mpeg" | "3gp" | "3g2" | "ogv" | "m2ts" | "mts" | "asf" | "f4v" => Self::Video,
+            "jpg" | "jpeg" | "jpe" | "jfif" | "png" | "webp" | "gif" | "avif" | "bmp" | "svg"
+            | "tiff" | "tif" | "heic" | "heif" => Self::Image,
             _ => Self::Unknown,
         }
     }
@@ -383,6 +384,9 @@ mod tests {
             GalleryContent::from_extension("webm"),
             GalleryContent::Video
         );
+        assert_eq!(GalleryContent::from_extension("flv"), GalleryContent::Video);
+        assert_eq!(GalleryContent::from_extension("wmv"), GalleryContent::Video);
+        assert_eq!(GalleryContent::from_extension("mpg"), GalleryContent::Video);
         assert_eq!(GalleryContent::from_extension("jpg"), GalleryContent::Image);
         assert_eq!(
             GalleryContent::from_extension("JPEG"),
@@ -390,6 +394,14 @@ mod tests {
         );
         assert_eq!(
             GalleryContent::from_extension("webp"),
+            GalleryContent::Image
+        );
+        assert_eq!(
+            GalleryContent::from_extension("heic"),
+            GalleryContent::Image
+        );
+        assert_eq!(
+            GalleryContent::from_extension("HEIF"),
             GalleryContent::Image
         );
         assert_eq!(

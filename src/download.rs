@@ -2004,6 +2004,7 @@ impl DownloadManager {
         // Cookies are resolved at spawn time (not enqueue time): the staged
         // file is ephemeral, so a path stored at enqueue would be stale on retry.
         let page_url = job.page_url.clone();
+        let jobs = self.max_concurrent() as u32;
         let handle = tokio_rt().spawn(async move {
             let tool = match crate::gallery_argv::resolve_tool() {
                 Ok(t) => t,
@@ -2049,7 +2050,7 @@ impl DownloadManager {
                     .as_deref()
                     .or_else(|| cookies_file.as_ref().map(|c| c.path())),
                 handoff_ua.as_deref(),
-                self.max_concurrent() as u32,
+                jobs,
                 |update| {
                     let _ = tx.send(GalleryMsg::Progress(update.files_completed));
                 },

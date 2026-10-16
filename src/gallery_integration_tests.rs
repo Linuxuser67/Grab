@@ -159,7 +159,11 @@ async fn gallery_integration_probe_count_download() {
         Err(e) => panic!("download failed: {e:?}"),
     };
     assert_eq!(result.files.len(), 3, "expected 3 downloaded files");
-    assert_eq!(completed.get(), 3, "progress should report 3 completed");
+    assert_eq!(
+        *completed.lock().unwrap(),
+        3,
+        "progress should report 3 completed"
+    );
     for f in &result.files {
         assert!(f.exists(), "downloaded file should exist: {f:?}");
     }

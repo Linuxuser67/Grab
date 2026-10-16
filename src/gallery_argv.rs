@@ -110,6 +110,15 @@ pub fn download_argv(
         argv.push("-r".to_string());
         argv.push(limit.to_string());
     }
+    // Instagram rate-limits aggressively: gallery-dl recommends 3s between
+    // requests and 1.5s before each download to avoid temporary IP blocks.
+    let host = crate::video_probe::page_host(url);
+    if host == "instagram.com" || host.ends_with(".instagram.com") {
+        argv.push("--sleep-request".to_string());
+        argv.push("3".to_string());
+        argv.push("--sleep".to_string());
+        argv.push("1.5".to_string());
+    }
     // `--` guards against URLs starting with `-` being parsed as options.
     argv.push("--".to_string());
     argv.push(url.to_string());
@@ -336,5 +345,40 @@ mod tests {
             .position(|a| a == "--filter")
             .expect("filter flag");
         assert!(argv[pos + 1].contains("jpg"));
+    }
+
+    #[test]
+    fn download_argv_instagram_gets_sleep_request() {
+        let argv = download_argv(
+            &tool(),
+            "https://www.instagram.com/p/ABC123/",
+            Path::new("/tmp/dest"),
+            None,
+            GalleryFilter::All,
+            None,
+        );
+        let pos = argv
+            .iter()
+            .position(|a| a == "--sleep-request")
+            .expect("sleep-request flag");
+        assert_eq!(argv[pos + 1], "3");
+        let pos = argv
+            .iter()
+            .position(|a| a == "--sleep")
+            .expect("sleep flag");
+        assert_eq!(argv[pos + 1], "1.5");
+    }
+
+    #[test]
+    fn download_argv_non_instagram_no_sleep_request() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            GalleryFilter::All,
+            None,
+        );
+        assert!(!argv.iter().any(|a| a == "--sleep-request"));
     }
 }

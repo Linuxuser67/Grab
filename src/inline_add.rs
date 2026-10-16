@@ -2466,6 +2466,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     filter,
                     cookies_browser,
                     speed_limit: crate::gallery_runner::gallery_speed_limit(m.settings()),
+                    range: None,
                 };
                 match m.enqueue_gallery(&job) {
                     Ok(_) => {

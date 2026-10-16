@@ -7010,6 +7010,7 @@ fn gallery_job_fixture() -> crate::gallery_argv::GalleryJob {
         filter: crate::gallery_argv::GalleryFilter::All,
         cookies_browser: "none".to_string(),
         speed_limit: None,
+        range: None,
     }
 }
 

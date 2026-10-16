@@ -100,6 +100,7 @@ pub(crate) fn submit_gallery_video(
                 filter: crate::gallery_argv::GalleryFilter::All,
                 cookies_browser,
                 speed_limit,
+                range: None,
             };
             manager.enqueue_gallery(&job)
         },

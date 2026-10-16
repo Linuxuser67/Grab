@@ -2133,17 +2133,17 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         if probe_b.borrow().generation != my {
                             return;
                         }
-                        // Probed links fall back to today's outcome (queue the file directly)
-                        // only when extraction says unsupported; transient failures keep
-                        // the error row with retry.
-                        if !crate::video::is_video_page(&url)
-                            && !crate::gallery_probe::url_is_direct_media(&url)
-                            && e.to_string().to_lowercase().contains("unsupported url")
-                        {
+                        // Gallery-dl is tried when yt-dlp fails (not just on
+                        // "unsupported url"): it handles sites yt-dlp can't
+                        // (e.g. Instagram stories needing login).
+                        // Skipped for direct media URLs (e.g. .mp4): those aren't
+                        // gallery pages, so gallery-dl would just waste time.
+                        // If gallery-dl finds nothing, plain fallback runs only for
+                        // non-video pages with "unsupported url"; otherwise the
+                        // original yt-dlp error shows with retry.
+                        if !crate::gallery_probe::url_is_direct_media(&url) {
                             // Try gallery-dl before falling back to direct: it handles
                             // sites yt-dlp can't (e.g. Instagram stories).
-                            // Skipped for direct media URLs (e.g. .mp4): those aren't
-                            // gallery pages, so gallery-dl would just waste time.
                             // Resolve gallery-dl first; only stage cookies if it exists.
                             if let Ok(tool) = crate::gallery_argv::resolve_tool() {
                                 // Stage cookies for the probe (StagedCookies drops at block end).
@@ -2272,25 +2272,33 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     }
                                 }
                             }
-                            match queue_plain(
-                                &manager_b,
-                                &dest_b,
-                                &close_b,
-                                &url,
-                                scheduled_at_b.get(),
-                            ) {
-                                Ok(()) => return,
-                                Err(pe) => {
-                                    fallback_plain_failed(
-                                        &probe_b,
-                                        &step_b,
-                                        &lookup_add_b,
-                                        &url,
-                                        &pe,
-                                    );
-                                    return;
+                            // Only queue plain for non-video pages with "unsupported url":
+                            // transient failures on video pages keep the error row with retry.
+                            // (gallery-dl was tried above for all non-direct-media URLs)
+                            let plain_fallback_ok = !crate::video::is_video_page(&url)
+                                && e.to_string().to_lowercase().contains("unsupported url");
+                            if plain_fallback_ok {
+                                match queue_plain(
+                                    &manager_b,
+                                    &dest_b,
+                                    &close_b,
+                                    &url,
+                                    scheduled_at_b.get(),
+                                ) {
+                                    Ok(()) => return,
+                                    Err(pe) => {
+                                        fallback_plain_failed(
+                                            &probe_b,
+                                            &step_b,
+                                            &lookup_add_b,
+                                            &url,
+                                            &pe,
+                                        );
+                                        return;
+                                    }
                                 }
                             }
+                            // Otherwise fall through to the error display below.
                         }
                         // Drive serves videos and plain files behind the same share URLs, but
                         // yt-dlp's Drive extractor is playback-API-only: PDFs, docs and zips

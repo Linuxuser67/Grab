@@ -724,13 +724,18 @@ impl DownloadManager {
         // the URL, which contains `/` and would fail restore validation).
         let title = crate::file_names::sanitize_folder_name(&job.title);
         // Ensure the gallery directory is unique and provably ours: if a
-        // directory with the sanitized title already exists (pre-existing
-        // user folder, or another gallery with a colliding title), append
-        // -1, -2, etc. until we find a free name. This prevents the delete
-        // path from trashing unrelated files.
+        // directory with the sanitized title already exists on disk
+        // (pre-existing user folder), or another gallery row already claims
+        // that name (same title enqueued twice, neither downloaded yet),
+        // append -2, -3, etc. until a free name is found. This prevents the
+        // delete path from trashing unrelated files.
         let mut unique_title = title.clone();
         let mut counter = 1;
-        while std::path::Path::new(&dir).join(&unique_title).exists() {
+        while std::path::Path::new(&dir).join(&unique_title).exists()
+            || self
+                .items()
+                .any(|it| it.dest_dir() == dir && it.filename() == unique_title)
+        {
             counter += 1;
             unique_title = format!("{title}-{counter}");
         }

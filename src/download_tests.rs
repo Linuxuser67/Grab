@@ -7398,5 +7398,10 @@ fn gallery_enqueue_uses_unique_dir_when_title_collides() {
     // Pre-existing directory and its file must still exist.
     assert!(preexisting.is_dir());
     assert!(preexisting.join("unrelated.txt").exists());
+    // A second gallery with the same title (neither downloaded yet, so no
+    // dir on disk) must get a *different* unique name — in-memory collision.
+    let item2 = m.enqueue_gallery(&job).expect("enqueue second");
+    assert_ne!(item2.filename(), item.filename());
+    assert_ne!(item2.filename(), "Test Gallery");
     let _ = std::fs::remove_dir_all(&tmp);
 }

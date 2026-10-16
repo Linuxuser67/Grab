@@ -192,11 +192,29 @@ pub async fn run_gallery_download(
         )));
     }
 
+    // Classify the result: clean exit with zero files is a visible failure.
+    let files =
+        classify_result(files, progress.files_skipped, None).map_err(GalleryError::runtime)?;
+
     Ok(GalleryResult {
         files,
         skipped: progress.files_skipped,
         exit_code: None,
     })
+}
+
+/// Classify a gallery-dl run result for the UI.
+/// Returns the user-facing outcome: Ok(files) for success, Err(msg) for failure.
+pub(crate) fn classify_result(
+    files: Vec<PathBuf>,
+    skipped: u32,
+    exit_code: Option<i32>,
+) -> Result<Vec<PathBuf>, String> {
+    // Clean exit with zero files and zero skipped: visible failure, not Done.
+    if exit_code.is_none() && files.is_empty() && skipped == 0 {
+        return Err("gallery-dl found no files (check login or filter)".to_string());
+    }
+    Ok(files)
 }
 
 /// Speed limit for gallery downloads, from settings.
@@ -209,6 +227,33 @@ pub fn gallery_speed_limit(settings: &crate::settings::AppSettings) -> Option<u6
 mod tests {
     use super::*;
     use crate::gallery_argv::GalleryFilter;
+
+    #[test]
+    fn classify_result_clean_no_files_is_failure() {
+        // Clean exit (None), zero files, zero skipped: visible failure.
+        // Mutation: return Ok → assertion on Err fails.
+        let err = classify_result(vec![], 0, None).unwrap_err();
+        assert_eq!(err, "gallery-dl found no files (check login or filter)");
+    }
+
+    #[test]
+    fn classify_result_with_files_is_ok() {
+        let files = vec![PathBuf::from("/tmp/a.jpg")];
+        assert!(classify_result(files, 0, None).is_ok());
+    }
+
+    #[test]
+    fn classify_result_skipped_only_is_ok() {
+        // All skipped (not downloaded): not a failure, just nothing new.
+        assert!(classify_result(vec![], 3, None).is_ok());
+    }
+
+    #[test]
+    fn classify_result_partial_with_exit_code_is_ok() {
+        // Non-clean exit but files present: partial success (handled upstream).
+        let files = vec![PathBuf::from("/tmp/a.jpg")];
+        assert!(classify_result(files, 0, Some(4)).is_ok());
+    }
 
     #[test]
     fn done_label_all_new() {

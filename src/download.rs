@@ -2025,12 +2025,20 @@ impl DownloadManager {
             } else if let Some(ytdlp) =
                 crate::video_tools::find_in_dirs("yt-dlp", &crate::video_tools::tool_search_dirs())
             {
-                crate::cookies::export_cookies_to_file(
-                    &ytdlp,
-                    &job.cookies_browser,
-                    &job.page_url,
-                    std::time::Duration::from_secs(30),
-                )
+                // Run on Tokio worker to avoid blocking (export is sync via block_on_sync).
+                let browser = job.cookies_browser.clone();
+                let page_url = job.page_url.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::cookies::export_cookies_to_file(
+                        &ytdlp,
+                        &browser,
+                        &page_url,
+                        std::time::Duration::from_secs(30),
+                    )
+                })
+                .await
+                .ok()
+                .flatten()
             } else {
                 None
             };

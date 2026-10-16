@@ -243,9 +243,17 @@ pub(crate) async fn export_cookies_to_file(
     page_url: &str,
     timeout: Duration,
 ) -> Option<StagedCookies> {
-    // Reuse the same secure temp-file + yt-dlp dump as export_cookies,
-    // but keep the file for the caller instead of reading+deleting.
-    let path = stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await?;
+    // Run on the Tokio runtime: callers may be on the GTK main loop
+    // (glib::spawn_future_local) which has no reactor for tokio::process.
+    let youtube_bin = youtube_bin.to_path_buf();
+    let cookies_browser = cookies_browser.to_string();
+    let page_url = page_url.to_string();
+    let path = crate::runtime::tokio_rt()
+        .spawn(async move {
+            stage_cookie_file(&youtube_bin, &cookies_browser, &page_url, timeout).await
+        })
+        .await
+        .ok()??;
     Some(StagedCookies(path))
 }
 

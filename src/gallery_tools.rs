@@ -174,19 +174,26 @@ pub fn resolve_gallerydl() -> Result<PathBuf, GalleryError> {
 }
 
 /// `gallery-dl --version` output, trimmed. Used for the Preferences row.
+/// Runs on the Tokio runtime: callers may be on the GTK main loop.
 pub async fn gallerydl_display_version(path: &Path) -> Result<String, GalleryError> {
-    let out = tokio::process::Command::new(path)
-        .arg("--version")
-        .output()
+    let path = path.to_path_buf();
+    crate::runtime::tokio_rt()
+        .spawn(async move {
+            let out = tokio::process::Command::new(&path)
+                .arg("--version")
+                .output()
+                .await
+                .map_err(|e| GalleryError::install(format!("couldn't run gallery-dl: {e}")))?;
+            let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if version.is_empty() {
+                return Err(GalleryError::install(
+                    "gallery-dl --version produced no output",
+                ));
+            }
+            Ok(version)
+        })
         .await
-        .map_err(|e| GalleryError::install(format!("couldn't run gallery-dl: {e}")))?;
-    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if version.is_empty() {
-        return Err(GalleryError::install(
-            "gallery-dl --version produced no output",
-        ));
-    }
-    Ok(version)
+        .unwrap_or_else(|e| Err(GalleryError::runtime(&e)))
 }
 
 #[cfg(test)]

@@ -8031,7 +8031,8 @@ fn unified_argv_limit_rate_when_set() {
         None,
     );
     let pos = argv.iter().position(|a| a == "--limit-rate").expect("flag");
-    assert_eq!(argv[pos + 1], "512000");
+    // --limit-rate is divided by 4 (concurrent fragments) so the total stays at the cap.
+    assert_eq!(argv[pos + 1], "128000");
     let sep = argv.iter().position(|a| a == "--").expect("separator");
     assert!(pos < sep, "limit-rate must precede the URL separator");
     // Default off: no trace of the flag.
@@ -8094,7 +8095,8 @@ fn hls_argv_limit_rate_when_set() {
         None,
     );
     let pos = argv.iter().position(|a| a == "--limit-rate").expect("flag");
-    assert_eq!(argv[pos + 1], "2097152");
+    // --limit-rate is divided by 4 (concurrent fragments) so the total stays at the cap.
+    assert_eq!(argv[pos + 1], "524288");
     let sep = argv.iter().position(|a| a == "--").expect("separator");
     assert!(pos < sep, "limit-rate must precede the URL separator");
     // Default off: no trace of the flag.

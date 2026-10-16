@@ -1625,8 +1625,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let (needs_count, url) = {
                     if let Some(card_ref) = card_rc.borrow().as_ref() {
                         *card_ref.filter.borrow_mut() = filter;
-                        if card_ref.total(filter).is_some() {
-                            // Cached: refresh immediately.
+                        if card_ref.is_count_cached(filter) {
+                            // Cached (success or failure): refresh immediately.
                             let count_text = crate::gallery_card::display_count(
                                 card_ref.file_count(),
                                 5,
@@ -1668,26 +1668,40 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 None
                             }
                         };
-                        if let Ok(tool) = crate::gallery_argv::resolve_tool()
-                            && let Some(n) = crate::gallery_probe::count_gallery_files(
+                        let count_result = if let Ok(tool) = crate::gallery_argv::resolve_tool() {
+                            crate::gallery_probe::count_gallery_files(
                                 &tool,
                                 &url,
                                 cookies.as_ref().map(|c| c.path()),
                                 filter,
                             )
                             .await
-                            && let Some(card_ref) = card_rc.borrow().as_ref()
+                        } else {
+                            None
+                        };
+                        if let Some(card_ref) = card_rc.borrow().as_ref()
+                            // Only update if the card still shows the same URL.
+                            // The user may have changed the URL while the count was running.
+                            && card_ref.url() == url
                         {
-                            card_ref.set_total(filter, n);
-                            // Refresh only if the filter hasn't changed again.
-                            if *card_ref.filter.borrow() == filter {
-                                let count_text = crate::gallery_card::display_count(
-                                    card_ref.file_count(),
-                                    5,
-                                    Some(n),
-                                );
-                                let preview = card_ref.preview_filenames().join(", ");
-                                info.set_subtitle(&format!("{count_text} • {preview}"));
+                            match count_result {
+                                Some(n) => {
+                                    card_ref.set_total(filter, n);
+                                    // Refresh only if the filter hasn't changed again.
+                                    if *card_ref.filter.borrow() == filter {
+                                        let count_text = crate::gallery_card::display_count(
+                                            card_ref.file_count(),
+                                            5,
+                                            Some(n),
+                                        );
+                                        let preview = card_ref.preview_filenames().join(", ");
+                                        info.set_subtitle(&format!("{count_text} • {preview}"));
+                                    }
+                                }
+                                None => {
+                                    // Cache the failure so we don't re-stage cookies on every toggle.
+                                    card_ref.set_total_failed(filter);
+                                }
                             }
                         }
                         // `cookies` (StagedCookies) drops here, deleting the file.

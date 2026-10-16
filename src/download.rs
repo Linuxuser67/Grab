@@ -2030,8 +2030,9 @@ impl DownloadManager {
         let job = match self.gallery_jobs.borrow().get(&item.id()).cloned() {
             Some(j) => j,
             None => {
-                item.set_status(DownloadStatus::Failed);
+                // Detail before status: the status notify fires synchronously.
                 item.set_detail("Gallery job not found".to_string());
+                item.set_status(DownloadStatus::Failed);
                 self.changed();
                 self.start_next();
                 return;
@@ -2144,18 +2145,11 @@ impl DownloadManager {
                         this.running.borrow_mut().remove(&item_c.id());
                         match result {
                             Ok(r) => {
-                                // Partial failure (exit_code.is_some()) is marked
-                                // Failed so it's retryable via retry_failed().
-                                // Clean success is Done.
-                                if r.exit_code.is_some() {
-                                    item_c.set_status(DownloadStatus::Failed);
-                                } else {
-                                    item_c.set_status(DownloadStatus::Done);
-                                }
+                                // Set detail BEFORE status: the status notify
+                                // fires synchronously and opens the dialog,
+                                // which reads the detail (same as Err below).
                                 let done =
                                     crate::gallery_runner::done_count(r.files.len(), r.skipped);
-                                item_c.set_gallery_files_done(done);
-                                item_c.set_progress(1.0);
                                 let detail = if r.exit_code.is_some() {
                                     format!(
                                         "{} \u{2022} some failed",
@@ -2164,7 +2158,17 @@ impl DownloadManager {
                                 } else {
                                     crate::gallery_runner::done_label(r.files.len(), r.skipped)
                                 };
+                                item_c.set_gallery_files_done(done);
+                                item_c.set_progress(1.0);
                                 item_c.set_detail(detail);
+                                // Partial failure (exit_code.is_some()) is marked
+                                // Failed so it's retryable via retry_failed().
+                                // Clean success is Done.
+                                if r.exit_code.is_some() {
+                                    item_c.set_status(DownloadStatus::Failed);
+                                } else {
+                                    item_c.set_status(DownloadStatus::Done);
+                                }
                                 // One finished record per URL (Parabolic parity):
                                 // done here (not at enqueue) so a failed
                                 // re-download keeps the earlier good record.

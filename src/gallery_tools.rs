@@ -194,7 +194,7 @@ pub async fn gallerydl_display_version(path: &Path) -> Result<String, GalleryErr
 /// Sync wrapper for `gallerydl_display_version` for true sync callers.
 pub fn gallerydl_display_version_sync(path: &Path) -> Result<String, GalleryError> {
     let path = path.to_path_buf();
-    crate::runtime::block_on_sync(gallerydl_display_version(&path))
+    crate::runtime::block_on_sync(async move { gallerydl_display_version(&path).await })
 }
 
 #[cfg(test)]

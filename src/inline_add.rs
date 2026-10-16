@@ -1652,6 +1652,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         let handoff_ua = crate::extension_server::handoff_user_agent(&url);
                         let url_for_count = url.clone();
                         let filter_c = filter;
+                        // Extract cookies_browser before spawn: AppSettings is !Send.
+                        let browser = crate::settings::AppSettings::new().cookies_browser();
                         // Run cookie export + count on Tokio worker (not GTK main).
                         let count_result = crate::runtime::tokio_rt()
                             .spawn(async move {
@@ -1659,8 +1661,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 let cookies = if handoff_path.is_some() {
                                     None
                                 } else {
-                                    let settings = crate::settings::AppSettings::new();
-                                    let browser = settings.cookies_browser();
                                     if browser.is_empty() || browser == "none" {
                                         None
                                     } else if let Some(ytdlp) = crate::video_tools::find_in_dirs(

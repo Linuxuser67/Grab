@@ -7268,8 +7268,8 @@ fn gallery_remove_discards_handoff_cookies() {
             host_only: None,
             path: None,
             secure: None,
+            expiration_date: None,
         }],
-        None,
     );
     assert!(crate::extension_server::handoff_cookie_path(&job.page_url).is_some());
     // Enqueue the gallery, then remove it.

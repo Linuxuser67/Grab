@@ -42,7 +42,6 @@ pub(crate) fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
 
     /// Regression: two concurrent long-running async tasks must not block a

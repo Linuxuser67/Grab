@@ -90,6 +90,7 @@ impl GalleryFilter {
 /// - `downloader.http.progress=null`: suppress gallery-dl's stderr progress
 /// - `output.progress=false`: disable multi-URL progress indicator
 /// - `output.mode=pipe`: one file path per line (see gallery_progress)
+#[allow(clippy::too_many_arguments)]
 pub fn download_argv(
     tool: &Path,
     url: &str,

@@ -7366,3 +7366,46 @@ fn gallery_legacy_backend_converts() {
     assert_eq!(job.page_url, "https://example.com/gallery");
     let _ = std::fs::remove_file(&qf);
 }
+
+#[test]
+fn gallery_enqueue_uses_unique_dir_when_title_collides() {
+    // RED: If a directory with the sanitized title already exists,
+    // enqueue_gallery must use a unique name (title-2, title-3, etc.)
+    // to avoid mixing files and to make delete safe.
+    let (_lock, _loop) = test_locks();
+    let settings = test_settings();
+    let tmp = std::env::temp_dir().join(format!("grab-test-gallery-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    // Pre-existing directory with the same sanitized title.
+    let preexisting = tmp.join("Test Gallery");
+    std::fs::create_dir_all(&preexisting).unwrap();
+    // Put an unrelated file in it - must survive.
+    std::fs::write(preexisting.join("unrelated.txt"), "do not delete").unwrap();
+
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let mut job = gallery_job_fixture();
+    job.dest_dir = tmp.clone();
+    job.title = "Test Gallery".to_string();
+    let item = m.enqueue_gallery(&job).expect("enqueue");
+    // Must NOT use the pre-existing directory.
+    assert_ne!(item.filename(), "Test Gallery");
+    assert!(item.filename().starts_with("Test Gallery-"));
+    // The job's dest_dir must point to the unique directory.
+    let stored_job = m.gallery_jobs.borrow().get(&item.id()).cloned().unwrap();
+    assert!(stored_job.dest_dir.starts_with(&tmp));
+    assert_ne!(stored_job.dest_dir, preexisting);
+    // Pre-existing directory and its file must still exist.
+    assert!(preexisting.is_dir());
+    assert!(preexisting.join("unrelated.txt").exists());
+    // A second gallery with the same title (neither downloaded yet, so no
+    // dir on disk) must get a *different* unique name — in-memory collision.
+    let item2 = m.enqueue_gallery(&job).expect("enqueue second");
+    assert_ne!(item2.filename(), item.filename());
+    assert_ne!(item2.filename(), "Test Gallery");
+    // Drain both spawned engines so no woken tail trips a later test's
+    // glib thread guard (SIGABRT in quiesce).
+    drain_engine(&m, item.id());
+    drain_engine(&m, item2.id());
+    let _ = std::fs::remove_dir_all(&tmp);
+}

@@ -723,10 +723,26 @@ impl DownloadManager {
         // Gallery title is the folder name; sanitize it (probe falls back to
         // the URL, which contains `/` and would fail restore validation).
         let title = crate::file_names::sanitize_folder_name(&job.title);
+        // Ensure the gallery directory is unique and provably ours: if a
+        // directory with the sanitized title already exists on disk
+        // (pre-existing user folder), or another gallery row already claims
+        // that name (same title enqueued twice, neither downloaded yet),
+        // append -2, -3, etc. until a free name is found. This prevents the
+        // delete path from trashing unrelated files.
+        let mut unique_title = title.clone();
+        let mut counter = 1;
+        while std::path::Path::new(&dir).join(&unique_title).exists()
+            || self
+                .items()
+                .any(|it| it.dest_dir() == dir && it.filename() == unique_title)
+        {
+            counter += 1;
+            unique_title = format!("{title}-{counter}");
+        }
         let item = DownloadItem::new(
             self.alloc_id_for(std::path::Path::new(&dir)),
             &url,
-            &title,
+            &unique_title,
             &dir,
         );
         item.set_is_gallery(true);
@@ -734,8 +750,8 @@ impl DownloadManager {
         item.set_gallery_files_done(0);
         item.set_gallery_url(url.clone());
         item.set_detail(format!("Gallery • {} files", job.file_count.unwrap_or(0)));
-        // Gallery files go into a subfolder named after the title.
-        let gallery_dir = std::path::Path::new(&dir).join(&title);
+        // Gallery files go into a subfolder named after the (unique) title.
+        let gallery_dir = std::path::Path::new(&dir).join(&unique_title);
         // Store a resolved copy: absolute dest_dir (the gallery subfolder)
         // and the real row ID. (The caller's job keeps its placeholder ID.)
         let mut stored_job = job.clone();

@@ -242,7 +242,13 @@ pub fn run(
             // gallery-dl for image galleries and fallback video; installed up front
             // so gallery pastes never wait on a lazy install.
             gdl.set_downloading();
-            let gdl_path = match crate::gallery::install_gallerydl() {
+            // Run on Tokio worker (not GTK main) to avoid UI freeze.
+            let gdl_path = match crate::runtime::tokio_rt()
+                .spawn(async move { crate::gallery::install_gallerydl() })
+                .await
+                .ok()
+                .unwrap_or_else(|| Err(crate::gallery_tools::GalleryError::install("spawn failed")))
+            {
                 Ok(path) => path,
                 Err(e) => {
                     let message = e.to_string();
@@ -252,7 +258,11 @@ pub fn run(
                     return;
                 }
             };
-            let version = crate::gallery::gallerydl_display_version(&gdl_path).ok();
+            let version = crate::runtime::tokio_rt()
+                .spawn(async move { crate::gallery::gallerydl_display_version(&gdl_path).ok() })
+                .await
+                .ok()
+                .flatten();
             gdl.set_installed(version);
         }
         if do_ff {

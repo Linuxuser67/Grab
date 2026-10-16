@@ -2095,7 +2095,14 @@ impl DownloadManager {
                         this.running.borrow_mut().remove(&item_c.id());
                         match result {
                             Ok(r) => {
-                                item_c.set_status(DownloadStatus::Done);
+                                // Partial failure (exit_code.is_some()) is marked
+                                // Failed so it's retryable via retry_failed().
+                                // Clean success is Done.
+                                if r.exit_code.is_some() {
+                                    item_c.set_status(DownloadStatus::Failed);
+                                } else {
+                                    item_c.set_status(DownloadStatus::Done);
+                                }
                                 let done =
                                     crate::gallery_runner::done_count(r.files.len(), r.skipped);
                                 item_c.set_gallery_files_done(done);

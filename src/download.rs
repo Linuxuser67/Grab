@@ -3247,6 +3247,7 @@ impl DownloadManager {
                         filter: crate::gallery_argv::GalleryFilter::All,
                         cookies_browser: "none".to_string(),
                         speed_limit: None,
+                        range: None,
                     })
                 } else {
                     None

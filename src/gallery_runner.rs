@@ -75,6 +75,7 @@ pub async fn run_gallery_download(
         user_agent,
         job.filter,
         job.speed_limit,
+        job.range.as_deref(),
     );
 
     let mut cmd = Command::new(&argv[0]);
@@ -288,6 +289,7 @@ mod tests {
             filter: GalleryFilter::ImagesOnly,
             cookies_browser: "none".to_string(),
             speed_limit: None,
+            range: None,
         };
         let json = serde_json::to_string(&job).unwrap();
         // item_id skipped on serialize.

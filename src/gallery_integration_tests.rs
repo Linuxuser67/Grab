@@ -133,6 +133,7 @@ async fn gallery_integration_probe_count_download() {
         filter: crate::gallery_argv::GalleryFilter::All,
         cookies_browser: "none".to_string(),
         speed_limit: None,
+        range: None,
     };
     let completed = std::cell::Cell::new(0u32);
     let result =
@@ -204,6 +205,7 @@ async fn gallery_integration_filtered_download() {
         filter: crate::gallery_argv::GalleryFilter::ImagesOnly,
         cookies_browser: "none".to_string(),
         speed_limit: None,
+        range: None,
     };
     let result =
         match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |_| {}).await {

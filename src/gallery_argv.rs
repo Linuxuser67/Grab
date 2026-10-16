@@ -90,6 +90,7 @@ impl GalleryFilter {
 /// - `downloader.http.progress=null`: suppress gallery-dl's stderr progress
 /// - `output.progress=false`: disable multi-URL progress indicator
 /// - `output.mode=pipe`: one file path per line (see gallery_progress)
+#[allow(clippy::too_many_arguments)]
 pub fn download_argv(
     tool: &Path,
     url: &str,
@@ -98,6 +99,7 @@ pub fn download_argv(
     user_agent: Option<&str>,
     filter: GalleryFilter,
     speed_limit: Option<u64>,
+    range: Option<&str>,
 ) -> Vec<String> {
     let mut argv = vec![
         tool.to_string_lossy().to_string(),
@@ -132,6 +134,11 @@ pub fn download_argv(
     if let Some(limit) = speed_limit {
         argv.push("-r".to_string());
         argv.push(limit.to_string());
+    }
+    // Picker selection: only download the chosen indices.
+    if let Some(spec) = range {
+        argv.push("--range".to_string());
+        argv.push(spec.to_string());
     }
     // Instagram rate-limits aggressively: throttle requests.
     argv.extend(instagram_throttle_args(url, true));
@@ -217,6 +224,11 @@ pub struct GalleryJob {
     pub cookies_browser: String,
     /// Per-download speed cap in bytes/sec (`-r`/`--limit-rate`); `None` = unlimited.
     pub speed_limit: Option<u64>,
+    /// gallery-dl `--range` spec for a file-picker selection (e.g. "1,3,5-7");
+    /// `None` = download everything. Set by the picker (Phase 3); the backend
+    /// just threads it through to the argv.
+    #[serde(default)]
+    pub range: Option<String>,
 }
 
 #[cfg(test)]
@@ -260,6 +272,7 @@ mod tests {
             None,
             GalleryFilter::All,
             None,
+            None,
         );
         // `-D`, not `-d` (exact dir, no nesting).
         let d_pos = argv.iter().position(|a| a == "-D").unwrap();
@@ -277,6 +290,7 @@ mod tests {
             None,
             GalleryFilter::All,
             None,
+            None,
         );
         let f_pos = argv.iter().position(|a| a == "-f").unwrap();
         assert_eq!(argv[f_pos + 1], "/O");
@@ -292,6 +306,7 @@ mod tests {
             None,
             GalleryFilter::All,
             None,
+            None,
         );
         assert!(argv.contains(&"extractor.directory=[]".to_string()));
     }
@@ -305,6 +320,7 @@ mod tests {
             Some(Path::new("/tmp/cookies.txt")),
             None,
             GalleryFilter::All,
+            None,
             None,
         );
         let c_pos = argv.iter().position(|a| a == "-C").unwrap();
@@ -321,6 +337,7 @@ mod tests {
             Some("Mozilla/5.0 Test"),
             GalleryFilter::All,
             None,
+            None,
         );
         let ua_pos = argv.iter().position(|a| a == "--user-agent").unwrap();
         assert_eq!(argv[ua_pos + 1], "Mozilla/5.0 Test");
@@ -335,6 +352,7 @@ mod tests {
             None,
             None,
             GalleryFilter::All,
+            None,
             None,
         );
         assert!(!argv.iter().any(|a| a == "--user-agent"));
@@ -357,6 +375,7 @@ mod tests {
             None,
             GalleryFilter::ImagesOnly,
             None,
+            None,
         );
         let f_pos = argv.iter().position(|a| a == "--filter").unwrap();
         assert!(argv[f_pos + 1].contains("jpg"));
@@ -373,6 +392,7 @@ mod tests {
             None,
             GalleryFilter::VideosOnly,
             None,
+            None,
         );
         let f_pos = argv.iter().position(|a| a == "--filter").unwrap();
         assert!(argv[f_pos + 1].contains("mp4"));
@@ -388,6 +408,7 @@ mod tests {
             None,
             None,
             GalleryFilter::All,
+            None,
             None,
         );
         assert!(!argv.iter().any(|a| a == "--filter"));
@@ -432,6 +453,7 @@ mod tests {
             None,
             GalleryFilter::All,
             None,
+            None,
         );
         let pos = argv
             .iter()
@@ -446,6 +468,42 @@ mod tests {
     }
 
     #[test]
+    fn download_argv_range_selection() {
+        // RED: a picker selection must reach gallery-dl as `--range <spec>`.
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            None,
+            GalleryFilter::All,
+            None,
+            Some("1,3,5-7"),
+        );
+        let pos = argv
+            .iter()
+            .position(|a| a == "--range")
+            .expect("--range flag");
+        assert_eq!(argv[pos + 1], "1,3,5-7");
+    }
+
+    #[test]
+    fn download_argv_no_range_by_default() {
+        // No selection: no `--range` flag at all (download everything).
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            None,
+            GalleryFilter::All,
+            None,
+            None,
+        );
+        assert!(!argv.iter().any(|a| a == "--range"));
+    }
+
+    #[test]
     fn download_argv_non_instagram_no_sleep_request() {
         let argv = download_argv(
             &tool(),
@@ -454,6 +512,7 @@ mod tests {
             None,
             None,
             GalleryFilter::All,
+            None,
             None,
         );
         assert!(!argv.iter().any(|a| a == "--sleep-request"));

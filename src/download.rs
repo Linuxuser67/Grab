@@ -2056,9 +2056,9 @@ impl DownloadManager {
             .await;
             // `cookies_file` (StagedCookies) drops at block end, deleting the
             // file. Pause/cancel drops the task, so no leak.
-            // Discard handoff cookies only on success. On failure, retain them
-            // for retry (the user may retry the failed download).
-            if result.is_ok() {
+            // Discard handoff cookies only on clean success (exit_code.is_none()).
+            // Partial success (exit_code.is_some()) retains them for retry.
+            if matches!(&result, Ok(r) if r.exit_code.is_none()) {
                 crate::extension_server::discard_handoff_cookies(&page_url);
             }
             let _ = tx.send(GalleryMsg::Finished(result.map_err(|e| e.to_string())));

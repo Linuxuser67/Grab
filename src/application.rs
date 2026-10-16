@@ -97,7 +97,7 @@ async fn intake_remote_torrent(
     client: reqwest::Client,
     url: String,
     file_name: String,
-) {
+) -> bool {
     let fail = |msg: String| {
         toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&msg)));
     };
@@ -105,7 +105,7 @@ async fn intake_remote_torrent(
         Ok(b) => b,
         Err(TorrentFetchError::TooLarge) => {
             fail(gettext("That .torrent link is too large"));
-            return;
+            return false;
         }
         Err(TorrentFetchError::TimedOut) => {
             fail(format!(
@@ -113,14 +113,14 @@ async fn intake_remote_torrent(
                 gettext("Could not fetch that .torrent link"),
                 gettext("timed out")
             ));
-            return;
+            return false;
         }
         Err(TorrentFetchError::Failed(e)) => {
             fail(format!(
                 "{}: {e}",
                 gettext("Could not fetch that .torrent link")
             ));
-            return;
+            return false;
         }
     };
     let stem = std::path::Path::new(&file_name)
@@ -136,10 +136,15 @@ async fn intake_remote_torrent(
         Ok(_) => {
             if let Err(e) = manager.enqueue_torrent_file(bytes, &stem, None, None) {
                 fail(e);
+                return false;
             }
         }
-        Err(e) => fail(e),
+        Err(e) => {
+            fail(e);
+            return false;
+        }
     }
+    true
 }
 
 /// Restore the original URL from a browser-extension handoff.
@@ -237,7 +242,7 @@ enum Routed {
     Failed,
 }
 
-fn route_open_uri(
+async fn route_open_uri(
     manager: Rc<DownloadManager>,
     toasts: Rc<adw::ToastOverlay>,
     add_card: crate::inline_add::AddCard,
@@ -271,12 +276,15 @@ fn route_open_uri(
                 return Routed::Failed;
             }
         };
-        glib::spawn_future_local(intake_remote_torrent(
-            manager, toasts, add_card, client, url, file_name,
-        ));
-        // Note: the fetch may fail later; the browser copy is already gone.
-        // Closing this needs intake_remote_torrent to report its result back.
-        return Routed::Queued;
+        // Fetch the torrent first; only acknowledge (200) if we actually
+        // queued it. The extension deletes the browser copy on 200.
+        let success =
+            intake_remote_torrent(manager, toasts, add_card, client, url, file_name).await;
+        return if success {
+            Routed::Queued
+        } else {
+            Routed::Failed
+        };
     }
     // Anything over http(s) that isn't obviously a direct file takes the
     // inline card path (pre-filled): the card probes it with yt-dlp exactly
@@ -326,8 +334,11 @@ fn dispatch_handoff(
         if via_grab && let Some(host) = uri.host_str() {
             crate::download_net::require_public_resolution(host);
         }
-        let routed = route_open_uri(manager, toasts, add_card, settings, uri);
-        answer_handoff(decision, routed.into());
+        // Route async (remote torrent fetch needs to complete before ack).
+        glib::spawn_future_local(async move {
+            let routed = route_open_uri(manager, toasts, add_card, settings, uri).await;
+            answer_handoff(decision, routed.into());
+        });
         return;
     }
     // Validate before the dialog: the user should approve the canonical URL,
@@ -354,14 +365,17 @@ fn dispatch_handoff(
         move || {
             // Route first, then answer: the extension deletes the browser
             // copy only if Grab really queued it.
-            let routed = route_open_uri(
-                manager.clone(),
-                toasts.clone(),
-                add_card.clone(),
-                settings.clone(),
-                approved.clone(),
-            );
-            answer_handoff(decision.borrow_mut().take(), routed.into());
+            let manager_c = manager.clone();
+            let toasts_c = toasts.clone();
+            let add_card_c = add_card.clone();
+            let settings_c = settings.clone();
+            let approved_c = approved.clone();
+            let decision_c = decision.clone();
+            glib::spawn_future_local(async move {
+                let routed =
+                    route_open_uri(manager_c, toasts_c, add_card_c, settings_c, approved_c).await;
+                answer_handoff(decision_c.borrow_mut().take(), routed.into());
+            });
         },
         move || {
             answer_handoff(

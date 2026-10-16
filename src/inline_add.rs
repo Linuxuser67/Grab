@@ -1669,13 +1669,23 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             }
                         };
                         let count_result = if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                            crate::gallery_probe::count_gallery_files(
-                                &tool,
-                                &url,
-                                cookies.as_ref().map(|c| c.path()),
-                                filter,
-                            )
-                            .await
+                            // Run on the Tokio runtime (GTK main loop has no reactor).
+                            let tool_clone = tool.clone();
+                            let url_clone = url.clone();
+                            let cookies_path = cookies.as_ref().map(|c| c.path().to_path_buf());
+                            crate::runtime::tokio_rt()
+                                .spawn(async move {
+                                    crate::gallery_probe::count_gallery_files(
+                                        &tool_clone,
+                                        &url_clone,
+                                        cookies_path.as_deref(),
+                                        filter,
+                                    )
+                                    .await
+                                })
+                                .await
+                                .ok()
+                                .flatten()
                         } else {
                             None
                         };
@@ -2169,12 +2179,35 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                         None
                                     }
                                 };
-                                let probe_result = crate::gallery_probe::probe_gallery(
-                                    &tool,
-                                    &url,
-                                    probe_cookies.as_ref().map(|c| c.path()),
-                                )
-                                .await;
+                                // Run the probe on the Tokio runtime: this async block
+                                // runs on the GTK main loop (glib::spawn_future_local),
+                                // which has no Tokio reactor for tokio::process::Command.
+                                let tool_clone = tool.clone();
+                                let url_clone = url.clone();
+                                let cookies_path =
+                                    probe_cookies.as_ref().map(|c| c.path().to_path_buf());
+                                let probe_result = match crate::runtime::tokio_rt()
+                                    .spawn(async move {
+                                        crate::gallery_probe::probe_gallery(
+                                            &tool_clone,
+                                            &url_clone,
+                                            cookies_path.as_deref(),
+                                        )
+                                        .await
+                                    })
+                                    .await
+                                {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "gallery-dl probe task failed"
+                                        );
+                                        Err(crate::gallery_tools::GalleryError::runtime(
+                                            "probe task failed",
+                                        ))
+                                    }
+                                };
                                 // Keep probe_cookies for the count below; StagedCookies
                                 // drops at block end.
                                 match probe_result {
@@ -2217,16 +2250,32 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             );
                                             // Verify count via the lightweight counter, with
                                             // the staged cookies (auth-gated galleries).
-                                            if let Ok(tool) = crate::gallery_argv::resolve_tool()
-                                                && let Some(n) =
-                                                    crate::gallery_probe::count_gallery_files(
-                                                        &tool,
-                                                        &url,
-                                                        probe_cookies.as_ref().map(|c| c.path()),
-                                                        crate::gallery_argv::GalleryFilter::All,
-                                                    )
-                                                    .await
+                                            // Run on Tokio runtime (GTK main loop has no reactor).
+                                            let verified_count = if let Ok(tool) =
+                                                crate::gallery_argv::resolve_tool()
                                             {
+                                                let tool_clone = tool.clone();
+                                                let url_clone = url.clone();
+                                                let cookies_path = probe_cookies
+                                                    .as_ref()
+                                                    .map(|c| c.path().to_path_buf());
+                                                crate::runtime::tokio_rt()
+                                                    .spawn(async move {
+                                                        crate::gallery_probe::count_gallery_files(
+                                                            &tool_clone,
+                                                            &url_clone,
+                                                            cookies_path.as_deref(),
+                                                            crate::gallery_argv::GalleryFilter::All,
+                                                        )
+                                                        .await
+                                                    })
+                                                    .await
+                                                    .ok()
+                                                    .flatten()
+                                            } else {
+                                                None
+                                            };
+                                            if let Some(n) = verified_count {
                                                 card.set_total(
                                                     crate::gallery_argv::GalleryFilter::All,
                                                     n,

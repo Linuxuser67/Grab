@@ -2175,7 +2175,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 let url_clone = url.clone();
                                 let browser = settings_b.cookies_browser();
                                 // Run export + probe on Tokio worker (not GTK main).
-                                let (probe_result, probe_cookies) = crate::runtime::tokio_rt()
+                                let (probe_result, _probe_cookies) = crate::runtime::tokio_rt()
                                     .spawn(async move {
                                         // Export browser cookies only if no handoff jar.
                                         let probe_cookies = if handoff_path.is_none() {

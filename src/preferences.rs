@@ -1175,29 +1175,39 @@ pub fn show(
                             _ => indeterminate = true,
                         }
                     }
-                    if !missing.is_empty() {
-                        // Missing tools get "Install", not "Update" — you can't
-                        // update what isn't there.
-                        let names: Vec<String> = missing.clone();
-                        *pending_b.borrow_mut() = names;
-                        row_b.set_subtitle(
-                            &gettext("Not installed: {list}")
-                                .replace("{list}", &missing.join(", ")),
+                    if !missing.is_empty() || !updates.is_empty() {
+                        // Combine missing and updates: the install popup handles
+                        // both (installs missing, updates the rest).
+                        let mut names: Vec<String> = missing.clone();
+                        names.extend(
+                            updates
+                                .iter()
+                                .filter_map(|u| u.split_whitespace().next().map(str::to_string)),
                         );
-                        btn_b.set_label(&gettext("Install"));
-                        action_b.set(ToolAction::Update);
-                    } else if !updates.is_empty() {
-                        // Store tool names for the filtered download popup.
-                        let names: Vec<String> = updates
-                            .iter()
-                            .filter_map(|u| u.split_whitespace().next().map(str::to_string))
-                            .collect();
                         *pending_b.borrow_mut() = names;
-                        row_b.set_subtitle(
-                            &gettext("Update available: {list}")
-                                .replace("{list}", &updates.join(", ")),
-                        );
-                        btn_b.set_label(&gettext("Update"));
+                        // Build subtitle: "Not installed: ..." and/or
+                        // "Update available: ..."
+                        let mut parts: Vec<String> = Vec::new();
+                        if !missing.is_empty() {
+                            parts.push(
+                                gettext("Not installed: {list}")
+                                    .replace("{list}", &missing.join(", ")),
+                            );
+                        }
+                        if !updates.is_empty() {
+                            parts.push(
+                                gettext("Update available: {list}")
+                                    .replace("{list}", &updates.join(", ")),
+                            );
+                        }
+                        row_b.set_subtitle(&parts.join(" • "));
+                        // Button says "Install" if anything is missing (you can't
+                        // update what isn't there), else "Update".
+                        if !missing.is_empty() {
+                            btn_b.set_label(&gettext("Install"));
+                        } else {
+                            btn_b.set_label(&gettext("Update"));
+                        }
                         action_b.set(ToolAction::Update);
                     } else if !indeterminate {
                         row_b.set_subtitle(

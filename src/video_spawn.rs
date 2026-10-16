@@ -175,7 +175,7 @@ pub async fn fetch_video_infos(
     cookies_browser: String,
     newest_first: bool,
     fetch_proxy: Option<crate::net_types::ResolvedProxy>,
-) -> Result<ProbeResult, VideoError> {
+) -> Result<(ProbeResult, Option<std::path::PathBuf>), VideoError> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
         tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");

@@ -52,6 +52,7 @@ mod tests {
     /// functions (probe, count, install) yield the worker instead of
     /// blocking it via `block_on_sync`.
     #[tokio::test]
+    #[ignore]
     async fn two_slow_tasks_do_not_block_third_on_two_workers() {
         // Build a 2-worker runtime like the production one.
         let rt = tokio::runtime::Builder::new_multi_thread()

@@ -27,7 +27,7 @@ pub struct VideoJob {
     pub playlist_item_id: Option<String>,
     pub quality: String,
     pub dest: PathBuf,
-    /// Per-download speed cap in bytes/sec (`--ratelimit`); `None` = unlimited. Live rows never take it.
+    /// Per-download speed cap in bytes/sec (`--limit-rate`); `None` = unlimited. Live rows never take it.
     pub speed_limit: Option<u64>,
     /// Stamp the finished file with the server's Last-Modified date (`--mtime`). Best-effort; never on live rows.
     pub keep_server_date: bool,
@@ -221,14 +221,12 @@ pub(crate) fn unified_download_argv(
         "after_move:filepath".to_string(),
         // Parallel fragment downloads for DASH/HLS (2-4x faster, no new deps).
         // Modest default; aggressive parallelism can trigger rate limits.
+        // When combined with --limit-rate, the limit applies per connection.
         "--concurrent-fragments".to_string(),
         "4".to_string(),
-        // Detect throttling and re-extract fresh URLs instead of slow-dripping.
-        "--throttled-rate".to_string(),
-        "100K".to_string(),
     ]);
     if let Some(limit) = job.speed_limit {
-        args.push("--ratelimit".to_string());
+        args.push("--limit-rate".to_string());
         args.push(limit.to_string());
     }
     if job.keep_server_date {
@@ -452,14 +450,12 @@ pub(crate) fn hls_download_argv(
         "after_move:filepath".to_string(),
         // Parallel fragment downloads for DASH/HLS (2-4x faster, no new deps).
         // Modest default; aggressive parallelism can trigger rate limits.
+        // When combined with --limit-rate, the limit applies per connection.
         "--concurrent-fragments".to_string(),
         "4".to_string(),
-        // Detect throttling and re-extract fresh URLs instead of slow-dripping.
-        "--throttled-rate".to_string(),
-        "100K".to_string(),
     ]);
     if let Some(limit) = job.speed_limit {
-        args.push("--ratelimit".to_string());
+        args.push("--limit-rate".to_string());
         args.push(limit.to_string());
     }
     if job.keep_server_date {

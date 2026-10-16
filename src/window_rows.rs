@@ -605,7 +605,10 @@ fn show_failure_dialog(
         .vexpand(true)
         .hexpand(true)
         .build();
-    text.buffer().set_text(&item.detail());
+    // Show the full error log if available, otherwise the detail summary.
+    let log = item.error_log();
+    let display = if log.is_empty() { item.detail() } else { log };
+    text.buffer().set_text(&display);
     let scrolled = gtk4::ScrolledWindow::builder()
         .min_content_height(240)
         .min_content_width(480)

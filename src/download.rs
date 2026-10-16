@@ -734,10 +734,12 @@ impl DownloadManager {
         item.set_gallery_files_done(0);
         item.set_gallery_url(url.clone());
         item.set_detail(format!("Gallery • {} files", job.file_count.unwrap_or(0)));
-        // Store a resolved copy: absolute dest_dir and the real row ID.
-        // (The caller's job keeps its placeholder ID.)
+        // Gallery files go into a subfolder named after the title.
+        let gallery_dir = std::path::Path::new(&dir).join(&title);
+        // Store a resolved copy: absolute dest_dir (the gallery subfolder)
+        // and the real row ID. (The caller's job keeps its placeholder ID.)
         let mut stored_job = job.clone();
-        stored_job.dest_dir = std::path::PathBuf::from(&dir);
+        stored_job.dest_dir = gallery_dir;
         stored_job.item_id = item.id();
         self.gallery_jobs.borrow_mut().insert(item.id(), stored_job);
         Ok(self.insert(item))
@@ -1978,6 +1980,8 @@ impl DownloadManager {
     /// registered in `running` for cancel/concurrency/shutdown.
     fn spawn_gallery(self: &Rc<Self>, item: DownloadItem) {
         item.set_status(DownloadStatus::Downloading);
+        // Clear previous error log on (re)start.
+        item.set_error_log(String::new());
         self.changed();
 
         // Get the job (carries the user's filter). Kept in the map for retry.
@@ -1995,7 +1999,7 @@ impl DownloadManager {
         // Channel for progress/finished messages (tokio -> glib).
         #[derive(Debug)]
         enum GalleryMsg {
-            Progress(u32),
+            Progress(crate::gallery_runner::GalleryProgressUpdate),
             Finished(Result<crate::gallery_runner::GalleryResult, String>),
         }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<GalleryMsg>();
@@ -2050,7 +2054,7 @@ impl DownloadManager {
                     .or_else(|| cookies_file.as_ref().map(|c| c.path())),
                 handoff_ua.as_deref(),
                 |update| {
-                    let _ = tx.send(GalleryMsg::Progress(update.files_completed));
+                    let _ = tx.send(GalleryMsg::Progress(update));
                 },
             )
             .await;
@@ -2074,19 +2078,26 @@ impl DownloadManager {
         gtk4::glib::spawn_future_local(async move {
             while let Some(msg) = rx.recv().await {
                 match msg {
-                    GalleryMsg::Progress(done) => {
+                    GalleryMsg::Progress(update) => {
+                        let done = update.files_completed;
                         item_c.set_gallery_files_done(done);
+                        // Show the last completed filename if available.
+                        let file_part = update
+                            .last_completed_file
+                            .as_ref()
+                            .and_then(|p| std::path::Path::new(p).file_name()?.to_str())
+                            .map(|n| format!(" • {n}"))
+                            .unwrap_or_default();
                         if total > 0 && done <= total {
                             item_c.set_progress((done as f64 / total as f64).min(1.0));
-                            item_c.set_detail(format!("Gallery \u{2022} {done}/{total} files"));
-                        } else if total == 0 {
-                            // Total unknown: show files done without a bar.
-                            item_c.set_progress(0.0);
-                            item_c.set_detail(format!("Gallery \u{2022} {done} files"));
+                            item_c.set_detail(format!(
+                                "Gallery \u{2022} {done}/{total} files{file_part}"
+                            ));
                         } else {
-                            // done exceeded total (the count was wrong): leave the
-                            // progress bar unchanged instead of resetting to 0.
-                            item_c.set_detail(format!("Gallery \u{2022} {done} files"));
+                            // Total unknown or count was wrong: show files done
+                            // without a progress bar (no misleading percentage).
+                            // Leave progress unchanged (stays at 0 = no bar).
+                            item_c.set_detail(format!("Gallery \u{2022} {done} files{file_part}"));
                         }
                         this.changed();
                     }
@@ -2128,7 +2139,10 @@ impl DownloadManager {
                             }
                             Err(e) => {
                                 item_c.set_status(DownloadStatus::Failed);
-                                item_c.set_detail(format!("Gallery failed: {e}"));
+                                // Card shows summary; dialog shows full log via error_log.
+                                let summary = e.lines().next().unwrap_or(&e).trim();
+                                item_c.set_detail(format!("Gallery failed: {summary}"));
+                                item_c.set_error_log(e.clone());
                                 tracing::error!(error = %e, "gallery download failed");
                             }
                         }
@@ -2597,6 +2611,23 @@ impl DownloadManager {
     /// Returns a display-ready message when trashing fails.
     pub fn delete_download(self: &Rc<Self>, id: u64) -> Result<(), String> {
         let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
+        // Gallery rows: trash the gallery subfolder (title-named folder inside dest_dir).
+        if item.is_gallery() {
+            let gallery_dir = std::path::Path::new(&item.dest_dir()).join(item.filename());
+            if gallery_dir.is_dir() {
+                match gio::File::for_path(&gallery_dir).trash(gio::Cancellable::NONE) {
+                    Ok(()) => {}
+                    Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
+                    Err(e) => {
+                        return Err(format!("Could not move {} to Trash: {e}", item.filename()));
+                    }
+                }
+            }
+            // Remove the gallery job record.
+            self.gallery_jobs.borrow_mut().remove(&id);
+            self.remove(id);
+            return Ok(());
+        }
         // Torrent rows: drop the session entry and archive, drop the row, then Trash the real files (they live in the recorded/recomputed folder, never the stub path).
         if crate::torrent::is_torrent(&item.url()) {
             let url = item.url();

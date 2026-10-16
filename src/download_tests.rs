@@ -7210,7 +7210,11 @@ fn enqueue_gallery_resolves_dest_and_id() {
             .get(&item.id())
             .cloned()
             .expect("job");
-        assert_eq!(stored.dest_dir.to_string_lossy(), item.dest_dir());
+        assert_eq!(
+            stored.dest_dir.to_string_lossy(),
+            format!("{}/{}", item.dest_dir(), item.filename()),
+            "stored job dest_dir should be the gallery subfolder"
+        );
         assert_eq!(stored.item_id, item.id());
         assert_ne!(stored.item_id, 0);
         // Drain the spawned gallery task so it doesn't trip the next test's

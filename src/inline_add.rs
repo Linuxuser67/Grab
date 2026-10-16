@@ -2203,7 +2203,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     })
                                     .await
                                     .ok()
-                                    .unwrap_or_else(|| Ok(None));
+                                    .unwrap_or(Ok(None));
                                 // Keep probe_cookies for the count below; StagedCookies
                                 // drops at block end.
                                 match probe_result {

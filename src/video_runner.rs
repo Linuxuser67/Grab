@@ -284,6 +284,9 @@ async fn run_video_download_inner(
             }
             // Clear this item's staging files (grab-<id>-*), not the dest dir itself: a previous attempt's detached writers may still hold old inodes, so unlink first. Only mismatches/oversize leftovers land here; same-selection resume never does.
             crate::video::clean_staging_files(&staging, job.item_id);
+            // Reclaim a previous attempt's info-JSON temp file (crash debris;
+            // the normal path deletes it after the attempt).
+            let _ = std::fs::remove_file(staging.join(format!(".grab-info-{}.json", job.item_id)));
             // Dest-dir parts are Grab-namespaced, so a mismatch restarts clean instead of resuming into a foreign lookalike. The finished file itself is never touched.
             clean_dest_parts(&job.dest);
             // Record this attempt's selection up front: a pause from here on leaves a matchable sidecar, so the next attempt resumes instead of wiping.
@@ -461,16 +464,23 @@ pub(crate) async fn run_unified_ytdlp(
     );
     // Skip re-extraction: the probe's info JSON is reused via --load-info-json.
     // yt-dlp re-extracts automatically if a loaded format URL 403/404s (safety net),
-    // so stale entries are harmless. The temp file lives in staging (cleaned with it).
-    if let Some(json) = job.info_json.as_ref() {
+    // so stale entries are harmless.
+    let info_json_path: Option<std::path::PathBuf> = if let Some(json) = job.info_json.as_ref() {
         let json_path = staging.join(format!(".grab-info-{}.json", job.item_id));
-        if let Ok(text) = serde_json::to_string(json) {
-            if std::fs::write(&json_path, text).is_ok() {
-                argv.push("--load-info-json".to_string());
-                argv.push(json_path.to_string_lossy().to_string());
-            }
+        if serde_json::to_string(json)
+            .ok()
+            .and_then(|text| std::fs::write(&json_path, text).ok())
+            .is_some()
+        {
+            argv.push("--load-info-json".to_string());
+            argv.push(json_path.to_string_lossy().to_string());
+            Some(json_path)
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
     // Single-counter progress with the pump's granularity gate; `done` is capped against the metadata total so the bar never passes 100%.
     let sent = Arc::new(AtomicU64::new(0));
     let report = {
@@ -510,7 +520,13 @@ pub(crate) async fn run_unified_ytdlp(
         abort,
         timeout,
     )
-    .await?;
+    .await;
+    // The info JSON temp file is single-use: delete it now that yt-dlp has
+    // read it (or failed to). Staging's manifest cleanup never owns it.
+    if let Some(path) = info_json_path {
+        let _ = std::fs::remove_file(path);
+    }
+    let (done, after_move, abort_intent) = done?;
     let Some(()) = done else {
         // User abort: on Preserve, try merging partial DASH parts into a
         // single file instead of abandoning them.

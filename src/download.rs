@@ -335,11 +335,15 @@ thread_local! {
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
     /// Cache a probe's raw info JSON by page URL for `--load-info-json`.
-    /// Overwrites any earlier entry for the URL.
+    /// Overwrites any earlier entry for the URL. Bounded (32 entries):
+    /// probed-but-never-downloaded URLs must not accumulate ~100KB each
+    /// for the whole session.
     pub(crate) fn cache_probe_json(&self, page_url: &str, json: serde_json::Value) {
-        self.probe_json_cache
-            .borrow_mut()
-            .insert(page_url.to_string(), json);
+        let mut cache = self.probe_json_cache.borrow_mut();
+        if cache.len() >= 32 {
+            cache.clear();
+        }
+        cache.insert(page_url.to_string(), json);
     }
 
     /// Take the cached probe JSON for a URL (single use: the download consumes it).

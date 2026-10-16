@@ -2159,8 +2159,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             // sites yt-dlp can't (e.g. Instagram stories).
                             // Resolve gallery-dl first; only stage cookies if it exists.
                             if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                                // Stage cookies for the probe (StagedCookies drops at block end).
-                                let probe_cookies = {
+                                // Cookies for the probe: prefer the extension's staged
+                                // cookies ("Download with Grab"); fall back to browser
+                                // export. StagedCookies drops at block end.
+                                let handoff_path =
+                                    crate::extension_server::handoff_cookie_path(&url);
+                                let probe_cookies = if handoff_path.is_none() {
                                     let browser = settings_b.cookies_browser();
                                     if browser.is_empty() || browser == "none" {
                                         None
@@ -2178,14 +2182,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     } else {
                                         None
                                     }
+                                } else {
+                                    None
                                 };
                                 // Run the probe on the Tokio runtime: this async block
                                 // runs on the GTK main loop (glib::spawn_future_local),
                                 // which has no Tokio reactor for tokio::process::Command.
                                 let tool_clone = tool.clone();
                                 let url_clone = url.clone();
-                                let cookies_path =
-                                    probe_cookies.as_ref().map(|c| c.path().to_path_buf());
+                                // Extension handoff path wins; else the staged browser export.
+                                let cookies_path = handoff_path.or_else(|| {
+                                    probe_cookies.as_ref().map(|c| c.path().to_path_buf())
+                                });
                                 let probe_result = match crate::runtime::tokio_rt()
                                     .spawn(async move {
                                         crate::gallery_probe::probe_gallery(
@@ -2251,14 +2259,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             // Verify count via the lightweight counter, with
                                             // the staged cookies (auth-gated galleries).
                                             // Run on Tokio runtime (GTK main loop has no reactor).
+                                            // Prefer extension handoff cookies; fall back to the
+                                            // browser-exported probe_cookies.
                                             let verified_count = if let Ok(tool) =
                                                 crate::gallery_argv::resolve_tool()
                                             {
                                                 let tool_clone = tool.clone();
                                                 let url_clone = url.clone();
-                                                let cookies_path = probe_cookies
-                                                    .as_ref()
-                                                    .map(|c| c.path().to_path_buf());
+                                                let cookies_path =
+                                                    crate::extension_server::handoff_cookie_path(
+                                                        &url,
+                                                    )
+                                                    .or_else(|| {
+                                                        probe_cookies
+                                                            .as_ref()
+                                                            .map(|c| c.path().to_path_buf())
+                                                    });
                                                 crate::runtime::tokio_rt()
                                                     .spawn(async move {
                                                         crate::gallery_probe::count_gallery_files(

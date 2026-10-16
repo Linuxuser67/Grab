@@ -2029,20 +2029,16 @@ impl DownloadManager {
             } else if let Some(ytdlp) =
                 crate::video_tools::find_in_dirs("yt-dlp", &crate::video_tools::tool_search_dirs())
             {
-                // Run on Tokio worker to avoid blocking (export is sync via block_on_sync).
+                // Async now: no spawn_blocking needed.
                 let browser = job.cookies_browser.clone();
                 let page_url = job.page_url.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::cookies::export_cookies_to_file(
-                        &ytdlp,
-                        &browser,
-                        &page_url,
-                        std::time::Duration::from_secs(30),
-                    )
-                })
+                crate::cookies::export_cookies_to_file(
+                    &ytdlp,
+                    &browser,
+                    &page_url,
+                    std::time::Duration::from_secs(30),
+                )
                 .await
-                .ok()
-                .flatten()
             } else {
                 None
             };
@@ -2498,6 +2494,11 @@ impl DownloadManager {
         // The snapshot carries the source for Undo; the live map drops it
         // with the row (cancel keeps it, remove doesn't).
         self.video_sources.borrow_mut().remove(&id);
+        // Gallery: discard handoff cookies on removal (failed rows keep them
+        // for retry, but removal means the user is done with this URL).
+        if let Some(job) = self.gallery_jobs.borrow().get(&id) {
+            crate::extension_server::discard_handoff_cookies(&job.page_url);
+        }
         self.gallery_jobs.borrow_mut().remove(&id);
         if let Some(pos) = self.position_of(id) {
             self.store.remove(pos);

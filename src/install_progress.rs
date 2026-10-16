@@ -244,7 +244,7 @@ pub fn run(
             gdl.set_downloading();
             // Run on Tokio worker (not GTK main) to avoid UI freeze.
             let gdl_path = match crate::runtime::tokio_rt()
-                .spawn(async move { crate::gallery::install_gallerydl() })
+                .spawn(async move { crate::gallery::install_gallerydl().await })
                 .await
                 .ok()
                 .unwrap_or_else(|| Err(crate::gallery_tools::GalleryError::install("spawn failed")))
@@ -259,7 +259,11 @@ pub fn run(
                 }
             };
             let version = crate::runtime::tokio_rt()
-                .spawn(async move { crate::gallery::gallerydl_display_version(&gdl_path).ok() })
+                .spawn(async move {
+                    crate::gallery::gallerydl_display_version(&gdl_path)
+                        .await
+                        .ok()
+                })
                 .await
                 .ok()
                 .flatten();

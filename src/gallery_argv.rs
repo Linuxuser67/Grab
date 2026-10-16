@@ -89,7 +89,7 @@ impl GalleryFilter {
 /// - `extractor.cookies-update=false`: don't mutate Grab's staged cookies
 /// - `downloader.http.progress=null`: suppress gallery-dl's stderr progress
 /// - `output.progress=false`: disable multi-URL progress indicator
-/// - Custom `output.mode`: parseable pipe format (see gallery_progress)
+/// - `output.mode=pipe`: one file path per line (see gallery_progress)
 pub fn download_argv(
     tool: &Path,
     url: &str,
@@ -115,9 +115,10 @@ pub fn download_argv(
         "-o".to_string(),
         "output.progress=false".to_string(),
         "-o".to_string(),
-        // Custom pipe mode: success lines are bare paths, skip lines are
-        // `# `-prefixed. Byte progress is disabled; file counts drive the UI.
-        "output.mode={\"success\": \"{}\\n\", \"skip\": \"# {}\\n\"}".to_string(),
+        // Pipe mode: one file path per line. Avoids the custom JSON
+        // output.mode which triggers a gallery-dl internal bug
+        // (AttributeError in output.py _make_func).
+        "output.mode=pipe".to_string(),
     ];
     if let Some(cookies) = cookies_file {
         argv.push("-C".to_string());

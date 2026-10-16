@@ -221,13 +221,14 @@ pub(crate) fn unified_download_argv(
         "after_move:filepath".to_string(),
         // Parallel fragment downloads for DASH/HLS (2-4x faster, no new deps).
         // Modest default; aggressive parallelism can trigger rate limits.
-        // When combined with --limit-rate, the limit applies per connection.
         "--concurrent-fragments".to_string(),
         "4".to_string(),
     ]);
     if let Some(limit) = job.speed_limit {
+        // --limit-rate applies per connection; with 4 concurrent fragments,
+        // divide by 4 so the total stays at the cap.
         args.push("--limit-rate".to_string());
-        args.push(limit.to_string());
+        args.push((limit / 4).max(1).to_string());
     }
     if job.keep_server_date {
         args.push("--mtime".to_string());
@@ -450,13 +451,14 @@ pub(crate) fn hls_download_argv(
         "after_move:filepath".to_string(),
         // Parallel fragment downloads for DASH/HLS (2-4x faster, no new deps).
         // Modest default; aggressive parallelism can trigger rate limits.
-        // When combined with --limit-rate, the limit applies per connection.
         "--concurrent-fragments".to_string(),
         "4".to_string(),
     ]);
     if let Some(limit) = job.speed_limit {
+        // --limit-rate applies per connection; with 4 concurrent fragments,
+        // divide by 4 so the total stays at the cap.
         args.push("--limit-rate".to_string());
-        args.push(limit.to_string());
+        args.push((limit / 4).max(1).to_string());
     }
     if job.keep_server_date {
         args.push("--mtime".to_string());

@@ -167,6 +167,27 @@ pub fn should_surface(e: &GalleryError) -> bool {
     }
 }
 
+/// Whether a yt-dlp failure is worth trying gallery-dl for.
+/// Only unsupported-URL and login-required errors: gallery-dl handles sites
+/// yt-dlp can't (e.g. Instagram stories). Network errors, rate limits,
+/// geo-blocks, and private/removed videos are not worth the probe delay
+/// (up to 45s: 30s cookie export + 15s probe).
+/// Pure for tests.
+pub fn ytdlp_error_worth_gallery_dl(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    // Unsupported URL: yt-dlp doesn't know this site.
+    if lower.contains("unsupported url") {
+        return true;
+    }
+    // Login required for content access (e.g. Instagram stories).
+    // Excludes YouTube's "Sign in to confirm you're not a bot" (bot check,
+    // gallery-dl won't help).
+    if lower.contains("log in to access") || lower.contains("login required") {
+        return true;
+    }
+    false
+}
+
 /// Best-effort title from probe metadata. First non-empty wins:
 /// `title` → `user`/`author` → `category` → URL-derived filename.
 pub fn probe_title(item: &GalleryItem, url: &str) -> String {
@@ -391,6 +412,37 @@ mod tests {
         )));
         assert!(!should_surface(&GalleryError::install("timeout")));
         assert!(!should_surface(&GalleryError::runtime("spawn failed")));
+    }
+
+    #[test]
+    fn ytdlp_error_worth_gallery_dl_cases() {
+        // Unsupported URL: worth trying gallery-dl.
+        assert!(ytdlp_error_worth_gallery_dl(
+            "ERROR: [generic] Unsupported URL: https://example.com/gallery"
+        ));
+        // Login required for content: worth trying (e.g. Instagram stories).
+        assert!(ytdlp_error_worth_gallery_dl(
+            "ERROR: [instagram:story] You need to log in to access this content."
+        ));
+        assert!(ytdlp_error_worth_gallery_dl(
+            "ERROR: Login required to access this content"
+        ));
+        // YouTube bot check: not worth it (gallery-dl won't help).
+        assert!(!ytdlp_error_worth_gallery_dl(
+            "ERROR: [youtube] Sign in to confirm you're not a bot"
+        ));
+        // Network errors: not worth the probe delay.
+        assert!(!ytdlp_error_worth_gallery_dl(
+            "ERROR: Unable to download webpage: <urlopen error [Errno -2] Name or service not known>"
+        ));
+        // Private video: not worth it.
+        assert!(!ytdlp_error_worth_gallery_dl(
+            "ERROR: [youtube] Private video. Sign in if you've been granted access to this video"
+        ));
+        // Removed video: not worth it.
+        assert!(!ytdlp_error_worth_gallery_dl(
+            "ERROR: [youtube] Video unavailable"
+        ));
     }
 
     fn item(extension: &str) -> GalleryItem {

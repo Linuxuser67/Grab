@@ -175,14 +175,25 @@ pub fn should_surface(e: &GalleryError) -> bool {
 /// Pure for tests.
 pub fn ytdlp_error_worth_gallery_dl(error: &str) -> bool {
     let lower = error.to_lowercase();
+    // YouTube bot check: gallery-dl won't help. Must come first because the
+    // message also carries a --cookies-from-browser hint.
+    if lower.contains("confirm you're not a bot") {
+        return false;
+    }
     // Unsupported URL: yt-dlp doesn't know this site.
     if lower.contains("unsupported url") {
         return true;
     }
-    // Login required for content access (e.g. Instagram stories).
-    // Excludes YouTube's "Sign in to confirm you're not a bot" (bot check,
-    // gallery-dl won't help).
-    if lower.contains("log in to access") || lower.contains("login required") {
+    // Login required for content access.
+    // Covers: "You need to log in to access this content" (Instagram),
+    // "This video is only available for registered users" (yt-dlp default),
+    // "redirected to the login page", "locked behind the login page".
+    if lower.contains("log in to access")
+        || lower.contains("login required")
+        || lower.contains("registered users")
+        || lower.contains("login page")
+        || lower.contains("locked behind the login")
+    {
         return true;
     }
     false
@@ -427,9 +438,21 @@ mod tests {
         assert!(ytdlp_error_worth_gallery_dl(
             "ERROR: Login required to access this content"
         ));
+        // yt-dlp default login message.
+        assert!(ytdlp_error_worth_gallery_dl(
+            "ERROR: This video is only available for registered users. Use --cookies-from-browser or --username"
+        ));
+        // Instagram login-page redirects.
+        assert!(ytdlp_error_worth_gallery_dl(
+            "ERROR: [instagram] The webpage request was redirected to the login page"
+        ));
+        assert!(ytdlp_error_worth_gallery_dl(
+            "ERROR: [instagram] Main webpage is locked behind the login page"
+        ));
         // YouTube bot check: not worth it (gallery-dl won't help).
+        // Must stay false even though the message carries a cookies hint.
         assert!(!ytdlp_error_worth_gallery_dl(
-            "ERROR: [youtube] Sign in to confirm you're not a bot"
+            "ERROR: [youtube] Sign in to confirm you're not a bot. Use --cookies-from-browser"
         ));
         // Network errors: not worth the probe delay.
         assert!(!ytdlp_error_worth_gallery_dl(

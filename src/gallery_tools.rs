@@ -93,7 +93,7 @@ async fn latest_gallerydl_asset() -> Option<(String, Option<String>, String)> {
 /// Latest nightly tag without downloading anything: one user-initiated
 /// GitHub API call. `None` on any network/API failure.
 pub fn latest_gallerydl_tag() -> Option<String> {
-    crate::runtime::block_on_sync(async {
+    crate::runtime::block_on_sync(async move {
         let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new(BUILDS_OWNER, BUILDS_REPO);
         fetcher
             .fetch_latest_release(None)
@@ -106,7 +106,7 @@ pub fn latest_gallerydl_tag() -> Option<String> {
 /// Install (or update) gallery-dl from the nightly channel into the user lib dir.
 /// Fails closed when the release metadata carries no SHA-256 digest.
 pub fn install_gallerydl() -> Result<PathBuf, GalleryError> {
-    crate::runtime::block_on_sync(async {
+    crate::runtime::block_on_sync(async move {
         let (url, digest, tag) = latest_gallerydl_asset().await.ok_or_else(|| {
             GalleryError::install("couldn't determine the latest gallery-dl release")
         })?;

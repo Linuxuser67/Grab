@@ -233,8 +233,12 @@ pub fn probe_gallery(
     url: &str,
     cookies_file: Option<&Path>,
 ) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
-    crate::runtime::block_on_sync(async {
-        let mut cmd = tokio::process::Command::new(tool);
+    // Clone for 'static bound (block_on_sync may spawn a thread).
+    let tool = tool.to_path_buf();
+    let url = url.to_string();
+    let cookies_file = cookies_file.map(|p| p.to_path_buf());
+    crate::runtime::block_on_sync(async move {
+        let mut cmd = tokio::process::Command::new(&tool);
         cmd.arg("--config-ignore")
             .arg("-j")
             .arg("--no-download")
@@ -243,15 +247,15 @@ pub fn probe_gallery(
             // Don't let gallery-dl write back to Grab's staged cookies file.
             .arg("-o")
             .arg("extractor.cookies-update=false");
-        if let Some(cookies) = cookies_file {
+        if let Some(cookies) = cookies_file.as_deref() {
             cmd.arg("-C").arg(cookies);
         }
         // Instagram throttling for extraction requests (probe doesn't download).
-        for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
+        for arg in crate::gallery_argv::instagram_throttle_args(&url, false) {
             cmd.arg(arg);
         }
         // `--` last: guards against URLs starting with `-` being parsed as options.
-        cmd.arg("--").arg(url);
+        cmd.arg("--").arg(&url);
         let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
             .await
             .map_err(|_| GalleryError::install("gallery-dl probe timed out"))?
@@ -379,8 +383,11 @@ pub fn count_gallery_files(
     cookies_file: Option<&Path>,
     filter: crate::gallery_argv::GalleryFilter,
 ) -> Option<u32> {
-    crate::runtime::block_on_sync(async {
-        let argv = crate::gallery_argv::count_argv(tool, url, cookies_file, filter);
+    let tool = tool.to_path_buf();
+    let url = url.to_string();
+    let cookies_file = cookies_file.map(|p| p.to_path_buf());
+    crate::runtime::block_on_sync(async move {
+        let argv = crate::gallery_argv::count_argv(&tool, &url, cookies_file.as_deref(), filter);
         let mut cmd = tokio::process::Command::new(&argv[0]);
         cmd.args(&argv[1..]);
         let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())

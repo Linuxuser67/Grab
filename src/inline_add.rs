@@ -2303,6 +2303,32 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 }
                             }
                         }
+                        // Plain fallback for yt-dlp "unsupported url" on non-video
+                        // pages (e.g. direct .pdf/.zip links). Gallery-dl was
+                        // already tried above and found nothing.
+                        let plain_fallback_ok = !crate::video::is_video_page(&url)
+                            && e.to_string().to_lowercase().contains("unsupported url");
+                        if plain_fallback_ok {
+                            match queue_plain(
+                                &manager_b,
+                                &dest_b,
+                                &close_b,
+                                &url,
+                                scheduled_at_b.get(),
+                            ) {
+                                Ok(()) => return,
+                                Err(pe) => {
+                                    fallback_plain_failed(
+                                        &probe_b,
+                                        &step_b,
+                                        &lookup_add_b,
+                                        &url,
+                                        &pe,
+                                    );
+                                    return;
+                                }
+                            }
+                        }
                         probe_b.borrow_mut().info.take();
                         tracing::warn!(
                             host = %crate::video_probe::page_host(&url),

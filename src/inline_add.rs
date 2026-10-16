@@ -252,6 +252,9 @@ pub(crate) struct VideoStep {
     pub(crate) gallery_select_btn: gtk4::Button,
     /// Opener for the gallery picker, set at probe completion (where nav,
     /// manager, dest, etc. are in scope). The button invokes it if set.
+    /// The nested Rc/RefCell/Option is the wiring cost of connecting the
+    /// button (wired at VideoStep construction) to context available later.
+    #[allow(clippy::type_complexity)]
     pub(crate) gallery_select_opener: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
     /// The form's Add button: icon-only until a format is picked, then a
     /// labeled "Add" pill (HIG: primary actions carry a text label).

@@ -4,6 +4,11 @@ use gtk4::gio;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
+/// Tool identifiers for the install filter. Must match the strings in
+/// `install_progress.rs` `include()` calls exactly.
+const TOOL_QUICKJS: &str = "quickjs";
+const TOOL_GALLERY_DL: &str = "gallery-dl";
+
 /// Two-way ComboRow <-> GSettings sync via index/value mapping (plain bind can't map index vs string).
 fn bind_combo_row(
     row: &adw::ComboRow,
@@ -1095,6 +1100,7 @@ pub fn show(
                     }
                     spin_b.set_visible(false);
                     let mut updates: Vec<String> = Vec::new();
+                    let mut missing: Vec<String> = Vec::new();
                     let mut current: Vec<String> = Vec::new();
                     let mut indeterminate = installed.is_none();
                     if let Some((yt, ff, qjs, gdl)) = installed {
@@ -1127,6 +1133,7 @@ pub fn show(
                         }
                         // quickjs is optional (provisioned for YouTube only):
                         // judged when installed, never blocks the check.
+                        // If missing, offer to install it.
                         match (qjs.as_deref(), qjs_tag.as_deref()) {
                             (Some(installed), Some(tag))
                                 if crate::video_tools::tool_update_available(installed, tag) =>
@@ -1141,7 +1148,7 @@ pub fn show(
                                 current.push(format!("quickjs {}", installed.trim()));
                             }
                             (None, Some(_)) => {
-                                updates.push("quickjs (not installed)".to_string());
+                                missing.push(TOOL_QUICKJS.to_string());
                             }
                             _ => indeterminate = true,
                         }
@@ -1162,13 +1169,24 @@ pub fn show(
                                 current.push(format!("gallery-dl {}", installed.trim()));
                             }
                             (None, Some(_)) => {
-                                updates.push("gallery-dl (not installed)".to_string());
+                                missing.push(TOOL_GALLERY_DL.to_string());
                             }
                             (None, _) => {}
                             _ => indeterminate = true,
                         }
                     }
-                    if !updates.is_empty() {
+                    if !missing.is_empty() {
+                        // Missing tools get "Install", not "Update" — you can't
+                        // update what isn't there.
+                        let names: Vec<String> = missing.clone();
+                        *pending_b.borrow_mut() = names;
+                        row_b.set_subtitle(
+                            &gettext("Not installed: {list}")
+                                .replace("{list}", &missing.join(", ")),
+                        );
+                        btn_b.set_label(&gettext("Install"));
+                        action_b.set(ToolAction::Update);
+                    } else if !updates.is_empty() {
                         // Store tool names for the filtered download popup.
                         let names: Vec<String> = updates
                             .iter()

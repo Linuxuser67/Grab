@@ -46,14 +46,27 @@ pub enum GalleryContent {
     Unknown,
 }
 
+/// Video extensions recognized for gallery classification and filtering.
+pub const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "webm", "mov", "mkv", "m4v", "avi", "ts", "flv", "wmv", "mpg", "mpeg", "3gp", "3g2",
+    "ogv", "m2ts", "mts", "asf", "f4v",
+];
+
+/// Image extensions recognized for gallery classification and filtering.
+pub const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "jpe", "jfif", "png", "webp", "gif", "avif", "bmp", "svg", "tiff", "tif",
+    "heic", "heif",
+];
+
 impl GalleryContent {
     pub fn from_extension(ext: &str) -> Self {
-        match ext.to_ascii_lowercase().as_str() {
-            "mp4" | "webm" | "mov" | "mkv" | "m4v" | "avi" | "ts" | "flv" | "wmv" | "mpg"
-            | "mpeg" | "3gp" | "3g2" | "ogv" | "m2ts" | "mts" | "asf" | "f4v" => Self::Video,
-            "jpg" | "jpeg" | "jpe" | "jfif" | "png" | "webp" | "gif" | "avif" | "bmp" | "svg"
-            | "tiff" | "tif" | "heic" | "heif" => Self::Image,
-            _ => Self::Unknown,
+        let lower = ext.to_ascii_lowercase();
+        if VIDEO_EXTENSIONS.contains(&lower.as_str()) {
+            Self::Video
+        } else if IMAGE_EXTENSIONS.contains(&lower.as_str()) {
+            Self::Image
+        } else {
+            Self::Unknown
         }
     }
 }
@@ -66,7 +79,13 @@ pub fn url_is_direct_media(url: &str) -> bool {
     const AUDIO: &[&str] = &[
         "mp3", "m4a", "aac", "ogg", "oga", "opus", "flac", "wav", "wma", "alac", "aiff",
     ];
-    let path = url.split(['?', '#']).next().unwrap_or(url);
+    // Strip query/fragment, then take the path after the authority so a
+    // host-only URL like https://example.mov isn't read as extension "mov".
+    let without_query = url.split(['?', '#']).next().unwrap_or(url);
+    let path = match without_query.split_once("://") {
+        Some((_, rest)) => rest.split('/').skip(1).collect::<Vec<_>>().join("/"),
+        None => without_query.to_string(),
+    };
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     if ext.is_empty() || ext.contains('/') {
         return false;
@@ -439,6 +458,9 @@ mod tests {
         assert!(!url_is_direct_media("https://example.com/page.html"));
         assert!(!url_is_direct_media("https://example.com/noext"));
         assert!(!url_is_direct_media("https://example.com/"));
+        // Host-only URL: .mov is a TLD, not a file extension.
+        assert!(!url_is_direct_media("https://example.mov"));
+        assert!(!url_is_direct_media("https://example.mov/"));
     }
 
     #[test]

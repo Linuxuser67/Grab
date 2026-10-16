@@ -33,16 +33,21 @@ impl<'de> serde::Deserialize<'de> for GalleryFilter {
 impl GalleryFilter {
     /// gallery-dl `--filter` Python expression. `None` for All (no filter).
     /// Uses the `extension` keyword which every extractor provides;
-    /// case-insensitive via `.lower()`.
-    pub fn to_filter_expr(self) -> Option<&'static str> {
+    /// case-insensitive via `.lower()`. Built from the shared tables in
+    /// [`gallery_probe`](crate::gallery_probe) so filters and classification agree.
+    pub fn to_filter_expr(self) -> Option<String> {
+        fn expr(exts: &[&str]) -> String {
+            let list = exts
+                .iter()
+                .map(|e| format!("'{e}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("extension.lower() in ({list})")
+        }
         match self {
             Self::All => None,
-            Self::ImagesOnly => Some(
-                "extension.lower() in ('jpg', 'jpeg', 'jpe', 'png', 'webp', 'gif', 'avif', 'bmp', 'svg', 'tiff', 'tif')",
-            ),
-            Self::VideosOnly => {
-                Some("extension.lower() in ('mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi', 'ts')")
-            }
+            Self::ImagesOnly => Some(expr(crate::gallery_probe::IMAGE_EXTENSIONS)),
+            Self::VideosOnly => Some(expr(crate::gallery_probe::VIDEO_EXTENSIONS)),
         }
     }
 }
@@ -132,7 +137,7 @@ pub fn count_argv(
 fn push_filter(argv: &mut Vec<String>, filter: GalleryFilter) {
     if let Some(expr) = filter.to_filter_expr() {
         argv.push("--filter".to_string());
-        argv.push(expr.to_string());
+        argv.push(expr);
     }
 }
 
@@ -166,9 +171,32 @@ pub struct GalleryJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gallery_probe::{GalleryContent, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS};
 
     fn tool() -> PathBuf {
         PathBuf::from("/tmp/gallery-dl")
+    }
+
+    #[test]
+    fn filter_expr_matches_classification_tables() {
+        // Every table entry must appear in its filter expression and classify the same way.
+        let images = GalleryFilter::ImagesOnly.to_filter_expr().expect("expr");
+        for ext in IMAGE_EXTENSIONS {
+            assert!(
+                images.contains(&format!("'{ext}'")),
+                "image ext '{ext}' missing from filter"
+            );
+            assert_eq!(GalleryContent::from_extension(ext), GalleryContent::Image);
+        }
+        let videos = GalleryFilter::VideosOnly.to_filter_expr().expect("expr");
+        for ext in VIDEO_EXTENSIONS {
+            assert!(
+                videos.contains(&format!("'{ext}'")),
+                "video ext '{ext}' missing from filter"
+            );
+            assert_eq!(GalleryContent::from_extension(ext), GalleryContent::Video);
+        }
+        assert!(GalleryFilter::All.to_filter_expr().is_none());
     }
 
     #[test]

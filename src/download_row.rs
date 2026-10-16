@@ -52,6 +52,9 @@ mod imp {
         /// Source page URL for the gallery (for retry).
         #[property(get, set)]
         pub gallery_url: RefCell<String>,
+        /// Full error log for the failure dialog; `detail` holds the summary.
+        #[property(get, set)]
+        pub error_log: RefCell<String>,
     }
 
     #[glib::object_subclass]

@@ -794,20 +794,12 @@ async fn handle_add(
         return StatusCode::OK;
     };
     match tokio::time::timeout(st.confirm_wait, answer).await {
-        Ok(Ok(HandoffOutcome::Queued)) => StatusCode::OK,
-        Ok(Ok(HandoffOutcome::CardOpened)) => {
-            // Card opened: user action pending. Retain staged cookies for the
-            // card's probe/download lifecycle. Do NOT discard.
-            StatusCode::ACCEPTED
-        }
-        Ok(Ok(HandoffOutcome::Declined)) | Ok(Ok(HandoffOutcome::Failed)) => {
-            // Declined or failed: the extension keeps the browser download,
-            // so the staged cookies have no user. Only discard what this
-            // request staged.
-            if staged {
+        Ok(Ok(outcome)) => {
+            let (status, discard) = handoff_outcome_response(&outcome);
+            if discard && staged {
                 discard_handoff_cookies(&req.url);
             }
-            StatusCode::CONFLICT
+            status
         }
         outcome => {
             // Dropped unanswered or timed out.

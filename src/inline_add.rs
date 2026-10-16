@@ -2439,10 +2439,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // (phase 12) will drive the actual download.
                 let cookies_browser = m.settings().cookies_browser().to_string();
                 let job = crate::gallery_argv::GalleryJob {
-                    item_id: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0),
+                    // Placeholder; enqueue_gallery assigns the real row ID.
+                    item_id: 0,
                     page_url: url.clone(),
                     title,
                     file_count,

@@ -89,10 +89,8 @@ pub(crate) fn submit_gallery_video(
         scheduled_at,
         |d| {
             let job = crate::gallery_argv::GalleryJob {
-                item_id: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0),
+                // Placeholder; enqueue_gallery assigns the real row ID.
+                item_id: 0,
                 page_url: url.to_string(),
                 title: title.clone(),
                 // Probe items are capped at 5; don't report a wrong count.

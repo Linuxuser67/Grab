@@ -42,7 +42,9 @@ jobs:
     container: fedora:44
     steps:
       - name: Install system dependencies
-        run: dnf install -y git gcc pkg-config gtk4-devel libadwaita-devel python3
+        run: dnf install -y git gcc pkg-config gtk4-devel libadwaita-devel python3 python3-pip
+      - name: Install pinned gallery-dl (for integration tests)
+        run: pip3 install --break-system-packages gallery-dl==1.32.16
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No job pushes or fetches; don't persist the token in git config.
@@ -54,7 +56,11 @@ jobs:
       # Serial: the suite shares one glib default MainContext across test
       # threads, and glib futures are bound to their spawning thread, so
       # parallel runs abort when one test's loop polls another's source.
+      # GRAB_REQUIRE_GALLERY_DL=1: integration tests fail (not skip) if
+      # gallery-dl is missing.
       - run: cargo test -- --test-threads=1
+        env:
+          GRAB_REQUIRE_GALLERY_DL: "1"
   # Guards the module structure: sentrux enforces the architectural rules
   # in .sentrux/rules.toml (currently: zero import cycles). Pinned to
   # v0.5.7 so an upstream release can't silently change the verdict; runs

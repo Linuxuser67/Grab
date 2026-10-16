@@ -2212,8 +2212,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     })
                     .await;
                 // Stale guard: the card may have been closed or a new URL
-                // pasted while enumerating; don't touch the UI or push a
-                // picker for the old gallery onto the new card's nav stack.
+                // pasted while enumerating; don't push a picker for the old
+                // gallery onto the new card's nav stack. Restore the button
+                // first: it's a shared VideoStep widget, and its default
+                // state is valid for whatever lookup is current.
+                restore_btn();
                 let still_current = step3
                     .gallery_card
                     .borrow()
@@ -2223,7 +2226,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 if !still_current {
                     return;
                 }
-                restore_btn();
                 match result {
                     Ok(Ok(items)) if !items.is_empty() => {
                         push_gallery_picker_page(

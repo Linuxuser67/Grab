@@ -64,6 +64,7 @@ pub async fn run_gallery_download(
     job: &GalleryJob,
     tool: &Path,
     cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
     on_progress: impl Fn(GalleryProgressUpdate),
 ) -> Result<GalleryResult, GalleryError> {
     let argv = download_argv(
@@ -71,6 +72,7 @@ pub async fn run_gallery_download(
         &job.page_url,
         &job.dest_dir,
         cookies_file,
+        user_agent,
         job.filter,
         job.speed_limit,
     );

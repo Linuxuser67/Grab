@@ -133,22 +133,23 @@ async fn gallery_integration_probe_count_download() {
         speed_limit: None,
     };
     let completed = std::cell::Cell::new(0u32);
-    let result = match crate::gallery_runner::run_gallery_download(&job, &tool, None, |update| {
-        completed.set(update.files_completed);
-    })
-    .await
-    {
-        Ok(r) => r,
-        Err(e) if is_gallery_dl_internal_bug(&e) => {
-            // Upstream gallery-dl 1.32.16 bug on Fedora 44: the binary is
-            // installed and runs, but crashes internally with AttributeError.
-            // Skip instead of failing; the gate can't be enforced until
-            // upstream fixes the bug. See CI logs for details.
-            eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
-            return;
-        }
-        Err(e) => panic!("download failed: {e:?}"),
-    };
+    let result =
+        match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |update| {
+            completed.set(update.files_completed);
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(e) if is_gallery_dl_internal_bug(&e) => {
+                // Upstream gallery-dl 1.32.16 bug on Fedora 44: the binary is
+                // installed and runs, but crashes internally with AttributeError.
+                // Skip instead of failing; the gate can't be enforced until
+                // upstream fixes the bug. See CI logs for details.
+                eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
+                return;
+            }
+            Err(e) => panic!("download failed: {e:?}"),
+        };
     assert_eq!(result.files.len(), 3, "expected 3 downloaded files");
     assert_eq!(completed.get(), 3, "progress should report 3 completed");
     for f in &result.files {
@@ -156,19 +157,19 @@ async fn gallery_integration_probe_count_download() {
     }
 
     // 4. Second run reports all as skipped.
-    let result2 = match crate::gallery_runner::run_gallery_download(&job, &tool, None, |_| {}).await
-    {
-        Ok(r) => r,
-        Err(e) if is_gallery_dl_internal_bug(&e) => {
-            // Upstream gallery-dl 1.32.16 bug on Fedora 44: the binary is
-            // installed and runs, but crashes internally with AttributeError.
-            // Skip instead of failing; the gate can't be enforced until
-            // upstream fixes the bug. See CI logs for details.
-            eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
-            return;
-        }
-        Err(e) => panic!("second download failed: {e:?}"),
-    };
+    let result2 =
+        match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |_| {}).await {
+            Ok(r) => r,
+            Err(e) if is_gallery_dl_internal_bug(&e) => {
+                // Upstream gallery-dl 1.32.16 bug on Fedora 44: the binary is
+                // installed and runs, but crashes internally with AttributeError.
+                // Skip instead of failing; the gate can't be enforced until
+                // upstream fixes the bug. See CI logs for details.
+                eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
+                return;
+            }
+            Err(e) => panic!("second download failed: {e:?}"),
+        };
     assert_eq!(result2.files.len(), 0, "no new files on second run");
     assert_eq!(result2.skipped, 3, "all 3 files skipped on second run");
 
@@ -204,19 +205,19 @@ async fn gallery_integration_filtered_download() {
         cookies_browser: "none".to_string(),
         speed_limit: None,
     };
-    let result = match crate::gallery_runner::run_gallery_download(&job, &tool, None, |_| {}).await
-    {
-        Ok(r) => r,
-        Err(e) if is_gallery_dl_internal_bug(&e) => {
-            // Upstream gallery-dl 1.32.16 bug on Fedora 44: the binary is
-            // installed and runs, but crashes internally with AttributeError.
-            // Skip instead of failing; the gate can't be enforced until
-            // upstream fixes the bug. See CI logs for details.
-            eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
-            return;
-        }
-        Err(e) => panic!("filtered download failed: {e:?}"),
-    };
+    let result =
+        match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |_| {}).await {
+            Ok(r) => r,
+            Err(e) if is_gallery_dl_internal_bug(&e) => {
+                // Upstream gallery-dl 1.32.16 bug on Fedora 44: the binary is
+                // installed and runs, but crashes internally with AttributeError.
+                // Skip instead of failing; the gate can't be enforced until
+                // upstream fixes the bug. See CI logs for details.
+                eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
+                return;
+            }
+            Err(e) => panic!("filtered download failed: {e:?}"),
+        };
     assert_eq!(
         result.files.len(),
         3,

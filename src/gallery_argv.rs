@@ -96,6 +96,7 @@ pub fn download_argv(
     url: &str,
     dest_dir: &Path,
     cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
     filter: GalleryFilter,
     speed_limit: Option<u64>,
 ) -> Vec<String> {
@@ -122,6 +123,10 @@ pub fn download_argv(
     if let Some(cookies) = cookies_file {
         argv.push("-C".to_string());
         argv.push(cookies.to_string_lossy().to_string());
+    }
+    if let Some(ua) = user_agent {
+        argv.push("--user-agent".to_string());
+        argv.push(ua.to_string());
     }
     push_filter(&mut argv, filter);
     if let Some(limit) = speed_limit {
@@ -241,6 +246,7 @@ mod tests {
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
+            None,
             GalleryFilter::All,
             None,
         );
@@ -257,6 +263,7 @@ mod tests {
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
+            None,
             GalleryFilter::All,
             None,
         );
@@ -271,6 +278,7 @@ mod tests {
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
+            None,
             GalleryFilter::All,
             None,
         );
@@ -284,6 +292,7 @@ mod tests {
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             Some(Path::new("/tmp/cookies.txt")),
+            None,
             GalleryFilter::All,
             None,
         );
@@ -292,11 +301,41 @@ mod tests {
     }
 
     #[test]
+    fn download_argv_user_agent() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            Some("Mozilla/5.0 Test"),
+            GalleryFilter::All,
+            None,
+        );
+        let ua_pos = argv.iter().position(|a| a == "--user-agent").unwrap();
+        assert_eq!(argv[ua_pos + 1], "Mozilla/5.0 Test");
+    }
+
+    #[test]
+    fn download_argv_no_user_agent_by_default() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            None,
+            GalleryFilter::All,
+            None,
+        );
+        assert!(!argv.iter().any(|a| a == "--user-agent"));
+    }
+
+    #[test]
     fn download_argv_filter_images() {
         let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
+            None,
             None,
             GalleryFilter::ImagesOnly,
             None,
@@ -313,6 +352,7 @@ mod tests {
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
+            None,
             GalleryFilter::VideosOnly,
             None,
         );
@@ -327,6 +367,7 @@ mod tests {
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
+            None,
             None,
             GalleryFilter::All,
             None,
@@ -368,6 +409,7 @@ mod tests {
             "https://www.instagram.com/p/ABC123/",
             Path::new("/tmp/dest"),
             None,
+            None,
             GalleryFilter::All,
             None,
         );
@@ -389,6 +431,7 @@ mod tests {
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
+            None,
             None,
             GalleryFilter::All,
             None,

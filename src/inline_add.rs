@@ -1647,51 +1647,54 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     let card_rc = card_rc.clone();
                     let info = info.clone();
                     glib::spawn_future_local(async move {
-                        // Re-stage cookies for the count (auth-gated galleries).
-                        let cookies = {
-                            let settings = crate::settings::AppSettings::new();
-                            let browser = settings.cookies_browser();
-                            if browser.is_empty() || browser == "none" {
-                                None
-                            } else if let Some(ytdlp) = crate::video_tools::find_in_dirs(
-                                "yt-dlp",
-                                &crate::video_tools::tool_search_dirs(),
-                            ) {
-                                crate::cookies::export_cookies_to_file(
-                                    &ytdlp,
-                                    browser.as_str(),
-                                    &url,
-                                    std::time::Duration::from_secs(30),
-                                )
-                            } else {
-                                None
-                            }
-                        };
-                        let count_result = if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                            // Prefer extension handoff cookies; fall back to the
-                            // browser-exported cookies.
-                            let cookies_path = crate::extension_server::handoff_cookie_path(&url)
-                                .or_else(|| cookies.as_ref().map(|c| c.path().to_path_buf()));
-                            // Run on Tokio worker thread (not GTK main) to avoid UI freeze.
-                            let url_for_count = url.clone();
-                            // Handoff UA for Cloudflare-bound cookies.
-                            let handoff_ua = crate::extension_server::handoff_user_agent(&url);
-                            crate::runtime::tokio_rt()
-                                .spawn(async move {
+                        // Check handoff cookies first (no export needed if available).
+                        let handoff_path = crate::extension_server::handoff_cookie_path(&url);
+                        let handoff_ua = crate::extension_server::handoff_user_agent(&url);
+                        let url_for_count = url.clone();
+                        let filter_c = filter;
+                        // Run cookie export + count on Tokio worker (not GTK main).
+                        let count_result = crate::runtime::tokio_rt()
+                            .spawn(async move {
+                                // Export browser cookies only if no handoff jar.
+                                let cookies = if handoff_path.is_some() {
+                                    None
+                                } else {
+                                    let settings = crate::settings::AppSettings::new();
+                                    let browser = settings.cookies_browser();
+                                    if browser.is_empty() || browser == "none" {
+                                        None
+                                    } else if let Some(ytdlp) = crate::video_tools::find_in_dirs(
+                                        "yt-dlp",
+                                        &crate::video_tools::tool_search_dirs(),
+                                    ) {
+                                        crate::cookies::export_cookies_to_file(
+                                            &ytdlp,
+                                            browser.as_str(),
+                                            &url_for_count,
+                                            std::time::Duration::from_secs(30),
+                                        )
+                                    } else {
+                                        None
+                                    }
+                                };
+                                if let Ok(tool) = crate::gallery_argv::resolve_tool() {
+                                    let cookies_path = handoff_path.or_else(|| {
+                                        cookies.as_ref().map(|c| c.path().to_path_buf())
+                                    });
                                     crate::gallery_probe::count_gallery_files(
                                         &tool,
                                         &url_for_count,
                                         cookies_path.as_deref(),
                                         handoff_ua.as_deref(),
-                                        filter,
+                                        filter_c,
                                     )
-                                })
-                                .await
-                                .ok()
-                                .flatten()
-                        } else {
-                            None
-                        };
+                                } else {
+                                    None
+                                }
+                            })
+                            .await
+                            .ok()
+                            .flatten();
                         if let Some(card_ref) = card_rc.borrow().as_ref()
                             // Only update if the card still shows the same URL.
                             // The user may have changed the URL while the count was running.
@@ -2167,50 +2170,49 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 // export. StagedCookies drops at block end.
                                 let handoff_path =
                                     crate::extension_server::handoff_cookie_path(&url);
-                                let probe_cookies = if handoff_path.is_none() {
-                                    let browser = settings_b.cookies_browser();
-                                    if browser.is_empty() || browser == "none" {
-                                        None
-                                    } else if let Some(ytdlp) = crate::video_tools::find_in_dirs(
-                                        "yt-dlp",
-                                        &crate::video_tools::tool_search_dirs(),
-                                    ) {
-                                        crate::cookies::export_cookies_to_file(
-                                            &ytdlp,
-                                            browser.as_str(),
-                                            &url,
-                                            std::time::Duration::from_secs(30),
-                                        )
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
-                                // Run the probe on the Tokio runtime: this async block
-                                // runs on the GTK main loop (glib::spawn_future_local),
-                                // which has no Tokio reactor for tokio::process::Command.
+                                let handoff_ua = crate::extension_server::handoff_user_agent(&url);
                                 let tool_clone = tool.clone();
                                 let url_clone = url.clone();
-                                // Extension handoff path wins; else the staged browser export.
-                                let cookies_path = handoff_path.or_else(|| {
-                                    probe_cookies.as_ref().map(|c| c.path().to_path_buf())
-                                });
-                                // Handoff UA for Cloudflare-bound cookies.
-                                let handoff_ua =
-                                    crate::extension_server::handoff_user_agent(&url_clone);
-                                let probe_result = crate::runtime::tokio_rt()
+                                let browser = settings_b.cookies_browser();
+                                // Run export + probe on Tokio worker (not GTK main).
+                                let (probe_result, _probe_cookies) = crate::runtime::tokio_rt()
                                     .spawn(async move {
-                                        crate::gallery_probe::probe_gallery(
+                                        // Export browser cookies only if no handoff jar.
+                                        let probe_cookies = if handoff_path.is_none() {
+                                            if browser.is_empty() || browser == "none" {
+                                                None
+                                            } else if let Some(ytdlp) =
+                                                crate::video_tools::find_in_dirs(
+                                                    "yt-dlp",
+                                                    &crate::video_tools::tool_search_dirs(),
+                                                )
+                                            {
+                                                crate::cookies::export_cookies_to_file(
+                                                    &ytdlp,
+                                                    browser.as_str(),
+                                                    &url_clone,
+                                                    std::time::Duration::from_secs(30),
+                                                )
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        };
+                                        let cookies_path = handoff_path.or_else(|| {
+                                            probe_cookies.as_ref().map(|c| c.path().to_path_buf())
+                                        });
+                                        let result = crate::gallery_probe::probe_gallery(
                                             &tool_clone,
                                             &url_clone,
                                             cookies_path.as_deref(),
                                             handoff_ua.as_deref(),
-                                        )
+                                        );
+                                        (result, probe_cookies)
                                     })
                                     .await
                                     .ok()
-                                    .unwrap_or(Ok(None));
+                                    .unwrap_or((Ok(None), None));
                                 // Keep probe_cookies for the count below; StagedCookies
                                 // drops at block end.
                                 match probe_result {

@@ -1022,7 +1022,6 @@ fn push_playlist_items_page(
                             // segment pages and never need it, but highlights — and anything
                             // unparseable at pick time — re-resolve the tray by this id.
                             playlist_item_id: Some(item.id.to_string()),
-                            info_json: None,
                         },
                         &existing,
                     ) {

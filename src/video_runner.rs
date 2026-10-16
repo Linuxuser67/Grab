@@ -506,7 +506,7 @@ pub(crate) async fn run_unified_ytdlp(
             }
         })
     };
-    let (done, after_move, abort_intent) = run_ytdlp_attempt(
+    let attempt_result = run_ytdlp_attempt(
         youtube_bin,
         &argv,
         report,
@@ -526,7 +526,7 @@ pub(crate) async fn run_unified_ytdlp(
     if let Some(path) = info_json_path {
         let _ = std::fs::remove_file(path);
     }
-    let (done, after_move, abort_intent) = done?;
+    let (done, after_move, abort_intent) = attempt_result?;
     let Some(()) = done else {
         // User abort: on Preserve, try merging partial DASH parts into a
         // single file instead of abandoning them.

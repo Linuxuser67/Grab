@@ -1668,7 +1668,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             }
                         };
                         let count_result = if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                            let cookies_path = cookies.as_ref().map(|c| c.path().to_path_buf());
+                            // Prefer extension handoff cookies; fall back to the
+                            // browser-exported cookies.
+                            let cookies_path = crate::extension_server::handoff_cookie_path(&url)
+                                .or_else(|| cookies.as_ref().map(|c| c.path().to_path_buf()));
                             crate::gallery_probe::count_gallery_files(
                                 &tool,
                                 &url,

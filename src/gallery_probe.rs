@@ -764,4 +764,44 @@ mod tests {
         let items = parse_probe_messages(&messages).unwrap();
         assert_eq!(route(false, Some(&items), None), ProbeOutcome::Gallery);
     }
+
+    /// Regression: probe_gallery must work from a thread without a Tokio
+    /// runtime (e.g. GTK main thread). Uses block_on via the internal
+    /// static runtime; a nonexistent tool should give a proper error,
+    /// not a "no reactor running" panic.
+    #[test]
+    fn probe_gallery_works_without_tokio_runtime() {
+        let result = std::thread::spawn(|| {
+            // No Tokio runtime on this thread.
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            probe_gallery(
+                std::path::Path::new("/nonexistent/gallery-dl"),
+                "https://example.com/",
+                None,
+            )
+        })
+        .join()
+        .expect("thread panicked");
+        // Should be an Err (couldn't spawn), not a panic.
+        assert!(result.is_err());
+    }
+
+    /// Regression: count_gallery_files must work from a thread without
+    /// a Tokio runtime.
+    #[test]
+    fn count_gallery_files_works_without_tokio_runtime() {
+        let result = std::thread::spawn(|| {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            count_gallery_files(
+                std::path::Path::new("/nonexistent/gallery-dl"),
+                "https://example.com/",
+                None,
+                crate::gallery_argv::GalleryFilter::All,
+            )
+        })
+        .join()
+        .expect("thread panicked");
+        // Should be None (failure), not a panic.
+        assert_eq!(result, None);
+    }
 }

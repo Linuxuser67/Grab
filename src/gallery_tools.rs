@@ -234,4 +234,17 @@ mod tests {
             );
         }
     }
+
+    /// Regression: gallerydl_display_version must work from a thread
+    /// without a Tokio runtime.
+    #[test]
+    fn gallerydl_display_version_works_without_tokio_runtime() {
+        let result = std::thread::spawn(|| {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            gallerydl_display_version(std::path::Path::new("/nonexistent/gallery-dl"))
+        })
+        .join()
+        .expect("thread panicked");
+        assert!(result.is_err());
+    }
 }

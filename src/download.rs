@@ -2133,9 +2133,11 @@ impl DownloadManager {
                                 "Gallery \u{2022} {done}/{total} files{file_part}"
                             ));
                         } else {
-                            // Total unknown or count was wrong: show files done
-                            // without a progress bar (no misleading percentage).
-                            // Leave progress unchanged (stays at 0 = no bar).
+                            // Total unknown or the probe count was wrong (done >
+                            // total): reset to indeterminate instead of keeping
+                            // a stale fraction. progress <= 0 pulses the bar
+                            // (should_pulse) and the a11y label reads 0%.
+                            item_c.set_progress(0.0);
                             item_c.set_detail(format!("Gallery \u{2022} {done} files{file_part}"));
                         }
                         this.changed();

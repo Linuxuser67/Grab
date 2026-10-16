@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.9~beta.4" date="2026-10-16">
+      <description>
+        <ul>
+          <li>Fix a crash when gallery-dl probes a URL (missing Tokio runtime).</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.9~beta.3" date="2026-10-16">
       <description>
         <ul>

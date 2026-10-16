@@ -1980,6 +1980,8 @@ impl DownloadManager {
     /// registered in `running` for cancel/concurrency/shutdown.
     fn spawn_gallery(self: &Rc<Self>, item: DownloadItem) {
         item.set_status(DownloadStatus::Downloading);
+        // Clear previous error log on (re)start.
+        item.set_error_log(String::new());
         self.changed();
 
         // Get the job (carries the user's filter). Kept in the map for retry.
@@ -2091,13 +2093,10 @@ impl DownloadManager {
                             item_c.set_detail(format!(
                                 "Gallery \u{2022} {done}/{total} files{file_part}"
                             ));
-                        } else if total == 0 {
-                            // Total unknown: show files done without a bar.
-                            item_c.set_progress(0.0);
-                            item_c.set_detail(format!("Gallery \u{2022} {done} files{file_part}"));
                         } else {
-                            // done exceeded total (the count was wrong): leave the
-                            // progress bar unchanged instead of resetting to 0.
+                            // Total unknown or count was wrong: show files done
+                            // without a progress bar (no misleading percentage).
+                            // Leave progress unchanged (stays at 0 = no bar).
                             item_c.set_detail(format!("Gallery \u{2022} {done} files{file_part}"));
                         }
                         this.changed();

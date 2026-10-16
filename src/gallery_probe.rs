@@ -46,24 +46,12 @@ pub enum GalleryContent {
     Unknown,
 }
 
-/// Video extensions recognized for gallery classification and filtering.
-pub const VIDEO_EXTENSIONS: &[&str] = &[
-    "mp4", "webm", "mov", "mkv", "m4v", "avi", "ts", "flv", "wmv", "mpg", "mpeg", "3gp", "3g2",
-    "ogv", "m2ts", "mts", "asf", "f4v",
-];
-
-/// Image extensions recognized for gallery classification and filtering.
-pub const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "jpe", "jfif", "png", "webp", "gif", "avif", "bmp", "svg", "tiff", "tif",
-    "heic", "heif",
-];
-
 impl GalleryContent {
     pub fn from_extension(ext: &str) -> Self {
         let lower = ext.to_ascii_lowercase();
-        if VIDEO_EXTENSIONS.contains(&lower.as_str()) {
+        if crate::gallery_argv::VIDEO_EXTENSIONS.contains(&lower.as_str()) {
             Self::Video
-        } else if IMAGE_EXTENSIONS.contains(&lower.as_str()) {
+        } else if crate::gallery_argv::IMAGE_EXTENSIONS.contains(&lower.as_str()) {
             Self::Image
         } else {
             Self::Unknown

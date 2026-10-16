@@ -5,6 +5,18 @@
 
 use std::path::{Path, PathBuf};
 
+/// Video extensions recognized for gallery classification and filtering.
+pub const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "webm", "mov", "mkv", "m4v", "avi", "ts", "flv", "wmv", "mpg", "mpeg", "3gp", "3g2",
+    "ogv", "m2ts", "mts", "asf", "f4v",
+];
+
+/// Image extensions recognized for gallery classification and filtering.
+pub const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "jpe", "jfif", "png", "webp", "gif", "avif", "bmp", "svg", "tiff", "tif",
+    "heic", "heif",
+];
+
 /// Filters for the gallery download (user's Images/Videos/All picker).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize)]
 pub enum GalleryFilter {
@@ -46,8 +58,8 @@ impl GalleryFilter {
         }
         match self {
             Self::All => None,
-            Self::ImagesOnly => Some(expr(crate::gallery_probe::IMAGE_EXTENSIONS)),
-            Self::VideosOnly => Some(expr(crate::gallery_probe::VIDEO_EXTENSIONS)),
+            Self::ImagesOnly => Some(expr(IMAGE_EXTENSIONS)),
+            Self::VideosOnly => Some(expr(VIDEO_EXTENSIONS)),
         }
     }
 }
@@ -171,7 +183,7 @@ pub struct GalleryJob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gallery_probe::{GalleryContent, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS};
+    use crate::gallery_probe::GalleryContent;
 
     fn tool() -> PathBuf {
         PathBuf::from("/tmp/gallery-dl")

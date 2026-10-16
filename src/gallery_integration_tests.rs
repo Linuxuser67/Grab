@@ -89,7 +89,7 @@ async fn gallery_integration_probe_count_download() {
     let url = format!("generic:http://127.0.0.1:{port}/");
 
     // 1. Probe returns items.
-    let probe_result = crate::gallery_probe::probe_gallery(&tool, &url, None);
+    let probe_result = crate::gallery_probe::probe_gallery(&tool, &url, None, None);
     let items = match probe_result {
         Ok(Some(items)) => items,
         Ok(None) => panic!("probe returned None"),
@@ -115,6 +115,7 @@ async fn gallery_integration_probe_count_download() {
     let count = crate::gallery_probe::count_gallery_files(
         &tool,
         &url,
+        None,
         None,
         crate::gallery_argv::GalleryFilter::All,
     );

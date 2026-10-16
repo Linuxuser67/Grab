@@ -1674,12 +1674,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 .or_else(|| cookies.as_ref().map(|c| c.path().to_path_buf()));
                             // Run on Tokio worker thread (not GTK main) to avoid UI freeze.
                             let url_for_count = url.clone();
+                            // Handoff UA for Cloudflare-bound cookies.
+                            let handoff_ua = crate::extension_server::handoff_user_agent(&url);
                             crate::runtime::tokio_rt()
                                 .spawn(async move {
                                     crate::gallery_probe::count_gallery_files(
                                         &tool,
                                         &url_for_count,
                                         cookies_path.as_deref(),
+                                        handoff_ua.as_deref(),
                                         filter,
                                     )
                                 })
@@ -2193,12 +2196,16 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 let cookies_path = handoff_path.or_else(|| {
                                     probe_cookies.as_ref().map(|c| c.path().to_path_buf())
                                 });
+                                // Handoff UA for Cloudflare-bound cookies.
+                                let handoff_ua =
+                                    crate::extension_server::handoff_user_agent(&url_clone);
                                 let probe_result = crate::runtime::tokio_rt()
                                     .spawn(async move {
                                         crate::gallery_probe::probe_gallery(
                                             &tool_clone,
                                             &url_clone,
                                             cookies_path.as_deref(),
+                                            handoff_ua.as_deref(),
                                         )
                                     })
                                     .await

@@ -232,11 +232,13 @@ pub fn probe_gallery(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
 ) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
     // Clone for 'static bound (block_on_sync may spawn a thread).
     let tool = tool.to_path_buf();
     let url = url.to_string();
     let cookies_file = cookies_file.map(|p| p.to_path_buf());
+    let user_agent = user_agent.map(|s| s.to_string());
     crate::runtime::block_on_sync(async move {
         let mut cmd = tokio::process::Command::new(&tool);
         cmd.arg("--config-ignore")
@@ -249,6 +251,9 @@ pub fn probe_gallery(
             .arg("extractor.cookies-update=false");
         if let Some(cookies) = cookies_file.as_deref() {
             cmd.arg("-C").arg(cookies);
+        }
+        if let Some(ua) = user_agent.as_deref() {
+            cmd.arg("--user-agent").arg(ua);
         }
         // Instagram throttling for extraction requests (probe doesn't download).
         for arg in crate::gallery_argv::instagram_throttle_args(&url, false) {
@@ -381,13 +386,21 @@ pub fn count_gallery_files(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
 ) -> Option<u32> {
     let tool = tool.to_path_buf();
     let url = url.to_string();
     let cookies_file = cookies_file.map(|p| p.to_path_buf());
+    let user_agent = user_agent.map(|s| s.to_string());
     crate::runtime::block_on_sync(async move {
-        let argv = crate::gallery_argv::count_argv(&tool, &url, cookies_file.as_deref(), filter);
+        let argv = crate::gallery_argv::count_argv(
+            &tool,
+            &url,
+            cookies_file.as_deref(),
+            user_agent.as_deref(),
+            filter,
+        );
         let mut cmd = tokio::process::Command::new(&argv[0]);
         cmd.args(&argv[1..]);
         let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
@@ -785,6 +798,7 @@ mod tests {
                 std::path::Path::new("/nonexistent/gallery-dl"),
                 "https://example.com/",
                 None,
+                None,
             )
         })
         .join()
@@ -802,6 +816,7 @@ mod tests {
             count_gallery_files(
                 std::path::Path::new("/nonexistent/gallery-dl"),
                 "https://example.com/",
+                None,
                 None,
                 crate::gallery_argv::GalleryFilter::All,
             )

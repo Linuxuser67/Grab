@@ -1093,7 +1093,11 @@ pub fn show(
                         crate::video::latest_ytdlp_tag(),
                         crate::video::latest_ffmpeg_tag(),
                         crate::video::latest_quickjs_tag(),
-                        crate::gallery::latest_gallerydl_tag()
+                        async {
+                            tokio::task::spawn_blocking(crate::gallery::latest_gallerydl_tag)
+                                .await
+                                .unwrap_or(None)
+                        }
                     );
                     if dialog_b.upgrade().is_none() {
                         return;

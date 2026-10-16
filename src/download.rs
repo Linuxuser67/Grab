@@ -2031,7 +2031,6 @@ impl DownloadManager {
                     &job.page_url,
                     std::time::Duration::from_secs(30),
                 )
-                .await
             } else {
                 None
             };

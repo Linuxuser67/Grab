@@ -242,7 +242,7 @@ pub fn run(
             // gallery-dl for image galleries and fallback video; installed up front
             // so gallery pastes never wait on a lazy install.
             gdl.set_downloading();
-            let gdl_path = match crate::gallery::install_gallerydl().await {
+            let gdl_path = match crate::gallery::install_gallerydl() {
                 Ok(path) => path,
                 Err(e) => {
                     let message = e.to_string();
@@ -252,9 +252,7 @@ pub fn run(
                     return;
                 }
             };
-            let version = crate::gallery::gallerydl_display_version(&gdl_path)
-                .await
-                .ok();
+            let version = crate::gallery::gallerydl_display_version(&gdl_path).ok();
             gdl.set_installed(version);
         }
         if do_ff {

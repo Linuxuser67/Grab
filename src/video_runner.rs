@@ -330,7 +330,7 @@ async fn run_video_download_inner(
         job.audio_only,
     );
     let combined_total = query.total;
-    // NOTE: Grab's speed limit applies to VOD legs via `--ratelimit`. Live capture runs unthrottled: capping an endless stream would fall behind the edge.
+    // NOTE: Grab's speed limit applies to VOD legs via `--limit-rate`. Live capture runs unthrottled: capping an endless stream would fall behind the edge.
     run_unified_ytdlp(
         &youtube_bin,
         &ffmpeg_bin,

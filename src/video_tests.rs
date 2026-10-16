@@ -7968,7 +7968,6 @@ fn live_capture_argv_never_embeds_chapters() {
 fn vod_and_live_argv_never_emit_removed_tuning_flags() {
     // The old Advanced tuning knobs are gone: all left at yt-dlp defaults,
     // so none of their flags may appear on any leg.
-    // (`--throttled-rate` is back as a fixed 100K default, not a user knob.)
     let gone = [
         "--retries",
         "--retry-sleep",
@@ -7978,6 +7977,7 @@ fn vod_and_live_argv_never_emit_removed_tuning_flags() {
         "--socket-timeout",
         "--extractor-retries",
         "--user-agent",
+        "--throttled-rate",
     ];
     let job = direct_test_job();
     let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
@@ -8015,9 +8015,9 @@ fn vod_and_live_argv_never_emit_removed_tuning_flags() {
 }
 
 #[test]
-fn unified_argv_ratelimit_when_set() {
+fn unified_argv_limit_rate_when_set() {
     // Opt-in throttle: the shared speed limit caps VOD legs via
-    // `--ratelimit` (plain bytes; yt-dlp accepts the raw rate).
+    // `--limit-rate` (plain bytes; yt-dlp accepts the raw rate).
     let mut job = direct_test_job();
     job.speed_limit = Some(512_000);
     let out = std::path::Path::new("/tmp/staging/media.%(ext)s");
@@ -8030,10 +8030,10 @@ fn unified_argv_ratelimit_when_set() {
         out,
         None,
     );
-    let pos = argv.iter().position(|a| a == "--ratelimit").expect("flag");
+    let pos = argv.iter().position(|a| a == "--limit-rate").expect("flag");
     assert_eq!(argv[pos + 1], "512000");
     let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "ratelimit must precede the URL separator");
+    assert!(pos < sep, "limit-rate must precede the URL separator");
     // Default off: no trace of the flag.
     job.speed_limit = None;
     let argv = unified_download_argv(
@@ -8045,7 +8045,7 @@ fn unified_argv_ratelimit_when_set() {
         out,
         None,
     );
-    assert!(!argv.iter().any(|a| a == "--ratelimit"));
+    assert!(!argv.iter().any(|a| a == "--limit-rate"));
 }
 
 #[test]
@@ -8082,7 +8082,7 @@ fn unified_argv_mtime_when_set() {
 }
 
 #[test]
-fn hls_argv_ratelimit_when_set() {
+fn hls_argv_limit_rate_when_set() {
     let mut job = direct_test_job();
     job.speed_limit = Some(2_097_152);
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
@@ -8093,10 +8093,10 @@ fn hls_argv_ratelimit_when_set() {
         dest,
         None,
     );
-    let pos = argv.iter().position(|a| a == "--ratelimit").expect("flag");
+    let pos = argv.iter().position(|a| a == "--limit-rate").expect("flag");
     assert_eq!(argv[pos + 1], "2097152");
     let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "ratelimit must precede the URL separator");
+    assert!(pos < sep, "limit-rate must precede the URL separator");
     // Default off: no trace of the flag.
     job.speed_limit = None;
     let argv = hls_download_argv(
@@ -8106,11 +8106,11 @@ fn hls_argv_ratelimit_when_set() {
         dest,
         None,
     );
-    assert!(!argv.iter().any(|a| a == "--ratelimit"));
+    assert!(!argv.iter().any(|a| a == "--limit-rate"));
 }
 
 #[test]
-fn live_capture_argv_never_ratelimit() {
+fn live_capture_argv_never_limit_rate() {
     // Throttling an endless capture would fall behind the live edge, so
     // even opted in the flag must not appear.
     let mut job = live_test_job();
@@ -8121,7 +8121,7 @@ fn live_capture_argv_never_ratelimit() {
         std::path::Path::new("/tmp/dl/v.live.ts"),
         None,
     );
-    assert!(!argv.iter().any(|a| a == "--ratelimit"));
+    assert!(!argv.iter().any(|a| a == "--limit-rate"));
 }
 
 #[test]

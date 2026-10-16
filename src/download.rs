@@ -2017,9 +2017,10 @@ impl DownloadManager {
             // fall back to browser export. Same order as the probe.
             let handoff_path = crate::extension_server::handoff_cookie_path(&job.page_url);
             let handoff_ua = crate::extension_server::handoff_user_agent(&job.page_url);
-            let cookies_file: Option<crate::cookies::StagedCookies> = if handoff_path.is_some() {
-                None
-            } else if job.cookies_browser.is_empty() || job.cookies_browser == "none" {
+            let cookies_file: Option<crate::cookies::StagedCookies> = if handoff_path.is_some()
+                || job.cookies_browser.is_empty()
+                || job.cookies_browser == "none"
+            {
                 None
             } else if let Some(ytdlp) =
                 crate::video_tools::find_in_dirs("yt-dlp", &crate::video_tools::tool_search_dirs())

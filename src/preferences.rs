@@ -1140,11 +1140,14 @@ pub fn show(
                             (Some(installed), Some(_)) => {
                                 current.push(format!("quickjs {}", installed.trim()));
                             }
-                            (None, _) => {}
+                            (None, Some(_)) => {
+                                updates.push("quickjs (not installed)".to_string());
+                            }
                             _ => indeterminate = true,
                         }
                         // gallery-dl is optional (provisioned for galleries only):
                         // judged when installed, never blocks the check.
+                        // If missing, offer to install it.
                         match (gdl.as_deref(), gdl_tag.as_deref()) {
                             (Some(_installed), Some(tag))
                                 if crate::gallery::gallerydl_update_available(tag) =>
@@ -1157,6 +1160,9 @@ pub fn show(
                             }
                             (Some(installed), Some(_)) => {
                                 current.push(format!("gallery-dl {}", installed.trim()));
+                            }
+                            (None, Some(_)) => {
+                                updates.push("gallery-dl (not installed)".to_string());
                             }
                             (None, _) => {}
                             _ => indeterminate = true,

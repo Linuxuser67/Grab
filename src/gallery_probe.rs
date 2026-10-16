@@ -245,6 +245,10 @@ pub async fn probe_gallery(
     if let Some(cookies) = cookies_file {
         cmd.arg("-C").arg(cookies);
     }
+    // Instagram throttling for extraction requests (probe doesn't download).
+    for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
+        cmd.arg(arg);
+    }
     // `--` last: guards against URLs starting with `-` being parsed as options.
     cmd.arg("--").arg(url);
     let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())

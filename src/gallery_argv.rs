@@ -5,6 +5,24 @@
 
 use std::path::{Path, PathBuf};
 
+/// Instagram request throttling args: gallery-dl recommends 3s between
+/// requests to avoid rate-limiting and temporary IP blocks.
+/// `include_download_sleep`: also add `--sleep 1.5` (delay before each file
+/// download). Only meaningful for actual downloads, not probes/counts.
+pub fn instagram_throttle_args(url: &str, include_download_sleep: bool) -> Vec<String> {
+    let host = crate::video_probe::page_host(url);
+    if host == "instagram.com" || host.ends_with(".instagram.com") {
+        let mut args = vec!["--sleep-request".to_string(), "3".to_string()];
+        if include_download_sleep {
+            args.push("--sleep".to_string());
+            args.push("1.5".to_string());
+        }
+        args
+    } else {
+        Vec::new()
+    }
+}
+
 /// Video extensions recognized for gallery classification and filtering.
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "webm", "mov", "mkv", "m4v", "avi", "ts", "flv", "wmv", "mpg", "mpeg", "3gp", "3g2",
@@ -110,15 +128,8 @@ pub fn download_argv(
         argv.push("-r".to_string());
         argv.push(limit.to_string());
     }
-    // Instagram rate-limits aggressively: gallery-dl recommends 3s between
-    // requests and 1.5s before each download to avoid temporary IP blocks.
-    let host = crate::video_probe::page_host(url);
-    if host == "instagram.com" || host.ends_with(".instagram.com") {
-        argv.push("--sleep-request".to_string());
-        argv.push("3".to_string());
-        argv.push("--sleep".to_string());
-        argv.push("1.5".to_string());
-    }
+    // Instagram rate-limits aggressively: throttle requests.
+    argv.extend(instagram_throttle_args(url, true));
     // `--` guards against URLs starting with `-` being parsed as options.
     argv.push("--".to_string());
     argv.push(url.to_string());
@@ -149,6 +160,9 @@ pub fn count_argv(
         argv.push(cookies.to_string_lossy().to_string());
     }
     push_filter(&mut argv, filter);
+    // Instagram throttling for the extraction requests (no --sleep: count
+    // doesn't download files).
+    argv.extend(instagram_throttle_args(url, false));
     argv.push("--".to_string());
     argv.push(url.to_string());
     argv
@@ -380,5 +394,44 @@ mod tests {
             None,
         );
         assert!(!argv.iter().any(|a| a == "--sleep-request"));
+    }
+
+    #[test]
+    fn instagram_throttle_args_download_includes_both() {
+        let args = instagram_throttle_args("https://www.instagram.com/p/ABC/", true);
+        assert_eq!(
+            args,
+            vec![
+                "--sleep-request".to_string(),
+                "3".to_string(),
+                "--sleep".to_string(),
+                "1.5".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn instagram_throttle_args_probe_excludes_download_sleep() {
+        let args = instagram_throttle_args("https://www.instagram.com/p/ABC/", false);
+        assert_eq!(args, vec!["--sleep-request".to_string(), "3".to_string()]);
+    }
+
+    #[test]
+    fn instagram_throttle_args_non_instagram_empty() {
+        assert!(instagram_throttle_args("https://example.com/gallery", true).is_empty());
+        assert!(instagram_throttle_args("https://example.com/gallery", false).is_empty());
+    }
+
+    #[test]
+    fn count_argv_instagram_gets_sleep_request() {
+        let argv = count_argv(
+            &tool(),
+            "https://www.instagram.com/p/ABC123/",
+            None,
+            GalleryFilter::All,
+        );
+        assert!(argv.contains(&"--sleep-request".to_string()));
+        // Count doesn't download: no --sleep.
+        assert!(!argv.iter().any(|a| a == "--sleep"));
     }
 }

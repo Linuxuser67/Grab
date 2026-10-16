@@ -2178,7 +2178,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             glib::spawn_future_local(async move {
                 let restore_btn = || {
                     step3.gallery_select_btn.set_sensitive(true);
-                    step3.gallery_select_btn.set_label(Some(&orig_label));
+                    step3.gallery_select_btn.set_label(&orig_label);
                 };
                 // Surface enumeration failures on the gallery row instead of
                 // only logging: the user clicked a button and deserves feedback.

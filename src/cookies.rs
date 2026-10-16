@@ -248,6 +248,7 @@ pub(crate) async fn export_cookies_to_file(
 }
 
 /// Sync wrapper for `export_cookies_to_file` for true sync callers.
+#[allow(dead_code)]
 pub(crate) fn export_cookies_to_file_sync(
     youtube_bin: &Path,
     cookies_browser: &str,

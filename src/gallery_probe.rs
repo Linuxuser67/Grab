@@ -256,7 +256,50 @@ pub async fn probe_gallery(
     Ok(Some(items))
 }
 
+/// Enumerate ALL files in a gallery (no range limit). Used for the file picker.
+/// Returns the full list of items in download order. This can be slow for large
+/// galleries; callers should show progress.
+pub async fn enumerate_gallery_files(
+    tool: &Path,
+    url: &str,
+    cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
+) -> Result<Vec<GalleryItem>, GalleryError> {
+    let mut cmd = tokio::process::Command::new(tool);
+    cmd.arg("--config-ignore")
+        .arg("-j")
+        .arg("--no-download")
+        // No --range: enumerate everything.
+        .arg("-o")
+        .arg("extractor.cookies-update=false");
+    if let Some(cookies) = cookies_file {
+        cmd.arg("-C").arg(cookies);
+    }
+    if let Some(ua) = user_agent {
+        cmd.arg("--user-agent").arg(ua);
+    }
+    for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
+        cmd.arg(arg);
+    }
+    cmd.arg("--").arg(url);
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
+    if !output.status.success() {
+        return Err(GalleryError::install(format!(
+            "gallery-dl enumerate failed (exit {})",
+            output.status.code().unwrap_or(-1)
+        )));
+    }
+    let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
+    let items = parse_probe_messages(&messages)?;
+    Ok(items)
+}
+
 /// Sync wrapper for `probe_gallery` for true sync callers. Uses `block_on_sync`.
+#[allow(dead_code)]
 pub fn probe_gallery_sync(
     tool: &Path,
     url: &str,
@@ -391,6 +434,7 @@ pub async fn count_gallery_files(
 
 /// Sync wrapper for `count_gallery_files` for true sync callers (e.g. tests,
 /// non-async contexts). Uses `block_on_sync` internally.
+#[allow(dead_code)]
 pub fn count_gallery_files_sync(
     tool: &Path,
     url: &str,

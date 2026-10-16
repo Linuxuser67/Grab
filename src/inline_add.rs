@@ -2141,120 +2141,115 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // Try gallery-dl FIRST (before yt-dlp): it handles image galleries
                 // and sites yt-dlp can't (e.g. Instagram stories). If it finds
                 // nothing, fall through to yt-dlp. Skipped for direct media URLs.
-                if !crate::gallery_probe::url_is_direct_media(&url) {
-                    if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                        let handoff_path = crate::extension_server::handoff_cookie_path(&url);
-                        let handoff_ua = crate::extension_server::handoff_user_agent(&url);
-                        let tool_clone = tool.clone();
-                        let url_clone = url.clone();
-                        let browser = settings_b.cookies_browser();
-                        // Run export + probe on Tokio worker (not GTK main).
-                        let (probe_result, _probe_cookies) = crate::runtime::tokio_rt()
-                            .spawn(async move {
-                                // Export browser cookies only if no handoff jar.
-                                let probe_cookies = if handoff_path.is_none() {
-                                    if browser.is_empty() || browser == "none" {
-                                        None
-                                    } else if let Some(ytdlp) = crate::video_tools::find_in_dirs(
-                                        "yt-dlp",
-                                        &crate::video_tools::tool_search_dirs(),
-                                    ) {
-                                        crate::cookies::export_cookies_to_file(
-                                            &ytdlp,
-                                            browser.as_str(),
-                                            &url_clone,
-                                            std::time::Duration::from_secs(30),
-                                        )
-                                        .await
-                                    } else {
-                                        None
-                                    }
+                if !crate::gallery_probe::url_is_direct_media(&url)
+                    && let Ok(tool) = crate::gallery_argv::resolve_tool()
+                {
+                    let handoff_path = crate::extension_server::handoff_cookie_path(&url);
+                    let handoff_ua = crate::extension_server::handoff_user_agent(&url);
+                    let tool_clone = tool.clone();
+                    let url_clone = url.clone();
+                    let browser = settings_b.cookies_browser();
+                    // Run export + probe on Tokio worker (not GTK main).
+                    let (probe_result, _probe_cookies) = crate::runtime::tokio_rt()
+                        .spawn(async move {
+                            // Export browser cookies only if no handoff jar.
+                            let probe_cookies = if handoff_path.is_none() {
+                                if browser.is_empty() || browser == "none" {
+                                    None
+                                } else if let Some(ytdlp) = crate::video_tools::find_in_dirs(
+                                    "yt-dlp",
+                                    &crate::video_tools::tool_search_dirs(),
+                                ) {
+                                    crate::cookies::export_cookies_to_file(
+                                        &ytdlp,
+                                        browser.as_str(),
+                                        &url_clone,
+                                        std::time::Duration::from_secs(30),
+                                    )
+                                    .await
                                 } else {
                                     None
-                                };
-                                let cookies_path = handoff_path.or_else(|| {
-                                    probe_cookies.as_ref().map(|c| c.path().to_path_buf())
-                                });
-                                let result = crate::gallery_probe::probe_gallery(
-                                    &tool_clone,
-                                    &url_clone,
-                                    cookies_path.as_deref(),
-                                    handoff_ua.as_deref(),
-                                )
-                                .await;
-                                (result, probe_cookies)
-                            })
-                            .await
-                            .ok()
-                            .unwrap_or((Ok(None), None));
-                        // Discard stale results.
-                        if probe_b.borrow().generation != my {
-                            return;
+                                }
+                            } else {
+                                None
+                            };
+                            let cookies_path = handoff_path
+                                .or_else(|| probe_cookies.as_ref().map(|c| c.path().to_path_buf()));
+                            let result = crate::gallery_probe::probe_gallery(
+                                &tool_clone,
+                                &url_clone,
+                                cookies_path.as_deref(),
+                                handoff_ua.as_deref(),
+                            )
+                            .await;
+                            (result, probe_cookies)
+                        })
+                        .await
+                        .ok()
+                        .unwrap_or((Ok(None), None));
+                    // Discard stale results.
+                    if probe_b.borrow().generation != my {
+                        return;
+                    }
+                    match probe_result {
+                        Ok(Some(items)) => {
+                            // gallery-dl found something; route it.
+                            let outcome = crate::gallery_probe::route(
+                                false, // yt-dlp found nothing (not tried yet)
+                                Some(items.as_slice()),
+                                Some(crate::gallery_probe::StickyMode::Video),
+                            );
+                            if matches!(outcome, crate::gallery_probe::ProbeOutcome::VideoGalleryDl)
+                            {
+                                crate::inline_gallery::submit_gallery_video(
+                                    &manager_b,
+                                    &dest_b,
+                                    &close_b,
+                                    &url,
+                                    &items,
+                                    scheduled_at_b.get(),
+                                    &step_b,
+                                    &lookup_add_b,
+                                );
+                                return;
+                            }
+                            if matches!(outcome, crate::gallery_probe::ProbeOutcome::Gallery) {
+                                let card = crate::gallery_card::GalleryCard::new(
+                                    items,
+                                    Some(crate::gallery_probe::StickyMode::Gallery),
+                                    url.clone(),
+                                );
+                                let title = card
+                                    .items
+                                    .first()
+                                    .map(|i| crate::gallery_probe::probe_title(i, &url))
+                                    .unwrap_or_else(|| url.clone());
+                                tracing::info!(
+                                    files = card.file_count(),
+                                    preview = ?card.preview_filenames(),
+                                    sticky = ?card.sticky_mode(),
+                                    "gallery-dl found image gallery"
+                                );
+                                crate::inline_gallery::show_gallery_ready(&step_b, card, &title);
+                                return;
+                            }
+                            // Neither video nor gallery: fall through to yt-dlp.
                         }
-                        match probe_result {
-                            Ok(Some(items)) => {
-                                // gallery-dl found something; route it.
-                                let outcome = crate::gallery_probe::route(
-                                    false, // yt-dlp found nothing (not tried yet)
-                                    Some(items.as_slice()),
-                                    Some(crate::gallery_probe::StickyMode::Video),
-                                );
-                                if matches!(
-                                    outcome,
-                                    crate::gallery_probe::ProbeOutcome::VideoGalleryDl
-                                ) {
-                                    crate::inline_gallery::submit_gallery_video(
-                                        &manager_b,
-                                        &dest_b,
-                                        &close_b,
-                                        &url,
-                                        &items,
-                                        scheduled_at_b.get(),
-                                        &step_b,
-                                        &lookup_add_b,
-                                    );
-                                    return;
-                                }
-                                if matches!(outcome, crate::gallery_probe::ProbeOutcome::Gallery) {
-                                    let card = crate::gallery_card::GalleryCard::new(
-                                        items,
-                                        Some(crate::gallery_probe::StickyMode::Gallery),
-                                        url.clone(),
-                                    );
-                                    let title = card
-                                        .items
-                                        .first()
-                                        .map(|i| crate::gallery_probe::probe_title(i, &url))
-                                        .unwrap_or_else(|| url.clone());
-                                    tracing::info!(
-                                        files = card.file_count(),
-                                        preview = ?card.preview_filenames(),
-                                        sticky = ?card.sticky_mode(),
-                                        "gallery-dl found image gallery"
-                                    );
-                                    crate::inline_gallery::show_gallery_ready(
-                                        &step_b, card, &title,
-                                    );
-                                    return;
-                                }
-                                // Neither video nor gallery: fall through to yt-dlp.
+                        Ok(None) => {
+                            // gallery-dl found nothing; fall through to yt-dlp.
+                        }
+                        Err(e) => {
+                            // If the error should surface (auth, etc.), show it.
+                            // Otherwise fall through to yt-dlp.
+                            if crate::gallery_probe::should_surface(&e) {
+                                show_video_error(&step_b, &e.to_string());
+                                set_lookup_add(&lookup_add_b, true);
+                                return;
                             }
-                            Ok(None) => {
-                                // gallery-dl found nothing; fall through to yt-dlp.
-                            }
-                            Err(e) => {
-                                // If the error should surface (auth, etc.), show it.
-                                // Otherwise fall through to yt-dlp.
-                                if crate::gallery_probe::should_surface(&e) {
-                                    show_video_error(&step_b, &e.to_string());
-                                    set_lookup_add(&lookup_add_b, true);
-                                    return;
-                                }
-                                tracing::warn!(
-                                    error = %e,
-                                    "gallery-dl probe failed, falling back to yt-dlp"
-                                );
-                            }
+                            tracing::warn!(
+                                error = %e,
+                                "gallery-dl probe failed, falling back to yt-dlp"
+                            );
                         }
                     }
                 }

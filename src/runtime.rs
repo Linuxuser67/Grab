@@ -19,6 +19,9 @@ pub(crate) fn tokio_rt() -> &'static tokio::runtime::Runtime {
 /// (e.g. GTK main) this blocks on the shared runtime; from within a
 /// runtime (e.g. #[tokio::test]) it spawns a dedicated thread to avoid
 /// the "Cannot start a runtime from within a runtime" panic.
+///
+/// Only used by test sync wrappers now that production callers are async.
+#[allow(dead_code)]
 pub(crate) fn block_on_sync<F, T>(fut: F) -> T
 where
     F: std::future::Future<Output = T> + Send + 'static,

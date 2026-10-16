@@ -102,6 +102,7 @@ pub async fn latest_gallerydl_tag() -> Option<String> {
 }
 
 /// Sync wrapper for `latest_gallerydl_tag` for true sync callers.
+#[allow(dead_code)]
 pub fn latest_gallerydl_tag_sync() -> Option<String> {
     crate::runtime::block_on_sync(latest_gallerydl_tag())
 }
@@ -141,6 +142,7 @@ pub async fn install_gallerydl() -> Result<PathBuf, GalleryError> {
 }
 
 /// Sync wrapper for `install_gallerydl` for true sync callers.
+#[allow(dead_code)]
 pub fn install_gallerydl_sync() -> Result<PathBuf, GalleryError> {
     crate::runtime::block_on_sync(install_gallerydl())
 }
@@ -192,6 +194,7 @@ pub async fn gallerydl_display_version(path: &Path) -> Result<String, GalleryErr
 }
 
 /// Sync wrapper for `gallerydl_display_version` for true sync callers.
+#[allow(dead_code)]
 pub fn gallerydl_display_version_sync(path: &Path) -> Result<String, GalleryError> {
     let path = path.to_path_buf();
     crate::runtime::block_on_sync(async move { gallerydl_display_version(&path).await })

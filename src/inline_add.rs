@@ -2430,6 +2430,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // usable. Skipped for direct media URLs (not gallery pages).
                 let browser = settings_b.cookies_browser();
                 let newest_first = settings_b.video_codec_newest();
+                // Key the probe-JSON cache by the probe's conditions: the
+                // download reuses the JSON only under identical ones.
+                let probe_json_key: crate::download::ProbeJsonKey = (
+                    url.clone(),
+                    browser.clone(),
+                    proxy.as_ref().map(|p| p.cli_url.clone()),
+                );
                 let (ytdlp_result, gallery_error) =
                     if !crate::gallery_probe::url_is_direct_media(&url)
                         && let Ok(tool) = crate::gallery_argv::resolve_tool()
@@ -2601,7 +2608,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         // Cache the raw info JSON for --load-info-json at download time.
                         // Single videos only; playlists re-probe per entry.
                         if let Some(json) = raw_json {
-                            manager_b.cache_probe_json(&url, json);
+                            manager_b.cache_probe_json(probe_json_key.clone(), json);
                         }
                         // Resolved but nothing playable, and not a listed video
                         // page: same plain fallback as above.

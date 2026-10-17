@@ -7422,12 +7422,86 @@ fn probe_json_cache_roundtrip() {
     let settings = test_settings();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     let json = serde_json::json!({"id": "abc123", "title": "Test"});
-    m.cache_probe_json("https://example.com/v", json.clone());
+    let key: ProbeJsonKey = (
+        "https://example.com/v".to_string(),
+        "chrome".to_string(),
+        None,
+    );
+    m.cache_probe_json(key.clone(), json.clone());
     // Take consumes (single use).
-    assert_eq!(m.take_probe_json("https://example.com/v"), Some(json));
-    assert_eq!(m.take_probe_json("https://example.com/v"), None);
+    assert_eq!(m.take_probe_json(&key), Some(json));
+    assert_eq!(m.take_probe_json(&key), None);
     // Missing URL returns None.
-    assert_eq!(m.take_probe_json("https://example.com/other"), None);
+    let other: ProbeJsonKey = (
+        "https://example.com/other".to_string(),
+        "chrome".to_string(),
+        None,
+    );
+    assert_eq!(m.take_probe_json(&other), None);
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn probe_json_cache_key_includes_conditions() {
+    // Same URL probed under different cookies/proxy must not share JSON.
+    let (_lock, _loop) = test_locks();
+    let qf = test_queue_file("probe-json-key");
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let json = serde_json::json!({"id": "abc123"});
+    let key: ProbeJsonKey = (
+        "https://example.com/v".to_string(),
+        "chrome".to_string(),
+        None,
+    );
+    m.cache_probe_json(key.clone(), json.clone());
+    // Different cookie source: miss.
+    let other_browser: ProbeJsonKey = (
+        "https://example.com/v".to_string(),
+        "firefox".to_string(),
+        None,
+    );
+    assert_eq!(m.take_probe_json(&other_browser), None);
+    // Different proxy: miss (the chrome entry is still there).
+    let proxied: ProbeJsonKey = (
+        "https://example.com/v".to_string(),
+        "chrome".to_string(),
+        Some("socks5h://127.0.0.1:9050".to_string()),
+    );
+    assert_eq!(m.take_probe_json(&proxied), None);
+    // Exact key: hit.
+    assert_eq!(m.take_probe_json(&key), Some(json));
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn probe_json_expired_rejects_old_entries() {
+    assert!(!probe_json_expired(std::time::Instant::now()));
+    assert!(probe_json_expired(
+        std::time::Instant::now() - std::time::Duration::from_secs(301)
+    ));
+}
+
+#[test]
+fn probe_json_cache_drops_expired_entries() {
+    let (_lock, _loop) = test_locks();
+    let qf = test_queue_file("probe-json-ttl");
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let key: ProbeJsonKey = (
+        "https://example.com/v".to_string(),
+        "none".to_string(),
+        None,
+    );
+    // Insert with a backdated timestamp: take must drop it, not return it.
+    m.probe_json_cache.borrow_mut().insert(
+        key.clone(),
+        (
+            std::time::Instant::now() - std::time::Duration::from_secs(301),
+            serde_json::json!({"id": "stale"}),
+        ),
+    );
+    assert_eq!(m.take_probe_json(&key), None);
     let _ = std::fs::remove_file(&qf);
 }
 

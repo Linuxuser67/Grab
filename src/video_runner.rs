@@ -118,22 +118,24 @@ async fn run_video_download_inner(
     });
     let mut video: Option<Video> = None;
     let mut playlist_index: Option<usize> = None;
-    // Live fast path: the card probe cached the info JSON — parse it locally
-    // instead of spawning yt-dlp for a second extraction. The capture itself
-    // gets --load-info-json below, so a stale manifest URL just triggers
-    // yt-dlp's automatic re-extract. Falls through to the fresh resolve when
-    // the cache missed (extension handoff, restored queue) or parsing fails.
-    if job.is_live
-        && let Some(json) = job.info_json.as_ref()
-    {
+    // Fast path: the card probe cached the info JSON — parse it locally
+    // instead of spawning yt-dlp for a second extraction. Invariant: the
+    // JSON is loaded (--load-info-json) iff the Video was built from that
+    // same JSON, so a format ID picked from the Video is always present in
+    // the JSON. Resumed downloads clear it first: signed URLs in a cached
+    // JSON have likely expired.
+    if resuming {
+        job.info_json = None;
+    }
+    if let Some(json) = job.info_json.as_ref() {
         match crate::video_probe::parse_single_video(json.clone()) {
             Ok(v) => {
-                tracing::debug!("live resolve: reused probe info JSON, skipping re-extract");
+                tracing::debug!("resolve: reused probe info JSON, skipping re-extract");
                 video = Some(v);
             }
             Err(e) => {
-                tracing::info!("live probe JSON parse failed, re-resolving: {e}");
-                // The capture must not load JSON the resolve couldn't parse:
+                tracing::info!("probe JSON parse failed, re-resolving: {e}");
+                // The download must not load JSON the resolve couldn't parse:
                 // a format ID from the fresh Video missing in stale JSON is a
                 // hard error with no re-extract safety net.
                 job.info_json = None;
@@ -158,6 +160,10 @@ async fn run_video_download_inner(
                 }) => {
                     video = Some(*v);
                     playlist_index = index;
+                    // The Video is fresh: never load a (possibly stale)
+                    // cached JSON under it — the invariant is JSON iff the
+                    // Video was built from that JSON.
+                    job.info_json = None;
                     break;
                 }
                 // No picked entry: the spawner expands the collection into per-item rows instead of failing it.
@@ -488,8 +494,10 @@ pub(crate) async fn run_unified_ytdlp(
         playlist_index,
     );
     // Skip re-extraction: the probe's info JSON is reused via --load-info-json.
-    // yt-dlp re-extracts automatically if a loaded format URL 403/404s (safety net),
-    // so stale entries are harmless.
+    // The JSON is only loaded when the Video was built from it (see the
+    // resolve above), so every requested format ID is present. yt-dlp still
+    // re-extracts automatically if a loaded format URL 403/404s (safety net
+    // for stale signed URLs).
     let info_json_path: Option<std::path::PathBuf> = if let Some(json) = job.info_json.as_ref() {
         let json_path = staging.join(format!(".grab-info-{}.json", job.item_id));
         // Private write: the JSON can hold signed media URLs and headers.

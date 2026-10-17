@@ -202,7 +202,7 @@ pub struct DownloadManager {
     /// probe time. The spawn takes it to build `--load-info-json`, skipping
     /// a second extraction. Session-only; never persisted. Stale entries
     /// are harmless: yt-dlp re-extracts if a loaded format URL 403/404s.
-    probe_json_cache: RefCell<HashMap<String, serde_json::Value>>,
+    probe_json_cache: RefCell<HashMap<ProbeJsonKey, (std::time::Instant, serde_json::Value)>>,
     /// The 30s schedule checker's source, if running. Kept so the
     /// scheduling preference can stop the timer entirely.
     scheduler_source: RefCell<Option<glib::SourceId>>,
@@ -332,23 +332,44 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+/// Cache key for probe info JSON: the JSON is only reusable when the
+/// download runs under the same conditions the probe did — same page, same
+/// cookie source, same proxy. (page_url, cookies_browser, proxy cli_url)
+pub(crate) type ProbeJsonKey = (String, String, Option<String>);
+
+/// Probe info JSON older than this is never reused: signed media URLs inside
+/// go stale, and the extractor's format list may have rotated.
+const PROBE_JSON_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Whether a cached probe JSON timestamp is too old to reuse.
+fn probe_json_expired(cached_at: std::time::Instant) -> bool {
+    cached_at.elapsed() > PROBE_JSON_TTL
+}
+
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
-    /// Cache a probe's raw info JSON by page URL for `--load-info-json`.
-    /// Overwrites any earlier entry for the URL. Bounded (32 entries):
+    /// Cache a probe's raw info JSON for `--load-info-json`.
+    /// Overwrites any earlier entry for the key. Bounded (32 entries):
     /// probed-but-never-downloaded URLs must not accumulate ~100KB each
     /// for the whole session.
-    pub(crate) fn cache_probe_json(&self, page_url: &str, json: serde_json::Value) {
+    pub(crate) fn cache_probe_json(&self, key: ProbeJsonKey, json: serde_json::Value) {
         let mut cache = self.probe_json_cache.borrow_mut();
         if cache.len() >= 32 {
             cache.clear();
         }
-        cache.insert(page_url.to_string(), json);
+        cache.insert(key, (std::time::Instant::now(), json));
     }
 
-    /// Take the cached probe JSON for a URL (single use: the download consumes it).
-    pub(crate) fn take_probe_json(&self, page_url: &str) -> Option<serde_json::Value> {
-        self.probe_json_cache.borrow_mut().remove(page_url)
+    /// Take the cached probe JSON for a key (single use: the download
+    /// consumes it). Entries older than `PROBE_JSON_TTL` are dropped —
+    /// signed media URLs inside go stale.
+    pub(crate) fn take_probe_json(&self, key: &ProbeJsonKey) -> Option<serde_json::Value> {
+        let (cached_at, json) = self.probe_json_cache.borrow_mut().remove(key)?;
+        if probe_json_expired(cached_at) {
+            None
+        } else {
+            Some(json)
+        }
     }
 
     /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
@@ -1946,6 +1967,12 @@ impl DownloadManager {
                 return;
             }
         };
+        // Probe JSON is only reusable under the conditions it was probed with.
+        let probe_json_key: ProbeJsonKey = (
+            page_url.clone(),
+            self.settings.cookies_browser(),
+            proxy.as_ref().map(|p| p.cli_url.clone()),
+        );
         let job = crate::video::VideoJob {
             item_id: id,
             page_url: page_url.clone(),
@@ -1980,7 +2007,7 @@ impl DownloadManager {
             proxy,
             // Take the probe's raw info JSON if cached (single videos only).
             // Lets the download use --load-info-json instead of re-extracting.
-            info_json: self.take_probe_json(&page_url),
+            info_json: self.take_probe_json(&probe_json_key),
         };
         let handle = tokio_rt().spawn(async move {
             let worker_tx = tx.clone();

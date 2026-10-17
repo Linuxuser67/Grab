@@ -85,14 +85,8 @@ pub async fn run_gallery_download(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    // Debug: log the full argv before spawning. Guard the allocation: the
-    // Vec is only built when enabled.
-    if crate::backend_debug::enabled() {
-        crate::backend_debug::log_spawn(
-            &argv[0],
-            &argv[1..].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-        );
-    }
+    // Debug: log the full argv before spawning.
+    crate::backend_debug::log_command(&cmd);
 
     let mut child = cmd
         .spawn()
@@ -118,9 +112,7 @@ pub async fn run_gallery_download(
         while let Ok(Some(line)) = lines.next_line().await {
             // Debug: echo stderr live. The line is still captured below
             // for the failure tail.
-            if crate::backend_debug::enabled() {
-                eprintln!("[grab-backend] gallery-dl stderr: {line}");
-            }
+            crate::backend_debug::echo_line(&line);
             let mut buf = stderr_lines_clone.lock().unwrap();
             buf.push(line);
             if buf.len() > 20 {

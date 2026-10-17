@@ -737,24 +737,38 @@ pub(crate) fn file_len(path: &Path) -> Option<u64> {
 /// The probe info-JSON temp files can hold signed media URLs and request
 /// headers, so they must not be world-readable. Any pre-existing file is
 /// removed first: `mode(0o600)` only applies at creation, and a previous
-/// run's crash debris could otherwise keep wider permissions. Flushes
-/// before returning: `write_all` only queues into tokio's buffer, and a
-/// backend spawn reading the file right after must see the whole thing.
+/// run's crash debris could otherwise keep wider permissions. The open then
+/// uses `create_new`: the staging dir sits inside the user's destination
+/// folder, which may be shared, and anything planted in the gap after the
+/// removal — a symlink, most importantly — must fail the open, not be
+/// followed or truncated. Flushes before returning: `write_all` only queues
+/// into tokio's buffer, and a backend spawn reading the file right after
+/// must see the whole thing.
 #[cfg(unix)]
 pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt as _;
-    // Remove first so the 0600 mode below always applies (creation only).
+    // Remove first so the 0600 mode in `open_new_private` always applies
+    // (creation only).
     let _ = tokio::fs::remove_file(path).await;
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .await?;
+    let mut file = open_new_private(path).await?;
     file.write_all(bytes).await?;
     file.flush().await?;
     Ok(())
+}
+
+/// Open `path` exclusively for writing with owner-only permissions: if
+/// anything — a regular file, a symlink — is present, the open fails instead
+/// of truncating it or following it. Split out so tests can pin the
+/// exclusive open directly; `write_private`'s remove→open gap is closed by
+/// it.
+#[cfg(unix)]
+async fn open_new_private(path: &Path) -> std::io::Result<tokio::fs::File> {
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .await
 }
 
 /// Non-Unix fallback: no permission bits to set, still async + flushed.
@@ -933,6 +947,52 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"signed\":\"url\"}");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "info-JSON temp file must be owner-only");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A symlink planted at the temp-file path must never be followed: the
+    /// write replaces the link itself, and the file it pointed at is left
+    /// untouched. The exclusive open itself is pinned by
+    /// `open_new_private_refuses_existing_paths`.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn write_private_never_follows_a_symlink() {
+        let dir = unique_dir("write-private-symlink");
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"keep").unwrap();
+        let path = dir.join(".grab-info-2.json");
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        write_private(&path, b"{\"signed\":\"url\"}").await.unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep", "symlink target must stay untouched");
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(!meta.file_type().is_symlink(), "path must be a fresh file");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"signed\":\"url\"}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pins the exclusive open itself: an entry already at the path — a
+    /// regular file or a symlink — must fail the open (`AlreadyExists`), not
+    /// be truncated or followed. This is the check that fails if
+    /// `create_new` is ever watered down; the remove→open race window itself
+    /// is not deterministic from a test.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn open_new_private_refuses_existing_paths() {
+        let dir = unique_dir("open-new-private");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("exists");
+        std::fs::write(&file, b"old").unwrap();
+        let err = open_new_private(&file).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&file).unwrap(), b"old", "existing bytes stay untouched");
+        // A symlink fails the same way; its target is never opened.
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"keep").unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        assert!(open_new_private(&link).await.is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep", "symlink target stays untouched");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -237,15 +237,7 @@ pub async fn probe_gallery(
     // `--` last: guards against URLs starting with `-` being parsed as options.
     cmd.arg("--").arg(url);
     // Debug: log the full argv before spawning.
-    if crate::backend_debug::enabled() {
-        let std_cmd = cmd.as_std();
-        let program = std_cmd.get_program().to_string_lossy().into_owned();
-        let args: Vec<String> = std_cmd
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        crate::backend_debug::log_spawn(&program, &args);
-    }
+    crate::backend_debug::log_command(&cmd);
     let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
         .await
         .map_err(|_| GalleryError::install("gallery-dl probe timed out"))?
@@ -327,15 +319,7 @@ pub async fn enumerate_gallery_files(
     }
     cmd.arg("--").arg(url);
     // Debug: log the full argv before spawning.
-    if crate::backend_debug::enabled() {
-        let std_cmd = cmd.as_std();
-        let program = std_cmd.get_program().to_string_lossy().into_owned();
-        let args: Vec<String> = std_cmd
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        crate::backend_debug::log_spawn(&program, &args);
-    }
+    crate::backend_debug::log_command(&cmd);
     let output = tokio::time::timeout(ENUMERATE_TIMEOUT, cmd.output())
         .await
         .map_err(|_| GalleryError::probe("gallery-dl enumerate timed out".to_string()))?
@@ -458,15 +442,7 @@ pub async fn count_gallery_files(
     cmd.kill_on_drop(true);
     cmd.args(&argv[1..]);
     // Debug: log the full argv before spawning.
-    if crate::backend_debug::enabled() {
-        let std_cmd = cmd.as_std();
-        let program = std_cmd.get_program().to_string_lossy().into_owned();
-        let args: Vec<String> = std_cmd
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        crate::backend_debug::log_spawn(&program, &args);
-    }
+    crate::backend_debug::log_command(&cmd);
     let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
         .await
         .ok()?

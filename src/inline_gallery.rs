@@ -1,22 +1,21 @@
 //! Gallery probe orchestration for the inline New Download card.
 //!
-//! The dual-backend probe race (`dual_probe`) and unified gallery auth
+//! The dual-backend probe (`dual_probe`) and unified gallery auth
 //! (`GalleryAuth`, `resolve_gallery_auth`). All UI stays in `inline_add.rs`;
 //! this module has no dependency on it (the sentrux structure check forbids
 //! the cycle).
 
-/// Outcome of the dual-backend probe race. The caller (inline_add.rs) owns
+/// Outcome of the dual-backend probe. The caller (inline_add.rs) checks
+/// staleness, routes the real results with `gallery_probe::route`, and owns
 /// all UI; this only orchestrates the two probes.
 pub(crate) enum DualProbeOutcome {
-    /// gallery-dl found actionable items (an image gallery and/or video);
-    /// the yt-dlp probe was cancelled and its result is ignored. Route the
-    /// items with ytdlp_video=false.
-    GalleryWin(Vec<crate::gallery_probe::GalleryItem>),
-    /// gallery-dl found nothing usable; yt-dlp's result decides. The gallery
-    /// error is Some only when `should_surface` accepted it — shown on the
-    /// final error row when yt-dlp also failed.
-    YtDlpFallback {
-        gallery_error: Option<crate::gallery_tools::GalleryError>,
+    /// Both probes completed. The caller derives the `ytdlp_video` route()
+    /// input (see [`ytdlp_found_video`]) and routes the gallery items.
+    Complete {
+        gallery: Result<
+            Option<Vec<crate::gallery_probe::GalleryItem>>,
+            crate::gallery_tools::GalleryError,
+        >,
         ytdlp: Result<
             (crate::video::ProbeResult, Option<serde_json::Value>),
             crate::video_tools::VideoError,
@@ -34,26 +33,40 @@ pub(crate) struct DualProbeCtx<'a> {
     pub tool: std::path::PathBuf,
 }
 
-/// Did gallery-dl find anything worth showing on its own? Images and/or
-/// video items (route() → Gallery | VideoGalleryDl). An all-unknown item
-/// list, an empty find, or a probe error means "not won": yt-dlp decides.
-/// Pure for tests.
-pub(crate) fn gallery_won(
+/// Did yt-dlp find video worth showing? The `ytdlp_video` input of
+/// `gallery_probe::route`. Pure for tests.
+pub(crate) fn ytdlp_found_video(
     result: &Result<
+        (crate::video::ProbeResult, Option<serde_json::Value>),
+        crate::video_tools::VideoError,
+    >,
+) -> bool {
+    let Ok((probe, _)) = result else {
+        return false;
+    };
+    matches!(
+        probe,
+        crate::video::ProbeResult::Single(_) | crate::video::ProbeResult::Playlist(_)
+    )
+}
+
+/// The gallery-dl error worth showing on the failure path, if any: a
+/// surfaced error (login, challenge, HTTP) is more actionable than
+/// yt-dlp's, but only when yt-dlp found nothing to show — a video result
+/// always stands over a gallery-dl complaint.
+pub(crate) fn preferred_probe_error(
+    ytdlp_video: bool,
+    gallery: &Result<
         Option<Vec<crate::gallery_probe::GalleryItem>>,
         crate::gallery_tools::GalleryError,
     >,
-) -> bool {
-    match result {
-        Ok(Some(items)) => {
-            let outcome = crate::gallery_probe::route(false, Some(items.as_slice()), None);
-            matches!(
-                outcome,
-                crate::gallery_probe::ProbeOutcome::Gallery
-                    | crate::gallery_probe::ProbeOutcome::VideoGalleryDl
-            )
-        }
-        _ => false,
+) -> Option<crate::gallery_tools::GalleryError> {
+    if ytdlp_video {
+        return None;
+    }
+    match gallery {
+        Err(e) if crate::gallery_probe::should_surface(e) => Some(e.clone()),
+        _ => None,
     }
 }
 
@@ -99,38 +112,29 @@ pub(crate) async fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAut
     }
 }
 
-/// Race gallery-dl against yt-dlp for one URL. gallery-dl's success ends the
-/// race: the yt-dlp probe is cancelled (its child SIGKILLed) and its result
-/// ignored — no steps after that. Otherwise yt-dlp's result decides.
+/// Probe both backends for one URL, concurrently: yt-dlp's video check and
+/// gallery-dl's item listing. Both results go back to the caller, which
+/// routes them with the established `route()`. A gallery-dl hit no longer
+/// cancels yt-dlp: the user's video/gallery choice needs yt-dlp's result
+/// too, so a lookup takes the slower probe's time, not the faster one's.
 ///
-/// Cookies: the handoff jar is preferred; the browser export (up to 30s)
-/// runs only for gallery-dl, which needs a cookie file, while yt-dlp is
-/// already probing (it uses --cookies-from-browser).
+/// Cookies: yt-dlp probes with --cookies-from-browser, so it starts
+/// immediately; gallery-dl resolves its auth first (`resolve_gallery_auth`).
 pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
-    type YtDlpProbe = Result<
-        (crate::video::ProbeResult, Option<serde_json::Value>),
-        crate::video_tools::VideoError,
-    >;
-    type GalleryProbe =
-        Result<Option<Vec<crate::gallery_probe::GalleryItem>>, crate::gallery_tools::GalleryError>;
-
     let url = ctx.url.to_string();
-    // Cookie export for gallery-dl only, on the worker (not GTK main).
-    // yt-dlp probes with a cancel handle: gallery-dl winning the race aborts
-    // it instead of leaving it to finish detached. yt-dlp starts immediately:
-    // it uses --cookies-from-browser, not the exported file below.
-    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-    let mut ytdlp_fut = Box::pin(crate::video::fetch_video_infos(
+    // yt-dlp starts immediately: it uses --cookies-from-browser, not the
+    // exported file below.
+    let ytdlp_fut = crate::video::fetch_video_infos(
         ctx.libs,
         url.clone(),
         ctx.browser.clone(),
         ctx.newest_first,
         ctx.proxy,
-        Some(cancel_rx),
-    ));
+        None,
+    );
     // gallery-dl needs its auth first (handoff jar preferred); the export
     // runs while yt-dlp is already probing.
-    let mut gallery_fut = Box::pin(async {
+    let gallery_fut = async {
         let auth = resolve_gallery_auth(&url, &ctx.browser).await;
         let r = crate::gallery_probe::probe_gallery(
             &ctx.tool,
@@ -142,79 +146,58 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
         // The auth (and its staged jar) must outlive the probe.
         drop(auth);
         r
-    });
+    };
 
-    let (gallery_result, ytdlp_result, won): (GalleryProbe, Option<YtDlpProbe>, bool) = tokio::select! {
-        g = &mut gallery_fut => {
-            let won = gallery_won(&g);
-            let y = if won {
-                // gallery-dl won: stop yt-dlp, ignore its result. The
-                // cancel makes fetch_video_infos abort its worker, so
-                // the yt-dlp child dies instead of probing on.
-                let _ = cancel_tx.send(());
-                let _ = ytdlp_fut.await;
-                None
-            } else {
-                Some(ytdlp_fut.await)
-            };
-            (g, y, won)
-        }
-        y = &mut ytdlp_fut => {
-            // yt-dlp finished first: nothing to cancel, but gallery-dl's
-            // success still wins per the caller's rule.
-            let g = gallery_fut.await;
-            let won = gallery_won(&g);
-            (g, Some(y), won)
-        }
-    };
-    // Note: staleness (user pasted a new URL mid-probe) is checked by the
-    // caller, which owns the probe state.
-    if won {
-        let items = gallery_result
-            .expect("gallery_won implies Ok(Some)")
-            .expect("gallery_won implies Some");
-        return DualProbeOutcome::GalleryWin(items);
-    }
-    let gallery_error = match &gallery_result {
-        Err(e) if crate::gallery_probe::should_surface(e) => Some(e.clone()),
-        _ => None,
-    };
-    DualProbeOutcome::YtDlpFallback {
-        gallery_error,
-        ytdlp: ytdlp_result.expect("ytdlp awaited on every fallthrough path"),
-    }
+    let (ytdlp, gallery) = tokio::join!(ytdlp_fut, gallery_fut);
+    DualProbeOutcome::Complete { gallery, ytdlp }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn item(extension: &str) -> crate::gallery_probe::GalleryItem {
-        crate::gallery_probe::GalleryItem {
-            filename: format!("file.{extension}"),
-            extension: extension.to_string(),
-            category: "test".to_string(),
-            extra: serde_json::Map::new(),
-        }
+    #[test]
+    fn ytdlp_found_video_cases() {
+        // A single video counts as "found video".
+        assert!(ytdlp_found_video(&Ok((
+            crate::video::ProbeResult::Single(crate::video::VideoInfo {
+                title: "T".into(),
+                duration: None,
+                page_url: "https://example.com/p".into(),
+                expires_at: None,
+                formats: Box::default(),
+                is_live: false,
+                fetchable: true,
+            }),
+            None,
+        ))));
+        // A playlist counts too (it plays through the picker).
+        assert!(ytdlp_found_video(&Ok((
+            crate::video::ProbeResult::Playlist(crate::media_types::PlaylistInfo {
+                id: "p".into(),
+                title: "T".into(),
+                page_url: "https://example.com/p".into(),
+                kind: crate::media_types::PlaylistKind::Playlist,
+                total: 0,
+                items: Box::default(),
+            }),
+            None,
+        ))));
+        // A probe error found nothing.
+        assert!(!ytdlp_found_video(&Err(
+            crate::video_tools::VideoError::Message("nope".into())
+        )));
     }
 
     #[test]
-    fn gallery_won_cases() {
-        // Images: gallery-dl won, yt-dlp is cancelled.
-        assert!(gallery_won(&Ok(Some(vec![item("jpg")]))));
-        // Video: gallery-dl won (submits via the gallery-dl backend).
-        assert!(gallery_won(&Ok(Some(vec![item("mp4")]))));
-        // Mixed images+video: won.
-        assert!(gallery_won(&Ok(Some(vec![item("jpg"), item("mp4")]))));
-        // Unknown-only items: not won, yt-dlp decides.
-        assert!(!gallery_won(&Ok(Some(vec![item("xyz")]))));
-        // Empty item list: not won.
-        assert!(!gallery_won(&Ok(Some(vec![]))));
-        // Empty find: not won.
-        assert!(!gallery_won(&Ok(None)));
-        // Probe error: not won.
-        assert!(!gallery_won(&Err(
-            crate::gallery_tools::GalleryError::probe("nope")
-        )));
+    fn preferred_probe_error_cases() {
+        // A surfaced gallery error wins when yt-dlp found nothing.
+        let surfaced = Err(crate::gallery_tools::GalleryError::probe("HttpError: 403"));
+        assert!(preferred_probe_error(false, &surfaced).is_some());
+        // A yt-dlp video stands over a gallery-dl complaint.
+        assert!(preferred_probe_error(true, &surfaced).is_none());
+        // Non-surfaced gallery errors fall through to yt-dlp's error.
+        let unsupported = Err(crate::gallery_tools::GalleryError::probe("unsupported url"));
+        assert!(preferred_probe_error(false, &unsupported).is_none());
     }
 }

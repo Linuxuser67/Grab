@@ -33,8 +33,9 @@ fn is_gallery_dl_internal_bug(err: &crate::gallery_tools::GalleryError) -> bool 
     msg.contains("'NoneType' object has no attribute")
 }
 
-/// Collect the shipping streamed enumeration into a Vec for the assertions.
-/// An errored run still reports its error after draining what was listed.
+/// Collect the shipping streamed enumeration (and its document-mode
+/// fallback) into a Vec for the assertions. An errored run still reports
+/// its error after draining what was listed.
 async fn enumerate_all(
     tool: &std::path::Path,
     url: &str,

@@ -199,8 +199,9 @@ pub fn probe_title(item: &GalleryItem, url: &str) -> String {
 }
 
 /// Run the gallery-dl probe: `gallery-dl --config-ignore -j --no-download
-/// --range 1-5 <url>`, with `output.jsonl=true` so messages arrive line by
-/// line (see `parse_jsonl`).
+/// --range 1-5 <url>`. Document mode, not jsonl: the probe isn't streamed,
+/// and jsonl mode drops a fatal extraction error's `[-1]` message (see
+/// `enumerate_gallery_files_streamed`).
 ///
 /// Returns `Ok(Some(items))` on success, `Ok(None)` when the URL is unsupported
 /// (exit 64) or yields no files. `Err` on timeout, spawn failure, or any other
@@ -224,11 +225,7 @@ pub async fn probe_gallery(
         .arg("1-5")
         // Don't let gallery-dl write back to Grab's staged cookies file.
         .arg("-o")
-        .arg("extractor.cookies-update=false")
-        // One JSON message per line instead of one pretty-printed document:
-        // the same messages, parsed line by line (see parse_jsonl).
-        .arg("-o")
-        .arg("output.jsonl=true");
+        .arg("extractor.cookies-update=false");
     if let Some(cookies) = cookies_file {
         cmd.arg("-C").arg(cookies);
     }
@@ -261,7 +258,8 @@ pub async fn probe_gallery(
     }
     // `-j` emits `[type, ...]` arrays: [2, {dir}] for directory context,
     // [3, "url", {meta}] for files, [-1, {error, message}] for errors.
-    let messages = parse_jsonl(&output.stdout)?;
+    let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
     let items = parse_probe_messages(&messages)?;
     if items.is_empty() {
         return Ok(None);
@@ -270,9 +268,10 @@ pub async fn probe_gallery(
 }
 
 /// Base argv for the file enumeration (before auth, filter, and URL).
-/// Pure for tests: asserts the `--range` bound stays in place.
-fn enumerate_base_argv() -> Vec<String> {
-    vec![
+/// `jsonl` selects line-framed streaming output; document mode (jsonl off)
+/// is the fallback that keeps fatal errors visible.
+fn enumerate_base_argv(jsonl: bool) -> Vec<String> {
+    let mut argv = vec![
         "--config-ignore".to_string(),
         "-j".to_string(),
         "--no-download".to_string(),
@@ -282,25 +281,29 @@ fn enumerate_base_argv() -> Vec<String> {
         format!("1-{ENUMERATE_MAX_FILES}"),
         "-o".to_string(),
         "extractor.cookies-update=false".to_string(),
-        "-o".to_string(),
+    ];
+    if jsonl {
         // One JSON message per line, flushed as it arrives (see parse_jsonl).
-        "output.jsonl=true".to_string(),
-    ]
+        argv.push("-o".to_string());
+        argv.push("output.jsonl=true".to_string());
+    }
+    argv
 }
 
-/// The enumeration command: base argv (range-bounded jsonl), auth, filter,
-/// throttle.
+/// The enumeration command: base argv, auth, filter, throttle. `jsonl` picks
+/// line-framed streaming output over the document form.
 fn enumerate_command(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
+    jsonl: bool,
 ) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(tool);
     // See probe_gallery: a dropped enumeration future must kill the child.
     cmd.kill_on_drop(true);
-    for arg in enumerate_base_argv() {
+    for arg in enumerate_base_argv(jsonl) {
         cmd.arg(arg);
     }
     if let Some(cookies) = cookies_file {
@@ -322,6 +325,40 @@ fn enumerate_command(
     cmd
 }
 
+/// Wall-clock bound for the document-mode enumeration. It buffers the whole
+/// output itself, so the streamed path's idle bound doesn't apply.
+const ENUMERATE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Non-streamed enumeration in document mode: the whole output arrives as one
+/// pretty-printed JSON array, the fatal error's `[-1]` message included. The
+/// streamed path falls back to this when it collected nothing, because jsonl
+/// mode swallows that message (see `enumerate_gallery_files_streamed`).
+pub(crate) async fn enumerate_gallery_files(
+    tool: &Path,
+    url: &str,
+    cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
+    filter: crate::gallery_argv::GalleryFilter,
+) -> Result<Vec<GalleryItem>, GalleryError> {
+    let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, false);
+    // Debug: log the full argv before spawning.
+    crate::backend_debug::log_command(&cmd);
+    let output = tokio::time::timeout(ENUMERATE_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| GalleryError::probe("gallery-dl enumerate timed out".to_string()))?
+        .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
+    if !output.status.success() {
+        return Err(GalleryError::install(format!(
+            "gallery-dl enumerate failed (exit {})",
+            output.status.code().unwrap_or(-1)
+        )));
+    }
+    let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
+    let items = parse_probe_messages(&messages)?;
+    Ok(items)
+}
+
 /// Idle bound between lines and the overall wall-clock bound for the
 /// streamed enumeration. Large galleries throttle between items, so the
 /// idle bound is generous; the total bound still stops a pathological run.
@@ -332,7 +369,9 @@ const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 /// so every flushed line is one message and items are pushed to `items_tx`
 /// as they arrive — the picker can open on the first one. Returns the number
 /// of items delivered. Dropping the future kills gallery-dl (`kill_on_drop`);
-/// a closed receiver stops the stream early.
+/// a closed receiver stops the stream early. An empty stream re-runs in
+/// document mode: jsonl drops a fatal error's `[-1]` message, so only the
+/// fallback keeps such failures visible.
 pub(crate) async fn enumerate_gallery_files_streamed(
     tool: &Path,
     url: &str,
@@ -344,9 +383,9 @@ pub(crate) async fn enumerate_gallery_files_streamed(
     // Same line-streaming shape as the yt-dlp runner (see video_runner.rs).
     use tokio::io::AsyncBufReadExt as _;
 
-    let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter);
-    // stdout is the line stream; stderr is discarded — the exit status is
-    // the failure signal.
+    let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, true);
+    // stdout is the line stream; stderr is discarded — failures reach us
+    // through the exit status and the document-mode fallback below.
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     // Debug: log the full argv before spawning.
@@ -384,11 +423,10 @@ pub(crate) async fn enumerate_gallery_files_streamed(
             ));
         }
         // Blank lines carry no message.
-        if line.trim().is_empty() {
+        let mut messages = parse_jsonl(line.as_bytes())?;
+        let Some(m) = messages.pop() else {
             continue;
-        }
-        let m: serde_json::Value = serde_json::from_str(&line)
-            .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
+        };
         if let Some(item) = reader.feed(&m) {
             // A closed receiver means the UI is gone: stop early.
             if items_tx.send(item).is_err() {
@@ -409,6 +447,21 @@ pub(crate) async fn enumerate_gallery_files_streamed(
         )));
     }
     reader.finish()?;
+    // gallery-dl's jsonl mode drops the final `[-1]` message on a fatal
+    // extraction error and still exits 0 (DataJob.run only appends it to the
+    // buffer that jsonl mode no longer dumps). An empty stream is therefore
+    // ambiguous — genuinely no files, or a swallowed error — so re-run once
+    // in document mode, the only form where that error reaches us, and
+    // forward whatever it found. Cost: empty galleries walk twice.
+    if count == 0 && !items_tx.is_closed() {
+        let batched = enumerate_gallery_files(tool, url, cookies_file, user_agent, filter);
+        for item in batched.await? {
+            if items_tx.send(item).is_err() {
+                break;
+            }
+            count += 1;
+        }
+    }
     Ok(count)
 }
 
@@ -585,7 +638,7 @@ mod tests {
     fn enumerate_argv_is_range_bounded() {
         // The enumeration must stay --range-bounded: the cap bounds
         // gallery-dl's walk (the picker itself virtualizes rows).
-        let argv = enumerate_base_argv();
+        let argv = enumerate_base_argv(true);
         let range_pos = argv.iter().position(|a| a == "--range");
         assert!(range_pos.is_some(), "argv: {argv:?}");
         assert_eq!(
@@ -599,12 +652,19 @@ mod tests {
     fn argv_requests_jsonl_output() {
         // One JSON message per line, flushed as it arrives: the streaming
         // enumerate and the picker's incremental appends read this format.
-        let argv = enumerate_base_argv();
+        let argv = enumerate_base_argv(true);
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "-o" && w[1] == "output.jsonl=true"),
             "argv: {argv:?}"
         );
+        // The fallback must stay in document mode: jsonl is what swallows
+        // the `[-1]` error the fallback exists to surface.
+        let argv = enumerate_base_argv(false);
+        let jsonl = argv
+            .windows(2)
+            .any(|w| w[0] == "-o" && w[1] == "output.jsonl=true");
+        assert!(!jsonl, "argv: {argv:?}");
     }
 
     #[test]
@@ -790,6 +850,86 @@ mod tests {
         assert!(result.is_err(), "non-zero exit must be an error");
         let item = rx.try_recv().expect("item delivered before the failure");
         assert_eq!(item.filename, "1.jpg");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A silent stream — jsonl drops the fatal error's `[-1]` message — must
+    /// re-run in document mode and forward the items it finds.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn streamed_enumerate_falls_back_to_document_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("grab-fallback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-gallery-dl.sh");
+        std::fs::write(
+            &script,
+            concat!(
+                "#!/bin/sh\n",
+                // Streamed run: nothing, like a swallowed error, exit 0.
+                "case \"$*\" in\n",
+                "  *output.jsonl=true*) exit 0;;\n",
+                "esac\n",
+                // Document run: one file message.
+                "printf '%s' '[[3, \"https://example.com/1.jpg\", {\"filename\": \"1.jpg\"}]]'\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let count = enumerate_gallery_files_streamed(
+            &script,
+            "https://example.com/",
+            None,
+            None,
+            crate::gallery_argv::GalleryFilter::All,
+            tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        let item = rx.try_recv().expect("fallback items must reach the receiver");
+        assert_eq!(item.filename, "1.jpg");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The fallback's error must propagate: it is exactly the error the
+    /// streamed run lost, so returning `Ok(0)` would hide the failure.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn streamed_enumerate_reports_fallback_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("grab-fallback-err-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-gallery-dl.sh");
+        std::fs::write(
+            &script,
+            concat!(
+                "#!/bin/sh\n",
+                "case \"$*\" in\n",
+                "  *output.jsonl=true*) exit 0;;\n",
+                "esac\n",
+                "printf '%s' '[[-1, {\"error\": \"HttpError\", \"message\": \"404\"}]]'\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = enumerate_gallery_files_streamed(
+            &script,
+            "https://example.com/",
+            None,
+            None,
+            crate::gallery_argv::GalleryFilter::All,
+            tx,
+        )
+        .await;
+        assert!(result.is_err(), "a swallowed error must surface, not Ok(0)");
+        assert!(rx.try_recv().is_err(), "no items were ever listed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -11,7 +11,6 @@ use crate::window_rows::{
     apply_scheduled_at, list_selected, picker_enter_confirms, picker_header, picker_list,
     selection_action_bar, wire_list_selection_bar,
 };
-use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
 use libadwaita as adw;

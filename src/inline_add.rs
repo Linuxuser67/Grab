@@ -21,7 +21,7 @@ use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
 use crate::window_rows::{
     apply_scheduled_at, default_name_for, list_selected, picker_enter_confirms, picker_header,
-    selection_action_bar, wire_list_selection_bar,
+    picker_list, selection_action_bar, wire_list_selection_bar,
 };
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};

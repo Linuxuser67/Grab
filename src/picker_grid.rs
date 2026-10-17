@@ -214,9 +214,9 @@ mod tests {
     use super::*;
     use gtk4::glib;
 
-    // `GtkMultiSelection::new` asserts that GTK is initialized, so every
-    // test here needs a display and is `#[ignore]`d: CI runs them under
-    // Xvfb (the "UI tests (Xvfb)" step in ci.yml), the plain run skips them.
+    // `GtkMultiSelection::new` asserts that GTK is initialized, so the test
+    // here needs a display and is `#[ignore]`d: CI runs it under Xvfb (the
+    // "UI tests (Xvfb)" step in ci.yml), the plain run skips it.
     fn store_and_selection(n: usize) -> (gio::ListStore, gtk4::MultiSelection) {
         let store = gio::ListStore::new::<gtk4::StringObject>();
         let selection = gtk4::MultiSelection::new(Some(store.clone()));
@@ -228,10 +228,20 @@ mod tests {
         (store, selection)
     }
 
+    // libtest gives every `#[test]` its own thread, and `gtk4::init` may run
+    // only once per process (a later call panics "GTK from two different
+    // threads"), so all scenarios share this one entry point and one thread.
     #[test]
     #[ignore = "needs a display; run under Xvfb (see ci.yml)"]
-    fn picker_grid_selection_semantics() {
+    fn picker_grid() {
         gtk4::init().expect("gtk::init (run under Xvfb)");
+        selection_semantics();
+        append_keeps_existing_selection();
+        empty_store();
+        ui_smoke();
+    }
+
+    fn selection_semantics() {
         let (_, selection) = store_and_selection(3);
         // All-on default comes from append_titles.
         assert_eq!(selected_indices(&selection), vec![0, 1, 2]);
@@ -248,10 +258,7 @@ mod tests {
         assert_eq!(selected_indices(&selection), vec![0, 1, 2]);
     }
 
-    #[test]
-    #[ignore = "needs a display; run under Xvfb (see ci.yml)"]
-    fn picker_grid_append_keeps_existing_selection() {
-        gtk4::init().expect("gtk::init (run under Xvfb)");
+    fn append_keeps_existing_selection() {
         let (store, selection) = store_and_selection(2);
         selection.unselect_item(0);
         append_titles(&store, &selection, vec!["late".to_string()]);
@@ -259,10 +266,7 @@ mod tests {
         assert_eq!(selected_indices(&selection), vec![1, 2]);
     }
 
-    #[test]
-    #[ignore = "needs a display; run under Xvfb (see ci.yml)"]
-    fn picker_grid_empty_store() {
-        gtk4::init().expect("gtk::init (run under Xvfb)");
+    fn empty_store() {
         let (store, selection) = store_and_selection(0);
         assert_eq!(store.n_items(), 0);
         selection.select_all();
@@ -271,10 +275,7 @@ mod tests {
 
     /// UI smoke: realized cells bind both ways, and the capped layout keeps
     /// a long list from expanding (i.e. it stays virtualized).
-    #[test]
-    #[ignore = "needs a display; run under Xvfb (see ci.yml)"]
-    fn picker_grid_ui_smoke() {
-        gtk4::init().expect("gtk::init (run under Xvfb)");
+    fn ui_smoke() {
         let titles: Vec<String> = (0..5).map(|i| format!("item-{i}")).collect();
         let grid = PickerGrid::new(titles);
         let add_btn = gtk4::Button::new();

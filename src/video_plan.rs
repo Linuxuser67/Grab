@@ -248,10 +248,6 @@ pub(crate) fn plan_streams(
 pub(crate) struct StreamSel {
     pub(crate) format_id: String,
     pub(crate) ext: String,
-    /// Direct fetch URL. Written at plan time; the runners address
-    /// splits by format id today, so only tests read this.
-    #[allow(dead_code)]
-    pub(crate) url: String,
     pub(crate) size: Option<u64>,
     /// Whether the stream may carry an audio track: true unless the
     /// extractor explicitly marks it audio-less (`acodec: none`). Sparse
@@ -272,14 +268,12 @@ impl StreamSel {
         if matches!(f.has_drm, Some(DrmStatus::Yes)) {
             return Err(VideoError::unavailable());
         }
+        if f.download_info.url.is_none() {
+            return Err(VideoError::unavailable());
+        }
         Ok(Self {
             format_id: f.format_id.clone(),
             ext: f.download_info.ext.as_str().to_string(),
-            url: f
-                .download_info
-                .url
-                .clone()
-                .ok_or_else(VideoError::unavailable)?,
             size: filesize_of(f),
             // Absent acodec is "unknown", not "none": sparse extractors
             // (Instagram stories) only set `acodec: none` when the media is

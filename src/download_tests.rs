@@ -1752,9 +1752,7 @@ fn torrent_file_list_parses() {
     assert_eq!(name, "bar");
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].raw_path, "a.txt");
-    assert_eq!(entries[0].length, 2);
     assert_eq!(entries[1].raw_path, "sub/b.txt");
-    assert_eq!(entries[1].length, 3);
     assert!(crate::torrent::torrent_file_list(b"not a torrent").is_err());
 }
 
@@ -2582,25 +2580,20 @@ fn expand_playlist_rows_use_titled_subfolder() {
         },
     );
     let pl = crate::media_types::PlaylistInfo {
-        id: "PLx".into(),
         title: "My Mix: Vol. 1".into(),
         page_url: "https://www.youtube.com/playlist?list=PLx".into(),
         kind: crate::media_types::PlaylistKind::Playlist,
         total: 2,
         items: vec![
             crate::media_types::PlaylistItem {
-                index: 1,
                 id: "a".into(),
                 title: "First".into(),
                 page_url: "https://www.youtube.com/watch?v=aaa".to_string(),
-                duration: None,
             },
             crate::media_types::PlaylistItem {
-                index: 2,
                 id: "b".into(),
                 title: "Second".into(),
                 page_url: "https://www.youtube.com/watch?v=bbb".to_string(),
-                duration: None,
             },
         ]
         .into_boxed_slice(),

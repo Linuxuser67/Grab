@@ -377,9 +377,7 @@ mod tests {
         assert!(ytdlp_found_video(&Ok((
             crate::video::ProbeResult::Single(crate::video::VideoInfo {
                 title: "T".into(),
-                duration: None,
                 page_url: "https://example.com/p".into(),
-                expires_at: None,
                 formats: Box::default(),
                 is_live: false,
                 fetchable: true,
@@ -389,7 +387,6 @@ mod tests {
         // A playlist counts too (it plays through the picker).
         assert!(ytdlp_found_video(&Ok((
             crate::video::ProbeResult::Playlist(crate::media_types::PlaylistInfo {
-                id: "p".into(),
                 title: "T".into(),
                 page_url: "https://example.com/p".into(),
                 kind: crate::media_types::PlaylistKind::Playlist,

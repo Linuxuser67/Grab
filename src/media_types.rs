@@ -98,26 +98,16 @@ impl PlaylistKind {
 /// `page_url` stays `String`: story retargeting rewrites it after construction.
 #[derive(Clone, Debug)]
 pub struct PlaylistItem {
-    /// 1-based position; extractor contract, picker addresses by position.
-    #[allow(dead_code)]
-    pub index: usize,
     pub id: Box<str>,
     pub title: Box<str>,
     /// Canonical per-item page URL — the identity queued and persisted.
     pub page_url: String,
-    /// Duration seconds, when the listing reports one. Contract data: the
-    /// picker pills show titles only, nothing reads it yet.
-    #[allow(dead_code)]
-    pub duration: Option<i64>,
 }
 
 /// Probed collection: picker lists items, queue gets one row per choice.
 /// Boxed strings/slice: built once at probe, never grown afterwards.
 #[derive(Clone, Debug)]
 pub struct PlaylistInfo {
-    /// Extractor collection id; contract only, picker uses positions.
-    #[allow(dead_code)]
-    pub id: Box<str>,
     pub title: Box<str>,
     /// The collection URL that was probed.
     pub page_url: Box<str>,

@@ -4,7 +4,7 @@
 use crate::file_names::fmt_bytes;
 use yt_dlp::model::format::{Format, Protocol};
 use yt_dlp::model::selector::VideoCodecPreference;
-use yt_dlp::model::{DrmStatus, FORMAT_URL_LIFETIME, Video};
+use yt_dlp::model::{DrmStatus, Video};
 
 /// Hosts routed through the video extractor instead of the plain HTTP engine.
 /// Suffix-matched (`music.youtube.com` counts), lowercase. DRM-free sites only:
@@ -116,20 +116,13 @@ pub fn has_fetchable_media(video: &Video) -> bool {
 }
 
 /// Extraction result, kept deliberately small: the queue row needs the
-/// title/duration and the *page URL* for expiry-safe re-resolve.
+/// title and the *page URL* for expiry-safe re-resolve.
 /// Strings are boxed: every field is written once at probe time, never mutated.
 #[derive(Clone, Debug)]
 pub struct VideoInfo {
     pub title: Box<str>,
-    /// Duration in seconds; read only in tests today.
-    #[allow(dead_code)]
-    pub duration: Option<i64>,
     /// Canonical page URL — the identity persisted across restarts.
     pub page_url: Box<str>,
-    /// Unix time after which every resolved format URL is stale; written at
-    /// probe time for expiry-safe re-resolve, no reader yet.
-    #[allow(dead_code)]
-    pub expires_at: Option<i64>,
     /// Pinnable video-only formats, tallest first. Computed once at resolve.
     pub formats: Box<[VideoFormatOption]>,
     /// Whether the page is currently live. Decides stop-and-keep behavior
@@ -149,17 +142,9 @@ impl VideoInfo {
             .filter(|u| !u.is_empty())
             .unwrap_or(fallback_page)
             .to_string();
-        let expires_at = v
-            .formats
-            .iter()
-            .filter_map(|f| f.available_at)
-            .min()
-            .map(|t| t + FORMAT_URL_LIFETIME);
         Self {
             title: v.title.clone().into_boxed_str(),
-            duration: v.duration,
             page_url: page_url.into_boxed_str(),
-            expires_at,
             formats: video_format_options(v, newest_first),
             is_live: v.is_live.unwrap_or(false),
             fetchable: has_fetchable_media(v),

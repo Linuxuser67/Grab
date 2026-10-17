@@ -459,9 +459,11 @@ fn parse_jsonl(bytes: &[u8]) -> Result<Vec<serde_json::Value>, GalleryError> {
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        messages.push(serde_json::from_slice(line).map_err(|e| {
-            GalleryError::probe(format!("couldn't parse gallery-dl output: {e}"))
-        })?);
+        messages.push(
+            serde_json::from_slice(line).map_err(|e| {
+                GalleryError::probe(format!("couldn't parse gallery-dl output: {e}"))
+            })?,
+        );
     }
     Ok(messages)
 }

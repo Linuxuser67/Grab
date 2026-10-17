@@ -808,11 +808,12 @@ fn push_playlist_items_page(
     let toolbar = adw::ToolbarView::new();
     // Compact header instead of the auto AdwHeaderBar: back + title + count
     // on one tight row, no 48px of empty chrome around a centered title.
-    toolbar.add_top_bar(&picker_header(
+    let (header, _count_label) = picker_header(
         nav,
         &playlist.title,
         &playlist_count_label(playlist.kind, count),
-    ));
+    );
+    toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&list_box));
     let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();
     toolbar.add_bottom_bar(&action_bar);
@@ -998,7 +999,8 @@ fn push_torrent_picker_page(
 
     let toolbar = adw::ToolbarView::new();
     // Same compact header as the playlist picker: back + file name + count.
-    toolbar.add_top_bar(&picker_header(nav, &file_name, &file_count));
+    let (header, _count_label) = picker_header(nav, &file_name, &file_count);
+    toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&list_box));
     // HIG selection mode: the selection's actions live in a bottom
     // action bar, not the header. Back pops the page (cancels).
@@ -2986,71 +2988,126 @@ fn make_gallery_picker_opener(
                 }
             };
             let url_c = url.clone();
+            let (items_tx, mut items_rx) = tokio::sync::mpsc::unbounded_channel();
             let handle = crate::runtime::tokio_rt().spawn(async move {
                 // Unified auth: handoff jar first, browser export as
                 // fallback (was handoff-only: auth-gated galleries could
                 // list nothing here but download fine).
                 let auth =
                     crate::inline_gallery::resolve_gallery_auth(&url_c, browser3.as_str()).await;
-                let r = crate::gallery_probe::enumerate_gallery_files(
+                let r = crate::gallery_probe::enumerate_gallery_files_streamed(
                     &tool,
                     &url_c,
                     auth.cookies_path.as_deref(),
                     auth.user_agent.as_deref(),
                     filter,
+                    items_tx,
                 )
                 .await;
                 drop(auth);
                 r
             });
             *step3.enumerate_abort.borrow_mut() = Some(handle.abort_handle());
-            let result = handle.await;
-            // Superseded (newer click, card close, new lookup): stay
-            // quiet — the newer task owns the UI now.
-            if step3.enumerate_gen.get() != my_gen {
-                return;
+            // Fill the picker as items arrive: it opens on the first one, so
+            // a huge gallery never blocks the UI on the full listing.
+            let mut page: Option<crate::inline_gallery::GalleryPickerStream> = None;
+            let mut batch: Vec<crate::gallery_probe::GalleryItem> = Vec::new();
+            while let Some(item) = items_rx.recv().await {
+                batch.push(item);
+                // Coalesce whatever else already arrived into one append:
+                // one items-changed and one relayout per burst.
+                while let Ok(next) = items_rx.try_recv() {
+                    batch.push(next);
+                }
+                if page.is_none() {
+                    // Superseded (newer click, card close, new lookup):
+                    // stay quiet — the newer task owns the UI now.
+                    if step3.enumerate_gen.get() != my_gen {
+                        handle.abort();
+                        return;
+                    }
+                    // Stale guard: the card may have been closed or a new
+                    // URL pasted while enumerating; don't push a picker for
+                    // the old gallery onto the new card's nav stack. The
+                    // picker replaces the card's loading button from here on.
+                    let still_current = step3
+                        .gallery_card
+                        .borrow()
+                        .as_ref()
+                        .map(|card| card.url() == url)
+                        .unwrap_or(false);
+                    if !still_current {
+                        handle.abort();
+                        return;
+                    }
+                    restore_btn();
+                    page = match crate::inline_gallery::push_gallery_picker_page(
+                        &nav3,
+                        manager3.clone(),
+                        dest3.clone(),
+                        close3.clone(),
+                        scheduled3.get(),
+                        title.clone(),
+                        url.clone(),
+                        filter,
+                        crate::picker_grid::PickerGrid::empty(),
+                    ) {
+                        Some(page) => Some(page),
+                        // Another picker already owns the screen: the
+                        // enumeration has nowhere to land — drop out.
+                        None => {
+                            handle.abort();
+                            return;
+                        }
+                    };
+                }
+                if let Some(page) = page.as_ref() {
+                    page.append(&batch);
+                }
+                batch.clear();
             }
-            // Stale guard: the card may have been closed or a new URL
-            // pasted while enumerating; don't push a picker for the old
-            // gallery onto the new card's nav stack. Restore the button
-            // first: it's a shared VideoStep widget, and its default
-            // state is valid for whatever lookup is current.
-            restore_btn();
-            let still_current = step3
-                .gallery_card
-                .borrow()
-                .as_ref()
-                .map(|card| card.url() == url)
-                .unwrap_or(false);
-            if !still_current {
+            let result = handle.await;
+            // Superseded: the newer task owns the card, so stay quiet — but
+            // a picker for this gallery already on screen must still be
+            // enabled, or nothing ever un-gates its action bar.
+            if step3.enumerate_gen.get() != my_gen {
+                if let Some(page) = page.as_ref() {
+                    page.mark_loaded();
+                }
                 return;
             }
             match result {
-                Ok(Ok(items)) if !items.is_empty() => {
-                    crate::inline_gallery::push_gallery_picker_page(
-                        &nav3,
-                        manager3,
-                        dest3,
-                        close3,
-                        scheduled3.get(),
-                        title,
-                        url,
-                        filter,
-                        items,
-                    );
-                }
-                Ok(Ok(_)) => {
-                    show_error(&gettext("No files found"));
-                }
+                Ok(Ok(_)) => match page {
+                    Some(page) => page.mark_loaded(),
+                    None => {
+                        // Stream ended without a single item.
+                        restore_btn();
+                        show_error(&gettext("No files found"));
+                    }
+                },
                 Ok(Err(e)) => {
                     tracing::warn!("gallery picker: enumeration failed: {e:?}");
-                    show_error(&gettext("Could not list files"));
+                    match page {
+                        // Partial list: keep it selectable, surface the
+                        // failure under the entries.
+                        Some(page) => page.show_error(&gettext("Could not list files")),
+                        None => {
+                            restore_btn();
+                            show_error(&gettext("Could not list files"));
+                        }
+                    }
                 }
                 Err(e) => {
                     // Aborted or panicked: the abort path returns above
                     // via the generation guard, so this is a real failure.
                     tracing::warn!("gallery picker: enumeration task failed: {e:?}");
-                    show_error(&gettext("Could not list files"));
+                    match page {
+                        Some(page) => page.show_error(&gettext("Could not list files")),
+                        None => {
+                            restore_btn();
+                            show_error(&gettext("Could not list files"));
+                        }
+                    }
                 }
             }
         });

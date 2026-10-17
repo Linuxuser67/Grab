@@ -814,9 +814,8 @@ async fn run_ytdlp_attempt(
 fn ytdlp_failure_detail(log_tail: &str) -> String {
     let detail = last_log_line(log_tail, "yt-dlp reported failure");
     if crate::video_tools::extractor_failure(log_tail) {
-        let hint = gettext(
-            "yt-dlp may be out of date: update it in Preferences → Check for Updates",
-        );
+        let hint =
+            gettext("yt-dlp may be out of date: update it in Preferences → Check for Updates");
         format!("{detail}. {hint}")
     } else {
         detail

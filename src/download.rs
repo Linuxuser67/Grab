@@ -2310,7 +2310,17 @@ impl DownloadManager {
                 }
             }
         }
+        let dest_dir = item.dest_dir();
+        let renamed_dir = std::path::Path::new(&dest_dir).join(&name);
         item.set_filename(name);
+        // Gallery rows: the stored job's dest_dir is the on-disk subfolder.
+        // Keep it in sync with the rename so Delete's ownership check and a
+        // later retry target the renamed folder, not the stale name.
+        if item.is_gallery()
+            && let Some(job) = self.gallery_jobs.borrow_mut().get_mut(&id)
+        {
+            job.dest_dir = renamed_dir;
+        }
         self.persist_queue();
         self.changed();
         Ok(())
@@ -2656,16 +2666,53 @@ impl DownloadManager {
         (0..BLOCK_CELLS).map(|i| i < filled).collect()
     }
 
+    /// The folder Delete may trash for a gallery row.
+    ///
+    /// Returns `Some` only when the stored job proves Grab owns the folder:
+    /// the recorded subfolder must be a direct child of the row's `dest_dir`,
+    /// named exactly the row's filename. Anything else — legacy rows whose
+    /// job points at the parent itself, a missing or mismatched record —
+    /// yields `None` and Delete removes just the row.
+    fn gallery_trash_target(
+        item: &DownloadItem,
+        job: &crate::gallery_argv::GalleryJob,
+    ) -> Option<std::path::PathBuf> {
+        let dest_dir = item.dest_dir();
+        let parent = std::path::Path::new(&dest_dir);
+        let filename = item.filename();
+        // All three must hold: a distinct subfolder, directly inside the
+        // row's dest_dir, named exactly the row's filename. This rules out
+        // legacy rows (job points at the parent itself), `..` escapes, and
+        // records that drifted to a different folder.
+        if job.dest_dir.as_path() == parent {
+            return None;
+        }
+        if job.dest_dir.parent() != Some(parent) {
+            return None;
+        }
+        if job.dest_dir.file_name() != Some(std::ffi::OsStr::new(&filename)) {
+            return None;
+        }
+        Some(job.dest_dir.clone())
+    }
+
     /// Move the downloaded file to Trash, then remove the row.
     ///
     /// # Errors
     /// Returns a display-ready message when trashing fails.
     pub fn delete_download(self: &Rc<Self>, id: u64) -> Result<(), String> {
         let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
-        // Gallery rows: trash the gallery subfolder (title-named folder inside dest_dir).
+        // Gallery rows: trash the gallery subfolder — but only when the
+        // stored job proves it's ours (see `gallery_trash_target`). Legacy
+        // rows and missing records trash nothing; the row is still removed.
         if item.is_gallery() {
-            let gallery_dir = std::path::Path::new(&item.dest_dir()).join(item.filename());
-            if gallery_dir.is_dir() {
+            let target = self
+                .gallery_jobs
+                .borrow()
+                .get(&id)
+                .and_then(|job| Self::gallery_trash_target(&item, job))
+                .filter(|dir| dir.is_dir());
+            if let Some(gallery_dir) = target {
                 match gio::File::for_path(&gallery_dir).trash(gio::Cancellable::NONE) {
                     Ok(()) => {}
                     Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}

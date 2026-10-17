@@ -6,7 +6,8 @@
 //! action, and application-open URLs) reveal one card at the top of the main
 //! window; the queue stays usable underneath. The card holds an
 //! [`adw::NavigationView`]: the form page plus right-sliding playlist and
-//! multi-file torrent picker pages. Cancel, Escape, or a successful enqueue
+//! multi-file torrent picker pages (the gallery picker page is built in
+//! inline_gallery.rs). Cancel, Escape, or a successful enqueue
 //! collapses the card and resets the form, so reopening always starts fresh.
 //!
 //! Intake behavior is unchanged from the old dialog: probing with generation
@@ -18,8 +19,10 @@
 
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
-use crate::download_store::DownloadStatus;
-use crate::window_rows::{default_name_for, selection_action_bar};
+use crate::window_rows::{
+    apply_scheduled_at, default_name_for, list_selected, picker_enter_confirms, picker_header,
+    picker_list, selection_action_bar, wire_list_selection_bar,
+};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use glib::object::Cast;
@@ -281,6 +284,11 @@ pub(crate) struct VideoStep {
     /// Generation of the enumeration above: a completed-but-superseded task
     /// stays quiet instead of flashing "Could not list files".
     pub(crate) enumerate_gen: Cell<u64>,
+    /// Handle of the in-flight video lookup task (`kick_video` spawns it).
+    /// Aborted when a newer kick or an edit supersedes it, or the card
+    /// closes: dropping the task kills its probe children (kill_on_drop)
+    /// instead of letting them run out their timeouts on a dead URL.
+    pub(crate) lookup_abort: Rc<RefCell<Option<glib::JoinHandle<()>>>>,
     /// The form's Add button: icon-only until a format is picked, then a
     /// labeled "Add" pill (HIG: primary actions carry a text label).
     pub(crate) add_btn: gtk4::Button,
@@ -381,15 +389,27 @@ pub(crate) fn abort_enumeration(step: &VideoStep) {
     }
 }
 
+/// Abort the in-flight video lookup, if any: superseding it (a newer kick,
+/// an edit that stales it, the card closing) drops the lookup task and its
+/// probe children instead of letting them run out their timeouts. Safe from
+/// inside the task (close paths): glib defers the source destruction until
+/// the current dispatch returns.
+pub(crate) fn abort_lookup(step: &VideoStep) {
+    if let Some(handle) = step.lookup_abort.borrow_mut().take() {
+        handle.abort();
+    }
+}
+
 /// Clear the video preview block back to a pristine state: `close_card`
 /// calls this so a non-video add after a video leaves no dead probe state
 /// in memory. Hiding alone is not enough — the name row keeps its text,
 /// the format rows keep their widgets, and the tools/error rows keep
 /// their subtitles.
 fn reset_video_step(step: &VideoStep) {
-    // No enumeration survives a close: kill gallery-dl instead of letting
-    // it probe on for a dead card.
+    // No enumeration or lookup survives a close: kill gallery-dl and the
+    // probe children instead of letting them run on for a dead card.
     abort_enumeration(step);
+    abort_lookup(step);
     // Drop the format options and the current pick.
     step.options.borrow_mut().clear();
     step.format.set_model(Some(&gtk4::StringList::new(&[])));
@@ -678,23 +698,6 @@ fn fallback_plain_failed(
     set_lookup_add(lookup_add, true);
 }
 
-/// Enqueue with the card's destination, then collapse the card on success.
-///
-/// Apply a scheduled timestamp to a freshly enqueued item. Future timestamps
-/// become Scheduled; past ones (the 12:00 default is often stale by Add time)
-/// queue immediately, mirroring restore_existing's overdue handling.
-pub(crate) fn apply_scheduled_at(item: &DownloadItem, scheduled_at: Option<i64>) {
-    if let Some(ts) = scheduled_at {
-        let now = glib::DateTime::now_local()
-            .map(|dt| dt.to_unix())
-            .unwrap_or(0);
-        if ts > now {
-            item.set_scheduled_at(ts);
-            item.set_status(DownloadStatus::Scheduled);
-        }
-    }
-}
-
 /// The destination borrow lives only for the enqueue call: a `dest.borrow()`
 /// temporary in a `match` scrutinee would live into the arms, and
 /// `close_card()` re-borrows the same cell mutably to reset the destination —
@@ -738,160 +741,6 @@ fn queue_plain(
     apply_scheduled_at(&item, scheduled_at);
     close_card();
     Ok(())
-}
-
-/// Enter confirms a picker page's action: the card-scoped counterpart of the
-/// old dialog's default widget. Rows and buttons keep Enter for their own
-/// activation — they stop the event before it bubbles up here — so this only
-/// fires when focus is on the page background.
-pub(crate) fn picker_enter_confirms(page: &adw::NavigationPage, add_btn: &gtk4::Button) {
-    let key = gtk4::EventControllerKey::new();
-    let add_btn = add_btn.clone();
-    key.connect_key_pressed(move |_, keyval, _, _| {
-        if keyval == gtk4::gdk::Key::Return || keyval == gtk4::gdk::Key::KP_Enter {
-            // emit_clicked bypasses sensitivity; skip while the import is in flight.
-            if add_btn.is_sensitive() {
-                add_btn.emit_clicked();
-            }
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
-        }
-    });
-    page.add_controller(key);
-}
-
-/// Compact picker header: back + title + dimmed count on one tight row.
-/// The auto `AdwHeaderBar` left the centered title floating in 48px of
-/// chrome with nothing else in it; a picker embedded in a card earns a
-/// denser row. Back pops the navigation page (Esc still collapses the
-/// whole card); the selection actions stay in the bottom action bar.
-pub(crate) fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::Box {
-    let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-    header.set_margin_top(6);
-    header.set_margin_bottom(6);
-    header.set_margin_start(6);
-    header.set_margin_end(12);
-    let back = gtk4::Button::builder()
-        .icon_name("go-previous-symbolic")
-        .css_classes(["flat", "circular"])
-        .tooltip_text(gettext("Back"))
-        .valign(gtk4::Align::Center)
-        .build();
-    back.update_property(&[gtk4::accessible::Property::Label(&gettext("Back"))]);
-    {
-        let nav = nav.clone();
-        back.connect_clicked(move |_| {
-            nav.pop();
-        });
-    }
-    let title_label = gtk4::Label::builder()
-        .label(title)
-        .css_classes(["heading"])
-        .halign(gtk4::Align::Start)
-        .valign(gtk4::Align::Center)
-        .hexpand(true)
-        .ellipsize(gtk4::pango::EllipsizeMode::End)
-        .build();
-    let count_label = gtk4::Label::builder()
-        .label(count)
-        .css_classes(["dimmed", "caption"])
-        .valign(gtk4::Align::Center)
-        .build();
-    header.append(&back);
-    header.append(&title_label);
-    header.append(&count_label);
-    header
-}
-
-/// A picker grid: `AdwWrapBox` as the wrapping container, cells as toggle
-/// pills with the simple Button API. All entries start active, matching the
-/// old checked-by-default rows. Returns the box and the pills for the caller
-/// to wire.
-///
-/// Pills size to their titles (no homogeneous mode): short titles get small
-/// pills, and the last row has no phantom empty slots.
-pub(crate) fn picker_list(
-    entries: Rc<Vec<(String, String)>>,
-) -> (adw::WrapBox, Vec<gtk4::ToggleButton>) {
-    // Flowing grid of toggle pills: the simple Button API
-    // (set_active/is_active/toggled), native selected styling, no selection
-    // model. WrapBox is only the wrapping container.
-    let wrapbox = adw::WrapBox::builder()
-        .child_spacing(12)
-        .line_spacing(12)
-        .valign(gtk4::Align::Start)
-        .build();
-    let mut buttons = Vec::with_capacity(entries.len());
-    for (title, _) in entries.iter() {
-        // Titles are untrusted (video titles carry `&`, `<`, …): Button label
-        // is plain text, never markup.
-        let btn = gtk4::ToggleButton::with_label(title);
-        btn.set_active(true);
-        // Overlong titles ellipsize instead of forcing the FlowBox into
-        // degenerate width measurements (gtk_widget_measure for_size
-        // criticals): the pill keeps a sane minimum width. The char cap is
-        // what makes homogeneous sizing + ellipsis interact — without it one
-        // overlong title stretches every pill and ellipsis never fires.
-        if let Some(label) = btn.child().and_downcast::<gtk4::Label>() {
-            label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-            label.set_max_width_chars(24);
-        }
-        wrapbox.append(&btn);
-        buttons.push(btn);
-    }
-    (wrapbox, buttons)
-}
-
-/// Wire the pickers' bottom action bar to the toggle pills: the action counts
-/// the live selection, Select All/None drive the buttons.
-pub(crate) fn wire_list_selection_bar(
-    buttons: &[gtk4::ToggleButton],
-    select_all_btn: &gtk4::Button,
-    select_none_btn: &gtk4::Button,
-    add_btn: &gtk4::Button,
-    count_label: impl Fn(usize) -> String + 'static,
-) {
-    let buttons = buttons.to_vec();
-    let refresh = Rc::new({
-        let buttons = buttons.clone();
-        let add_btn = add_btn.clone();
-        move || {
-            let n = buttons.iter().filter(|b| b.is_active()).count();
-            add_btn.set_label(&count_label(n));
-        }
-    });
-    for btn in &buttons {
-        let refresh = Rc::clone(&refresh);
-        btn.connect_toggled(move |_| refresh());
-    }
-    refresh();
-    {
-        let buttons = buttons.clone();
-        select_all_btn.connect_clicked(move |_| {
-            for b in &buttons {
-                b.set_active(true);
-            }
-        });
-    }
-    {
-        let buttons = buttons.clone();
-        select_none_btn.connect_clicked(move |_| {
-            for b in &buttons {
-                b.set_active(false);
-            }
-        });
-    }
-}
-
-/// Selected indices of picker toggle pills, ascending.
-pub(crate) fn list_selected(buttons: &[gtk4::ToggleButton]) -> Vec<usize> {
-    buttons
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| b.is_active())
-        .map(|(i, _)| i)
-        .collect()
 }
 
 fn push_playlist_items_page(
@@ -1712,6 +1561,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         gallery_select_opener: Rc::new(RefCell::new(None)),
         enumerate_abort: Rc::new(RefCell::new(None)),
         enumerate_gen: Cell::new(0),
+        lookup_abort: Rc::new(RefCell::new(None)),
         add_btn: add_btn.clone(),
     });
     // "Select files…" invokes the opener set below (where the picker context
@@ -2167,7 +2017,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 scheduled_at_kick.clone(),
                 pending_kick.clone(),
             );
-            glib::spawn_future_local(async move {
+            let lookup = glib::spawn_future_local(async move {
                 // Declared BEFORE the guard so it drops AFTER it (reverse
                 // declaration order): every exit, early returns included, starts
                 // the next queued link with the in-flight marker already clear.
@@ -2565,6 +2415,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     }
                 }
             });
+            // This kick supersedes any earlier lookup: its generation is
+            // stale now, so abort it — the dropped task kills the probe
+            // children instead of letting them run out their timeouts.
+            if let Some(prev) = step2.lookup_abort.borrow_mut().replace(lookup) {
+                prev.abort();
+            }
         })
     };
 
@@ -2831,8 +2687,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 }
             }
             // Editing mid-lookup stales the in-flight resolve so its
-            // completion is discarded.
+            // completion is discarded — and aborts it, so the probes stop
+            // instead of reading to completion for a URL the user left.
             probe.borrow_mut().bump_generation();
+            abort_lookup(&step2);
             // Any edit clears the lookup-in-flight state, and the icon
             // follows: the tick returns for non-empty text, the spinner
             // and the icon-less states clear.
@@ -3099,157 +2957,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
 }
 
-/// Gallery file picker as a right-sliding card page: one toggle pill per
-/// file (all on by default), mirroring the playlist picker. The selection
-/// becomes a gallery-dl `--range` spec on the queued job.
-#[allow(clippy::too_many_arguments)]
-fn push_gallery_picker_page(
-    nav: &adw::NavigationView,
-    manager: Rc<DownloadManager>,
-    dest_dir: Rc<RefCell<String>>,
-    close_card: Rc<dyn Fn()>,
-    scheduled_at: Option<i64>,
-    title: String,
-    url: String,
-    filter: crate::gallery_argv::GalleryFilter,
-    items: Vec<crate::gallery_probe::GalleryItem>,
-) {
-    // Don't stack a second picker while one is already visible.
-    if nav.visible_page_tag().as_deref() == Some("gallery-picker") {
-        return;
-    }
-    let count = items.len();
-    // The enumeration is capped (see ENUMERATE_MAX_FILES): say so when we
-    // hit the cap, so the user knows the list is truncated.
-    let capped = count >= crate::gallery_probe::ENUMERATE_MAX_FILES;
-    let entries: Rc<Vec<(String, String)>> = Rc::new(
-        items
-            .iter()
-            .map(|item| {
-                let sub = if item.extension.is_empty() {
-                    item.category.clone()
-                } else {
-                    item.extension.clone()
-                };
-                (item.filename.clone(), sub)
-            })
-            .collect(),
-    );
-    let (wrapbox, picks) = picker_list(Rc::clone(&entries));
-
-    let list_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(6)
-        .build();
-    list_box.set_margin_top(12);
-    list_box.set_margin_bottom(12);
-    list_box.set_margin_start(12);
-    list_box.set_margin_end(12);
-    list_box.append(&wrapbox);
-    let error_caption = gtk4::Label::builder()
-        .label("")
-        .css_classes(["error", "caption"])
-        .halign(gtk4::Align::Start)
-        .visible(false)
-        .build();
-    list_box.append(&error_caption);
-
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .child(&list_box)
-        .propagate_natural_height(true)
-        .max_content_height(480)
-        .vexpand(false)
-        .valign(gtk4::Align::Start)
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .build();
-
-    let toolbar = adw::ToolbarView::new();
-    let count_text =
-        ngettext("{} file", "{} files", count as u32).replace("{}", &count.to_string());
-    let count_text = if capped {
-        format!(
-            "{} \u{2022} {}",
-            count_text,
-            gettext("Showing the first {} files").replace("{}", &count.to_string())
-        )
-    } else {
-        count_text
-    };
-    toolbar.add_top_bar(&picker_header(nav, &title, &count_text));
-    toolbar.set_content(Some(&scrolled));
-    let (action_bar, select_all_btn, select_none_btn, add_btn) =
-        crate::window_rows::selection_action_bar();
-    toolbar.add_bottom_bar(&action_bar);
-    let picker_page = adw::NavigationPage::builder()
-        .tag("gallery-picker")
-        .title(&title)
-        .child(&toolbar)
-        .build();
-    picker_enter_confirms(&picker_page, &add_btn);
-
-    wire_list_selection_bar(&picks, &select_all_btn, &select_none_btn, &add_btn, |n| {
-        ngettext("_Queue {} file", "_Queue {} files", n as u32).replace("{}", &n.to_string())
-    });
-
-    {
-        let picks = picks.clone();
-        let error_caption = error_caption.clone();
-        let add_btn_click = add_btn.clone();
-        let nav_pop = nav.clone();
-        add_btn_click.connect_clicked(move |_| {
-            if !add_btn.is_sensitive() {
-                return;
-            }
-            let selected = list_selected(&picks);
-            if selected.is_empty() {
-                error_caption.set_text(&gettext("Select at least one file"));
-                error_caption.set_visible(true);
-                return;
-            }
-            let range = match crate::gallery_argv::range_spec(&selected) {
-                Some(spec) => spec,
-                None => {
-                    error_caption.set_text(&gettext("Select at least one file"));
-                    error_caption.set_visible(true);
-                    return;
-                }
-            };
-            // Disable while the enqueue runs: a second click would enqueue duplicates.
-            add_btn.set_sensitive(false);
-            let settings = manager.settings();
-            let base_job = crate::gallery_argv::GalleryJob {
-                item_id: 0, // enqueue_gallery assigns the real row ID.
-                page_url: url.clone(),
-                title: title.clone(),
-                file_count: Some(selected.len() as u32),
-                dest_dir: std::path::PathBuf::from("."),
-                filter,
-                cookies_browser: settings.cookies_browser().to_string(),
-                speed_limit: crate::gallery_runner::gallery_speed_limit(settings),
-                range: Some(range),
-            };
-            // Batch guard defers start_next until the Scheduled status is set.
-            let _guard = manager.batch_guard();
-            let mut job = base_job.clone();
-            job.dest_dir = std::path::PathBuf::from(dest_dir.borrow().clone());
-            match manager.enqueue_gallery(&job) {
-                Ok(item) => {
-                    apply_scheduled_at(&item, scheduled_at);
-                    nav_pop.pop();
-                    close_card();
-                }
-                Err(e) => {
-                    error_caption.set_text(&e);
-                    error_caption.set_visible(true);
-                    add_btn.set_sensitive(true);
-                }
-            }
-        });
-    }
-
-    nav.push(&picker_page);
-}
-
 /// Build the gallery "Select files…" opener: reads the current card state
 /// (URL, filter, title) at click time, runs the bounded enumeration in the
 /// background, then pushes the checklist picker.
@@ -3356,7 +3063,7 @@ fn make_gallery_picker_opener(
             }
             match result {
                 Ok(Ok(items)) if !items.is_empty() => {
-                    push_gallery_picker_page(
+                    crate::inline_gallery::push_gallery_picker_page(
                         &nav3,
                         manager3,
                         dest3,

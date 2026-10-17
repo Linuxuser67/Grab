@@ -1,7 +1,7 @@
-//! Row widgets: list-row construction, refresh ticks, pulse gating and the
-//! shared builders. UI leaf module (gtk/adw).
+//! Row widgets: list-row construction, refresh ticks, pulse gating, the
+//! picker toolkit and the shared builders. UI leaf module (gtk/adw).
 
-use crate::download::{DownloadManager, RemovedSnapshot};
+use crate::download::{DownloadItem, DownloadManager, RemovedSnapshot};
 use crate::download_pieces::{BLOCK_CELLS, aggregate};
 use crate::download_store::DownloadStatus;
 use adw::prelude::*;
@@ -77,6 +77,175 @@ pub(crate) fn selection_action_bar() -> (gtk4::ActionBar, gtk4::Button, gtk4::Bu
     action_bar.pack_start(&select_none_btn);
     action_bar.pack_end(&add_btn);
     (action_bar, select_all_btn, select_none_btn, add_btn)
+}
+
+/// Apply a scheduled timestamp to a freshly enqueued item. Future timestamps
+/// become Scheduled; past ones (the 12:00 default is often stale by Add time)
+/// queue immediately, mirroring restore_existing's overdue handling.
+pub(crate) fn apply_scheduled_at(item: &DownloadItem, scheduled_at: Option<i64>) {
+    if let Some(ts) = scheduled_at {
+        let now = glib::DateTime::now_local()
+            .map(|dt| dt.to_unix())
+            .unwrap_or(0);
+        if ts > now {
+            item.set_scheduled_at(ts);
+            item.set_status(DownloadStatus::Scheduled);
+        }
+    }
+}
+
+/// Enter confirms a picker page's action: the card-scoped counterpart of the
+/// old dialog's default widget. Rows and buttons keep Enter for their own
+/// activation — they stop the event before it bubbles up here — so this only
+/// fires when focus is on the page background.
+pub(crate) fn picker_enter_confirms(page: &adw::NavigationPage, add_btn: &gtk4::Button) {
+    let key = gtk4::EventControllerKey::new();
+    let add_btn = add_btn.clone();
+    key.connect_key_pressed(move |_, keyval, _, _| {
+        if keyval == gtk4::gdk::Key::Return || keyval == gtk4::gdk::Key::KP_Enter {
+            // emit_clicked bypasses sensitivity; skip while the import is in flight.
+            if add_btn.is_sensitive() {
+                add_btn.emit_clicked();
+            }
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    page.add_controller(key);
+}
+
+/// Compact picker header: back + title + dimmed count on one tight row.
+/// The auto `AdwHeaderBar` left the centered title floating in 48px of
+/// chrome with nothing else in it; a picker embedded in a card earns a
+/// denser row. Back pops the navigation page (Esc still collapses the
+/// whole card); the selection actions stay in the bottom action bar.
+pub(crate) fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::Box {
+    let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    header.set_margin_top(6);
+    header.set_margin_bottom(6);
+    header.set_margin_start(6);
+    header.set_margin_end(12);
+    let back = gtk4::Button::builder()
+        .icon_name("go-previous-symbolic")
+        .css_classes(["flat", "circular"])
+        .tooltip_text(gettext("Back"))
+        .valign(gtk4::Align::Center)
+        .build();
+    back.update_property(&[gtk4::accessible::Property::Label(&gettext("Back"))]);
+    {
+        let nav = nav.clone();
+        back.connect_clicked(move |_| {
+            nav.pop();
+        });
+    }
+    let title_label = gtk4::Label::builder()
+        .label(title)
+        .css_classes(["heading"])
+        .halign(gtk4::Align::Start)
+        .valign(gtk4::Align::Center)
+        .hexpand(true)
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
+        .build();
+    let count_label = gtk4::Label::builder()
+        .label(count)
+        .css_classes(["dimmed", "caption"])
+        .valign(gtk4::Align::Center)
+        .build();
+    header.append(&back);
+    header.append(&title_label);
+    header.append(&count_label);
+    header
+}
+
+/// A picker grid: `AdwWrapBox` as the wrapping container, cells as toggle
+/// pills with the simple Button API. All entries start active, matching the
+/// old checked-by-default rows. Returns the box and the pills for the caller
+/// to wire.
+///
+/// Pills size to their titles (no homogeneous mode): short titles get small
+/// pills, and the last row has no phantom empty slots.
+pub(crate) fn picker_list(
+    entries: Rc<Vec<(String, String)>>,
+) -> (adw::WrapBox, Vec<gtk4::ToggleButton>) {
+    // Flowing grid of toggle pills: the simple Button API
+    // (set_active/is_active/toggled), native selected styling, no selection
+    // model. WrapBox is only the wrapping container.
+    let wrapbox = adw::WrapBox::builder()
+        .child_spacing(12)
+        .line_spacing(12)
+        .valign(gtk4::Align::Start)
+        .build();
+    let mut buttons = Vec::with_capacity(entries.len());
+    for (title, _) in entries.iter() {
+        // Titles are untrusted (video titles carry `&`, `<`, …): Button label
+        // is plain text, never markup.
+        let btn = gtk4::ToggleButton::with_label(title);
+        btn.set_active(true);
+        // Overlong titles ellipsize instead of forcing the FlowBox into
+        // degenerate width measurements (gtk_widget_measure for_size
+        // criticals): the pill keeps a sane minimum width. The char cap is
+        // what makes homogeneous sizing + ellipsis interact — without it one
+        // overlong title stretches every pill and ellipsis never fires.
+        if let Some(label) = btn.child().and_downcast::<gtk4::Label>() {
+            label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            label.set_max_width_chars(24);
+        }
+        wrapbox.append(&btn);
+        buttons.push(btn);
+    }
+    (wrapbox, buttons)
+}
+
+/// Wire the pickers' bottom action bar to the toggle pills: the action counts
+/// the live selection, Select All/None drive the buttons.
+pub(crate) fn wire_list_selection_bar(
+    buttons: &[gtk4::ToggleButton],
+    select_all_btn: &gtk4::Button,
+    select_none_btn: &gtk4::Button,
+    add_btn: &gtk4::Button,
+    count_label: impl Fn(usize) -> String + 'static,
+) {
+    let buttons = buttons.to_vec();
+    let refresh = Rc::new({
+        let buttons = buttons.clone();
+        let add_btn = add_btn.clone();
+        move || {
+            let n = buttons.iter().filter(|b| b.is_active()).count();
+            add_btn.set_label(&count_label(n));
+        }
+    });
+    for btn in &buttons {
+        let refresh = Rc::clone(&refresh);
+        btn.connect_toggled(move |_| refresh());
+    }
+    refresh();
+    {
+        let buttons = buttons.clone();
+        select_all_btn.connect_clicked(move |_| {
+            for b in &buttons {
+                b.set_active(true);
+            }
+        });
+    }
+    {
+        let buttons = buttons.clone();
+        select_none_btn.connect_clicked(move |_| {
+            for b in &buttons {
+                b.set_active(false);
+            }
+        });
+    }
+}
+
+/// Selected indices of picker toggle pills, ascending.
+pub(crate) fn list_selected(buttons: &[gtk4::ToggleButton]) -> Vec<usize> {
+    buttons
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.is_active())
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Open `path` with the system's default application for its file type.

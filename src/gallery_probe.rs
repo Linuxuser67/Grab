@@ -3,6 +3,8 @@
 //! On paste, Grab spawns the yt-dlp probe (existing) and the gallery-dl probe
 //! (here) concurrently. This module parses gallery-dl's `-j` output and decides
 //! which mode the New Download card shows, per the routing table in the design.
+//! The file picker's enumeration streams the same messages line by line
+//! (`output.jsonl=true`), so the picker can open on the first item.
 
 use std::path::Path;
 use std::time::Duration;
@@ -297,13 +299,15 @@ fn enumerate_base_argv() -> Vec<String> {
     ]
 }
 
-pub async fn enumerate_gallery_files(
+/// The enumeration command: base argv (range-bounded jsonl), auth, filter,
+/// throttle. Shared by the batched and the streamed enumeration.
+fn enumerate_command(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
-) -> Result<Vec<GalleryItem>, GalleryError> {
+) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(tool);
     // See probe_gallery: a dropped enumeration future must kill the child.
     cmd.kill_on_drop(true);
@@ -326,6 +330,17 @@ pub async fn enumerate_gallery_files(
         cmd.arg(arg);
     }
     cmd.arg("--").arg(url);
+    cmd
+}
+
+pub async fn enumerate_gallery_files(
+    tool: &Path,
+    url: &str,
+    cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
+    filter: crate::gallery_argv::GalleryFilter,
+) -> Result<Vec<GalleryItem>, GalleryError> {
+    let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter);
     // Debug: log the full argv before spawning.
     crate::backend_debug::log_command(&cmd);
     let output = tokio::time::timeout(ENUMERATE_TIMEOUT, cmd.output())
@@ -341,6 +356,96 @@ pub async fn enumerate_gallery_files(
     let messages = parse_jsonl(&output.stdout)?;
     let items = parse_probe_messages(&messages)?;
     Ok(items)
+}
+
+/// Idle bound between lines and the overall wall-clock bound for the
+/// streamed enumeration. Large galleries throttle between items, so the
+/// idle bound is generous; the total bound still stops a pathological run.
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Streamed twin of `enumerate_gallery_files`: gallery-dl runs with
+/// `output.jsonl=true`, so every flushed line is one message and items are
+/// pushed to `items_tx` as they arrive — the picker can open on the first
+/// one. Returns the number of items delivered. Dropping the future kills
+/// gallery-dl (`kill_on_drop`); a closed receiver stops the stream early.
+pub(crate) async fn enumerate_gallery_files_streamed(
+    tool: &Path,
+    url: &str,
+    cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
+    filter: crate::gallery_argv::GalleryFilter,
+    items_tx: tokio::sync::mpsc::UnboundedSender<GalleryItem>,
+) -> Result<usize, GalleryError> {
+    // Same line-streaming shape as the yt-dlp runner (see video_runner.rs).
+    use tokio::io::AsyncBufReadExt as _;
+
+    let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter);
+    // stdout is the line stream; stderr is discarded like the batched
+    // variant (its failure signal is the exit status).
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    // Debug: log the full argv before spawning.
+    crate::backend_debug::log_command(&cmd);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| GalleryError::install("gallery-dl enumerate: no stdout".to_string()))?;
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let mut reader = ProbeReader::default();
+    let mut count = 0usize;
+    let deadline = tokio::time::Instant::now() + STREAM_TOTAL_TIMEOUT;
+    loop {
+        let next = tokio::time::timeout(STREAM_IDLE_TIMEOUT, lines.next_line());
+        let line = match next.await {
+            Err(_) => {
+                return Err(GalleryError::probe(
+                    "gallery-dl enumerate stalled (no output)".to_string(),
+                ));
+            }
+            Ok(Err(e)) => {
+                return Err(GalleryError::probe(format!(
+                    "couldn't read gallery-dl output: {e}"
+                )));
+            }
+            Ok(Ok(None)) => break,
+            Ok(Ok(Some(line))) => line,
+        };
+        if tokio::time::Instant::now() > deadline {
+            return Err(GalleryError::probe(
+                "gallery-dl enumerate timed out".to_string(),
+            ));
+        }
+        // Blank lines carry no message.
+        if line.trim().is_empty() {
+            continue;
+        }
+        let m: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
+        if let Some(item) = reader.feed(&m) {
+            count += 1;
+            // A closed receiver means the UI is gone: stop early.
+            if items_tx.send(item).is_err() {
+                return Ok(count);
+            }
+        }
+    }
+    // EOF: the child should exit promptly — it just closed stdout.
+    let status = tokio::time::timeout(STREAM_IDLE_TIMEOUT, child.wait())
+        .await
+        .map_err(|_| GalleryError::probe("gallery-dl enumerate timed out".to_string()))?
+        .map_err(|e| GalleryError::install(format!("gallery-dl enumerate failed: {e}")))?;
+    if !status.success() {
+        return Err(GalleryError::install(format!(
+            "gallery-dl enumerate failed (exit {})",
+            status.code().unwrap_or(-1)
+        )));
+    }
+    reader.finish()?;
+    Ok(count)
 }
 
 /// Parse `gallery-dl -o output.jsonl=true` output: one JSON message array
@@ -360,39 +465,44 @@ fn parse_jsonl(bytes: &[u8]) -> Result<Vec<serde_json::Value>, GalleryError> {
     Ok(messages)
 }
 
-/// Parse `gallery-dl -j` message arrays into file items.
-///
-/// Message types (first array element): 2 = directory context, 3 = file,
-/// -1 = error. Directory metadata is inherited by file items lacking
-/// `title`/`user`/`author`. Returns `Err` on a type -1 error message.
-fn parse_probe_messages(messages: &[serde_json::Value]) -> Result<Vec<GalleryItem>, GalleryError> {
-    let mut items = Vec::new();
-    // A `-1` error doesn't discard files already seen; stored here and
-    // returned only if no items were collected.
-    let mut pending_err: Option<GalleryError> = None;
-    // Directory context from the most recent type-2 message; file items
-    // inherit its title/user when they don't carry their own.
-    let mut dir_ctx: Option<serde_json::Map<String, serde_json::Value>> = None;
-    for m in messages {
-        let t = m.get(0).and_then(|v| v.as_i64());
-        match t {
+/// Streaming twin of `parse_probe_messages`: feed messages one at a time
+/// and items come out as they arrive. Directory context and the pending
+/// error carry across feeds exactly like the whole-vector parse.
+#[derive(Default)]
+struct ProbeReader {
+    /// Directory context from the most recent type-2 message; file items
+    /// inherit its title/user when they don't carry their own.
+    dir_ctx: Option<serde_json::Map<String, serde_json::Value>>,
+    /// A `-1` error doesn't discard files already seen; kept here and only
+    /// surfaced by `finish` when nothing was collected.
+    pending_err: Option<GalleryError>,
+    got_items: bool,
+}
+
+impl ProbeReader {
+    /// Feed one message; returns the file item it carried, if any.
+    ///
+    /// Message types (first array element): 2 = directory context, 3 = file,
+    /// -1 = error.
+    fn feed(&mut self, m: &serde_json::Value) -> Option<GalleryItem> {
+        match m.get(0).and_then(|v| v.as_i64()) {
             Some(msg_type::FILE) => {
                 let meta = match m.get(2) {
                     Some(v) => v.clone(),
                     None => {
                         tracing::trace!(message = ?m, "gallery-dl probe file message without metadata");
-                        continue;
+                        return None;
                     }
                 };
                 let mut item: GalleryItem = match serde_json::from_value(meta) {
                     Ok(item) => item,
                     Err(e) => {
                         tracing::trace!(error = %e, "gallery-dl probe couldn't parse file metadata");
-                        continue;
+                        return None;
                     }
                 };
                 // Inherit directory title/user when the file lacks them.
-                if let Some(dir) = dir_ctx.as_ref() {
+                if let Some(dir) = self.dir_ctx.as_ref() {
                     for key in ["title", "user", "author"] {
                         if !item.extra.contains_key(key)
                             && let Some(v) = dir.get(key)
@@ -408,12 +518,14 @@ fn parse_probe_messages(messages: &[serde_json::Value]) -> Result<Vec<GalleryIte
                         serde_json::Value::String(url.to_string()),
                     );
                 }
-                items.push(item);
+                self.got_items = true;
+                Some(item)
             }
             Some(msg_type::DIRECTORY) => {
                 if let Some(obj) = m.get(1).and_then(|v| v.as_object()) {
-                    dir_ctx = Some(obj.clone());
+                    self.dir_ctx = Some(obj.clone());
                 }
+                None
             }
             Some(msg_type::ERROR) => {
                 let err = m
@@ -426,28 +538,46 @@ fn parse_probe_messages(messages: &[serde_json::Value]) -> Result<Vec<GalleryIte
                     .and_then(|v| v.get("message"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                // Don't discard usable items: store the error and continue.
-                // If we got files, return them; otherwise return the error.
-                pending_err = Some(GalleryError::probe(format!("gallery-dl: {err}: {msg}")));
-                continue;
+                // Don't discard usable items: store the error and let
+                // `finish` decide, exactly like the batched parse.
+                self.pending_err = Some(GalleryError::probe(format!("gallery-dl: {err}: {msg}")));
+                None
             }
             _ => {
                 tracing::trace!(message = ?m, "gallery-dl probe unknown message");
+                None
             }
         }
     }
-    // If we got items despite an error, return them (log the error).
-    // Otherwise return the pending error, or Ok(empty) if none.
-    if !items.is_empty() {
-        if let Some(e) = pending_err {
-            tracing::warn!(error = %e, "gallery-dl probe had error but returned items");
+
+    /// Same verdict as the batched parse: items win over a pending error.
+    fn finish(self) -> Result<(), GalleryError> {
+        match (self.got_items, self.pending_err) {
+            (true, Some(e)) => {
+                tracing::warn!(error = %e, "gallery-dl probe had error but returned items");
+                Ok(())
+            }
+            (false, Some(e)) => Err(e),
+            _ => Ok(()),
         }
-        Ok(items)
-    } else if let Some(e) = pending_err {
-        Err(e)
-    } else {
-        Ok(items)
     }
+}
+
+/// Parse `gallery-dl -j` message arrays into file items.
+///
+/// Message types (first array element): 2 = directory context, 3 = file,
+/// -1 = error. Directory metadata is inherited by file items lacking
+/// `title`/`user`/`author`. Returns `Err` on a type -1 error message.
+fn parse_probe_messages(messages: &[serde_json::Value]) -> Result<Vec<GalleryItem>, GalleryError> {
+    let mut reader = ProbeReader::default();
+    let mut items = Vec::new();
+    for m in messages {
+        if let Some(item) = reader.feed(m) {
+            items.push(item);
+        }
+    }
+    reader.finish()?;
+    Ok(items)
 }
 
 /// Count files without downloading: `gallery-dl --config-ignore -g --no-download <url>`.
@@ -535,6 +665,81 @@ mod tests {
         // --range the download side applies, so this must fail loudly.
         let jsonl = b"[3, \"https://example.com/1.jpg\", {\"filename\": \"1.jpg\"}]\nnot json\n";
         assert!(parse_jsonl(jsonl).is_err());
+    }
+
+    #[test]
+    fn probe_reader_carries_dir_context_and_error_across_feeds() {
+        // Same semantics as the batched parse, but messages arrive one at a
+        // time: the directory context must carry over, and an error after
+        // items must not discard them.
+        let json = r#"[
+            [2, {"user": "someone"}],
+            [3, "https://example.com/1.jpg", {"filename": "1.jpg"}],
+            [-1, {"error": "HttpError", "message": "404"}]
+        ]"#;
+        let messages: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let mut reader = ProbeReader::default();
+        assert!(reader.feed(&messages[0]).is_none());
+        let item = reader.feed(&messages[1]).unwrap();
+        assert_eq!(
+            item.extra.get("user").and_then(|v| v.as_str()),
+            Some("someone")
+        );
+        assert!(reader.feed(&messages[2]).is_none());
+        // Items exist, so the trailing error is logged, not surfaced.
+        assert!(reader.finish().is_ok());
+    }
+
+    #[test]
+    fn probe_reader_error_without_items_fails_finish() {
+        let json = r#"[[-1, {"error": "AuthenticationError", "message": "login required"}]]"#;
+        let messages: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let mut reader = ProbeReader::default();
+        assert!(reader.feed(&messages[0]).is_none());
+        assert!(reader.finish().is_err());
+    }
+
+    /// Streaming: a fake tool that prints jsonl messages must deliver items
+    /// as they arrive, in order, and report the count.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn streamed_enumerate_delivers_items_in_order() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("grab-stream-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-gallery-dl.sh");
+        std::fs::write(
+            &script,
+            concat!(
+                "#!/bin/sh\n",
+                "printf '%s\\n' '[2, {\"user\": \"someone\"}]'\n",
+                "printf '%s\\n' '[3, \"https://example.com/1.jpg\", {\"filename\": \"1.jpg\"}]'\n",
+                "printf '%s\\n' '[3, \"https://example.com/2.jpg\", {\"filename\": \"2.jpg\"}]'\n",
+                "exit 0\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let count = enumerate_gallery_files_streamed(
+            &script,
+            "https://example.com/",
+            None,
+            None,
+            crate::gallery_argv::GalleryFilter::All,
+            tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 2);
+        let mut names = Vec::new();
+        while let Ok(item) = rx.try_recv() {
+            names.push(item.filename);
+        }
+        assert_eq!(names, ["1.jpg", "2.jpg"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

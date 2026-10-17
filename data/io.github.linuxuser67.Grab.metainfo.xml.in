@@ -50,6 +50,19 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.9~beta.8" date="2026-10-17">
+      <description>
+        <ul>
+          <li>Gallery picker opens as soon as the first file is listed, so large galleries no longer wait for the full listing.</li>
+          <li>Gallery picker lists up to 5000 files, up from 500, and stays responsive at that size.</li>
+          <li>Gallery picker shows a note when a selection may be out of date because the gallery changed.</li>
+          <li>Link lookups run both gallery-dl and yt-dlp and choose the result from what they actually found.</li>
+          <li>Deleting a gallery download removes its folder only when Grab created it.</li>
+          <li>Closes a symlink race when writing private metadata files.</li>
+          <li>Gallery enumeration failures now include gallery-dl's error output in the log.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.9~beta.7" date="2026-10-16">
       <description>
         <ul>

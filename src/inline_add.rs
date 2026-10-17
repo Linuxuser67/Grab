@@ -34,6 +34,18 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+/// Where a submit came from. Only user submits open the gallery picker; auto-add
+/// keeps its direct path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubmitSource {
+    /// Enter in the URL entry.
+    Enter,
+    /// The Add button or the entry's tick icon.
+    Button,
+    /// The debounced submit that auto-add fires after a lookup.
+    Auto,
+}
+
 /// Multi-file torrent picker opener: file name, raw bytes, parsed entries.
 type TorrentPickerOpener = Rc<dyn Fn(String, Vec<u8>, Vec<crate::torrent::TorrentFileEntry>)>;
 
@@ -2428,20 +2440,66 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let lookup_add_submit = lookup_add.clone();
         let nav2 = nav.clone();
         let scheduled_at = Rc::clone(&scheduled_at);
-        Rc::new(move |from_activate: bool| {
+        Rc::new(move |source: SubmitSource| {
+            let from_activate = matches!(source, SubmitSource::Enter | SubmitSource::Auto);
             let fail = |message: &str| {
                 // Form-validation pattern: the error state lives on the
                 // entry itself, not in a caption underneath it.
                 set_field_error(&url_entry, message);
             };
-            // Gallery: nothing is queued without the file picker. Enter, Add,
-            // the tick icon and auto-add all open it, and it selects every file
-            // by default, so the user confirms what gets downloaded.
-            if step2.is_gallery.get() {
+            // A gallery submitted by the user opens the file picker; nothing is
+            // queued unseen. Auto-add keeps the direct enqueue below.
+            if step2.is_gallery.get() && source != SubmitSource::Auto {
                 let open = step2.gallery_select_opener.borrow().clone();
                 if let Some(open) = open {
                     open();
                 }
+                return;
+            }
+            // Gallery download: the probe found an image gallery, not a video.
+            if step2.is_gallery.get()
+                && let Some(card) = step2.gallery_card.borrow().as_ref()
+            {
+                let url = url_entry.text().trim().to_string();
+                let dest = dd.borrow().clone();
+                let filter = *card.filter.borrow();
+                // Use the cached total from count_gallery_files, not the
+                // probe length (capped at 5). None when unknown.
+                let file_count = card.total(filter);
+                let title = card
+                    .items
+                    .first()
+                    .map(|i| crate::gallery_probe::probe_title(i, &url))
+                    .unwrap_or_else(|| url.clone());
+                // Enqueue via DownloadManager (phase 11). The runner integration
+                // (phase 12) will drive the actual download.
+                let cookies_browser = m.settings().cookies_browser().to_string();
+                let job = crate::gallery_argv::GalleryJob {
+                    // Placeholder; enqueue_gallery assigns the real row ID.
+                    item_id: 0,
+                    page_url: url.clone(),
+                    title,
+                    file_count,
+                    dest_dir: std::path::PathBuf::from(dest),
+                    filter,
+                    cookies_browser,
+                    speed_limit: crate::gallery_runner::gallery_speed_limit(m.settings()),
+                    range: None,
+                };
+                match m.enqueue_gallery(&job) {
+                    Ok(_) => {
+                        tracing::info!(
+                            url = %url,
+                            files = file_count,
+                            "gallery enqueued"
+                        );
+                    }
+                    Err(e) => {
+                        fail(&e);
+                        return;
+                    }
+                }
+                close_card();
                 return;
             }
             let url = url_entry.text().trim().to_string();
@@ -2556,18 +2614,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     };
     {
         let s = submit.clone();
-        add_btn.connect_clicked(move |_| s(false));
+        add_btn.connect_clicked(move |_| s(SubmitSource::Button));
     }
     {
         let s = submit.clone();
-        url_entry.connect_activate(move |_| s(true));
+        url_entry.connect_activate(move |_| s(SubmitSource::Enter));
     }
     // Tick icon inside the entry submits like Enter.
     {
         let s = submit.clone();
         url_entry.connect_icon_press(move |_, pos| {
             if pos == gtk4::EntryIconPosition::Secondary {
-                s(false);
+                s(SubmitSource::Button);
             }
         });
     }
@@ -2614,7 +2672,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         // set_text) must not remove this dead ID — that was a
                         // hard abort ("Source ID was not found").
                         *debounce_c.borrow_mut() = None;
-                        s(true);
+                        s(SubmitSource::Auto);
                         glib::ControlFlow::Break
                     });
                 *debounce.borrow_mut() = Some(id);

@@ -5,7 +5,9 @@ Serves an HTML page with <img> tags and the image bytes, so gallery-dl's
 
 Usage: gallery_server.py PORT
 Serves:
-  /           - HTML page with 3 <img> tags (2 jpg, 1 png)
+  /           - HTML page with 1 video + 3 <img> tags (video first, so
+                range tests can tell filtered order from raw order)
+  /vid1.mp4   - fake MP4 (gallery-dl copies the bytes; nothing decodes it)
   /img1.jpg   - 1x1 red JPEG
   /img2.jpg   - 1x1 green JPEG
   /img3.png   - 1x1 blue PNG
@@ -55,7 +57,12 @@ PNG_BLUE = bytes([
     0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
 ])
 
+# Fake MP4: only an ftyp box header. gallery-dl writes the response bytes
+# as-is; nothing decodes the video.
+MP4_FAKE = bytes([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70])
+
 HTML = b"""<html><body>
+<video src="/vid1.mp4"></video>
 <img src="/img1.jpg">
 <img src="/img2.jpg">
 <img src="/img3.png">
@@ -66,6 +73,8 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/":
             data, ctype = HTML, "text/html"
+        elif self.path == "/vid1.mp4":
+            data, ctype = MP4_FAKE, "video/mp4"
         elif self.path == "/img1.jpg":
             data, ctype = JPEG_RED, "image/jpeg"
         elif self.path == "/img2.jpg":

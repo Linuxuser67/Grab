@@ -4875,40 +4875,59 @@ fn sweep_never_touches_bystander_with_id_like_name() {
 
 #[test]
 fn a_crashed_remux_leaves_only_a_partial_and_it_is_reclaimable() {
-    // A remux writes `final.<n>.<ext>.part` and renames only on success, so partials are sweepable by construction.
+    // A remux writes `final.<id>.<n>.<ext>.part` and renames only on success, so a row's own partials are sweepable by construction once their lease shows they were ours.
     let dir = std::env::temp_dir().join(format!("grab-partialremux-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let staging = dir.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
-    std::fs::write(staging.join("final.1.mp4.part"), b"half a remux").unwrap();
-    std::fs::write(staging.join("final.2.mp4"), b"a completed recording").unwrap();
-    std::fs::write(staging.join("final.2.mp4.lease"), b"").unwrap();
+    std::fs::write(staging.join("final.7.1.mp4.part"), b"half a remux").unwrap();
+    std::fs::write(staging.join("final.7.1.mp4.lease"), b"").unwrap();
+    std::fs::write(staging.join("final.7.2.mp4"), b"a completed recording").unwrap();
+    std::fs::write(staging.join("final.7.2.mp4.lease"), b"").unwrap();
     std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
 
-    sweep_partial_remuxes(&staging);
+    sweep_partial_remuxes(&staging, 7);
 
     assert!(
-        !staging.join("final.1.mp4.part").exists(),
+        !staging.join("final.7.1.mp4.part").exists(),
         "a partial remux from a crashed attempt was not reclaimed"
     );
+    assert!(
+        !staging.join("final.7.1.mp4.lease").exists(),
+        "the reclaimed partial's lease was left behind"
+    );
     assert_eq!(
-        std::fs::read(staging.join("final.2.mp4")).unwrap(),
+        std::fs::read(staging.join("final.7.2.mp4")).unwrap(),
         b"a completed recording",
         "bounded retention must never cost a completed recording -- that is \
          the whole reason the partial is named differently"
     );
-    assert!(staging.join("final.2.mp4.lease").exists(), "lease lost");
+    assert!(staging.join("final.7.2.mp4.lease").exists(), "lease lost");
     assert!(
         staging.join("manifest.json").exists(),
         "this sweep is only about partials; other scratch is the finishing \
          leg's business"
     );
     // A file that merely contains "part" is not a partial remux.
-    std::fs::write(staging.join("final.3.partial.mp4"), b"not a partial").unwrap();
-    sweep_partial_remuxes(&staging);
+    std::fs::write(staging.join("final.7.3.partial.mp4"), b"not a partial").unwrap();
+    sweep_partial_remuxes(&staging, 7);
     assert!(
-        staging.join("final.3.partial.mp4").exists(),
+        staging.join("final.7.3.partial.mp4").exists(),
         "the sweep matched a name that is not a partial remux"
+    );
+    // Another row's partial is never ours to reclaim, lease or not.
+    std::fs::write(staging.join("final.8.1.mp4.part"), b"a neighbour's remux").unwrap();
+    std::fs::write(staging.join("final.8.1.mp4.lease"), b"").unwrap();
+    // A partial with no lease has no proof it was Grab's scratch: keep it.
+    std::fs::write(staging.join("final.7.4.mp4.part"), b"no lease, not provably ours").unwrap();
+    sweep_partial_remuxes(&staging, 7);
+    assert!(
+        staging.join("final.8.1.mp4.part").exists(),
+        "a sweep for one row reclaimed another row's remux"
+    );
+    assert!(
+        staging.join("final.7.4.mp4.part").exists(),
+        "a partial with no lease was deleted on a guess"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5024,27 +5043,40 @@ fn a_remux_slot_is_claimed_exactly_once() {
     let staging = dir.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
 
-    let first = reserve_remux_temp(&staging, "mp4").unwrap();
-    assert_eq!(first.file_name().unwrap(), "final.1.mp4");
+    let first = reserve_remux_temp(&staging, 7, "mp4").unwrap();
+    assert_eq!(first.file_name().unwrap(), "final.7.1.mp4");
     assert!(
         first.with_extension("mp4.lease").exists(),
         "the slot must be claimed with a lease, not merely observed free"
     );
 
     // A second claim cannot land on the same slot, even without a temp file yet.
-    let second = reserve_remux_temp(&staging, "mp4").unwrap();
-    assert_eq!(second.file_name().unwrap(), "final.2.mp4");
+    let second = reserve_remux_temp(&staging, 7, "mp4").unwrap();
+    assert_eq!(second.file_name().unwrap(), "final.7.2.mp4");
     assert_ne!(second, first, "two claims shared one remux slot");
 
     // An occupied temp is skipped too, not just an occupied lease.
     release_remux_lease(&first);
     std::fs::write(&first, b"an earlier recording").unwrap();
-    let third = reserve_remux_temp(&staging, "mp4").unwrap();
+    let third = reserve_remux_temp(&staging, 7, "mp4").unwrap();
     assert_eq!(
         third.file_name().unwrap(),
-        "final.3.mp4",
+        "final.7.3.mp4",
         "an existing completed remux must never be handed out as a new slot"
     );
+
+    // A stray partial occupies its slot as well.
+    std::fs::write(staging.join("final.7.4.mp4.part"), b"leftover").unwrap();
+    let fifth = reserve_remux_temp(&staging, 7, "mp4").unwrap();
+    assert_eq!(
+        fifth.file_name().unwrap(),
+        "final.7.5.mp4",
+        "a slot with a stray partial was handed out"
+    );
+
+    // Slots are namespaced by row: another row starts at 1 and never collides.
+    let other = reserve_remux_temp(&staging, 8, "mp4").unwrap();
+    assert_eq!(other.file_name().unwrap(), "final.8.1.mp4");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

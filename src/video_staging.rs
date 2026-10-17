@@ -423,7 +423,10 @@ pub(crate) fn reserve_remux_temp(
     for n in 1..=9999u32 {
         let name = format!("final.{item_id}.{n}.{ext}");
         let partial = format!("{name}.part");
-        if taken.iter().any(|t| t == &name || t == &format!("{name}.lease") || t == &partial) {
+        if taken
+            .iter()
+            .any(|t| t == &name || t == &format!("{name}.lease") || t == &partial)
+        {
             continue;
         }
         let lease = staging.join(format!("{name}.lease"));
@@ -510,14 +513,19 @@ pub(crate) fn dir_file_names(dir: &Path) -> Vec<String> {
 pub fn sweep_partial_remuxes(staging: &Path, item_id: u64) {
     let prefix = format!("final.{item_id}.");
     for name in dir_file_names(staging) {
-        let Some(base) = name.strip_prefix(&prefix).and_then(|s| s.strip_suffix(".part")) else {
+        let Some(base) = name
+            .strip_prefix(&prefix)
+            .and_then(|s| s.strip_suffix(".part"))
+        else {
             continue;
         };
         let Some((n, ext)) = base.split_once('.') else {
             continue;
         };
-        if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit())
-            || ext.is_empty() || ext.contains('.')
+        if n.is_empty()
+            || !n.bytes().all(|b| b.is_ascii_digit())
+            || ext.is_empty()
+            || ext.contains('.')
         {
             continue;
         }

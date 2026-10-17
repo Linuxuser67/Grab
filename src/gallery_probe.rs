@@ -20,10 +20,6 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// keeps gallery-dl itself from walking further.
 pub(crate) const ENUMERATE_MAX_FILES: usize = 5000;
 
-/// Timeout for the full enumeration: a huge gallery can take a while even
-/// capped, but it must not hang forever.
-const ENUMERATE_TIMEOUT: Duration = Duration::from_secs(120);
-
 /// One file from `gallery-dl -j` output. Extractors emit wildly different
 /// metadata keys; `filename`/`extension`/`category` are the reliable core,
 /// everything else lands in `extra` for best-effort title derivation.
@@ -273,14 +269,6 @@ pub async fn probe_gallery(
     Ok(Some(items))
 }
 
-/// Enumerate ALL files in a gallery (no range limit). Used for the file picker.
-/// Returns the full list of items in download order. This can be slow for large
-/// galleries; callers should show progress.
-///
-/// The `filter` must match the download's filter: gallery-dl applies `--range`
-/// to the filtered results, so picker indices only line up when both sides
-/// filter identically.
-///
 /// Base argv for the file enumeration (before auth, filter, and URL).
 /// Pure for tests: asserts the `--range` bound stays in place.
 fn enumerate_base_argv() -> Vec<String> {
@@ -301,7 +289,7 @@ fn enumerate_base_argv() -> Vec<String> {
 }
 
 /// The enumeration command: base argv (range-bounded jsonl), auth, filter,
-/// throttle. Shared by the batched and the streamed enumeration.
+/// throttle.
 fn enumerate_command(
     tool: &Path,
     url: &str,
@@ -334,42 +322,17 @@ fn enumerate_command(
     cmd
 }
 
-pub async fn enumerate_gallery_files(
-    tool: &Path,
-    url: &str,
-    cookies_file: Option<&Path>,
-    user_agent: Option<&str>,
-    filter: crate::gallery_argv::GalleryFilter,
-) -> Result<Vec<GalleryItem>, GalleryError> {
-    let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter);
-    // Debug: log the full argv before spawning.
-    crate::backend_debug::log_command(&cmd);
-    let output = tokio::time::timeout(ENUMERATE_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| GalleryError::probe("gallery-dl enumerate timed out".to_string()))?
-        .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
-    if !output.status.success() {
-        return Err(GalleryError::install(format!(
-            "gallery-dl enumerate failed (exit {})",
-            output.status.code().unwrap_or(-1)
-        )));
-    }
-    let messages = parse_jsonl(&output.stdout)?;
-    let items = parse_probe_messages(&messages)?;
-    Ok(items)
-}
-
 /// Idle bound between lines and the overall wall-clock bound for the
 /// streamed enumeration. Large galleries throttle between items, so the
 /// idle bound is generous; the total bound still stops a pathological run.
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Streamed twin of `enumerate_gallery_files`: gallery-dl runs with
-/// `output.jsonl=true`, so every flushed line is one message and items are
-/// pushed to `items_tx` as they arrive — the picker can open on the first
-/// one. Returns the number of items delivered. Dropping the future kills
-/// gallery-dl (`kill_on_drop`); a closed receiver stops the stream early.
+/// Streamed gallery enumeration: gallery-dl runs with `output.jsonl=true`,
+/// so every flushed line is one message and items are pushed to `items_tx`
+/// as they arrive — the picker can open on the first one. Returns the number
+/// of items delivered. Dropping the future kills gallery-dl (`kill_on_drop`);
+/// a closed receiver stops the stream early.
 pub(crate) async fn enumerate_gallery_files_streamed(
     tool: &Path,
     url: &str,

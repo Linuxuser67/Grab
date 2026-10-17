@@ -44,10 +44,8 @@ pub fn done_label(files: usize, skipped: u32) -> String {
 
 /// Progress update from the runner.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields populated for API completeness; row UI uses files_completed for now.
 pub struct GalleryProgressUpdate {
     pub files_completed: u32,
-    pub files_total: Option<u32>,
     /// Last completed file path (gallery-dl doesn't name the in-progress file).
     pub last_completed_file: Option<String>,
 }
@@ -148,7 +146,6 @@ pub async fn run_gallery_download(
         if meaningful {
             on_progress(GalleryProgressUpdate {
                 files_completed: progress.files_completed,
-                files_total: job.file_count,
                 last_completed_file: last_completed.clone(),
             });
         }

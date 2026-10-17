@@ -7430,3 +7430,184 @@ fn probe_json_cache_roundtrip() {
     assert_eq!(m.take_probe_json("https://example.com/other"), None);
     let _ = std::fs::remove_file(&qf);
 }
+
+fn test_gallery_item(id: u64, dest_dir: &std::path::Path, filename: &str) -> DownloadItem {
+    let item = DownloadItem::new(
+        id,
+        "https://example.com/gallery",
+        filename,
+        &dest_dir.to_string_lossy(),
+    );
+    item.set_is_gallery(true);
+    item.set_status(DownloadStatus::Done);
+    item
+}
+
+fn test_gallery_job(dest_dir: std::path::PathBuf) -> crate::gallery_argv::GalleryJob {
+    crate::gallery_argv::GalleryJob {
+        item_id: 0,
+        page_url: "https://example.com/gallery".to_string(),
+        title: "title".to_string(),
+        file_count: None,
+        dest_dir,
+        filter: crate::gallery_argv::GalleryFilter::All,
+        cookies_browser: "none".to_string(),
+        speed_limit: None,
+        range: None,
+    }
+}
+
+#[test]
+fn gallery_trash_target_new_row_returns_subfolder() {
+    let dir = std::path::PathBuf::from("/dl");
+    let item = test_gallery_item(1, &dir, "title");
+    let job = test_gallery_job(dir.join("title"));
+    assert_eq!(
+        DownloadManager::gallery_trash_target(&item, &job),
+        Some(dir.join("title"))
+    );
+}
+
+#[test]
+fn gallery_trash_target_legacy_row_returns_none() {
+    // Pre-#420 rows: the job points at the parent itself. The same-named
+    // folder in the parent is not provably ours — trash nothing.
+    let dir = std::path::PathBuf::from("/dl");
+    let item = test_gallery_item(1, &dir, "title");
+    let job = test_gallery_job(dir.clone());
+    assert_eq!(DownloadManager::gallery_trash_target(&item, &job), None);
+}
+
+#[test]
+fn gallery_trash_target_escapes_parent_returns_none() {
+    // A `..` in the recorded path must not let Delete reach outside dest_dir.
+    let dir = std::path::PathBuf::from("/dl");
+    let item = test_gallery_item(1, &dir, "title");
+    let job = test_gallery_job(dir.join("..").join("evil"));
+    assert_eq!(DownloadManager::gallery_trash_target(&item, &job), None);
+    // A subfolder of a different parent is not ours either.
+    let job = test_gallery_job(std::path::PathBuf::from("/other/title"));
+    assert_eq!(DownloadManager::gallery_trash_target(&item, &job), None);
+}
+
+#[test]
+fn gallery_trash_target_name_mismatch_returns_none() {
+    let dir = std::path::PathBuf::from("/dl");
+    let item = test_gallery_item(1, &dir, "title");
+    let job = test_gallery_job(dir.join("other"));
+    assert_eq!(DownloadManager::gallery_trash_target(&item, &job), None);
+}
+
+#[test]
+fn delete_download_legacy_gallery_row_keeps_unrelated_folder() {
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("del-gallery-legacy");
+    let settings = test_settings();
+    // Home-backed dir: GIO refuses to trash across filesystems like /tmp.
+    let dir = glib::user_data_dir().join(format!("grab-del-gal-legacy-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // An unrelated folder that happens to share the title, with content.
+    let decoy = dir.join("title");
+    std::fs::create_dir_all(&decoy).unwrap();
+    std::fs::write(decoy.join("keep.txt"), b"not ours").unwrap();
+
+    let store = gio::ListStore::new::<DownloadItem>();
+    let manager = DownloadManager::new(store.clone(), settings);
+    let item = test_gallery_item(7, &dir, "title");
+    store.append(&item);
+    // Legacy job record: dest_dir is the parent itself.
+    manager
+        .gallery_jobs
+        .borrow_mut()
+        .insert(7, test_gallery_job(dir.clone()));
+
+    assert!(manager.delete_download(7).is_ok());
+    assert_eq!(store.n_items(), 0);
+    // The unrelated folder and its content survive.
+    assert!(decoy.join("keep.txt").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn delete_download_gallery_row_without_job_keeps_folder() {
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("del-gallery-nojob");
+    let settings = test_settings();
+    let dir = glib::user_data_dir().join(format!("grab-del-gal-nojob-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let folder = dir.join("title");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("keep.txt"), b"not ours").unwrap();
+
+    let store = gio::ListStore::new::<DownloadItem>();
+    let manager = DownloadManager::new(store.clone(), settings);
+    store.append(&test_gallery_item(7, &dir, "title"));
+    // No job record at all: nothing is provably ours.
+
+    assert!(manager.delete_download(7).is_ok());
+    assert_eq!(store.n_items(), 0);
+    assert!(folder.join("keep.txt").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn delete_download_new_gallery_row_trashes_subfolder() {
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("del-gallery-new");
+    let settings = test_settings();
+    let dir = glib::user_data_dir().join(format!("grab-del-gal-new-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sub = dir.join("title");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("1.jpg"), b"ours").unwrap();
+
+    let store = gio::ListStore::new::<DownloadItem>();
+    let manager = DownloadManager::new(store.clone(), settings);
+    store.append(&test_gallery_item(7, &dir, "title"));
+    manager
+        .gallery_jobs
+        .borrow_mut()
+        .insert(7, test_gallery_job(sub.clone()));
+
+    assert!(manager.delete_download(7).is_ok());
+    assert_eq!(store.n_items(), 0);
+    assert!(!sub.exists());
+    // Undo the test's own Trash litter.
+    let trash = glib::user_data_dir().join("Trash");
+    let _ = std::fs::remove_dir_all(trash.join("files/title"));
+    let _ = std::fs::remove_file(trash.join("info/title.trashinfo"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn delete_download_after_gallery_rename_trashes_renamed_folder() {
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("del-gallery-rename");
+    let settings = test_settings();
+    // Home-backed dir: GIO refuses to trash across filesystems like /tmp.
+    let dir = glib::user_data_dir().join(format!("grab-del-gal-rename-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sub = dir.join("title");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("1.jpg"), b"ours").unwrap();
+
+    let store = gio::ListStore::new::<DownloadItem>();
+    let manager = DownloadManager::new(store.clone(), settings);
+    store.append(&test_gallery_item(7, &dir, "title"));
+    manager
+        .gallery_jobs
+        .borrow_mut()
+        .insert(7, test_gallery_job(sub.clone()));
+
+    assert!(manager.rename_download(7, "renamed").is_ok());
+    assert!(dir.join("renamed").is_dir());
+    assert!(manager.delete_download(7).is_ok());
+    assert_eq!(store.n_items(), 0);
+    // The renamed folder — the one Grab owns — must be trashed.
+    assert!(!dir.join("renamed").exists());
+    // Undo the test's own Trash litter.
+    let trash = glib::user_data_dir().join("Trash");
+    let _ = std::fs::remove_dir_all(trash.join("files/renamed"));
+    let _ = std::fs::remove_file(trash.join("info/renamed.trashinfo"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

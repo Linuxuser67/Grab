@@ -1,115 +1,10 @@
-//! Gallery UI helpers for the inline New Download card.
+//! Gallery probe orchestration for the inline New Download card.
 //!
-//! Pure move from `inline_add.rs` (no behavior change): the gallery preview
-//! (`show_gallery_ready`, `refresh_gallery_info`) and the gallery-dl video
-//! fallback submit (`submit_gallery_video`).
+//! The dual-backend probe race (`dual_probe`) and unified gallery auth
+//! (`GalleryAuth`, `resolve_gallery_auth`). All UI stays in `inline_add.rs`;
+//! this module has no dependency on it (the sentrux structure check forbids
+//! the cycle).
 
-use crate::download::DownloadManager;
-use crate::inline_add::{
-    VideoStep, enqueue_and_close, hide_video_step, set_lookup_add, show_video_error,
-    sync_entry_icon,
-};
-use adw::prelude::*;
-use gettextrs::gettext;
-use gtk4::prelude::*;
-use libadwaita as adw;
-use std::cell::RefCell;
-use std::rc::Rc;
-
-/// Show the gallery preview: title, file count, and filenames.
-/// Hides the video-specific rows (format selector).
-pub(crate) fn show_gallery_ready(
-    v: &VideoStep,
-    card: crate::gallery_card::GalleryCard,
-    title: &str,
-) {
-    hide_video_step(v);
-    v.looking_up.set(false);
-    v.is_gallery.set(true);
-    // Store the card first so the filter handler can access it.
-    *v.gallery_card.borrow_mut() = Some(card);
-    // Reset filter to All.
-    v.gallery_filter.set_active_name(Some("all"));
-    refresh_gallery_info(v, title);
-    v.gallery_info.set_visible(true);
-    v.gallery_filter_wrap.set_visible(true);
-    // Reveal the block.
-    v.action_revealer.set_visible(true);
-    v.action_revealer.set_reveal_child(true);
-    v.group_revealer.set_visible(true);
-    v.group_revealer.set_reveal_child(true);
-    // The Add button earns its text label.
-    v.add_btn.set_icon_name("");
-    v.add_btn.remove_css_class("circular");
-    v.add_btn.set_label(&gettext("Add"));
-    sync_entry_icon(v);
-}
-
-/// Refresh the gallery info row from the current card state.
-pub(crate) fn refresh_gallery_info(v: &VideoStep, title: &str) {
-    if let Some(card) = v.gallery_card.borrow().as_ref() {
-        let filter = *card.filter.borrow();
-        let total = card.total(filter);
-        let count_text = crate::gallery_card::display_count(
-            card.file_count(),
-            5, // probe cap (--range 1-5)
-            total,
-        );
-        let preview = card.preview_filenames().join(", ");
-        let subtitle = format!("{count_text} • {preview}");
-        v.gallery_info.set_title(title);
-        v.gallery_info.set_subtitle(&subtitle);
-    }
-}
-
-/// Submit a video URL that yt-dlp can't handle but gallery-dl can.
-/// Queues it as a gallery row (option A); the title comes from the gallery probe.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn submit_gallery_video(
-    manager: &Rc<DownloadManager>,
-    dest: &Rc<RefCell<String>>,
-    close_card: &Rc<dyn Fn()>,
-    url: &str,
-    items: &[crate::gallery_probe::GalleryItem],
-    scheduled_at: Option<i64>,
-    step: &Rc<VideoStep>,
-    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
-) {
-    let title = items
-        .first()
-        .map(|i| crate::gallery_probe::probe_title(i, url))
-        .unwrap_or_else(|| url.to_string());
-    let settings = manager.settings();
-    let cookies_browser = settings.cookies_browser().to_string();
-    let speed_limit = crate::gallery_runner::gallery_speed_limit(settings);
-    enqueue_and_close(
-        manager,
-        dest,
-        close_card,
-        scheduled_at,
-        |d| {
-            let job = crate::gallery_argv::GalleryJob {
-                // Placeholder; enqueue_gallery assigns the real row ID.
-                item_id: 0,
-                page_url: url.to_string(),
-                title: title.clone(),
-                // Probe items are capped at 5; don't report a wrong count.
-                file_count: None,
-                dest_dir: std::path::PathBuf::from(d.unwrap_or(".")),
-                // Default to All: a video fallback may still yield images.
-                filter: crate::gallery_argv::GalleryFilter::All,
-                cookies_browser,
-                speed_limit,
-                range: None,
-            };
-            manager.enqueue_gallery(&job)
-        },
-        |e| {
-            show_video_error(step, e);
-            set_lookup_add(lookup_add, true);
-        },
-    );
-}
 /// Outcome of the dual-backend probe race. The caller (inline_add.rs) owns
 /// all UI; this only orchestrates the two probes.
 pub(crate) enum DualProbeOutcome {
@@ -127,8 +22,6 @@ pub(crate) enum DualProbeOutcome {
             crate::video_tools::VideoError,
         >,
     },
-    /// A newer lookup started while probing: show nothing.
-    Stale,
 }
 
 /// Inputs for [`dual_probe`].
@@ -139,8 +32,6 @@ pub(crate) struct DualProbeCtx<'a> {
     pub proxy: Option<crate::net_types::ResolvedProxy>,
     pub libs: yt_dlp::client::deps::Libraries,
     pub tool: std::path::PathBuf,
-    pub probe: &'a Rc<RefCell<crate::inline_add::ProbeState>>,
-    pub generation: u64,
 }
 
 /// Did gallery-dl find anything worth showing on its own? Images and/or
@@ -163,6 +54,48 @@ pub(crate) fn gallery_won(
             )
         }
         _ => false,
+    }
+}
+
+/// Auth for a gallery-dl spawn: cookie jar path + user agent. The handoff
+/// jar (from the browser extension) is preferred; otherwise cookies are
+/// exported from the configured browser (up to 30s). `_staged` keeps an
+/// exported jar alive as long as the auth is held.
+pub(crate) struct GalleryAuth {
+    pub cookies_path: Option<std::path::PathBuf>,
+    pub user_agent: Option<String>,
+    _staged: Option<crate::cookies::StagedCookies>,
+}
+
+/// Resolve gallery-dl auth for a URL: handoff jar first, browser export as
+/// fallback. Runs on the worker (not GTK main); the export can take 30s.
+pub(crate) async fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAuth {
+    let handoff_path = crate::extension_server::handoff_cookie_path(url);
+    let handoff_ua = crate::extension_server::handoff_user_agent(url);
+    let staged = if handoff_path.is_none() {
+        if browser.is_empty() || browser == "none" {
+            None
+        } else if let Some(ytdlp) =
+            crate::video_tools::find_in_dirs("yt-dlp", &crate::video_tools::tool_search_dirs())
+        {
+            crate::cookies::export_cookies_to_file(
+                &ytdlp,
+                browser,
+                url,
+                std::time::Duration::from_secs(30),
+            )
+            .await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let cookies_path = handoff_path.or_else(|| staged.as_ref().map(|c| c.path().to_path_buf()));
+    GalleryAuth {
+        cookies_path,
+        user_agent: handoff_ua,
+        _staged: staged,
     }
 }
 
@@ -195,41 +128,19 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
         ctx.proxy,
         Some(cancel_rx),
     ));
-    // gallery-dl needs the cookie export first (handoff jar preferred); the
-    // export runs while yt-dlp is already probing.
+    // gallery-dl needs its auth first (handoff jar preferred); the export
+    // runs while yt-dlp is already probing.
     let mut gallery_fut = Box::pin(async {
-        let handoff_path = crate::extension_server::handoff_cookie_path(&url);
-        let handoff_ua = crate::extension_server::handoff_user_agent(&url);
-        let probe_cookies = if handoff_path.is_none() {
-            if ctx.browser.is_empty() || ctx.browser == "none" {
-                None
-            } else if let Some(ytdlp) =
-                crate::video_tools::find_in_dirs("yt-dlp", &crate::video_tools::tool_search_dirs())
-            {
-                crate::cookies::export_cookies_to_file(
-                    &ytdlp,
-                    ctx.browser.as_str(),
-                    &url,
-                    std::time::Duration::from_secs(30),
-                )
-                .await
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let cookies_path =
-            handoff_path.or_else(|| probe_cookies.as_ref().map(|c| c.path().to_path_buf()));
+        let auth = resolve_gallery_auth(&url, &ctx.browser).await;
         let r = crate::gallery_probe::probe_gallery(
             &ctx.tool,
             &url,
-            cookies_path.as_deref(),
-            handoff_ua.as_deref(),
+            auth.cookies_path.as_deref(),
+            auth.user_agent.as_deref(),
         )
         .await;
-        // The exported jar must outlive the probe.
-        drop(probe_cookies);
+        // The auth (and its staged jar) must outlive the probe.
+        drop(auth);
         r
     });
 
@@ -256,10 +167,8 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
             (g, Some(y), won)
         }
     };
-    // Discard stale results: the user may have pasted a new URL meanwhile.
-    if ctx.probe.borrow().generation() != ctx.generation {
-        return DualProbeOutcome::Stale;
-    }
+    // Note: staleness (user pasted a new URL mid-probe) is checked by the
+    // caller, which owns the probe state.
     if won {
         let items = gallery_result
             .expect("gallery_won implies Ok(Some)")

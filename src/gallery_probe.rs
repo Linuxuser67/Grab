@@ -12,6 +12,15 @@ use crate::gallery_tools::GalleryError;
 /// Timeout for the gallery-dl probe (same as the yt-dlp probe).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Upper bound for the file picker enumeration: the picker builds one toggle
+/// per file on the GTK thread, so an unbounded gallery would freeze the UI.
+/// `--range` keeps gallery-dl itself from walking further.
+pub(crate) const ENUMERATE_MAX_FILES: usize = 500;
+
+/// Timeout for the full enumeration: a huge gallery can take a while even
+/// capped, but it must not hang forever.
+const ENUMERATE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// One file from `gallery-dl -j` output. Extractors emit wildly different
 /// metadata keys; `filename`/`extension`/`category` are the reliable core,
 /// everything else lands in `extra` for best-effort title derivation.
@@ -271,6 +280,23 @@ pub async fn probe_gallery(
 /// The `filter` must match the download's filter: gallery-dl applies `--range`
 /// to the filtered results, so picker indices only line up when both sides
 /// filter identically.
+///
+/// Base argv for the file enumeration (before auth, filter, and URL).
+/// Pure for tests: asserts the `--range` bound stays in place.
+fn enumerate_base_argv() -> Vec<String> {
+    vec![
+        "--config-ignore".to_string(),
+        "-j".to_string(),
+        "--no-download".to_string(),
+        // Bound the work: the picker can't show more than ENUMERATE_MAX_FILES
+        // anyway. Indices stay 1-based, so range_spec remains correct.
+        "--range".to_string(),
+        format!("1-{ENUMERATE_MAX_FILES}"),
+        "-o".to_string(),
+        "extractor.cookies-update=false".to_string(),
+    ]
+}
+
 pub async fn enumerate_gallery_files(
     tool: &Path,
     url: &str,
@@ -281,12 +307,9 @@ pub async fn enumerate_gallery_files(
     let mut cmd = tokio::process::Command::new(tool);
     // See probe_gallery: a dropped enumeration future must kill the child.
     cmd.kill_on_drop(true);
-    cmd.arg("--config-ignore")
-        .arg("-j")
-        .arg("--no-download")
-        // No --range: enumerate everything.
-        .arg("-o")
-        .arg("extractor.cookies-update=false");
+    for arg in enumerate_base_argv() {
+        cmd.arg(arg);
+    }
     if let Some(cookies) = cookies_file {
         cmd.arg("-C").arg(cookies);
     }
@@ -313,9 +336,9 @@ pub async fn enumerate_gallery_files(
             .collect();
         crate::backend_debug::log_spawn(&program, &args);
     }
-    let output = cmd
-        .output()
+    let output = tokio::time::timeout(ENUMERATE_TIMEOUT, cmd.output())
         .await
+        .map_err(|_| GalleryError::probe("gallery-dl enumerate timed out".to_string()))?
         .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
     if !output.status.success() {
         return Err(GalleryError::install(format!(
@@ -461,6 +484,20 @@ pub async fn count_gallery_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enumerate_argv_is_range_bounded() {
+        // The picker builds one toggle per file on the GTK thread: the
+        // enumeration must stay capped or a huge gallery freezes the UI.
+        let argv = enumerate_base_argv();
+        let range_pos = argv.iter().position(|a| a == "--range");
+        assert!(range_pos.is_some(), "argv: {argv:?}");
+        assert_eq!(
+            argv[range_pos.unwrap() + 1],
+            format!("1-{ENUMERATE_MAX_FILES}"),
+            "argv: {argv:?}"
+        );
+    }
 
     #[test]
     fn should_surface_auth_errors() {

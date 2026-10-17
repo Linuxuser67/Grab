@@ -364,3 +364,20 @@ fn staging_claim_skips_existing_base_file() {
     // Cleanup
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn live_info_json_args_none_is_empty() {
+    assert!(live_info_json_args(None).is_empty());
+}
+
+#[test]
+fn live_info_json_args_some_emits_flag_pair() {
+    let args = live_info_json_args(Some(std::path::Path::new("/tmp/.grab-live-1.json")));
+    assert_eq!(
+        args,
+        vec![
+            "--load-info-json".to_string(),
+            "/tmp/.grab-live-1.json".to_string()
+        ]
+    );
+}

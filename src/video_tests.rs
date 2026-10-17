@@ -4937,6 +4937,60 @@ fn a_crashed_remux_leaves_only_a_partial_and_it_is_reclaimable() {
 }
 
 #[test]
+fn a_failed_bsf_remux_retries_bare_over_its_own_partial() {
+    // The first attempt can leave a partial output behind; the bare retry must still run.
+    let dir = std::env::temp_dir().join(format!("grab-remuxbsf-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("v.1.mp4.part");
+    std::fs::write(&src, b"recorded").unwrap();
+    let final_tmp = dir.join("final.1.mp4");
+    let marker = dir.join("first-ran");
+    let bin = dir.join("fake-ffmpeg-bsf-then-ok");
+    let script = r#"#!/bin/sh
+input=""
+prev=""
+last=""
+for a in "$@"; do
+    if [ "$prev" = "-i" ]; then input="$a"; fi
+    prev="$a"
+    last="$a"
+done
+if [ ! -f "MARKER" ]; then
+    touch "MARKER"
+    printf 'partial' > "$last"
+    echo "ffmpeg: first attempt failed" >&2
+    exit 1
+fi
+cat "$input" > "$last"
+exit 0
+"#;
+    let script = script.replace("MARKER", &marker.display().to_string());
+    std::fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let res = crate::runtime::tokio_rt().block_on(remux_live_capture(
+        &bin,
+        &src,
+        &final_tmp,
+        false,
+        std::time::Duration::from_secs(30),
+        "https://x.com/watch?v=abc123",
+    ));
+    assert!(
+        res.is_ok(),
+        "the bare retry never ran; the failed attempt's partial blocked it: {res:?}"
+    );
+    assert_eq!(std::fs::read(&final_tmp).unwrap(), b"recorded");
+    assert!(!dir.join("final.1.mp4.part").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_successful_live_remux_is_only_named_final_once_ffmpeg_succeeds() {
     // The rename is the mechanism: until then the file is a sweepable `.part`.
     let dir = std::env::temp_dir().join(format!("grab-remuxrename-{}", std::process::id()));

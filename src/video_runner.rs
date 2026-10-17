@@ -883,6 +883,9 @@ pub(crate) async fn remux_live_capture(
         let detail = last_log_line(&log_tail, "ffmpeg reported failure");
         if with_bsf {
             tracing::debug!(error = %detail, "live remux without bsf, retrying bare");
+            // The failed attempt may have left a partial output. The retry must
+            // start clean; the partial is ours because this loop reserved its slot.
+            let _ = tokio::fs::remove_file(&partial).await;
             with_bsf = false;
             continue;
         }

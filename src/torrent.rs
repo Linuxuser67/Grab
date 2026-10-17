@@ -213,6 +213,9 @@ pub struct TorrentFileEntry {
     pub raw_path: String,
     /// Display form of `raw_path`. UI only — never a filesystem path.
     pub display_path: String,
+    /// File size in bytes. Contract data: the picker pills show paths only,
+    /// nothing reads it yet.
+    #[allow(dead_code)]
     pub length: u64,
 }
 

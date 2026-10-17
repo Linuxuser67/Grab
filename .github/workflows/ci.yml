@@ -42,7 +42,7 @@ jobs:
     container: fedora:44
     steps:
       - name: Install system dependencies
-        run: dnf install -y git gcc pkg-config gtk4-devel libadwaita-devel python3 python3-pip
+        run: dnf install -y git gcc pkg-config gtk4-devel libadwaita-devel python3 python3-pip xorg-x11-server-Xvfb
       - name: Install Python 3.12 (for gallery-dl venv)
         run: dnf install -y python3.12
       - name: Install pinned gallery-dl (for integration tests)
@@ -69,6 +69,21 @@ jobs:
       # (gallery-dl has an upstream internal bug; tests skip until fixed).
       # To enforce the gate locally: GRAB_REQUIRE_GALLERY_DL=1 cargo test
       - run: cargo test -- --test-threads=1 --nocapture
+      # picker_grid's tests need a display: GtkMultiSelection asserts that GTK
+      # is initialized, so they are #[ignore]d for the plain run above. Xvfb
+      # supplies one; the test binary and its deps are already built. The
+      # trailing grep guards the ignore: zero matching tests would exit 0.
+      - name: UI tests (Xvfb)
+        run: |
+          set -o pipefail
+          Xvfb :99 -screen 0 1280x800x24 &
+          for _ in $(seq 1 20); do [ -S /tmp/.X11-unix/X99 ] && break; sleep 0.5; done
+          # Fail at the readiness check, not later in cargo test, if it never came up.
+          test -S /tmp/.X11-unix/X99
+          export DISPLAY=:99
+          export GSK_RENDERER=cairo
+          cargo test picker_grid -- --ignored --test-threads=1 --nocapture | tee /tmp/ui-tests.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' /tmp/ui-tests.log
   # Guards the module structure: sentrux enforces the architectural rules
   # in .sentrux/rules.toml (currently: zero import cycles). Pinned to
   # v0.5.7 so an upstream release can't silently change the verdict; runs

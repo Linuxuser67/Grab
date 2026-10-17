@@ -19,9 +19,10 @@
 
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
+use crate::picker_grid::PickerGrid;
 use crate::window_rows::{
-    apply_scheduled_at, default_name_for, list_selected, picker_enter_confirms, picker_header,
-    picker_list, selection_action_bar, wire_list_selection_bar,
+    apply_scheduled_at, default_name_for, picker_enter_confirms, picker_header,
+    selection_action_bar,
 };
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
@@ -186,7 +187,9 @@ pub(crate) fn playlist_count_label(kind: crate::media_types::PlaylistKind, count
     template.replace("{}", &count.to_string())
 }
 
-/// Seconds as M:SS / H:MM:SS for picker subtitles.
+/// Seconds as M:SS / H:MM:SS. Test-only since the pills dropped subtitles
+/// (window_tests keeps the formatting pinned).
+#[cfg(test)]
 pub(crate) fn fmt_item_duration(secs: i64) -> String {
     let secs = secs.max(0) as u64;
     let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
@@ -758,21 +761,15 @@ fn push_playlist_items_page(
     }
 
     let count = playlist.items.len();
-    // Title over a dimmed duration. The truncation
-    // notice sits under the header as a dimmed caption.
-    let entries: Rc<Vec<(String, String)>> = Rc::new(
+    // Pill titles; the truncation notice sits under the header as a dimmed
+    // caption.
+    let grid = PickerGrid::new(
         playlist
             .items
             .iter()
-            .map(|item| {
-                (
-                    item.title.to_string(),
-                    item.duration.map(fmt_item_duration).unwrap_or_default(),
-                )
-            })
+            .map(|item| item.title.to_string())
             .collect(),
     );
-    let (wrapbox, picks) = picker_list(Rc::clone(&entries));
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -795,7 +792,10 @@ fn push_playlist_items_page(
             .build();
         list_box.append(&notice);
     }
-    list_box.append(&wrapbox);
+    // Scrolled: big playlists must not size the card off-screen, but the
+    // capped natural height still grows and shrinks with the item count.
+    let scrolled = crate::picker_grid::scrolled_grid(grid.widget());
+    list_box.append(&scrolled);
     // The error caption lives under the list, like the old row list.
     let error_caption = gtk4::Label::builder()
         .label("")
@@ -805,20 +805,6 @@ fn push_playlist_items_page(
         .build();
     list_box.append(&error_caption);
 
-    // Scrolled: big playlists must not size the card off-screen, but the capped
-    // natural height lets it grow and shrink with the item count. valign=Start
-    // (not the Fill default): the ToolbarView would otherwise stretch the
-    // scrolled window to the full content height, leaving empty space below
-    // a short list.
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .child(&list_box)
-        .propagate_natural_height(true)
-        .max_content_height(480)
-        .vexpand(false)
-        .valign(gtk4::Align::Start)
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .build();
-
     let toolbar = adw::ToolbarView::new();
     // Compact header instead of the auto AdwHeaderBar: back + title + count
     // on one tight row, no 48px of empty chrome around a centered title.
@@ -827,7 +813,7 @@ fn push_playlist_items_page(
         &playlist.title,
         &playlist_count_label(playlist.kind, count),
     ));
-    toolbar.set_content(Some(&scrolled));
+    toolbar.set_content(Some(&list_box));
     let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();
     toolbar.add_bottom_bar(&action_bar);
     let picker_page = adw::NavigationPage::builder()
@@ -837,14 +823,14 @@ fn push_playlist_items_page(
         .build();
     picker_enter_confirms(&picker_page, &add_btn);
 
-    // The action counts the live selection (see `wire_list_selection_bar`).
-    wire_list_selection_bar(&picks, &select_all_btn, &select_none_btn, &add_btn, |n| {
+    // The action counts the live selection (see `PickerGrid::wire_selection_bar`).
+    grid.wire_selection_bar(&select_all_btn, &select_none_btn, &add_btn, |n| {
         ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
     });
 
     {
         let close_card = close_card.clone();
-        let picks = picks.clone();
+        let grid = grid.clone();
         let add_btn_click = add_btn.clone();
         add_btn_click.connect_clicked(move |_| {
             // Guard against re-entry: Enter emits clicked directly, bypassing
@@ -853,7 +839,7 @@ fn push_playlist_items_page(
             if !add_btn.is_sensitive() {
                 return;
             }
-            let picked: Vec<usize> = list_selected(&picks);
+            let picked: Vec<usize> = grid.selected_indices();
             let picked_set: std::collections::HashSet<usize> = picked.into_iter().collect();
             // Owned clones for the async import below.
             let chosen: Vec<(usize, crate::media_types::PlaylistItem)> = playlist
@@ -876,10 +862,10 @@ fn push_playlist_items_page(
             let multi = chosen.len() > 1;
             let title = playlist.title.clone();
             // Disable the button while the import is in flight: a second
-            // click would see the picks still active and enqueue duplicates.
+            // click would see the selection unchanged and enqueue duplicates.
             add_btn.set_sensitive(false);
             let manager = manager.clone();
-            let picks = picks.clone();
+            let grid = grid.clone();
             let error_caption = error_caption.clone();
             let close_card = close_card.clone();
             let page_url = playlist.page_url.clone();
@@ -947,7 +933,7 @@ fn push_playlist_items_page(
                     // Rows already queued stay queued on a partial failure: unselect
                     // them so a retry submits only the remainder (dedupe is by
                     // filename).
-                    picks[*i].set_active(false);
+                    grid.unselect(*i);
                 }
                 if let Some(e) = failed {
                     error_caption.set_text(&e);
@@ -986,20 +972,9 @@ fn push_torrent_picker_page(
     // The file count lives in the compact header; the group needs no title.
     let file_count = ngettext("{} file", "{} files", entries.len() as u32)
         .replace("{}", &entries.len().to_string());
-    // Like the playlist picker: path over a dimmed size.
-    let entry_count = entries.len();
-    let list_entries: Rc<Vec<(String, String)>> = Rc::new(
-        entries
-            .iter()
-            .map(|e| {
-                (
-                    e.display_path.clone(),
-                    crate::file_names::fmt_bytes(e.length),
-                )
-            })
-            .collect(),
-    );
-    let (wrapbox, picks) = picker_list(list_entries);
+    // Pills carry the display path; the old pill loop never rendered the
+    // size sub either.
+    let grid = PickerGrid::new(entries.iter().map(|e| e.display_path.clone()).collect());
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -1010,7 +985,9 @@ fn push_torrent_picker_page(
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
-    list_box.append(&wrapbox);
+    // Same arrangement as the playlist picker (see scrolled_grid).
+    let scrolled = crate::picker_grid::scrolled_grid(grid.widget());
+    list_box.append(&scrolled);
     let error_caption = gtk4::Label::builder()
         .label("")
         .css_classes(["error", "caption"])
@@ -1019,23 +996,10 @@ fn push_torrent_picker_page(
         .build();
     list_box.append(&error_caption);
 
-    // Same capped scrolled window as the playlist picker: big torrents must
-    // not size the card off-screen. valign=Start (not the Fill default): the
-    // ToolbarView would otherwise stretch the scrolled window to the full
-    // content height, leaving empty space below a short list.
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .child(&list_box)
-        .propagate_natural_height(true)
-        .max_content_height(480)
-        .vexpand(false)
-        .valign(gtk4::Align::Start)
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .build();
-
     let toolbar = adw::ToolbarView::new();
     // Same compact header as the playlist picker: back + file name + count.
     toolbar.add_top_bar(&picker_header(nav, &file_name, &file_count));
-    toolbar.set_content(Some(&scrolled));
+    toolbar.set_content(Some(&list_box));
     // HIG selection mode: the selection's actions live in a bottom
     // action bar, not the header. Back pops the page (cancels).
     let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();
@@ -1048,22 +1012,22 @@ fn push_torrent_picker_page(
     picker_enter_confirms(&picker_page, &add_btn);
 
     // Same as the playlist picker: the action counts the live selection.
-    wire_list_selection_bar(&picks, &select_all_btn, &select_none_btn, &add_btn, |n| {
+    grid.wire_selection_bar(&select_all_btn, &select_none_btn, &add_btn, |n| {
         ngettext("_Add {} file", "_Add {} files", n as u32).replace("{}", &n.to_string())
     });
 
     {
         let close_card = close_card.clone();
-        let picks = picks.clone();
+        let grid = grid.clone();
         add_btn.connect_clicked(move |_| {
-            let selected: Vec<usize> = list_selected(&picks);
+            let selected: Vec<usize> = grid.selected_indices();
             if selected.is_empty() {
                 error_caption.set_text(&gettext("Select at least one file"));
                 error_caption.set_visible(true);
                 return;
             }
             // All on means no filter: pass None, not every index.
-            let only = (selected.len() < entry_count).then_some(selected);
+            let only = (selected.len() < grid.len()).then_some(selected);
             enqueue_and_close(
                 &manager,
                 &dest_dir,

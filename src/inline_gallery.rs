@@ -4,12 +4,13 @@
 //! (`GalleryAuth`, `resolve_gallery_auth`) and the gallery file picker page
 //! (`push_gallery_picker_page`). Step-bound UI stays in `inline_add.rs`; this
 //! module has no dependency on it (the sentrux structure check forbids the
-//! cycle), and the picker's shared widgets come from `window_rows`.
+//! cycle). The picker's shared widgets come from `window_rows`; the entry
+//! grid from `picker_grid`.
 
 use crate::download::DownloadManager;
+use crate::picker_grid::PickerGrid;
 use crate::window_rows::{
-    apply_scheduled_at, list_selected, picker_enter_confirms, picker_header, picker_list,
-    selection_action_bar, wire_list_selection_bar,
+    apply_scheduled_at, picker_enter_confirms, picker_header, selection_action_bar,
 };
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
@@ -187,20 +188,7 @@ pub(crate) fn push_gallery_picker_page(
     // The enumeration is capped (see ENUMERATE_MAX_FILES): say so when we
     // hit the cap, so the user knows the list is truncated.
     let capped = count >= crate::gallery_probe::ENUMERATE_MAX_FILES;
-    let entries: Rc<Vec<(String, String)>> = Rc::new(
-        items
-            .iter()
-            .map(|item| {
-                let sub = if item.extension.is_empty() {
-                    item.category.clone()
-                } else {
-                    item.extension.clone()
-                };
-                (item.filename.clone(), sub)
-            })
-            .collect(),
-    );
-    let (wrapbox, picks) = picker_list(Rc::clone(&entries));
+    let grid = PickerGrid::new(items.iter().map(|item| item.filename.clone()).collect());
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -223,7 +211,9 @@ pub(crate) fn push_gallery_picker_page(
         .halign(gtk4::Align::Start)
         .build();
     list_box.append(&positional_note);
-    list_box.append(&wrapbox);
+    // Only the entries scroll; the captions stay outside (see scrolled_grid).
+    let scrolled = crate::picker_grid::scrolled_grid(grid.widget());
+    list_box.append(&scrolled);
     let error_caption = gtk4::Label::builder()
         .label("")
         .css_classes(["error", "caption"])
@@ -231,15 +221,6 @@ pub(crate) fn push_gallery_picker_page(
         .visible(false)
         .build();
     list_box.append(&error_caption);
-
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .child(&list_box)
-        .propagate_natural_height(true)
-        .max_content_height(480)
-        .vexpand(false)
-        .valign(gtk4::Align::Start)
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .build();
 
     let toolbar = adw::ToolbarView::new();
     let count_text =
@@ -254,7 +235,7 @@ pub(crate) fn push_gallery_picker_page(
         count_text
     };
     toolbar.add_top_bar(&picker_header(nav, &title, &count_text));
-    toolbar.set_content(Some(&scrolled));
+    toolbar.set_content(Some(&list_box));
     let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();
     toolbar.add_bottom_bar(&action_bar);
     let picker_page = adw::NavigationPage::builder()
@@ -264,12 +245,12 @@ pub(crate) fn push_gallery_picker_page(
         .build();
     picker_enter_confirms(&picker_page, &add_btn);
 
-    wire_list_selection_bar(&picks, &select_all_btn, &select_none_btn, &add_btn, |n| {
+    grid.wire_selection_bar(&select_all_btn, &select_none_btn, &add_btn, |n| {
         ngettext("_Queue {} file", "_Queue {} files", n as u32).replace("{}", &n.to_string())
     });
 
     {
-        let picks = picks.clone();
+        let grid = grid.clone();
         let error_caption = error_caption.clone();
         let add_btn_click = add_btn.clone();
         let nav_pop = nav.clone();
@@ -277,7 +258,7 @@ pub(crate) fn push_gallery_picker_page(
             if !add_btn.is_sensitive() {
                 return;
             }
-            let selected = list_selected(&picks);
+            let selected = grid.selected_indices();
             if selected.is_empty() {
                 error_caption.set_text(&gettext("Select at least one file"));
                 error_caption.set_visible(true);

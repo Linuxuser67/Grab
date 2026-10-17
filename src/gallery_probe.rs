@@ -167,12 +167,6 @@ pub fn should_surface(e: &GalleryError) -> bool {
     }
 }
 
-/// Whether a yt-dlp failure is worth trying gallery-dl for.
-/// Only unsupported-URL and login-required errors: gallery-dl handles sites
-/// yt-dlp can't (e.g. Instagram stories). Network errors, rate limits,
-/// geo-blocks, and private/removed videos are not worth the probe delay
-/// (up to 45s: 30s cookie export + 15s probe).
-/// Pure for tests.
 /// Best-effort title from probe metadata. First non-empty wins:
 /// `title` → `user`/`author` → `category` → URL-derived filename.
 pub fn probe_title(item: &GalleryItem, url: &str) -> String {
@@ -209,6 +203,10 @@ pub async fn probe_gallery(
     user_agent: Option<&str>,
 ) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
     let mut cmd = tokio::process::Command::new(tool);
+    // A timed-out probe must not leave gallery-dl running: dropping the
+    // `timeout(.., cmd.output())` future below drops the child, and with
+    // kill_on_drop it is SIGKILLed instead of orphaned.
+    cmd.kill_on_drop(true);
     cmd.arg("--config-ignore")
         .arg("-j")
         .arg("--no-download")
@@ -281,6 +279,8 @@ pub async fn enumerate_gallery_files(
     filter: crate::gallery_argv::GalleryFilter,
 ) -> Result<Vec<GalleryItem>, GalleryError> {
     let mut cmd = tokio::process::Command::new(tool);
+    // See probe_gallery: a dropped enumeration future must kill the child.
+    cmd.kill_on_drop(true);
     cmd.arg("--config-ignore")
         .arg("-j")
         .arg("--no-download")
@@ -327,23 +327,6 @@ pub async fn enumerate_gallery_files(
         .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
     let items = parse_probe_messages(&messages)?;
     Ok(items)
-}
-
-/// Sync wrapper for `probe_gallery` for true sync callers. Uses `block_on_sync`.
-#[allow(dead_code)]
-pub fn probe_gallery_sync(
-    tool: &Path,
-    url: &str,
-    cookies_file: Option<&Path>,
-    user_agent: Option<&str>,
-) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
-    let tool = tool.to_path_buf();
-    let url = url.to_string();
-    let cookies_file = cookies_file.map(|p| p.to_path_buf());
-    let user_agent = user_agent.map(|s| s.to_string());
-    crate::runtime::block_on_sync(async move {
-        probe_gallery(&tool, &url, cookies_file.as_deref(), user_agent.as_deref()).await
-    })
 }
 
 /// Parse `gallery-dl -j` message arrays into file items.
@@ -448,6 +431,8 @@ pub async fn count_gallery_files(
 ) -> Option<u32> {
     let argv = crate::gallery_argv::count_argv(tool, url, cookies_file, user_agent, filter);
     let mut cmd = tokio::process::Command::new(&argv[0]);
+    // See probe_gallery: a timed-out count must not orphan gallery-dl.
+    cmd.kill_on_drop(true);
     cmd.args(&argv[1..]);
     // Debug: log the full argv before spawning.
     if crate::backend_debug::enabled() {
@@ -471,32 +456,6 @@ pub async fn count_gallery_files(
         .filter(|l| !l.trim().is_empty())
         .count();
     Some(count as u32)
-}
-
-/// Sync wrapper for `count_gallery_files` for true sync callers (e.g. tests,
-/// non-async contexts). Uses `block_on_sync` internally.
-#[allow(dead_code)]
-pub fn count_gallery_files_sync(
-    tool: &Path,
-    url: &str,
-    cookies_file: Option<&Path>,
-    user_agent: Option<&str>,
-    filter: crate::gallery_argv::GalleryFilter,
-) -> Option<u32> {
-    let tool = tool.to_path_buf();
-    let url = url.to_string();
-    let cookies_file = cookies_file.map(|p| p.to_path_buf());
-    let user_agent = user_agent.map(|s| s.to_string());
-    crate::runtime::block_on_sync(async move {
-        count_gallery_files(
-            &tool,
-            &url,
-            cookies_file.as_deref(),
-            user_agent.as_deref(),
-            filter,
-        )
-        .await
-    })
 }
 
 #[cfg(test)]
@@ -832,12 +791,12 @@ mod tests {
         let result = std::thread::spawn(|| {
             // No Tokio runtime on this thread.
             assert!(tokio::runtime::Handle::try_current().is_err());
-            probe_gallery_sync(
+            crate::runtime::tokio_rt().block_on(probe_gallery(
                 std::path::Path::new("/nonexistent/gallery-dl"),
                 "https://example.com/",
                 None,
                 None,
-            )
+            ))
         })
         .join()
         .expect("thread panicked");
@@ -851,17 +810,70 @@ mod tests {
     fn count_gallery_files_works_without_tokio_runtime() {
         let result = std::thread::spawn(|| {
             assert!(tokio::runtime::Handle::try_current().is_err());
-            count_gallery_files_sync(
+            crate::runtime::tokio_rt().block_on(count_gallery_files(
                 std::path::Path::new("/nonexistent/gallery-dl"),
                 "https://example.com/",
                 None,
                 None,
                 crate::gallery_argv::GalleryFilter::All,
-            )
+            ))
         })
         .join()
         .expect("thread panicked");
         // Should be None (failure), not a panic.
         assert_eq!(result, None);
+    }
+
+    /// Regression: dropping the probe future (as `timeout()` does on expiry)
+    /// must kill the gallery-dl child instead of orphaning it. The fake tool
+    /// records its own PID so the test can check the process is really gone.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn probe_kills_child_when_future_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("grab-kill-drop-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-gallery-dl.sh");
+        let pidfile = dir.join("child.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho $$ > {}\nexec sleep 60\n",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Drop the probe future quickly, like `timeout()` does on expiry.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(300),
+            probe_gallery(&script, "https://example.com/", None, None),
+        )
+        .await;
+
+        // Wait for the child to have started, then require it to die.
+        let pid: u32 = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pidfile)
+                    && let Ok(pid) = text.trim().parse()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("fake tool never started");
+        let gone = tokio::time::timeout(Duration::from_secs(5), async {
+            while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(gone, "probe child (pid {pid}) survived the dropped future");
     }
 }

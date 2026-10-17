@@ -7250,7 +7250,6 @@ fn gallery_round_trip_failed() {
 }
 
 #[test]
-#[ignore]
 fn gallery_remove_discards_handoff_cookies() {
     // Removing a gallery row must discard its handoff cookies (failed rows
     // keep them for retry, but removal means the user is done).
@@ -7262,7 +7261,7 @@ fn gallery_remove_discards_handoff_cookies() {
     job.page_url = "https://example.com/gallery-cookies".to_string();
     // Stage handoff cookies for the URL.
     crate::extension_server::discard_handoff_cookies(&job.page_url);
-    let _path = crate::extension_server::write_handoff_cookies(
+    let path = crate::extension_server::write_handoff_cookies(
         &job.page_url,
         &[crate::extension_server::Cookie {
             name: "c".to_string(),
@@ -7273,7 +7272,11 @@ fn gallery_remove_discards_handoff_cookies() {
             secure: None,
             expiration_date: None,
         }],
-    );
+    )
+    .expect("write handoff cookies");
+    // write_handoff_cookies only writes the file; the handoff receiver
+    // registers it in the store once accepted — simulate that here.
+    crate::extension_server::store_handoff_cookies(&job.page_url, path, None);
     assert!(crate::extension_server::handoff_cookie_path(&job.page_url).is_some());
     // Enqueue the gallery, then remove it.
     let item = m.enqueue_gallery(&job).expect("enqueue");

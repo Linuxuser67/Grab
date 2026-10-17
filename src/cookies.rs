@@ -247,22 +247,6 @@ pub(crate) async fn export_cookies_to_file(
     Some(StagedCookies(path))
 }
 
-/// Sync wrapper for `export_cookies_to_file` for true sync callers.
-#[allow(dead_code)]
-pub(crate) fn export_cookies_to_file_sync(
-    youtube_bin: &Path,
-    cookies_browser: &str,
-    page_url: &str,
-    timeout: Duration,
-) -> Option<StagedCookies> {
-    let youtube_bin = youtube_bin.to_path_buf();
-    let cookies_browser = cookies_browser.to_string();
-    let page_url = page_url.to_string();
-    crate::runtime::block_on_sync(async move {
-        export_cookies_to_file(&youtube_bin, &cookies_browser, &page_url, timeout).await
-    })
-}
-
 /// Dump one profile's cookies through yt-dlp to a temp file; caller deletes it.
 async fn export_cookies(
     youtube_bin: &Path,

@@ -3067,8 +3067,13 @@ fn make_gallery_picker_opener(
                 batch.clear();
             }
             let result = handle.await;
-            // Superseded: stay quiet — the newer task owns the UI now.
+            // Superseded: the newer task owns the card, so stay quiet — but
+            // a picker for this gallery already on screen must still be
+            // enabled, or nothing ever un-gates its action bar.
             if step3.enumerate_gen.get() != my_gen {
+                if let Some(page) = page.as_ref() {
+                    page.mark_loaded();
+                }
                 return;
             }
             match result {

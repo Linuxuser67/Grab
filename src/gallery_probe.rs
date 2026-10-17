@@ -345,8 +345,8 @@ pub(crate) async fn enumerate_gallery_files_streamed(
     use tokio::io::AsyncBufReadExt as _;
 
     let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter);
-    // stdout is the line stream; stderr is discarded like the batched
-    // variant (its failure signal is the exit status).
+    // stdout is the line stream; stderr is discarded — the exit status is
+    // the failure signal.
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     // Debug: log the full argv before spawning.
@@ -390,11 +390,11 @@ pub(crate) async fn enumerate_gallery_files_streamed(
         let m: serde_json::Value = serde_json::from_str(&line)
             .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
         if let Some(item) = reader.feed(&m) {
-            count += 1;
             // A closed receiver means the UI is gone: stop early.
             if items_tx.send(item).is_err() {
                 return Ok(count);
             }
+            count += 1;
         }
     }
     // EOF: the child should exit promptly — it just closed stdout.
@@ -705,6 +705,91 @@ mod tests {
             names.push(item.filename);
         }
         assert_eq!(names, ["1.jpg", "2.jpg"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Streaming: items must reach the receiver while the child is still
+    /// running — the picker opens on the first one, it does not wait for
+    /// the whole listing.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn streamed_enumerate_yields_items_before_exit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("grab-stream-early-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-gallery-dl.sh");
+        std::fs::write(
+            &script,
+            concat!(
+                "#!/bin/sh\n",
+                "printf '%s\\n' '[3, \"https://example.com/1.jpg\", {\"filename\": \"1.jpg\"}]'\n",
+                // Holds the process open: buffer-until-exit would time out.
+                "sleep 30\n",
+                "exit 0\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            enumerate_gallery_files_streamed(
+                &script,
+                "https://example.com/",
+                None,
+                None,
+                crate::gallery_argv::GalleryFilter::All,
+                tx,
+            )
+            .await
+        });
+        let first = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("first item must arrive before the child exits")
+            .expect("stream must yield an item");
+        assert_eq!(first.filename, "1.jpg");
+        // Cancelling drops the future, which kills the sleeping child.
+        handle.abort();
+        let _ = handle.await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A non-zero exit after items were delivered must surface the error
+    /// while the receiver keeps the partial list: the picker shows what was
+    /// listed and stays usable.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn streamed_enumerate_keeps_delivered_items_on_failed_exit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("grab-stream-exit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-gallery-dl.sh");
+        std::fs::write(
+            &script,
+            concat!(
+                "#!/bin/sh\n",
+                "printf '%s\\n' '[3, \"https://example.com/1.jpg\", {\"filename\": \"1.jpg\"}]'\n",
+                "exit 1\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = enumerate_gallery_files_streamed(
+            &script,
+            "https://example.com/",
+            None,
+            None,
+            crate::gallery_argv::GalleryFilter::All,
+            tx,
+        )
+        .await;
+        assert!(result.is_err(), "non-zero exit must be an error");
+        let item = rx.try_recv().expect("item delivered before the failure");
+        assert_eq!(item.filename, "1.jpg");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

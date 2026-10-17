@@ -407,7 +407,9 @@ pub(crate) async fn enumerate_gallery_files_streamed(
         let wake = (tokio::time::Instant::now() + STREAM_IDLE_TIMEOUT).min(deadline);
         let line = match tokio::time::timeout_at(wake, lines.next_line()).await {
             Err(_) if tokio::time::Instant::now() >= deadline => {
-                return Err(GalleryError::probe("gallery-dl enumerate timed out".to_string()));
+                return Err(GalleryError::probe(
+                    "gallery-dl enumerate timed out".to_string(),
+                ));
             }
             Err(_) => {
                 return Err(GalleryError::probe(

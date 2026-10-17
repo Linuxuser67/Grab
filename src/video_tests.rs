@@ -4919,7 +4919,11 @@ fn a_crashed_remux_leaves_only_a_partial_and_it_is_reclaimable() {
     std::fs::write(staging.join("final.8.1.mp4.part"), b"a neighbour's remux").unwrap();
     std::fs::write(staging.join("final.8.1.mp4.lease"), b"").unwrap();
     // A partial with no lease has no proof it was Grab's scratch: keep it.
-    std::fs::write(staging.join("final.7.4.mp4.part"), b"no lease, not provably ours").unwrap();
+    std::fs::write(
+        staging.join("final.7.4.mp4.part"),
+        b"no lease, not provably ours",
+    )
+    .unwrap();
     sweep_partial_remuxes(&staging, 7);
     assert!(
         staging.join("final.8.1.mp4.part").exists(),

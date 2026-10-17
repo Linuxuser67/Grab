@@ -261,6 +261,13 @@ pub(crate) struct VideoStep {
     /// button (wired at VideoStep construction) to context available later.
     #[allow(clippy::type_complexity)]
     pub(crate) gallery_select_opener: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    /// Abort handle for the in-flight gallery file enumeration (picker).
+    /// Aborted when the card closes, a new lookup starts, or the opener is
+    /// invoked again — killing gallery-dl instead of letting it probe on.
+    pub(crate) enumerate_abort: Rc<RefCell<Option<tokio::task::AbortHandle>>>,
+    /// Generation of the enumeration above: a completed-but-superseded task
+    /// stays quiet instead of flashing "Could not list files".
+    pub(crate) enumerate_gen: Cell<u64>,
     /// The form's Add button: icon-only until a format is picked, then a
     /// labeled "Add" pill (HIG: primary actions carry a text label).
     pub(crate) add_btn: gtk4::Button,
@@ -350,12 +357,25 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     // visible — resetting it here would flash a blue tick mid-slide.
 }
 
+/// Abort the in-flight gallery file enumeration, if any. The generation
+/// bump makes the superseded task stay quiet instead of flashing an error.
+pub(crate) fn abort_enumeration(step: &VideoStep) {
+    step.enumerate_gen
+        .set(step.enumerate_gen.get().wrapping_add(1));
+    if let Some(handle) = step.enumerate_abort.borrow_mut().take() {
+        handle.abort();
+    }
+}
+
 /// Clear the video preview block back to a pristine state: `close_card`
 /// calls this so a non-video add after a video leaves no dead probe state
 /// in memory. Hiding alone is not enough — the name row keeps its text,
 /// the format rows keep their widgets, and the tools/error rows keep
 /// their subtitles.
 fn reset_video_step(step: &VideoStep) {
+    // No enumeration survives a close: kill gallery-dl instead of letting
+    // it probe on for a dead card.
+    abort_enumeration(step);
     // Drop the format options and the current pick.
     step.options.borrow_mut().clear();
     step.format.set_model(Some(&gtk4::StringList::new(&[])));
@@ -375,6 +395,8 @@ fn reset_video_step(step: &VideoStep) {
 
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
+    // A new lookup supersedes any in-flight file enumeration: kill it.
+    abort_enumeration(v);
     // The tick morphs into a spinner in place (browser-address-bar style):
     // no separate indicator beside the entry, no layout shift.
     v.looking_up.set(true);
@@ -626,7 +648,7 @@ fn fallback_plain_failed(
 /// Apply a scheduled timestamp to a freshly enqueued item. Future timestamps
 /// become Scheduled; past ones (the 12:00 default is often stale by Add time)
 /// queue immediately, mirroring restore_existing's overdue handling.
-fn apply_scheduled_at(item: &DownloadItem, scheduled_at: Option<i64>) {
+pub(crate) fn apply_scheduled_at(item: &DownloadItem, scheduled_at: Option<i64>) {
     if let Some(ts) = scheduled_at {
         let now = glib::DateTime::now_local()
             .map(|dt| dt.to_unix())
@@ -687,7 +709,7 @@ fn queue_plain(
 /// old dialog's default widget. Rows and buttons keep Enter for their own
 /// activation — they stop the event before it bubbles up here — so this only
 /// fires when focus is on the page background.
-fn picker_enter_confirms(page: &adw::NavigationPage, add_btn: &gtk4::Button) {
+pub(crate) fn picker_enter_confirms(page: &adw::NavigationPage, add_btn: &gtk4::Button) {
     let key = gtk4::EventControllerKey::new();
     let add_btn = add_btn.clone();
     key.connect_key_pressed(move |_, keyval, _, _| {
@@ -709,7 +731,7 @@ fn picker_enter_confirms(page: &adw::NavigationPage, add_btn: &gtk4::Button) {
 /// chrome with nothing else in it; a picker embedded in a card earns a
 /// denser row. Back pops the navigation page (Esc still collapses the
 /// whole card); the selection actions stay in the bottom action bar.
-fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::Box {
+pub(crate) fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::Box {
     let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
     header.set_margin_top(6);
     header.set_margin_bottom(6);
@@ -754,7 +776,9 @@ fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::B
 ///
 /// Pills size to their titles (no homogeneous mode): short titles get small
 /// pills, and the last row has no phantom empty slots.
-fn picker_list(entries: Rc<Vec<(String, String)>>) -> (adw::WrapBox, Vec<gtk4::ToggleButton>) {
+pub(crate) fn picker_list(
+    entries: Rc<Vec<(String, String)>>,
+) -> (adw::WrapBox, Vec<gtk4::ToggleButton>) {
     // Flowing grid of toggle pills: the simple Button API
     // (set_active/is_active/toggled), native selected styling, no selection
     // model. WrapBox is only the wrapping container.
@@ -786,7 +810,7 @@ fn picker_list(entries: Rc<Vec<(String, String)>>) -> (adw::WrapBox, Vec<gtk4::T
 
 /// Wire the pickers' bottom action bar to the toggle pills: the action counts
 /// the live selection, Select All/None drive the buttons.
-fn wire_list_selection_bar(
+pub(crate) fn wire_list_selection_bar(
     buttons: &[gtk4::ToggleButton],
     select_all_btn: &gtk4::Button,
     select_none_btn: &gtk4::Button,
@@ -826,7 +850,7 @@ fn wire_list_selection_bar(
 }
 
 /// Selected indices of picker toggle pills, ascending.
-fn list_selected(buttons: &[gtk4::ToggleButton]) -> Vec<usize> {
+pub(crate) fn list_selected(buttons: &[gtk4::ToggleButton]) -> Vec<usize> {
     buttons
         .iter()
         .enumerate()
@@ -1051,146 +1075,6 @@ fn push_playlist_items_page(
                 // on the picker so the remaining rows (unchecked above) can be retried.
                 close_card();
             });
-        });
-    }
-
-    nav.push(&picker_page);
-}
-
-/// Gallery file picker as a right-sliding card page: one toggle pill per
-/// file (all on by default), mirroring the playlist picker. The selection
-/// becomes a gallery-dl `--range` spec on the queued job.
-#[allow(clippy::too_many_arguments)]
-fn push_gallery_picker_page(
-    nav: &adw::NavigationView,
-    manager: Rc<DownloadManager>,
-    dest_dir: Rc<RefCell<String>>,
-    close_card: Rc<dyn Fn()>,
-    scheduled_at: Option<i64>,
-    title: String,
-    url: String,
-    filter: crate::gallery_argv::GalleryFilter,
-    items: Vec<crate::gallery_probe::GalleryItem>,
-) {
-    // Don't stack a second picker while one is already visible.
-    if nav.visible_page_tag().as_deref() == Some("gallery-picker") {
-        return;
-    }
-    let count = items.len();
-    let entries: Rc<Vec<(String, String)>> = Rc::new(
-        items
-            .iter()
-            .map(|item| {
-                let sub = if item.extension.is_empty() {
-                    item.category.clone()
-                } else {
-                    item.extension.clone()
-                };
-                (item.filename.clone(), sub)
-            })
-            .collect(),
-    );
-    let (wrapbox, picks) = picker_list(Rc::clone(&entries));
-
-    let list_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(6)
-        .build();
-    list_box.set_margin_top(12);
-    list_box.set_margin_bottom(12);
-    list_box.set_margin_start(12);
-    list_box.set_margin_end(12);
-    list_box.append(&wrapbox);
-    let error_caption = gtk4::Label::builder()
-        .label("")
-        .css_classes(["error", "caption"])
-        .halign(gtk4::Align::Start)
-        .visible(false)
-        .build();
-    list_box.append(&error_caption);
-
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .child(&list_box)
-        .propagate_natural_height(true)
-        .max_content_height(480)
-        .vexpand(false)
-        .valign(gtk4::Align::Start)
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .build();
-
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&picker_header(
-        nav,
-        &title,
-        &ngettext("{} file", "{} files", count as u32).replace("{}", &count.to_string()),
-    ));
-    toolbar.set_content(Some(&scrolled));
-    let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();
-    toolbar.add_bottom_bar(&action_bar);
-    let picker_page = adw::NavigationPage::builder()
-        .tag("gallery-picker")
-        .title(&title)
-        .child(&toolbar)
-        .build();
-    picker_enter_confirms(&picker_page, &add_btn);
-
-    wire_list_selection_bar(&picks, &select_all_btn, &select_none_btn, &add_btn, |n| {
-        ngettext("_Queue {} file", "_Queue {} files", n as u32).replace("{}", &n.to_string())
-    });
-
-    {
-        let picks = picks.clone();
-        let error_caption = error_caption.clone();
-        let add_btn_click = add_btn.clone();
-        let nav_pop = nav.clone();
-        add_btn_click.connect_clicked(move |_| {
-            if !add_btn.is_sensitive() {
-                return;
-            }
-            let selected = list_selected(&picks);
-            if selected.is_empty() {
-                error_caption.set_text(&gettext("Select at least one file"));
-                error_caption.set_visible(true);
-                return;
-            }
-            let range = match crate::gallery_argv::range_spec(&selected) {
-                Some(spec) => spec,
-                None => {
-                    error_caption.set_text(&gettext("Select at least one file"));
-                    error_caption.set_visible(true);
-                    return;
-                }
-            };
-            // Disable while the enqueue runs: a second click would enqueue duplicates.
-            add_btn.set_sensitive(false);
-            let settings = manager.settings();
-            let base_job = crate::gallery_argv::GalleryJob {
-                item_id: 0, // enqueue_gallery assigns the real row ID.
-                page_url: url.clone(),
-                title: title.clone(),
-                file_count: Some(selected.len() as u32),
-                dest_dir: std::path::PathBuf::from("."),
-                filter,
-                cookies_browser: settings.cookies_browser().to_string(),
-                speed_limit: crate::gallery_runner::gallery_speed_limit(settings),
-                range: Some(range),
-            };
-            // Batch guard defers start_next until the Scheduled status is set.
-            let _guard = manager.batch_guard();
-            let mut job = base_job.clone();
-            job.dest_dir = std::path::PathBuf::from(dest_dir.borrow().clone());
-            match manager.enqueue_gallery(&job) {
-                Ok(item) => {
-                    apply_scheduled_at(&item, scheduled_at);
-                    nav_pop.pop();
-                    close_card();
-                }
-                Err(e) => {
-                    error_caption.set_text(&e);
-                    error_caption.set_visible(true);
-                    add_btn.set_sensitive(true);
-                }
-            }
         });
     }
 
@@ -1770,6 +1654,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         gallery_card: Rc::new(RefCell::new(None)),
         gallery_select_btn: gallery_select_btn.clone(),
         gallery_select_opener: Rc::new(RefCell::new(None)),
+        enumerate_abort: Rc::new(RefCell::new(None)),
+        enumerate_gen: Cell::new(0),
         add_btn: add_btn.clone(),
     });
     // "Select files…" invokes the opener set below (where the picker context
@@ -1821,46 +1707,28 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     let card_rc = card_rc.clone();
                     let info = info.clone();
                     glib::spawn_future_local(async move {
-                        // Check handoff cookies first (no export needed if available).
-                        let handoff_path = crate::extension_server::handoff_cookie_path(&url);
-                        let handoff_ua = crate::extension_server::handoff_user_agent(&url);
                         let url_for_count = url.clone();
                         let filter_c = filter;
                         // Extract cookies_browser before spawn: AppSettings is !Send.
                         let browser = crate::settings::AppSettings::new().cookies_browser();
-                        // Run cookie export + count on Tokio worker (not GTK main).
+                        // Run auth + count on Tokio worker (not GTK main).
                         let count_result = crate::runtime::tokio_rt()
                             .spawn(async move {
-                                // Export browser cookies only if no handoff jar.
-                                let cookies = if handoff_path.is_some() {
-                                    None
-                                } else {
-                                    if browser.is_empty() || browser == "none" {
-                                        None
-                                    } else if let Some(ytdlp) = crate::video_tools::find_in_dirs(
-                                        "yt-dlp",
-                                        &crate::video_tools::tool_search_dirs(),
-                                    ) {
-                                        crate::cookies::export_cookies_to_file(
-                                            &ytdlp,
-                                            browser.as_str(),
-                                            &url_for_count,
-                                            std::time::Duration::from_secs(30),
-                                        )
-                                        .await
-                                    } else {
-                                        None
-                                    }
-                                };
+                                // Unified auth: handoff jar first, browser
+                                // export as fallback (was handoff-only: auth-
+                                // gated galleries could count zero here but
+                                // download fine).
+                                let auth = crate::inline_gallery::resolve_gallery_auth(
+                                    &url_for_count,
+                                    browser.as_str(),
+                                )
+                                .await;
                                 if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                                    let cookies_path = handoff_path.or_else(|| {
-                                        cookies.as_ref().map(|c| c.path().to_path_buf())
-                                    });
                                     crate::gallery_probe::count_gallery_files(
                                         &tool,
                                         &url_for_count,
-                                        cookies_path.as_deref(),
-                                        handoff_ua.as_deref(),
+                                        auth.cookies_path.as_deref(),
+                                        auth.user_agent.as_deref(),
                                         filter_c,
                                     )
                                     .await
@@ -2152,117 +2020,16 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         })
     };
 
-    // Gallery "Select files…" opener: set once at build time. It reads the
-    // current card state (URL, filter, title) at click time, runs the full
-    // enumeration in the background, then pushes the checklist picker.
-    {
-        let step2 = step.clone();
-        let nav2 = nav.clone();
-        let manager2 = manager.clone();
-        let dest2 = dest_dir.clone();
-        let close2 = close_card.clone();
-        let scheduled2 = scheduled_at.clone();
-        *step.gallery_select_opener.borrow_mut() = Some(Rc::new(move || {
-            let (url, filter, title) = match step2.gallery_card.borrow().as_ref() {
-                Some(card) => (
-                    card.url().to_string(),
-                    *card.filter.borrow(),
-                    step2.gallery_info.title().to_string(),
-                ),
-                None => return,
-            };
-            // Disable the button and show a loading label while enumerating;
-            // the picker replaces it on success.
-            let loading_label = gettext("Loading…");
-            let orig_label = step2.gallery_select_btn.label().unwrap_or_default();
-            step2.gallery_select_btn.set_sensitive(false);
-            step2.gallery_select_btn.set_label(&loading_label);
-            let step3 = step2.clone();
-            let nav3 = nav2.clone();
-            let manager3 = manager2.clone();
-            let dest3 = dest2.clone();
-            let close3 = close2.clone();
-            let scheduled3 = scheduled2.clone();
-            glib::spawn_future_local(async move {
-                let restore_btn = || {
-                    step3.gallery_select_btn.set_sensitive(true);
-                    step3.gallery_select_btn.set_label(&orig_label);
-                };
-                // Surface enumeration failures on the gallery row instead of
-                // only logging: the user clicked a button and deserves feedback.
-                let show_error = |msg: &str| {
-                    step3.gallery_info.set_subtitle(msg);
-                };
-                let handoff_path = crate::extension_server::handoff_cookie_path(&url);
-                let handoff_ua = crate::extension_server::handoff_user_agent(&url);
-                let tool = match crate::gallery_argv::resolve_tool() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::warn!("gallery picker: no gallery-dl: {e}");
-                        restore_btn();
-                        show_error(&gettext(
-                            "Could not list files: gallery-dl is not installed",
-                        ));
-                        return;
-                    }
-                };
-                let url_c = url.clone();
-                let result = crate::runtime::tokio_rt()
-                    .spawn(async move {
-                        crate::gallery_probe::enumerate_gallery_files(
-                            &tool,
-                            &url_c,
-                            handoff_path.as_deref(),
-                            handoff_ua.as_deref(),
-                            filter,
-                        )
-                        .await
-                    })
-                    .await;
-                // Stale guard: the card may have been closed or a new URL
-                // pasted while enumerating; don't push a picker for the old
-                // gallery onto the new card's nav stack. Restore the button
-                // first: it's a shared VideoStep widget, and its default
-                // state is valid for whatever lookup is current.
-                restore_btn();
-                let still_current = step3
-                    .gallery_card
-                    .borrow()
-                    .as_ref()
-                    .map(|card| card.url() == url)
-                    .unwrap_or(false);
-                if !still_current {
-                    return;
-                }
-                match result {
-                    Ok(Ok(items)) if !items.is_empty() => {
-                        push_gallery_picker_page(
-                            &nav3,
-                            manager3,
-                            dest3,
-                            close3,
-                            scheduled3.get(),
-                            title,
-                            url,
-                            filter,
-                            items,
-                        );
-                    }
-                    Ok(Ok(_)) => {
-                        show_error(&gettext("No files found"));
-                    }
-                    Ok(Err(e)) => {
-                        tracing::warn!("gallery picker: enumeration failed: {e:?}");
-                        show_error(&gettext("Could not list files"));
-                    }
-                    Err(e) => {
-                        tracing::warn!("gallery picker: enumeration task failed: {e:?}");
-                        show_error(&gettext("Could not list files"));
-                    }
-                }
-            });
-        }));
-    }
+    // Gallery "Select files…" opener: set once at build time.
+    *step.gallery_select_opener.borrow_mut() =
+        Some(crate::inline_gallery::make_gallery_picker_opener(
+            step.clone(),
+            &nav,
+            manager.clone(),
+            dest_dir.clone(),
+            close_card.clone(),
+            scheduled_at.clone(),
+        ));
 
     // X button dismisses the card, like the header toggle and Escape.
     {

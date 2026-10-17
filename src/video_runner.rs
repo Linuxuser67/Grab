@@ -117,32 +117,56 @@ async fn run_video_download_inner(
     });
     let mut video: Option<Video> = None;
     let mut playlist_index: Option<usize> = None;
-    for attempt in 0u32..3 {
-        match fetch_video_page(
-            &youtube_bin,
-            &job.page_url,
-            &job.cookies_browser,
-            Duration::from_secs(300),
-            job.proxy.as_ref(),
-            job.playlist_item_id.as_deref(),
-        )
-        .await
-        {
-            Ok(FetchedVideo::Single {
-                video: v,
-                playlist_index: index,
-            }) => {
-                video = Some(*v);
-                playlist_index = index;
-                break;
+    // Live fast path: the card probe cached the info JSON — parse it locally
+    // instead of spawning yt-dlp for a second extraction. The capture itself
+    // gets --load-info-json below, so a stale manifest URL just triggers
+    // yt-dlp's automatic re-extract. Falls through to the fresh resolve when
+    // the cache missed (extension handoff, restored queue) or parsing fails.
+    if job.is_live
+        && let Some(json) = job.info_json.as_ref()
+    {
+        match crate::video_probe::parse_single_video(json.clone()) {
+            Ok(v) => {
+                tracing::debug!("live resolve: reused probe info JSON, skipping re-extract");
+                video = Some(v);
             }
-            // No picked entry: the spawner expands the collection into per-item rows instead of failing it.
-            Ok(FetchedVideo::Playlist(pl)) => return Ok(VideoOutcome::Expand(pl.into())),
-            Err(e) if attempt + 1 < 3 => {
-                tracing::info!("video resolve failed, retrying: {e}");
-                tokio::time::sleep(Duration::from_secs(u64::from(attempt) + 1)).await;
+            Err(e) => {
+                tracing::info!("live probe JSON parse failed, re-resolving: {e}");
+                // The capture must not load JSON the resolve couldn't parse:
+                // a format ID from the fresh Video missing in stale JSON is a
+                // hard error with no re-extract safety net.
+                job.info_json = None;
             }
-            Err(e) => return Err(e),
+        }
+    }
+    if video.is_none() {
+        for attempt in 0u32..3 {
+            match fetch_video_page(
+                &youtube_bin,
+                &job.page_url,
+                &job.cookies_browser,
+                Duration::from_secs(300),
+                job.proxy.as_ref(),
+                job.playlist_item_id.as_deref(),
+            )
+            .await
+            {
+                Ok(FetchedVideo::Single {
+                    video: v,
+                    playlist_index: index,
+                }) => {
+                    video = Some(*v);
+                    playlist_index = index;
+                    break;
+                }
+                // No picked entry: the spawner expands the collection into per-item rows instead of failing it.
+                Ok(FetchedVideo::Playlist(pl)) => return Ok(VideoOutcome::Expand(pl.into())),
+                Err(e) if attempt + 1 < 3 => {
+                    tracing::info!("video resolve failed, retrying: {e}");
+                    tokio::time::sleep(Duration::from_secs(u64::from(attempt) + 1)).await;
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
     let Some(video) = video else {
@@ -472,8 +496,15 @@ pub(crate) async fn run_unified_ytdlp(
             .and_then(|text| std::fs::write(&json_path, text).ok())
             .is_some()
         {
-            argv.push("--load-info-json".to_string());
-            argv.push(json_path.to_string_lossy().to_string());
+            // Before the `-- <url>` terminator: anything past it is a
+            // positional URL, so the flag would be swallowed there.
+            splice_before_terminator(
+                &mut argv,
+                vec![
+                    "--load-info-json".to_string(),
+                    json_path.to_string_lossy().to_string(),
+                ],
+            );
             Some(json_path)
         } else {
             None
@@ -1266,6 +1297,29 @@ fn claim_staging_name(
     }
 }
 
+/// Splice args before the `--` URL terminator. Pure: anything past `--` is a
+/// positional URL, so flags must go before it. No-op when empty or when the
+/// terminator is absent.
+pub(crate) fn splice_before_terminator(argv: &mut Vec<String>, args: Vec<String>) {
+    if !args.is_empty()
+        && let Some(pos) = argv.iter().position(|a| a == "--")
+    {
+        argv.splice(pos..pos, args);
+    }
+}
+
+/// `--load-info-json` suffix for a live capture argv. Pure: returns the flag
+/// pair when a probe JSON path is available, empty otherwise.
+pub(crate) fn live_info_json_args(path: Option<&std::path::Path>) -> Vec<String> {
+    match path {
+        Some(p) => vec![
+            "--load-info-json".to_string(),
+            p.to_string_lossy().to_string(),
+        ],
+        None => vec![],
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_live_ytdlp(
     youtube_bin: &Path,
@@ -1354,6 +1408,37 @@ pub(crate) async fn run_live_ytdlp(
     let state = out.with_extension(format!("{ext}.ytdl"));
     // Covers the await windows a shutdown can cancel, so the state file does not outlive the app. Held purely for its `Drop`.
     let _scratch = LiveScratchGuard::new(&state);
+    // Skip the capture-time extraction: reuse the probe's info JSON via
+    // --load-info-json. Written once, shared by both attempts, deleted after.
+    // yt-dlp re-extracts automatically on 403/404, so a stale manifest URL
+    // degrades to today's behavior instead of failing.
+    let live_info_path: Option<std::path::PathBuf> = job
+        .info_json
+        .as_ref()
+        .and_then(|json| serde_json::to_string(json).ok())
+        .and_then(|text| {
+            let path = staging.join(format!(".grab-live-{}.json", job.item_id));
+            std::fs::write(&path, text).ok().map(|()| path)
+        });
+    // Reclaim a previous run's crash debris (the normal path deletes it below).
+    if live_info_path.is_none() {
+        let _ = std::fs::remove_file(staging.join(format!(".grab-live-{}.json", job.item_id)));
+    }
+    // Deleted on drop: the attempt loop has early returns (quiesce failure,
+    // nothing recorded) that would otherwise leak it.
+    struct InfoJsonGuard {
+        path: Option<std::path::PathBuf>,
+    }
+    impl Drop for InfoJsonGuard {
+        fn drop(&mut self) {
+            if let Some(p) = self.path.take() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    let _info_guard = InfoJsonGuard {
+        path: live_info_path.clone(),
+    };
     let mut downgraded: Option<VideoJob> = None;
     let src = 'attempt: loop {
         let attempt: &VideoJob = downgraded.as_ref().unwrap_or(job);
@@ -1363,13 +1448,11 @@ pub(crate) async fn run_live_ytdlp(
         let _ = tokio::fs::remove_file(&state).await;
         let mut cmd = ytdlp_command(youtube_bin);
         // The builder argv ends with `-- <page URL>`: nothing may be appended
-        // after it — anything past `--` becomes a positional URL.
-        cmd.args(live_capture_argv(
-            attempt,
-            hls_format_id,
-            &out,
-            playlist_index,
-        ));
+        // after it — anything past `--` becomes a positional URL. Splice the
+        // --load-info-json pair before the terminator.
+        let mut argv = live_capture_argv(attempt, hls_format_id, &out, playlist_index);
+        splice_before_terminator(&mut argv, live_info_json_args(live_info_path.as_deref()));
+        cmd.args(argv);
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
         let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
         // Without this guard a shutdown orphans the recorder (and the ffmpeg it may have started) still writing to the capture.

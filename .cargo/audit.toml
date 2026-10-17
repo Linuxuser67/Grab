@@ -5,4 +5,12 @@
 # (stream_tx.rs) — u8's drop cannot panic, so the trigger is unreachable.
 # Upgrade blocked upstream: librqbit-utp 0.7.0 (newest) pins ringbuf ^0.4.7,
 # ringbuf 0.4.9 is yanked. Revisit when librqbit moves to ringbuf 0.5.
-ignore = ["RUSTSEC-2026-0293"]
+#
+# RUSTSEC-2026-0367/0368/0369 (zip <9.0.0): ZipArchive::extract() symlink
+# traversal, SUID/SGID preservation, and permission application through
+# symlinks. Not exploitable in this tree: no code calls .extract() — Grab
+# (video_tools.rs) and the yt-dlp 2.9.0 crate (utils/fs.rs) both iterate
+# entries manually via ZipArchive::by_index(), and yt-dlp validates paths
+# with enclosed_name(). Upgrade blocked upstream: yt-dlp 2.9.0 (newest)
+# pins zip ^8. Revisit when yt-dlp moves to zip 9.
+ignore = ["RUSTSEC-2026-0293", "RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369"]

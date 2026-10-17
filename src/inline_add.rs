@@ -6,7 +6,8 @@
 //! action, and application-open URLs) reveal one card at the top of the main
 //! window; the queue stays usable underneath. The card holds an
 //! [`adw::NavigationView`]: the form page plus right-sliding playlist and
-//! multi-file torrent picker pages. Cancel, Escape, or a successful enqueue
+//! multi-file torrent picker pages (the gallery picker page is built in
+//! inline_gallery.rs). Cancel, Escape, or a successful enqueue
 //! collapses the card and resets the form, so reopening always starts fresh.
 //!
 //! Intake behavior is unchanged from the old dialog: probing with generation
@@ -283,6 +284,11 @@ pub(crate) struct VideoStep {
     /// Generation of the enumeration above: a completed-but-superseded task
     /// stays quiet instead of flashing "Could not list files".
     pub(crate) enumerate_gen: Cell<u64>,
+    /// Handle of the in-flight video lookup task (`kick_video` spawns it).
+    /// Aborted when a newer kick or an edit supersedes it, or the card
+    /// closes: dropping the task kills its probe children (kill_on_drop)
+    /// instead of letting them run out their timeouts on a dead URL.
+    pub(crate) lookup_abort: Rc<RefCell<Option<glib::JoinHandle<()>>>>,
     /// The form's Add button: icon-only until a format is picked, then a
     /// labeled "Add" pill (HIG: primary actions carry a text label).
     pub(crate) add_btn: gtk4::Button,
@@ -383,15 +389,27 @@ pub(crate) fn abort_enumeration(step: &VideoStep) {
     }
 }
 
+/// Abort the in-flight video lookup, if any: superseding it (a newer kick,
+/// an edit that stales it, the card closing) drops the lookup task and its
+/// probe children instead of letting them run out their timeouts. Safe from
+/// inside the task (close paths): glib defers the source destruction until
+/// the current dispatch returns.
+pub(crate) fn abort_lookup(step: &VideoStep) {
+    if let Some(handle) = step.lookup_abort.borrow_mut().take() {
+        handle.abort();
+    }
+}
+
 /// Clear the video preview block back to a pristine state: `close_card`
 /// calls this so a non-video add after a video leaves no dead probe state
 /// in memory. Hiding alone is not enough — the name row keeps its text,
 /// the format rows keep their widgets, and the tools/error rows keep
 /// their subtitles.
 fn reset_video_step(step: &VideoStep) {
-    // No enumeration survives a close: kill gallery-dl instead of letting
-    // it probe on for a dead card.
+    // No enumeration or lookup survives a close: kill gallery-dl and the
+    // probe children instead of letting them run on for a dead card.
     abort_enumeration(step);
+    abort_lookup(step);
     // Drop the format options and the current pick.
     step.options.borrow_mut().clear();
     step.format.set_model(Some(&gtk4::StringList::new(&[])));
@@ -1543,6 +1561,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         gallery_select_opener: Rc::new(RefCell::new(None)),
         enumerate_abort: Rc::new(RefCell::new(None)),
         enumerate_gen: Cell::new(0),
+        lookup_abort: Rc::new(RefCell::new(None)),
         add_btn: add_btn.clone(),
     });
     // "Select files…" invokes the opener set below (where the picker context
@@ -1998,7 +2017,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 scheduled_at_kick.clone(),
                 pending_kick.clone(),
             );
-            glib::spawn_future_local(async move {
+            let lookup = glib::spawn_future_local(async move {
                 // Declared BEFORE the guard so it drops AFTER it (reverse
                 // declaration order): every exit, early returns included, starts
                 // the next queued link with the in-flight marker already clear.
@@ -2396,6 +2415,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     }
                 }
             });
+            // This kick supersedes any earlier lookup: its generation is
+            // stale now, so abort it — the dropped task kills the probe
+            // children instead of letting them run out their timeouts.
+            if let Some(prev) = step2.lookup_abort.borrow_mut().replace(lookup) {
+                prev.abort();
+            }
         })
     };
 
@@ -2662,8 +2687,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 }
             }
             // Editing mid-lookup stales the in-flight resolve so its
-            // completion is discarded.
+            // completion is discarded — and aborts it, so the probes stop
+            // instead of reading to completion for a URL the user left.
             probe.borrow_mut().bump_generation();
+            abort_lookup(&step2);
             // Any edit clears the lookup-in-flight state, and the icon
             // follows: the tick returns for non-empty text, the spinner
             // and the icon-less states clear.

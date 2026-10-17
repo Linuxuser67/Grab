@@ -179,6 +179,19 @@ pub(crate) async fn fetch_video_page(
     })
 }
 
+/// Aborts the wrapped task when dropped. Aborting an already-finished task is
+/// a no-op, so no disarm bookkeeping is needed. [`fetch_video_infos`] keeps it
+/// alive for the duration of the probe: a caller dropping the probe future
+/// (card closed, lookup superseded) must not leave the yt-dlp worker — and
+/// its child — probing on detached.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Extract metadata for one URL (the page URL is what survives restarts, not the media URLs).
 /// Returns the parsed result plus the raw `--dump-single-json` for single videos
 /// (used for `--load-info-json` at download time to skip re-extraction).
@@ -233,6 +246,9 @@ pub async fn fetch_video_infos(
             Some(raw_json),
         ))
     });
+    // Dropping the caller's future aborts the worker: the yt-dlp child dies
+    // with it (kill_on_drop) instead of probing on detached.
+    let _abort_on_drop = AbortOnDrop(handle.abort_handle());
     await_probe(handle, cancel).await
 }
 
@@ -587,5 +603,32 @@ mod tests {
                 .expect("the drain must not stall the writer")
                 .unwrap();
         });
+    }
+
+    #[test]
+    fn abort_on_drop_cancels_a_running_worker() {
+        let rt = crate::runtime::tokio_rt();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let worker = rt.spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let guard = AbortOnDrop(worker.abort_handle());
+        rt.block_on(started_rx).expect("worker starts");
+        drop(guard);
+        let err = rt
+            .block_on(worker)
+            .expect_err("the guard's abort must cancel the running worker");
+        assert!(err.is_cancelled(), "got {err:?}");
+    }
+
+    #[test]
+    fn abort_on_drop_leaves_a_finished_worker_alone() {
+        let rt = crate::runtime::tokio_rt();
+        let worker = rt.spawn(async { 7u32 });
+        let guard = AbortOnDrop(worker.abort_handle());
+        assert_eq!(rt.block_on(worker).expect("worker completes"), 7);
+        // Aborting a finished task is a no-op, not a cancellation.
+        drop(guard);
     }
 }

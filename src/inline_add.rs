@@ -2434,50 +2434,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // entry itself, not in a caption underneath it.
                 set_field_error(&url_entry, message);
             };
-            // Gallery download: the probe found an image gallery, not a video.
-            if step2.is_gallery.get()
-                && let Some(card) = step2.gallery_card.borrow().as_ref()
-            {
-                let url = url_entry.text().trim().to_string();
-                let dest = dd.borrow().clone();
-                let filter = *card.filter.borrow();
-                // Use the cached total from count_gallery_files, not the
-                // probe length (capped at 5). None when unknown.
-                let file_count = card.total(filter);
-                let title = card
-                    .items
-                    .first()
-                    .map(|i| crate::gallery_probe::probe_title(i, &url))
-                    .unwrap_or_else(|| url.clone());
-                // Enqueue via DownloadManager (phase 11). The runner integration
-                // (phase 12) will drive the actual download.
-                let cookies_browser = m.settings().cookies_browser().to_string();
-                let job = crate::gallery_argv::GalleryJob {
-                    // Placeholder; enqueue_gallery assigns the real row ID.
-                    item_id: 0,
-                    page_url: url.clone(),
-                    title,
-                    file_count,
-                    dest_dir: std::path::PathBuf::from(dest),
-                    filter,
-                    cookies_browser,
-                    speed_limit: crate::gallery_runner::gallery_speed_limit(m.settings()),
-                    range: None,
-                };
-                match m.enqueue_gallery(&job) {
-                    Ok(_) => {
-                        tracing::info!(
-                            url = %url,
-                            files = file_count,
-                            "gallery enqueued"
-                        );
-                    }
-                    Err(e) => {
-                        fail(&e);
-                        return;
-                    }
+            // Gallery: nothing is queued without the file picker. Enter, Add,
+            // the tick icon and auto-add all open it, and it selects every file
+            // by default, so the user confirms what gets downloaded.
+            if step2.is_gallery.get() {
+                let open = step2.gallery_select_opener.borrow().clone();
+                if let Some(open) = open {
+                    open();
                 }
-                close_card();
                 return;
             }
             let url = url_entry.text().trim().to_string();

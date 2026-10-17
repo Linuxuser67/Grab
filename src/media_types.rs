@@ -105,7 +105,9 @@ pub struct PlaylistItem {
     pub title: Box<str>,
     /// Canonical per-item page URL — the identity queued and persisted.
     pub page_url: String,
-    /// Duration seconds, when the listing reports one.
+    /// Duration seconds, when the listing reports one. Contract data: the
+    /// picker pills show titles only, nothing reads it yet.
+    #[allow(dead_code)]
     pub duration: Option<i64>,
 }
 

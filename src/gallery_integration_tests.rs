@@ -8,6 +8,9 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::gallery_argv::GalleryFilter;
+use crate::gallery_probe::enumerate_gallery_files;
+
 /// Find gallery-dl on PATH, or return None to skip the test.
 /// If GRAB_REQUIRE_GALLERY_DL=1 and it's missing, panic (CI must have it).
 fn find_gallery_dl() -> Option<PathBuf> {
@@ -105,7 +108,11 @@ async fn gallery_integration_probe_count_download() {
         }
         Err(e) => panic!("probe failed: {e:?}"),
     };
-    assert_eq!(items.len(), 3, "expected 3 images from test server");
+    assert_eq!(
+        items.len(),
+        4,
+        "expected 3 images + 1 video from test server"
+    );
     assert!(
         items.iter().all(|i| !i.filename.is_empty()),
         "all items need filenames"
@@ -120,7 +127,7 @@ async fn gallery_integration_probe_count_download() {
         crate::gallery_argv::GalleryFilter::All,
     )
     .await;
-    assert_eq!(count, Some(3), "count should be 3");
+    assert_eq!(count, Some(4), "count should be 4");
 
     // 3. Download produces files.
     let dest = std::env::temp_dir().join(format!("grab-gallery-test-{port}"));
@@ -129,7 +136,7 @@ async fn gallery_integration_probe_count_download() {
         item_id: 1,
         page_url: url.clone(),
         title: "test-gallery".to_string(),
-        file_count: Some(3),
+        file_count: Some(4),
         dest_dir: dest.clone(),
         filter: crate::gallery_argv::GalleryFilter::All,
         cookies_browser: "none".to_string(),
@@ -153,8 +160,8 @@ async fn gallery_integration_probe_count_download() {
             }
             Err(e) => panic!("download failed: {e:?}"),
         };
-    assert_eq!(result.files.len(), 3, "expected 3 downloaded files");
-    assert_eq!(completed.get(), 3, "progress should report 3 completed");
+    assert_eq!(result.files.len(), 4, "expected 4 downloaded files");
+    assert_eq!(completed.get(), 4, "progress should report 4 completed");
     for f in &result.files {
         assert!(f.exists(), "downloaded file should exist: {f:?}");
     }
@@ -173,7 +180,7 @@ async fn gallery_integration_probe_count_download() {
             Err(e) => panic!("second download failed: {e:?}"),
         };
     assert_eq!(result2.files.len(), 0, "no new files on second run");
-    assert_eq!(result2.skipped, 3, "all 3 files skipped on second run");
+    assert_eq!(result2.skipped, 4, "all 4 files skipped on second run");
 
     // Cleanup.
     std::fs::remove_dir_all(&dest).ok();
@@ -194,7 +201,8 @@ async fn gallery_integration_filtered_download() {
     };
     let url = format!("generic:http://127.0.0.1:{port}/");
 
-    // Filtered run: images only (server has 2 jpg + 1 png, all images).
+    // Filtered run: images only. The server also serves a video ahead of
+    // the images; the filter must exclude it (3 of 4 items).
     let dest = std::env::temp_dir().join(format!("grab-gallery-filter-{port}"));
     std::fs::create_dir_all(&dest).unwrap();
     let job = crate::gallery_argv::GalleryJob {
@@ -224,6 +232,103 @@ async fn gallery_integration_filtered_download() {
         result.files.len(),
         3,
         "all 3 test images pass the ImagesOnly filter"
+    );
+
+    std::fs::remove_dir_all(&dest).ok();
+}
+
+#[tokio::test]
+async fn gallery_integration_range_indexes_filtered_files() {
+    let Some(tool) = find_gallery_dl() else {
+        eprintln!("SKIP: gallery-dl not on PATH");
+        return;
+    };
+    let Some((_server, port)) = start_server() else {
+        if std::env::var("GRAB_REQUIRE_GALLERY_DL").as_deref() == Ok("1") {
+            panic!("GRAB_REQUIRE_GALLERY_DL=1 but cannot bind to port 80 for integration test");
+        }
+        eprintln!("SKIP: cannot bind to port 80 (need root for integration test)");
+        return;
+    };
+    let url = format!("generic:http://127.0.0.1:{port}/");
+
+    // The picker enumerates with the download's filter and maps picks to
+    // `--range` positions; gallery-dl applies `--range` to the filtered
+    // list, so position 1 is the first IMAGE even though the server serves
+    // a video first. Guard the fixture: if generic stops yielding the
+    // video, the assertions below would pass vacuously.
+    let all = match enumerate_gallery_files(&tool, &url, None, None, GalleryFilter::All).await {
+        Ok(items) => items,
+        Err(e) if is_gallery_dl_internal_bug(&e) => {
+            if std::env::var("GRAB_REQUIRE_GALLERY_DL").as_deref() == Ok("1") {
+                panic!("gallery-dl internal bug (GRAB_REQUIRE_GALLERY_DL=1): {e:?}");
+            }
+            eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
+            return;
+        }
+        Err(e) => panic!("unfiltered enumerate failed: {e:?}"),
+    };
+    assert_eq!(all.len(), 4, "fixture: 3 images + 1 video");
+    assert_eq!(all[0].extension, "mp4", "fixture: the video comes first");
+
+    let filter = GalleryFilter::ImagesOnly;
+    let filtered = match enumerate_gallery_files(&tool, &url, None, None, filter).await {
+        Ok(items) => items,
+        Err(e) if is_gallery_dl_internal_bug(&e) => {
+            if std::env::var("GRAB_REQUIRE_GALLERY_DL").as_deref() == Ok("1") {
+                panic!("gallery-dl internal bug (GRAB_REQUIRE_GALLERY_DL=1): {e:?}");
+            }
+            eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
+            return;
+        }
+        Err(e) => panic!("filtered enumerate failed: {e:?}"),
+    };
+    assert_eq!(filtered.len(), 3, "the video must not survive the filter");
+    assert_eq!(
+        filtered[0].extension, "jpg",
+        "first filtered file is an image"
+    );
+
+    // Pick the first listed file, as the picker would.
+    let range = crate::gallery_argv::range_spec(&[0]).expect("range for one pick");
+    assert_eq!(range, "1");
+
+    let dest = std::env::temp_dir().join(format!("grab-gallery-range-{port}"));
+    // A dest left over from a failed run would make gallery-dl skip files
+    // and fail the count below for the wrong reason.
+    std::fs::remove_dir_all(&dest).ok();
+    std::fs::create_dir_all(&dest).unwrap();
+    let job = crate::gallery_argv::GalleryJob {
+        item_id: 3,
+        page_url: url.clone(),
+        title: "test-gallery-range".to_string(),
+        file_count: Some(1),
+        dest_dir: dest.clone(),
+        filter,
+        cookies_browser: "none".to_string(),
+        speed_limit: None,
+        range: Some(range),
+    };
+    let result =
+        match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |_| {}).await {
+            Ok(r) => r,
+            Err(e) if is_gallery_dl_internal_bug(&e) => {
+                if std::env::var("GRAB_REQUIRE_GALLERY_DL").as_deref() == Ok("1") {
+                    panic!("gallery-dl internal bug (GRAB_REQUIRE_GALLERY_DL=1): {e:?}");
+                }
+                eprintln!("SKIP: gallery-dl has an internal bug in this environment: {e:?}");
+                return;
+            }
+            Err(e) => panic!("range download failed: {e:?}"),
+        };
+    assert_eq!(result.files.len(), 1, "range 1 selects exactly one file");
+    let name = result.files[0]
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned());
+    assert_eq!(
+        name.as_deref(),
+        Some("img1.jpg"),
+        "--range must index the filtered list, not the raw one"
     );
 
     std::fs::remove_dir_all(&dest).ok();

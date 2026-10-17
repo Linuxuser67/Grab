@@ -9,6 +9,7 @@ src/download_store.rs
 src/install_help.rs
 src/install_progress.rs
 src/inline_add.rs
+src/inline_gallery.rs
 src/preferences.rs
 src/torrent.rs
 src/video.rs

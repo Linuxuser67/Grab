@@ -455,6 +455,39 @@ mod tests {
     }
 
     #[test]
+    fn download_argv_filter_matches_the_picker_enumeration() {
+        // The picker enumerates with `push_filter`, so `--range` indices
+        // only line up while the download emits the exact same expression
+        // (gallery-dl applies `--range` to the filtered list). This pins
+        // the download side to that shared source of truth; the enumeration
+        // side is only pinned by the integration test.
+        for filter in [
+            GalleryFilter::All,
+            GalleryFilter::ImagesOnly,
+            GalleryFilter::VideosOnly,
+        ] {
+            let argv = download_argv(
+                &tool(),
+                "https://example.com/gallery",
+                Path::new("/tmp/dest"),
+                None,
+                None,
+                filter,
+                None,
+                None,
+            );
+            let mut expected = Vec::new();
+            push_filter(&mut expected, filter);
+            let found: Vec<String> = argv
+                .iter()
+                .position(|a| a == "--filter")
+                .map(|pos| argv[pos..=pos + 1].to_vec())
+                .unwrap_or_default();
+            assert_eq!(found, expected, "filter {filter:?}");
+        }
+    }
+
+    #[test]
     fn count_argv_no_fallback() {
         let argv = count_argv(
             &tool(),

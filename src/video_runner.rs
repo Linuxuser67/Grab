@@ -803,10 +803,24 @@ async fn run_ytdlp_attempt(
     let after_move = progress.await.unwrap_or_default();
     let log_tail = logs.await.unwrap_or_default();
     if !status.success() {
-        let detail = last_log_line(&log_tail, "yt-dlp reported failure");
+        let detail = ytdlp_failure_detail(&log_tail);
         return Err(VideoError::part_failed(detail));
     }
     Ok((Some(()), after_move, None))
+}
+
+/// The failure line for a yt-dlp run. When the log shows the extractor
+/// breaking, the line also says yt-dlp may be out of date and where to update it.
+fn ytdlp_failure_detail(log_tail: &str) -> String {
+    let detail = last_log_line(log_tail, "yt-dlp reported failure");
+    if crate::video_tools::extractor_failure(log_tail) {
+        let hint = gettext(
+            "yt-dlp may be out of date: update it in Preferences → Check for Updates",
+        );
+        format!("{detail}. {hint}")
+    } else {
+        detail
+    }
 }
 
 /// Remux a stopped live capture into place. ffmpeg writes `<dest>.part` and the result is renamed to `dest` only on success: a bare `final.<n>.<ext>` is always worth keeping, a `.part` never is.
@@ -2002,7 +2016,7 @@ pub(crate) async fn run_hls_ytdlp(
     let after_move = progress.await.unwrap_or_default();
     let log_tail = logs.await.unwrap_or_default();
     if !status.success() {
-        let detail = last_log_line(&log_tail, "yt-dlp reported failure");
+        let detail = ytdlp_failure_detail(&log_tail);
         return Err(VideoError::part_failed(detail));
     }
     let final_tmp = discover_ytdlp_output(&job.dest, after_move.as_deref());

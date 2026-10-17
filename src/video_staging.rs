@@ -964,7 +964,11 @@ mod tests {
         let path = dir.join(".grab-info-2.json");
         std::os::unix::fs::symlink(&victim, &path).unwrap();
         write_private(&path, b"{\"signed\":\"url\"}").await.unwrap();
-        assert_eq!(std::fs::read(&victim).unwrap(), b"keep", "symlink target must stay untouched");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"keep",
+            "symlink target must stay untouched"
+        );
         let meta = std::fs::symlink_metadata(&path).unwrap();
         assert!(!meta.file_type().is_symlink(), "path must be a fresh file");
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"signed\":\"url\"}");
@@ -985,14 +989,22 @@ mod tests {
         std::fs::write(&file, b"old").unwrap();
         let err = open_new_private(&file).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
-        assert_eq!(std::fs::read(&file).unwrap(), b"old", "existing bytes stay untouched");
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"old",
+            "existing bytes stay untouched"
+        );
         // A symlink fails the same way; its target is never opened.
         let victim = dir.join("victim");
         std::fs::write(&victim, b"keep").unwrap();
         let link = dir.join("link");
         std::os::unix::fs::symlink(&victim, &link).unwrap();
         assert!(open_new_private(&link).await.is_err());
-        assert_eq!(std::fs::read(&victim).unwrap(), b"keep", "symlink target stays untouched");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"keep",
+            "symlink target stays untouched"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

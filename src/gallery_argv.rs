@@ -458,9 +458,14 @@ mod tests {
     fn download_argv_filter_matches_the_picker_enumeration() {
         // The picker enumerates with `push_filter`, so `--range` indices
         // only line up while the download emits the exact same expression
-        // (gallery-dl applies `--range` to the filtered list). Pin the
-        // download side to that shared source of truth.
-        for filter in [GalleryFilter::All, GalleryFilter::ImagesOnly, GalleryFilter::VideosOnly] {
+        // (gallery-dl applies `--range` to the filtered list). This pins
+        // the download side to that shared source of truth; the enumeration
+        // side is only pinned by the integration test.
+        for filter in [
+            GalleryFilter::All,
+            GalleryFilter::ImagesOnly,
+            GalleryFilter::VideosOnly,
+        ] {
             let argv = download_argv(
                 &tool(),
                 "https://example.com/gallery",

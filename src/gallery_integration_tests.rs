@@ -287,6 +287,9 @@ async fn gallery_integration_range_indexes_filtered_files() {
     assert_eq!(range, "1");
 
     let dest = std::env::temp_dir().join(format!("grab-gallery-range-{port}"));
+    // A dest left over from a failed run would make gallery-dl skip files
+    // and fail the count below for the wrong reason.
+    std::fs::remove_dir_all(&dest).ok();
     std::fs::create_dir_all(&dest).unwrap();
     let job = crate::gallery_argv::GalleryJob {
         item_id: 3,
@@ -312,7 +315,9 @@ async fn gallery_integration_range_indexes_filtered_files() {
             Err(e) => panic!("range download failed: {e:?}"),
         };
     assert_eq!(result.files.len(), 1, "range 1 selects exactly one file");
-    let name = result.files[0].file_name().map(|n| n.to_string_lossy().into_owned());
+    let name = result.files[0]
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned());
     assert_eq!(
         name.as_deref(),
         Some("img1.jpg"),

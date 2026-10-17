@@ -215,8 +215,8 @@ pub async fn probe_gallery(
 ) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
     let mut cmd = tokio::process::Command::new(tool);
     // A timed-out probe must not leave gallery-dl running: dropping the
-    // `timeout(.., cmd.output())` future below drops the child, and with
-    // kill_on_drop it is SIGKILLed instead of orphaned.
+    // timed `cmd.output()` future in `run_to_completion` drops the child,
+    // and with kill_on_drop it is SIGKILLed instead of orphaned.
     cmd.kill_on_drop(true);
     cmd.arg("--config-ignore")
         .arg("-j")
@@ -238,12 +238,7 @@ pub async fn probe_gallery(
     }
     // `--` last: guards against URLs starting with `-` being parsed as options.
     cmd.arg("--").arg(url);
-    // Debug: log the full argv before spawning.
-    crate::backend_debug::log_command(&cmd);
-    let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| GalleryError::install("gallery-dl probe timed out"))?
-        .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
+    let output = run_to_completion(cmd, PROBE_TIMEOUT, "gallery-dl probe").await?;
 
     // Exit 32 (v1.30.0+) / 64 (older) = NoExtractorError: unsupported URL,
     // not a failure. v1.30.0 folded NoExtractorError (64) into InputError (32).
@@ -251,20 +246,43 @@ pub async fn probe_gallery(
         return Ok(None);
     }
     if !output.status.success() {
-        return Err(GalleryError::install(format!(
-            "gallery-dl probe failed (exit {})",
-            output.status.code().unwrap_or(-1)
+        return Err(GalleryError::probe(exit_message(
+            "gallery-dl probe",
+            &output.status,
         )));
     }
-    // `-j` emits `[type, ...]` arrays: [2, {dir}] for directory context,
-    // [3, "url", {meta}] for files, [-1, {error, message}] for errors.
-    let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
-        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
-    let items = parse_probe_messages(&messages)?;
+    let items = parse_document(&output.stdout)?;
     if items.is_empty() {
         return Ok(None);
     }
     Ok(Some(items))
+}
+
+/// Run a gallery-dl command to completion under a wall-clock bound. Spawn
+/// failures are install errors; a timeout is a probe error.
+async fn run_to_completion(
+    mut cmd: tokio::process::Command,
+    timeout: Duration,
+    what: &str,
+) -> Result<std::process::Output, GalleryError> {
+    // Debug: log the full argv before spawning.
+    crate::backend_debug::log_command(&cmd);
+    tokio::time::timeout(timeout, cmd.output())
+        .await
+        .map_err(|_| GalleryError::probe(format!("{what} timed out")))?
+        .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))
+}
+
+/// Parse a complete `gallery-dl -j` document (one JSON array of messages).
+fn parse_document(stdout: &[u8]) -> Result<Vec<GalleryItem>, GalleryError> {
+    let messages: Vec<serde_json::Value> = serde_json::from_slice(stdout)
+        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
+    parse_probe_messages(&messages)
+}
+
+/// The message for a non-zero exit, shared by every gallery-dl run path.
+fn exit_message(what: &str, status: &std::process::ExitStatus) -> String {
+    format!("{what} failed (exit {})", status.code().unwrap_or(-1))
 }
 
 /// Base argv for the file enumeration (before auth, filter, and URL).
@@ -340,23 +358,15 @@ pub(crate) async fn enumerate_gallery_files(
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
 ) -> Result<Vec<GalleryItem>, GalleryError> {
-    let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, false);
-    // Debug: log the full argv before spawning.
-    crate::backend_debug::log_command(&cmd);
-    let output = tokio::time::timeout(ENUMERATE_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| GalleryError::probe("gallery-dl enumerate timed out".to_string()))?
-        .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
+    let cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, false);
+    let output = run_to_completion(cmd, ENUMERATE_TIMEOUT, "gallery-dl enumerate").await?;
     if !output.status.success() {
-        return Err(GalleryError::install(format!(
-            "gallery-dl enumerate failed (exit {})",
-            output.status.code().unwrap_or(-1)
+        return Err(GalleryError::probe(exit_message(
+            "gallery-dl enumerate",
+            &output.status,
         )));
     }
-    let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
-        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
-    let items = parse_probe_messages(&messages)?;
-    Ok(items)
+    parse_document(&output.stdout)
 }
 
 /// Idle bound between lines and the overall wall-clock bound for the
@@ -442,9 +452,9 @@ pub(crate) async fn enumerate_gallery_files_streamed(
         .map_err(|_| GalleryError::probe("gallery-dl enumerate timed out".to_string()))?
         .map_err(|e| GalleryError::install(format!("gallery-dl enumerate failed: {e}")))?;
     if !status.success() {
-        return Err(GalleryError::install(format!(
-            "gallery-dl enumerate failed (exit {}){}",
-            status.code().unwrap_or(-1),
+        return Err(GalleryError::probe(format!(
+            "{}{}",
+            exit_message("gallery-dl enumerate", &status),
             stderr_summary(&stderr_tail)
         )));
     }
@@ -685,6 +695,26 @@ pub async fn count_gallery_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_timeout_is_a_probe_error() {
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("5");
+        let err = run_to_completion(cmd, Duration::from_millis(50), "gallery-dl probe")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GalleryError::Probe(ref m) if m == "gallery-dl probe timed out"));
+    }
+
+    #[tokio::test]
+    async fn run_spawn_failure_is_an_install_error() {
+        let cmd = tokio::process::Command::new("/nonexistent/gallery-dl");
+        let err = run_to_completion(cmd, Duration::from_secs(5), "gallery-dl probe")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GalleryError::Install(_)));
+    }
 
     #[test]
     fn enumerate_argv_is_range_bounded() {

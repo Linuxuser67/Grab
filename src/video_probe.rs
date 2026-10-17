@@ -488,7 +488,6 @@ pub(crate) fn parse_playlist_json(
         .take(MAX_PLAYLIST_ITEMS)
         .collect();
     Some(crate::media_types::PlaylistInfo {
-        id: json_str(value, "id").unwrap_or("").into(),
         title: json_str(value, "title").unwrap_or(url).into(),
         page_url: json_str(value, "webpage_url").unwrap_or(url).into(),
         kind: crate::media_types::PlaylistKind::classify(url, extractor_key),

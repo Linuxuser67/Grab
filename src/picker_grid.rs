@@ -85,15 +85,6 @@ impl PickerGrid {
         selected_indices(&self.inner.selection)
     }
 
-    /// Turn every entry on/off (Select All / None).
-    pub(crate) fn set_all_selected(&self, selected: bool) {
-        if selected {
-            self.inner.selection.select_all();
-        } else {
-            self.inner.selection.unselect_all();
-        }
-    }
-
     /// Unselect one entry (a queued row after a partial playlist import, so a
     /// retry submits only the remainder).
     pub(crate) fn unselect(&self, index: usize) {
@@ -329,8 +320,9 @@ mod tests {
         assert_eq!(grid.selected_indices(), vec![1, 2, 3, 4]);
         assert_eq!(add_btn.label().as_deref(), Some("4 selected"));
 
-        // Programmatic path: Select All/None -> ListItem:selected -> pills.
-        grid.set_all_selected(false);
+        // Button path (Select All/None -> selection model -> ListItem:selected
+        // -> pills), the real action-bar wiring.
+        select_none.emit_clicked();
         settle();
         assert!(
             collect_toggle_buttons(grid.widget().upcast_ref::<gtk4::Widget>())
@@ -339,7 +331,7 @@ mod tests {
             "unselected items must unset visible pills"
         );
         assert_eq!(add_btn.label().as_deref(), Some("0 selected"));
-        grid.set_all_selected(true);
+        select_all.emit_clicked();
         settle();
         assert_eq!(add_btn.label().as_deref(), Some("5 selected"));
 

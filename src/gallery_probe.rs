@@ -246,7 +246,10 @@ pub async fn probe_gallery(
         return Ok(None);
     }
     if !output.status.success() {
-        return Err(GalleryError::probe(exit_message("gallery-dl probe", &output.status)));
+        return Err(GalleryError::probe(exit_message(
+            "gallery-dl probe",
+            &output.status,
+        )));
     }
     let items = parse_document(&output.stdout)?;
     if items.is_empty() {
@@ -358,7 +361,10 @@ pub(crate) async fn enumerate_gallery_files(
     let cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, false);
     let output = run_to_completion(cmd, ENUMERATE_TIMEOUT, "gallery-dl enumerate").await?;
     if !output.status.success() {
-        return Err(GalleryError::probe(exit_message("gallery-dl enumerate", &output.status)));
+        return Err(GalleryError::probe(exit_message(
+            "gallery-dl enumerate",
+            &output.status,
+        )));
     }
     parse_document(&output.stdout)
 }

@@ -37,9 +37,9 @@ fn append_titles(store: &gio::ListStore, selection: &gtk4::MultiSelection, title
         return;
     }
     let start = store.n_items();
-    for title in titles {
-        store.append(&gtk4::StringObject::new(&title));
-    }
+    let objs: Vec<gtk4::StringObject> = titles.iter().map(|t| gtk4::StringObject::new(t)).collect();
+    // One splice = one items-changed signal for the whole batch.
+    store.splice(start, 0, &objs[..]);
     selection.select_range(start, n, false);
 }
 
@@ -146,7 +146,12 @@ fn build_grid(selection: &gtk4::MultiSelection) -> gtk4::GridView {
         // MultiSelection's replace-the-whole-selection semantics to every
         // click that lands on the row instead of a pill.
         list_item.set_selectable(false);
+        // The pill's label is ours: ellipsize once here, not on every bind.
+        let label = gtk4::Label::new(None);
+        label.set_ellipsize(pango::EllipsizeMode::End);
+        label.set_max_width_chars(24);
         let btn = gtk4::ToggleButton::new();
+        btn.set_child(Some(&label));
         // The view mirrors `ListItem:selected` from the selection model on
         // every bind, so this one-time binding covers recycling, Select
         // All/None and streamed appends. Both objects share the cell's
@@ -194,12 +199,8 @@ fn build_grid(selection: &gtk4::MultiSelection) -> gtk4::GridView {
             .unwrap();
         // Titles are untrusted (they carry `&`, `<`, …): Button label is
         // plain text, never markup.
-        btn.set_label(&title);
-        // Overlong titles ellipsize instead of forcing degenerate width
-        // measurements: the pill keeps a sane minimum width.
         if let Some(label) = btn.child().and_downcast::<gtk4::Label>() {
-            label.set_ellipsize(pango::EllipsizeMode::End);
-            label.set_max_width_chars(24);
+            label.set_label(&title);
         }
     });
     // Pills are the only selection UI: rubberband selection writes straight
@@ -235,6 +236,13 @@ pub(crate) fn scrolled_grid(grid: &gtk4::GridView) -> gtk4::ScrolledWindow {
 mod tests {
     use super::*;
     use gtk4::glib;
+
+    /// Pill text now lives on the child label (see `build_grid`).
+    fn pill_title(b: &gtk4::ToggleButton) -> Option<String> {
+        b.child()
+            .and_downcast::<gtk4::Label>()
+            .map(|l| l.label().to_string())
+    }
 
     // `GtkMultiSelection::new` asserts that GTK is initialized, so the test
     // here needs a display and is `#[ignore]`d: CI runs it under Xvfb (the
@@ -337,7 +345,7 @@ mod tests {
         // Click path: pill -> selection model -> count sink.
         let first = buttons
             .iter()
-            .find(|b| b.label().as_deref() == Some("item-0"))
+            .find(|b| pill_title(b).as_deref() == Some("item-0"))
             .expect("item-0 pill realized");
         first.set_active(false);
         settle();
@@ -384,7 +392,7 @@ mod tests {
         settle();
         let last = collect_toggle_buttons(grid.widget().upcast_ref::<gtk4::Widget>())
             .into_iter()
-            .find(|b| b.label().as_deref() == Some("item-299"))
+            .find(|b| pill_title(b).as_deref() == Some("item-299"))
             .expect("bottom row must realize after scrolling");
         assert!(last.is_active(), "rebound cell must show item-299 selected");
         last.set_active(false);

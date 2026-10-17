@@ -105,12 +105,18 @@ impl PickerGrid {
         add_btn.set_label(&count_label(n));
         {
             let count_label = Rc::clone(&count_label);
-            let add_btn = add_btn.clone();
+            // Weak, not strong: the button's own click handler holds the grid,
+            // so a strong reference here would close a cycle and keep the
+            // whole page alive after the picker window is popped.
+            let add_btn = add_btn.downgrade();
             // The selection model is the single source of truth: one signal
             // per change, one label write; no per-pill bookkeeping.
             self.inner
                 .selection
                 .connect_selection_changed(move |selection, _, _| {
+                    let Some(add_btn) = add_btn.upgrade() else {
+                        return;
+                    };
                     let n = selection.selection().size() as usize;
                     add_btn.set_label(&count_label(n));
                 });
@@ -206,6 +212,22 @@ fn build_grid(selection: &gtk4::MultiSelection) -> gtk4::GridView {
         .enable_rubberband(false)
         .model(selection)
         .factory(&factory)
+        .build()
+}
+
+/// The picker pages' nesting: the grid goes straight into a capped scrolled
+/// window (the list-widget docs' placement, so cells stay virtualized), and
+/// the captions stay outside so only the entries scroll. valign=Start (not
+/// the Fill default): the ToolbarView would otherwise stretch the scrolled
+/// window to the full content height, leaving empty space below a short list.
+pub(crate) fn scrolled_grid(grid: &gtk4::GridView) -> gtk4::ScrolledWindow {
+    gtk4::ScrolledWindow::builder()
+        .child(grid)
+        .propagate_natural_height(true)
+        .max_content_height(480)
+        .vexpand(false)
+        .valign(gtk4::Align::Start)
+        .hscrollbar_policy(gtk4::PolicyType::Never)
         .build()
 }
 
@@ -305,6 +327,7 @@ mod tests {
         assert!(buttons.iter().all(|b| b.is_active()), "all-on default");
         // A handful of titles must not stretch the card to the 480 cap.
         println!("smoke: 5-entry scrolled height = {}", scrolled.height());
+        assert!(scrolled.height() > 0, "card height must be measured");
         assert!(
             scrolled.height() < 480,
             "5 files should not stretch the card: h={}",
@@ -342,6 +365,7 @@ mod tests {
         settle();
         println!("smoke: 300-entry scrolled height = {}", scrolled.height());
         assert_eq!(add_btn.label().as_deref(), Some("300 selected"));
+        assert!(scrolled.height() > 0, "card height must be measured");
         assert!(
             scrolled.height() <= 480,
             "the scrolled window must cap the grid: h={}",
@@ -351,19 +375,22 @@ mod tests {
             collect_toggle_buttons(grid.widget().upcast_ref::<gtk4::Widget>()).len() < 300,
             "only visible cells may be realized"
         );
-    }
 
-    /// The picker pages' nesting: a bounded scrolled window wrapped directly
-    /// around the grid.
-    fn scrolled_grid(grid: &gtk4::GridView) -> gtk4::ScrolledWindow {
-        gtk4::ScrolledWindow::builder()
-            .child(grid)
-            .propagate_natural_height(true)
-            .max_content_height(480)
-            .vexpand(false)
-            .valign(gtk4::Align::Start)
-            .hscrollbar_policy(gtk4::PolicyType::Never)
-            .build()
+        // Recycling: scrolling rebinds realized cells to new positions, the
+        // case the toggled-position guard exists for. Scroll to the bottom
+        // and check a rebound pill both shows and writes the right index.
+        let vadj = scrolled.vadjustment();
+        vadj.set_value(vadj.upper());
+        settle();
+        let last = collect_toggle_buttons(grid.widget().upcast_ref::<gtk4::Widget>())
+            .into_iter()
+            .find(|b| b.label().as_deref() == Some("item-299"))
+            .expect("bottom row must realize after scrolling");
+        assert!(last.is_active(), "rebound cell must show item-299 selected");
+        last.set_active(false);
+        settle();
+        assert_eq!(add_btn.label().as_deref(), Some("299 selected"));
+        assert!(!grid.selected_indices().contains(&299));
     }
 
     /// Pump the main loop for a bounded time: enough for the view to lay out
@@ -371,7 +398,12 @@ mod tests {
     fn settle() {
         let ctx = glib::MainContext::default();
         for _ in 0..200 {
-            while ctx.pending() {
+            // Bounded too: a source that stays ready without draining would
+            // otherwise spin here forever.
+            for _ in 0..1000 {
+                if !ctx.pending() {
+                    break;
+                }
                 ctx.iteration(false);
             }
             std::thread::sleep(std::time::Duration::from_millis(5));

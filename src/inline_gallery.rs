@@ -211,17 +211,8 @@ pub(crate) fn push_gallery_picker_page(
         .halign(gtk4::Align::Start)
         .build();
     list_box.append(&positional_note);
-    // The grid goes straight into a scrolled window (the list-widget docs'
-    // placement, so cells stay virtualized); the captions stay outside, so
-    // only the entries scroll.
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .child(grid.widget())
-        .propagate_natural_height(true)
-        .max_content_height(480)
-        .vexpand(false)
-        .valign(gtk4::Align::Start)
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .build();
+    // Only the entries scroll; the captions stay outside (see scrolled_grid).
+    let scrolled = crate::picker_grid::scrolled_grid(grid.widget());
     list_box.append(&scrolled);
     let error_caption = gtk4::Label::builder()
         .label("")

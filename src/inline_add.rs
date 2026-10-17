@@ -792,20 +792,9 @@ fn push_playlist_items_page(
             .build();
         list_box.append(&notice);
     }
-    // The grid goes straight into a scrolled window (the list-widget docs'
-    // placement, so cells stay virtualized). Scrolled: big playlists must
-    // not size the card off-screen, but the capped natural height lets it
-    // grow and shrink with the item count. valign=Start (not the Fill
-    // default): the ToolbarView would otherwise stretch the scrolled window
-    // to the full content height, leaving empty space below a short list.
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .child(grid.widget())
-        .propagate_natural_height(true)
-        .max_content_height(480)
-        .vexpand(false)
-        .valign(gtk4::Align::Start)
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .build();
+    // Scrolled: big playlists must not size the card off-screen, but the
+    // capped natural height still grows and shrinks with the item count.
+    let scrolled = crate::picker_grid::scrolled_grid(grid.widget());
     list_box.append(&scrolled);
     // The error caption lives under the list, like the old row list.
     let error_caption = gtk4::Label::builder()
@@ -996,19 +985,8 @@ fn push_torrent_picker_page(
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
-    // Same arrangement as the playlist picker: the grid goes straight into
-    // the capped scrolled window (the list-widget docs' placement, so cells
-    // stay virtualized). valign=Start (not the Fill default): the
-    // ToolbarView would otherwise stretch the scrolled window to the full
-    // content height, leaving empty space below a short list.
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .child(grid.widget())
-        .propagate_natural_height(true)
-        .max_content_height(480)
-        .vexpand(false)
-        .valign(gtk4::Align::Start)
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .build();
+    // Same arrangement as the playlist picker (see scrolled_grid).
+    let scrolled = crate::picker_grid::scrolled_grid(grid.widget());
     list_box.append(&scrolled);
     let error_caption = gtk4::Label::builder()
         .label("")

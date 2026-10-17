@@ -37,7 +37,10 @@ fn append_titles(store: &gio::ListStore, selection: &gtk4::MultiSelection, title
         return;
     }
     let start = store.n_items();
-    let objs: Vec<gtk4::StringObject> = titles.iter().map(|t| gtk4::StringObject::new(t)).collect();
+    let objs: Vec<gtk4::StringObject> = titles
+        .iter()
+        .map(|t| gtk4::StringObject::new(t))
+        .collect();
     // One splice = one items-changed signal for the whole batch.
     store.splice(start, 0, &objs[..]);
     selection.select_range(start, n, false);

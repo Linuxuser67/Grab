@@ -407,9 +407,7 @@ pub(crate) async fn enumerate_gallery_files_streamed(
         let wake = (tokio::time::Instant::now() + STREAM_IDLE_TIMEOUT).min(deadline);
         let line = match tokio::time::timeout_at(wake, lines.next_line()).await {
             Err(_) if tokio::time::Instant::now() >= deadline => {
-                return Err(GalleryError::probe(
-                    "gallery-dl enumerate timed out".to_string(),
-                ));
+                return Err(GalleryError::probe("gallery-dl enumerate timed out".to_string()));
             }
             Err(_) => {
                 return Err(GalleryError::probe(
@@ -537,7 +535,9 @@ fn placeholder_item(url: Option<&str>, n: usize) -> GalleryItem {
         .and_then(|u| u.split(['?', '#']).next())
         .and_then(|u| u.rsplit('/').next())
         .filter(|s| !s.is_empty());
-    let filename = tail.map(str::to_string).unwrap_or_else(|| format!("file {n}"));
+    let filename = tail
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("file {n}"));
     let extension = filename
         .rsplit_once('.')
         .map(|(_, e)| e.to_string())
@@ -563,7 +563,10 @@ impl ProbeReader {
                 let mut item: GalleryItem = match m.get(2).cloned().map(serde_json::from_value) {
                     Some(Ok(item)) => item,
                     _ => {
-                        tracing::warn!(url = ?url, "gallery-dl probe file message unreadable; keeping a placeholder");
+                        tracing::warn!(
+                            url = ?url,
+                            "gallery-dl probe file message unreadable; keeping a placeholder"
+                        );
                         placeholder_item(url, self.file_index)
                     }
                 };

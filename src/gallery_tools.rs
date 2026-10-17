@@ -20,7 +20,7 @@ const BUILDS_REPO: &str = "builds";
 const LINUX_ASSET: &str = "gallery-dl_linux";
 
 /// Errors from gallery-dl tool provisioning.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum GalleryError {
     /// Install/update failed (network, verification, filesystem).
     #[error("{0}")]

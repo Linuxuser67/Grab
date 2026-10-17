@@ -197,6 +197,7 @@ pub async fn fetch_video_infos(
     cookies_browser: String,
     newest_first: bool,
     fetch_proxy: Option<crate::net_types::ResolvedProxy>,
+    cancel: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
@@ -240,9 +241,36 @@ pub async fn fetch_video_infos(
             Some(raw_json),
         ))
     });
-    match handle.await {
-        Ok(r) => r,
-        Err(e) => Err(VideoError::runtime(&e)),
+    await_probe(handle, cancel).await
+}
+
+/// Await `handle` unless `cancel` fires first (the gallery-dl probe won the
+/// race): abort the worker so the yt-dlp child dies with it instead of
+/// probing on detached.
+async fn await_probe(
+    handle: tokio::task::JoinHandle<Result<(ProbeResult, Option<serde_json::Value>), VideoError>>,
+    cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
+    match cancel {
+        Some(rx) => {
+            // Pin: the abort arm needs `handle` after the select drops its
+            // borrow of it.
+            let mut handle = handle;
+            tokio::select! {
+                r = &mut handle => match r {
+                    Ok(r) => r,
+                    Err(e) => Err(VideoError::runtime(&e)),
+                },
+                _ = rx => {
+                    handle.abort();
+                    Err(VideoError::cancelled())
+                }
+            }
+        }
+        None => match handle.await {
+            Ok(r) => r,
+            Err(e) => Err(VideoError::runtime(&e)),
+        },
     }
 }
 
@@ -500,6 +528,30 @@ pub(crate) fn discover_ytdlp_output(dest: &Path, after_move: Option<&str>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_video_infos_reports_cancelled_when_pre_cancelled() {
+        // gallery-dl won the race before yt-dlp started: the probe must
+        // report Cancelled (not run the pipeline, not a generic error).
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send(()).expect("receiver alive");
+        let libs = Libraries {
+            youtube: std::path::PathBuf::from("/nonexistent/yt-dlp"),
+            ffmpeg: std::path::PathBuf::from("/nonexistent/ffmpeg"),
+        };
+        let r = crate::runtime::tokio_rt().block_on(fetch_video_infos(
+            libs,
+            "https://example.com/video".to_string(),
+            String::new(),
+            false,
+            None,
+            Some(rx),
+        ));
+        assert!(
+            matches!(r, Err(VideoError::Cancelled)),
+            "a pre-cancelled probe must report Cancelled, got {r:?}"
+        );
+    }
 
     #[test]
     fn bounded_drain_passes_small_streams() {

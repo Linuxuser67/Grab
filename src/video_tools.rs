@@ -25,6 +25,10 @@ pub enum VideoError {
     /// Background task machinery failed (panic/join) — internal.
     #[error("{0}")]
     Runtime(String),
+    /// The probe was cancelled because the other backend won the race —
+    /// internal, never surfaced to the user.
+    #[error("probe cancelled")]
+    Cancelled,
     /// Other translated failure.
     #[error("{0}")]
     Message(String),
@@ -52,6 +56,9 @@ impl VideoError {
     }
     pub(crate) fn runtime(e: impl std::fmt::Display) -> Self {
         Self::Runtime(e.to_string())
+    }
+    pub(crate) fn cancelled() -> Self {
+        Self::Cancelled
     }
     pub(crate) fn unavailable() -> Self {
         Self::Message(gettext("No suitable formats found for this media"))
@@ -129,6 +136,7 @@ impl VideoError {
             Self::Fetch(s) => Self::Fetch(format!("{s}{suffix}")),
             Self::Runtime(s) => Self::Runtime(format!("{s}{suffix}")),
             Self::Message(s) => Self::Message(format!("{s}{suffix}")),
+            Self::Cancelled => Self::Cancelled,
         }
     }
     pub(crate) fn interrupted() -> Self {

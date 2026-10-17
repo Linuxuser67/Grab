@@ -1,9 +1,22 @@
 //! Gallery probe orchestration for the inline New Download card.
 //!
-//! The dual-backend probe (`dual_probe`) and unified gallery auth
-//! (`GalleryAuth`, `resolve_gallery_auth`). All UI stays in `inline_add.rs`;
-//! this module has no dependency on it (the sentrux structure check forbids
-//! the cycle).
+//! The dual-backend probe (`dual_probe`), unified gallery auth
+//! (`GalleryAuth`, `resolve_gallery_auth`) and the gallery file picker page
+//! (`push_gallery_picker_page`). Step-bound UI stays in `inline_add.rs`; this
+//! module has no dependency on it (the sentrux structure check forbids the
+//! cycle), and the picker's shared widgets come from `window_rows`.
+
+use crate::download::DownloadManager;
+use crate::window_rows::{
+    apply_scheduled_at, list_selected, picker_enter_confirms, picker_header, picker_list,
+    selection_action_bar, wire_list_selection_bar,
+};
+use adw::prelude::*;
+use gettextrs::{gettext, ngettext};
+use gtk4::prelude::*;
+use libadwaita as adw;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Outcome of the dual-backend probe. The caller (inline_add.rs) checks
 /// staleness, routes the real results with `gallery_probe::route`, and owns
@@ -150,6 +163,156 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
 
     let (ytdlp, gallery) = tokio::join!(ytdlp_fut, gallery_fut);
     DualProbeOutcome::Complete { gallery, ytdlp }
+}
+
+/// Gallery file picker as a right-sliding card page: one toggle pill per
+/// file (all on by default), mirroring the playlist picker. The selection
+/// becomes a gallery-dl `--range` spec on the queued job.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_gallery_picker_page(
+    nav: &adw::NavigationView,
+    manager: Rc<DownloadManager>,
+    dest_dir: Rc<RefCell<String>>,
+    close_card: Rc<dyn Fn()>,
+    scheduled_at: Option<i64>,
+    title: String,
+    url: String,
+    filter: crate::gallery_argv::GalleryFilter,
+    items: Vec<crate::gallery_probe::GalleryItem>,
+) {
+    // Don't stack a second picker while one is already visible.
+    if nav.visible_page_tag().as_deref() == Some("gallery-picker") {
+        return;
+    }
+    let count = items.len();
+    // The enumeration is capped (see ENUMERATE_MAX_FILES): say so when we
+    // hit the cap, so the user knows the list is truncated.
+    let capped = count >= crate::gallery_probe::ENUMERATE_MAX_FILES;
+    let entries: Rc<Vec<(String, String)>> = Rc::new(
+        items
+            .iter()
+            .map(|item| {
+                let sub = if item.extension.is_empty() {
+                    item.category.clone()
+                } else {
+                    item.extension.clone()
+                };
+                (item.filename.clone(), sub)
+            })
+            .collect(),
+    );
+    let (wrapbox, picks) = picker_list(Rc::clone(&entries));
+
+    let list_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(6)
+        .build();
+    list_box.set_margin_top(12);
+    list_box.set_margin_bottom(12);
+    list_box.set_margin_start(12);
+    list_box.set_margin_end(12);
+    list_box.append(&wrapbox);
+    let error_caption = gtk4::Label::builder()
+        .label("")
+        .css_classes(["error", "caption"])
+        .halign(gtk4::Align::Start)
+        .visible(false)
+        .build();
+    list_box.append(&error_caption);
+
+    let scrolled = gtk4::ScrolledWindow::builder()
+        .child(&list_box)
+        .propagate_natural_height(true)
+        .max_content_height(480)
+        .vexpand(false)
+        .valign(gtk4::Align::Start)
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .build();
+
+    let toolbar = adw::ToolbarView::new();
+    let count_text =
+        ngettext("{} file", "{} files", count as u32).replace("{}", &count.to_string());
+    let count_text = if capped {
+        format!(
+            "{} \u{2022} {}",
+            count_text,
+            gettext("Showing the first {} files").replace("{}", &count.to_string())
+        )
+    } else {
+        count_text
+    };
+    toolbar.add_top_bar(&picker_header(nav, &title, &count_text));
+    toolbar.set_content(Some(&scrolled));
+    let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();
+    toolbar.add_bottom_bar(&action_bar);
+    let picker_page = adw::NavigationPage::builder()
+        .tag("gallery-picker")
+        .title(&title)
+        .child(&toolbar)
+        .build();
+    picker_enter_confirms(&picker_page, &add_btn);
+
+    wire_list_selection_bar(&picks, &select_all_btn, &select_none_btn, &add_btn, |n| {
+        ngettext("_Queue {} file", "_Queue {} files", n as u32).replace("{}", &n.to_string())
+    });
+
+    {
+        let picks = picks.clone();
+        let error_caption = error_caption.clone();
+        let add_btn_click = add_btn.clone();
+        let nav_pop = nav.clone();
+        add_btn_click.connect_clicked(move |_| {
+            if !add_btn.is_sensitive() {
+                return;
+            }
+            let selected = list_selected(&picks);
+            if selected.is_empty() {
+                error_caption.set_text(&gettext("Select at least one file"));
+                error_caption.set_visible(true);
+                return;
+            }
+            let range = match crate::gallery_argv::range_spec(&selected) {
+                Some(spec) => spec,
+                None => {
+                    error_caption.set_text(&gettext("Select at least one file"));
+                    error_caption.set_visible(true);
+                    return;
+                }
+            };
+            // Disable while the enqueue runs: a second click would enqueue duplicates.
+            add_btn.set_sensitive(false);
+            let settings = manager.settings();
+            let base_job = crate::gallery_argv::GalleryJob {
+                item_id: 0, // enqueue_gallery assigns the real row ID.
+                page_url: url.clone(),
+                title: title.clone(),
+                file_count: Some(selected.len() as u32),
+                dest_dir: std::path::PathBuf::from("."),
+                filter,
+                cookies_browser: settings.cookies_browser().to_string(),
+                speed_limit: crate::gallery_runner::gallery_speed_limit(settings),
+                range: Some(range),
+            };
+            // Batch guard defers start_next until the Scheduled status is set.
+            let _guard = manager.batch_guard();
+            let mut job = base_job.clone();
+            job.dest_dir = std::path::PathBuf::from(dest_dir.borrow().clone());
+            match manager.enqueue_gallery(&job) {
+                Ok(item) => {
+                    apply_scheduled_at(&item, scheduled_at);
+                    nav_pop.pop();
+                    close_card();
+                }
+                Err(e) => {
+                    error_caption.set_text(&e);
+                    error_caption.set_visible(true);
+                    add_btn.set_sensitive(true);
+                }
+            }
+        });
+    }
+
+    nav.push(&picker_page);
 }
 
 #[cfg(test)]

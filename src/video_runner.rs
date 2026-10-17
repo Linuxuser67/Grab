@@ -26,6 +26,7 @@ use crate::video_staging::{
     dest_part_path, discover_unified_output, ensure_staging_dir_in, file_len, read_manifest,
     release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
     staging_location_for_dest, sweep_partial_remuxes, sweep_staging_preserving_recordings,
+    write_private,
 };
 use crate::video_tools::{
     VideoError, ensure_tool_versions, resolve_libraries, ytdlp_identity_args,
@@ -491,11 +492,12 @@ pub(crate) async fn run_unified_ytdlp(
     // so stale entries are harmless.
     let info_json_path: Option<std::path::PathBuf> = if let Some(json) = job.info_json.as_ref() {
         let json_path = staging.join(format!(".grab-info-{}.json", job.item_id));
-        if serde_json::to_string(json)
-            .ok()
-            .and_then(|text| std::fs::write(&json_path, text).ok())
-            .is_some()
-        {
+        // Private write: the JSON can hold signed media URLs and headers.
+        let written = match serde_json::to_string(json) {
+            Ok(text) => write_private(&json_path, text.as_bytes()).await.is_ok(),
+            Err(_) => false,
+        };
+        if written {
             // Before the `-- <url>` terminator: anything past it is a
             // positional URL, so the flag would be swallowed there.
             splice_before_terminator(
@@ -1412,14 +1414,21 @@ pub(crate) async fn run_live_ytdlp(
     // --load-info-json. Written once, shared by both attempts, deleted after.
     // yt-dlp re-extracts automatically on 403/404, so a stale manifest URL
     // degrades to today's behavior instead of failing.
-    let live_info_path: Option<std::path::PathBuf> = job
+    let live_info_path: Option<std::path::PathBuf> = match job
         .info_json
         .as_ref()
         .and_then(|json| serde_json::to_string(json).ok())
-        .and_then(|text| {
+    {
+        Some(text) => {
             let path = staging.join(format!(".grab-live-{}.json", job.item_id));
-            std::fs::write(&path, text).ok().map(|()| path)
-        });
+            // Private write: the JSON can hold signed manifest URLs.
+            match write_private(&path, text.as_bytes()).await {
+                Ok(()) => Some(path),
+                Err(_) => None,
+            }
+        }
+        None => None,
+    };
     // Reclaim a previous run's crash debris (the normal path deletes it below).
     if live_info_path.is_none() {
         let _ = std::fs::remove_file(staging.join(format!(".grab-live-{}.json", job.item_id)));

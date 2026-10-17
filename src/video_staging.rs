@@ -166,6 +166,19 @@ pub fn ensure_staging_dir_in(root: &Path, dir: &Path) -> Result<PathBuf, VideoEr
         .ok_or_else(|| VideoError::staging(gettext("staging directory escaped its root")))
 }
 
+/// Create a single directory with owner-only permissions (0700).
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    std::fs::DirBuilder::new().mode(0o700).create(dir)
+}
+
+/// Non-Unix fallback: no permission bits to set.
+#[cfg(not(unix))]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(dir)
+}
+
 /// The staging leaf must be a real directory, never a symlink: build the
 /// parent chain, then create the leaf atomically, so a pre-planted link is
 /// refused up front and a link racing for the name can't be followed into
@@ -183,7 +196,9 @@ fn ensure_real_staging_leaf(dir: &Path) -> Result<(), VideoError> {
             if let Some(parent) = dir.parent() {
                 std::fs::create_dir_all(parent).map_err(VideoError::staging)?;
             }
-            match std::fs::create_dir(dir) {
+            // Owner-only leaf: staging can hold private info-JSON temp files.
+            // Only the leaf gets the mode — never the shared parent above.
+            match create_private_dir(dir) {
                 Ok(()) => Ok(()),
                 // Lost a race for the name: whoever won must still be a real
                 // dir — a link that appeared in the gap is refused.
@@ -716,6 +731,42 @@ pub(crate) fn file_len(path: &Path) -> Option<u64> {
     std::fs::metadata(path).map(|m| m.len()).ok()
 }
 
+/// Write `bytes` to `path` with owner-only permissions (0600), without
+/// blocking the async executor.
+///
+/// The probe info-JSON temp files can hold signed media URLs and request
+/// headers, so they must not be world-readable. Any pre-existing file is
+/// removed first: `mode(0o600)` only applies at creation, and a previous
+/// run's crash debris could otherwise keep wider permissions. Flushes
+/// before returning: `write_all` only queues into tokio's buffer, and a
+/// backend spawn reading the file right after must see the whole thing.
+#[cfg(unix)]
+pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+    // Remove first so the 0600 mode below always applies (creation only).
+    let _ = tokio::fs::remove_file(path).await;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .await?;
+    file.write_all(bytes).await?;
+    file.flush().await?;
+    Ok(())
+}
+
+/// Non-Unix fallback: no permission bits to set, still async + flushed.
+#[cfg(not(unix))]
+pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+    let mut file = tokio::fs::File::create(path).await?;
+    file.write_all(bytes).await?;
+    file.flush().await?;
+    Ok(())
+}
+
 /// Allocated bytes on disk (`None` off-Unix: callers treat that as dense).
 #[cfg(unix)]
 fn allocated_bytes(path: &Path) -> Option<u64> {
@@ -864,6 +915,25 @@ mod tests {
             "grab-staging-{tag}-{}-{n}-{nanos}",
             std::process::id()
         ))
+    }
+
+    /// Regression: info-JSON temp files must be owner-only (0600), even
+    /// when a wider-mode file from a crashed run is already in place.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn write_private_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = unique_dir("write-private");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".grab-info-1.json");
+        // Crash debris with 0644 permissions must not keep its mode.
+        std::fs::write(&path, b"stale").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, b"{\"signed\":\"url\"}").await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"signed\":\"url\"}");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "info-JSON temp file must be owner-only");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

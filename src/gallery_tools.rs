@@ -101,12 +101,6 @@ pub async fn latest_gallerydl_tag() -> Option<String> {
         .map(|release| release.tag_name)
 }
 
-/// Sync wrapper for `latest_gallerydl_tag` for true sync callers.
-#[allow(dead_code)]
-pub fn latest_gallerydl_tag_sync() -> Option<String> {
-    crate::runtime::block_on_sync(latest_gallerydl_tag())
-}
-
 /// Install (or update) gallery-dl from the nightly channel into the user lib dir.
 /// Fails closed when the release metadata carries no SHA-256 digest.
 pub async fn install_gallerydl() -> Result<PathBuf, GalleryError> {
@@ -141,12 +135,6 @@ pub async fn install_gallerydl() -> Result<PathBuf, GalleryError> {
     }
 }
 
-/// Sync wrapper for `install_gallerydl` for true sync callers.
-#[allow(dead_code)]
-pub fn install_gallerydl_sync() -> Result<PathBuf, GalleryError> {
-    crate::runtime::block_on_sync(install_gallerydl())
-}
-
 async fn fetch_gallerydl_inner(
     url: &str,
     part: &Path,
@@ -179,7 +167,11 @@ pub fn resolve_gallerydl() -> Result<PathBuf, GalleryError> {
 
 /// `gallery-dl --version` output, trimmed. Used for the Preferences row.
 pub async fn gallerydl_display_version(path: &Path) -> Result<String, GalleryError> {
-    let out = tokio::process::Command::new(path)
+    // kill_on_drop: the Preferences row that calls this can be closed
+    // mid-probe; the child must not outlive the dropped future.
+    let mut cmd = tokio::process::Command::new(path);
+    cmd.kill_on_drop(true);
+    let out = cmd
         .arg("--version")
         .output()
         .await
@@ -191,13 +183,6 @@ pub async fn gallerydl_display_version(path: &Path) -> Result<String, GalleryErr
         ));
     }
     Ok(version)
-}
-
-/// Sync wrapper for `gallerydl_display_version` for true sync callers.
-#[allow(dead_code)]
-pub fn gallerydl_display_version_sync(path: &Path) -> Result<String, GalleryError> {
-    let path = path.to_path_buf();
-    crate::runtime::block_on_sync(async move { gallerydl_display_version(&path).await })
 }
 
 #[cfg(test)]
@@ -252,7 +237,9 @@ mod tests {
     fn gallerydl_display_version_works_without_tokio_runtime() {
         let result = std::thread::spawn(|| {
             assert!(tokio::runtime::Handle::try_current().is_err());
-            gallerydl_display_version_sync(std::path::Path::new("/nonexistent/gallery-dl"))
+            crate::runtime::tokio_rt().block_on(gallerydl_display_version(std::path::Path::new(
+                "/nonexistent/gallery-dl",
+            )))
         })
         .join()
         .expect("thread panicked");

@@ -74,6 +74,11 @@ pub(crate) async fn fetch_raw_dump_json(
     ));
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin);
+    // Belt-and-braces with the ProcessGroupGuard below (which SIGKILLs the
+    // process group on drop): if the drain is dropped, the child dies with
+    // it either way. Download/capture spawns keep their guard-only shutdown
+    // behavior; never set this via the shared ytdlp_command() builder.
+    cmd.kill_on_drop(true);
     cmd.args(&args);
     apply_proxy_env(&mut cmd, fetch_proxy);
     // Debug: log the full argv before spawning. as_std() captures everything

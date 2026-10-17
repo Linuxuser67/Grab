@@ -76,6 +76,17 @@ pub(crate) async fn fetch_raw_dump_json(
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(&args);
     apply_proxy_env(&mut cmd, fetch_proxy);
+    // Debug: log the full argv before spawning. as_std() captures everything
+    // including ytdlp_command()'s --impersonate flag.
+    if crate::backend_debug::enabled() {
+        let std_cmd = cmd.as_std();
+        let program = std_cmd.get_program().to_string_lossy().into_owned();
+        let full_args: Vec<String> = std_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        crate::backend_debug::log_spawn(&program, &full_args);
+    }
     let mut child = cmd.spawn().map_err(VideoError::fetch)?;
     let mut group = ProcessGroupGuard::new(&child);
     let stdout = child
@@ -123,6 +134,9 @@ pub(crate) async fn fetch_raw_dump_json(
         .await
         .and_then(|r| r.ok())
         .unwrap_or_default();
+    // Debug: echo the probe's stderr (not live — the probe is short-lived,
+    // so post-hoc is fine).
+    crate::backend_debug::echo_stderr(&stderr);
     if !status.success() {
         let detail = last_log_line(&String::from_utf8_lossy(&stderr), "yt-dlp reported failure");
         return Err(VideoError::fetch(detail));
@@ -269,6 +283,17 @@ pub(crate) fn spawn_piped_ytdlp(
     ),
     VideoError,
 > {
+    // Debug: log the full argv before spawning. as_std() gives the program
+    // and args that were built via ytdlp_command() + cmd.args(argv).
+    if crate::backend_debug::enabled() {
+        let std_cmd = cmd.as_std();
+        let program = std_cmd.get_program().to_string_lossy().into_owned();
+        let args: Vec<String> = std_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        crate::backend_debug::log_spawn(&program, &args);
+    }
     let mut child = cmd.spawn().map_err(VideoError::runtime)?;
     let stdout = child
         .stdout
@@ -295,6 +320,9 @@ pub(crate) fn drain_stderr_to_tail(
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    // Debug: echo raw stderr live. The bytes are still
+                    // captured below for parsing and the error tail.
+                    crate::backend_debug::echo_stderr(&buf[..n]);
                     trace_format_lines(&mut pending, &buf[..n]);
                     tail.extend_from_slice(&buf[..n]);
                     if tail.len() > 8192 {

@@ -1,5 +1,6 @@
 mod application;
 mod attempt_gate;
+mod backend_debug;
 mod cookies;
 mod download;
 mod download_fetch;
@@ -116,6 +117,7 @@ fn main() -> glib::ExitCode {
     // (tarball/uninstalled run).
     ensure_schema_dir();
     tracing_subscriber::fmt::init();
+    backend_debug::init();
     // Register before dialogs open; corrupt bundle only loses release notes (About guards the missing case).
     if let Ok(res) = gio::Resource::from_data(&glib::Bytes::from_static(GRESOURCE_DATA)) {
         gio::resources_register(&res);

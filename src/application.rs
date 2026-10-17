@@ -433,6 +433,14 @@ pub fn setup(app: &adw::Application) {
             manager.start_scheduler();
 
             let toasts = Rc::new(adw::ToastOverlay::new());
+            // Startup update check: at most one upstream fetch a day. A toast
+            // appears only when that fetch finds a newer yt-dlp than installed.
+            let toasts_check = toasts.clone();
+            gtk4::glib::spawn_future_local(async move {
+                if let Some(msg) = crate::update_cache::startup_notice().await {
+                    toasts_check.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&msg)));
+                }
+            });
             register_actions(app, &st);
             let win = window::build_window(app, manager.clone(), settings.clone(), toasts.clone());
             st.borrow_mut().replace(Rc::new(State {

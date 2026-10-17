@@ -1086,14 +1086,24 @@ pub fn show(
                     .await
                     .ok()
                     .flatten();
-                    // Probe the four upstreams concurrently: sequential
-                    // round-trips would quadruple the wait and burn four times
-                    // the unauthenticated rate limit per click.
-                    let (yt_tag, ff_tag, qjs_tag, gdl_tag) = tokio::join!(
-                        crate::video::latest_ytdlp_tag(),
-                        crate::video::latest_ffmpeg_tag(),
-                        crate::video::latest_quickjs_tag(),
-                        crate::gallery::latest_gallerydl_tag(),
+                    // Upstream tags come from the update cache: a click reuses a
+                    // check from the last 15 minutes. The lookups run on Grab's
+                    // Tokio runtime inside update_cache, never on this GLib task.
+                    let max_age = crate::update_cache::MANUAL_MAX_AGE_SECS;
+                    let snapshot = crate::update_cache::latest(max_age).await;
+                    let latest = snapshot.latest;
+                    let yt_tag = latest.ytdlp;
+                    let ff_tag = latest.ffmpeg;
+                    let qjs_tag = latest.quickjs;
+                    let gdl_tag = latest.gallerydl;
+                    let gdl_digest = latest.gallerydl_digest;
+                    // Grab's own gallery-dl is judged by its bytes, read off-thread.
+                    let gdl_managed = gio::spawn_blocking(crate::gallery::managed_gallerydl_sha)
+                        .await
+                        .unwrap_or(None);
+                    let gdl_needs_update = crate::gallery::gallerydl_needs_update(
+                        gdl_managed.as_ref().map(|m| m.as_deref()),
+                        gdl_digest.as_deref(),
                     );
                     if dialog_b.upgrade().is_none() {
                         return;
@@ -1156,9 +1166,7 @@ pub fn show(
                         // judged when installed, never blocks the check.
                         // If missing, offer to install it.
                         match (gdl.as_deref(), gdl_tag.as_deref()) {
-                            (Some(_installed), Some(tag))
-                                if crate::gallery::gallerydl_update_available(tag) =>
-                            {
+                            (Some(_installed), Some(tag)) if gdl_needs_update => {
                                 updates.push(format!(
                                     "gallery-dl {} → {}",
                                     _installed.trim(),

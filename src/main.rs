@@ -25,6 +25,7 @@ mod runtime;
 mod settings;
 mod torrent;
 mod ui_util;
+mod update_cache;
 // gallery-dl: image galleries + fallback video downloads.
 mod gallery;
 mod gallery_argv;

@@ -8,6 +8,6 @@
 //! (phase 4); they have no non-test callers yet.
 /// Facade: tool provisioning lives in [`gallery_tools`](crate::gallery_tools) now.
 pub use crate::gallery_tools::{
-    gallerydl_display_version, gallerydl_update_available, install_gallerydl, latest_gallerydl_tag,
+    gallerydl_display_version, gallerydl_needs_update, install_gallerydl, managed_gallerydl_sha,
     resolve_gallerydl,
 };

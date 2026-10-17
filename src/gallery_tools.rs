@@ -45,30 +45,58 @@ impl GalleryError {
     }
 }
 
-/// Whether a gallery-dl update is available. The nightly tag is date-based
-/// (`2026.10.15`) while `gallery-dl --version` prints semver (`1.32.14`),
-/// Whether a gallery-dl update is available.
-/// Compares the latest nightly tag against the sidecar written at install time.
-/// Missing sidecar means "update available" (once).
-pub fn gallerydl_update_available(tag: &str) -> bool {
-    let tag = tag.trim();
-    if tag.is_empty() {
-        return false;
-    }
-    let sidecar = user_lib_dir().join("gallery-dl.tag");
-    let stored = std::fs::read_to_string(&sidecar).ok();
-    update_available_for_tags(stored.as_deref(), tag)
+/// Latest nightly gallery-dl release as `(tag, SHA-256 digest of its asset)`.
+/// One GitHub lookup on the Tokio runtime; `None` on any network/API failure.
+pub async fn latest_gallerydl_release() -> Option<(String, Option<String>)> {
+    latest_gallerydl_asset()
+        .await
+        .map(|(_, digest, tag)| (tag, digest))
 }
 
-/// Pure helper: is an update available given the stored vs latest tags?
-fn update_available_for_tags(stored: Option<&str>, latest: &str) -> bool {
-    let latest = latest.trim();
-    if latest.is_empty() {
-        return false;
+/// SHA-256 of a file as lowercase hex, read in chunks.
+pub(crate) fn sha256_file(path: &Path) -> std::io::Result<String> {
+    use sha2::Digest as _;
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
     }
-    match stored {
-        Some(s) => s.trim() != latest,
-        None => true,
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// The installed gallery-dl as the update check reads it: `None` when the
+/// resolved binary is not Grab's own copy (a system or PATH install is not
+/// Grab's to update), `Some(None)` when it is Grab's but unreadable, and
+/// `Some(Some(sha))` otherwise. Blocking: call off the GTK thread.
+pub fn managed_gallerydl_sha() -> Option<Option<String>> {
+    let path = resolve_gallerydl().ok()?;
+    if !path.starts_with(user_lib_dir()) {
+        return None;
+    }
+    Some(sha256_file(&path).ok())
+}
+
+/// Whether Grab's own gallery-dl differs from the latest upstream build. It
+/// compares the installed file's SHA-256 with the upstream asset digest, the
+/// same value the installer verifies, so the answer follows the binary on
+/// disk. A binary Grab does not manage, or a missing upstream digest, never
+/// prompts.
+pub fn gallerydl_needs_update(managed: Option<Option<&str>>, latest_digest: Option<&str>) -> bool {
+    match (managed, latest_digest) {
+        (Some(Some(installed)), Some(latest)) => !installed.eq_ignore_ascii_case(latest),
+        // Grab's but unreadable: a reinstall is the fix.
+        (Some(None), Some(_)) => true,
+        _ => false,
     }
 }
 
@@ -90,24 +118,10 @@ async fn latest_gallerydl_asset() -> Option<(String, Option<String>, String)> {
     handle.await.ok().flatten()
 }
 
-/// Latest nightly tag without downloading anything: one user-initiated
-/// GitHub API call. `None` on any network/API failure.
-pub async fn latest_gallerydl_tag() -> Option<String> {
-    let handle = crate::runtime::tokio_rt().spawn(async move {
-        let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new(BUILDS_OWNER, BUILDS_REPO);
-        fetcher
-            .fetch_latest_release(None)
-            .await
-            .ok()
-            .map(|release| release.tag_name)
-    });
-    handle.await.ok().flatten()
-}
-
 /// Install (or update) gallery-dl from the nightly channel into the user lib dir.
 /// Fails closed when the release metadata carries no SHA-256 digest.
 pub async fn install_gallerydl() -> Result<PathBuf, GalleryError> {
-    let (url, digest, tag) = latest_gallerydl_asset()
+    let (url, digest, _) = latest_gallerydl_asset()
         .await
         .ok_or_else(|| GalleryError::install("couldn't determine the latest gallery-dl release"))?;
     // Fail closed: no digest means no verified install. The digest comes from
@@ -127,15 +141,7 @@ pub async fn install_gallerydl() -> Result<PathBuf, GalleryError> {
     if result.is_err() {
         std::fs::remove_file(&part).ok();
     }
-    match result {
-        Ok(()) => {
-            // Write the installed tag to the sidecar for the update check.
-            let tag_file = dir.join("gallery-dl.tag");
-            std::fs::write(&tag_file, &tag).ok();
-            Ok(dest)
-        }
-        Err(e) => Err(e),
-    }
+    result.map(|()| dest)
 }
 
 async fn fetch_gallerydl_inner(
@@ -193,16 +199,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn update_available_on_nightly() {
-        // Same tag: no update.
-        assert!(!update_available_for_tags(Some("2026.10.15"), "2026.10.15"));
-        // Different tag: update available.
-        assert!(update_available_for_tags(Some("2026.10.14"), "2026.10.15"));
-        // Missing sidecar: update available (once).
-        assert!(update_available_for_tags(None, "2026.10.15"));
-        // Empty latest tag: no update.
-        assert!(!update_available_for_tags(Some("2026.10.15"), ""));
-        assert!(!update_available_for_tags(None, ""));
+    fn gallerydl_needs_update_follows_the_binary_not_a_sidecar() {
+        // Grab's binary matches upstream: current.
+        assert!(!gallerydl_needs_update(Some(Some("abc")), Some("abc")));
+        // Different bytes: update available.
+        assert!(gallerydl_needs_update(Some(Some("abc")), Some("def")));
+        // Grab's but unreadable: reinstall.
+        assert!(gallerydl_needs_update(Some(None), Some("def")));
+        // Not Grab's (system or PATH install): never prompts.
+        assert!(!gallerydl_needs_update(None, Some("def")));
+        // No upstream digest to compare against: never prompts.
+        assert!(!gallerydl_needs_update(Some(Some("abc")), None));
+    }
+
+    #[test]
+    fn sha256_file_matches_the_known_digest() {
+        let path = std::env::temp_dir().join("grab-sha-test");
+        std::fs::write(&path, b"abc").unwrap();
+        let got = sha256_file(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            got.unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

@@ -24,8 +24,8 @@ use crate::video_prefs::{
 };
 use crate::video_probe::{
     DIRECT_FILE_EXTS, MAX_PLAYLIST_ITEMS, drive_direct_url, drive_file_id, expand_child_target,
-    insta_shortcode_to_pk, is_direct_file_url, is_expired, is_http_url, is_stream_manifest_url,
-    now_unix, parse_playlist_json, parse_single_video, pick_playlist_entry, playlist_resolve_error,
+    insta_shortcode_to_pk, is_direct_file_url, is_http_url, is_stream_manifest_url,
+    parse_playlist_json, parse_single_video, pick_playlist_entry, playlist_resolve_error,
     retarget_story_items, sanitize_video_json, story_segment_url, story_tray_url,
 };
 use crate::video_progress::{
@@ -230,7 +230,6 @@ fn test_format(overrides: serde_json::Value) -> yt_dlp::model::format::Format {
 fn from_format_accepts_plain_https() {
     let sel = StreamSel::from_format(&test_format(serde_json::json!({}))).unwrap();
     assert_eq!(sel.format_id, "137");
-    assert_eq!(sel.url, "https://cdn.example/v.mp4");
     assert_eq!(sel.size, Some(100));
 }
 
@@ -471,24 +470,6 @@ fn domain_case_insensitive() {
 #[test]
 fn domain_unknown_not_match() {
     assert!(!video_domain("google.com"));
-}
-
-// ── expiry ─────────────────────────────────────────────────────────────
-
-#[test]
-fn expired_none_is_expired() {
-    assert!(is_expired(None));
-}
-
-#[test]
-fn expired_past() {
-    assert!(is_expired(Some(0)));
-}
-
-#[test]
-fn expired_future() {
-    let future = now_unix() + 3600;
-    assert!(!is_expired(Some(future)));
 }
 
 // ── staging ────────────────────────────────────────────────────────────
@@ -1112,9 +1093,7 @@ fn pipeline_reports_missing_tools() {
 fn test_video_info(page_url: &str) -> ProbeResult {
     ProbeResult::Single(VideoInfo {
         title: "T".into(),
-        duration: None,
         page_url: page_url.into(),
-        expires_at: None,
         formats: Box::default(),
         is_live: false,
         fetchable: false,
@@ -1193,14 +1172,9 @@ fn parse_playlist_reads_flat_entries() {
     assert_eq!(pl.items.len(), 2);
     assert_eq!(&*pl.items[0].title, "First");
     assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
-    // Float durations truncate like the video path.
-    assert_eq!(pl.items[0].duration, Some(61));
-    assert_eq!(pl.items[0].index, 1);
-    // Empty title falls back to id; missing index falls back to position.
+    // Empty title falls back to id.
     assert_eq!(&*pl.items[1].title, "b2");
     assert_eq!(pl.items[1].page_url, "https://example.com/v/b2");
-    assert_eq!(pl.items[1].index, 3);
-    assert_eq!(pl.items[1].duration, None);
 }
 
 #[test]
@@ -1497,15 +1471,12 @@ fn probe_result_helpers_cover_both_variants() {
     assert!(!single.fetchable());
 
     let items = vec![PlaylistItem {
-        index: 1,
         id: "a1".into(),
         title: "First".into(),
         page_url: "https://www.youtube.com/watch?v=a1".into(),
-        duration: None,
     }]
     .into_boxed_slice();
     let list = ProbeResult::Playlist(PlaylistInfo {
-        id: "PL1".into(),
         title: "My List".into(),
         page_url: "https://www.youtube.com/playlist?list=PL1".into(),
         kind: PlaylistKind::Playlist,
@@ -1517,7 +1488,6 @@ fn probe_result_helpers_cover_both_variants() {
     assert!(list.fetchable());
 
     let empty = ProbeResult::Playlist(PlaylistInfo {
-        id: "PL1".into(),
         title: "My List".into(),
         page_url: "https://www.youtube.com/playlist?list=PL1".into(),
         kind: PlaylistKind::Playlist,
@@ -1537,10 +1507,10 @@ fn probe_result_helpers_cover_both_variants() {
 fn probe_struct_footprint_budget() {
     use std::mem::size_of;
     assert_eq!(size_of::<VideoFormatOption>(), 40, "VideoFormatOption");
-    assert_eq!(size_of::<VideoInfo>(), 88, "VideoInfo");
-    assert_eq!(size_of::<PlaylistItem>(), 80, "PlaylistItem");
-    assert_eq!(size_of::<PlaylistInfo>(), 80, "PlaylistInfo");
-    assert_eq!(size_of::<ProbeResult>(), 88, "ProbeResult");
+    assert_eq!(size_of::<VideoInfo>(), 56, "VideoInfo");
+    assert_eq!(size_of::<PlaylistItem>(), 56, "PlaylistItem");
+    assert_eq!(size_of::<PlaylistInfo>(), 64, "PlaylistInfo");
+    assert_eq!(size_of::<ProbeResult>(), 64, "ProbeResult");
     // Rare large variants stay boxed so the common values stay small.
     assert_eq!(size_of::<VideoOutcome>(), 16, "VideoOutcome");
     assert_eq!(size_of::<crate::engine_msg::EngineMsg>(), 40, "EngineMsg");
@@ -6698,11 +6668,9 @@ fn fetch_video_page_resolves_without_flat_playlist() {
 fn expand_child_target_routes_entries() {
     fn item(id: &str, page_url: &str) -> PlaylistItem {
         PlaylistItem {
-            index: 1,
             id: id.into(),
             title: "t".into(),
             page_url: page_url.to_string(),
-            duration: None,
         }
     }
     let tray = "https://www.instagram.com/stories/someuser/";

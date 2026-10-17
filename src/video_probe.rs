@@ -4,8 +4,6 @@
 
 use crate::video_tools::VideoError;
 use gettextrs::gettext;
-#[cfg(test)]
-use std::time::{SystemTime, UNIX_EPOCH};
 use yt_dlp::model::Video;
 
 /// Google Drive file id from share/download URLs (`file/d/<id>` or
@@ -64,27 +62,6 @@ pub fn drive_direct_url(url: &str) -> Option<String> {
     drive_file_id(url).map(|id| {
         format!("https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t")
     })
-}
-
-/// Unix timestamp now, seconds — the probe clock for `is_expired`.
-/// Test-only: no production caller yet (`VideoInfo.expires_at` has no reader).
-#[cfg(test)]
-pub fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// Whether a resolved media URL is no longer usable. `None` ("not resolved")
-/// counts as expired so restores always re-extract until a fresh URL is stored.
-/// Test-only: no production caller yet.
-#[cfg(test)]
-pub fn is_expired(expires_at: Option<i64>) -> bool {
-    match expires_at {
-        None => true,
-        Some(t) => now_unix() >= t,
-    }
 }
 
 /// Whether the string is an HTTP(S) URL: the only scheme the dialog probes for
@@ -449,15 +426,6 @@ pub(crate) fn playlist_truncated(pl: &crate::media_types::PlaylistInfo) -> bool 
     pl.total > pl.items.len() && pl.items.len() == MAX_PLAYLIST_ITEMS
 }
 
-/// Lenient i64 for extractor JSON (durations arrive as floats, e.g. fractional
-/// Instagram reel durations); floats truncate toward zero, negatives included —
-/// callers clamp display.
-fn json_i64(value: &serde_json::Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_f64().map(|f| f.trunc() as i64))
-}
-
 /// Non-empty string field, borrowed.
 fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     value
@@ -487,18 +455,10 @@ fn parse_playlist_item(
     let title = json_str(entry, "title")
         .map(str::to_string)
         .unwrap_or_else(|| id.clone());
-    let index = entry
-        .get("playlist_index")
-        .and_then(json_i64)
-        .and_then(|i| usize::try_from(i).ok())
-        .filter(|&i| i > 0) // `playlist_index` is documented 1-based; 0 is bogus.
-        .unwrap_or(position + 1);
     Some(crate::media_types::PlaylistItem {
-        index,
         id: id.into_boxed_str(),
         title: title.into_boxed_str(),
         page_url: page_url.to_string(),
-        duration: entry.get("duration").and_then(json_i64),
     })
 }
 

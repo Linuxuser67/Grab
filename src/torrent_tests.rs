@@ -398,7 +398,6 @@ fn deletion_target_uses_raw_path_not_display() {
     let entry = TorrentFileEntry {
         raw_path: long.clone(),
         display_path: format!("{}…", "x".repeat(120)),
-        length: 3,
     };
     // Target is the raw on-disk name: the truncated display path addresses nothing.
     assert_eq!(
@@ -413,7 +412,6 @@ fn deletion_target_skips_kept_and_hostile_entries() {
     let entry = TorrentFileEntry {
         raw_path: "keep.iso".to_string(),
         display_path: "keep.iso".to_string(),
-        length: 2,
     };
     let mut keep = std::collections::HashSet::new();
     keep.insert(0);
@@ -421,7 +419,6 @@ fn deletion_target_skips_kept_and_hostile_entries() {
     let hostile = TorrentFileEntry {
         raw_path: "../evil.iso".to_string(),
         display_path: "../evil.iso".to_string(),
-        length: 2,
     };
     assert_eq!(
         deletion_target(folder, 1, &std::collections::HashSet::new(), &hostile),

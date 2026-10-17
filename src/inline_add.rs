@@ -3190,9 +3190,7 @@ mod tests {
     fn dummy_probe() -> crate::video::ProbeResult {
         crate::video::ProbeResult::Single(crate::video::VideoInfo {
             title: "Test title".into(),
-            duration: None,
             page_url: "https://youtu.be/x".into(),
-            expires_at: None,
             formats: Box::new([]),
             is_live: false,
             fetchable: true,

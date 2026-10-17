@@ -199,7 +199,9 @@ pub fn probe_title(item: &GalleryItem, url: &str) -> String {
     crate::file_names::filename_from_url(url)
 }
 
-/// Run the gallery-dl probe: `gallery-dl --config-ignore -j --no-download --range 1-5 <url>`.
+/// Run the gallery-dl probe: `gallery-dl --config-ignore -j --no-download
+/// --range 1-5 <url>`, with `output.jsonl=true` so messages arrive line by
+/// line (see `parse_jsonl`).
 ///
 /// Returns `Ok(Some(items))` on success, `Ok(None)` when the URL is unsupported
 /// (exit 64) or yields no files. `Err` on timeout, spawn failure, or any other
@@ -223,7 +225,11 @@ pub async fn probe_gallery(
         .arg("1-5")
         // Don't let gallery-dl write back to Grab's staged cookies file.
         .arg("-o")
-        .arg("extractor.cookies-update=false");
+        .arg("extractor.cookies-update=false")
+        // One JSON message per line instead of one pretty-printed document:
+        // the same messages, parsed line by line (see parse_jsonl).
+        .arg("-o")
+        .arg("output.jsonl=true");
     if let Some(cookies) = cookies_file {
         cmd.arg("-C").arg(cookies);
     }
@@ -256,8 +262,7 @@ pub async fn probe_gallery(
     }
     // `-j` emits `[type, ...]` arrays: [2, {dir}] for directory context,
     // [3, "url", {meta}] for files, [-1, {error, message}] for errors.
-    let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
-        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
+    let messages = parse_jsonl(&output.stdout)?;
     let items = parse_probe_messages(&messages)?;
     if items.is_empty() {
         return Ok(None);
@@ -286,6 +291,9 @@ fn enumerate_base_argv() -> Vec<String> {
         format!("1-{ENUMERATE_MAX_FILES}"),
         "-o".to_string(),
         "extractor.cookies-update=false".to_string(),
+        "-o".to_string(),
+        // One JSON message per line, flushed as it arrives (see parse_jsonl).
+        "output.jsonl=true".to_string(),
     ]
 }
 
@@ -330,10 +338,26 @@ pub async fn enumerate_gallery_files(
             output.status.code().unwrap_or(-1)
         )));
     }
-    let messages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
-        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))?;
+    let messages = parse_jsonl(&output.stdout)?;
     let items = parse_probe_messages(&messages)?;
     Ok(items)
+}
+
+/// Parse `gallery-dl -o output.jsonl=true` output: one JSON message array
+/// per line, blank lines ignored. A malformed line is an error — silently
+/// skipping one would shift every later index away from what `--range`
+/// expects on the download side.
+fn parse_jsonl(bytes: &[u8]) -> Result<Vec<serde_json::Value>, GalleryError> {
+    let mut messages = Vec::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        messages.push(serde_json::from_slice(line).map_err(|e| {
+            GalleryError::probe(format!("couldn't parse gallery-dl output: {e}"))
+        })?);
+    }
+    Ok(messages)
 }
 
 /// Parse `gallery-dl -j` message arrays into file items.
@@ -473,6 +497,44 @@ mod tests {
             format!("1-{ENUMERATE_MAX_FILES}"),
             "argv: {argv:?}"
         );
+    }
+
+    #[test]
+    fn argv_requests_jsonl_output() {
+        // One JSON message per line, flushed as it arrives: the streaming
+        // enumerate and the picker's incremental appends read this format.
+        let argv = enumerate_base_argv();
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "-o" && w[1] == "output.jsonl=true"),
+            "argv: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn jsonl_lines_parse_like_a_batched_document() {
+        let jsonl = concat!(
+            "[2, {\"category\": \"instagram\"}]\n",
+            "\n",
+            "[3, \"https://example.com/1.jpg\", {\"filename\": \"1.jpg\"}]\n",
+            "   \n",
+            "[3, \"https://example.com/2.jpg\", {\"filename\": \"2.jpg\"}]\n",
+            "[-1, {\"error\": \"HttpError\", \"message\": \"404\"}]\n"
+        );
+        let messages = parse_jsonl(jsonl.as_bytes()).unwrap();
+        // Blank/whitespace-only lines are skipped; message order is kept.
+        assert_eq!(messages.len(), 4);
+        let items = parse_probe_messages(&messages).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].filename, "2.jpg");
+    }
+
+    #[test]
+    fn jsonl_garbage_line_is_an_error() {
+        // A skipped line would shift every later index away from the
+        // --range the download side applies, so this must fail loudly.
+        let jsonl = b"[3, \"https://example.com/1.jpg\", {\"filename\": \"1.jpg\"}]\nnot json\n";
+        assert!(parse_jsonl(jsonl).is_err());
     }
 
     #[test]

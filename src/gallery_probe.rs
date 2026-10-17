@@ -14,10 +14,11 @@ use crate::gallery_tools::GalleryError;
 /// Timeout for the gallery-dl probe (same as the yt-dlp probe).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Upper bound for the file picker enumeration: the picker builds one toggle
-/// per file on the GTK thread, so an unbounded gallery would freeze the UI.
-/// `--range` keeps gallery-dl itself from walking further.
-pub(crate) const ENUMERATE_MAX_FILES: usize = 500;
+/// Upper bound for the file picker enumeration. The picker virtualizes its
+/// rows, so the UI cost is independent of the count; the cap only bounds
+/// gallery-dl's own listing walk and the buffered item list. `--range`
+/// keeps gallery-dl itself from walking further.
+pub(crate) const ENUMERATE_MAX_FILES: usize = 5000;
 
 /// Timeout for the full enumeration: a huge gallery can take a while even
 /// capped, but it must not hang forever.
@@ -287,8 +288,8 @@ fn enumerate_base_argv() -> Vec<String> {
         "--config-ignore".to_string(),
         "-j".to_string(),
         "--no-download".to_string(),
-        // Bound the work: the picker can't show more than ENUMERATE_MAX_FILES
-        // anyway. Indices stay 1-based, so range_spec remains correct.
+        // Bound gallery-dl's walk (the picker itself virtualizes rows).
+        // Indices stay 1-based, so range_spec remains correct.
         "--range".to_string(),
         format!("1-{ENUMERATE_MAX_FILES}"),
         "-o".to_string(),
@@ -617,8 +618,8 @@ mod tests {
 
     #[test]
     fn enumerate_argv_is_range_bounded() {
-        // The picker builds one toggle per file on the GTK thread: the
-        // enumeration must stay capped or a huge gallery freezes the UI.
+        // The enumeration must stay --range-bounded: the cap bounds
+        // gallery-dl's walk (the picker itself virtualizes rows).
         let argv = enumerate_base_argv();
         let range_pos = argv.iter().position(|a| a == "--range");
         assert!(range_pos.is_some(), "argv: {argv:?}");

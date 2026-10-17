@@ -2110,17 +2110,43 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     if !crate::gallery_probe::url_is_direct_media(&url)
                         && let Ok(tool) = crate::gallery_argv::resolve_tool()
                     {
-                        let probe_outcome = crate::inline_gallery::dual_probe(
-                            crate::inline_gallery::DualProbeCtx {
-                                url: &url,
-                                browser: browser.clone(),
-                                newest_first,
-                                proxy: proxy.clone(),
-                                libs: libs.clone(),
-                                tool,
-                            },
-                        )
-                        .await;
+                        // This lookup is polled by GLib, but gallery-dl and browser-cookie
+                        // export use tokio::process and must run inside Tokio's runtime.
+                        let probe_url = url.clone();
+                        let probe_browser = browser.clone();
+                        let probe_proxy = proxy.clone();
+                        let probe_libs = libs.clone();
+                        let probe_handle = crate::runtime::tokio_rt().spawn(async move {
+                            crate::inline_gallery::dual_probe(
+                                crate::inline_gallery::DualProbeCtx {
+                                    url: &probe_url,
+                                    browser: probe_browser,
+                                    newest_first,
+                                    proxy: probe_proxy,
+                                    libs: probe_libs,
+                                    tool,
+                                },
+                            )
+                            .await
+                        });
+                        let probe_outcome = match probe_handle.await {
+                            Ok(outcome) => outcome,
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    "dual-backend probe task failed"
+                                );
+                                // Don't overwrite the UI if this lookup is stale.
+                                if probe_b.borrow().generation() != my {
+                                    return;
+                                }
+                                let message =
+                                    gettext("The lookup failed unexpectedly. Please try again.");
+                                show_video_error(&step_b, &message);
+                                set_lookup_add(&lookup_add_b, true);
+                                return;
+                            }
+                        };
                         // Discard stale results: the user may have pasted a new URL
                         // meanwhile.
                         if probe_b.borrow().generation() != my {

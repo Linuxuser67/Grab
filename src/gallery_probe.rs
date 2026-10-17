@@ -283,7 +283,7 @@ fn enumerate_base_argv(jsonl: bool) -> Vec<String> {
         "extractor.cookies-update=false".to_string(),
     ];
     if jsonl {
-        // One JSON message per line, flushed as it arrives (see parse_jsonl).
+        // One JSON message per line, flushed as it arrives (see parse_jsonl_line).
         argv.push("-o".to_string());
         argv.push("output.jsonl=true".to_string());
     }
@@ -384,10 +384,10 @@ pub(crate) async fn enumerate_gallery_files_streamed(
     use tokio::io::AsyncBufReadExt as _;
 
     let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, true);
-    // stdout is the line stream; stderr is discarded — failures reach us
-    // through the exit status and the document-mode fallback below.
+    // stdout is the line stream; stderr is kept as a short tail for the
+    // error text, drained concurrently so gallery-dl never blocks on a full pipe.
     cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::piped());
     // Debug: log the full argv before spawning.
     crate::backend_debug::log_command(&cmd);
     let mut child = cmd
@@ -397,13 +397,20 @@ pub(crate) async fn enumerate_gallery_files_streamed(
         .stdout
         .take()
         .ok_or_else(|| GalleryError::install("gallery-dl enumerate: no stdout".to_string()))?;
+    let stderr_tail = spawn_stderr_tail(child.stderr.take());
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut reader = ProbeReader::default();
     let mut count = 0usize;
     let deadline = tokio::time::Instant::now() + STREAM_TOTAL_TIMEOUT;
     loop {
-        let next = tokio::time::timeout(STREAM_IDLE_TIMEOUT, lines.next_line());
-        let line = match next.await {
+        // Wake at the idle bound or the total deadline, whichever is first.
+        let wake = (tokio::time::Instant::now() + STREAM_IDLE_TIMEOUT).min(deadline);
+        let line = match tokio::time::timeout_at(wake, lines.next_line()).await {
+            Err(_) if tokio::time::Instant::now() >= deadline => {
+                return Err(GalleryError::probe(
+                    "gallery-dl enumerate timed out".to_string(),
+                ));
+            }
             Err(_) => {
                 return Err(GalleryError::probe(
                     "gallery-dl enumerate stalled (no output)".to_string(),
@@ -417,14 +424,8 @@ pub(crate) async fn enumerate_gallery_files_streamed(
             Ok(Ok(None)) => break,
             Ok(Ok(Some(line))) => line,
         };
-        if tokio::time::Instant::now() > deadline {
-            return Err(GalleryError::probe(
-                "gallery-dl enumerate timed out".to_string(),
-            ));
-        }
         // Blank lines carry no message.
-        let mut messages = parse_jsonl(line.as_bytes())?;
-        let Some(m) = messages.pop() else {
+        let Some(m) = parse_jsonl_line(&line)? else {
             continue;
         };
         if let Some(item) = reader.feed(&m) {
@@ -442,8 +443,9 @@ pub(crate) async fn enumerate_gallery_files_streamed(
         .map_err(|e| GalleryError::install(format!("gallery-dl enumerate failed: {e}")))?;
     if !status.success() {
         return Err(GalleryError::install(format!(
-            "gallery-dl enumerate failed (exit {})",
-            status.code().unwrap_or(-1)
+            "gallery-dl enumerate failed (exit {}){}",
+            status.code().unwrap_or(-1),
+            stderr_summary(&stderr_tail)
         )));
     }
     reader.finish()?;
@@ -465,23 +467,50 @@ pub(crate) async fn enumerate_gallery_files_streamed(
     Ok(count)
 }
 
+/// Last few stderr lines of a streamed run, drained in the background.
+type StderrTail = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
+
+const STDERR_TAIL_LINES: usize = 8;
+
+fn spawn_stderr_tail(stderr: Option<tokio::process::ChildStderr>) -> StderrTail {
+    use tokio::io::AsyncBufReadExt as _;
+    let tail: StderrTail = Default::default();
+    if let Some(stderr) = stderr {
+        let sink = tail.clone();
+        tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let mut t = sink.lock().unwrap_or_else(|p| p.into_inner());
+                if t.len() == STDERR_TAIL_LINES {
+                    t.pop_front();
+                }
+                t.push_back(line);
+            }
+        });
+    }
+    tail
+}
+
+/// `": line | line"` for the error text, or empty when stderr said nothing.
+fn stderr_summary(tail: &StderrTail) -> String {
+    let t = tail.lock().unwrap_or_else(|p| p.into_inner());
+    if t.is_empty() {
+        return String::new();
+    }
+    format!(": {}", t.iter().cloned().collect::<Vec<_>>().join(" | "))
+}
+
 /// Parse `gallery-dl -o output.jsonl=true` output: one JSON message array
 /// per line, blank lines ignored. A malformed line is an error — silently
 /// skipping one would shift every later index away from what `--range`
 /// expects on the download side.
-fn parse_jsonl(bytes: &[u8]) -> Result<Vec<serde_json::Value>, GalleryError> {
-    let mut messages = Vec::new();
-    for line in bytes.split(|b| *b == b'\n') {
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        messages.push(
-            serde_json::from_slice(line).map_err(|e| {
-                GalleryError::probe(format!("couldn't parse gallery-dl output: {e}"))
-            })?,
-        );
+fn parse_jsonl_line(line: &str) -> Result<Option<serde_json::Value>, GalleryError> {
+    if line.trim().is_empty() {
+        return Ok(None);
     }
-    Ok(messages)
+    serde_json::from_str(line)
+        .map(Some)
+        .map_err(|e| GalleryError::probe(format!("couldn't parse gallery-dl output: {e}")))
 }
 
 /// Streaming twin of `parse_probe_messages`: feed messages one at a time
@@ -489,6 +518,9 @@ fn parse_jsonl(bytes: &[u8]) -> Result<Vec<serde_json::Value>, GalleryError> {
 /// error carry across feeds exactly like the whole-vector parse.
 #[derive(Default)]
 struct ProbeReader {
+    /// Count of file messages seen, including unreadable ones: gallery-dl
+    /// counts every file in `--range`, so placeholders must hold a slot.
+    file_index: usize,
     /// Directory context from the most recent type-2 message; file items
     /// inherit its title/user when they don't carry their own.
     dir_ctx: Option<serde_json::Map<String, serde_json::Value>>,
@@ -496,6 +528,28 @@ struct ProbeReader {
     /// surfaced by `finish` when nothing was collected.
     pending_err: Option<GalleryError>,
     got_items: bool,
+}
+
+/// Stand-in for a file message whose metadata is missing or unreadable.
+/// Keeps its position in the picker so `--range` indices stay aligned.
+fn placeholder_item(url: Option<&str>, n: usize) -> GalleryItem {
+    let tail = url
+        .and_then(|u| u.split(['?', '#']).next())
+        .and_then(|u| u.rsplit('/').next())
+        .filter(|s| !s.is_empty());
+    let filename = tail
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("file {n}"));
+    let extension = filename
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_string())
+        .unwrap_or_default();
+    GalleryItem {
+        filename,
+        extension,
+        category: String::new(),
+        extra: serde_json::Map::new(),
+    }
 }
 
 impl ProbeReader {
@@ -506,18 +560,16 @@ impl ProbeReader {
     fn feed(&mut self, m: &serde_json::Value) -> Option<GalleryItem> {
         match m.get(0).and_then(|v| v.as_i64()) {
             Some(msg_type::FILE) => {
-                let meta = match m.get(2) {
-                    Some(v) => v.clone(),
-                    None => {
-                        tracing::trace!(message = ?m, "gallery-dl probe file message without metadata");
-                        return None;
-                    }
-                };
-                let mut item: GalleryItem = match serde_json::from_value(meta) {
-                    Ok(item) => item,
-                    Err(e) => {
-                        tracing::trace!(error = %e, "gallery-dl probe couldn't parse file metadata");
-                        return None;
+                self.file_index += 1;
+                let url = m.get(1).and_then(|v| v.as_str());
+                let mut item: GalleryItem = match m.get(2).cloned().map(serde_json::from_value) {
+                    Some(Ok(item)) => item,
+                    _ => {
+                        tracing::warn!(
+                            url = ?url,
+                            "gallery-dl probe file message unreadable; keeping a placeholder"
+                        );
+                        placeholder_item(url, self.file_index)
                     }
                 };
                 // Inherit directory title/user when the file lacks them.
@@ -677,7 +729,10 @@ mod tests {
             "[3, \"https://example.com/2.jpg\", {\"filename\": \"2.jpg\"}]\n",
             "[-1, {\"error\": \"HttpError\", \"message\": \"404\"}]\n"
         );
-        let messages = parse_jsonl(jsonl.as_bytes()).unwrap();
+        let messages: Vec<serde_json::Value> = jsonl
+            .lines()
+            .filter_map(|l| parse_jsonl_line(l).unwrap())
+            .collect();
         // Blank/whitespace-only lines are skipped; message order is kept.
         assert_eq!(messages.len(), 4);
         let items = parse_probe_messages(&messages).unwrap();
@@ -689,8 +744,28 @@ mod tests {
     fn jsonl_garbage_line_is_an_error() {
         // A skipped line would shift every later index away from the
         // --range the download side applies, so this must fail loudly.
-        let jsonl = b"[3, \"https://example.com/1.jpg\", {\"filename\": \"1.jpg\"}]\nnot json\n";
-        assert!(parse_jsonl(jsonl).is_err());
+        let jsonl = "[3, \"https://example.com/1.jpg\", {\"filename\": \"1.jpg\"}]\nnot json\n";
+        assert!(jsonl.lines().any(|l| parse_jsonl_line(l).is_err()));
+        assert!(parse_jsonl_line("   ").unwrap().is_none());
+    }
+
+    #[test]
+    fn unreadable_file_message_keeps_its_range_slot() {
+        // gallery-dl counts this message in --range. Dropping it would shift
+        // every later pick onto the wrong file, so it must become a placeholder.
+        let messages: Vec<serde_json::Value> = vec![
+            serde_json::json!([3, "https://example.com/a", {"filename": "a"}]),
+            serde_json::json!([3, "https://example.com/dir/b.jpg"]),
+            serde_json::json!([3, "https://example.com/c", {"filename": 5}]),
+            serde_json::json!([3, "https://example.com/d", {"filename": "d"}]),
+        ];
+        let items = parse_probe_messages(&messages).unwrap();
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0].filename, "a");
+        assert_eq!(items[1].filename, "b.jpg");
+        assert_eq!(items[1].extension, "jpg");
+        assert_eq!(items[2].filename, "c");
+        assert_eq!(items[3].filename, "d");
     }
 
     #[test]

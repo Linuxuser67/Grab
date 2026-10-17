@@ -3061,6 +3061,11 @@ fn make_gallery_picker_opener(
                         }
                     };
                 }
+                // Items buffered before a supersede must not land on the page.
+                if step3.enumerate_gen.get() != my_gen {
+                    handle.abort();
+                    break;
+                }
                 if let Some(page) = page.as_ref() {
                     page.append(&batch);
                 }

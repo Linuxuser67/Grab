@@ -2117,16 +2117,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         let probe_proxy = proxy.clone();
                         let probe_libs = libs.clone();
                         let probe_handle = crate::runtime::tokio_rt().spawn(async move {
-                            crate::inline_gallery::dual_probe(
-                                crate::inline_gallery::DualProbeCtx {
-                                    url: &probe_url,
-                                    browser: probe_browser,
-                                    newest_first,
-                                    proxy: probe_proxy,
-                                    libs: probe_libs,
-                                    tool,
-                                },
-                            )
+                            crate::inline_gallery::dual_probe(crate::inline_gallery::DualProbeCtx {
+                                url: &probe_url,
+                                browser: probe_browser,
+                                newest_first,
+                                proxy: probe_proxy,
+                                libs: probe_libs,
+                                tool,
+                            })
                             .await
                         });
                         let probe_outcome = match probe_handle.await {

@@ -141,7 +141,7 @@ impl PickerGrid {
 
 fn build_grid(selection: &gtk4::MultiSelection) -> gtk4::GridView {
     let factory = gtk4::SignalListItemFactory::new();
-    let selection = selection.clone();
+    let setup_selection = selection.clone();
     factory.connect_setup(move |_, list_item| {
         let list_item = list_item.downcast_ref::<gtk4::ListItem>().unwrap();
         // Rows are not selectable by the user: clicks belong to the pills.
@@ -158,7 +158,7 @@ fn build_grid(selection: &gtk4::MultiSelection) -> gtk4::GridView {
             .bind_property("selected", &btn, "active")
             .sync_create()
             .build();
-        let weak_selection = selection.downgrade();
+        let weak_selection = setup_selection.downgrade();
         let weak_item = list_item.downgrade();
         btn.connect_toggled(move |btn| {
             let (Some(selection), Some(list_item)) =
@@ -213,7 +213,7 @@ fn build_grid(selection: &gtk4::MultiSelection) -> gtk4::GridView {
     // title. Pin max_columns here if beta shows the wrap is off.
     gtk4::GridView::builder()
         .enable_rubberband(false)
-        .model(&selection)
+        .model(selection)
         .factory(&factory)
         .build()
 }

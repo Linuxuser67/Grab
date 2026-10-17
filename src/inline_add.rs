@@ -207,6 +207,10 @@ pub(crate) struct FormatOption {
     audio_only: bool,
 }
 
+/// The Video ⇄ Gallery switcher's Gallery side: the probe's items and the
+/// URL they came from.
+pub(crate) type ToggleItems = (Vec<crate::gallery_probe::GalleryItem>, String);
+
 /// The video preview block inside the form: exactly one state shows at a
 /// time (ready rows, tools row, or the centered error card), driven by the
 /// probe below.
@@ -248,6 +252,15 @@ pub(crate) struct VideoStep {
     pub(crate) gallery_filter: adw::ToggleGroup,
     /// Wrapper for the filter toggle (for visibility control).
     pub(crate) gallery_filter_wrap: gtk4::Box,
+    /// Media-type switcher (Video ⇄ Gallery), the established AdwToggleGroup:
+    /// shown only when both backends are viable for the current decode
+    /// (yt-dlp video + gallery-dl images).
+    pub(crate) mode_toggle: adw::ToggleGroup,
+    /// Wrapper for the switcher (visibility control + accessible label).
+    pub(crate) mode_toggle_wrap: gtk4::Box,
+    /// Items backing the switcher's Gallery side: Some only while the choice
+    /// is live. Cleared when a lookup starts and on reset.
+    pub(crate) toggle_items: Rc<RefCell<Option<ToggleItems>>>,
     /// True when the current preview is a gallery (not a video).
     pub(crate) is_gallery: Rc<Cell<bool>>,
     /// The gallery card state (filter, items) when is_gallery is true.
@@ -349,6 +362,7 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.error.set_visible(false);
     v.gallery_info.set_visible(false);
     v.gallery_filter_wrap.set_visible(false);
+    v.mode_toggle_wrap.set_visible(false);
     v.is_gallery.set(false);
     v.gallery_card.borrow_mut().take();
     // NOTE: the Add button keeps its labeled-pill appearance while sliding
@@ -385,6 +399,8 @@ fn reset_video_step(step: &VideoStep) {
     step.tools.set_subtitle("");
     step.error.set_subtitle("");
     hide_video_step(step);
+    // The media-type choice does not survive a close either.
+    arm_mode_toggle(step, None);
     // No lookup survives a close: clear the flag before the entry text is
     // cleared below (its changed handler would otherwise keep the spinner).
     step.looking_up.set(false);
@@ -393,10 +409,26 @@ fn reset_video_step(step: &VideoStep) {
     step.action_revealer.set_reveal_child(false);
 }
 
+/// Reset the Video ⇄ Gallery switcher and arm its Gallery side: `items` is
+/// Some when the decode has both a yt-dlp video and gallery-dl images
+/// (route() → VideoYtDlp { gallery_toggle: true }). The active name resets
+/// to Video while the items are absent, so the notify that fires on the
+/// reset finds an unarmed switcher and is ignored.
+fn arm_mode_toggle(step: &VideoStep, items: Option<ToggleItems>) {
+    step.toggle_items.borrow_mut().take();
+    step.mode_toggle.set_active_name(Some("video"));
+    if let Some(items) = items {
+        *step.toggle_items.borrow_mut() = Some(items);
+    }
+}
+
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
     // A new lookup supersedes any in-flight file enumeration: kill it.
     abort_enumeration(v);
+    // A new lookup supersedes the previous media-type choice; the switcher
+    // re-arms at completion when both backends are viable.
+    v.toggle_items.borrow_mut().take();
     // The tick morphs into a spinner in place (browser-address-bar style):
     // no separate indicator beside the entry, no layout shift.
     v.looking_up.set(true);
@@ -420,6 +452,9 @@ fn show_video_ready(v: &VideoStep) {
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
+    // The switcher shows while both sides exist for this decode.
+    v.mode_toggle_wrap
+        .set_visible(v.toggle_items.borrow().is_some());
     // Reveal after the rows are shown: set_visible(true) first so the
     // SlideDown has a mapped widget to animate (see slide_down_revealer).
     v.group_revealer.set_visible(true);
@@ -1548,6 +1583,23 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // HIG AdwPreferencesGroup: title/description are built-in, rows get the
     // 12px internal margins natively.
     let video_group = adw::PreferencesGroup::new();
+    // Media-type switcher (Video ⇄ Gallery): the established AdwToggleGroup,
+    // same pattern as the gallery filter below. Hidden until both backends
+    // are viable for a decode; the wrapper carries the accessible label
+    // (AdwToggleGroup doesn't implement GtkAccessible).
+    let mode_toggle = adw::ToggleGroup::new();
+    for (name, label) in [("video", gettext("Video")), ("gallery", gettext("Gallery"))] {
+        let toggle = adw::Toggle::builder().name(name).label(&label).build();
+        mode_toggle.add(toggle);
+    }
+    mode_toggle.set_active_name(Some("video"));
+    // The wrapper owns visibility; the group stays visible inside it.
+    let mode_toggle_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    mode_toggle_wrap
+        .update_property(&[gtk4::accessible::Property::Label(&gettext("Preview type"))]);
+    mode_toggle_wrap.append(&mode_toggle);
+    mode_toggle_wrap.set_visible(false);
+    video_group.add(&mode_toggle_wrap);
     let video_name = adw::EntryRow::builder().title(gettext("File name")).build();
     let video_revert_btn = gtk4::Button::builder()
         .icon_name("edit-undo-symbolic")
@@ -1621,7 +1673,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         gallery_filter.add(toggle);
     }
     gallery_filter.set_active_name(Some("all"));
-    gallery_filter.set_visible(false);
+    // The wrapper owns visibility; the group stays visible inside it. (Phase
+    // 10 hid the group here and never re-showed it: the filter never rendered.)
     // AdwToggleGroup doesn't implement GtkAccessible; the label goes on a
     // wrapper so screen readers announce the filter's purpose.
     let filter_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
@@ -1650,6 +1703,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         gallery_info,
         gallery_filter,
         gallery_filter_wrap: filter_wrap,
+        mode_toggle,
+        mode_toggle_wrap,
+        toggle_items: Rc::new(RefCell::new(None)),
         is_gallery: Rc::new(Cell::new(false)),
         gallery_card: Rc::new(RefCell::new(None)),
         gallery_select_btn: gallery_select_btn.clone(),
@@ -1768,6 +1824,33 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     });
                 }
             });
+    }
+    // Media-type switcher: flipping to Gallery builds the card from the
+    // already-probed items (no second gallery-dl run); flipping back shows
+    // the yt-dlp preview from the stored probe. Programmatic active-name
+    // resets run with the items absent and are ignored here.
+    {
+        let step2 = step.clone();
+        step.mode_toggle.connect_active_name_notify(move |toggle| {
+            let state = step2.toggle_items.borrow().clone();
+            let Some((items, url)) = state else {
+                return;
+            };
+            if toggle.active_name().as_deref() != Some("gallery") {
+                show_video_ready(&step2);
+                return;
+            }
+            let title = items
+                .first()
+                .map(|i| crate::gallery_probe::probe_title(i, &url))
+                .unwrap_or_else(|| url.clone());
+            let card = crate::gallery_card::GalleryCard::new(
+                items,
+                Some(crate::gallery_probe::StickyMode::Gallery),
+                url,
+            );
+            show_gallery_ready(&step2, card, &title);
+        });
     }
     // Card-local choices: the format is initialized from Preferences (not
     // bound). Exact picks are per lookup, so nothing persists here.
@@ -2190,10 +2273,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         return;
                     }
                 };
-                // Dual-backend probe: gallery-dl and yt-dlp race. gallery-dl
-                // success cancels yt-dlp outright (no steps after that);
-                // yt-dlp's result only decides when gallery-dl finds nothing
-                // usable. Skipped for direct media URLs (not gallery pages).
+                // Dual-backend probe: both tools run for non-direct-media
+                // URLs and the established route() decides over both real
+                // results. A gallery-dl hit no longer cancels yt-dlp: the
+                // user's video/gallery choice needs yt-dlp's result too.
+                // Skipped for direct media URLs (not gallery pages).
                 let browser = settings_b.cookies_browser();
                 let newest_first = settings_b.video_codec_newest();
                 // Key the probe-JSON cache by the probe's conditions: the
@@ -2203,6 +2287,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     browser.clone(),
                     proxy.as_ref().map(|p| p.cli_url.clone()),
                 );
+                // Gallery items for the Video ⇄ Gallery switcher, armed in
+                // the Single arm below when route() says both are viable.
+                let mut toggle_items: Option<ToggleItems> = None;
                 let (ytdlp_result, gallery_error) =
                     if !crate::gallery_probe::url_is_direct_media(&url)
                         && let Ok(tool) = crate::gallery_argv::resolve_tool()
@@ -2218,62 +2305,83 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             },
                         )
                         .await;
-                        // Discard stale results: the user may have pasted a new URL meanwhile.
+                        // Discard stale results: the user may have pasted a new URL
+                        // meanwhile.
                         if probe_b.borrow().generation() != my {
                             return;
                         }
                         match probe_outcome {
-                            crate::inline_gallery::DualProbeOutcome::GalleryWin(items) => {
-                                let outcome = crate::gallery_probe::route(
-                                    false,
-                                    Some(items.as_slice()),
+                            crate::inline_gallery::DualProbeOutcome::Complete {
+                                gallery,
+                                ytdlp,
+                            } => {
+                                // Failure-path error precedence: a
+                                // surfaced gallery error is preferred, but
+                                // only when yt-dlp found nothing.
+                                let ytdlp_video = crate::inline_gallery::ytdlp_found_video(&ytdlp);
+                                let gallery_error = crate::inline_gallery::preferred_probe_error(
+                                    ytdlp_video,
+                                    &gallery,
+                                );
+                                let routed = crate::gallery_probe::route(
+                                    ytdlp_video,
+                                    gallery.as_ref().ok().and_then(|items| items.as_deref()),
                                     None,
                                 );
-                                if matches!(
-                                    outcome,
-                                    crate::gallery_probe::ProbeOutcome::VideoGalleryDl
-                                ) {
-                                    // Submit as video via the gallery-dl backend.
-                                    submit_gallery_video(
-                                        &manager_b,
-                                        &dest_b,
-                                        &close_b,
-                                        &url,
-                                        &items,
-                                        scheduled_at_b.get(),
-                                        &step_b,
-                                        &lookup_add_b,
-                                    );
-                                } else {
-                                    debug_assert!(matches!(
-                                        outcome,
-                                        crate::gallery_probe::ProbeOutcome::Gallery
-                                    ));
-                                    // Gallery (images): show the gallery UI.
-                                    let card = crate::gallery_card::GalleryCard::new(
-                                        items,
-                                        Some(crate::gallery_probe::StickyMode::Gallery),
-                                        url.clone(),
-                                    );
-                                    let title = card
-                                        .items
-                                        .first()
-                                        .map(|i| crate::gallery_probe::probe_title(i, &url))
-                                        .unwrap_or_else(|| url.clone());
-                                    tracing::info!(
-                                        files = card.file_count(),
-                                        preview = ?card.preview_filenames(),
-                                        sticky = ?card.sticky_mode(),
-                                        "gallery-dl won the probe race"
-                                    );
-                                    show_gallery_ready(&step_b, card, &title);
+                                match routed {
+                                    crate::gallery_probe::ProbeOutcome::VideoYtDlp {
+                                        gallery_toggle,
+                                    } => {
+                                        if gallery_toggle {
+                                            let items = gallery.ok().flatten();
+                                            toggle_items = items.map(|i| (i, url.clone()));
+                                        }
+                                        (ytdlp, gallery_error)
+                                    }
+                                    crate::gallery_probe::ProbeOutcome::VideoGalleryDl => {
+                                        // Submit as video via the gallery-dl
+                                        // backend (route() implies items).
+                                        let items = gallery.ok().flatten().unwrap_or_default();
+                                        submit_gallery_video(
+                                            &manager_b,
+                                            &dest_b,
+                                            &close_b,
+                                            &url,
+                                            &items,
+                                            scheduled_at_b.get(),
+                                            &step_b,
+                                            &lookup_add_b,
+                                        );
+                                        return;
+                                    }
+                                    crate::gallery_probe::ProbeOutcome::Gallery => {
+                                        // Gallery (images): show the gallery
+                                        // UI (route() implies items).
+                                        let items = gallery.ok().flatten().unwrap_or_default();
+                                        let card = crate::gallery_card::GalleryCard::new(
+                                            items,
+                                            Some(crate::gallery_probe::StickyMode::Gallery),
+                                            url.clone(),
+                                        );
+                                        let title = card
+                                            .items
+                                            .first()
+                                            .map(|i| crate::gallery_probe::probe_title(i, &url))
+                                            .unwrap_or_else(|| url.clone());
+                                        tracing::info!(
+                                            files = card.file_count(),
+                                            preview = ?card.preview_filenames(),
+                                            sticky = ?card.sticky_mode(),
+                                            "gallery-dl has the items, no yt-dlp video"
+                                        );
+                                        show_gallery_ready(&step_b, card, &title);
+                                        return;
+                                    }
+                                    crate::gallery_probe::ProbeOutcome::None => {
+                                        (ytdlp, gallery_error)
+                                    }
                                 }
-                                return;
                             }
-                            crate::inline_gallery::DualProbeOutcome::YtDlpFallback {
-                                gallery_error,
-                                ytdlp,
-                            } => (ytdlp, gallery_error),
                         }
                     } else {
                         (
@@ -2418,6 +2526,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 // immediately with the pre-selected quality.
                                 probe_b.borrow_mut().info =
                                     Some(crate::video::ProbeResult::Single(v.clone()));
+                                // Both backends were viable (route() armed
+                                // the items): show the Video ⇄ Gallery
+                                // switcher with the preview.
+                                arm_mode_toggle(&step_b, toggle_items.take());
                                 if settings_b.auto_add_downloads() {
                                     submit_probed_single(
                                         &manager_b,
@@ -3285,6 +3397,10 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     refresh_gallery_info(v, title);
     v.gallery_info.set_visible(true);
     v.gallery_filter_wrap.set_visible(true);
+    // The switcher is live while both sides are stored; flipping to Video
+    // restores the yt-dlp preview.
+    v.mode_toggle_wrap
+        .set_visible(v.toggle_items.borrow().is_some());
     // Reveal the block.
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);

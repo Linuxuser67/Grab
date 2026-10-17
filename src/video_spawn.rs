@@ -244,8 +244,8 @@ pub async fn fetch_video_infos(
     await_probe(handle, cancel).await
 }
 
-/// Await `handle` unless `cancel` fires first (the gallery-dl probe won the
-/// race): abort the worker so the yt-dlp child dies with it instead of
+/// Await `handle` unless `cancel` fires first (a caller cancelling the
+/// probe): abort the worker so the yt-dlp child dies with it instead of
 /// probing on detached.
 async fn await_probe(
     handle: tokio::task::JoinHandle<Result<(ProbeResult, Option<serde_json::Value>), VideoError>>,
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn fetch_video_infos_reports_cancelled_when_pre_cancelled() {
-        // gallery-dl won the race before yt-dlp started: the probe must
+        // A caller cancelling before the probe starts: the probe must
         // report Cancelled (not run the pipeline, not a generic error).
         let (tx, rx) = tokio::sync::oneshot::channel();
         tx.send(()).expect("receiver alive");

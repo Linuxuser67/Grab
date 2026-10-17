@@ -25,8 +25,8 @@ pub enum VideoError {
     /// Background task machinery failed (panic/join) — internal.
     #[error("{0}")]
     Runtime(String),
-    /// The probe was cancelled because the other backend won the race —
-    /// internal, never surfaced to the user.
+    /// The probe was cancelled by its caller — internal, never surfaced
+    /// to the user.
     #[error("probe cancelled")]
     Cancelled,
     /// Other translated failure.

@@ -890,7 +890,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count, 1);
-        let item = rx.try_recv().expect("fallback items must reach the receiver");
+        let item = rx
+            .try_recv()
+            .expect("fallback items must reach the receiver");
         assert_eq!(item.filename, "1.jpg");
         let _ = std::fs::remove_dir_all(&dir);
     }

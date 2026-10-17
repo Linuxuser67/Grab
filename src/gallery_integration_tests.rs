@@ -9,7 +9,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use crate::gallery_argv::GalleryFilter;
-use crate::gallery_probe::enumerate_gallery_files;
+use crate::gallery_probe::{GalleryItem, enumerate_gallery_files_streamed};
 
 /// Find gallery-dl on PATH, or return None to skip the test.
 /// If GRAB_REQUIRE_GALLERY_DL=1 and it's missing, panic (CI must have it).
@@ -31,6 +31,24 @@ fn find_gallery_dl() -> Option<PathBuf> {
 fn is_gallery_dl_internal_bug(err: &crate::gallery_tools::GalleryError) -> bool {
     let msg = format!("{err:?}");
     msg.contains("'NoneType' object has no attribute")
+}
+
+/// Collect the shipping streamed enumeration (and its document-mode
+/// fallback) into a Vec for the assertions. An errored run still reports
+/// its error after draining what was listed.
+async fn enumerate_all(
+    tool: &std::path::Path,
+    url: &str,
+    filter: GalleryFilter,
+) -> Result<Vec<GalleryItem>, crate::gallery_tools::GalleryError> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let enumeration = enumerate_gallery_files_streamed(tool, url, None, None, filter, tx);
+    let result = enumeration.await;
+    let mut items = Vec::new();
+    while let Ok(item) = rx.try_recv() {
+        items.push(item);
+    }
+    result.map(|_| items)
 }
 
 /// Start the Python gallery test server on port 80.
@@ -257,7 +275,7 @@ async fn gallery_integration_range_indexes_filtered_files() {
     // list, so position 1 is the first IMAGE even though the server serves
     // a video first. Guard the fixture: if generic stops yielding the
     // video, the assertions below would pass vacuously.
-    let all = match enumerate_gallery_files(&tool, &url, None, None, GalleryFilter::All).await {
+    let all = match enumerate_all(&tool, &url, GalleryFilter::All).await {
         Ok(items) => items,
         Err(e) if is_gallery_dl_internal_bug(&e) => {
             if std::env::var("GRAB_REQUIRE_GALLERY_DL").as_deref() == Ok("1") {
@@ -272,7 +290,7 @@ async fn gallery_integration_range_indexes_filtered_files() {
     assert_eq!(all[0].extension, "mp4", "fixture: the video comes first");
 
     let filter = GalleryFilter::ImagesOnly;
-    let filtered = match enumerate_gallery_files(&tool, &url, None, None, filter).await {
+    let filtered = match enumerate_all(&tool, &url, filter).await {
         Ok(items) => items,
         Err(e) if is_gallery_dl_internal_bug(&e) => {
             if std::env::var("GRAB_REQUIRE_GALLERY_DL").as_deref() == Ok("1") {

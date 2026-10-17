@@ -165,9 +165,67 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
     DualProbeOutcome::Complete { gallery, ytdlp }
 }
 
+/// The picker header's "{n} files" text; shared by the initial paint and
+/// the streamed count updates.
+fn header_count_text(n: usize) -> String {
+    ngettext("{} file", "{} files", n as u32).replace("{}", &n.to_string())
+}
+
+/// Handles into a live gallery-picker page, so a streamed enumeration can
+/// fill it in: the count in the header, the error caption, and the gated
+/// action bar.
+pub(crate) struct GalleryPickerStream {
+    grid: PickerGrid,
+    count_label: gtk4::Label,
+    error_caption: gtk4::Label,
+    add_btn: gtk4::Button,
+    select_all_btn: gtk4::Button,
+    select_none_btn: gtk4::Button,
+}
+
+impl GalleryPickerStream {
+    /// Append one burst of streamed items and update the running count.
+    pub(crate) fn append(&self, items: &[crate::gallery_probe::GalleryItem]) {
+        self.grid
+            .append(items.iter().map(|item| item.filename.clone()).collect());
+        self.count_label
+            .set_label(&header_count_text(self.grid.len()));
+    }
+
+    /// Stream finished: reveal the truncation notice when the cap was hit
+    /// and enable the action bar.
+    pub(crate) fn mark_loaded(&self) {
+        let n = self.grid.len();
+        if n >= crate::gallery_probe::ENUMERATE_MAX_FILES {
+            self.count_label.set_label(&format!(
+                "{} \u{2022} {}",
+                header_count_text(n),
+                gettext("Showing the first {} files").replace("{}", &n.to_string())
+            ));
+        }
+        self.add_btn.set_sensitive(true);
+        self.select_all_btn.set_sensitive(true);
+        self.select_none_btn.set_sensitive(true);
+    }
+
+    /// Stream failed after items arrived: keep the partial list selectable
+    /// and surface the message.
+    pub(crate) fn show_error(&self, message: &str) {
+        self.error_caption.set_label(message);
+        self.error_caption.set_visible(true);
+        self.add_btn.set_sensitive(true);
+        self.select_all_btn.set_sensitive(true);
+        self.select_none_btn.set_sensitive(true);
+    }
+}
+
 /// Gallery file picker as a right-sliding card page: one toggle pill per
 /// file (all on by default), mirroring the playlist picker. The selection
 /// becomes a gallery-dl `--range` spec on the queued job.
+///
+/// The grid arrives empty and fills from a streamed enumeration (see
+/// `GalleryPickerStream`); `None` means another picker page already owns
+/// the screen, so the caller should drop its enumeration.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_gallery_picker_page(
     nav: &adw::NavigationView,
@@ -178,17 +236,12 @@ pub(crate) fn push_gallery_picker_page(
     title: String,
     url: String,
     filter: crate::gallery_argv::GalleryFilter,
-    items: Vec<crate::gallery_probe::GalleryItem>,
-) {
+    grid: PickerGrid,
+) -> Option<GalleryPickerStream> {
     // Don't stack a second picker while one is already visible.
     if nav.visible_page_tag().as_deref() == Some("gallery-picker") {
-        return;
+        return None;
     }
-    let count = items.len();
-    // The enumeration is capped (see ENUMERATE_MAX_FILES): say so when we
-    // hit the cap, so the user knows the list is truncated.
-    let capped = count >= crate::gallery_probe::ENUMERATE_MAX_FILES;
-    let grid = PickerGrid::new(items.iter().map(|item| item.filename.clone()).collect());
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -223,18 +276,8 @@ pub(crate) fn push_gallery_picker_page(
     list_box.append(&error_caption);
 
     let toolbar = adw::ToolbarView::new();
-    let count_text =
-        ngettext("{} file", "{} files", count as u32).replace("{}", &count.to_string());
-    let count_text = if capped {
-        format!(
-            "{} \u{2022} {}",
-            count_text,
-            gettext("Showing the first {} files").replace("{}", &count.to_string())
-        )
-    } else {
-        count_text
-    };
-    toolbar.add_top_bar(&picker_header(nav, &title, &count_text));
+    let (header, count_label) = picker_header(nav, &title, &header_count_text(grid.len()));
+    toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&list_box));
     let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();
     toolbar.add_bottom_bar(&action_bar);
@@ -245,6 +288,13 @@ pub(crate) fn push_gallery_picker_page(
         .build();
     picker_enter_confirms(&picker_page, &add_btn);
 
+    // Items are still streaming in: nothing may be queued until the stream
+    // ends (`mark_loaded`/`show_error` enable the bar), so a partial list
+    // can't be submitted by mistake.
+    add_btn.set_sensitive(false);
+    select_all_btn.set_sensitive(false);
+    select_none_btn.set_sensitive(false);
+
     grid.wire_selection_bar(&select_all_btn, &select_none_btn, &add_btn, |n| {
         ngettext("_Queue {} file", "_Queue {} files", n as u32).replace("{}", &n.to_string())
     });
@@ -253,9 +303,10 @@ pub(crate) fn push_gallery_picker_page(
         let grid = grid.clone();
         let error_caption = error_caption.clone();
         let add_btn_click = add_btn.clone();
+        let add_btn_guard = add_btn.clone();
         let nav_pop = nav.clone();
         add_btn_click.connect_clicked(move |_| {
-            if !add_btn.is_sensitive() {
+            if !add_btn_guard.is_sensitive() {
                 return;
             }
             let selected = grid.selected_indices();
@@ -273,7 +324,7 @@ pub(crate) fn push_gallery_picker_page(
                 }
             };
             // Disable while the enqueue runs: a second click would enqueue duplicates.
-            add_btn.set_sensitive(false);
+            add_btn_guard.set_sensitive(false);
             let settings = manager.settings();
             let base_job = crate::gallery_argv::GalleryJob {
                 item_id: 0, // enqueue_gallery assigns the real row ID.
@@ -299,13 +350,21 @@ pub(crate) fn push_gallery_picker_page(
                 Err(e) => {
                     error_caption.set_text(&e);
                     error_caption.set_visible(true);
-                    add_btn.set_sensitive(true);
+                    add_btn_guard.set_sensitive(true);
                 }
             }
         });
     }
 
     nav.push(&picker_page);
+    Some(GalleryPickerStream {
+        grid,
+        count_label,
+        error_caption,
+        add_btn,
+        select_all_btn,
+        select_none_btn,
+    })
 }
 
 #[cfg(test)]

@@ -120,7 +120,14 @@ pub(crate) fn picker_enter_confirms(page: &adw::NavigationPage, add_btn: &gtk4::
 /// chrome with nothing else in it; a picker embedded in a card earns a
 /// denser row. Back pops the navigation page (Esc still collapses the
 /// whole card); the selection actions stay in the bottom action bar.
-pub(crate) fn picker_header(nav: &adw::NavigationView, title: &str, count: &str) -> gtk4::Box {
+///
+/// Returns the header and its count label: pickers that fill in from a
+/// streamed enumeration update the count as items arrive.
+pub(crate) fn picker_header(
+    nav: &adw::NavigationView,
+    title: &str,
+    count: &str,
+) -> (gtk4::Box, gtk4::Label) {
     let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
     header.set_margin_top(6);
     header.set_margin_bottom(6);
@@ -155,7 +162,7 @@ pub(crate) fn picker_header(nav: &adw::NavigationView, title: &str, count: &str)
     header.append(&back);
     header.append(&title_label);
     header.append(&count_label);
-    header
+    (header, count_label)
 }
 
 /// Open `path` with the system's default application for its file type.

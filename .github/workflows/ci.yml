@@ -78,6 +78,8 @@ jobs:
           set -o pipefail
           Xvfb :99 -screen 0 1280x800x24 &
           for _ in $(seq 1 20); do [ -S /tmp/.X11-unix/X99 ] && break; sleep 0.5; done
+          # Fail at the readiness check, not later in cargo test, if it never came up.
+          test -S /tmp/.X11-unix/X99
           export DISPLAY=:99
           export GSK_RENDERER=cairo
           cargo test picker_grid -- --ignored --test-threads=1 --nocapture | tee /tmp/ui-tests.log

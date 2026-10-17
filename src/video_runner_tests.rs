@@ -298,7 +298,12 @@ fn recording_watcher_guard_aborts_on_drop() {
                 "test setup: the task must be running inside the guard"
             );
         }
-        // The guard dropped: an aborted task can never set the flag again.
+        // The guard dropped: abort() is asynchronous, so give the worker a
+        // chance to deliver it before clearing the flag — otherwise a task
+        // still mid-iteration could set the flag after we clear it and the
+        // assert below would flake. Once the abort has landed, an aborted
+        // task can never set the flag again.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         flag.store(false, Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(

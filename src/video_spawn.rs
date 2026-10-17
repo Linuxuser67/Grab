@@ -76,8 +76,17 @@ pub(crate) async fn fetch_raw_dump_json(
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(&args);
     apply_proxy_env(&mut cmd, fetch_proxy);
-    // Debug: log the full argv before spawning.
-    crate::backend_debug::log_spawn(&youtube_bin.to_string_lossy(), &args);
+    // Debug: log the full argv before spawning. as_std() captures everything
+    // including ytdlp_command()'s --impersonate flag.
+    if crate::backend_debug::enabled() {
+        let std_cmd = cmd.as_std();
+        let program = std_cmd.get_program().to_string_lossy().into_owned();
+        let full_args: Vec<String> = std_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        crate::backend_debug::log_spawn(&program, &full_args);
+    }
     let mut child = cmd.spawn().map_err(VideoError::fetch)?;
     let mut group = ProcessGroupGuard::new(&child);
     let stdout = child

@@ -449,6 +449,16 @@ pub async fn count_gallery_files(
     let argv = crate::gallery_argv::count_argv(tool, url, cookies_file, user_agent, filter);
     let mut cmd = tokio::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]);
+    // Debug: log the full argv before spawning.
+    if crate::backend_debug::enabled() {
+        let std_cmd = cmd.as_std();
+        let program = std_cmd.get_program().to_string_lossy().into_owned();
+        let args: Vec<String> = std_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        crate::backend_debug::log_spawn(&program, &args);
+    }
     let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
         .await
         .ok()?

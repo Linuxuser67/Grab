@@ -93,12 +93,15 @@ async fn latest_gallerydl_asset() -> Option<(String, Option<String>, String)> {
 /// Latest nightly tag without downloading anything: one user-initiated
 /// GitHub API call. `None` on any network/API failure.
 pub async fn latest_gallerydl_tag() -> Option<String> {
-    let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new(BUILDS_OWNER, BUILDS_REPO);
-    fetcher
-        .fetch_latest_release(None)
-        .await
-        .ok()
-        .map(|release| release.tag_name)
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new(BUILDS_OWNER, BUILDS_REPO);
+        fetcher
+            .fetch_latest_release(None)
+            .await
+            .ok()
+            .map(|release| release.tag_name)
+    });
+    handle.await.ok().flatten()
 }
 
 /// Install (or update) gallery-dl from the nightly channel into the user lib dir.

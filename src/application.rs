@@ -101,7 +101,18 @@ async fn intake_remote_torrent(
     let fail = |msg: String| {
         toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&msg)));
     };
-    let bytes = match fetch_remote_torrent_bytes(&client, &url, TORRENT_FETCH_TIMEOUT).await {
+    let fetch_url = url.clone();
+    let fetch_client = client.clone();
+    let fetch = crate::runtime::tokio_rt().spawn(async move {
+        fetch_remote_torrent_bytes(&fetch_client, &fetch_url, TORRENT_FETCH_TIMEOUT).await
+    });
+    let fetched = match fetch.await {
+        Ok(result) => result,
+        Err(e) => Err(TorrentFetchError::Failed(format!(
+            "torrent fetch task failed: {e}"
+        ))),
+    };
+    let bytes = match fetched {
         Ok(b) => b,
         Err(TorrentFetchError::TooLarge) => {
             fail(gettext("That .torrent link is too large"));

@@ -484,6 +484,12 @@ async fn attempt_once(
     // At most one restart: a 416 may only trigger a single delete-and-retry.
     let mut restarted = false;
     loop {
+        // A fresh attempt owns no bytes yet: never infer ownership from size,
+        // Content-Range or a server's 416 response. Use symlink_metadata so a
+        // dangling symlink also counts as an occupied destination.
+        if claim && tokio::fs::symlink_metadata(&ctx.dest).await.is_ok() {
+            return Err(DEST_EXISTS.to_string());
+        }
         let start = tokio::fs::metadata(&ctx.dest)
             .await
             .map(|m| m.len())
@@ -500,6 +506,11 @@ async fn attempt_once(
         }
         let resp = execute_with_timeout(&ctx.client, req, ctx.timeout).await?;
         let status = resp.status();
+        // The path could have appeared while the request was in flight. The
+        // fresh attempt has not opened it yet, so it still cannot be ours.
+        if claim && tokio::fs::symlink_metadata(&ctx.dest).await.is_ok() {
+            return Err(DEST_EXISTS.to_string());
+        }
         if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
             // "Already complete" only with proof: matching length AND fully allocated bytes (a sparse full-size file must never take this shortcut).
             let claimed = resp
@@ -522,6 +533,12 @@ async fn attempt_once(
                 {
                     return Ok(());
                 }
+            }
+            // A HEAD fallback above may have awaited the network. Recheck
+            // immediately before the destructive restart so a foreign file
+            // appearing during that wait is never removed.
+            if claim && tokio::fs::symlink_metadata(&ctx.dest).await.is_ok() {
+                return Err(DEST_EXISTS.to_string());
             }
             if restarted {
                 return Err(gettext("Server rejects range requests"));

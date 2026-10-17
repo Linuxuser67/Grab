@@ -413,15 +413,17 @@ pub(crate) fn ytdlp_output_template(path: &Path) -> String {
 /// Grab-namespaced part infixes (the only names `clean_dest_parts` touches).
 const PART_KINDS: &[&str] = &["video.", "audio.", "hls.", "live.", "live-"];
 
-/// Reserve a `final.<n>.<ext>` remux slot via an atomic `.lease` sidecar (claim is check-then-use across overlapping attempts; fails closed).
-pub(crate) fn reserve_remux_temp(staging: &Path, ext: &str) -> Result<PathBuf, VideoError> {
+/// Reserve a row-namespaced remux slot via an atomic `.lease` sidecar.
+pub(crate) fn reserve_remux_temp(
+    staging: &Path,
+    item_id: u64,
+    ext: &str,
+) -> Result<PathBuf, VideoError> {
     let taken = dir_file_names(staging);
     for n in 1..=9999u32 {
-        let name = format!("final.{n}.{ext}");
-        if taken
-            .iter()
-            .any(|t| t == &name || t == &format!("{name}.lease"))
-        {
+        let name = format!("final.{item_id}.{n}.{ext}");
+        let partial = format!("{name}.part");
+        if taken.iter().any(|t| t == &name || t == &format!("{name}.lease") || t == &partial) {
             continue;
         }
         let lease = staging.join(format!("{name}.lease"));
@@ -430,10 +432,21 @@ pub(crate) fn reserve_remux_temp(staging: &Path, ext: &str) -> Result<PathBuf, V
             .write(true)
             .open(&lease)
         {
-            Ok(_) => return Ok(staging.join(name)),
-            // Someone else claimed it between the scan and the create.
+            Ok(mut file) => {
+                use std::io::Write as _;
+                if let Err(e) = file.write_all(b"grab-remux-lease-v1\n") {
+                    let _ = std::fs::remove_file(&lease);
+                    return Err(VideoError::staging(e.to_string()));
+                }
+                // The scan is only an optimization; don't claim a path if a
+                // part appeared before the lease was created.
+                if staging.join(&partial).exists() {
+                    let _ = std::fs::remove_file(&lease);
+                    continue;
+                }
+                return Ok(staging.join(name));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            // Unwritable staging fails closed (a guess here would share one slot).
             Err(e) => return Err(VideoError::staging(e.to_string())),
         }
     }
@@ -491,11 +504,30 @@ pub(crate) fn dir_file_names(dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Reclaim `final.<n>.<ext>.part` leftovers from attempts that died mid-ffmpeg (never completed recordings).
-pub fn sweep_partial_remuxes(staging: &Path) {
+/// Reclaim this row's interrupted remuxes only. Remux temp files share the
+/// destination directory with user data and other rows, so a global
+/// `final.*.part` sweep could delete an active neighbor's output or a user file.
+pub fn sweep_partial_remuxes(staging: &Path, item_id: u64) {
+    let prefix = format!("final.{item_id}.");
     for name in dir_file_names(staging) {
-        if name.starts_with("final.") && name.ends_with(".part") {
+        let Some(base) = name.strip_prefix(&prefix).and_then(|s| s.strip_suffix(".part")) else {
+            continue;
+        };
+        let Some((n, ext)) = base.split_once('.') else {
+            continue;
+        };
+        if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit())
+            || ext.is_empty() || ext.contains('.')
+        {
+            continue;
+        }
+        let lease_name = format!("{prefix}{n}.{ext}.lease");
+        let lease = staging.join(&lease_name);
+        // No matching lease means we have no positive evidence that the file
+        // was Grab's remux scratch. Preserve it rather than guessing.
+        if std::fs::symlink_metadata(&lease).is_ok_and(|m| m.file_type().is_file()) {
             let _ = std::fs::remove_file(staging.join(&name));
+            let _ = std::fs::remove_file(lease);
         }
     }
 }

@@ -407,7 +407,7 @@ pub(crate) async fn enumerate_gallery_files_streamed(
         .stdout
         .take()
         .ok_or_else(|| GalleryError::install("gallery-dl enumerate: no stdout".to_string()))?;
-    let stderr_tail = spawn_stderr_tail(child.stderr.take());
+    let (stderr_tail, stderr_drain) = spawn_stderr_tail(child.stderr.take());
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut reader = ProbeReader::default();
     let mut count = 0usize;
@@ -451,6 +451,15 @@ pub(crate) async fn enumerate_gallery_files_streamed(
         .await
         .map_err(|_| GalleryError::probe("gallery-dl enumerate timed out".to_string()))?
         .map_err(|e| GalleryError::install(format!("gallery-dl enumerate failed: {e}")))?;
+    // Stabilize the final error tail after process exit. A grandchild may
+    // inherit stderr, so never wait for EOF without a bound.
+    let stderr_abort = stderr_drain.abort_handle();
+    if tokio::time::timeout(STREAM_IDLE_TIMEOUT, stderr_drain)
+        .await
+        .is_err()
+    {
+        stderr_abort.abort();
+    }
     if !status.success() {
         return Err(GalleryError::probe(format!(
             "{}{}",
@@ -482,12 +491,14 @@ type StderrTail = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<Str
 
 const STDERR_TAIL_LINES: usize = 8;
 
-fn spawn_stderr_tail(stderr: Option<tokio::process::ChildStderr>) -> StderrTail {
+fn spawn_stderr_tail(
+    stderr: Option<tokio::process::ChildStderr>,
+) -> (StderrTail, tokio::task::JoinHandle<()>) {
     use tokio::io::AsyncBufReadExt as _;
     let tail: StderrTail = Default::default();
-    if let Some(stderr) = stderr {
-        let sink = tail.clone();
-        tokio::spawn(async move {
+    let sink = tail.clone();
+    let handle = tokio::spawn(async move {
+        if let Some(stderr) = stderr {
             let mut lines = tokio::io::BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let mut t = sink.lock().unwrap_or_else(|p| p.into_inner());
@@ -496,9 +507,9 @@ fn spawn_stderr_tail(stderr: Option<tokio::process::ChildStderr>) -> StderrTail 
                 }
                 t.push_back(line);
             }
-        });
-    }
-    tail
+        }
+    });
+    (tail, handle)
 }
 
 /// `": line | line"` for the error text, or empty when stderr said nothing.

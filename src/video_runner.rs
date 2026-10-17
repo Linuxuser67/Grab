@@ -824,8 +824,14 @@ pub(crate) async fn remux_live_capture(
     // Two attempts: with the bsf, then bare. The loop always exits via break.
     let mut with_bsf = true;
     loop {
-        // ffmpeg runs without `-y` and refuses an existing output, so the bare retry must not inherit the first attempt's partial.
-        let _ = tokio::fs::remove_file(&partial).await;
+        // Never unlink the output path blindly: a foreign file may have
+        // appeared since the slot scan. ffmpeg runs without `-y` and will
+        // refuse an existing file rather than clobber it.
+        if tokio::fs::symlink_metadata(&partial).await.is_ok() {
+            return Err(VideoError::staging(
+                "remux temporary output already exists".to_string(),
+            ));
+        }
         let mut cmd = tokio::process::Command::new(ffmpeg_bin);
         cmd.args(live_remux_argv(
             ts_path, &partial, audio_only, with_bsf, page_url,
@@ -1412,7 +1418,7 @@ pub(crate) async fn run_live_ytdlp(
     )
     .await;
     // Reclaim partial remuxes from attempts that died mid-ffmpeg: worthless by construction (a completed one is renamed), so this bounds crash litter without risking a real recording.
-    sweep_partial_remuxes(staging);
+    sweep_partial_remuxes(staging, job.item_id);
     // At most two attempts: the from-start capture, then — only if it recorded nothing and wasn't stopped — one retry from the live edge.
     let part = out.with_extension(format!("{ext}.part"));
     let state = out.with_extension(format!("{ext}.ytdl"));
@@ -1719,7 +1725,7 @@ pub(crate) async fn run_live_ytdlp(
         break src;
     };
     tx.send(EngineMsg::Phase(gettext("Finalizing…"))).ok();
-    let final_tmp = match reserve_remux_temp(staging, ext) {
+    let final_tmp = match reserve_remux_temp(staging, job.item_id, ext) {
         Ok(path) => path,
         // No claimable slot: leave the recorded shell for salvage rather
         // than risk sharing one. This is the pre-existing behaviour.

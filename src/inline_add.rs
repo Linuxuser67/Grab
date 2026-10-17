@@ -34,6 +34,18 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+/// Where a submit came from. Only user submits open the gallery picker; auto-add
+/// keeps its direct path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubmitSource {
+    /// Enter in the URL entry.
+    Enter,
+    /// The Add button or the entry's tick icon.
+    Button,
+    /// The debounced submit that auto-add fires after a lookup.
+    Auto,
+}
+
 /// Multi-file torrent picker opener: file name, raw bytes, parsed entries.
 type TorrentPickerOpener = Rc<dyn Fn(String, Vec<u8>, Vec<crate::torrent::TorrentFileEntry>)>;
 
@@ -2428,12 +2440,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let lookup_add_submit = lookup_add.clone();
         let nav2 = nav.clone();
         let scheduled_at = Rc::clone(&scheduled_at);
-        Rc::new(move |from_activate: bool| {
+        Rc::new(move |source: SubmitSource| {
+            let from_activate = matches!(source, SubmitSource::Enter | SubmitSource::Auto);
             let fail = |message: &str| {
                 // Form-validation pattern: the error state lives on the
                 // entry itself, not in a caption underneath it.
                 set_field_error(&url_entry, message);
             };
+            // A gallery submitted by the user opens the file picker; nothing is
+            // queued unseen. Auto-add keeps the direct enqueue below.
+            if step2.is_gallery.get() && source != SubmitSource::Auto {
+                let open = step2.gallery_select_opener.borrow().clone();
+                if let Some(open) = open {
+                    open();
+                }
+                return;
+            }
             // Gallery download: the probe found an image gallery, not a video.
             if step2.is_gallery.get()
                 && let Some(card) = step2.gallery_card.borrow().as_ref()
@@ -2592,18 +2614,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     };
     {
         let s = submit.clone();
-        add_btn.connect_clicked(move |_| s(false));
+        add_btn.connect_clicked(move |_| s(SubmitSource::Button));
     }
     {
         let s = submit.clone();
-        url_entry.connect_activate(move |_| s(true));
+        url_entry.connect_activate(move |_| s(SubmitSource::Enter));
     }
     // Tick icon inside the entry submits like Enter.
     {
         let s = submit.clone();
         url_entry.connect_icon_press(move |_, pos| {
             if pos == gtk4::EntryIconPosition::Secondary {
-                s(false);
+                s(SubmitSource::Button);
             }
         });
     }
@@ -2650,7 +2672,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         // set_text) must not remove this dead ID — that was a
                         // hard abort ("Source ID was not found").
                         *debounce_c.borrow_mut() = None;
-                        s(true);
+                        s(SubmitSource::Auto);
                         glib::ControlFlow::Break
                     });
                 *debounce.borrow_mut() = Some(id);

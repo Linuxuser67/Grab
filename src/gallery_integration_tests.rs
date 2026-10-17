@@ -108,7 +108,11 @@ async fn gallery_integration_probe_count_download() {
         }
         Err(e) => panic!("probe failed: {e:?}"),
     };
-    assert_eq!(items.len(), 4, "expected 3 images + 1 video from test server");
+    assert_eq!(
+        items.len(),
+        4,
+        "expected 3 images + 1 video from test server"
+    );
     assert!(
         items.iter().all(|i| !i.filename.is_empty()),
         "all items need filenames"
@@ -280,7 +284,10 @@ async fn gallery_integration_range_indexes_filtered_files() {
         Err(e) => panic!("filtered enumerate failed: {e:?}"),
     };
     assert_eq!(filtered.len(), 3, "the video must not survive the filter");
-    assert_eq!(filtered[0].extension, "jpg", "first filtered file is an image");
+    assert_eq!(
+        filtered[0].extension, "jpg",
+        "first filtered file is an image"
+    );
 
     // Pick the first listed file, as the picker would.
     let range = crate::gallery_argv::range_spec(&[0]).expect("range for one pick");

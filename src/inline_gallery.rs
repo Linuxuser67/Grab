@@ -216,7 +216,9 @@ pub(crate) fn push_gallery_picker_page(
     // say so up front. (Queueing the selected file URLs themselves would be
     // the robust fix and needs a design decision.)
     let positional_note = gtk4::Label::builder()
-        .label(gettext("Selected by position; reopen this picker if the gallery changed"))
+        .label(gettext(
+            "Selected by position; reopen this picker if the gallery changed",
+        ))
         .css_classes(["dimmed", "caption"])
         .halign(gtk4::Align::Start)
         .build();

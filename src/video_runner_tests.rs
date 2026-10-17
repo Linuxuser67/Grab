@@ -381,3 +381,45 @@ fn live_info_json_args_some_emits_flag_pair() {
         ]
     );
 }
+
+#[test]
+fn splice_before_terminator_inserts_before_dashes() {
+    let mut argv = vec![
+        "-f".to_string(),
+        "best".to_string(),
+        "--".to_string(),
+        "https://example.com".to_string(),
+    ];
+    splice_before_terminator(
+        &mut argv,
+        vec!["--load-info-json".to_string(), "/tmp/info.json".to_string()],
+    );
+    let flag_pos = argv.iter().position(|a| a == "--load-info-json").unwrap();
+    let term_pos = argv.iter().position(|a| a == "--").unwrap();
+    assert!(flag_pos < term_pos);
+    assert_eq!(
+        argv,
+        vec![
+            "-f",
+            "best",
+            "--load-info-json",
+            "/tmp/info.json",
+            "--",
+            "https://example.com"
+        ]
+    );
+}
+
+#[test]
+fn splice_before_terminator_empty_is_noop() {
+    let mut argv = vec!["-f".to_string(), "--".to_string(), "url".to_string()];
+    splice_before_terminator(&mut argv, vec![]);
+    assert_eq!(argv, vec!["-f", "--", "url"]);
+}
+
+#[test]
+fn splice_before_terminator_missing_terminator_is_noop() {
+    let mut argv = vec!["-f".to_string(), "best".to_string()];
+    splice_before_terminator(&mut argv, vec!["--flag".to_string()]);
+    assert_eq!(argv, vec!["-f", "best"]);
+}

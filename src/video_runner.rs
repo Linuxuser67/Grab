@@ -132,6 +132,10 @@ async fn run_video_download_inner(
             }
             Err(e) => {
                 tracing::info!("live probe JSON parse failed, re-resolving: {e}");
+                // The capture must not load JSON the resolve couldn't parse:
+                // a format ID from the fresh Video missing in stale JSON is a
+                // hard error with no re-extract safety net.
+                job.info_json = None;
             }
         }
     }
@@ -492,8 +496,15 @@ pub(crate) async fn run_unified_ytdlp(
             .and_then(|text| std::fs::write(&json_path, text).ok())
             .is_some()
         {
-            argv.push("--load-info-json".to_string());
-            argv.push(json_path.to_string_lossy().to_string());
+            // Before the `-- <url>` terminator: anything past it is a
+            // positional URL, so the flag would be swallowed there.
+            splice_before_terminator(
+                &mut argv,
+                vec![
+                    "--load-info-json".to_string(),
+                    json_path.to_string_lossy().to_string(),
+                ],
+            );
             Some(json_path)
         } else {
             None
@@ -1286,6 +1297,17 @@ fn claim_staging_name(
     }
 }
 
+/// Splice args before the `--` URL terminator. Pure: anything past `--` is a
+/// positional URL, so flags must go before it. No-op when empty or when the
+/// terminator is absent.
+pub(crate) fn splice_before_terminator(argv: &mut Vec<String>, args: Vec<String>) {
+    if !args.is_empty()
+        && let Some(pos) = argv.iter().position(|a| a == "--")
+    {
+        argv.splice(pos..pos, args);
+    }
+}
+
 /// `--load-info-json` suffix for a live capture argv. Pure: returns the flag
 /// pair when a probe JSON path is available, empty otherwise.
 pub(crate) fn live_info_json_args(path: Option<&std::path::Path>) -> Vec<String> {
@@ -1426,9 +1448,10 @@ pub(crate) async fn run_live_ytdlp(
         let _ = tokio::fs::remove_file(&state).await;
         let mut cmd = ytdlp_command(youtube_bin);
         // The builder argv ends with `-- <page URL>`: nothing may be appended
-        // after it — anything past `--` becomes a positional URL.
+        // after it — anything past `--` becomes a positional URL. Splice the
+        // --load-info-json pair before the terminator.
         let mut argv = live_capture_argv(attempt, hls_format_id, &out, playlist_index);
-        argv.extend(live_info_json_args(live_info_path.as_deref()));
+        splice_before_terminator(&mut argv, live_info_json_args(live_info_path.as_deref()));
         cmd.args(argv);
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
         let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;

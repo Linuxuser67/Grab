@@ -9,6 +9,7 @@
 //! `GtkMultiSelection` underneath — with per-text pills there is no
 //! recycling left to mirror it to.
 
+use adw::prelude::*;
 use gtk4::prelude::*;
 use gtk4::{glib, pango};
 use std::cell::RefCell;
@@ -52,7 +53,10 @@ fn pill(title: &str) -> gtk4::ToggleButton {
         .ellipsize(pango::EllipsizeMode::End)
         .max_width_chars(24)
         .build();
-    let btn = gtk4::ToggleButton::builder().child(&label).active(true).build();
+    let btn = gtk4::ToggleButton::builder()
+        .child(&label)
+        .active(true)
+        .build();
     // Titles are untrusted (they carry `&`, `<`, …): Button label is plain
     // text, never markup.
     btn.set_tooltip_text(Some(title));
@@ -247,7 +251,9 @@ mod tests {
     /// so a short entry gives a short pill and a long one a wide pill.
     fn pills_fit_their_text() {
         let short = PickerGrid::new(vec!["abc".to_string()]);
-        let long = PickerGrid::new(vec!["a-very-long-entry-title-that-keeps-going-and-going".to_string()]);
+        let long = PickerGrid::new(vec![
+            "a-very-long-entry-title-that-keeps-going-and-going".to_string(),
+        ]);
         let sw_short = scrolled_grid(short.widget());
         let sw_long = scrolled_grid(long.widget());
         let page = gtk4::Box::new(gtk4::Orientation::Vertical, 6);

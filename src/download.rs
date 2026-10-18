@@ -895,8 +895,9 @@ impl DownloadManager {
             };
             // Match the interactive picker: carry each entry's title into its
             // output filename, falling back to an entry URL slug when needed.
+            let remux = crate::video_prefs::remux_video_active(&self.settings.remux_video());
             let name =
-                crate::window_rows::default_name_for(&self.settings, &entry.title, audio_only);
+                crate::video::default_video_filename(&entry.title, audio_only, remux.as_deref());
             // Live streams queued from a playlist take the VOD path; each child re-resolves its own page.
             if self
                 .enqueue_video_staged(

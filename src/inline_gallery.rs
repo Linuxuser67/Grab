@@ -203,17 +203,8 @@ impl GalleryPickerStream {
             .set_label(&header_count_text(self.grid.len()));
     }
 
-    /// Stream finished: reveal the truncation notice when the cap was hit
-    /// and enable the action bar.
+    /// Stream finished: enable the action bar.
     pub(crate) fn mark_loaded(&self) {
-        let n = self.grid.len();
-        if n >= crate::gallery_probe::ENUMERATE_MAX_FILES {
-            self.count_label.set_label(&format!(
-                "{} \u{2022} {}",
-                header_count_text(n),
-                gettext("Showing the first {} files").replace("{}", &n.to_string())
-            ));
-        }
         self.add_btn.set_sensitive(true);
         self.select_all_btn.set_sensitive(true);
         self.select_none_btn.set_sensitive(true);

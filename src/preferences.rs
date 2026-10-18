@@ -680,10 +680,12 @@ pub fn show(
         }
         Some(first)
     }
-    /// Installed tool versions for the tools row: `(yt-dlp, ffmpeg, quickjs?)`;
-    /// `None` when the core tools are missing, falling back to the binary path
-    /// if `--version` fails. quickjs is `None` when no `qjs` is on hand — it is
-    /// only provisioned for YouTube.
+    /// Probe installed tool versions: `(yt-dlp, ffmpeg, quickjs?)` plus
+    /// gallery-dl; `None` when the core tools are missing, falling back to
+    /// the binary path if `--version` fails. quickjs is `None` when no
+    /// `qjs` is on hand — it is only provisioned for YouTube. Only tool
+    /// presence matters for the row ("Ready" vs "Not installed"); the
+    /// versions themselves are not shown.
     fn installed_tool_versions() -> Option<(String, String, Option<String>, Option<String>)> {
         crate::video::resolve_libraries().ok().map(|libs| {
             let yt = tool_version(&libs.youtube, "--version")
@@ -716,17 +718,10 @@ pub fn show(
         probed: Option<(String, String, Option<String>, Option<String>)>,
     ) {
         match probed {
-            Some((yt, ff, qjs, gdl)) => {
-                // Order: yt-dlp, gallery-dl (under yt-dlp), ffmpeg, quickjs.
-                let mut subtitle = gettext("Ready • {yt}").replace("{yt}", &yt);
-                if let Some(gdl) = gdl {
-                    subtitle.push_str(&format!(" • {gdl}"));
-                }
-                subtitle.push_str(&format!(" • {ff}"));
-                if let Some(qjs) = qjs {
-                    subtitle.push_str(&format!(" • {qjs}"));
-                }
-                row.set_subtitle(&subtitle);
+            // Tool names live in the group description; the row carries
+            // state only: no versions, no ffmpeg/quickjs noise.
+            Some(_) => {
+                row.set_subtitle(&gettext("Ready"));
                 btn.set_label(&gettext("Check for Updates"));
                 action.set(ToolAction::Check);
             }
@@ -966,7 +961,7 @@ pub fn show(
     video_live_group.add(&live_from_start);
     let video_tools_group = adw::PreferencesGroup::builder()
         .title(gettext("Support tools"))
-        .description(gettext("yt-dlp and ffmpeg resolve media pages"))
+        .description(gettext("yt-dlp and gallery-dl resolve media pages"))
         .build();
     let video_tools_row = adw::ActionRow::builder()
         .title(gettext("Media support tools"))

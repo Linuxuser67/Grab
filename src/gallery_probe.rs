@@ -15,12 +15,6 @@ use crate::video_spawn::ProcessGroupGuard;
 /// Timeout for the gallery-dl probe (same as the yt-dlp probe).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Upper bound for the file picker enumeration. The picker virtualizes its
-/// rows, so the UI cost is independent of the count; the cap only bounds
-/// gallery-dl's own listing walk and the buffered item list. `--range`
-/// keeps gallery-dl itself from walking further.
-pub(crate) const ENUMERATE_MAX_FILES: usize = 500;
-
 /// One file from `gallery-dl -j` output. Extractors emit wildly different
 /// metadata keys; `filename`/`extension`/`category` are the reliable core,
 /// everything else lands in `extra` for best-effort title derivation.
@@ -468,11 +462,9 @@ fn enumerate_base_argv(jsonl: bool) -> Vec<String> {
         "--config-ignore".to_string(),
         "-j".to_string(),
         "--no-download".to_string(),
-        // Bound gallery-dl's walk: the picker builds one pill widget per
-        // entry, so enumeration stays bounded to picker sizes.
-        // Indices stay 1-based, so range_spec remains correct.
-        "--range".to_string(),
-        format!("1-{ENUMERATE_MAX_FILES}"),
+        // Unbounded walk: the user decides how much of a gallery to walk
+        // (huge collections stream in as pills over time). Indices stay
+        // 1-based, so range_spec remains correct.
         "-o".to_string(),
         "extractor.cookies-update=false".to_string(),
     ];
@@ -943,15 +935,12 @@ mod tests {
     }
 
     #[test]
-    fn enumerate_argv_is_range_bounded() {
-        // The enumeration must stay --range-bounded: the cap bounds
-        // gallery-dl's walk (the picker builds one pill widget per entry).
+    fn enumerate_argv_has_no_range_bound() {
+        // Galleries enumerate unbounded: the user walks as much of a
+        // collection as they want (selection maps positionally afterward).
         let argv = enumerate_base_argv(true);
-        let range_pos = argv.iter().position(|a| a == "--range");
-        assert!(range_pos.is_some(), "argv: {argv:?}");
-        assert_eq!(
-            argv[range_pos.unwrap() + 1],
-            format!("1-{ENUMERATE_MAX_FILES}"),
+        assert!(
+            argv.iter().position(|a| a == "--range").is_none(),
             "argv: {argv:?}"
         );
     }

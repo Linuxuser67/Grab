@@ -1,9 +1,9 @@
 //! Picker pill grid shared by the gallery, playlist and torrent pickers: an
 //! `AdwWrapBox` of `GtkToggleButton`s, one per entry, each sized to its own
-//! text (children wrap like words in a label). Cost follows the entry count,
-//! so both enumeration paths stay bounded: playlists at
-//! `MAX_PLAYLIST_ITEMS`, galleries at `ENUMERATE_MAX_FILES` (the previously
-//! shipped caps before the recycled GridView experiment).
+//! text (children wrap like words in a label). Cost follows the entry count:
+//! playlists stay bounded at `MAX_PLAYLIST_ITEMS`; galleries stream in
+//! unbounded (the user chooses the walk), so huge collections pay a linear
+//! widget cost by design.
 //!
 //! The pills are the selection state: active == selected. No
 //! `GtkMultiSelection` underneath — with per-text pills there is no

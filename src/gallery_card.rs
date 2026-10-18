@@ -84,15 +84,6 @@ impl GalleryCard {
         self.filtered_items().len()
     }
 
-    /// Filenames for the file list expander (first 5).
-    pub fn preview_filenames(&self) -> Vec<String> {
-        self.filtered_items()
-            .iter()
-            .take(5)
-            .map(|item| item.filename.clone())
-            .collect()
-    }
-
     /// Get the sticky mode for this host (for the mode toggle).
     pub fn sticky_mode(&self) -> StickyMode {
         self.sticky.unwrap_or(StickyMode::Video)
@@ -141,7 +132,6 @@ mod tests {
         );
         set_filter_index(&card, 1);
         assert_eq!(card.file_count(), 1);
-        assert_eq!(card.preview_filenames(), vec!["a.jpg".to_string()]);
     }
 
     #[test]

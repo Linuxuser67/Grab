@@ -980,37 +980,15 @@ pub fn show(
     video_tools_spin.set_visible(false);
     video_tools_row.add_suffix(&video_tools_spin);
     video_tools_group.add(&video_tools_row);
-    // Probe off the main thread: spawning cold binaries can jank startup.
-    // The row shows Checking until versions (or absence) resolve.
+    // Nothing is probed on open: versions and updates are checked only when
+    // the user presses Check for Updates.
     let tool_action = std::rc::Rc::new(std::cell::Cell::new(ToolAction::Check));
     // Tools needing update (from the check); passed to install_progress::run
     // so the popup only shows what's actually downloading.
     let pending_updates: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
         std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    {
-        let (row, btn, spin) = (
-            video_tools_row.clone(),
-            video_tools_btn.clone(),
-            video_tools_spin.clone(),
-        );
-        let dialog_weak = dialog.downgrade();
-        let action = tool_action.clone();
-        video_tools_row.set_subtitle(&gettext("Checking…"));
-        video_tools_btn.set_sensitive(false);
-        video_tools_spin.set_visible(true);
-        gtk4::glib::spawn_future_local(async move {
-            let probed = gio::spawn_blocking(installed_tool_versions)
-                .await
-                .ok()
-                .flatten();
-            if dialog_weak.upgrade().is_none() {
-                return;
-            }
-            spin.set_visible(false);
-            paint_tools_state(&row, &btn, &action, probed);
-            btn.set_sensitive(true);
-        });
-    }
+    video_tools_btn.set_label(&gettext("Check for Updates"));
+    video_tools_row.set_subtitle(&gettext("Press Check for Updates to see versions"));
     {
         let (row, btn, spin) = (
             video_tools_row.clone(),
@@ -1090,8 +1068,7 @@ pub fn show(
                     // check from the last 15 minutes. The lookups run on Grab's
                     // Tokio runtime inside update_cache, never on this GLib task.
                     let max_age = crate::update_cache::MANUAL_MAX_AGE_SECS;
-                    let snapshot = crate::update_cache::latest(max_age).await;
-                    let latest = snapshot.latest;
+                    let latest = crate::update_cache::latest(max_age).await;
                     let yt_tag = latest.ytdlp;
                     let ff_tag = latest.ffmpeg;
                     let qjs_tag = latest.quickjs;

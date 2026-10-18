@@ -1,20 +1,17 @@
-//! Cache for upstream "latest release" lookups, shared by the manual check
-//! and the startup check.
+//! Cache for upstream "latest release" lookups, used by the Check for Updates
+//! button.
 //!
 //! GitHub's unauthenticated API allows 60 requests an hour per IP, so a click
 //! must not cost four requests each time. Every network lookup here runs on
 //! Grab's Tokio runtime: this module is awaited from GLib tasks, and reqwest
 //! and tokio::process panic when no Tokio runtime is entered.
 
-use gettextrs::gettext;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Freshness for a manual "Check for Updates" click.
+/// Freshness for a "Check for Updates" click.
 pub const MANUAL_MAX_AGE_SECS: u64 = 15 * 60;
-/// Freshness for the startup check: at most one upstream fetch a day.
-pub const STARTUP_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 
 /// Latest upstream release tags, plus the SHA-256 of the gallery-dl asset the
 /// installer would fetch.
@@ -36,12 +33,6 @@ impl Latest {
             && self.quickjs.is_some()
             && self.gallerydl.is_some()
     }
-}
-
-/// Result of [`latest`]: the answer, and whether it came from a fresh fetch.
-pub struct Snapshot {
-    pub latest: Latest,
-    pub fetched: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -107,16 +98,13 @@ async fn fetch_all() -> Latest {
 /// Latest upstream releases, from the cache while it is younger than
 /// `max_age` seconds. The work always runs on Grab's Tokio runtime, whatever
 /// context the caller is in.
-pub async fn latest(max_age: u64) -> Snapshot {
+pub async fn latest(max_age: u64) -> Latest {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let path = cache_path();
         if let Some(stored) = read_cache(&path)
             && is_fresh(stored.checked_at, now_secs(), max_age)
         {
-            return Snapshot {
-                latest: stored.latest,
-                fetched: false,
-            };
+            return stored.latest;
         }
         let latest = fetch_all().await;
         if latest.is_complete() {
@@ -126,40 +114,10 @@ pub async fn latest(max_age: u64) -> Snapshot {
             };
             write_cache(&path, &stored);
         }
-        Snapshot {
-            latest,
-            fetched: true,
-        }
+        latest
     });
-    match handle.await {
-        Ok(snapshot) => snapshot,
-        // A panicked lookup reads as "no answer" rather than taking the caller down.
-        Err(_) => Snapshot {
-            latest: Latest::default(),
-            fetched: false,
-        },
-    }
-}
-
-/// Startup check: refreshes the cache at most once a day. Returns a notice only
-/// when that fetch found a newer yt-dlp than the installed one, so a launch
-/// that reuses the cache never repeats the notice.
-pub async fn startup_notice() -> Option<String> {
-    let snapshot = latest(STARTUP_MAX_AGE_SECS).await;
-    if !snapshot.fetched {
-        return None;
-    }
-    let tag = snapshot.latest.ytdlp?;
-    let installed = gtk4::gio::spawn_blocking(crate::video_tools::installed_ytdlp_version)
-        .await
-        .ok()
-        .flatten()?;
-    if !crate::video_tools::ytdlp_update_available(&installed, &tag) {
-        return None;
-    }
-    let template = gettext("yt-dlp {new} available, you have {old}. Update in Preferences.");
-    let text = template.replace("{new}", tag.trim());
-    Some(text.replace("{old}", installed.trim()))
+    // A panicked lookup reads as "no answer" rather than taking the caller down.
+    handle.await.unwrap_or_default()
 }
 
 #[cfg(test)]

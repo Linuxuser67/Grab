@@ -3627,7 +3627,7 @@ fn identity_args_order_and_trim() {
         argv,
         vec![
             "--extractor-args".to_string(),
-            "youtube:player_client=-web".to_string(),
+            "youtube:player_client=default,-web".to_string(),
             "--user-agent".to_string(),
             "Grab/1".to_string(),
             "--".to_string(),
@@ -3640,7 +3640,7 @@ fn identity_args_order_and_trim() {
         argv,
         vec![
             "--extractor-args".to_string(),
-            "youtube:player_client=-web".to_string(),
+            "youtube:player_client=default,-web".to_string(),
             "--".to_string(),
             "https://x.com/u/status/1".to_string(),
         ]
@@ -3655,7 +3655,7 @@ fn identity_args_excludes_web_player_client() {
         .iter()
         .position(|a| a == "--extractor-args")
         .expect("extractor-args flag present");
-    assert_eq!(argv[pos + 1], "youtube:player_client=-web");
+    assert_eq!(argv[pos + 1], "youtube:player_client=default,-web");
     assert!(argv.iter().position(|a| a == "--").unwrap() > pos + 1);
 }
 
@@ -7315,7 +7315,7 @@ fn download_builders_use_machine_progress_and_ignore_config() {
             .iter()
             .position(|a| a == "--extractor-args")
             .expect("extractor-args flag");
-        assert_eq!(argv[e + 1], "youtube:player_client=-web", "{argv:?}");
+        assert_eq!(argv[e + 1], "youtube:player_client=default,-web", "{argv:?}");
         let sep = argv.iter().position(|a| a == "--").expect("separator");
         assert!(sep > e + 1, "{argv:?}");
     }

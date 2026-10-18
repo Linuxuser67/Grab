@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Outcome of the dual-backend probe. The caller (inline_add.rs) checks
-/// staleness, routes the real results with `gallery_probe::route`, and owns
+/// staleness, routes the real results with `gallery_probe::route_for_collection`, and owns
 /// all UI; this only orchestrates the two probes.
 pub(crate) enum DualProbeOutcome {
     /// Both probes completed. The caller derives the `ytdlp_video` route()
@@ -47,7 +47,7 @@ pub(crate) struct DualProbeCtx<'a> {
 }
 
 /// Did yt-dlp find video worth showing? The `ytdlp_video` input of
-/// `gallery_probe::route`. Pure for tests.
+/// `gallery_probe::route_for_collection`. Pure for tests.
 pub(crate) fn ytdlp_found_video(
     result: &Result<
         (crate::video::ProbeResult, Option<serde_json::Value>),

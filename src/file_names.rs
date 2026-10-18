@@ -288,7 +288,13 @@ pub(crate) fn title_from_url(url_str: &str) -> String {
     };
 
     const QUERY_KEYS: &[&str] = &[
-        "list", "playlist_id", "highlight_id", "collection_id", "album_id", "id", "v",
+        "list",
+        "playlist_id",
+        "highlight_id",
+        "collection_id",
+        "album_id",
+        "id",
+        "v",
     ];
     let query_title = QUERY_KEYS.iter().find_map(|wanted| {
         parsed.query_pairs().find_map(|(key, value)| {
@@ -297,8 +303,19 @@ pub(crate) fn title_from_url(url_str: &str) -> String {
     });
 
     const GENERIC_SEGMENTS: &[&str] = &[
-        "watch", "playlist", "reel", "reels", "stories", "highlights", "p", "post",
-        "posts", "video", "videos", "shorts", "share",
+        "watch",
+        "playlist",
+        "reel",
+        "reels",
+        "stories",
+        "highlights",
+        "p",
+        "post",
+        "posts",
+        "video",
+        "videos",
+        "shorts",
+        "share",
     ];
     let candidate = if let Some(value) = query_title {
         value
@@ -323,8 +340,8 @@ pub(crate) fn title_from_url(url_str: &str) -> String {
     let mut title = candidate;
     if let Some((stem, extension)) = title.rsplit_once('.') {
         const MEDIA_EXTENSIONS: &[&str] = &[
-            "mp4", "m4v", "mkv", "webm", "mov", "avi", "mpg", "mpeg", "jpg", "jpeg",
-            "png", "gif", "webp", "heic", "heif",
+            "mp4", "m4v", "mkv", "webm", "mov", "avi", "mpg", "mpeg", "jpg", "jpeg", "png", "gif",
+            "webp", "heic", "heif",
         ];
         if MEDIA_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()) {
             title = stem.to_string();

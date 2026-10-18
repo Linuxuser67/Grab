@@ -724,11 +724,9 @@ mod playlist_title_fallback_tests {
                 "url": "https://example.com/videos/sunset-from-italy"
             }]
         });
-        let playlist = parse_playlist_json(
-            &value,
-            "https://www.youtube.com/playlist?list=PLabc123",
-        )
-        .expect("playlist-shaped JSON");
+        let playlist =
+            parse_playlist_json(&value, "https://www.youtube.com/playlist?list=PLabc123")
+                .expect("playlist-shaped JSON");
         assert_eq!(&*playlist.title, "PLabc123");
         assert_eq!(&*playlist.items[0].title, "sunset from italy");
     }
@@ -744,9 +742,8 @@ mod playlist_title_fallback_tests {
                 "url": "https://example.com/videos/sunset-from-italy"
             }]
         });
-        let playlist =
-            parse_playlist_json(&value, "https://example.com/playlist?list=PLabc123")
-                .expect("playlist-shaped JSON");
+        let playlist = parse_playlist_json(&value, "https://example.com/playlist?list=PLabc123")
+            .expect("playlist-shaped JSON");
         assert_eq!(&*playlist.title, "Actual collection title");
         assert_eq!(&*playlist.items[0].title, "Actual item title");
     }

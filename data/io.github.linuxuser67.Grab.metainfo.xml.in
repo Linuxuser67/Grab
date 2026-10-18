@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.9~beta.14" date="2026-10-18">
+      <description>
+        <ul>
+          <li>The New Download card now lives in the content area instead of the toolbar, avoiding toolbar sizing problems with tall gallery and playlist pickers.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.9~beta.13" date="2026-10-18">
       <description>
         <ul>

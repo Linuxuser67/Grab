@@ -269,22 +269,20 @@ async fn run_video_download_inner(
         let res = match hls_outcome {
             Err(ref e) if is_subtitles_fetch_failure(e) => {
                 match subtitle_degrade(&mut job, &mut abort, e, phase).await {
-                    Ok(()) => {
-                        run_hls_ytdlp(
-                            &youtube_bin,
-                            &ffmpeg_bin,
-                            &staging,
-                            &job,
-                            gate,
-                            &hls.format_id,
-                            &mut abort,
-                            timeout,
-                            tx,
-                            playlist_index,
-                        )
-                        .await
-                        .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished))
-                    }
+                    Ok(()) => run_hls_ytdlp(
+                        &youtube_bin,
+                        &ffmpeg_bin,
+                        &staging,
+                        &job,
+                        gate,
+                        &hls.format_id,
+                        &mut abort,
+                        timeout,
+                        tx,
+                        playlist_index,
+                    )
+                    .await
+                    .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished)),
                     Err(()) => Ok(VideoOutcome::Aborted),
                 }
             }
@@ -418,24 +416,22 @@ async fn run_video_download_inner(
     match outcome {
         Err(ref e) if is_subtitles_fetch_failure(e) => {
             match subtitle_degrade(&mut job, &mut abort, e, phase).await {
-                Ok(()) => {
-                    run_unified_ytdlp(
-                        &youtube_bin,
-                        &ffmpeg_bin,
-                        &staging,
-                        &job,
-                        gate,
-                        &spec,
-                        video_sel.as_ref().map(|s| s.ext.as_str()),
-                        combined_total,
-                        &mut abort,
-                        timeout,
-                        tx,
-                        playlist_index,
-                    )
-                    .await
-                    .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished))
-                }
+                Ok(()) => run_unified_ytdlp(
+                    &youtube_bin,
+                    &ffmpeg_bin,
+                    &staging,
+                    &job,
+                    gate,
+                    &spec,
+                    video_sel.as_ref().map(|s| s.ext.as_str()),
+                    combined_total,
+                    &mut abort,
+                    timeout,
+                    tx,
+                    playlist_index,
+                )
+                .await
+                .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished)),
                 Err(()) => Ok(VideoOutcome::Aborted),
             }
         }
@@ -888,7 +884,8 @@ fn ytdlp_failure_detail(log_tail: &str) -> String {
 /// attempt on them even though the video itself was healthy. Matched on
 /// yt-dlp's stable English log phrase (its stderr, never user-facing).
 pub(crate) fn is_subtitles_fetch_failure(err: &VideoError) -> bool {
-    err.to_string().contains("Unable to download video subtitles")
+    err.to_string()
+        .contains("Unable to download video subtitles")
 }
 
 /// Shared degradation for a failed subtitle fetch: warn, update the row's
@@ -912,7 +909,7 @@ async fn subtitle_degrade(
     // ponytail: fixed 5 s settle — compute backoff from telemetry only if throttles persist.
     tokio::select! {
         _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-        _ = abort.recv() => return Err(()),
+        _ = &mut *abort => return Err(()),
     }
     // Subtitles off in every downstream use: the language pass returns None
     // immediately and the argv builders skip the write/embed/sidecar legs.
@@ -1999,8 +1996,7 @@ pub(crate) async fn run_hls_ytdlp(
     // (preferred, else English, else none) before the media argv is built.
     // An abort here stops the download; a probe failure just drops subtitles.
     let mut job = job.clone();
-    job.subtitles = match resolve_subtitle_lang(youtube_bin, &job, abort, playlist_index).await
-    {
+    job.subtitles = match resolve_subtitle_lang(youtube_bin, &job, abort, playlist_index).await {
         Ok(lang) => lang,
         Err(()) => return Ok(None),
     };

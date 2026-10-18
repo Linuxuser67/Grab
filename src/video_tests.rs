@@ -5633,7 +5633,7 @@ fn hls_map_survives_estimate_wobble() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -5723,7 +5723,7 @@ fn hls_map_rebuilds_on_upward_wobble() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -5812,7 +5812,7 @@ fn hls_map_adopts_estimate_collapse() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -5908,7 +5908,7 @@ fn hls_progress_moves_through_second_leg() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -6021,7 +6021,7 @@ fn hls_progress_moves_through_similar_sized_legs() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -6141,7 +6141,7 @@ fn hls_stall_watchdog_kills_silent_download() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -6150,7 +6150,6 @@ fn hls_stall_watchdog_kills_silent_download() {
         &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-
         std::time::Duration::from_secs(2),
         tx,
         None,
@@ -6175,7 +6174,7 @@ fn hls_stall_watchdog_spares_progressing_download() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -6184,7 +6183,6 @@ fn hls_stall_watchdog_spares_progressing_download() {
         &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-
         std::time::Duration::from_secs(2),
         tx,
         None,
@@ -6207,7 +6205,7 @@ fn hls_stall_watchdog_spares_silent_merge() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -6216,7 +6214,6 @@ fn hls_stall_watchdog_spares_silent_merge() {
         &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-
         std::time::Duration::from_secs(2),
         tx,
         None,
@@ -6319,7 +6316,7 @@ fn vod_hls_pins_planner_variant_id() {
         info_json: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let gate = AttemptGate::new();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
@@ -6329,7 +6326,6 @@ fn vod_hls_pins_planner_variant_id() {
         &gate,
         "h1080",
         &mut abort_rx,
-
         std::time::Duration::from_secs(30),
         tx,
         None,
@@ -6389,7 +6385,7 @@ fn vod_hls_refuses_existing_dest() {
     };
     std::fs::write(&job.dest, b"already").unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -8994,7 +8990,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         info_json: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -9031,7 +9027,7 @@ fn hls_embed_skips_sidecar_collection() {
     job.subtitles = Some("en".into());
     job.embed_subs = true;
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -9104,7 +9100,7 @@ exit 0
     job.dest = dir.join("v.mp4");
     job.subtitles = Some("en".into());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &bin,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -10204,7 +10200,7 @@ fn an_hls_leg_honours_a_discard_before_its_commit() {
     let gate = AttemptGate::new();
     assert!(gate.discard());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let (_stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
@@ -10213,7 +10209,6 @@ fn an_hls_leg_honours_a_discard_before_its_commit() {
         &gate,
         "h1080",
         &mut stop_rx,
-
         std::time::Duration::from_secs(30),
         tx,
         None,

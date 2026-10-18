@@ -201,9 +201,9 @@ fn build_grid(selection: &gtk4::MultiSelection) -> gtk4::GridView {
         // plain text, never markup.
         if let Some(label) = btn.child().and_downcast::<gtk4::Label>() {
             label.set_label(&title);
-            // Keep the compact, ellipsized pill but expose the whole title on hover.
-            label.set_tooltip_text(Some(&title));
         }
+        // Keep the compact, ellipsized pill; the pill tooltip exposes the
+        // whole title on hover.
         btn.set_tooltip_text(Some(&title));
     });
     // Pills are the only selection UI: rubberband selection writes straight

@@ -230,13 +230,16 @@ pub fn probe_title(item: &GalleryItem, url: &str) -> String {
     };
 
     let collection_title = str_field("_collection_title");
-    if let Some(title) = str_field("_gallery_item_title").or_else(|| {
-        if collection_title.is_none() {
-            str_field("title")
-        } else {
-            None
-        }
-    }) {
+    // The entry's own label always wins.
+    if let Some(title) = str_field("_gallery_item_title") {
+        return title.to_string();
+    }
+    // Without it, an inherited "title" describes the whole collection:
+    // skip it when the directory title came through; the filename is the
+    // honest per-file fallback in that case.
+    if collection_title.is_none()
+        && let Some(title) = str_field("title")
+    {
         return title.to_string();
     }
     if !item.filename.trim().is_empty() {

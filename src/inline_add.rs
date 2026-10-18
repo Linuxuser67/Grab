@@ -1581,8 +1581,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 5,
                                 card_ref.total(filter),
                             );
-                            let preview = card_ref.preview_filenames().join(", ");
-                            info.set_subtitle(&format!("{count_text} • {preview}"));
+                            info.set_subtitle(&count_text);
                             (false, String::new())
                         } else {
                             (true, card_ref.url().to_string())
@@ -1643,8 +1642,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             5,
                                             Some(n),
                                         );
-                                        let preview = card_ref.preview_filenames().join(", ");
-                                        info.set_subtitle(&format!("{count_text} • {preview}"));
+                                        info.set_subtitle(&count_text);
                                     }
                                 }
                                 None => {
@@ -2219,7 +2217,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                         );
                                         tracing::info!(
                                             files = card.file_count(),
-                                            preview = ?card.preview_filenames(),
                                             sticky = ?card.sticky_mode(),
                                             "gallery-dl items await user selection"
                                         );
@@ -3148,15 +3145,9 @@ fn refresh_gallery_info(v: &VideoStep, title: &str) {
     if let Some(card) = v.gallery_card.borrow().as_ref() {
         let filter = *card.filter.borrow();
         let total = card.total(filter);
-        let count_text = crate::gallery_card::display_count(
-            card.file_count(),
-            5, // probe cap (--range 1-5)
-            total,
-        );
-        let preview = card.preview_filenames().join(", ");
-        let subtitle = format!("{count_text} • {preview}");
+        let count_text = crate::gallery_card::display_count(card.file_count(), 5, total);
         v.gallery_info.set_title(title);
-        v.gallery_info.set_subtitle(&subtitle);
+        v.gallery_info.set_subtitle(&count_text);
     }
 }
 

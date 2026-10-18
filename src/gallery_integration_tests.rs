@@ -110,7 +110,7 @@ async fn gallery_integration_probe_count_download() {
         eprintln!("SKIP: cannot bind to port 80 (need root for integration test)");
         return;
     };
-    let url = format!("generic:http://127.0.0.1/");
+    let url = "generic:http://127.0.0.1/".to_string();
 
     // 1. Probe returns items.
     let probe_result = crate::gallery_probe::probe_gallery(&tool, &url, None, None).await;
@@ -220,7 +220,7 @@ async fn gallery_integration_filtered_download() {
         eprintln!("SKIP: cannot bind to port 80 (need root for integration test)");
         return;
     };
-    let url = format!("generic:http://127.0.0.1/");
+    let url = "generic:http://127.0.0.1/".to_string();
 
     // Filtered run: images only. The server also serves a video ahead of
     // the images; the filter must exclude it (3 of 4 items).
@@ -271,7 +271,7 @@ async fn gallery_integration_range_indexes_filtered_files() {
         eprintln!("SKIP: cannot bind to port 80 (need root for integration test)");
         return;
     };
-    let url = format!("generic:http://127.0.0.1/");
+    let url = "generic:http://127.0.0.1/".to_string();
 
     // The picker enumerates with the download's filter and maps picks to
     // `--range` positions; gallery-dl applies `--range` to the filtered

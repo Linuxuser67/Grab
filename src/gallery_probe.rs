@@ -338,17 +338,114 @@ pub async fn probe_gallery(
 
 /// Run a gallery-dl command to completion under a wall-clock bound. Spawn
 /// failures are install errors; a timeout is a probe error.
+///
+/// The pipes are drained through the shared bounded reader instead of
+/// `Command::output()`'s unbounded buffering — the timeout bounds time, not
+/// memory, so a pathological page can't balloon the app. The child runs in
+/// its own process group and dies with the future: a timeout must reach the
+/// extractor's grandchildren too (mirrors `ytdlp_command`).
 async fn run_to_completion(
     mut cmd: tokio::process::Command,
     timeout: Duration,
     what: &str,
 ) -> Result<std::process::Output, GalleryError> {
+    // Byte ceilings for drained pipes (same policy as video_spawn; probes
+    // can be large enumerations, so the stdout cap is generous).
+    const MAX_PROBE_STDOUT_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_PROBE_STDERR_BYTES: u64 = 1024 * 1024;
     // Debug: log the full argv before spawning.
     crate::backend_debug::log_command(&cmd);
-    tokio::time::timeout(timeout, cmd.output())
-        .await
-        .map_err(|_| GalleryError::probe(format!("{what} timed out")))?
-        .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    cmd.kill_on_drop(true);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
+    let mut guard = ProcessGroupGuard::new(&child);
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| GalleryError::install("gallery-dl gave no output pipe".to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| GalleryError::install("gallery-dl gave no log pipe".to_string()))?;
+    let out_task = tokio::spawn(async move {
+        crate::video_spawn::read_bounded(stdout, MAX_PROBE_STDOUT_BYTES).await
+    });
+    let err_task = tokio::spawn(async move {
+        crate::video_spawn::read_bounded(stderr, MAX_PROBE_STDERR_BYTES).await
+    });
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => {
+            // Reaped: disarm so Drop can't reach a recycled PGID (contract).
+            guard.disarm();
+            status
+        }
+        // Wait failed: keep the guard armed — Drop then clears the group
+        // safely (signal races resolve to ESRCH).
+        Ok(Err(e)) => {
+            return Err(GalleryError::install(format!(
+                "couldn't wait for gallery-dl: {e}"
+            )))
+        }
+        Err(_) => {
+            // Timed out: dead task ends the probe; the child dies with the
+            // future (guard drop + kill_on_drop, grandchildren via killpg).
+            return Err(GalleryError::probe(format!("{what} timed out")));
+        }
+    };
+    // The drains exit once the pipes hit EOF; on timeout the future is gone
+    // but the tasks keep reading until the guard's kill closes the pipes.
+    let stdout = match join_bounded(out_task).await {
+        Ok(buf) => buf,
+        Err(e) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
+            return Err(GalleryError::probe(format!(
+                "{what} produced too much output"
+            )));
+        }
+        Err(e) => {
+            return Err(GalleryError::install(format!(
+                "couldn't drain gallery-dl output: {e}"
+            )))
+        }
+    };
+    let stderr_bytes = match join_bounded(err_task).await {
+        Ok(buf) => buf,
+        // stderr overflow of the tail is non-fatal for document mode: report
+        // it the same way (drain errors must not silently pass small blobs).
+        Err(e) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
+            return Err(GalleryError::probe(format!(
+                "{what} produced too much output"
+            )));
+        }
+        Err(e) => {
+            return Err(GalleryError::install(format!(
+                "couldn't drain gallery-dl output: {e}"
+            )))
+        }
+    };
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr: stderr_bytes,
+        stdin: None,
+    })
+}
+
+/// Join a bounded-drain task: a panicking reader becomes an io error.
+async fn join_bounded(
+    task: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
+) -> std::io::Result<Vec<u8>> {
+    match task.await {
+        Ok(result) => result,
+        Err(join) => Err(std::io::Error::other(join)),
+    }
 }
 
 /// Parse a complete `gallery-dl -j` document (one JSON array of messages).
@@ -476,11 +573,18 @@ pub(crate) async fn enumerate_gallery_files_streamed(
     // error text, drained concurrently so gallery-dl never blocks on a full pipe.
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    // Own process group: the streamed run must reach the extractor's
+    // grandchildren too when its future is dropped (mirrors the runner).
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
     // Debug: log the full argv before spawning.
     crate::backend_debug::log_command(&cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
+    let mut guard = ProcessGroupGuard::new(&child);
     let stdout = child
         .stdout
         .take()
@@ -529,6 +633,8 @@ pub(crate) async fn enumerate_gallery_files_streamed(
         .await
         .map_err(|_| GalleryError::probe("gallery-dl enumerate timed out".to_string()))?
         .map_err(|e| GalleryError::install(format!("gallery-dl enumerate failed: {e}")))?;
+    // Reaped: disarm so Drop can't reach a recycled PGID (guard contract).
+    guard.disarm();
     // Stabilize the final error tail after process exit. A grandchild may
     // inherit stderr, so never wait for EOF without a bound.
     let stderr_abort = stderr_drain.abort_handle();

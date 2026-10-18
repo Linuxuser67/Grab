@@ -351,3 +351,101 @@ async fn gallery_integration_range_indexes_filtered_files() {
 
     std::fs::remove_dir_all(&dest).ok();
 }
+
+/// Recursive byte total of `path` (flat small test trees only).
+fn dir_bytes(dir: &std::path::Path) -> u64 {
+    fn walk(entry_path: &std::path::Path, total: &mut u64) {
+        if let Ok(meta) = std::fs::metadata(entry_path) {
+            if meta.is_file() {
+                *total += meta.len();
+            }
+        }
+        if entry_path.is_dir()
+            && let Ok(entries) = std::fs::read_dir(entry_path)
+        {
+            for entry in entries.flatten() {
+                let child = entry.path();
+                if child.is_dir() {
+                    walk(&child, total);
+                }
+            }
+        }
+    }
+    let mut total = 0u64;
+    walk(dir, &mut total);
+    total
+}
+
+#[tokio::test]
+async fn gallery_integration_cancel_kills_the_process() {
+    // Cancelling must kill gallery-dl, not just the runner future: the spawn
+    // used to build a ProcessGroupGuard whose killpg was a no-op because the
+    // child never became a group leader — cancel/abort/shutdown left the
+    // download running detached. The behavior is observable on the wire:
+    // bytes stop flowing once the future is dropped.
+    let Some(tool) = find_gallery_dl() else {
+        eprintln!("SKIP: gallery-dl not on PATH");
+        return;
+    };
+    let Some((_server, port)) = start_server() else {
+        if std::env::var("GRAB_REQUIRE_GALLERY_DL").as_deref() == Ok("1") {
+            panic!("GRAB_REQUIRE_GALLERY_DL=1 but cannot bind to port 80 for integration test");
+        }
+        eprintln!("SKIP: cannot bind to port 80 (need root for integration test)");
+        return;
+    };
+    let url = format!("generic:http://127.0.0.1:{port}/slow/");
+    let dest = std::env::temp_dir().join(format!("grab-gallery-cancel-{port}"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let job = crate::gallery_argv::GalleryJob {
+        item_id: 3,
+        page_url: url.clone(),
+        title: "test-gallery-cancel".to_string(),
+        file_count: Some(1),
+        dest_dir: dest.clone(),
+        filter: GalleryFilter::All,
+        cookies_browser: "none".to_string(),
+        speed_limit: None,
+        range: None,
+    };
+    // The runner borrows `job`; move clones into the spawned future.
+    let tool = tool.clone();
+    let task = tokio::spawn(async move {
+        crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |_| {}).await
+    });
+
+    // Wait until bytes are on disk, i.e. the download is truly in flight.
+    let mut in_flight = 0u64;
+    for _ in 0..250 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        in_flight = dir_bytes(&dest);
+        if in_flight > 512 * 1024 {
+            break;
+        }
+    }
+    assert!(
+        in_flight > 512 * 1024,
+        "expected a streaming download; saw {in_flight} bytes"
+    );
+
+    // Cancel like the DownloadManager does: abort the runner future.
+    task.abort();
+
+    // Give the guard's group kill room to land (the child can't exit
+    // abruptly without a final pipe write).
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let after_abort = dir_bytes(&dest);
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let settled = dir_bytes(&dest);
+    assert_eq!(
+        after_abort, settled,
+        "bytes must stop flowing once cancelled (slow server sends continuously; \
+         a surviving gallery-dl would keep growing the file)"
+    );
+    assert!(
+        settled > 0 && settled < 100 * 1024 * 1024,
+        "the file was mid-download when killed; saw {settled} bytes"
+    );
+
+    std::fs::remove_dir_all(&dest).ok();
+}

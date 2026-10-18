@@ -50,6 +50,25 @@ pub struct GalleryProgressUpdate {
     pub last_completed_file: Option<String>,
 }
 
+/// Journal-safe stderr text: gallery-dl failure lines embed the media URL
+/// with signed query tokens, so swap URL words for their path stem — same
+/// convention as `video_probe::page_host` (journal never gets query strings).
+/// User-facing error text keeps the raw line.
+fn redact_query_tokens(text: &str) -> String {
+    text.split_whitespace()
+        .map(|word| {
+            if url::Url::parse(word).is_ok()
+                && let Some(cut) = word.find(['?', '#'])
+            {
+                format!("{}(...)", &word[..cut])
+            } else {
+                word.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Run a gallery download.
 ///
 /// - `job`: the gallery job (URL, dest, filter, cookies)
@@ -57,7 +76,8 @@ pub struct GalleryProgressUpdate {
 ///   skipped, or byte progress — not for log noise)
 /// - Returns the downloaded files on success, or a GalleryError.
 ///
-/// Cancellation: drop the future; the child is killed via ProcessGroupGuard.
+/// Cancellation: drop the future; the child and its whole process group are
+/// SIGKILLed (own process group + `ProcessGroupGuard` + `kill_on_drop`).
 pub async fn run_gallery_download(
     job: &GalleryJob,
     tool: &Path,
@@ -82,6 +102,15 @@ pub async fn run_gallery_download(
     // (drained in a separate task so gallery-dl can't block on a full pipe).
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    // Own process group + kill-on-drop: cancel/abort/shutdown drops this
+    // future, and only a group kill reaches gallery-dl's grandchildren too
+    // (mirrors ytdlp_command; a bare killpg on the raw pid is an ESRCH
+    // no-op when the child never became a group leader).
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    cmd.kill_on_drop(true);
 
     // Debug: log the full argv before spawning.
     crate::backend_debug::log_command(&cmd);
@@ -89,8 +118,8 @@ pub async fn run_gallery_download(
     let mut child = cmd
         .spawn()
         .map_err(|e| GalleryError::runtime(format!("couldn't spawn gallery-dl: {e}")))?;
-    // Kill the child if the future is dropped (user cancel, app quit).
-    let _guard = ProcessGroupGuard::new(&child);
+    // Kill the child's group if the future is dropped (user cancel, app quit).
+    let mut guard = ProcessGroupGuard::new(&child);
 
     let stdout = child
         .stdout
@@ -155,6 +184,8 @@ pub async fn run_gallery_download(
         .wait()
         .await
         .map_err(|e| GalleryError::runtime(format!("couldn't wait for gallery-dl: {e}")))?;
+    // Reaped: disarm so Drop can't reach a recycled PGID (guard contract).
+    guard.disarm();
 
     // The child has exited, so the stderr pipe is at EOF; awaiting the drain
     // guarantees the ring buffer has the complete tail.
@@ -163,9 +194,10 @@ pub async fn run_gallery_download(
     if !status.success() {
         let code = status.code();
         let stderr_tail = stderr_lines.lock().unwrap().join("\n");
-        // Log the full tail at warning level; the user-facing message gets
-        // the full tail too (the dialog scrolls).
-        tracing::warn!(stderr = %stderr_tail, "gallery-dl stderr tail");
+        // Log a redacted tail (gallery-dl failure lines embed media URLs with
+        // signed query tokens; the journal gets no query strings). The
+        // user-facing message keeps the full tail (the dialog scrolls).
+        tracing::warn!(stderr = %redact_query_tokens(&stderr_tail), "gallery-dl stderr tail");
         // Partial success: files were downloaded/skipped before the failure.
         // Return Ok with the exit code so the row shows Done with a warning.
         if !files.is_empty() || progress.files_skipped > 0 {
@@ -266,6 +298,19 @@ mod tests {
     #[test]
     fn done_label_all_skipped() {
         assert_eq!(done_label(0, 3), "Gallery \u{2022} 3 files");
+    }
+
+    #[test]
+    fn stderr_url_tokens_are_redacted_for_the_journal() {
+        let raw = "[instagram][warning] 404 https://media.example/file?token=abc#frag plain";
+        assert_eq!(
+            redact_query_tokens(raw),
+            "[instagram][warning] 404 https://media.example/file(...) plain"
+        );
+        // Words that are not URLs keep their glyph bytes.
+        assert_eq!(redact_query_tokens("a?b#c"), "a?b#c");
+        // Plain text passes through untouched.
+        assert_eq!(redact_query_tokens("no urls here"), "no urls here");
     }
 
     #[test]

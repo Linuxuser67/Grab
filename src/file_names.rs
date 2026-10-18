@@ -348,7 +348,7 @@ pub(crate) fn title_from_url(url_str: &str) -> String {
         }
     }
 
-    title = title.replace('-', " ").replace('_', " ");
+    title = title.replace(['-', '_'], " ");
     let title = title.trim_matches(|c: char| c.is_whitespace() || c == '.');
     if title.is_empty() {
         "collection".to_string()

@@ -465,7 +465,7 @@ fn parse_playlist_item(
             if page_url == collection_url {
                 return None;
             }
-            let from_url = crate::file_names::title_from_url(&page_url);
+            let from_url = crate::file_names::title_from_url(page_url);
             (from_url != "collection" && from_url != id).then_some(from_url)
         })
         .unwrap_or_else(|| id.clone());

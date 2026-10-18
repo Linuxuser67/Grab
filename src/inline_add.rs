@@ -1217,7 +1217,7 @@ pub struct AddCard {
 }
 
 impl AddCard {
-    /// The card widget, pinned under the header as a toolbar top bar.
+    /// The card widget, placed above the view stack in the window content.
     pub fn widget(&self) -> &gtk4::Widget {
         &self.widget
     }

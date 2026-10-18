@@ -2204,7 +2204,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             Some(crate::gallery_probe::StickyMode::Gallery),
                                             url.clone(),
                                         );
-                                        let title = crate::gallery_probe::collection_title(&card.items, &url);
+                                        let title = crate::gallery_probe::collection_title(
+                                            &card.items,
+                                            &url,
+                                        );
                                         tracing::info!(
                                             files = card.file_count(),
                                             preview = ?card.preview_filenames(),

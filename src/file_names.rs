@@ -290,13 +290,11 @@ pub(crate) fn title_from_url(url_str: &str) -> String {
     const QUERY_KEYS: &[&str] = &[
         "list", "playlist_id", "highlight_id", "collection_id", "album_id", "id", "v",
     ];
-    let pairs: Vec<(String, String)> = parsed
-        .query_pairs()
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect();
-    let query_title = QUERY_KEYS
-        .iter()
-        .find_map(|wanted| pairs.iter().find(|(key, value)| key == wanted && !value.trim().is_empty()).map(|(_, value)| value.clone()));
+    let query_title = QUERY_KEYS.iter().find_map(|wanted| {
+        parsed.query_pairs().find_map(|(key, value)| {
+            (key.as_ref() == *wanted && !value.trim().is_empty()).then(|| value.into_owned())
+        })
+    });
 
     const GENERIC_SEGMENTS: &[&str] = &[
         "watch", "playlist", "reel", "reels", "stories", "highlights", "p", "post",
@@ -340,6 +338,19 @@ pub(crate) fn title_from_url(url_str: &str) -> String {
     } else {
         title.to_string()
     }
+}
+
+/// Percent-decode a URL component once. Invalid UTF-8 and decoded NULs retain
+/// the original component, so this never manufactures an invalid filesystem name.
+pub(crate) fn percent_decode(s: &str) -> String {
+    // Decoded NUL (from `%00` or a literal NUL) is rejected: filenames
+    // can't contain it, so keep the literal like the old GLib path did.
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8()
+        .ok()
+        .filter(|decoded| !decoded.contains('\0'))
+        .map(|cow| cow.into_owned())
+        .unwrap_or_else(|| s.to_owned())
 }
 
 /// Best-effort filename from URL path via `percent_encoding`

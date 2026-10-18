@@ -245,7 +245,12 @@ pub fn probe_title(item: &GalleryItem, url: &str) -> String {
 /// individual media item's title/user/category; fall back to a useful URL slug.
 pub(crate) fn collection_title(items: &[GalleryItem], url: &str) -> String {
     for item in items {
-        for key in ["_collection_title", "collection_title", "playlist_title", "album"] {
+        for key in [
+            "_collection_title",
+            "collection_title",
+            "playlist_title",
+            "album",
+        ] {
             if let Some(title) = item
                 .extra
                 .get(key)

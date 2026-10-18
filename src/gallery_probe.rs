@@ -158,41 +158,46 @@ pub fn route(
     }
 }
 
-/// Route a probe using the original URL and whether yt-dlp resolved it as a
-/// playlist. Instagram Highlights are collection-only URLs: when gallery-dl
-/// confirms video entries, use its picker/download path so each picked item is
-/// selected from gallery-dl's range rather than re-resolving the whole tray
-/// through yt-dlp's Instagram story extractor.
-pub(crate) fn route_for_url(
-    url: &str,
+/// Prefer gallery-dl for collections with multiple entries when it can list
+/// supported media. The dual probe already has yt-dlp's result, so an empty or
+/// unsupported gallery-dl result can fall back to yt-dlp without losing the
+/// original playlist picker.
+pub(crate) fn route_for_collection(
     ytdlp_video: bool,
-    ytdlp_playlist: bool,
+    ytdlp_playlist_entries: usize,
     gallery_items: Option<&[GalleryItem]>,
     host_sticky: Option<StickyMode>,
 ) -> ProbeOutcome {
-    let is_instagram_highlights = url::Url::parse(url).is_ok_and(|parsed| {
-        matches!(
-            parsed.host_str(),
-            Some("instagram.com") | Some("www.instagram.com")
-        ) && parsed.path_segments().is_some_and(|segments| {
-            let parts: Vec<_> = segments.filter(|segment| !segment.is_empty()).collect();
-            parts.len() == 3
-                && parts[0] == "stories"
-                && parts[1] == "highlights"
-                && !parts[2].is_empty()
-                && parts[2].chars().all(|c| c.is_ascii_digit())
+    let (has_video, has_images) = gallery_items
+        .map(|items| {
+            let mut video = false;
+            let mut images = false;
+            for item in items {
+                match GalleryContent::from_extension(&item.extension) {
+                    GalleryContent::Video => video = true,
+                    GalleryContent::Image => images = true,
+                    GalleryContent::Unknown => {}
+                }
+            }
+            (video, images)
         })
-    });
-    let has_gallery_video = gallery_items.is_some_and(|items| {
-        items
-            .iter()
-            .any(|item| GalleryContent::from_extension(&item.extension) == GalleryContent::Video)
-    });
-    if is_instagram_highlights && ytdlp_playlist && has_gallery_video {
-        ProbeOutcome::VideoGalleryDl
-    } else {
-        route(ytdlp_video, gallery_items, host_sticky)
+        .unwrap_or((false, false));
+
+    // Either backend can confirm multiple entries. The gallery-dl preview is
+    // capped, so one supported preview item is enough when yt-dlp found a list.
+    let multi_entry = ytdlp_playlist_entries > 1
+        || gallery_items.is_some_and(|items| items.len() > 1);
+    if multi_entry {
+        if has_video {
+            return ProbeOutcome::VideoGalleryDl;
+        }
+        if has_images {
+            return ProbeOutcome::Gallery;
+        }
     }
+
+    // gallery-dl could not list usable media; preserve the existing yt-dlp path.
+    route(ytdlp_video, gallery_items, host_sticky)
 }
 
 /// Whether a probe error should be surfaced to the user instead of falling
@@ -1178,40 +1183,65 @@ mod tests {
     }
 
     #[test]
-    fn route_instagram_highlights_playlist_prefers_gallerydl_videos() {
-        let highlights = "https://www.instagram.com/stories/highlights/18119089357372404/";
+    fn route_prefers_gallerydl_for_multi_entry_collections() {
         let videos = vec![item("mp4"), item("webm")];
         assert_eq!(
-            route_for_url(highlights, true, true, Some(&videos), None),
+            route_for_collection(true, 4, Some(&videos), None),
             ProbeOutcome::VideoGalleryDl
         );
 
-        // A single video is not overridden, and regular playlists remain yt-dlp's.
+        // This rule is site-independent: a YouTube playlist also uses gallery-dl.
         assert_eq!(
-            route_for_url(highlights, true, false, Some(&videos), None),
+            route_for_collection(true, 4, Some(&videos), None),
+            ProbeOutcome::VideoGalleryDl
+        );
+
+        // Multi-entry image collections default to gallery-dl as well.
+        let images = vec![item("jpg"), item("png")];
+        assert_eq!(
+            route_for_collection(true, 4, Some(&images), None),
+            ProbeOutcome::Gallery
+        );
+
+        // gallery-dl can confirm a collection even if yt-dlp didn't parse it as one.
+        assert_eq!(
+            route_for_collection(true, 0, Some(&videos), None),
+            ProbeOutcome::VideoGalleryDl
+        );
+
+        // Single-entry pages keep the established yt-dlp preference.
+        let single = vec![item("mp4")];
+        assert_eq!(
+            route_for_collection(true, 1, Some(&single), None),
             ProbeOutcome::VideoYtDlp {
                 gallery_toggle: false
             }
         );
+    }
+
+    #[test]
+    fn route_falls_back_to_ytdlp_when_gallerydl_has_no_supported_items() {
+        // Unsupported or failed gallery-dl probes must not block a valid playlist.
         assert_eq!(
-            route_for_url(
-                "https://www.youtube.com/playlist?list=PL123",
-                true,
-                true,
-                Some(&videos),
-                None,
-            ),
+            route_for_collection(true, 3, None, None),
+            ProbeOutcome::VideoYtDlp {
+                gallery_toggle: false
+            }
+        );
+        let unknown = vec![item("xyz"), item("bin")];
+        assert_eq!(
+            route_for_collection(true, 3, Some(&unknown), None),
             ProbeOutcome::VideoYtDlp {
                 gallery_toggle: false
             }
         );
 
-        // Do not pick gallery-dl if its probe did not find any video entries.
-        let images = vec![item("jpg")];
+        // One entry is not forced through gallery-dl just because it has metadata.
+        let single = vec![item("mp4")];
         assert_eq!(
-            route_for_url(highlights, true, true, Some(&images), None),
+            route_for_collection(true, 1, Some(&single), None),
             ProbeOutcome::VideoYtDlp {
-                gallery_toggle: true
+                gallery_toggle: false
             }
         );
     }

@@ -497,9 +497,9 @@ fn refresh_row(
         item.status(),
         DownloadStatus::Failed | DownloadStatus::Cancelled
     ));
+    let done = item.status() == DownloadStatus::Done;
     w.reveal_btn.set_visible(done);
     w.delete_btn.set_visible(done);
-
     let (icon, tip) = if item.status() == DownloadStatus::Paused {
         ("media-playback-start-symbolic", gettext("Resume"))
     } else {

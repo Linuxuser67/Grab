@@ -55,11 +55,14 @@ async fn enumerate_all(
 /// Returns (guard, port). The guard kills the server on drop.
 /// Returns None if port 80 can't be bound (need root).
 /// Port 80 is required because gallery-dl's `generic:` URL prefix drops the
-/// port number (upstream bug in GenericExtractor regex).
+/// port number (the GenericExtractor regex can't match `:port` at all —
+/// with one, the URL's path group parses to None and the extractor dies
+/// with "'NoneType' object has no attribute 'replace'"). Tests must keep
+/// the URL portless; the server listens on 80 so requests land there anyway.
 fn start_server() -> Option<(ServerGuard, u16)> {
-    // gallery-dl's `generic:` URL prefix drops the port (upstream bug in the
-    // GenericExtractor regex: domain group `[-\w\.]+` doesn't include `:port`).
-    // Use port 80 so the URL works. If port 80 is unavailable (non-root or
+    // gallery-dl's `generic:` URL prefix drops the port (the regex can't
+    // match `:port` at all; see the doc comment above). Use port 80 and
+    // keep the test URLs portless. If port 80 is unavailable (non-root or
     // busy), return None to skip the test.
     let port = 80;
     // Check if we can bind to port 80.
@@ -107,7 +110,7 @@ async fn gallery_integration_probe_count_download() {
         eprintln!("SKIP: cannot bind to port 80 (need root for integration test)");
         return;
     };
-    let url = format!("generic:http://127.0.0.1:{port}/");
+    let url = "generic:http://127.0.0.1/".to_string();
 
     // 1. Probe returns items.
     let probe_result = crate::gallery_probe::probe_gallery(&tool, &url, None, None).await;
@@ -217,7 +220,7 @@ async fn gallery_integration_filtered_download() {
         eprintln!("SKIP: cannot bind to port 80 (need root for integration test)");
         return;
     };
-    let url = format!("generic:http://127.0.0.1:{port}/");
+    let url = "generic:http://127.0.0.1/".to_string();
 
     // Filtered run: images only. The server also serves a video ahead of
     // the images; the filter must exclude it (3 of 4 items).
@@ -268,7 +271,7 @@ async fn gallery_integration_range_indexes_filtered_files() {
         eprintln!("SKIP: cannot bind to port 80 (need root for integration test)");
         return;
     };
-    let url = format!("generic:http://127.0.0.1:{port}/");
+    let url = "generic:http://127.0.0.1/".to_string();
 
     // The picker enumerates with the download's filter and maps picks to
     // `--range` positions; gallery-dl applies `--range` to the filtered

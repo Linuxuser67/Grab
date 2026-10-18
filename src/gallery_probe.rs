@@ -1465,7 +1465,6 @@ mod tests {
     }
 
     #[test]
-    fn probe_json_parses_real_array_format()    #[test]
     fn probe_json_parses_real_array_format() {
         // Real `gallery-dl -j` output: [2, {dir}] then [3, "url", {meta}].
         let json = r#"[

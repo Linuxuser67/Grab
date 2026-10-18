@@ -7315,7 +7315,11 @@ fn download_builders_use_machine_progress_and_ignore_config() {
             .iter()
             .position(|a| a == "--extractor-args")
             .expect("extractor-args flag");
-        assert_eq!(argv[e + 1], "youtube:player_client=default,-web", "{argv:?}");
+        assert_eq!(
+            argv[e + 1],
+            "youtube:player_client=default,-web",
+            "{argv:?}"
+        );
         let sep = argv.iter().position(|a| a == "--").expect("separator");
         assert!(sep > e + 1, "{argv:?}");
     }

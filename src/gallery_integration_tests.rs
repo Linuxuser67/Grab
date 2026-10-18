@@ -355,10 +355,10 @@ async fn gallery_integration_range_indexes_filtered_files() {
 /// Recursive byte total of `path` (flat small test trees only).
 fn dir_bytes(dir: &std::path::Path) -> u64 {
     fn walk(entry_path: &std::path::Path, total: &mut u64) {
-        if let Ok(meta) = std::fs::metadata(entry_path) {
-            if meta.is_file() {
-                *total += meta.len();
-            }
+        if let Ok(meta) = std::fs::metadata(entry_path)
+            && meta.is_file()
+        {
+            *total += meta.len();
         }
         if entry_path.is_dir()
             && let Ok(entries) = std::fs::read_dir(entry_path)

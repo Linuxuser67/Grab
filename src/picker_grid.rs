@@ -12,6 +12,7 @@
 use adw::prelude::*;
 use gtk4::prelude::*;
 use gtk4::{glib, pango};
+use libadwaita as adw;
 use std::cell::RefCell;
 use std::rc::Rc;
 

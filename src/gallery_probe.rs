@@ -1190,9 +1190,11 @@ mod tests {
             ProbeOutcome::VideoGalleryDl
         );
 
-        // This rule is site-independent: a YouTube playlist also uses gallery-dl.
+        // The probe is capped, so even a single preview item selects gallery-dl
+        // when yt-dlp confirms the source has multiple entries.
+        let first_preview_item = vec![item("mp4")];
         assert_eq!(
-            route_for_collection(true, 4, Some(&videos), None),
+            route_for_collection(true, 4, Some(&first_preview_item), None),
             ProbeOutcome::VideoGalleryDl
         );
 

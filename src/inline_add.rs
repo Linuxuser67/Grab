@@ -1501,11 +1501,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         gallery_filter.add(toggle);
     }
     gallery_filter.set_active_name(Some("all"));
+    // Span the section width: the segmented control reads as one control
+    // across the card instead of a floating pill row.
+    gallery_filter.set_hexpand(true);
     // The wrapper owns visibility; the group stays visible inside it. (Phase
     // 10 hid the group here and never re-showed it: the filter never rendered.)
     // AdwToggleGroup doesn't implement GtkAccessible; the label goes on a
     // wrapper so screen readers announce the filter's purpose.
     let filter_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    filter_wrap.set_hexpand(true);
     filter_wrap.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Filter gallery by type",
     ))]);

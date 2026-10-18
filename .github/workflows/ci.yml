@@ -85,6 +85,10 @@ jobs:
           export GSK_RENDERER=cairo
           cargo test picker_grid -- --ignored --test-threads=1 --nocapture | tee /tmp/ui-tests.log
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' /tmp/ui-tests.log
+          # A stray Gtk-CRITICAL (e.g. the measure flood from the drawn
+          # warnings while the picker streams entries) must fail the step,
+          # not just scroll past in the log.
+          ! grep -q "Gtk-CRITICAL" /tmp/ui-tests.log
   # Guards the module structure: sentrux enforces the architectural rules
   # in .sentrux/rules.toml (currently: zero import cycles). Pinned to
   # v0.5.7 so an upstream release can't silently change the verdict; runs

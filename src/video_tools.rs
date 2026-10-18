@@ -1701,13 +1701,6 @@ async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<S
 /// A hung or wedged tool binary must not stall every lookup or the settings page.
 pub(crate) const TOOL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Installed yt-dlp version (`yt-dlp --version`), or `None` when yt-dlp is
-/// missing or won't run. Blocking: call off the GTK thread.
-pub(crate) fn installed_ytdlp_version() -> Option<String> {
-    let libs = resolve_libraries().ok()?;
-    probe_first_line(&libs.youtube, "--version", TOOL_PROBE_TIMEOUT)
-}
-
 /// Whether a failed yt-dlp log shows the extractor breaking, which a newer
 /// yt-dlp usually fixes. Removed or private videos and network errors don't match.
 pub(crate) fn extractor_failure(log: &str) -> bool {

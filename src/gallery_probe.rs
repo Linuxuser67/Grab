@@ -185,8 +185,8 @@ pub(crate) fn route_for_collection(
 
     // Either backend can confirm multiple entries. The gallery-dl preview is
     // capped, so one supported preview item is enough when yt-dlp found a list.
-    let multi_entry = ytdlp_playlist_entries > 1
-        || gallery_items.is_some_and(|items| items.len() > 1);
+    let multi_entry =
+        ytdlp_playlist_entries > 1 || gallery_items.is_some_and(|items| items.len() > 1);
     if multi_entry {
         if has_video {
             return ProbeOutcome::VideoGalleryDl;

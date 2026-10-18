@@ -1616,7 +1616,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod collection_title_tests {
     use super::*;

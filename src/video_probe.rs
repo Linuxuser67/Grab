@@ -711,7 +711,6 @@ pub(crate) fn parse_single_video(mut value: serde_json::Value) -> Result<Video, 
     Ok(video)
 }
 
-
 #[cfg(test)]
 mod playlist_title_fallback_tests {
     use super::*;

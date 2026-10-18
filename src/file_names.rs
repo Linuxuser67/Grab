@@ -817,7 +817,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod url_title_tests {
     use super::*;

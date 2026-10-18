@@ -66,7 +66,8 @@ jobs:
       # threads, and glib futures are bound to their spawning thread, so
       # parallel runs abort when one test's loop polls another's source.
       # --nocapture: show SKIP messages from gallery integration tests
-      # (gallery-dl has an upstream internal bug; tests skip until fixed).
+      # (they skip gracefully when the port is busy or gallery-dl itself
+      # errors internally; GRAB_REQUIRE_GALLERY_DL=1 turns skips into failures).
       # To enforce the gate locally: GRAB_REQUIRE_GALLERY_DL=1 cargo test
       - run: cargo test -- --test-threads=1 --nocapture
       # picker_grid's tests need a display: GtkMultiSelection asserts that GTK

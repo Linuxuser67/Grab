@@ -1,0 +1,29 @@
+name: Dependency refresh (one-off)
+
+# One-off helper for the beta.12 cut: on the first push of this branch it
+# runs cargo update, regenerates the Flatpak vendor sources, and pushes
+# both back. The commit-message guard keeps it from re-triggering on its
+# own push or on the later release-prep commit. Removed in that commit.
+on:
+  push:
+    branches: [deps/beta.12-refresh]
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event.head_commit.message == 'Add one-off dependency refresh job'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - run: cargo update
+      - run: ./build-aux/gen-cargo-sources.py
+      - run: |
+          git config user.name "houssemko"
+          git config user.email "houssemko@users.noreply.github.com"
+          git add Cargo.lock build-aux/cargo-sources.json
+          git diff --cached --quiet || git commit -m "Refresh Cargo.lock via cargo update"
+          git push origin HEAD:${{ github.ref_name }}

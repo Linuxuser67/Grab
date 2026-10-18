@@ -34,8 +34,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-/// Where a submit came from. Only user submits open the gallery picker; auto-add
-/// keeps its direct path.
+/// Where a submit came from: Enter, the Add button or tick icon, or auto-add.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SubmitSource {
     /// Enter in the URL entry.
@@ -2447,9 +2446,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // entry itself, not in a caption underneath it.
                 set_field_error(&url_entry, message);
             };
-            // A gallery submitted by the user opens the file picker; nothing is
-            // queued unseen. Auto-add keeps the direct enqueue below.
-            if step2.is_gallery.get() && source != SubmitSource::Auto {
+            // A gallery opens the file picker on every submit, auto-add included,
+            // so nothing is queued unseen.
+            if step2.is_gallery.get() {
                 let open = step2.gallery_select_opener.borrow().clone();
                 if let Some(open) = open {
                     open();

@@ -683,8 +683,15 @@ pub fn build_window(
     toolbar.add_top_bar(&header);
     toolbar.add_top_bar(&search_clamp);
     toolbar.add_top_bar(&banner);
-    toolbar.add_top_bar(add_card.widget());
-    toolbar.set_content(Some(&stack));
+    // The add card's gallery/playlist picker pages can be much taller than
+    // a toolbar. Keeping it as a top bar can produce an invalid `for_size`
+    // measurement when the window is probed at its minimum size. Keep the
+    // toolbar bars compact and place the card in the content area instead.
+    let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    content.append(add_card.widget());
+    stack.set_vexpand(true);
+    content.append(&stack);
+    toolbar.set_content(Some(&content));
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(toasts.as_ref()));
 

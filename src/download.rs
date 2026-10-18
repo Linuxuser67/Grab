@@ -1015,8 +1015,10 @@ impl DownloadManager {
         if !std::path::Path::new(&stored.dest_dir).is_absolute() {
             return Err(format!("Invalid destination in queue: {}", stored.dest_dir));
         }
-        // Title was sanitized at enqueue; re-sanitize defensively.
-        let title = crate::file_names::sanitize_folder_name(&job.title);
+        // The row's folder name (with its -2 suffix) was sane-validated on
+        // load; use it verbatim so the restored row matches the on-disk
+        // subfolder instead of the payload's base title.
+        let title = stored.filename.clone();
         let id = self.claim_id(stored.id, std::path::Path::new(&stored.dest_dir));
         job.item_id = id;
         let item = DownloadItem::new(id, &url, &title, &stored.dest_dir);
@@ -3330,7 +3332,15 @@ impl DownloadManager {
                 Ok(mut job) => {
                     // Overwrite identity from the stored item, not the payload.
                     job.page_url = item.url.clone();
-                    job.dest_dir = std::path::PathBuf::from(&item.dest_dir);
+                    // The payload's dest_dir is the gallery subfolder enqueue
+                    // stored: parent + row filename — the only record of the
+                    // uniquifying -2 suffix. A payload matching that shape is
+                    // trustworthy; anything else (legacy rows, drifted
+                    // records) is rebuilt from the validated filename.
+                    let folder = std::path::Path::new(&item.dest_dir).join(&item.filename);
+                    if job.dest_dir != folder {
+                        job.dest_dir = folder;
+                    }
                     Some(job)
                 }
                 Err(e) => {

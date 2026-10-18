@@ -1496,8 +1496,9 @@ mod tests {
     }
 
     #[test]
-    fn probe_json_inherits_directory_user() {
-        // File without user inherits from the directory message.
+    fn probe_json_inherits_directory_user_without_using_it_as_picker_title() {
+        // File metadata inherits the directory user, but that account name
+        // must not replace an individual entry's filename in the picker.
         let json = r#"[
             [2, {"category": "instagram", "user": "someuser"}],
             [3, "https://example.com/12345.jpg", {
@@ -1511,7 +1512,11 @@ mod tests {
         // extension/category default when omitted (S7).
         assert_eq!(items[0].extension, "jpg");
         assert_eq!(items[0].category, "");
-        assert_eq!(probe_title(&items[0], "https://example.com/"), "someuser");
+        assert_eq!(
+            items[0].extra.get("user").and_then(|value| value.as_str()),
+            Some("someuser")
+        );
+        assert_eq!(probe_title(&items[0], "https://example.com/"), "12345.jpg");
     }
 
     #[test]

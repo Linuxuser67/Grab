@@ -441,6 +441,7 @@ fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
 fn parse_playlist_item(
     entry: &serde_json::Value,
     position: usize,
+    collection_url: &str,
 ) -> Option<crate::media_types::PlaylistItem> {
     entry.as_object()?;
     let is_http = |u: &str| u.starts_with("http://") || u.starts_with("https://");
@@ -452,8 +453,21 @@ fn parse_playlist_item(
     let id = json_str(entry, "id")
         .map(str::to_string)
         .unwrap_or_else(|| format!("item-{}", position + 1));
-    let title = json_str(entry, "title")
-        .map(str::to_string)
+    let title = ["title", "fulltitle", "alt_title"]
+        .iter()
+        .find_map(|key| {
+            json_str(entry, key)
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            if page_url == collection_url {
+                return None;
+            }
+            let from_url = crate::file_names::title_from_url(&page_url);
+            (from_url != "collection" && from_url != id).then_some(from_url)
+        })
         .unwrap_or_else(|| id.clone());
     Some(crate::media_types::PlaylistItem {
         id: id.into_boxed_str(),
@@ -484,11 +498,16 @@ pub(crate) fn parse_playlist_json(
     let items: Vec<crate::media_types::PlaylistItem> = entries
         .iter()
         .enumerate()
-        .filter_map(|(i, e)| parse_playlist_item(e, i))
+        .filter_map(|(i, e)| parse_playlist_item(e, i, url))
         .take(MAX_PLAYLIST_ITEMS)
         .collect();
+    let title = json_str(value, "title")
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::file_names::title_from_url(url));
     Some(crate::media_types::PlaylistInfo {
-        title: json_str(value, "title").unwrap_or(url).into(),
+        title: title.into_boxed_str(),
         page_url: json_str(value, "webpage_url").unwrap_or(url).into(),
         kind: crate::media_types::PlaylistKind::classify(url, extractor_key),
         total,
@@ -690,4 +709,46 @@ pub(crate) fn parse_single_video(mut value: serde_json::Value) -> Result<Video, 
         format.video_id = Some(video.id.clone());
     }
     Ok(video)
+}
+
+
+#[cfg(test)]
+mod playlist_title_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn missing_collection_and_entry_titles_use_url_derived_names() {
+        let value = serde_json::json!({
+            "_type": "playlist",
+            "entries": [{
+                "id": "entry-42",
+                "url": "https://example.com/videos/sunset-from-italy"
+            }]
+        });
+        let playlist = parse_playlist_json(
+            &value,
+            "https://www.youtube.com/playlist?list=PLabc123",
+        )
+        .expect("playlist-shaped JSON");
+        assert_eq!(&*playlist.title, "PLabc123");
+        assert_eq!(&*playlist.items[0].title, "sunset from italy");
+    }
+
+    #[test]
+    fn nonempty_extractor_titles_are_preserved() {
+        let value = serde_json::json!({
+            "_type": "playlist",
+            "title": "Actual collection title",
+            "entries": [{
+                "id": "entry-42",
+                "title": "Actual item title",
+                "url": "https://example.com/videos/sunset-from-italy"
+            }]
+        });
+        let playlist =
+            parse_playlist_json(&value, "https://example.com/playlist?list=PLabc123")
+                .expect("playlist-shaped JSON");
+        assert_eq!(&*playlist.title, "Actual collection title");
+        assert_eq!(&*playlist.items[0].title, "Actual item title");
+    }
 }

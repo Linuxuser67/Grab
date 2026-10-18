@@ -871,7 +871,9 @@ fn push_playlist_items_page(
             // dir is pure path manipulation; the subdir creation and readdir
             // can stall on network mounts, so they run off the GTK thread.
             let base_dir = manager.resolve_dir(Some(&dest_dir.borrow()));
-            let multi = chosen.len() > 1;
+            // The folder belongs to the collection, so retain it even when
+            // only one entry is selected from a multi-entry playlist.
+            let multi = playlist.total > 1;
             let title = playlist.title.clone();
             // Disable the button while the import is in flight: a second
             // click would see the selection unchanged and enqueue duplicates.
@@ -1667,10 +1669,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 show_video_ready(&step2);
                 return;
             }
-            let title = items
-                .first()
-                .map(|i| crate::gallery_probe::probe_title(i, &url))
-                .unwrap_or_else(|| url.clone());
+            let title = crate::gallery_probe::collection_title(&items, &url);
             let card = crate::gallery_card::GalleryCard::new(
                 items,
                 Some(crate::gallery_probe::StickyMode::Gallery),
@@ -2205,11 +2204,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             Some(crate::gallery_probe::StickyMode::Gallery),
                                             url.clone(),
                                         );
-                                        let title = card
-                                            .items
-                                            .first()
-                                            .map(|i| crate::gallery_probe::probe_title(i, &url))
-                                            .unwrap_or_else(|| url.clone());
+                                        let title = crate::gallery_probe::collection_title(&card.items, &url);
                                         tracing::info!(
                                             files = card.file_count(),
                                             preview = ?card.preview_filenames(),

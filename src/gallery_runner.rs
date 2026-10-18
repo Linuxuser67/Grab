@@ -335,9 +335,10 @@ mod tests {
             speed_limit: None,
             range: None,
         };
-        let task = tokio::spawn(async move {
-            run_gallery_download(&job, &tool, None, None, |_| {}).await
-        });
+        let task =
+            tokio::spawn(
+                async move { run_gallery_download(&job, &tool, None, None, |_| {}).await },
+            );
 
         // In flight: the heartbeat file exists and freshens.
         let started = std::time::Instant::now();

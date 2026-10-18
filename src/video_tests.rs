@@ -8645,6 +8645,78 @@ fn resolve_subtitle_lang_spawn_failure_drops_subtitles() {
     assert_eq!(res, Ok(None));
 }
 
+#[test]
+fn resolve_subtitle_lang_reuses_probe_json_without_probing() {
+    // The media leg loads the probe's info JSON (--load-info-json): it
+    // already lists the offered tracks, so the language comes from it with
+    // no second extraction. The binary can't even start, so a probe would
+    // yield `None` — the pick proves the JSON path.
+    let mut job = probe_test_job(Some("en"));
+    job.info_json = Some(serde_json::json!({
+        "automatic_captions": {"en": [{"url": "http://x/en", "ext": "vtt"}]},
+    }));
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        std::path::Path::new("/nonexistent/yt-dlp"),
+        &job,
+        &mut abort_rx,
+        None,
+    ));
+    assert_eq!(res, Ok(Some("en".to_string())));
+}
+
+#[test]
+fn resolve_subtitle_lang_probe_json_outranks_a_fresh_probe() {
+    // The probe JSON offers only French while the live page would offer
+    // English: the JSON decides, so the fresh probe must not have run.
+    let dir = std::env::temp_dir().join(format!("grab-probe-json-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_probe(
+        &dir,
+        r#"{"subtitles":{"en":[{"url":"http://x/en","ext":"vtt"}]}}"#,
+        false,
+    );
+    let mut job = probe_test_job(Some("en"));
+    job.info_json = Some(serde_json::json!({
+        "subtitles": {"fr": [{"url": "http://x/fr", "ext": "vtt"}]},
+    }));
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        &fake,
+        &job,
+        &mut abort_rx,
+        None,
+    ));
+    assert_eq!(res, Ok(None));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resolve_subtitle_lang_probe_json_without_subtitle_info_falls_through() {
+    // An extraction that emitted no subtitle maps says nothing about the
+    // tracks: the fresh probe must still run.
+    let dir = std::env::temp_dir().join(format!("grab-probe-nosub-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_probe(
+        &dir,
+        r#"{"subtitles":{"fr":[{"url":"http://x/fr","ext":"vtt"}]}}"#,
+        false,
+    );
+    let mut job = probe_test_job(Some("fr"));
+    job.info_json = Some(serde_json::json!({"id": "abc", "title": "no subtitle maps"}));
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        &fake,
+        &job,
+        &mut abort_rx,
+        None,
+    ));
+    assert_eq!(res, Ok(Some("fr".to_string())));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Fake yt-dlp for the subtitle probe that emits an info JSON larger than the
 /// OS pipe buffer (>64 KiB): real `--dump-json` output gets there on videos
 /// with many subtitle tracks.

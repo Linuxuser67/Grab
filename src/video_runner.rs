@@ -1064,10 +1064,14 @@ fn available_subtitle_langs(info: &serde_json::Value) -> std::collections::HashS
 
 /// Resolve the subtitle language for the media command: the preferred
 /// language if the video offers it, else English if offered, else no
-/// subtitles. The probe is one best-effort info fetch — any failure
-/// (network, HTTP 429, unparsable output) yields `None`, so a subtitle
-/// outage can never sink the media download. `Err(())` means the user
-/// aborted mid-probe: the caller must stop.
+/// subtitles. When the media leg reuses the probe's info JSON
+/// (--load-info-json), that JSON already lists the offered tracks — the
+/// same extraction a fresh probe would pay for — so pick from it and skip
+/// the probe instead of a second network fetch. The probe is one
+/// best-effort info fetch — any failure (network, HTTP 429, unparsable
+/// output) yields `None`, so a subtitle outage can never sink the media
+/// download. `Err(())` means the user aborted mid-probe: the caller must
+/// stop.
 pub(crate) async fn resolve_subtitle_lang(
     youtube_bin: &Path,
     job: &VideoJob,
@@ -1078,6 +1082,22 @@ pub(crate) async fn resolve_subtitle_lang(
         Some(p) => p.to_ascii_lowercase(),
         None => return Ok(None),
     };
+    // Fast path: the media leg is about to load this same probe JSON
+    // (--load-info-json), so its subtitle maps are what the download will
+    // use — deciding from them spares a second extraction. Key presence
+    // only: no maps at all means the JSON cannot answer, keep the probe.
+    if let Some(json) = job.info_json.as_ref()
+        && (json.get("subtitles").is_some() || json.get("automatic_captions").is_some())
+    {
+        let available = available_subtitle_langs(json);
+        let lang = pick_subtitle_lang(&available, &[&pref, "en"]);
+        if lang.is_none() {
+            tracing::debug!("video offers no subtitles in the preferred language or English");
+        } else {
+            tracing::debug!("subtitle resolve: reused the probe info JSON, skipping the probe");
+        }
+        return Ok(lang);
+    }
     let mut argv = vec!["--ignore-config".to_string()];
     // A picked row probes the collection URL: scope to its entry, or the
     // subtitles come from the tray's first entry while the media is another.

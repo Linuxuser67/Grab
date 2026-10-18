@@ -213,7 +213,6 @@ pub fn launch_path(path: &std::path::Path, toasts: &adw::ToastOverlay, reveal: b
 
 struct RowWidgets {
     media_icon: gtk4::Image,
-    done_badge: gtk4::Image,
     detail: gtk4::Label,
     progress: gtk4::ProgressBar,
     spinner: adw::Spinner,
@@ -467,10 +466,6 @@ fn refresh_row(
     } else {
         w.media_icon.remove_css_class("error");
     }
-    // Done badge: show the checkmark emblem when the download completes.
-    let done = item.status() == DownloadStatus::Done;
-    w.done_badge.set_visible(done);
-
     let running = matches!(
         item.status(),
         DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
@@ -532,7 +527,6 @@ fn refresh_row(
 #[derive(Clone)]
 struct RowWeaks {
     media_icon: glib::WeakRef<gtk4::Widget>,
-    done_badge: glib::WeakRef<gtk4::Widget>,
     detail: glib::WeakRef<gtk4::Widget>,
     progress: glib::WeakRef<gtk4::Widget>,
     spinner: glib::WeakRef<gtk4::Widget>,
@@ -560,7 +554,6 @@ struct LiveRow {
 fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
     let RowWeaks {
         media_icon: w_media,
-        done_badge: w_badge,
         detail: w_detail,
         progress: w_prog,
         spinner: w_spin,
@@ -577,7 +570,6 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
     } = weaks;
     let (
         Some(media_w),
-        Some(badge_w),
         Some(detail_w),
         Some(progress_w),
         Some(spinner_w),
@@ -593,7 +585,6 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
         Some(name_w),
     ) = (
         w_media.upgrade(),
-        w_badge.upgrade(),
         w_detail.upgrade(),
         w_prog.upgrade(),
         w_spin.upgrade(),
@@ -615,7 +606,6 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
         Ok(status),
         Ok(name),
         Ok(media_icon),
-        Ok(done_badge),
         Ok(detail),
         Ok(progress),
         Ok(spinner),
@@ -631,7 +621,6 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
         status_w.downcast::<gtk4::Label>(),
         name_w.downcast::<gtk4::Label>(),
         media_w.downcast::<gtk4::Image>(),
-        badge_w.downcast::<gtk4::Image>(),
         detail_w.downcast::<gtk4::Label>(),
         progress_w.downcast::<gtk4::ProgressBar>(),
         spinner_w.downcast::<adw::Spinner>(),
@@ -653,7 +642,6 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
         name,
         widgets: RowWidgets {
             media_icon,
-            done_badge,
             detail,
             progress,
             spinner,
@@ -758,19 +746,6 @@ pub(crate) fn build_row(
         .pixel_size(16)
         .valign(gtk4::Align::Center)
         .build();
-    // Done badge: HIG emblem overlay — a small checkmark in the corner
-    // when the download completes. Uses GtkOverlay, the established
-    // API for badging icons.
-    let done_badge = gtk4::Image::builder()
-        .icon_name("emblem-ok-symbolic")
-        .pixel_size(16)
-        .halign(gtk4::Align::End)
-        .valign(gtk4::Align::End)
-        .build();
-    done_badge.set_visible(false);
-    let media_overlay = gtk4::Overlay::new();
-    media_overlay.set_child(Some(&media_icon));
-    media_overlay.add_overlay(&done_badge);
     media_icon.update_property(&[gtk4::accessible::Property::Label(&match media {
         RowMedia::Live => gettext("Live recording"),
         RowMedia::Audio => gettext("Audio"),
@@ -810,7 +785,7 @@ pub(crate) fn build_row(
     delete_btn.add_css_class("destructive-action");
     let remove_btn = icon_button("list-remove-symbolic", &gettext("Remove from list"));
 
-    top.append(&media_overlay);
+    top.append(&media_icon);
     top.append(&name);
     top.append(&status);
     top.append(&spinner);
@@ -1011,7 +986,6 @@ pub(crate) fn build_row(
     let w = |w: &gtk4::Widget| w.downgrade();
     let weaks = RowWeaks {
         media_icon: w(media_icon.upcast_ref()),
-        done_badge: w(done_badge.upcast_ref()),
         detail: w(detail.upcast_ref()),
         progress: w(progress.upcast_ref()),
         spinner: w(spinner.upcast_ref()),
@@ -1053,7 +1027,6 @@ pub(crate) fn build_row(
         item,
         &RowWidgets {
             media_icon: media_icon.clone(),
-            done_badge: done_badge.clone(),
             detail: detail.clone(),
             progress: progress.clone(),
             spinner: spinner.clone(),

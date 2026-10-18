@@ -250,20 +250,45 @@ async fn run_video_download_inner(
             .await
             .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
         }
-        return run_hls_ytdlp(
+        let hls_outcome = run_hls_ytdlp(
             &youtube_bin,
             &ffmpeg_bin,
             &staging,
             &job,
             gate,
             &hls.format_id,
-            abort,
+            &mut abort,
             timeout,
-            tx,
+            tx.clone(),
             playlist_index,
         )
         .await
         .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
+        // Same subtitle-throttle degradation as the unified tail below: the
+        // HLS VOD leg carries the same subtitle argv and the same failure.
+        let res = match hls_outcome {
+            Err(ref e) if is_subtitles_fetch_failure(e) => {
+                match subtitle_degrade(&mut job, &mut abort, e, phase).await {
+                    Ok(()) => run_hls_ytdlp(
+                        &youtube_bin,
+                        &ffmpeg_bin,
+                        &staging,
+                        &job,
+                        gate,
+                        &hls.format_id,
+                        &mut abort,
+                        timeout,
+                        tx,
+                        playlist_index,
+                    )
+                    .await
+                    .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished)),
+                    Err(()) => Ok(VideoOutcome::Aborted),
+                }
+            }
+            other => other,
+        };
+        return res;
     }
     let Some(audio_sel) = audio_sel else {
         return Err(VideoError::unavailable_detail(&video.formats));
@@ -365,7 +390,7 @@ async fn run_video_download_inner(
     );
     let combined_total = query.total;
     // NOTE: Grab's speed limit applies to VOD legs via `--limit-rate`. Live capture runs unthrottled: capping an endless stream would fall behind the edge.
-    run_unified_ytdlp(
+    let outcome = run_unified_ytdlp(
         &youtube_bin,
         &ffmpeg_bin,
         &staging,
@@ -376,11 +401,42 @@ async fn run_video_download_inner(
         combined_total,
         &mut abort,
         timeout,
-        tx,
+        tx.clone(),
         playlist_index,
     )
     .await
-    .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished))
+    .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
+    // A subtitle fetch is one HTTP round-trip that happens before any media
+    // byte moves, yet yt-dlp fails the whole attempt when it errors (YouTube's
+    // transcript endpoint 429s under rate limiting). Degrade to that cost
+    // instead of losing the download: retry once with subtitles dropped.
+    // Staging/manifest state is unchanged (same selection), so the retry
+    // resumes in place; a cached info JSON is retained on the job and simply
+    // rewritten for the second attempt.
+    match outcome {
+        Err(ref e) if is_subtitles_fetch_failure(e) => {
+            match subtitle_degrade(&mut job, &mut abort, e, phase).await {
+                Ok(()) => run_unified_ytdlp(
+                    &youtube_bin,
+                    &ffmpeg_bin,
+                    &staging,
+                    &job,
+                    gate,
+                    &spec,
+                    video_sel.as_ref().map(|s| s.ext.as_str()),
+                    combined_total,
+                    &mut abort,
+                    timeout,
+                    tx,
+                    playlist_index,
+                )
+                .await
+                .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished)),
+                Err(()) => Ok(VideoOutcome::Aborted),
+            }
+        }
+        other => other,
+    }
 }
 
 /// One direct download through a single yt-dlp invocation: Grab claims the output into place (EXDEV-safe, no clobber) and wipes staging.
@@ -820,6 +876,46 @@ fn ytdlp_failure_detail(log_tail: &str) -> String {
     } else {
         detail
     }
+}
+
+/// Whether the yt-dlp failure was a *subtitle* fetch error (for example the
+/// transcript endpoint answering "HTTP Error 429"), not a media failure.
+/// Subtitles are fetched before the media bytes, so yt-dlp fails the whole
+/// attempt on them even though the video itself was healthy. Matched on
+/// yt-dlp's stable English log phrase (its stderr, never user-facing).
+pub(crate) fn is_subtitles_fetch_failure(err: &VideoError) -> bool {
+    err.to_string()
+        .contains("Unable to download video subtitles")
+}
+
+/// Shared degradation for a failed subtitle fetch: warn, update the row's
+/// phase, settle the throttle window, then strip subtitles from the job for
+/// one more attempt. `Err(())` means the user aborted during the settle; the
+/// partial parts stay in staging for a later resume (fresh rows have no parts
+/// at all). Returns with subtitles cleared on success.
+async fn subtitle_degrade(
+    job: &mut VideoJob,
+    abort: &mut oneshot::Receiver<StopIntent>,
+    error: &VideoError,
+    phase: impl Fn(String),
+) -> Result<(), ()> {
+    tracing::warn!(
+        item_id = job.item_id,
+        error = %error.to_string(),
+        "subtitle fetch failed; retrying without subtitles"
+    );
+    phase(gettext("Retrying without subtitles…"));
+    // The throttle window is seconds-scale; an instant retry just re-hits it.
+    // ponytail: fixed 5 s settle — compute backoff from telemetry only if throttles persist.
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+        _ = &mut *abort => return Err(()),
+    }
+    // Subtitles off in every downstream use: the language pass returns None
+    // immediately and the argv builders skip the write/embed/sidecar legs.
+    job.subtitles = None;
+    job.embed_subs = false;
+    Ok(())
 }
 
 /// Remux a stopped live capture into place. ffmpeg writes `<dest>.part` and the result is renamed to `dest` only on success: a bare `final.<n>.<ext>` is always worth keeping, a `.part` never is.
@@ -1881,7 +1977,7 @@ pub(crate) async fn run_hls_ytdlp(
     job: &VideoJob,
     gate: &std::sync::Arc<AttemptGate>,
     hls_format_id: &str,
-    mut abort: oneshot::Receiver<StopIntent>,
+    abort: &mut oneshot::Receiver<StopIntent>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
     playlist_index: Option<usize>,
@@ -1900,8 +1996,7 @@ pub(crate) async fn run_hls_ytdlp(
     // (preferred, else English, else none) before the media argv is built.
     // An abort here stops the download; a probe failure just drops subtitles.
     let mut job = job.clone();
-    job.subtitles = match resolve_subtitle_lang(youtube_bin, &job, &mut abort, playlist_index).await
-    {
+    job.subtitles = match resolve_subtitle_lang(youtube_bin, &job, abort, playlist_index).await {
         Ok(lang) => lang,
         Err(()) => return Ok(None),
     };
@@ -1971,7 +2066,7 @@ pub(crate) async fn run_hls_ytdlp(
         let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
         tokio::select! {
             biased;
-            _ = &mut abort => {
+            _ = &mut *abort => {
                 reap_child(&mut child, &mut group).await;
                 progress.abort();
                 logs.abort();

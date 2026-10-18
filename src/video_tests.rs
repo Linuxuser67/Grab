@@ -3809,10 +3809,11 @@ fn live_argv_pins_planner_id_in_mpegts() {
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
     assert_eq!(argv[f + 1], "bv*[height<=720]+ba/b");
     assert!(argv.contains(&"--hls-use-mpegts".to_string()));
-    assert!(
-        argv.windows(2)
-            .any(|w| w == ["--fragment-retries", "infinite"])
-    );
+    // ffmpeg is the pinned live-HLS downloader; fragment-retries does not
+    // apply to it, so the flag must be gone.
+    let d = argv.iter().position(|a| a == "--downloader").expect("has --downloader");
+    assert_eq!(argv[d + 1], "m3u8:ffmpeg");
+    assert!(!argv.iter().any(|a| a == "--fragment-retries"));
     // Record-now means the live edge: no live-from-start, no unbounded wait loop.
     assert!(!argv.iter().any(|a| a == "--live-from-start"));
     assert!(!argv.iter().any(|a| a == "--wait-for-video"));

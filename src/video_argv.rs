@@ -290,7 +290,9 @@ pub(crate) fn hls_format_spec(quality: &str, _pinned: Option<&str>) -> String {
     }
 }
 
-/// yt-dlp argv for a live capture: kill-safe MPEG-TS, endless fragment retries bounded by our timeout. Pure.
+/// yt-dlp argv for a live capture: kill-safe MPEG-TS, ffmpeg pinned as the
+/// live-HLS downloader per yt-dlp's own guidance ("Live HLS streams are not
+/// supported by the native downloader"). Pure.
 pub(crate) fn live_capture_argv(
     job: &VideoJob,
     hls_format_id: &str,
@@ -306,9 +308,12 @@ pub(crate) fn live_capture_argv(
         YTDLP_PROGRESS_TEMPLATE.to_string(),
         "-f".to_string(),
         hls_format_spec(&job.quality, Some(hls_format_id)),
+        // Live m3u8 goes to ffmpeg (the native fragment downloader cannot
+        // do live HLS). Protocol-scoped so non-HLS formats stay native.
+        // --fragment-retries does not apply to ffmpeg, so it is not passed.
+        "--downloader".to_string(),
+        "m3u8:ffmpeg".to_string(),
         "--hls-use-mpegts".to_string(),
-        "--fragment-retries".to_string(),
-        "infinite".to_string(),
         "-o".to_string(),
         ytdlp_output_template(out),
         // LL-HLS timestamp hygiene for yt-dlp's ffmpeg downloader: split A/V

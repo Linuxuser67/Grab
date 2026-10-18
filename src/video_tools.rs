@@ -1561,7 +1561,7 @@ pub(crate) fn ytdlp_identity_args(
     // (e.g. quickjs on PATH), so exclude it everywhere. Scoped to the
     // youtube extractor: a no-op for other sites.
     args.push("--extractor-args".to_string());
-    args.push("youtube:player_client=-web".to_string());
+    args.push("youtube:player_client=default,-web".to_string());
     // Pin quickjs-ng for YouTube (disabling other runtimes, since only deno is
     // on by default). Scoped to YouTube; skipped where quickjs-ng ships no
     // release, where yt-dlp keeps its own runtime discovery.

@@ -2174,8 +2174,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     ytdlp_video,
                                     &gallery,
                                 );
-                                let routed = crate::gallery_probe::route(
+                                let routed = crate::gallery_probe::route_for_url(
+                                    &url,
                                     ytdlp_video,
+                                    matches!(
+                                        &ytdlp,
+                                        Ok((crate::video::ProbeResult::Playlist(_), _))
+                                    ),
                                     gallery.as_ref().ok().and_then(|items| items.as_deref()),
                                     None,
                                 );

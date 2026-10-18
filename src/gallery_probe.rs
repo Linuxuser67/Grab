@@ -158,6 +158,41 @@ pub fn route(
     }
 }
 
+/// Route a probe using the original URL and whether yt-dlp resolved it as a
+/// playlist. Instagram Highlights are collection-only URLs: when gallery-dl
+/// confirms video entries, use its picker/download path so each picked item is
+/// selected from gallery-dl's range rather than re-resolving the whole tray
+/// through yt-dlp's Instagram story extractor.
+pub(crate) fn route_for_url(
+    url: &str,
+    ytdlp_video: bool,
+    ytdlp_playlist: bool,
+    gallery_items: Option<&[GalleryItem]>,
+    host_sticky: Option<StickyMode>,
+) -> ProbeOutcome {
+    let is_instagram_highlights = url::Url::parse(url).is_ok_and(|parsed| {
+        matches!(parsed.host_str(), Some("instagram.com") | Some("www.instagram.com"))
+            && parsed.path_segments().is_some_and(|segments| {
+                let parts: Vec<_> = segments.filter(|segment| !segment.is_empty()).collect();
+                parts.len() == 3
+                    && parts[0] == "stories"
+                    && parts[1] == "highlights"
+                    && !parts[2].is_empty()
+                    && parts[2].chars().all(|c| c.is_ascii_digit())
+            })
+    });
+    let has_gallery_video = gallery_items.is_some_and(|items| {
+        items.iter().any(|item| {
+            GalleryContent::from_extension(&item.extension) == GalleryContent::Video
+        })
+    });
+    if is_instagram_highlights && ytdlp_playlist && has_gallery_video {
+        ProbeOutcome::VideoGalleryDl
+    } else {
+        route(ytdlp_video, gallery_items, host_sticky)
+    }
+}
+
 /// Whether a probe error should be surfaced to the user instead of falling
 /// through to the plain-download path. Auth/HTTP errors mean the URL needs
 /// login; "unsupported URL" and timeouts mean gallery-dl just can't handle it.
@@ -1138,6 +1173,39 @@ mod tests {
         // Host-only URL: .mov is a TLD, not a file extension.
         assert!(!url_is_direct_media("https://example.mov"));
         assert!(!url_is_direct_media("https://example.mov/"));
+    }
+
+    #[test]
+    fn route_instagram_highlights_playlist_prefers_gallerydl_videos() {
+        let highlights = "https://www.instagram.com/stories/highlights/18119089357372404/";
+        let videos = vec![item("mp4"), item("webm")];
+        assert_eq!(
+            route_for_url(highlights, true, true, Some(&videos), None),
+            ProbeOutcome::VideoGalleryDl
+        );
+
+        // A single video is not overridden, and regular playlists remain yt-dlp's.
+        assert_eq!(
+            route_for_url(highlights, true, false, Some(&videos), None),
+            ProbeOutcome::VideoYtDlp { gallery_toggle: false }
+        );
+        assert_eq!(
+            route_for_url(
+                "https://www.youtube.com/playlist?list=PL123",
+                true,
+                true,
+                Some(&videos),
+                None,
+            ),
+            ProbeOutcome::VideoYtDlp { gallery_toggle: false }
+        );
+
+        // Do not pick gallery-dl if its probe did not find any video entries.
+        let images = vec![item("jpg")];
+        assert_eq!(
+            route_for_url(highlights, true, true, Some(&images), None),
+            ProbeOutcome::VideoYtDlp { gallery_toggle: true }
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 project('grab', 'rust',
-  version: '5.7.9-beta.10',
+  version: '5.7.9-beta.11',
   meson_version: '>= 0.59.0',
   license: 'GPL-3.0-only',
 )

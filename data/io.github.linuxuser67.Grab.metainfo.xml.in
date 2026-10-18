@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.9~beta.11" date="2026-10-18">
+      <description>
+        <ul>
+          <li>Gallery-dl video and gallery results now wait for file selection before they are queued.</li>
+          <li>YouTube extraction explicitly keeps the default player-client rotation while excluding the problematic web client.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.9~beta.10" date="2026-10-18">
       <description>
         <ul>

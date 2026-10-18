@@ -2327,7 +2327,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         // Cache the raw info JSON for --load-info-json at download time.
                         // Single videos only; playlists re-probe per entry.
                         if let Some(json) = raw_json {
-                            manager_b.cache_probe_json(probe_json_key.clone(), json);
+                            // The probe canonically retargets some pages
+                            // (youtu.be/… → …/watch?v=…) and enqueue stores the
+                            // probed page URL, which the download keys the cache on.
+                            // Fill that key too, else short links and other
+                            // retargets miss the cache and re-extract.
+                            manager_b.cache_probe_json(probe_json_key.clone(), json.clone());
+                            let final_url = crate::download::normalize_url(probe.page_url())
+                                .unwrap_or_else(|_| probe.page_url().to_string());
+                            if final_url != probe_json_key.0 {
+                                let retarget_key = (
+                                    final_url,
+                                    probe_json_key.1.clone(),
+                                    probe_json_key.2.clone(),
+                                );
+                                manager_b.cache_probe_json(retarget_key, json);
+                            }
                         }
                         // Resolved but nothing playable, and not a listed video
                         // page: same plain fallback as above.

@@ -349,12 +349,13 @@ fn probe_json_expired(cached_at: std::time::Instant) -> bool {
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
     /// Cache a probe's raw info JSON for `--load-info-json`.
-    /// Overwrites any earlier entry for the key. Bounded (32 entries):
+    /// Overwrites any earlier entry for the key. Bounded (64 entries):
     /// probed-but-never-downloaded URLs must not accumulate ~100KB each
     /// for the whole session.
     pub(crate) fn cache_probe_json(&self, key: ProbeJsonKey, json: serde_json::Value) {
         let mut cache = self.probe_json_cache.borrow_mut();
-        if cache.len() >= 32 {
+        // A probed video may occupy two entries (typed + retargeted URL keys).
+        if cache.len() >= 64 {
             cache.clear();
         }
         cache.insert(key, (std::time::Instant::now(), json));

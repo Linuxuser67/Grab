@@ -13,7 +13,6 @@ Serves:
   /img3.png   - 1x1 blue PNG
 """
 import sys
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # Minimal 1x1 JPEG (red) - 160 bytes
@@ -69,22 +68,11 @@ HTML = b"""<html><body>
 <img src="/img3.png">
 </body></html>"""
 
-# Cancellation-test page: one large, slowly streamed file, 1 GiB nominal
-# (sends 16 KiB every 50 ms, i.e. ~320 KiB/s — it never finishes inside a
-# test, so byte flow is the ground truth for the process being alive).
-SLOW_HTML = b"""<html><body>
-<video src="/slow-big.mp4"></video>
-</body></html>"""
-SLOW_TOTAL = 1024 * 1024 * 1024
-SLOW_CHUNK = bytes(16 * 1024)
-
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/":
             data, ctype = HTML, "text/html"
-        elif self.path == "/slow/":
-            data, ctype = SLOW_HTML, "text/html"
         elif self.path == "/vid1.mp4":
             data, ctype = MP4_FAKE, "video/mp4"
         elif self.path == "/img1.jpg":
@@ -93,18 +81,6 @@ class H(BaseHTTPRequestHandler):
             data, ctype = JPEG_RED, "image/jpeg"
         elif self.path == "/img3.png":
             data, ctype = PNG_BLUE, "image/png"
-        elif self.path == "/slow-big.mp4":
-            self.send_response(200)
-            self.send_header("Content-Type", "video/mp4")
-            self.send_header("Content-Length", str(SLOW_TOTAL))
-            self.end_headers()
-            try:
-                while True:
-                    self.wfile.write(SLOW_CHUNK)
-                    time.sleep(0.05)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-            return
         else:
             self.send_response(404)
             self.end_headers()

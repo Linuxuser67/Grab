@@ -300,6 +300,71 @@ mod tests {
         assert_eq!(done_label(0, 3), "Gallery \u{2022} 3 files");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_kills_the_download_process_group() {
+        // run_gallery_download must own a process group: dropping the future
+        // (cancel/abort/shutdown) kills the child and everything it spawned —
+        // the guard's killpg is a no-op unless the child became a group
+        // leader. A fake tool writes a heartbeat file every 200 ms; after
+        // the abort the heartbeat must freeze.
+        let dir = std::env::temp_dir().join(format!("grab-runner-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("fake-gallery-dl.sh");
+        let log = dir.join("heartbeat");
+        std::fs::write(
+            &tool,
+            format!(
+                "#!/bin/sh\nfor _ in $(seq 1 600); do echo tick >> '{}'; sleep 0.2; done\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let job = GalleryJob {
+            item_id: 1,
+            page_url: "https://example.com/x".to_string(),
+            title: "x".to_string(),
+            file_count: None,
+            dest_dir: dir.clone(),
+            filter: GalleryFilter::All,
+            cookies_browser: "none".to_string(),
+            speed_limit: None,
+            range: None,
+        };
+        let task = tokio::spawn(async move {
+            run_gallery_download(&job, &tool, None, None, |_| {}).await
+        });
+
+        // In flight: the heartbeat file exists and freshens.
+        let started = std::time::Instant::now();
+        while !log.exists() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "fake gallery-dl never wrote its first heartbeat"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        // Cancel like the DownloadManager does: abort the runner future.
+        task.abort();
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let after = std::fs::metadata(&log).unwrap().modified().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let settled = std::fs::metadata(&log).unwrap().modified().unwrap();
+        assert_eq!(
+            after, settled,
+            "heartbeat must freeze once the future is dropped (process-group kill); \
+             a surviving child would freshen it every 200 ms"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn stderr_url_tokens_are_redacted_for_the_journal() {
         let raw = "[instagram][warning] 404 https://media.example/file?token=abc#frag plain";

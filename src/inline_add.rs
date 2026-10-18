@@ -2107,9 +2107,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let browser = settings_b.cookies_browser();
                 let newest_first = settings_b.video_codec_newest();
                 // Key the probe-JSON cache by the probe's conditions: the
-                // download reuses the JSON only under identical ones.
+                // download reuses the JSON only under identical ones. The
+                // download side keys on the normalized page URL, so this key
+                // must match exactly: typed URLs that normalize (bare
+                // domains, trailing slash, host case) otherwise miss the
+                // cache silently.
+                let key_url = crate::download::normalize_url(&url).unwrap_or_else(|_| url.clone());
                 let probe_json_key: crate::download::ProbeJsonKey = (
-                    url.clone(),
+                    key_url,
                     browser.clone(),
                     proxy.as_ref().map(|p| p.cli_url.clone()),
                 );

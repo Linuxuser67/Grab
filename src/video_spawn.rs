@@ -25,7 +25,8 @@ const MAX_STDERR_BYTES: u64 = 1024 * 1024;
 
 /// Drain one child pipe with a hard byte ceiling (overflow fails as QuotaExceeded, never a bigger buffer).
 /// Always drains to EOF into a discard buffer so the child can never block on a full pipe.
-async fn read_bounded(
+/// Shared with the gallery probe (same bounded-drain policy).
+pub(crate) async fn read_bounded(
     stream: impl tokio::io::AsyncRead + Unpin,
     limit: u64,
 ) -> std::io::Result<Vec<u8>> {

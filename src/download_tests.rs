@@ -7056,6 +7056,82 @@ fn gallery_round_trip_queued() {
 }
 
 #[test]
+fn restored_gallery_keeps_its_subfolder_and_suffix() {
+    // Real enqueue shape: the row targets the parent dest and its filename
+    // is the uniquified subfolder name; the serialized payload's dest_dir
+    // is parent + filename (enqueue stores the subfolder there). Restore
+    // must keep it: the -2 suffix has no other record, resumed downloads
+    // must land in the subfolder, and Delete's trash rules only accept
+    // parent/filename-shaped jobs. (The old fixture masked this: it fed
+    // "/tmp/dl" to both sides.)
+    let (_lock, _loop) = test_locks();
+    let qf = test_queue_file("gallery-restore-subfolder");
+    let settings = test_settings();
+    let mut job = gallery_job_fixture();
+    job.dest_dir = std::path::PathBuf::from("/tmp/dl/Test Gallery-2");
+    let job_value = serde_json::to_value(&job).unwrap();
+    let mut stored = gallery_stored_item(DownloadStatus::Paused, Some(job_value));
+    stored.filename = "Test Gallery-2".to_string();
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items: vec![stored],
+    };
+    std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m.restore_queue();
+    assert_eq!(m.store().n_items(), 1);
+    let row = m.store().item(0).and_downcast::<DownloadItem>().unwrap();
+    assert!(row.is_gallery());
+    assert_eq!(
+        row.filename(),
+        "Test Gallery-2",
+        "the -2 suffix must survive restore"
+    );
+    let restored = m
+        .gallery_jobs
+        .borrow()
+        .get(&row.id())
+        .cloned()
+        .expect("restored gallery job");
+    assert_eq!(
+        restored.dest_dir,
+        std::path::PathBuf::from("/tmp/dl/Test Gallery-2"),
+        "the subfolder must survive restore"
+    );
+
+    // A legacy/partial payload whose dest_dir is just the parent must be
+    // rebuilt from the validated row filename, not left pointing at the
+    // parent (that shape currently disables Trash).
+    let qf2 = test_queue_file("gallery-restore-subfolder-legacy");
+    let parent_payload = gallery_job_fixture();
+    let payload_value = serde_json::to_value(&parent_payload).unwrap();
+    let legacy = gallery_stored_item(DownloadStatus::Paused, Some(payload_value.clone()));
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items: vec![legacy],
+    };
+    std::fs::write(&qf2, serde_json::to_string(&queue).unwrap()).unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    m.restore_queue();
+    assert_eq!(m.store().n_items(), 1);
+    let row = m.store().item(0).and_downcast::<DownloadItem>().unwrap();
+    let legacy_job = m
+        .gallery_jobs
+        .borrow()
+        .get(&row.id())
+        .cloned()
+        .expect("legacy restored job");
+    assert_eq!(
+        legacy_job.dest_dir,
+        std::path::PathBuf::from("/tmp/dl/Test Gallery"),
+        "legacy rows rebuild the subfolder from the row filename"
+    );
+
+    let _ = std::fs::remove_file(&qf);
+    let _ = std::fs::remove_file(&qf2);
+}
+
+#[test]
 fn gallery_round_trip_paused() {
     // Paused gallery restores with Paused status, 0 progress, and the job
     // available in gallery_jobs (for resume).

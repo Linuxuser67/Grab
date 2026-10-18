@@ -217,8 +217,9 @@ pub fn should_surface(e: &GalleryError) -> bool {
     }
 }
 
-/// Best-effort title from probe metadata. First non-empty wins:
-/// `title` → `user`/`author` → `category` → URL-derived filename.
+/// Best-effort label for one gallery-picker entry. Prefer its own media title,
+/// then the filename; do not confuse inherited collection metadata with an
+/// individual entry's label.
 pub fn probe_title(item: &GalleryItem, url: &str) -> String {
     let str_field = |key: &str| {
         item.extra
@@ -227,17 +228,52 @@ pub fn probe_title(item: &GalleryItem, url: &str) -> String {
             .map(str::trim)
             .filter(|s| !s.is_empty())
     };
-    if let Some(t) = str_field("title") {
-        return t.to_string();
+
+    let collection_title = str_field("_collection_title");
+    // The entry's own label always wins.
+    if let Some(title) = str_field("_gallery_item_title") {
+        return title.to_string();
     }
-    if let Some(u) = str_field("user").or_else(|| str_field("author")) {
-        return u.to_string();
+    // Without it, an inherited "title" describes the whole collection:
+    // skip it when the directory title came through; the filename is the
+    // honest per-file fallback in that case.
+    if collection_title.is_none()
+        && let Some(title) = str_field("title")
+    {
+        return title.to_string();
+    }
+    if !item.filename.trim().is_empty() {
+        return item.filename.clone();
     }
     if !item.category.trim().is_empty() {
         return item.category.trim().to_string();
     }
-    // Fallback: filename from URL (percent-decoded, validated).
     crate::file_names::filename_from_url(url)
+}
+
+/// Collection title for the gallery card, picker header and output folder.
+/// Prefer title metadata from gallery-dl's directory context, never an
+/// individual media item's title/user/category; fall back to a useful URL slug.
+pub(crate) fn collection_title(items: &[GalleryItem], url: &str) -> String {
+    for item in items {
+        for key in [
+            "_collection_title",
+            "collection_title",
+            "playlist_title",
+            "album",
+        ] {
+            if let Some(title) = item
+                .extra
+                .get(key)
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+            {
+                return title.to_string();
+            }
+        }
+    }
+    crate::file_names::title_from_url(url)
 }
 
 /// Run the gallery-dl probe: `gallery-dl --config-ignore -j --no-download
@@ -635,6 +671,36 @@ impl ProbeReader {
                         placeholder_item(url, self.file_index)
                     }
                 };
+                // Save an entry's own title before inheriting directory metadata.
+                if let Some(title) = item
+                    .extra
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                {
+                    item.extra.insert(
+                        "_gallery_item_title".to_string(),
+                        serde_json::Value::String(title.to_string()),
+                    );
+                }
+
+                // Preserve the directory-level title separately from a
+                // per-file title: collection folders should describe the
+                // collection, not just the first media item.
+                if let Some(title) = self
+                    .dir_ctx
+                    .as_ref()
+                    .and_then(|dir| dir.get("title"))
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                {
+                    item.extra.insert(
+                        "_collection_title".to_string(),
+                        serde_json::Value::String(title.to_string()),
+                    );
+                }
                 // Inherit directory title/user when the file lacks them.
                 if let Some(dir) = self.dir_ctx.as_ref() {
                     for key in ["title", "user", "author"] {
@@ -1377,8 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_title_falls_back_to_url() {
-        // Empty category and no metadata → URL-derived filename.
+    fn probe_title_falls_back_to_filename_before_url() {
         let item = GalleryItem {
             filename: "f.jpg".to_string(),
             extension: "jpg".to_string(),
@@ -1387,6 +1452,17 @@ mod tests {
         };
         assert_eq!(
             probe_title(&item, "https://example.com/p/sunset.jpg"),
+            "f.jpg"
+        );
+
+        let empty = GalleryItem {
+            filename: String::new(),
+            extension: "jpg".to_string(),
+            category: String::new(),
+            extra: serde_json::Map::new(),
+        };
+        assert_eq!(
+            probe_title(&empty, "https://example.com/p/sunset.jpg"),
             "sunset.jpg"
         );
     }
@@ -1423,8 +1499,9 @@ mod tests {
     }
 
     #[test]
-    fn probe_json_inherits_directory_user() {
-        // File without user inherits from the directory message.
+    fn probe_json_inherits_directory_user_without_using_it_as_picker_title() {
+        // File metadata inherits the directory user, but that account name
+        // must not replace an individual entry's filename in the picker.
         let json = r#"[
             [2, {"category": "instagram", "user": "someuser"}],
             [3, "https://example.com/12345.jpg", {
@@ -1438,7 +1515,11 @@ mod tests {
         // extension/category default when omitted (S7).
         assert_eq!(items[0].extension, "jpg");
         assert_eq!(items[0].category, "");
-        assert_eq!(probe_title(&items[0], "https://example.com/"), "someuser");
+        assert_eq!(
+            items[0].extra.get("user").and_then(|value| value.as_str()),
+            Some("someuser")
+        );
+        assert_eq!(probe_title(&items[0], "https://example.com/"), "12345.jpg");
     }
 
     #[test]
@@ -1572,5 +1653,75 @@ mod tests {
         .is_ok();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(gone, "probe child (pid {pid}) survived the dropped future");
+    }
+}
+
+#[cfg(test)]
+mod collection_title_tests {
+    use super::*;
+
+    #[test]
+    fn collection_title_prefers_directory_title_not_first_file_title() {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "_collection_title".to_string(),
+            serde_json::Value::String("Spring collection".to_string()),
+        );
+        extra.insert(
+            "title".to_string(),
+            serde_json::Value::String("First photo".to_string()),
+        );
+        let item = GalleryItem {
+            filename: "1.jpg".to_string(),
+            extension: "jpg".to_string(),
+            category: "instagram".to_string(),
+            extra,
+        };
+        assert_eq!(
+            collection_title(&[item], "https://instagram.com/stories/highlights/12345/"),
+            "Spring collection"
+        );
+    }
+
+    #[test]
+    fn picker_title_uses_filename_when_only_directory_title_was_inherited() {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "_collection_title".to_string(),
+            serde_json::Value::String("Whole collection".to_string()),
+        );
+        extra.insert(
+            "title".to_string(),
+            serde_json::Value::String("Whole collection".to_string()),
+        );
+        let item = GalleryItem {
+            filename: "entry-02.jpg".to_string(),
+            extension: "jpg".to_string(),
+            category: "instagram".to_string(),
+            extra,
+        };
+        assert_eq!(
+            probe_title(&item, "https://example.com/collections/123/"),
+            "entry-02.jpg"
+        );
+    }
+
+    #[test]
+    fn collection_title_falls_back_to_a_url_slug_not_a_user_or_category() {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "user".to_string(),
+            serde_json::Value::String("user123".to_string()),
+        );
+        let item = GalleryItem {
+            filename: "first.jpg".to_string(),
+            extension: "jpg".to_string(),
+            category: "instagram".to_string(),
+            extra,
+        };
+        assert_eq!(
+            collection_title(&[item], "https://example.com/collections/summer-trip/"),
+            "summer trip"
+        );
     }
 }

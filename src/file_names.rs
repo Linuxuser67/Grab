@@ -279,9 +279,86 @@ pub(crate) fn sane_filename(s: &str) -> bool {
         && !s.chars().any(|c| c.is_control() || is_bidi_control(c))
 }
 
-/// Best-effort filename from URL path via `percent_encoding`
-/// (single-pass `%XX` decode, leaves `+`); falls back to the literal input,
-/// then `index.html` at the call sites.
+/// Best-effort, filesystem-friendly title derived from a page URL.
+/// Prefer common collection identifiers in the query string; otherwise use the
+/// last non-generic path segment. Extractor metadata remains authoritative.
+pub(crate) fn title_from_url(url_str: &str) -> String {
+    let Ok(parsed) = url::Url::parse(url_str) else {
+        return "collection".to_string();
+    };
+
+    const QUERY_KEYS: &[&str] = &[
+        "list",
+        "playlist_id",
+        "highlight_id",
+        "collection_id",
+        "album_id",
+        "id",
+        "v",
+    ];
+    let query_title = QUERY_KEYS.iter().find_map(|wanted| {
+        parsed.query_pairs().find_map(|(key, value)| {
+            (key.as_ref() == *wanted && !value.trim().is_empty()).then(|| value.into_owned())
+        })
+    });
+
+    const GENERIC_SEGMENTS: &[&str] = &[
+        "watch",
+        "playlist",
+        "reel",
+        "reels",
+        "stories",
+        "highlights",
+        "p",
+        "post",
+        "posts",
+        "video",
+        "videos",
+        "shorts",
+        "share",
+    ];
+    let candidate = if let Some(value) = query_title {
+        value
+    } else {
+        parsed
+            .path_segments()
+            .into_iter()
+            .flatten()
+            .filter(|segment| !segment.is_empty())
+            .rev()
+            .find_map(|segment| {
+                let decoded = percent_decode(segment);
+                let lower = decoded.to_ascii_lowercase();
+                (!GENERIC_SEGMENTS.contains(&lower.as_str())).then_some(decoded)
+            })
+            .unwrap_or_else(|| {
+                let host = parsed.host_str().unwrap_or("collection");
+                host.strip_prefix("www.").unwrap_or(host).to_string()
+            })
+    };
+
+    let mut title = candidate;
+    if let Some((stem, extension)) = title.rsplit_once('.') {
+        const MEDIA_EXTENSIONS: &[&str] = &[
+            "mp4", "m4v", "mkv", "webm", "mov", "avi", "mpg", "mpeg", "jpg", "jpeg", "png", "gif",
+            "webp", "heic", "heif",
+        ];
+        if MEDIA_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()) {
+            title = stem.to_string();
+        }
+    }
+
+    title = title.replace(['-', '_'], " ");
+    let title = title.trim_matches(|c: char| c.is_whitespace() || c == '.');
+    if title.is_empty() {
+        "collection".to_string()
+    } else {
+        title.to_string()
+    }
+}
+
+/// Percent-decode a URL component once. Invalid UTF-8 and decoded NULs retain
+/// the original component, so this never manufactures an invalid filesystem name.
 pub(crate) fn percent_decode(s: &str) -> String {
     // Decoded NUL (from `%00` or a literal NUL) is rejected: filenames
     // can't contain it, so keep the literal like the old GLib path did.
@@ -293,6 +370,9 @@ pub(crate) fn percent_decode(s: &str) -> String {
         .unwrap_or_else(|| s.to_owned())
 }
 
+/// Best-effort filename from URL path via `percent_encoding`
+/// (single-pass `%XX` decode, leaves `+`); falls back to the literal input,
+/// then `index.html` at the call sites.
 pub fn filename_from_url(url_str: &str) -> String {
     url::Url::parse(url_str)
         .ok()
@@ -751,5 +831,26 @@ mod tests {
         assert_eq!(std::fs::read(&new).unwrap(), b"hello");
         assert!(!old.exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod url_title_tests {
+    use super::*;
+
+    #[test]
+    fn title_from_url_uses_collection_query_id_or_readable_path_slug() {
+        assert_eq!(
+            title_from_url("https://www.youtube.com/playlist?list=PLabc123"),
+            "PLabc123"
+        );
+        assert_eq!(
+            title_from_url("https://www.instagram.com/stories/highlights/18119089357372404/"),
+            "18119089357372404"
+        );
+        assert_eq!(
+            title_from_url("https://example.com/collections/summer%20trip/"),
+            "summer trip"
+        );
     }
 }

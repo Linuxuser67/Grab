@@ -879,7 +879,7 @@ impl DownloadManager {
         let _batch = self.batch_guard();
         // Multi-item collections land in a titled subfolder, torrent-style; a
         // lone item keeps the flat behavior.
-        let dest_dir = if pl.items.len() > 1 {
+        let dest_dir = if pl.total > 1 {
             crate::file_names::collection_subdir(&dest_dir, &pl.title)
         } else {
             dest_dir
@@ -893,12 +893,17 @@ impl DownloadManager {
             else {
                 continue;
             };
+            // Match the interactive picker: carry each entry's title into its
+            // output filename, falling back to an entry URL slug when needed.
+            let remux = crate::video_prefs::remux_video_active(&self.settings.remux_video());
+            let name =
+                crate::video::default_video_filename(&entry.title, audio_only, remux.as_deref());
             // Live streams queued from a playlist take the VOD path; each child re-resolves its own page.
             if self
                 .enqueue_video_staged(
                     &url,
                     &dest_dir,
-                    None,
+                    Some(&name),
                     crate::media_types::VideoChoices {
                         quality: quality.clone(),
                         audio_only,

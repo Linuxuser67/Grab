@@ -176,6 +176,7 @@ fn header_count_text(n: usize) -> String {
 /// action bar.
 pub(crate) struct GalleryPickerStream {
     grid: PickerGrid,
+    page_url: String,
     count_label: gtk4::Label,
     error_caption: gtk4::Label,
     add_btn: gtk4::Button,
@@ -186,8 +187,18 @@ pub(crate) struct GalleryPickerStream {
 impl GalleryPickerStream {
     /// Append one burst of streamed items and update the running count.
     pub(crate) fn append(&self, items: &[crate::gallery_probe::GalleryItem]) {
-        self.grid
-            .append(items.iter().map(|item| item.filename.clone()).collect());
+        let titles = items
+            .iter()
+            .map(|item| {
+                let item_url = item
+                    .extra
+                    .get("_gallery_dl_url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(&self.page_url);
+                crate::gallery_probe::probe_title(item, item_url)
+            })
+            .collect();
+        self.grid.append(titles);
         self.count_label
             .set_label(&header_count_text(self.grid.len()));
     }
@@ -242,6 +253,7 @@ pub(crate) fn push_gallery_picker_page(
     if nav.visible_page_tag().as_deref() == Some("gallery-picker") {
         return None;
     }
+    let page_url = url.clone();
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -359,6 +371,7 @@ pub(crate) fn push_gallery_picker_page(
     nav.push(&picker_page);
     Some(GalleryPickerStream {
         grid,
+        page_url,
         count_label,
         error_caption,
         add_btn,

@@ -10,6 +10,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::gallery_tools::GalleryError;
+use crate::video_spawn::ProcessGroupGuard;
 
 /// Timeout for the gallery-dl probe (same as the yt-dlp probe).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -392,7 +393,7 @@ async fn run_to_completion(
         Ok(Err(e)) => {
             return Err(GalleryError::install(format!(
                 "couldn't wait for gallery-dl: {e}"
-            )))
+            )));
         }
         Err(_) => {
             // Timed out: dead task ends the probe; the child dies with the
@@ -412,7 +413,7 @@ async fn run_to_completion(
         Err(e) => {
             return Err(GalleryError::install(format!(
                 "couldn't drain gallery-dl output: {e}"
-            )))
+            )));
         }
     };
     let stderr_bytes = match join_bounded(err_task).await {
@@ -427,14 +428,13 @@ async fn run_to_completion(
         Err(e) => {
             return Err(GalleryError::install(format!(
                 "couldn't drain gallery-dl output: {e}"
-            )))
+            )));
         }
     };
     Ok(std::process::Output {
         status,
         stdout,
         stderr: stderr_bytes,
-        stdin: None,
     })
 }
 

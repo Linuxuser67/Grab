@@ -9,19 +9,20 @@
 //! `GtkMultiSelection` underneath — with per-text pills there is no
 //! recycling left to mirror it to.
 
-use adw::prelude::*;
 use gtk4::prelude::*;
 use gtk4::{glib, pango};
 use libadwaita as adw;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// (weak add button, count label formatter) once wired.
+type CountSink = (glib::WeakRef<gtk4::Button>, Rc<dyn Fn(usize) -> String>);
+
 struct Inner {
     /// One pill per entry, in entry order; index == entry index.
     pills: RefCell<Vec<gtk4::ToggleButton>>,
     wrap: adw::WrapBox,
-    /// (weak add button, count label formatter) once wired.
-    count: RefCell<Option<(glib::WeakRef<gtk4::Button>, Rc<dyn Fn(usize) -> String>)>>,
+    count: RefCell<Option<CountSink>>,
 }
 
 /// Cloneable handle to the picker widgets (Rc inside, clone is cheap).
@@ -36,11 +37,11 @@ fn pill_count(pills: &[gtk4::ToggleButton]) -> usize {
 
 /// Refresh the wired count label from the pills.
 fn inner_count_bump(inner: &Inner) {
-    if let Some((add_btn, count_label)) = inner.count.borrow().as_ref() {
-        if let Some(add_btn) = add_btn.upgrade() {
-            let n = pill_count(&inner.pills.borrow());
-            add_btn.set_label(&count_label(n));
-        }
+    if let Some((add_btn, count_label)) = inner.count.borrow().as_ref()
+        && let Some(add_btn) = add_btn.upgrade()
+    {
+        let n = pill_count(&inner.pills.borrow());
+        add_btn.set_label(&count_label(n));
     }
 }
 

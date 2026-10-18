@@ -125,6 +125,15 @@ fn main() -> glib::ExitCode {
         gio::resources_register(&res);
     }
     init_locale();
+    // Warm the one-shot `--impersonate` support probe before anything spawns
+    // yt-dlp: the first spawn of a session otherwise runs without the flag
+    // (safe default while the background probe is still in flight).
+    if let Ok(libs) = video_tools::resolve_libraries() {
+        let bin = libs.youtube;
+        runtime::tokio_rt().spawn(async move {
+            video_tools::ytdlp_supports_impersonation(&bin);
+        });
+    }
     let app = adw::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)

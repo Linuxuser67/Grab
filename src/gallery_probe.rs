@@ -158,6 +158,48 @@ pub fn route(
     }
 }
 
+/// Prefer gallery-dl for collections with multiple entries when it can list
+/// supported media. The dual probe already has yt-dlp's result, so an empty or
+/// unsupported gallery-dl result can fall back to yt-dlp without losing the
+/// original playlist picker.
+pub(crate) fn route_for_collection(
+    ytdlp_video: bool,
+    ytdlp_playlist_entries: usize,
+    gallery_items: Option<&[GalleryItem]>,
+    host_sticky: Option<StickyMode>,
+) -> ProbeOutcome {
+    let (has_video, has_images) = gallery_items
+        .map(|items| {
+            let mut video = false;
+            let mut images = false;
+            for item in items {
+                match GalleryContent::from_extension(&item.extension) {
+                    GalleryContent::Video => video = true,
+                    GalleryContent::Image => images = true,
+                    GalleryContent::Unknown => {}
+                }
+            }
+            (video, images)
+        })
+        .unwrap_or((false, false));
+
+    // Either backend can confirm multiple entries. The gallery-dl preview is
+    // capped, so one supported preview item is enough when yt-dlp found a list.
+    let multi_entry =
+        ytdlp_playlist_entries > 1 || gallery_items.is_some_and(|items| items.len() > 1);
+    if multi_entry {
+        if has_video {
+            return ProbeOutcome::VideoGalleryDl;
+        }
+        if has_images {
+            return ProbeOutcome::Gallery;
+        }
+    }
+
+    // gallery-dl could not list usable media; preserve the existing yt-dlp path.
+    route(ytdlp_video, gallery_items, host_sticky)
+}
+
 /// Whether a probe error should be surfaced to the user instead of falling
 /// through to the plain-download path. Auth/HTTP errors mean the URL needs
 /// login; "unsupported URL" and timeouts mean gallery-dl just can't handle it.
@@ -1138,6 +1180,72 @@ mod tests {
         // Host-only URL: .mov is a TLD, not a file extension.
         assert!(!url_is_direct_media("https://example.mov"));
         assert!(!url_is_direct_media("https://example.mov/"));
+    }
+
+    #[test]
+    fn route_prefers_gallerydl_for_multi_entry_collections() {
+        let videos = vec![item("mp4"), item("webm")];
+        assert_eq!(
+            route_for_collection(true, 4, Some(&videos), None),
+            ProbeOutcome::VideoGalleryDl
+        );
+
+        // The probe is capped, so even a single preview item selects gallery-dl
+        // when yt-dlp confirms the source has multiple entries.
+        let first_preview_item = vec![item("mp4")];
+        assert_eq!(
+            route_for_collection(true, 4, Some(&first_preview_item), None),
+            ProbeOutcome::VideoGalleryDl
+        );
+
+        // Multi-entry image collections default to gallery-dl as well.
+        let images = vec![item("jpg"), item("png")];
+        assert_eq!(
+            route_for_collection(true, 4, Some(&images), None),
+            ProbeOutcome::Gallery
+        );
+
+        // gallery-dl can confirm a collection even if yt-dlp didn't parse it as one.
+        assert_eq!(
+            route_for_collection(true, 0, Some(&videos), None),
+            ProbeOutcome::VideoGalleryDl
+        );
+
+        // Single-entry pages keep the established yt-dlp preference.
+        let single = vec![item("mp4")];
+        assert_eq!(
+            route_for_collection(true, 1, Some(&single), None),
+            ProbeOutcome::VideoYtDlp {
+                gallery_toggle: false
+            }
+        );
+    }
+
+    #[test]
+    fn route_falls_back_to_ytdlp_when_gallerydl_has_no_supported_items() {
+        // Unsupported or failed gallery-dl probes must not block a valid playlist.
+        assert_eq!(
+            route_for_collection(true, 3, None, None),
+            ProbeOutcome::VideoYtDlp {
+                gallery_toggle: false
+            }
+        );
+        let unknown = vec![item("xyz"), item("bin")];
+        assert_eq!(
+            route_for_collection(true, 3, Some(&unknown), None),
+            ProbeOutcome::VideoYtDlp {
+                gallery_toggle: false
+            }
+        );
+
+        // One entry is not forced through gallery-dl just because it has metadata.
+        let single = vec![item("mp4")];
+        assert_eq!(
+            route_for_collection(true, 1, Some(&single), None),
+            ProbeOutcome::VideoYtDlp {
+                gallery_toggle: false
+            }
+        );
     }
 
     #[test]

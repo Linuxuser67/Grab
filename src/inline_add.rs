@@ -2101,7 +2101,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     }
                 };
                 // Dual-backend probe: both tools run for non-direct-media
-                // URLs and the established route() decides over both real
+                // URLs and `route_for_collection()` decides over both real
                 // results. A gallery-dl hit no longer cancels yt-dlp: the
                 // user's video/gallery choice needs yt-dlp's result too.
                 // Skipped for direct media URLs (not gallery pages).
@@ -2174,8 +2174,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     ytdlp_video,
                                     &gallery,
                                 );
-                                let routed = crate::gallery_probe::route(
+                                let ytdlp_playlist_entries = match &ytdlp {
+                                    Ok((crate::video::ProbeResult::Playlist(pl), _)) => pl.total,
+                                    _ => 0,
+                                };
+                                let routed = crate::gallery_probe::route_for_collection(
                                     ytdlp_video,
+                                    ytdlp_playlist_entries,
                                     gallery.as_ref().ok().and_then(|items| items.as_deref()),
                                     None,
                                 );

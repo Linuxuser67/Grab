@@ -1201,7 +1201,9 @@ mod tests {
                 Some(&videos),
                 None,
             ),
-            ProbeOutcome::VideoYtDlp { gallery_toggle: false }
+            ProbeOutcome::VideoYtDlp {
+                gallery_toggle: false
+            }
         );
 
         // Do not pick gallery-dl if its probe did not find any video entries.

@@ -2189,25 +2189,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                         }
                                         (ytdlp, gallery_error)
                                     }
-                                    crate::gallery_probe::ProbeOutcome::VideoGalleryDl => {
-                                        // Submit as video via the gallery-dl
-                                        // backend (route() implies items).
-                                        let items = gallery.ok().flatten().unwrap_or_default();
-                                        submit_gallery_video(
-                                            &manager_b,
-                                            &dest_b,
-                                            &close_b,
-                                            &url,
-                                            &items,
-                                            scheduled_at_b.get(),
-                                            &step_b,
-                                            &lookup_add_b,
-                                        );
-                                        return;
-                                    }
-                                    crate::gallery_probe::ProbeOutcome::Gallery => {
-                                        // Gallery (images): show the gallery
-                                        // UI (route() implies items).
+                                    crate::gallery_probe::ProbeOutcome::VideoGalleryDl
+                                    | crate::gallery_probe::ProbeOutcome::Gallery => {
+                                        // Both outcomes contain gallery-dl entries.
+                                        // Keep queue creation behind the full file picker:
+                                        // the probe is only a preview and may be capped.
                                         let items = gallery.ok().flatten().unwrap_or_default();
                                         let card = crate::gallery_card::GalleryCard::new(
                                             items,
@@ -2223,7 +2209,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             files = card.file_count(),
                                             preview = ?card.preview_filenames(),
                                             sticky = ?card.sticky_mode(),
-                                            "gallery-dl has the items, no yt-dlp video"
+                                            "gallery-dl items await user selection"
                                         );
                                         show_gallery_ready(&step_b, card, &title);
                                         return;
@@ -2453,52 +2439,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 if let Some(open) = open {
                     open();
                 }
-                return;
-            }
-            // Gallery download: the probe found an image gallery, not a video.
-            if step2.is_gallery.get()
-                && let Some(card) = step2.gallery_card.borrow().as_ref()
-            {
-                let url = url_entry.text().trim().to_string();
-                let dest = dd.borrow().clone();
-                let filter = *card.filter.borrow();
-                // Use the cached total from count_gallery_files, not the
-                // probe length (capped at 5). None when unknown.
-                let file_count = card.total(filter);
-                let title = card
-                    .items
-                    .first()
-                    .map(|i| crate::gallery_probe::probe_title(i, &url))
-                    .unwrap_or_else(|| url.clone());
-                // Enqueue via DownloadManager (phase 11). The runner integration
-                // (phase 12) will drive the actual download.
-                let cookies_browser = m.settings().cookies_browser().to_string();
-                let job = crate::gallery_argv::GalleryJob {
-                    // Placeholder; enqueue_gallery assigns the real row ID.
-                    item_id: 0,
-                    page_url: url.clone(),
-                    title,
-                    file_count,
-                    dest_dir: std::path::PathBuf::from(dest),
-                    filter,
-                    cookies_browser,
-                    speed_limit: crate::gallery_runner::gallery_speed_limit(m.settings()),
-                    range: None,
-                };
-                match m.enqueue_gallery(&job) {
-                    Ok(_) => {
-                        tracing::info!(
-                            url = %url,
-                            files = file_count,
-                            "gallery enqueued"
-                        );
-                    }
-                    Err(e) => {
-                        fail(&e);
-                        return;
-                    }
-                }
-                close_card();
                 return;
             }
             let url = url_entry.text().trim().to_string();
@@ -3206,55 +3146,6 @@ fn refresh_gallery_info(v: &VideoStep, title: &str) {
         v.gallery_info.set_title(title);
         v.gallery_info.set_subtitle(&subtitle);
     }
-}
-
-/// Submit a video URL that yt-dlp can't handle but gallery-dl can.
-/// Queues it as a gallery row (option A); the title comes from the gallery probe.
-#[allow(clippy::too_many_arguments)]
-fn submit_gallery_video(
-    manager: &Rc<DownloadManager>,
-    dest: &Rc<RefCell<String>>,
-    close_card: &Rc<dyn Fn()>,
-    url: &str,
-    items: &[crate::gallery_probe::GalleryItem],
-    scheduled_at: Option<i64>,
-    step: &Rc<VideoStep>,
-    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
-) {
-    let title = items
-        .first()
-        .map(|i| crate::gallery_probe::probe_title(i, url))
-        .unwrap_or_else(|| url.to_string());
-    let settings = manager.settings();
-    let cookies_browser = settings.cookies_browser().to_string();
-    let speed_limit = crate::gallery_runner::gallery_speed_limit(settings);
-    enqueue_and_close(
-        manager,
-        dest,
-        close_card,
-        scheduled_at,
-        |d| {
-            let job = crate::gallery_argv::GalleryJob {
-                // Placeholder; enqueue_gallery assigns the real row ID.
-                item_id: 0,
-                page_url: url.to_string(),
-                title: title.clone(),
-                // Probe items are capped at 5; don't report a wrong count.
-                file_count: None,
-                dest_dir: std::path::PathBuf::from(d.unwrap_or(".")),
-                // Default to All: a video fallback may still yield images.
-                filter: crate::gallery_argv::GalleryFilter::All,
-                cookies_browser,
-                speed_limit,
-                range: None,
-            };
-            manager.enqueue_gallery(&job)
-        },
-        |e| {
-            show_video_error(step, e);
-            set_lookup_add(lookup_add, true);
-        },
-    );
 }
 
 #[cfg(test)]

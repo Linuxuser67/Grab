@@ -805,7 +805,6 @@ fn push_playlist_items_page(
     }
     // The recycling grid fills the remaining card height; captions stay
     // outside so only the entries scroll.
-    list_box.set_vexpand(true);
     list_box.append(grid.widget());
     // The error caption lives under the list, like the old row list.
     let error_caption = gtk4::Label::builder()
@@ -1006,7 +1005,6 @@ fn push_torrent_picker_page(
     list_box.set_margin_end(12);
     // Same arrangement as the playlist picker: the grid fills the remaining
     // height, captions stay outside.
-    list_box.set_vexpand(true);
     list_box.append(grid.widget());
     let error_caption = gtk4::Label::builder()
         .label("")

@@ -221,8 +221,8 @@ impl GalleryPickerStream {
     }
 }
 
-/// Gallery file picker as a right-sliding card page: one toggle pill per
-/// file (all on by default), mirroring the playlist picker. The selection
+/// Gallery file picker as a right-sliding card page: one toggle cell per
+/// file (all on by default), mirroring the picker pages. The selection
 /// becomes a gallery-dl `--range` spec on the queued job.
 ///
 /// The grid arrives empty and fills from a streamed enumeration (see
@@ -269,7 +269,6 @@ pub(crate) fn push_gallery_picker_page(
     list_box.append(&positional_note);
     // Only the entries scroll; the recycling GridView fills the remaining
     // height whatever the enumeration produced (no pill-style height cap).
-    list_box.set_vexpand(true);
     list_box.append(grid.widget());
     let error_caption = gtk4::Label::builder()
         .label("")

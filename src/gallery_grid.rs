@@ -110,13 +110,17 @@ impl GalleryGrid {
                 let check = gtk4::CheckButton::new();
                 check.set_can_target(false);
                 check.set_focusable(false);
-                // The margins keep focus rings from clipping at the scroll
-                // edges.
+                // The margins create the gaps between grid cells (GridView
+                // has no spacing properties; only the space between cells,
+                // both axes, at one uniform value) and keep focus rings
+                // from clipping at the scroll edges.
                 let cell = gtk4::Box::builder()
                     .orientation(gtk4::Orientation::Horizontal)
                     .spacing(6)
-                    .margin_top(2)
-                    .margin_bottom(2)
+                    .margin_top(3)
+                    .margin_bottom(3)
+                    .margin_start(3)
+                    .margin_end(3)
                     .focusable(true)
                     .build();
                 cell.append(&check);

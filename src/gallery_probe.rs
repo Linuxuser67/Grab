@@ -401,8 +401,10 @@ async fn run_to_completion(
     // The drains exit once the pipes hit EOF; a descendant that inherited a
     // pipe after the direct child's exit could stall the join forever, and
     // the guard is already disarmed at this point — so bound the join past
-    // the reap (the streamed path bounds its stderr drain the same way) and
-    // kill the group when EOF never arrives.
+    // the reap and kill the group when EOF never arrives. If stdout hit its
+    // quota while a descendant still holds stderr, the tuple join waits on
+    // stderr first: such a run reports the timeout arm below rather than the
+    // sooner quota error — same failure class, later message.
     const DRAIN_AFTER_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
     let (stdout, stderr_bytes) = match tokio::time::timeout(DRAIN_AFTER_EXIT_TIMEOUT, async {
         (join_bounded(out_task).await, join_bounded(err_task).await)
@@ -434,7 +436,10 @@ async fn run_to_completion(
             // EOF never came; the length caps already watch the bytes, so
             // this is a pipe inherited by a surviving descendant. Kill the
             // group by the recorded PGID (the guard disarmed at reap) and
-            // fail the probe instead of hanging it.
+            // fail the probe instead of hanging it. The reap made the PGID
+            // reusable, so this does reopen the recycle window that disarm
+            // exists to avoid — accepted at this instant, the same tradeoff
+            // signal_group's policy tolerates when killing a timed-out group.
             #[cfg(unix)]
             if let Some(pgid) = pgid {
                 // SAFETY: constant signal number; ESRCH (already dead) is
@@ -737,7 +742,8 @@ async fn read_capped_line<R: tokio::io::AsyncBufRead + Unpin>(
         let taken = view.len();
         buf.extend_from_slice(view);
         if taken == 0 {
-            // Zero room left: the cap hit mid-line, before a terminator.
+            // Cap reached with no terminator left in the view — or a reader
+            // that served nothing without an EOF: fail instead of spinning.
             return Err(std::io::Error::other(
                 "gallery-dl emitted a metadata line over 2 MiB",
             ));
@@ -754,18 +760,33 @@ async fn read_capped_line<R: tokio::io::AsyncBufRead + Unpin>(
 fn spawn_stderr_tail(
     stderr: Option<tokio::process::ChildStderr>,
 ) -> (StderrTail, tokio::task::JoinHandle<()>) {
-    use tokio::io::AsyncBufReadExt as _;
     let tail: StderrTail = Default::default();
     let sink = tail.clone();
     let handle = tokio::spawn(async move {
         if let Some(stderr) = stderr {
-            let mut lines = tokio::io::BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let mut t = sink.lock().unwrap_or_else(|p| p.into_inner());
-                if t.len() == STDERR_TAIL_LINES {
-                    t.pop_front();
+            let mut reader = tokio::io::BufReader::new(stderr);
+            let mut line_buf = Vec::new();
+            // Same per-line ceiling as the JSONL reader: lines here are
+            // diagnostic text, but a broken or hostile extractor must not
+            // inflate the tail without bound. A cap hit or a read error
+            // stops tail updates — the child's stderr writes then block on
+            // the full pipe, which the run's own timeouts bound — because
+            // line-skipping machinery for a diagnostic ring buys nothing.
+            loop {
+                line_buf.clear();
+                match read_capped_line(&mut reader, &mut line_buf).await {
+                    Ok(Some(())) => {
+                        let line = String::from_utf8_lossy(&line_buf)
+                            .trim_end_matches(['\n', '\r'])
+                            .to_owned();
+                        let mut t = sink.lock().unwrap_or_else(|p| p.into_inner());
+                        if t.len() == STDERR_TAIL_LINES {
+                            t.pop_front();
+                        }
+                        t.push_back(line);
+                    }
+                    Ok(None) | Err(_) => break,
                 }
-                t.push_back(line);
             }
         }
     });
@@ -991,6 +1012,94 @@ pub async fn count_gallery_files(
         .filter(|l| !l.trim().is_empty())
         .count();
     Some(count as u32)
+}
+
+#[cfg(test)]
+mod capped_line_reader_tests {
+    use super::*;
+
+    use std::{pin::Pin, task::Poll};
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    /// Reader serving the whole payload one byte per poll, so every `fill_buf`
+    /// refill sees at most one fresh byte: it forces the consume/refill loop,
+    /// including mid-line boundaries that byte-chunked pipes rarely hit.
+    struct ByteAtATime(Vec<u8>, usize);
+    impl AsyncRead for ByteAtATime {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            out: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let this = self.get_mut();
+            if this.1 >= this.0.len() {
+                return Poll::Ready(Ok(()));
+            }
+            out.put_slice(&this.0[this.1..this.1 + 1]);
+            this.1 += 1;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    async fn next<R: tokio::io::AsyncBufRead + Unpin>(
+        reader: &mut R,
+    ) -> std::io::Result<Option<()>> {
+        let mut buf = Vec::new();
+        read_capped_line(reader, &mut buf).await
+    }
+
+    #[tokio::test]
+    async fn eof_after_a_finished_line_is_none() {
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(b"a\n".to_vec()));
+        assert!(next(&mut reader).await.unwrap().is_some());
+        assert!(next(&mut reader).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn unterminated_final_chunk_still_reads_as_a_line() {
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(b"abc".to_vec()));
+        assert!(next(&mut reader).await.unwrap().is_some());
+        assert!(next(&mut reader).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_line_under_the_cap_is_returned() {
+        let mut content = vec![b'x'; MAX_JSONL_LINE_BYTES - 2];
+        content.push(b'\n');
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(content));
+        assert!(next(&mut reader).await.unwrap().is_some());
+        assert!(next(&mut reader).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_over_cap_line_fails_without_hitting_eof() {
+        let mut content = vec![b'x'; MAX_JSONL_LINE_BYTES];
+        content.push(b'\n');
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(content));
+        let err = next(&mut reader).await.unwrap_err();
+        assert!(err.to_string().contains("over 2 MiB"), "{err}");
+        // The error is sticky for the stream so far: a partial suffix still
+        // reads as whatever remains after the rejected line was left behind.
+        assert!(next(&mut reader).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn an_over_cap_line_with_no_terminator_fails() {
+        let content = vec![b'x'; MAX_JSONL_LINE_BYTES + 2];
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(content));
+        let err = next(&mut reader).await.unwrap_err();
+        assert!(err.to_string().contains("over 2 MiB"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn newline_found_across_refills() {
+        let mut reader = tokio::io::BufReader::new(ByteAtATime(b"ab\nc".to_vec(), 0));
+        assert!(next(&mut reader).await.unwrap().is_some());
+        // Trailing fragment after the newline still reads as a line (Lines
+        // parity), then EOF.
+        assert!(next(&mut reader).await.unwrap().is_some());
+        assert!(next(&mut reader).await.unwrap().is_none());
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,4 @@
 use super::*;
-use gio::prelude::SettingsExt;
 use crate::attempt_gate::AttemptGate;
 use crate::file_names::{is_url_derived_name, strip_dedupe_suffix};
 use crate::media_types::{
@@ -67,6 +66,7 @@ use crate::video_types::video_domain;
 use crate::video_types::{
     VideoFormatOption, classify, codec_rank, has_fetchable_media, video_format_options,
 };
+use gio::prelude::SettingsExt;
 use pretty_assertions::assert_eq;
 use yt_dlp::model::Video;
 

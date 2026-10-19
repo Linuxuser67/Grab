@@ -852,5 +852,11 @@ mod url_title_tests {
             title_from_url("https://example.com/collections/summer%20trip/"),
             "summer trip"
         );
+        // A crafted path segment can decode into separators or relative hops
+        // (`%2F`); title_from_url passes them through on purpose:
+        // collection_subdir is the filesystem sink that sanitizes them.
+        // Locked in so any cleanup that moves here is a conscious change.
+        assert_eq!(title_from_url("https://example.com/a%2Fb"), "a/b");
+        assert_eq!(title_from_url("https://example.com/x/a%2F..%2Fb"), "a/../b");
     }
 }

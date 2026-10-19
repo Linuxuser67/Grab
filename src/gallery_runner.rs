@@ -54,19 +54,40 @@ pub struct GalleryProgressUpdate {
 /// with signed query tokens, so swap URL words for their path stem — same
 /// convention as `video_probe::page_host` (journal never gets query strings).
 /// User-facing error text keeps the raw line.
+/// Redacts the query/fragment of any `scheme://` URL in the text, scanning
+/// token-wise between whitespace/quote/bracket boundaries instead of
+/// `Url::parse`-ing whitespace-delimited words: quoted (`'https://x/?sig=…'`)
+/// and bracketed (`(https://x/?sig=…)`) shapes fail `Url::parse`, which let
+/// their signed tokens reach the journal in the clear. Non-URL text (no
+/// `://`) passes through untouched, including punctuation.
 fn redact_query_tokens(text: &str) -> String {
-    text.split_whitespace()
-        .map(|word| {
-            if url::Url::parse(word).is_ok()
-                && let Some(cut) = word.find(['?', '#'])
-            {
-                format!("{}(...)", &word[..cut])
-            } else {
-                word.to_string()
+    let is_special =
+        |b: u8| b.is_ascii_whitespace() || matches!(b, b'"' | b'\'' | b'(' | b')' | b'[' | b']');
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] < 0x80 && is_special(bytes[i]) {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        // Token: multibyte UTF-8 is never special, so these slice bounds
+        // always sit on char boundaries.
+        let start = i;
+        while i < bytes.len() && !(bytes[i] < 0x80 && is_special(bytes[i])) {
+            i += 1;
+        }
+        let token = &text[start..i];
+        match token.find("://").and_then(|_| token.find(['?', '#'])) {
+            Some(cut) => {
+                out.push_str(&token[..cut]);
+                out.push_str("(...)");
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            None => out.push_str(token),
+        }
+    }
+    out
 }
 
 /// Run a gallery download.
@@ -377,6 +398,21 @@ mod tests {
         assert_eq!(redact_query_tokens("a?b#c"), "a?b#c");
         // Plain text passes through untouched.
         assert_eq!(redact_query_tokens("no urls here"), "no urls here");
+        // Quoted and bracketed contexts used to dodge the redaction because
+        // Url::parse rejects the word with its delimiter; both are scanned
+        // out now.
+        assert_eq!(
+            redact_query_tokens("'https://media.example/file?token=abc'"),
+            "'https://media.example/file(...)'"
+        );
+        assert_eq!(
+            redact_query_tokens("(https://media.example/file?token=abc)(more)"),
+            "(https://media.example/file(...))(more)"
+        );
+        assert_eq!(
+            redact_query_tokens("]https://media.example/file#frag[ok"),
+            "]https://media.example/file(...)[ok"
+        );
     }
 
     #[test]

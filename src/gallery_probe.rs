@@ -362,6 +362,9 @@ async fn run_to_completion(
         .spawn()
         .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
     let mut guard = ProcessGroupGuard::new(&child);
+    // Recorded before the wait so the drain-timeout branch can still signal
+    // the group after the reap disarms the guard.
+    let pgid = guard.pgid();
     let stdout = child
         .stdout
         .take()
@@ -395,33 +398,53 @@ async fn run_to_completion(
             return Err(GalleryError::probe(format!("{what} timed out")));
         }
     };
-    // The drains exit once the pipes hit EOF; on timeout the future is gone
-    // but the tasks keep reading until the guard's kill closes the pipes.
-    let stdout = match join_bounded(out_task).await {
-        Ok(buf) => buf,
-        Err(e) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
+    // The drains exit once the pipes hit EOF; a descendant that inherited a
+    // pipe after the direct child's exit could stall the join forever, and
+    // the guard is already disarmed at this point — so bound the join past
+    // the reap (the streamed path bounds its stderr drain the same way) and
+    // kill the group when EOF never arrives.
+    const DRAIN_AFTER_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
+    let (stdout, stderr_bytes) = match tokio::time::timeout(DRAIN_AFTER_EXIT_TIMEOUT, async {
+        (join_bounded(out_task).await, join_bounded(err_task).await)
+    })
+    .await
+    {
+        Ok((Ok(buf), Ok(err))) => (buf, err),
+        Ok((Err(e), _)) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
             return Err(GalleryError::probe(format!(
                 "{what} produced too much output"
             )));
         }
-        Err(e) => {
+        Ok((Err(e), _)) => {
             return Err(GalleryError::install(format!(
                 "couldn't drain gallery-dl output: {e}"
             )));
         }
-    };
-    let stderr_bytes = match join_bounded(err_task).await {
-        Ok(buf) => buf,
-        // stderr overflow of the tail is non-fatal for document mode: report
-        // it the same way (drain errors must not silently pass small blobs).
-        Err(e) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
+        Ok((_, Err(e))) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
             return Err(GalleryError::probe(format!(
                 "{what} produced too much output"
             )));
         }
-        Err(e) => {
+        Ok((_, Err(e))) => {
             return Err(GalleryError::install(format!(
                 "couldn't drain gallery-dl output: {e}"
+            )));
+        }
+        Err(_) => {
+            // EOF never came; the length caps already watch the bytes, so
+            // this is a pipe inherited by a surviving descendant. Kill the
+            // group by the recorded PGID (the guard disarmed at reap) and
+            // fail the probe instead of hanging it.
+            #[cfg(unix)]
+            if let Some(pgid) = pgid {
+                // SAFETY: constant signal number; ESRCH (already dead) is
+                // harmless.
+                unsafe {
+                    libc::killpg(pgid, libc::SIGKILL);
+                }
+            }
+            return Err(GalleryError::probe(format!(
+                "{what} didn't close its pipes after exiting"
             )));
         }
     };
@@ -559,8 +582,6 @@ pub(crate) async fn enumerate_gallery_files_streamed(
     items_tx: tokio::sync::mpsc::UnboundedSender<GalleryItem>,
 ) -> Result<usize, GalleryError> {
     // Same line-streaming shape as the yt-dlp runner (see video_runner.rs).
-    use tokio::io::AsyncBufReadExt as _;
-
     let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, true);
     // stdout is the line stream; stderr is kept as a short tail for the
     // error text, drained concurrently so gallery-dl never blocks on a full pipe.
@@ -583,32 +604,41 @@ pub(crate) async fn enumerate_gallery_files_streamed(
         .take()
         .ok_or_else(|| GalleryError::install("gallery-dl enumerate: no stdout".to_string()))?;
     let (stderr_tail, stderr_drain) = spawn_stderr_tail(child.stderr.take());
-    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let mut lines_reader = tokio::io::BufReader::new(stdout);
+    let mut line_buf = Vec::new();
     let mut reader = ProbeReader::default();
     let mut count = 0usize;
     let deadline = tokio::time::Instant::now() + STREAM_TOTAL_TIMEOUT;
     loop {
         // Wake at the idle bound or the total deadline, whichever is first.
         let wake = (tokio::time::Instant::now() + STREAM_IDLE_TIMEOUT).min(deadline);
-        let line = match tokio::time::timeout_at(wake, lines.next_line()).await {
-            Err(_) if tokio::time::Instant::now() >= deadline => {
-                return Err(GalleryError::probe(
-                    "gallery-dl enumerate timed out".to_string(),
-                ));
-            }
-            Err(_) => {
-                return Err(GalleryError::probe(
-                    "gallery-dl enumerate stalled (no output)".to_string(),
-                ));
-            }
-            Ok(Err(e)) => {
-                return Err(GalleryError::probe(format!(
-                    "couldn't read gallery-dl output: {e}"
-                )));
-            }
-            Ok(Ok(None)) => break,
-            Ok(Ok(Some(line))) => line,
-        };
+        let line =
+            match tokio::time::timeout_at(wake, read_capped_line(&mut lines_reader, &mut line_buf))
+                .await
+            {
+                Err(_) if tokio::time::Instant::now() >= deadline => {
+                    return Err(GalleryError::probe(
+                        "gallery-dl enumerate timed out".to_string(),
+                    ));
+                }
+                Err(_) => {
+                    return Err(GalleryError::probe(
+                        "gallery-dl enumerate stalled (no output)".to_string(),
+                    ));
+                }
+                Ok(Err(e)) => {
+                    return Err(GalleryError::probe(format!(
+                        "couldn't read gallery-dl output: {e}"
+                    )));
+                }
+                Ok(Ok(None)) => break,
+                Ok(Ok(Some(()))) => {
+                    // The reader keeps the terminator; strip it for the parser.
+                    String::from_utf8_lossy(&line_buf)
+                        .trim_end_matches(['\n', '\r'])
+                        .to_owned()
+                }
+            };
         // Blank lines carry no message.
         let Some(m) = parse_jsonl_line(&line)? else {
             continue;
@@ -667,6 +697,59 @@ pub(crate) async fn enumerate_gallery_files_streamed(
 type StderrTail = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
 
 const STDERR_TAIL_LINES: usize = 8;
+
+/// Hard cap for one streamed JSONL metadata line: legit metadata lines are
+/// tiny, so anything near the cap is a broken or hostile extractor trying to
+/// inflate memory. Fails the enumeration loudly instead of skipping the line
+/// — a silently dropped line would shift `--range` positions and misalign
+/// the positional selection.
+const MAX_JSONL_LINE_BYTES: usize = 2 * 1024 * 1024;
+
+/// One newline-terminated line from `reader`, capped at
+/// [`MAX_JSONL_LINE_BYTES`]; an over-long line is an io error, `Ok(None)` is
+/// EOF, and a final unterminated chunk still reads as a line.
+async fn read_capped_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<Option<()>> {
+    use tokio::io::AsyncBufReadExt as _;
+    buf.clear();
+    loop {
+        let available = match reader.fill_buf().await {
+            Ok(available) => available,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if available.is_empty() {
+            return if buf.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(()))
+            };
+        }
+        let room = MAX_JSONL_LINE_BYTES - buf.len();
+        let view = &available[..available.len().min(room)];
+        if let Some(nl) = view.iter().position(|&b| b == b'\n') {
+            buf.extend_from_slice(&view[..nl + 1]);
+            reader.consume(nl + 1);
+            return Ok(Some(()));
+        }
+        let taken = view.len();
+        buf.extend_from_slice(view);
+        if taken == 0 {
+            // Zero room left: the cap hit mid-line, before a terminator.
+            return Err(std::io::Error::other(
+                "gallery-dl emitted a metadata line over 2 MiB",
+            ));
+        }
+        reader.consume(taken);
+        if buf.len() >= MAX_JSONL_LINE_BYTES {
+            return Err(std::io::Error::other(
+                "gallery-dl emitted a metadata line over 2 MiB",
+            ));
+        }
+    }
+}
 
 fn spawn_stderr_tail(
     stderr: Option<tokio::process::ChildStderr>,

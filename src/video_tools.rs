@@ -354,8 +354,7 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
 static IMPERSONATE_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
 
 /// Whether yt-dlp's `--impersonate` flag is known-supported for this binary.
-/// Sync,
-/// never blocks a worker: returns the cached probe result, or `false` (the
+/// Sync, never blocks a worker: returns the cached probe result, or `false` (the
 /// safe default) while the probe is still running. The first call kicks the
 /// probe off on the blocking pool so a wedged binary (up to ~15 s) doesn't
 /// park the download; the next download gets the cached answer.

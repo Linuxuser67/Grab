@@ -129,7 +129,9 @@ fn main() -> glib::ExitCode {
     // yt-dlp, but only when the user picked a browser: with impersonation
     // off (yt-dlp default) the flag never enters any argv, so the probe is
     // pure startup cost.
-    if !crate::settings::AppSettings::new().impersonate_browser().is_empty()
+    if !crate::settings::AppSettings::new()
+        .impersonate_browser()
+        .is_empty()
         && let Ok(libs) = video_tools::resolve_libraries()
     {
         let bin = libs.youtube;

@@ -1,0 +1,42 @@
+name: lockfile-refresh
+
+# One-off maintenance runner: refreshes Cargo.lock to the latest
+# semver-compatible releases and regenerates the Flatpak offline-build
+# vendor manifest. Dispatched on the chore branch it lives on; the push
+# lands as a normal commit that regular CI then verifies (fmt, check,
+# vendor-sync, audit). Temporary: removed with the stable-cut PR.
+on:
+  workflow_dispatch:
+  push:
+    branches: [chore/lockfile-refresh]
+
+# The job pushes the refreshed lock back to its own branch.
+permissions:
+  contents: write
+
+concurrency:
+  group: lockfile-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Pushing the refresh below needs a writable token.
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      # Semver-compatible refresh of everything in the lock: caret ranges
+      # in Cargo.toml resolve to the newest matching releases.
+      - run: cargo update --verbose
+      # The offline Flatpak vendor manifest must follow the lock.
+      - run: python3 build-aux/gen-cargo-sources.py
+      - run: git diff --stat
+      - name: Commit the refresh
+        run: |
+          git config user.name "houssemko"
+          git config user.email "houssemko@users.noreply.github.com"
+          git add Cargo.lock build-aux/cargo-sources.json
+          git diff --cached --quiet || git commit -m "Dependency refresh to latest stable"
+          git push

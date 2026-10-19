@@ -26,7 +26,7 @@ pub struct Latest {
 
 impl Latest {
     /// Only a complete answer is cached. A partial one (rate limit, outage) is
-    /// retried on the next check instead of being pinned for an hour.
+    /// retried on the next check instead of being pinned for 15 minutes.
     fn is_complete(&self) -> bool {
         self.ytdlp.is_some()
             && self.ffmpeg.is_some()

@@ -703,17 +703,17 @@ type StderrTail = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<Str
 
 const STDERR_TAIL_LINES: usize = 8;
 
-/// Hard cap for one streamed JSONL metadata line: legit metadata lines are
-/// tiny, so anything near the cap is a broken or hostile extractor trying to
-/// inflate memory. Fails the enumeration loudly instead of skipping the line
-/// — a silently dropped line would shift `--range` positions and misalign
-/// the positional selection.
-const MAX_JSONL_LINE_BYTES: usize = 2 * 1024 * 1024;
+/// Hard cap for one streamed line (JSONL metadata, stderr tails): legit
+/// lines are tiny, so anything near the cap is a broken or hostile
+/// extractor trying to inflate memory. JSONL readers fail the enumeration
+/// loudly instead of skipping — a silently dropped line would shift
+/// `--range` positions; diagnostic tail readers just stop updating.
+pub(crate) const MAX_JSONL_LINE_BYTES: usize = 2 * 1024 * 1024;
 
 /// One newline-terminated line from `reader`, capped at
 /// [`MAX_JSONL_LINE_BYTES`]; an over-long line is an io error, `Ok(None)` is
 /// EOF, and a final unterminated chunk still reads as a line.
-async fn read_capped_line<R: tokio::io::AsyncBufRead + Unpin>(
+pub(crate) async fn read_capped_line<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     buf: &mut Vec<u8>,
 ) -> std::io::Result<Option<()>> {

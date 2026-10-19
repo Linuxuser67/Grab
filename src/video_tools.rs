@@ -412,10 +412,7 @@ pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
         if let Ok(mut guard) = cache.lock() {
             guard.insert(
                 youtube_bin.to_path_buf(),
-                ImpersonateEntry {
-                    stamp,
-                    supported,
-                },
+                ImpersonateEntry { stamp, supported },
             );
         }
         supported
@@ -428,14 +425,14 @@ pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
 async fn warm_impersonation_cache(youtube_bin: std::path::PathBuf) {
     // Stat + probe run together on the blocking pool; the stamp recorded
     // here is the one the probe actually ran against.
-    let (key, stamp, supported) =
-        tokio::task::spawn_blocking(move || {
-            let stamp = impersonate_stamp(&youtube_bin);
-            let supported = probe_impersonate_support(&youtube_bin);
-            (youtube_bin, stamp, supported)
-        })
-        .await
-        .unwrap_or((youtube_bin.clone(), (None, 0), false));
+    let fallback = youtube_bin.clone();
+    let (key, stamp, supported) = tokio::task::spawn_blocking(move || {
+        let stamp = impersonate_stamp(&youtube_bin);
+        let supported = probe_impersonate_support(&youtube_bin);
+        (youtube_bin, stamp, supported)
+    })
+    .await
+    .unwrap_or((fallback, (None, 0), false));
     // A poisoned cache drops the fill silently instead of panicking the
     // background task: the next call re-probes and re-caches.
     if let Ok(mut guard) = IMPERSONATE_SUPPORT
@@ -444,10 +441,7 @@ async fn warm_impersonation_cache(youtube_bin: std::path::PathBuf) {
     {
         guard.insert(
             key,
-            ImpersonateEntry {
-                stamp,
-                supported,
-            },
+            ImpersonateEntry { stamp, supported },
         );
     }
 }

@@ -298,9 +298,8 @@ pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     // (binary, mtime, size) and cached — a PATH-provided yt-dlp without
     // curl_cffi hard-fails on the flag, so never pass it blindly.
     let target = crate::settings::AppSettings::new().impersonate_browser();
-    let target = crate::video_prefs::impersonate_value(crate::video_prefs::impersonate_index(
-        &target,
-    ));
+    let target =
+        crate::video_prefs::impersonate_value(crate::video_prefs::impersonate_index(&target));
     if !target.is_empty() && crate::video_tools::ytdlp_supports_impersonation(youtube_bin) {
         cmd.arg("--impersonate").arg(target);
     }

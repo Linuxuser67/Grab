@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.9~beta.15" date="2026-10-19">
+      <description>
+        <ul>
+          <li>The playlist, torrent and gallery file pickers moved to a recycling grid: entries stream in with no height limit, and the picker keeps the count, multi-select (clicks, Ctrl+A, a rubber band from empty space) and Enter toggles the focused row.</li>
+          <li>Gallery runs cap per-line stderr and metadata reads, so a broken or hostile extractor can no longer inflate memory with one oversized line.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.9~beta.14" date="2026-10-18">
       <description>
         <ul>

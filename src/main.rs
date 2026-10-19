@@ -126,9 +126,14 @@ fn main() -> glib::ExitCode {
     }
     init_locale();
     // Warm the one-shot `--impersonate` support probe before anything spawns
-    // yt-dlp: the first spawn of a session otherwise runs without the flag
-    // (safe default while the background probe is still in flight).
-    if let Ok(libs) = video_tools::resolve_libraries() {
+    // yt-dlp, but only when the user picked a browser: with impersonation
+    // off (yt-dlp default) the flag never enters any argv, so the probe is
+    // pure startup cost.
+    if !crate::settings::AppSettings::new()
+        .impersonate_browser()
+        .is_empty()
+        && let Ok(libs) = video_tools::resolve_libraries()
+    {
         let bin = libs.youtube;
         runtime::tokio_rt().spawn(async move {
             video_tools::ytdlp_supports_impersonation(&bin);

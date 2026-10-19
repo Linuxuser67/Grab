@@ -774,6 +774,28 @@ pub fn show(
     video_quality_group.add(&video_quality);
     let codec_labels = crate::video::codec_priority_labels();
     let codec_refs: Vec<&str> = codec_labels.iter().map(String::as_str).collect();
+    let impersonate = adw::ComboRow::builder()
+        .title(gettext("Impersonate a browser"))
+        .subtitle(gettext(
+            "Send a browser's TLS fingerprint with yt-dlp's requests.",
+        ))
+        .build();
+    impersonate.set_tooltip_text(Some(&gettext(
+        "Some sites drop plain HTTP clients mid-stream; forcing impersonation on every request may slow transfers",
+    )));
+    let labels = crate::video_prefs::impersonate_labels();
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    impersonate.set_model(Some(&gtk4::StringList::new(&refs)));
+    bind_combo_row(
+        &impersonate,
+        settings,
+        crate::settings::key::IMPERSONATE_BROWSER,
+        crate::settings::AppSettings::impersonate_browser,
+        crate::video_prefs::impersonate_index,
+        crate::video_prefs::impersonate_value,
+    );
+    advanced_media_group.add(&impersonate);
+
     let video_codec = adw::ComboRow::builder()
         .title(gettext("Preferred video codec"))
         .subtitle(gettext("Newest codecs first, or widest playback"))

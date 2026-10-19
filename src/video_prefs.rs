@@ -57,6 +57,34 @@ pub fn codec_priority_value(index: usize) -> &'static str {
     crate::media_types::combo_value(CODEC_PRIORITY_VALUES, index, CODEC_PRIORITY_NEWEST)
 }
 
+/// Browser clients yt-dlp's `--impersonate` accepts, index-aligned with
+/// [`impersonate_labels`]. Empty = none: yt-dlp's documented default (opt-in),
+/// since its docs warn that forcing impersonation on every request may hurt
+/// speed and stability.
+pub const IMPERSONATE_VALUES: &[&str] = &["", "chrome", "edge", "safari"];
+
+/// Translated combo labels, index-aligned with [`IMPERSONATE_VALUES`].
+/// The client names are brands and stay untranslated.
+pub fn impersonate_labels() -> Vec<String> {
+    vec![
+        gettext("None"),
+        "Chrome".to_string(),
+        "Edge".to_string(),
+        "Safari".to_string(),
+    ]
+}
+
+/// Combo index for a stored impersonation target. Unknown values fall back
+/// to none.
+pub fn impersonate_index(value: &str) -> usize {
+    crate::media_types::combo_index(IMPERSONATE_VALUES, value, 0)
+}
+
+/// Stored value for a combo index. Out-of-range indexes fall back to none.
+pub fn impersonate_value(index: usize) -> &'static str {
+    crate::media_types::combo_value(IMPERSONATE_VALUES, index, "")
+}
+
 /// yt-dlp subtitle language codes offered in preferences, index-aligned
 /// with [`subtitle_language_labels`]. `off` disables subtitle downloads.
 pub(crate) const SUBTITLE_LANGUAGE_VALUES: &[&str] = &[

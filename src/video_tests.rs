@@ -66,6 +66,7 @@ use crate::video_types::video_domain;
 use crate::video_types::{
     VideoFormatOption, classify, codec_rank, has_fetchable_media, video_format_options,
 };
+use gio::prelude::SettingsExt;
 use pretty_assertions::assert_eq;
 use yt_dlp::model::Video;
 
@@ -5545,6 +5546,7 @@ fn fake_sleeper(dir: &std::path::Path) -> std::path::PathBuf {
 #[cfg(unix)]
 #[test]
 fn reap_child_reaps_the_signalled_child() {
+    schema_env_once();
     // Signalling isn't reaping: an unreaped child lingers as a zombie holding its pid until waited on (ESRCH).
     let dir = std::env::temp_dir().join(format!("grab-fakesleeper-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -10317,6 +10319,22 @@ fn a_group_that_refuses_to_quiesce_is_reported_rather_than_assumed() {
 
 // ── impersonation probe ──────────────────────────────────────────────
 
+/// GSettings for tests: point at the compiled schema + memory backend
+/// once (thread-serializing), the same pattern as download_tests'
+/// test_settings. ytdlp_command reads the impersonation key, so every
+/// test spawning it needs this first. Required because plain cargo test
+/// has no installed schemas and the memory backend keeps dconf untouched.
+fn schema_env_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: CI runs --test-threads=1; no other thread reads these vars.
+        unsafe {
+            std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+            std::env::set_var("GSETTINGS_BACKEND", "memory");
+        }
+    });
+}
+
 /// Fake yt-dlp answering `--list-impersonate-targets` with `table` (exit 0
 /// for the probe, 1 otherwise); `None` makes every invocation fail.
 fn fake_ytdlp_impersonate(dir: &std::path::Path, table: Option<&str>) -> std::path::PathBuf {
@@ -10426,23 +10444,66 @@ async fn impersonation_probe_never_blocks_the_async_worker() {
 }
 
 #[test]
-fn ytdlp_command_prepends_impersonate_when_supported() {
-    let dir = impersonate_test_dir("cmd-on");
+fn impersonate_helpers_fall_back_to_none() {
+    // Unknown values and out-of-range indexes fall back to None (""):
+    // the defense against a stale/garbage stored value.
+    assert_eq!(crate::video_prefs::impersonate_index("mystery"), 0);
+    assert_eq!(crate::video_prefs::impersonate_value(0), "");
+    for (i, v) in crate::video_prefs::IMPERSONATE_VALUES.iter().enumerate() {
+        assert_eq!(crate::video_prefs::impersonate_index(v), i, "{v:?}");
+    }
+    assert_eq!(crate::video_prefs::impersonate_value(99), "");
+    assert_eq!(crate::video_prefs::impersonate_value(3), "safari");
+}
+
+#[test]
+fn ytdlp_command_omits_impersonate_by_default() {
+    schema_env_once();
+    let dir = impersonate_test_dir("cmd-default");
     let bin = fake_ytdlp_impersonate(
         &dir,
         Some("[info] Available impersonate targets\nClient  OS  Source\nChrome  -  curl_cffi\n"),
     );
+    // The default target is None: even a fully supported binary must not
+    // receive --impersonate unless the user picked a browser.
     let args: Vec<String> = ytdlp_command(&bin)
         .as_std()
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    assert_eq!(args[..2], ["--impersonate", "chrome"]);
+    assert!(!args.iter().any(|a| a == "--impersonate"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ytdlp_command_uses_the_selected_impersonate_target() {
+    schema_env_once();
+    let dir = impersonate_test_dir("cmd-selected");
+    let bin = fake_ytdlp_impersonate(
+        &dir,
+        Some("[info] Available impersonate targets\nClient  OS  Source\nChrome  -  curl_cffi\n"),
+    );
+    let settings = crate::settings::AppSettings::new();
+    settings
+        .set_string(crate::settings::key::IMPERSONATE_BROWSER, "edge")
+        .unwrap();
+    let args: Vec<String> = ytdlp_command(&bin)
+        .as_std()
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    // Restore the compiled default before asserting so a failure here
+    // doesn't poison sibling tests in the shared memory backend.
+    settings
+        .set_string(crate::settings::key::IMPERSONATE_BROWSER, "")
+        .unwrap();
+    assert_eq!(args[..2], ["--impersonate", "edge"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn ytdlp_command_skips_impersonate_when_unsupported() {
+    schema_env_once();
     let dir = impersonate_test_dir("cmd-off");
     let bin = fake_ytdlp_impersonate(&dir, None);
     let args: Vec<String> = ytdlp_command(&bin)

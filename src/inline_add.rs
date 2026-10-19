@@ -1509,6 +1509,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // AdwToggleGroup doesn't implement GtkAccessible; the label goes on a
     // wrapper so screen readers announce the filter's purpose.
     let filter_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    // HIG spacing: the count subtitle above and this filter are separate
+    // blocks, so raise the filter above the boxed list's bare row separator.
+    filter_wrap.set_margin_top(6);
     filter_wrap.set_hexpand(true);
     filter_wrap.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Filter gallery by type",

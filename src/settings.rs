@@ -33,6 +33,7 @@ pub mod key {
     pub const SUBTITLE_LANGUAGE: &str = "subtitle-language";
     pub const EMBED_SUBS: &str = "embed-subs";
     pub const COOKIES_BROWSER: &str = "cookies-browser";
+    pub const IMPERSONATE_BROWSER: &str = "impersonate-browser";
     pub const LAST_AUTO_PASTE: &str = "last-auto-paste";
     pub const SPONSORBLOCK_REMOVE: &str = "sponsorblock-remove";
     pub const SPONSORBLOCK_MARK: &str = "sponsorblock-mark";
@@ -150,6 +151,11 @@ impl AppSettings {
     }
     pub fn cookies_browser(&self) -> String {
         self.0.string(key::COOKIES_BROWSER).to_string()
+    }
+    /// Browser client (empty, chrome, edge or safari) yt-dlp's requests impersonate.
+    /// Empty means yt-dlp's documented default: no impersonation.
+    pub fn impersonate_browser(&self) -> String {
+        self.0.string(key::IMPERSONATE_BROWSER).to_string()
     }
     pub fn last_auto_paste(&self) -> String {
         self.0.string(key::LAST_AUTO_PASTE).to_string()

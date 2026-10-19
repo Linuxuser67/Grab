@@ -695,7 +695,7 @@ pub fn show(
                 .unwrap_or_else(|| libs.ffmpeg.display().to_string());
             let qjs = crate::video_tools::find_quickjs()
                 .and_then(|p| tool_version(&p, "--version").map(|v| format!("quickjs {v}")));
-            let gdl = crate::gallery::resolve_gallerydl()
+            let gdl = crate::gallery_tools::resolve_gallerydl()
                 .ok()
                 .and_then(|p| tool_version(&p, "--version").map(|v| format!("gallery-dl {v}")));
             (yt, ff, qjs, gdl)
@@ -1072,7 +1072,7 @@ pub fn show(
                             let ff = tool_first_line(&libs.ffmpeg, "-version");
                             let qjs = crate::video_tools::find_quickjs()
                                 .and_then(|p| tool_first_line(&p, "--version"));
-                            let gdl = crate::gallery::resolve_gallerydl()
+                            let gdl = crate::gallery_tools::resolve_gallerydl()
                                 .ok()
                                 .and_then(|p| tool_first_line(&p, "--version"));
                             (yt, ff, qjs, gdl)
@@ -1092,10 +1092,11 @@ pub fn show(
                     let gdl_tag = latest.gallerydl;
                     let gdl_digest = latest.gallerydl_digest;
                     // Grab's own gallery-dl is judged by its bytes, read off-thread.
-                    let gdl_managed = gio::spawn_blocking(crate::gallery::managed_gallerydl_sha)
-                        .await
-                        .unwrap_or(None);
-                    let gdl_needs_update = crate::gallery::gallerydl_needs_update(
+                    let gdl_managed =
+                        gio::spawn_blocking(crate::gallery_tools::managed_gallerydl_sha)
+                            .await
+                            .unwrap_or(None);
+                    let gdl_needs_update = crate::gallery_tools::gallerydl_needs_update(
                         gdl_managed.as_ref().map(|m| m.as_deref()),
                         gdl_digest.as_deref(),
                     );
@@ -1110,7 +1111,7 @@ pub fn show(
                     if let Some((yt, ff, qjs, gdl)) = installed {
                         match (yt.as_deref(), yt_tag.as_deref()) {
                             (Some(installed), Some(tag))
-                                if crate::video_tools::ytdlp_update_available(installed, tag) =>
+                                if crate::video_tools::tool_update_available(installed, tag) =>
                             {
                                 updates.push(format!(
                                     "yt-dlp {} → {}",

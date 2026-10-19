@@ -28,10 +28,6 @@ struct Inner {
     store: gtk4::StringList,
     selection: gtk4::MultiSelection,
     scrolled: gtk4::ScrolledWindow,
-    /// Position of the keyboard-focused cell; Space/Enter toggle it. It is
-    /// `INVALID_LIST_POSITION` whenever no cell is focused, so the unused
-    /// keys keep scrolling.
-    focused_cell: Rc<Cell<u32>>,
     count: RefCell<Option<CountSink>>,
 }
 
@@ -257,7 +253,6 @@ impl GalleryGrid {
                 store,
                 selection,
                 scrolled,
-                focused_cell,
                 count: RefCell::new(None),
             }),
         }

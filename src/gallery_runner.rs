@@ -51,9 +51,8 @@ pub struct GalleryProgressUpdate {
 }
 
 /// Journal-safe stderr text: gallery-dl failure lines embed the media URL
-/// with signed query tokens, so swap URL words for their path stem — same
-/// convention as `video_probe::page_host` (journal never gets query strings).
-/// User-facing error text keeps the raw line.
+/// with signed query tokens; the journal never gets them. User-facing error
+/// text keeps the raw line.
 /// Redacts the query/fragment of any `scheme://` URL in the text, scanning
 /// token-wise between whitespace/quote/bracket boundaries instead of
 /// `Url::parse`-ing whitespace-delimited words: quoted (`'https://x/?sig=…'`)
@@ -208,9 +207,19 @@ pub async fn run_gallery_download(
     // Reaped: disarm so Drop can't reach a recycled PGID (guard contract).
     guard.disarm();
 
-    // The child has exited, so the stderr pipe is at EOF; awaiting the drain
-    // guarantees the ring buffer has the complete tail.
-    let _ = drain_handle.await;
+    // The child has exited, so the stderr pipe ordinarily hits EOF quickly;
+    // awaiting the drain guarantees the ring buffer holds the complete tail.
+    // A descendant may have inherited the pipe, though, so the wait is
+    // bounded: the tail is diagnostic only, so on a timeout abort the drain
+    // and continue rather than hanging the job — same bound class as the
+    // streamed stderr drain in the probe.
+    let drain_abort = drain_handle.abort_handle();
+    if tokio::time::timeout(std::time::Duration::from_secs(30), drain_handle)
+        .await
+        .is_err()
+    {
+        drain_abort.abort();
+    }
 
     if !status.success() {
         let code = status.code();

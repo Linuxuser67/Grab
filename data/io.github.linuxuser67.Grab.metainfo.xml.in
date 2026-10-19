@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="5.7.9~beta.17" date="2026-10-19">
+      <description>
+        <ul>
+          <li>File pickers: entries in the recycling grids now keep an even space between rows and columns.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.9~beta.16" date="2026-10-19">
       <description>
         <ul>

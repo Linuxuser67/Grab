@@ -777,7 +777,7 @@ pub fn show(
     let impersonate = adw::ComboRow::builder()
         .title(gettext("Impersonate a browser"))
         .subtitle(gettext(
-            "Send a browser's TLS fingerprint with yt-dlp's requests. None is yt-dlp's default.",
+            "Send a browser's TLS fingerprint with yt-dlp's requests.",
         ))
         .build();
     impersonate.set_tooltip_text(Some(&gettext(

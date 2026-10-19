@@ -155,8 +155,18 @@ pub async fn run_gallery_download(
     let stderr_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let stderr_lines_clone = stderr_lines.clone();
     let drain_handle = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut reader = BufReader::new(stderr);
+        let mut line_buf = Vec::new();
+        // Same per-line ceiling as the JSONL reader: a broken or hostile
+        // extractor must not inflate the ring without bound. A cap hit or a
+        // read error stops tail updates and ends the loop — the tail is
+        // diagnostic only.
+        while let Ok(Some(())) =
+            crate::gallery_probe::read_capped_line(&mut reader, &mut line_buf).await
+        {
+            let line = String::from_utf8_lossy(&line_buf)
+                .trim_end_matches(['\n', '\r'])
+                .to_owned();
             // Debug: echo stderr live. The line is still captured below
             // for the failure tail.
             crate::backend_debug::echo_line(&line);

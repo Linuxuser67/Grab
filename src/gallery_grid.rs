@@ -14,7 +14,7 @@
 //! carry `&`, `<`, RTL and bidi-control characters.
 
 use gtk4::prelude::*;
-use gtk4::{glib, pango};
+use gtk4::{gdk, glib, pango};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -75,9 +75,31 @@ fn toggle_entry(selection: &gtk4::MultiSelection, position: u32) {
     }
 }
 
+/// Inter-cell gaps live in CSS on the item node: `GtkListItem` is not a
+/// widget, so margins can't be set from Rust, and themes paint the chip on
+/// the `gridview > child` node which spans the whole cell — inner-box
+/// margins only inset content inside the chip (beta.16 report). 3px on all
+/// sides = 6px gap between cells, the 6px-per-step GNOME spacing rhythm.
+/// Loaded once per display on first grid creation.
+fn ensure_gap_css() {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if ONCE.set(()).is_ok() {
+        let provider = gtk4::CssProvider::new();
+        provider.load_from_bytes(&glib::Bytes::from_static(
+            b"gridview > child { margin: 3px; }",
+        ));
+        gtk4::style_context_add_provider_for_display(
+            &gdk::Display::default().expect("grid gap CSS: no display"),
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
 impl GalleryGrid {
     /// Empty grid; entries arrive later via `append` (streamed enumeration).
     pub(crate) fn new() -> Self {
+        ensure_gap_css();
         let store = gtk4::StringList::new(&[]);
         let selection = gtk4::MultiSelection::new(Some(store.clone()));
         // The ToolbarView content area stretches every page to full height;
@@ -110,17 +132,13 @@ impl GalleryGrid {
                 let check = gtk4::CheckButton::new();
                 check.set_can_target(false);
                 check.set_focusable(false);
-                // The margins create the gaps between grid cells (GridView
-                // has no spacing properties; only the space between cells,
-                // both axes, at one uniform value) and keep focus rings
-                // from clipping at the scroll edges.
+                // The margins keep focus rings from clipping at the scroll
+                // edges.
                 let cell = gtk4::Box::builder()
                     .orientation(gtk4::Orientation::Horizontal)
                     .spacing(6)
-                    .margin_top(3)
-                    .margin_bottom(3)
-                    .margin_start(3)
-                    .margin_end(3)
+                    .margin_top(2)
+                    .margin_bottom(2)
                     .focusable(true)
                     .build();
                 cell.append(&check);

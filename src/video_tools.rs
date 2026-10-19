@@ -441,10 +441,7 @@ async fn warm_impersonation_cache(youtube_bin: std::path::PathBuf) {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
     {
-        guard.insert(
-            key,
-            ImpersonateEntry { stamp, supported },
-        );
+        guard.insert(key, ImpersonateEntry { stamp, supported });
     }
 }
 

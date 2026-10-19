@@ -1017,6 +1017,8 @@ pub async fn count_gallery_files(
 #[cfg(test)]
 mod capped_line_reader_tests {
     use super::*;
+
+    use std::{pin::Pin, task::Poll};
     use tokio::io::{AsyncRead, ReadBuf};
 
     /// Reader serving the whole payload one byte per poll, so every `fill_buf`
@@ -1091,10 +1093,7 @@ mod capped_line_reader_tests {
 
     #[tokio::test]
     async fn newline_found_across_refills() {
-        let mut reader = tokio::io::BufReader::new(ByteAtATime(
-            b"ab\nc".to_vec(),
-            0,
-        ));
+        let mut reader = tokio::io::BufReader::new(ByteAtATime(b"ab\nc".to_vec(), 0));
         assert!(next(&mut reader).await.unwrap().is_some());
         // Trailing fragment after the newline still reads as a line (Lines
         // parity), then EOF.

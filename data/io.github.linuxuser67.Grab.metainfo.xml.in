@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.0.1" date="2026-10-19">
+      <description>
+        <ul>
+          <li>More reliable gallery and playlist downloads, including improved backend selection, authentication handoff, retries, and cancellation.</li>
+          <li>Large gallery, playlist, and torrent pickers now stream entries and use virtualized grids for more responsive selection.</li>
+          <li>Improved collection-entry naming, download progress handling, and gallery workflow reliability.</li>
+        </ul>
+      </description>
+    </release>
     <release version="5.7.9~beta.17" date="2026-10-19">
       <description>
         <ul>

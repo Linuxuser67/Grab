@@ -574,14 +574,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/cc/cc-1.8.0.crate",
-        "sha256": "6651c9ed80effdc7db0ff72512157f901af5e3549e341e24b1dd4887d836d838",
-        "dest": "cargo/cc-1.8.0"
+        "url": "https://static.crates.io/crates/cc/cc-1.9.0.crate",
+        "sha256": "877bf67ac8e52449eb2f9e98a344ea163beb70dd1f9eebe3cc5357dcfeaee4df",
+        "dest": "cargo/cc-1.9.0"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"6651c9ed80effdc7db0ff72512157f901af5e3549e341e24b1dd4887d836d838\", \"files\": {}}",
-        "dest": "cargo/cc-1.8.0",
+        "contents": "{\"package\": \"877bf67ac8e52449eb2f9e98a344ea163beb70dd1f9eebe3cc5357dcfeaee4df\", \"files\": {}}",
+        "dest": "cargo/cc-1.9.0",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -1315,14 +1315,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/find-msvc-tools/find-msvc-tools-0.1.14.crate",
-        "sha256": "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484",
-        "dest": "cargo/find-msvc-tools-0.1.14"
+        "url": "https://static.crates.io/crates/find-msvc-tools/find-msvc-tools-0.1.15.crate",
+        "sha256": "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48",
+        "dest": "cargo/find-msvc-tools-0.1.15"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484\", \"files\": {}}",
-        "dest": "cargo/find-msvc-tools-0.1.14",
+        "contents": "{\"package\": \"1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48\", \"files\": {}}",
+        "dest": "cargo/find-msvc-tools-0.1.15",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -3473,14 +3473,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/ppmd-rust/ppmd-rust-1.5.0.crate",
-        "sha256": "196a7c80b9a7652aba7cc070827516c2abe4ccdf53d128e1944003cf5726cff1",
-        "dest": "cargo/ppmd-rust-1.5.0"
+        "url": "https://static.crates.io/crates/ppmd-rust/ppmd-rust-1.5.1.crate",
+        "sha256": "494b4379484fc92217cc7d9e3a532375b1d01a61889ec8333025dc3b0377af56",
+        "dest": "cargo/ppmd-rust-1.5.1"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"196a7c80b9a7652aba7cc070827516c2abe4ccdf53d128e1944003cf5726cff1\", \"files\": {}}",
-        "dest": "cargo/ppmd-rust-1.5.0",
+        "contents": "{\"package\": \"494b4379484fc92217cc7d9e3a532375b1d01a61889ec8333025dc3b0377af56\", \"files\": {}}",
+        "dest": "cargo/ppmd-rust-1.5.1",
         "dest-filename": ".cargo-checksum.json"
     },
     {

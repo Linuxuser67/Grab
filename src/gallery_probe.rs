@@ -486,7 +486,7 @@ fn enumerate_base_argv(jsonl: bool) -> Vec<String> {
         "-j".to_string(),
         "--no-download".to_string(),
         // Unbounded walk: the user decides how much of a gallery to walk
-        // (huge collections stream in as pills over time). Indices stay
+        // (huge collections stream in over time). Indices stay
         // 1-based, so range_spec remains correct.
         "-o".to_string(),
         "extractor.cookies-update=false".to_string(),

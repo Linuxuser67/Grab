@@ -198,8 +198,8 @@ pub(crate) fn playlist_count_label(kind: crate::media_types::PlaylistKind, count
     template.replace("{}", &count.to_string())
 }
 
-/// Seconds as M:SS / H:MM:SS. Test-only since the pills dropped subtitles
-/// (window_tests keeps the formatting pinned).
+/// Seconds as M:SS / H:MM:SS. Test-only since subtitles were dropped from
+/// playlist rows (window_tests keeps the formatting pinned).
 #[cfg(test)]
 pub(crate) fn fmt_item_duration(secs: i64) -> String {
     let secs = secs.max(0) as u64;
@@ -988,7 +988,10 @@ fn push_torrent_picker_page(
         .replace("{}", &entries.len().to_string());
     // Rows carry the display path; the old pill loop never rendered the
     // size sub either.
-    let titles = entries.iter().map(|e| e.display_path.clone()).collect::<Vec<_>>();
+    let titles = entries
+        .iter()
+        .map(|e| e.display_path.clone())
+        .collect::<Vec<_>>();
     let grid = GalleryGrid::new();
     grid.append(&titles);
 

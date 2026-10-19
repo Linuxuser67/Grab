@@ -81,12 +81,14 @@ impl GalleryGrid {
         let store = gtk4::StringList::new(&[]);
         let selection = gtk4::MultiSelection::new(Some(store.clone()));
         let focused_cell = Rc::new(Cell::new(gtk4::INVALID_LIST_POSITION));
-        // No height cap and no vexpand here: the picker page owns the one
-        // sizing question (the 480 cap was the pills' trick, unnecessary
-        // for a recycling view).
+        // The page gives the grid the remaining card height claim: vexpand
+        // here so every page that appends this widget fills it (the 480 cap
+        // was the pills' trick, unnecessary for a recycling view). The page
+        // still widens the claim by expanding its own ListBox.
         let scrolled = gtk4::ScrolledWindow::builder()
             .hscrollbar_policy(gtk4::PolicyType::Never)
             .build();
+        scrolled.set_vexpand(true);
 
         let factory = gtk4::SignalListItemFactory::new();
         // Per realized cell: one row of widgets, a toggle gesture, a focus
@@ -131,14 +133,16 @@ impl GalleryGrid {
 
                 // One press toggles the cell through the model and claims
                 // the sequence, so GridView's own click (a selection
-                // replacement) never gets it; the rubber band starts from
-                // its own drag sequence and stays available. Double presses
-                // stay one toggle.
+                // replacement) never gets it; a rubber band can only start
+                // from empty space, since a claimed sequence can't begin a
+                // drag. Presses with n_press > 1 only claim — a stray
+                // double-click must not replace the whole selection.
                 let gesture = gtk4::GestureClick::new();
                 {
                     let selection = selection.clone();
                     let item = item.clone();
                     gesture.connect_pressed(move |gesture, n_press, _, _| {
+                        gesture.set_state(gtk4::EventSequenceState::Claimed);
                         if n_press > 1 {
                             return;
                         }
@@ -151,10 +155,12 @@ impl GalleryGrid {
                 // Keyboard: remember the focused cell for Space/Enter on the
                 // view below; arrow keys are GridView's own.
                 {
-                    let focused_cell = focused_cell.clone();
-                    let item = item.clone();
                     let focus = gtk4::EventControllerFocus::new();
-                    focus.connect_enter(move |_| focused_cell.set(item_position(&item)));
+                    focus.connect_enter({
+                        let focused_cell = focused_cell.clone();
+                        let item = item.clone();
+                        move |_| focused_cell.set(item_position(&item))
+                    });
                     focus.connect_leave({
                         let focused_cell = focused_cell.clone();
                         move |_| focused_cell.set(gtk4::INVALID_LIST_POSITION)
@@ -199,15 +205,22 @@ impl GalleryGrid {
                 else {
                     return;
                 };
-                if let Some(cell) = list_item.child().and_downcast::<gtk4::Box>()
-                    && let Some(check) = cell.first_child().and_downcast::<gtk4::CheckButton>()
-                    && let Some(label) = check.next_sibling().and_downcast::<gtk4::Label>()
-                {
-                    label.set_text(&title);
-                    label.set_tooltip_text(Some(title.as_str()));
-                    cell.update_property(&[gtk4::accessible::Property::Label(title.as_str())]);
-                    check.set_active(selection.is_selected(list_item.position()));
-                }
+                let cell = list_item
+                    .child()
+                    .and_downcast::<gtk4::Box>()
+                    .expect("gallery cell: setup built a Box child");
+                let check = cell
+                    .first_child()
+                    .and_downcast::<gtk4::CheckButton>()
+                    .expect("gallery cell: first child is the check button");
+                let label = check
+                    .next_sibling()
+                    .and_downcast::<gtk4::Label>()
+                    .expect("gallery cell: label follows the check button");
+                label.set_text(&title);
+                label.set_tooltip_text(Some(title.as_str()));
+                cell.update_property(&[gtk4::accessible::Property::Label(title.as_str())]);
+                check.set_active(selection.is_selected(list_item.position()));
             });
         }
 
@@ -295,10 +308,17 @@ impl GalleryGrid {
     /// A selection-state consumer hook: called for every selection change
     /// (clicks, Ctrl+A, the rubber band, keyboard, the buttons).
     pub(crate) fn connect_selection_changed(&self, f: impl Fn(usize) + 'static) {
-        let inner = self.inner.clone();
+        // Weak from here on: the handler is stored on `selection`, which
+        // `Inner` owns — a strong `Rc<Inner>` capture would leak the whole
+        // page subtree per picker open.
+        let inner = Rc::downgrade(&self.inner);
         self.inner
             .selection
-            .connect_selection_changed(move |_, _, _| f(selected_count(&inner.selection)));
+            .connect_selection_changed(move |_, _, _| {
+                if let Some(inner) = inner.upgrade() {
+                    f(selected_count(&inner.selection));
+                }
+            });
     }
 
     /// Wire the bottom action bar: live selected-count label plus Select
@@ -315,10 +335,15 @@ impl GalleryGrid {
         let count_label = Rc::new(count_label);
         *self.inner.count.borrow_mut() = Some((add_btn_weak, count_label));
 
-        // The queued count follows every selection change.
+        // The queued count follows every selection change (weak capture —
+        // the handler list lives on the selection inside Inner).
         {
-            let inner = self.inner.clone();
-            self.connect_selection_changed(move |_| inner_count_bump(&inner));
+            let inner = Rc::downgrade(&self.inner);
+            self.connect_selection_changed(move |_| {
+                if let Some(inner) = inner.upgrade() {
+                    inner_count_bump(&inner);
+                }
+            });
         }
         // First paint: no selection-changed has fired for existing entries.
         inner_count_bump(&self.inner);

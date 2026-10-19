@@ -420,8 +420,10 @@ pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
 }
 
 /// Probe once on the blocking pool and cache the result. Spawned in the
-/// background by `ytdlp_supports_impersonation`; the `unwrap_or(false)` keeps
-/// a panicking probe from taking the answer above the safe default.
+/// background by `ytdlp_supports_impersonation`; on a join failure the
+/// fallback claims `(None, 0)` + unsupported, which cannot collide with a
+/// real binary's stamp — the next call sees a stamp mismatch and re-probes,
+/// so a panicking fill can never wedge a wrong-but-sticky answer.
 async fn warm_impersonation_cache(youtube_bin: std::path::PathBuf) {
     // Stat + probe run together on the blocking pool; the stamp recorded
     // here is the one the probe actually ran against.

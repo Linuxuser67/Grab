@@ -288,12 +288,17 @@ async fn await_probe(
 /// `qjs`; a system `qjs` elsewhere on PATH still works when Grab never installed one.
 pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(youtube_bin);
-    // Impersonate a real browser's TLS fingerprint where the binary supports
-    // it (curl_cffi): some sites cut plain-HTTP-client streams off mid-flight.
-    // Probed once per binary and cached — a PATH-provided yt-dlp without the
-    // dependency hard-fails on the flag, so never pass it blindly.
+    // Impersonation is user-selectable (Preferences → Advanced): yt-dlp's
+    // docs make it opt-in and warn that forcing it on every request may hurt
+    // speed and stability. Empty target = None = yt-dlp's documented default;
+    // every spawn passes --ignore-config, so nothing else can re-enable it.
+    // Support is probed once per binary and cached — a PATH-provided yt-dlp
+    // without curl_cffi hard-fails on the flag, so never pass it blindly.
     if crate::video_tools::ytdlp_supports_impersonation(youtube_bin) {
-        cmd.arg("--impersonate").arg("chrome");
+        let target = crate::settings::AppSettings::new().impersonate_browser();
+        if !target.is_empty() {
+            cmd.arg("--impersonate").arg(target);
+        }
     }
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

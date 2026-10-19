@@ -19,7 +19,6 @@ mod install_help;
 mod install_progress;
 mod media_types;
 mod net_types;
-mod picker_grid;
 mod preferences;
 mod runtime;
 mod settings;

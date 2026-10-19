@@ -1,8 +1,8 @@
 //! Gallery picker grid: a recycling `GtkGridView` over `GtkMultiSelection`.
 //!
-//! `AdwWrapBox` pills (see `picker_grid.rs`) materialize one widget per
+//! The pill layout this replaces materialized one widget per
 //! entry for the picker's whole life; galleries stream in unbounded, so cost
-//! is linear in entries. `GtkGridView` reuses a handful of cells whatever
+//! would be linear in entries. `GtkGridView` reuses a handful of cells whatever
 //! the enumeration produced, and `GtkMultiSelection` adds the Ctrl+A,
 //! rubber-band and arrow-key selection pills never had.
 //!
@@ -18,8 +18,8 @@ use gtk4::{gdk, glib, pango};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// (weak add button, count label formatter) once wired — same shape as
-/// `picker_grid.rs`: the add button shows the selected count.
+/// (weak add button, count label formatter) once wired — the add button
+/// shows the selected count.
 type CountSink = (glib::WeakRef<gtk4::Button>, Rc<dyn Fn(usize) -> String>);
 
 struct Inner {
@@ -146,7 +146,7 @@ impl GalleryGrid {
                         gesture.set_state(gtk4::EventSequenceState::Claimed);
                     });
                 }
-                cell.add_controller(&gesture);
+                cell.add_controller(gesture);
 
                 // Keyboard: remember the focused cell for Space/Enter on the
                 // view below; arrow keys are GridView's own.
@@ -159,7 +159,7 @@ impl GalleryGrid {
                         let focused_cell = focused_cell.clone();
                         move |_| focused_cell.set(gtk4::INVALID_LIST_POSITION)
                     });
-                    cell.add_controller(&focus);
+                    cell.add_controller(focus);
                 }
 
                 // Watches the model so Ctrl+A, the rubber band, keyboard and
@@ -235,7 +235,7 @@ impl GalleryGrid {
                 glib::Propagation::Stop
             });
         }
-        view.add_controller(&key);
+        view.add_controller(key);
 
         scrolled.set_child(Some(&view));
 
@@ -282,6 +282,14 @@ impl GalleryGrid {
         (0..bitset.size())
             .map(|i| bitset.nth(i as u32) as usize)
             .collect()
+    }
+
+    /// Unselect one entry (a queued row after a partial playlist import, so
+    /// a retry submits only the remainder).
+    pub(crate) fn unselect(&self, index: usize) {
+        if (index as u32) < self.inner.store.n_items() {
+            self.inner.selection.unselect_item(index as u32);
+        }
     }
 
     /// A selection-state consumer hook: called for every selection change

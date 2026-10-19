@@ -197,7 +197,7 @@ impl GalleryPickerStream {
                     .unwrap_or(&self.page_url);
                 crate::gallery_probe::probe_title(item, item_url)
             })
-            .collect();
+            .collect::<Vec<_>>();
         self.grid.append(&titles);
         self.count_label
             .set_label(&header_count_text(self.grid.len()));

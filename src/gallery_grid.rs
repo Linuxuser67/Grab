@@ -260,7 +260,9 @@ impl GalleryGrid {
         self.inner.store.splice(start, 0, &additions);
         // The rest of the selection is untouched: a batch already streaming
         // in must not reset the user's current pick.
-        self.inner.selection.select_range(start, titles.len() as u32, false);
+        self.inner
+            .selection
+            .select_range(start, titles.len() as u32, false);
     }
 
     /// The widget to append into the picker page's box.
@@ -277,7 +279,9 @@ impl GalleryGrid {
     /// order (the shifted-index caveat stays with the page's caption).
     pub(crate) fn selected_indices(&self) -> Vec<usize> {
         let bitset = self.inner.selection.selection();
-        (0..bitset.size()).map(|i| bitset.nth(i as u32) as usize).collect()
+        (0..bitset.size())
+            .map(|i| bitset.nth(i as u32) as usize)
+            .collect()
     }
 
     /// A selection-state consumer hook: called for every selection change

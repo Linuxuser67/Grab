@@ -1,4 +1,5 @@
 use super::*;
+use gio::prelude::SettingsExt;
 use crate::attempt_gate::AttemptGate;
 use crate::file_names::{is_url_derived_name, strip_dedupe_suffix};
 use crate::media_types::{

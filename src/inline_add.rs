@@ -3062,7 +3062,7 @@ fn make_gallery_picker_opener(
                         title.clone(),
                         url.clone(),
                         filter,
-                        crate::picker_grid::PickerGrid::empty(),
+                        crate::gallery_grid::GalleryGrid::new(),
                     ) {
                         Some(page) => Some(page),
                         // Another picker already owns the screen: the

@@ -5,10 +5,10 @@
 //! (`push_gallery_picker_page`). Step-bound UI stays in `inline_add.rs`; this
 //! module has no dependency on it (the sentrux structure check forbids the
 //! cycle). The picker's shared widgets come from `window_rows`; the entry
-//! grid from `picker_grid`.
+//! grid from `gallery_grid`.
 
 use crate::download::DownloadManager;
-use crate::picker_grid::PickerGrid;
+use crate::gallery_grid::GalleryGrid;
 use crate::window_rows::{
     apply_scheduled_at, picker_enter_confirms, picker_header, selection_action_bar,
 };
@@ -175,7 +175,7 @@ fn header_count_text(n: usize) -> String {
 /// fill it in: the count in the header, the error caption, and the gated
 /// action bar.
 pub(crate) struct GalleryPickerStream {
-    grid: PickerGrid,
+    grid: GalleryGrid,
     page_url: String,
     count_label: gtk4::Label,
     error_caption: gtk4::Label,
@@ -198,7 +198,7 @@ impl GalleryPickerStream {
                 crate::gallery_probe::probe_title(item, item_url)
             })
             .collect();
-        self.grid.append(titles);
+        self.grid.append(&titles);
         self.count_label
             .set_label(&header_count_text(self.grid.len()));
     }
@@ -238,7 +238,7 @@ pub(crate) fn push_gallery_picker_page(
     title: String,
     url: String,
     filter: crate::gallery_argv::GalleryFilter,
-    grid: PickerGrid,
+    grid: GalleryGrid,
 ) -> Option<GalleryPickerStream> {
     // Don't stack a second picker while one is already visible.
     if nav.visible_page_tag().as_deref() == Some("gallery-picker") {
@@ -267,9 +267,10 @@ pub(crate) fn push_gallery_picker_page(
         .halign(gtk4::Align::Start)
         .build();
     list_box.append(&positional_note);
-    // Only the entries scroll; the captions stay outside (see scrolled_grid).
-    let scrolled = crate::picker_grid::scrolled_grid(grid.widget());
-    list_box.append(&scrolled);
+    // Only the entries scroll; the recycling GridView fills the remaining
+    // height whatever the enumeration produced (no pill-style height cap).
+    list_box.set_vexpand(true);
+    list_box.append(grid.widget());
     let error_caption = gtk4::Label::builder()
         .label("")
         .css_classes(["error", "caption"])

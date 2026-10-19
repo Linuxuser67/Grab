@@ -30,6 +30,7 @@ mod update_cache;
 mod gallery;
 mod gallery_argv;
 mod gallery_card;
+mod gallery_grid;
 #[cfg(test)]
 mod gallery_integration_tests;
 mod gallery_probe;

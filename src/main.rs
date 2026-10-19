@@ -19,7 +19,6 @@ mod install_help;
 mod install_progress;
 mod media_types;
 mod net_types;
-mod picker_grid;
 mod preferences;
 mod runtime;
 mod settings;
@@ -30,6 +29,7 @@ mod update_cache;
 mod gallery;
 mod gallery_argv;
 mod gallery_card;
+mod gallery_grid;
 #[cfg(test)]
 mod gallery_integration_tests;
 mod gallery_probe;

@@ -19,7 +19,7 @@
 
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
-use crate::picker_grid::PickerGrid;
+use crate::gallery_grid::GalleryGrid;
 use crate::window_rows::{
     apply_scheduled_at, default_name_for, picker_enter_confirms, picker_header,
     selection_action_bar,
@@ -198,8 +198,8 @@ pub(crate) fn playlist_count_label(kind: crate::media_types::PlaylistKind, count
     template.replace("{}", &count.to_string())
 }
 
-/// Seconds as M:SS / H:MM:SS. Test-only since the pills dropped subtitles
-/// (window_tests keeps the formatting pinned).
+/// Seconds as M:SS / H:MM:SS. Test-only since subtitles were dropped from
+/// playlist rows (window_tests keeps the formatting pinned).
 #[cfg(test)]
 pub(crate) fn fmt_item_duration(secs: i64) -> String {
     let secs = secs.max(0) as u64;
@@ -772,15 +772,15 @@ fn push_playlist_items_page(
     }
 
     let count = playlist.items.len();
-    // Pill titles; the truncation notice sits under the header as a dimmed
+    // Titles; the truncation notice sits under the header as a dimmed
     // caption.
-    let grid = PickerGrid::new(
-        playlist
-            .items
-            .iter()
-            .map(|item| item.title.to_string())
-            .collect(),
-    );
+    let titles = playlist
+        .items
+        .iter()
+        .map(|item| item.title.to_string())
+        .collect::<Vec<_>>();
+    let grid = GalleryGrid::new();
+    grid.append(&titles);
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -803,10 +803,10 @@ fn push_playlist_items_page(
             .build();
         list_box.append(&notice);
     }
-    // Scrolled: big playlists must not size the card off-screen, but the
-    // capped natural height still grows and shrinks with the item count.
-    let scrolled = crate::picker_grid::scrolled_grid(grid.widget());
-    list_box.append(&scrolled);
+    // The recycling grid fills the remaining card height; captions stay
+    // outside so only the entries scroll.
+    list_box.set_vexpand(true);
+    list_box.append(grid.widget());
     // The error caption lives under the list, like the old row list.
     let error_caption = gtk4::Label::builder()
         .label("")
@@ -835,7 +835,7 @@ fn push_playlist_items_page(
         .build();
     picker_enter_confirms(&picker_page, &add_btn);
 
-    // The action counts the live selection (see `PickerGrid::wire_selection_bar`).
+    // The action counts the live selection (see `GalleryGrid::wire_selection_bar`).
     grid.wire_selection_bar(&select_all_btn, &select_none_btn, &add_btn, |n| {
         ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
     });
@@ -986,9 +986,14 @@ fn push_torrent_picker_page(
     // The file count lives in the compact header; the group needs no title.
     let file_count = ngettext("{} file", "{} files", entries.len() as u32)
         .replace("{}", &entries.len().to_string());
-    // Pills carry the display path; the old pill loop never rendered the
+    // Rows carry the display path; the old pill loop never rendered the
     // size sub either.
-    let grid = PickerGrid::new(entries.iter().map(|e| e.display_path.clone()).collect());
+    let titles = entries
+        .iter()
+        .map(|e| e.display_path.clone())
+        .collect::<Vec<_>>();
+    let grid = GalleryGrid::new();
+    grid.append(&titles);
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -999,9 +1004,10 @@ fn push_torrent_picker_page(
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
-    // Same arrangement as the playlist picker (see scrolled_grid).
-    let scrolled = crate::picker_grid::scrolled_grid(grid.widget());
-    list_box.append(&scrolled);
+    // Same arrangement as the playlist picker: the grid fills the remaining
+    // height, captions stay outside.
+    list_box.set_vexpand(true);
+    list_box.append(grid.widget());
     let error_caption = gtk4::Label::builder()
         .label("")
         .css_classes(["error", "caption"])
@@ -3062,7 +3068,7 @@ fn make_gallery_picker_opener(
                         title.clone(),
                         url.clone(),
                         filter,
-                        crate::picker_grid::PickerGrid::empty(),
+                        crate::gallery_grid::GalleryGrid::new(),
                     ) {
                         Some(page) => Some(page),
                         // Another picker already owns the screen: the

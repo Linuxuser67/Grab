@@ -14,8 +14,8 @@
 //! carry `&`, `<`, RTL and bidi-control characters.
 
 use gtk4::prelude::*;
-use gtk4::{gdk, glib, pango};
-use std::cell::{Cell, RefCell};
+use gtk4::{glib, pango};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// (weak add button, count label formatter) once wired — the add button
@@ -58,8 +58,12 @@ fn item_position(item: &glib::WeakRef<gtk4::ListItem>) -> u32 {
         .map_or(gtk4::INVALID_LIST_POSITION, |li| li.position())
 }
 
-/// Flip one entry through the model (the click and Space/Enter path); the
-/// rest of the selection is untouched.
+/// Flip one entry through the model (the click and Enter-activation path);
+/// the rest of the selection is untouched. Plain arrow keys keep
+/// `GtkListBase`'s select-and-move semantics (Up/Down move the focus and
+/// select only it, resetting a multi-selection) — accepted behavior for the
+/// list; the multi-select paths are clicks, the rubber band, Ctrl+A and
+/// Space on the focused cell.
 fn toggle_entry(selection: &gtk4::MultiSelection, position: u32) {
     if position == gtk4::INVALID_LIST_POSITION {
         return;
@@ -76,23 +80,20 @@ impl GalleryGrid {
     pub(crate) fn new() -> Self {
         let store = gtk4::StringList::new(&[]);
         let selection = gtk4::MultiSelection::new(Some(store.clone()));
-        let focused_cell = Rc::new(Cell::new(gtk4::INVALID_LIST_POSITION));
-        // The page gives the grid the remaining card height claim: vexpand
-        // here so every page that appends this widget fills it (the 480 cap
-        // was the pills' trick, unnecessary for a recycling view). The page
-        // still widens the claim by expanding its own ListBox.
+        // The ToolbarView content area stretches every page to full height;
+        // this vexpand makes the grid the child that takes it (the 480 cap
+        // was the pills' trick, unnecessary for a recycling view).
         let scrolled = gtk4::ScrolledWindow::builder()
             .hscrollbar_policy(gtk4::PolicyType::Never)
             .build();
         scrolled.set_vexpand(true);
 
         let factory = gtk4::SignalListItemFactory::new();
-        // Per realized cell: one row of widgets, a toggle gesture, a focus
-        // watcher and one selection-changed watch. Cells are recycled, so
+        // Per realized cell: one row of widgets, a toggle gesture and one
+        // selection-changed watch. Cells are recycled, so
         // all of this is paid a bounded handful of times, not per entry.
         {
             let selection = selection.clone();
-            let focused_cell = focused_cell.clone();
             factory.connect_setup(move |_, object| {
                 let list_item = object
                     .downcast_ref::<gtk4::ListItem>()
@@ -143,26 +144,9 @@ impl GalleryGrid {
                             return;
                         }
                         toggle_entry(&selection, item_position(&item));
-                        gesture.set_state(gtk4::EventSequenceState::Claimed);
                     });
                 }
                 cell.add_controller(gesture);
-
-                // Keyboard: remember the focused cell for Space/Enter on the
-                // view below; arrow keys are GridView's own.
-                {
-                    let focus = gtk4::EventControllerFocus::new();
-                    focus.connect_enter({
-                        let focused_cell = focused_cell.clone();
-                        let item = item.clone();
-                        move |_| focused_cell.set(item_position(&item))
-                    });
-                    focus.connect_leave({
-                        let focused_cell = focused_cell.clone();
-                        move |_| focused_cell.set(gtk4::INVALID_LIST_POSITION)
-                    });
-                    cell.add_controller(focus);
-                }
 
                 // Watches the model so Ctrl+A, the rubber band, keyboard and
                 // button actions refresh the visible check, not just the
@@ -229,22 +213,18 @@ impl GalleryGrid {
             .single_click_activate(false)
             .build();
 
-        // Space and Enter toggle the focused cell; everything else (arrow
-        // keys, scrolling) stays GridView's default. With no focused cell
-        // the keys pass through.
-        let key = gtk4::EventControllerKey::new();
+        // Return/ISO/KP over the grid surface is consumed by the focused
+        // item widget's own activate binding before any BUBBLE-phase
+        // controller could see it — so the view's `activate` signal is the
+        // live Enter path, and it ends up toggling like the click does.
+        // Space keeps its item-widget toggle binding, which changes the
+        // selection straight through the model. `single_click_activate` is
+        // off and the cell gesture denies double-click sequences, so
+        // activation is keyboard-only here.
         {
             let selection = selection.clone();
-            let focused_cell = focused_cell.clone();
-            key.connect_key_pressed(move |_, key, _, _| {
-                if !matches!(key, gdk::Key::space | gdk::Key::Return | gdk::Key::KP_Enter) {
-                    return glib::Propagation::Proceed;
-                }
-                toggle_entry(&selection, focused_cell.get());
-                glib::Propagation::Stop
-            });
+            view.connect_activate(move |_, position| toggle_entry(&selection, position));
         }
-        view.add_controller(key);
 
         scrolled.set_child(Some(&view));
 
@@ -389,9 +369,11 @@ mod tests {
         ]);
         // All-on default for streamed batches.
         assert_eq!(grid.selected_indices(), vec![0, 1, 2]);
-        // A single unselect (the click path) keeps the neighbors.
-        grid.inner.selection.unselect_item(0);
+        // A single unselect (the click path) keeps the neighbors; the
+        // out-of-range guard of the wrapper is a no-op.
+        grid.unselect(0);
         grid.inner.selection.unselect_item(1);
+        grid.unselect(usize::MAX);
         assert_eq!(grid.selected_indices(), vec![2]);
         grid.inner.selection.select_item(1, false);
         assert_eq!(grid.selected_indices(), vec![1, 2]);

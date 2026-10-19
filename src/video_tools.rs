@@ -1212,29 +1212,6 @@ pub const MIN_YTDLP_VERSION: [u32; 3] = [2026, 1, 1];
 /// Minimum ffmpeg: 7.0 (2024). Older releases lack codec/API coverage Grab relies on.
 pub const MIN_FFMPEG_VERSION: [u32; 3] = [7, 0, 0];
 
-/// Parse a `yt-dlp --version` first line into comparable parts; anything else
-/// (nightlies, forks) is unverifiable.
-pub(crate) fn parse_yt_dlp_version(first_line: &str) -> Option<[u32; 3]> {
-    let mut parts = first_line.trim().split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    Some([major, minor, patch])
-}
-
-/// Whether a release `tag` is newer than the installed version line. Unparseable
-/// tags never prompt: an unknown upstream shape must not nag. A `v` prefix is
-/// tolerated.
-pub(crate) fn ytdlp_update_available(installed: &str, tag: &str) -> bool {
-    match (
-        parse_yt_dlp_version(installed),
-        parse_yt_dlp_version(tag.trim_start_matches('v')),
-    ) {
-        (Some(current), Some(latest)) => latest > current,
-        _ => false,
-    }
-}
-
 /// Parse a dotted version with tolerant affixes into comparable parts: a
 /// leading `v`/`n` (boul2gom tags its builds `v9.0.2`, and its binaries report
 /// `n9.0.2`) and trailing non-numeric suffixes (`9.0.2-static`) are ignored;
@@ -1830,7 +1807,7 @@ pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, St
         tool_first_line(libs.ffmpeg.clone(), "-version")
     );
     let yt = yt.ok_or_else(VideoError::missing_tools)?;
-    let fresh = parse_yt_dlp_version(&yt).is_some_and(|v| v >= MIN_YTDLP_VERSION);
+    let fresh = parse_dotted_version(&yt).is_some_and(|v| v >= MIN_YTDLP_VERSION);
     if !fresh {
         return Err(VideoError::outdated());
     }

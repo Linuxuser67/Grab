@@ -56,9 +56,9 @@ use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_override_command_for, browser_override_dirs,
     browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
     ensure_tool_versions, extract_ffmpeg_toolchain, ffmpeg_version_token, find_in_dirs,
-    is_youtube_url, parse_dotted_version, parse_yt_dlp_version, quickjs_arch_supported,
-    quickjs_download_url, tool_update_available, toolchain_dir_in, user_lib_dir,
-    ytdlp_identity_args, ytdlp_supports_impersonation, ytdlp_update_available,
+    is_youtube_url, parse_dotted_version, quickjs_arch_supported, quickjs_download_url,
+    tool_update_available, toolchain_dir_in, user_lib_dir, ytdlp_identity_args,
+    ytdlp_supports_impersonation,
 };
 use crate::video_types::FetchedVideo;
 use crate::video_types::codec_preference;
@@ -1520,16 +1520,6 @@ fn probe_struct_footprint_budget() {
 // ── tool versions ────────────────────────────────────────────────────
 
 #[test]
-fn parse_yt_dlp_version_matrix() {
-    assert_eq!(parse_yt_dlp_version("2026.08.19"), Some([2026, 8, 19]));
-    assert_eq!(parse_yt_dlp_version("  2025.01.01\n"), Some([2025, 1, 1]));
-    assert_eq!(parse_yt_dlp_version("nightly"), None);
-    assert_eq!(parse_yt_dlp_version(""), None);
-    assert_eq!(parse_yt_dlp_version("2026.08"), None);
-    assert_eq!(parse_yt_dlp_version("not.a.version"), None);
-}
-
-#[test]
 fn version_floor_accepts_new_rejects_old() {
     assert!([2026, 8, 19] >= MIN_YTDLP_VERSION);
     assert!([2027, 1, 1] >= MIN_YTDLP_VERSION);
@@ -2359,14 +2349,15 @@ fn cookies_browser_index_round_trip() {
 }
 
 #[test]
-fn ytdlp_update_available_compares_releases() {
-    assert!(ytdlp_update_available("2026.08.19", "2026.09.01"));
-    assert!(!ytdlp_update_available("2026.09.01", "2026.09.01"));
-    assert!(!ytdlp_update_available("2026.09.02", "2026.09.01"));
-    // Unparseable tags never nag.
-    assert!(!ytdlp_update_available("2026.09.01", "nightly"));
-    assert!(!ytdlp_update_available("nightly", "2026.09.01"));
-    assert!(!ytdlp_update_available("", ""));
+fn yt_dlp_update_compares_releases() {
+    // Real yt-dlp date-versioned tags. Parseable sides never nag backwards;
+    // unparseable tags never nag at all (pinned by tool_update_available too).
+    assert!(tool_update_available("2026.08.19", "2026.09.01"));
+    assert!(!tool_update_available("2026.09.01", "2026.09.01"));
+    assert!(!tool_update_available("2026.09.02", "2026.09.01"));
+    assert!(!tool_update_available("2026.09.01", "nightly"));
+    assert!(!tool_update_available("nightly", "2026.09.01"));
+    assert!(!tool_update_available("", ""));
 }
 
 #[test]
@@ -3052,6 +3043,7 @@ fn quickjs_arch_supported_mirrors_download_url() {
 #[test]
 fn parse_dotted_version_handles_upstream_shapes() {
     assert_eq!(parse_dotted_version("2026.08.19"), Some([2026, 8, 19]));
+    assert_eq!(parse_dotted_version("  2025.01.01\n"), Some([2025, 1, 1]));
     assert_eq!(parse_dotted_version("v9.0.2"), Some([9, 0, 2]));
     assert_eq!(parse_dotted_version("0.17.0"), Some([0, 17, 0]));
     // boul2gom binaries report an `n`-prefixed, `-static`-suffixed token.
@@ -3059,6 +3051,8 @@ fn parse_dotted_version_handles_upstream_shapes() {
     assert_eq!(parse_dotted_version("n8.0"), Some([8, 0, 0]));
     // Distro builds carry their own suffixes.
     assert_eq!(parse_dotted_version("9.0.2-1"), Some([9, 0, 2]));
+    // Two-part versions pad with zero (the old strict parser rejected these).
+    assert_eq!(parse_dotted_version("2026.08"), Some([2026, 8, 0]));
 }
 
 #[test]
@@ -3068,6 +3062,8 @@ fn parse_dotted_version_rejects_non_versions() {
     // `N-…` git builds carry no dotted version.
     assert_eq!(parse_dotted_version("N-12345-gabcdef"), None);
     assert_eq!(parse_dotted_version("abc"), None);
+    // `not.a.version`: `n` prefix stripped, no numeric part remains.
+    assert_eq!(parse_dotted_version("not.a.version"), None);
 }
 
 #[test]

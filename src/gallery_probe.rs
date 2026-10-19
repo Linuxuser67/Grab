@@ -404,51 +404,50 @@ async fn run_to_completion(
     // the reap (the streamed path bounds its stderr drain the same way) and
     // kill the group when EOF never arrives.
     const DRAIN_AFTER_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
-    let (stdout, stderr_bytes) =
-        match tokio::time::timeout(DRAIN_AFTER_EXIT_TIMEOUT, async {
-            (join_bounded(out_task).await, join_bounded(err_task).await)
-        })
-        .await
-        {
-            Ok((Ok(buf), Ok(err))) => (buf, err),
-            Ok((Err(e), _)) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
-                return Err(GalleryError::probe(format!(
-                    "{what} produced too much output"
-                )));
-            }
-            Ok((Err(e), _)) => {
-                return Err(GalleryError::install(format!(
-                    "couldn't drain gallery-dl output: {e}"
-                )));
-            }
-            Ok((_, Err(e))) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
-                return Err(GalleryError::probe(format!(
-                    "{what} produced too much output"
-                )));
-            }
-            Ok((_, Err(e))) => {
-                return Err(GalleryError::install(format!(
-                    "couldn't drain gallery-dl output: {e}"
-                )));
-            }
-            Err(_) => {
-                // EOF never came; the length caps already watch the bytes, so
-                // this is a pipe inherited by a surviving descendant. Kill the
-                // group by the recorded PGID (the guard disarmed at reap) and
-                // fail the probe instead of hanging it.
-                #[cfg(unix)]
-                if let Some(pgid) = pgid {
-                    // SAFETY: constant signal number; ESRCH (already dead) is
-                    // harmless.
-                    unsafe {
-                        libc::killpg(pgid, libc::SIGKILL);
-                    }
+    let (stdout, stderr_bytes) = match tokio::time::timeout(DRAIN_AFTER_EXIT_TIMEOUT, async {
+        (join_bounded(out_task).await, join_bounded(err_task).await)
+    })
+    .await
+    {
+        Ok((Ok(buf), Ok(err))) => (buf, err),
+        Ok((Err(e), _)) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
+            return Err(GalleryError::probe(format!(
+                "{what} produced too much output"
+            )));
+        }
+        Ok((Err(e), _)) => {
+            return Err(GalleryError::install(format!(
+                "couldn't drain gallery-dl output: {e}"
+            )));
+        }
+        Ok((_, Err(e))) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
+            return Err(GalleryError::probe(format!(
+                "{what} produced too much output"
+            )));
+        }
+        Ok((_, Err(e))) => {
+            return Err(GalleryError::install(format!(
+                "couldn't drain gallery-dl output: {e}"
+            )));
+        }
+        Err(_) => {
+            // EOF never came; the length caps already watch the bytes, so
+            // this is a pipe inherited by a surviving descendant. Kill the
+            // group by the recorded PGID (the guard disarmed at reap) and
+            // fail the probe instead of hanging it.
+            #[cfg(unix)]
+            if let Some(pgid) = pgid {
+                // SAFETY: constant signal number; ESRCH (already dead) is
+                // harmless.
+                unsafe {
+                    libc::killpg(pgid, libc::SIGKILL);
                 }
-                return Err(GalleryError::probe(format!(
-                    "{what} didn't close its pipes after exiting"
-                )));
             }
-        };
+            return Err(GalleryError::probe(format!(
+                "{what} didn't close its pipes after exiting"
+            )));
+        }
+    };
     Ok(std::process::Output {
         status,
         stdout,
@@ -583,8 +582,6 @@ pub(crate) async fn enumerate_gallery_files_streamed(
     items_tx: tokio::sync::mpsc::UnboundedSender<GalleryItem>,
 ) -> Result<usize, GalleryError> {
     // Same line-streaming shape as the yt-dlp runner (see video_runner.rs).
-    use tokio::io::AsyncBufReadExt as _;
-
     let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, true);
     // stdout is the line stream; stderr is kept as a short tail for the
     // error text, drained concurrently so gallery-dl never blocks on a full pipe.
@@ -615,35 +612,33 @@ pub(crate) async fn enumerate_gallery_files_streamed(
     loop {
         // Wake at the idle bound or the total deadline, whichever is first.
         let wake = (tokio::time::Instant::now() + STREAM_IDLE_TIMEOUT).min(deadline);
-        let line = match tokio::time::timeout_at(
-            wake,
-            read_capped_line(&mut lines_reader, &mut line_buf),
-        )
-        .await
-        {
-            Err(_) if tokio::time::Instant::now() >= deadline => {
-                return Err(GalleryError::probe(
-                    "gallery-dl enumerate timed out".to_string(),
-                ));
-            }
-            Err(_) => {
-                return Err(GalleryError::probe(
-                    "gallery-dl enumerate stalled (no output)".to_string(),
-                ));
-            }
-            Ok(Err(e)) => {
-                return Err(GalleryError::probe(format!(
-                    "couldn't read gallery-dl output: {e}"
-                )));
-            }
-            Ok(Ok(None)) => break,
-            Ok(Ok(Some(()))) => {
-                // The reader keeps the terminator; strip it for the parser.
-                String::from_utf8_lossy(&line_buf)
-                    .trim_end_matches(['\n', '\r'])
-                    .to_owned()
-            }
-        };
+        let line =
+            match tokio::time::timeout_at(wake, read_capped_line(&mut lines_reader, &mut line_buf))
+                .await
+            {
+                Err(_) if tokio::time::Instant::now() >= deadline => {
+                    return Err(GalleryError::probe(
+                        "gallery-dl enumerate timed out".to_string(),
+                    ));
+                }
+                Err(_) => {
+                    return Err(GalleryError::probe(
+                        "gallery-dl enumerate stalled (no output)".to_string(),
+                    ));
+                }
+                Ok(Err(e)) => {
+                    return Err(GalleryError::probe(format!(
+                        "couldn't read gallery-dl output: {e}"
+                    )));
+                }
+                Ok(Ok(None)) => break,
+                Ok(Ok(Some(()))) => {
+                    // The reader keeps the terminator; strip it for the parser.
+                    String::from_utf8_lossy(&line_buf)
+                        .trim_end_matches(['\n', '\r'])
+                        .to_owned()
+                }
+            };
         // Blank lines carry no message.
         let Some(m) = parse_jsonl_line(&line)? else {
             continue;
@@ -726,7 +721,11 @@ async fn read_capped_line<R: tokio::io::AsyncBufRead + Unpin>(
             Err(e) => return Err(e),
         };
         if available.is_empty() {
-            return if buf.is_empty() { Ok(None) } else { Ok(Some(())) };
+            return if buf.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(()))
+            };
         }
         let room = MAX_JSONL_LINE_BYTES - buf.len();
         let view = &available[..available.len().min(room)];

@@ -61,9 +61,8 @@ pub struct GalleryProgressUpdate {
 /// their signed tokens reach the journal in the clear. Non-URL text (no
 /// `://`) passes through untouched, including punctuation.
 fn redact_query_tokens(text: &str) -> String {
-    let is_special = |b: u8| {
-        b.is_ascii_whitespace() || matches!(b, b'"' | b'\'' | b'(' | b')' | b'[' | b']')
-    };
+    let is_special =
+        |b: u8| b.is_ascii_whitespace() || matches!(b, b'"' | b'\'' | b'(' | b')' | b'[' | b']');
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;

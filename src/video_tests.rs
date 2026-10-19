@@ -10506,12 +10506,39 @@ fn ytdlp_command_skips_impersonate_when_unsupported() {
     schema_env_once();
     let dir = impersonate_test_dir("cmd-off");
     let bin = fake_ytdlp_impersonate(&dir, None);
+    // A selected target exercises the whole gate order: the flag must still
+    // never reach an unsupported binary.
+    let settings = crate::settings::AppSettings::new();
+    settings
+        .set_string(crate::settings::key::IMPERSONATE_BROWSER, "edge")
+        .unwrap();
     let args: Vec<String> = ytdlp_command(&bin)
         .as_std()
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
+    // Restore the compiled default before asserting so a failure here
+    // doesn't poison sibling tests in the shared memory backend.
+    settings
+        .set_string(crate::settings::key::IMPERSONATE_BROWSER, "")
+        .unwrap();
     assert!(!args.iter().any(|a| a == "--impersonate"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ytdlp_support_probe_reprobes_after_an_in_place_binary_update() {
+    schema_env_once();
+    let dir = impersonate_test_dir("probe-stamp");
+    let bin = fake_ytdlp_impersonate(
+        &dir,
+        Some("[info] Available impersonate targets\nClient  OS  Source\nChrome  -  curl_cffi\n"),
+    );
+    assert!(ytdlp_supports_impersonation(&bin));
+    // Overwrite the same path with a build that lacks curl_cffi: the
+    // (mtime, len) stamp flips, so the cached answer must not survive.
+    std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+    assert!(!ytdlp_supports_impersonation(&bin));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -350,8 +350,23 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
     Ok(Libraries::new(youtube, ffmpeg))
 }
 
-/// Cached `--impersonate` support per yt-dlp binary path.
-static IMPERSONATE_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+/// Cached `--impersonate` support per yt-dlp binary, stamped with the
+/// binary's `(mtime, len)`: an in-place yt-dlp update flips the stamp, so
+/// the next spawn re-probes instead of serving the old binary's answer.
+#[derive(Clone, Copy)]
+struct ImpersonateEntry {
+    stamp: (Option<std::time::SystemTime>, u64),
+    supported: bool,
+}
+
+static IMPERSONATE_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, ImpersonateEntry>>> = OnceLock::new();
+
+/// Stat stamp for the support cache; a missing binary reports `(None, 0)`.
+fn impersonate_stamp(youtube_bin: &Path) -> (Option<std::time::SystemTime>, u64) {
+    std::fs::metadata(youtube_bin)
+        .map(|m| (m.modified().ok(), m.len()))
+        .unwrap_or((None, 0))
+}
 
 /// Whether yt-dlp's `--impersonate` flag is known-supported for this binary.
 /// Sync, never blocks a worker: returns the cached probe result, or `false` (the
@@ -360,15 +375,27 @@ static IMPERSONATE_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::
 /// park the download; the next download gets the cached answer.
 pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
     let cache = IMPERSONATE_SUPPORT.get_or_init(|| Mutex::new(HashMap::new()));
+    let stamp = impersonate_stamp(youtube_bin);
     // A poisoned cache must never panic the caller: skip the read and fall
     // through to the safe default; the next call retries the lock.
     if let Ok(mut guard) = cache.lock() {
-        if let Some(&hit) = guard.get(youtube_bin) {
-            return hit;
+        if let Some(entry) = guard.get(youtube_bin) {
+            if entry.stamp == stamp {
+                return entry.supported;
+            }
+            // The binary changed in place (an update): drop the stale
+            // answer and let the claim below re-probe.
+            guard.remove(youtube_bin);
         }
         // Claim the key with the safe default so concurrent first calls don't
         // spawn duplicate probes; the background fill overwrites it.
-        guard.insert(youtube_bin.to_path_buf(), false);
+        guard.insert(
+            youtube_bin.to_path_buf(),
+            ImpersonateEntry {
+                stamp,
+                supported: false,
+            },
+        );
     }
     if tokio::runtime::Handle::try_current().is_ok() {
         tokio::spawn(warm_impersonation_cache(youtube_bin.to_path_buf()));
@@ -383,27 +410,38 @@ pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
         );
         let supported = probe_impersonate_support(youtube_bin);
         if let Ok(mut guard) = cache.lock() {
-            guard.insert(youtube_bin.to_path_buf(), supported);
+            guard.insert(
+                youtube_bin.to_path_buf(),
+                ImpersonateEntry { stamp, supported },
+            );
         }
         supported
     }
 }
 
 /// Probe once on the blocking pool and cache the result. Spawned in the
-/// background by `ytdlp_supports_impersonation`; the `unwrap_or(false)` keeps
-/// a panicking probe from taking the answer above the safe default.
+/// background by `ytdlp_supports_impersonation`; on a join failure the
+/// fallback claims `(None, 0)` + unsupported, which cannot collide with a
+/// real binary's stamp — the next call sees a stamp mismatch and re-probes,
+/// so a panicking fill can never wedge a wrong-but-sticky answer.
 async fn warm_impersonation_cache(youtube_bin: std::path::PathBuf) {
-    let key = youtube_bin.clone();
-    let supported = tokio::task::spawn_blocking(move || probe_impersonate_support(&youtube_bin))
-        .await
-        .unwrap_or(false);
+    // Stat + probe run together on the blocking pool; the stamp recorded
+    // here is the one the probe actually ran against.
+    let fallback = youtube_bin.clone();
+    let (key, stamp, supported) = tokio::task::spawn_blocking(move || {
+        let stamp = impersonate_stamp(&youtube_bin);
+        let supported = probe_impersonate_support(&youtube_bin);
+        (youtube_bin, stamp, supported)
+    })
+    .await
+    .unwrap_or((fallback, (None, 0), false));
     // A poisoned cache drops the fill silently instead of panicking the
     // background task: the next call re-probes and re-caches.
     if let Ok(mut guard) = IMPERSONATE_SUPPORT
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
     {
-        guard.insert(key, supported);
+        guard.insert(key, ImpersonateEntry { stamp, supported });
     }
 }
 

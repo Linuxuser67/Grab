@@ -7,6 +7,12 @@
       <description>Empty means the system Downloads folder.</description>
     </key>
     <key name="impersonate-browser" type="s">
+      <choices>
+        <choice value=''/>
+        <choice value='chrome'/>
+        <choice value='edge'/>
+        <choice value='safari'/>
+      </choices>
       <default>''</default>
       <summary>Impersonate a browser</summary>
       <description>Browser client whose TLS fingerprint yt-dlp sends (chrome, edge or safari). Empty does not impersonate, which is yt-dlp's documented default.</description>

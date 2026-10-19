@@ -290,15 +290,19 @@ pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(youtube_bin);
     // Impersonation is user-selectable (Preferences → Advanced): yt-dlp's
     // docs make it opt-in and warn that forcing it on every request may hurt
-    // speed and stability. Empty target = None = yt-dlp's documented default;
-    // every spawn passes --ignore-config, so nothing else can re-enable it.
-    // Support is probed once per binary and cached — a PATH-provided yt-dlp
-    // without curl_cffi hard-fails on the flag, so never pass it blindly.
-    if crate::video_tools::ytdlp_supports_impersonation(youtube_bin) {
-        let target = crate::settings::AppSettings::new().impersonate_browser();
-        if !target.is_empty() {
-            cmd.arg("--impersonate").arg(target);
-        }
+    // speed and stability. The stored string resolves through the validated
+    // value table (unknown values fall back to none), and the schema only
+    // accepts the listed choices, so argv never carries an unvetted string.
+    // Empty target = None = yt-dlp's documented default: decisive, because
+    // it also skips the support probe entirely. Support is probed once per
+    // (binary, mtime, size) and cached — a PATH-provided yt-dlp without
+    // curl_cffi hard-fails on the flag, so never pass it blindly.
+    let target = crate::settings::AppSettings::new().impersonate_browser();
+    let target = crate::video_prefs::impersonate_value(crate::video_prefs::impersonate_index(
+        &target,
+    ));
+    if !target.is_empty() && crate::video_tools::ytdlp_supports_impersonation(youtube_bin) {
+        cmd.arg("--impersonate").arg(target);
     }
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

@@ -551,15 +551,15 @@ mod tests {
         assert!(grid.selected_indices().is_empty());
         select_all.emit_clicked();
         settle();
-        assert_eq!(add_btn.label().as_deref(), Some("300 selected"));
+        assert_eq!(add_btn.label().as_deref(), Some("10000 selected"));
 
         // A late batch arrives selected with an existing pick untouched:
         // item-0 is out, the two late items are in.
         grid.inner.selection.unselect_item(0);
         grid.append(&["late-a".to_string(), "late-b".to_string()]);
         settle();
-        assert_eq!(grid.len(), 302);
-        assert_eq!(add_btn.label().as_deref(), Some("301 selected"));
+        assert_eq!(grid.len(), 10_002);
+        assert_eq!(add_btn.label().as_deref(), Some("10001 selected"));
         assert!(!grid.selected_indices().contains(&0));
     }
 

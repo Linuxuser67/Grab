@@ -3130,19 +3130,6 @@ fn ytdlp_identity_args_pins_quickjs_for_youtube_with_cookies() {
 }
 
 #[test]
-fn cookies_browser_with_handoff_prefers_scoped_jar() {
-    use crate::video_tools::cookies_browser_with_handoff;
-
-    let handoff = vec!["--cookies".to_string(), "/tmp/jar".to_string()];
-    // The jar is the browser's own cookies for this URL: browser extraction is
-    // redundant, and its keyring failure aborts the spawn even though the jar
-    // would work.
-    assert_eq!(cookies_browser_with_handoff("brave", &handoff), "none");
-    assert_eq!(cookies_browser_with_handoff("brave", &[]), "brave");
-    assert_eq!(cookies_browser_with_handoff("none", &handoff), "none");
-}
-
-#[test]
 fn ytdlp_identity_args_skips_quickjs_pin_off_youtube() {
     // The runtime pin is YouTube-only: other sites keep yt-dlp's own runtime
     // discovery, so a system runtime is never disabled there.
@@ -3808,6 +3795,84 @@ fn live_test_job() -> VideoJob {
         proxy: None,
         info_json: None,
     }
+}
+
+/// Stage a handoff jar for `url`; callers must discard the entry afterwards.
+fn stage_test_handoff(url: &str) -> std::path::PathBuf {
+    use crate::extension_server::{Cookie, store_handoff_cookies, write_handoff_cookies};
+    let cookie = Cookie {
+        name: "c".into(),
+        value: "v".into(),
+        domain: None,
+        host_only: None,
+        path: None,
+        secure: None,
+        expiration_date: None,
+    };
+    let path = write_handoff_cookies(url, &[cookie]).expect("handoff jar");
+    store_handoff_cookies(url, path.clone(), Some("HandoffUA/1".into()));
+    path
+}
+
+#[test]
+fn live_and_vod_argv_prefer_a_fresh_handoff_jar() {
+    use crate::extension_server::discard_handoff_cookies;
+    let url = "https://handoff-argv.invalid/v/1";
+    let path = stage_test_handoff(url);
+    let mut live = live_test_job();
+    live.page_url = url.into();
+    live.cookies_browser = "brave".into();
+    let argv = live_capture_argv(&live, "h720", std::path::Path::new("/tmp/x.ts"), None);
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a.starts_with("--cookies-from-browser=")),
+        "fresh jar must not trigger keyring extraction: {argv:?}"
+    );
+    let ci = argv
+        .iter()
+        .position(|a| a == "--cookies")
+        .expect("jar flag");
+    assert_eq!(argv[ci + 1], path.to_string_lossy().into_owned());
+    assert!(argv.iter().any(|a| a == "HandoffUA/1"));
+    assert!(ci < argv.iter().position(|a| a == "--").expect("--"));
+    let mut vod = direct_test_job();
+    vod.page_url = url.into();
+    vod.cookies_browser = "brave".into();
+    let argv = unified_download_argv(
+        &vod,
+        "bv*+ba/b",
+        false,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        std::path::Path::new("/tmp/x.mp4"),
+        None,
+    );
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a.starts_with("--cookies-from-browser="))
+    );
+    let ci = argv
+        .iter()
+        .position(|a| a == "--cookies")
+        .expect("jar flag");
+    assert_eq!(argv[ci + 1], path.to_string_lossy().into_owned());
+    discard_handoff_cookies(url);
+}
+
+#[test]
+fn live_argv_uses_browser_cookies_without_a_handoff() {
+    let mut live = live_test_job();
+    live.page_url = "https://no-handoff-argv.invalid/v/1".into();
+    live.cookies_browser = "brave".into();
+    let argv = live_capture_argv(&live, "h720", std::path::Path::new("/tmp/x.ts"), None);
+    assert!(
+        argv.iter()
+            .any(|a| a.starts_with("--cookies-from-browser=")),
+        "configured browser must still be used: {argv:?}"
+    );
+    assert!(!argv.iter().any(|a| a == "--cookies"));
 }
 
 #[test]

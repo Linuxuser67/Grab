@@ -28,10 +28,7 @@ use crate::video_staging::{
     staging_location_for_dest, sweep_partial_remuxes, sweep_staging_preserving_recordings,
     write_private,
 };
-use crate::video_tools::{
-    VideoError, cookies_browser_with_handoff, ensure_tool_versions, resolve_libraries,
-    ytdlp_identity_args,
-};
+use crate::video_tools::{VideoError, ensure_tool_versions, resolve_libraries};
 use crate::video_types::{FetchedVideo, VideoOutcome};
 use gettextrs::gettext;
 use std::path::{Path, PathBuf};
@@ -1201,15 +1198,10 @@ pub(crate) async fn resolve_subtitle_lang(
     argv.extend(playlist_scope_args(playlist_index));
     argv.extend(["--skip-download".to_string(), "--dump-json".to_string()]);
     argv.extend(proxy_cli_args(job.proxy.as_ref()));
-    // The subtitle probe extracts too, so it needs the handoff cookies like
-    // every other leg. Before the identity args (`-- <url>` terminates argv).
-    let handoff = crate::extension_server::handoff_cookie_args(&job.page_url);
-    let cookie_source = cookies_browser_with_handoff(&job.cookies_browser, &handoff);
-    argv.extend(handoff);
-    let handoff_ua = crate::extension_server::handoff_user_agent(&job.page_url);
-    argv.extend(ytdlp_identity_args(
-        cookie_source,
-        handoff_ua.as_deref(),
+    // The subtitle probe extracts too, so it uses the same handoff jar (or
+    // configured browser) plus the shared identity tail ending in `-- <url>`.
+    argv.extend(crate::extension_server::ytdlp_spawn_identity(
+        &job.cookies_browser,
         &job.page_url,
     ));
     let mut cmd = ytdlp_command(youtube_bin);

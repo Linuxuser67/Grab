@@ -304,7 +304,7 @@ async fn stage_cookie_file(
     // workaround, cookies, `--` URL guard): one helper so flags can't drift.
     // Both cookie sources are intentional here: `--cookies` is this export's
     // output file and `--cookies-from-browser` is what fills it, so this spawn
-    // must not use cookies_browser_with_handoff.
+    // must not use the handoff-aware ytdlp_spawn_identity.
     cmd.args(crate::video_tools::ytdlp_identity_args(
         cookies_browser,
         None,

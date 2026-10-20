@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.0.2~beta.1" date="2026-10-20">
+      <description>
+        <ul>
+          <li>Browser-cookie handoff now ignores stale extension snapshots across yt-dlp, gallery-dl, and direct HTTP downloads when a live browser source can provide current cookies.</li>
+          <li>Fresh extension cookie snapshots remain usable, while snapshots older than 30 minutes are withheld for configured live browser sources.</li>
+          <li>Collection pickers show clearer item titles, and auto-add keeps collection lookups active, including when the same URL is entered again.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.0.1" date="2026-10-19">
       <description>
         <ul>

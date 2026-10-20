@@ -43,8 +43,7 @@ gettext-rs = "0.8"
 yt-dlp = { version = "2.8.3", default-features = false, features = ["rustls"] }
 libc = "0.2"
 thiserror = "2"
-# ZIP fixtures in video tests; tar.xz extraction for the ffmpeg/ffprobe installer.
-zip = "8"
+# tar.xz extraction for the ffmpeg/ffprobe static-build installer.
 tar = "0.4"
 xz2 = "0.1"
 

@@ -898,16 +898,21 @@ const FFMPEG_MAX_DOWNLOAD_BYTES: u64 = 192 * 1024 * 1024;
 /// extraction; awaits off the GTK thread.
 async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
     ensure_lib_dir(&dir)?;
-    let release = fetch_latest_ffmpeg_asset()
-        .await
-        .ok_or_else(|| VideoError::install(
-            "couldn't find a checksummed, versioned Linux FFmpeg build with ffprobe"
-        ))?;
+    let release = fetch_latest_ffmpeg_asset().await.ok_or_else(|| {
+        VideoError::install(
+            "couldn't find a checksummed, versioned Linux FFmpeg build with ffprobe",
+        )
+    })?;
     let archive = dir.join(&release.name);
     // Use Grab's proxy-aware streaming client for the large archive, and refuse
     // any payload whose size or SHA-256 does not match expectations.
-    if let Err(e) =
-        download_to_file(&release.url, &archive, &release.checksum, FFMPEG_MAX_DOWNLOAD_BYTES).await
+    if let Err(e) = download_to_file(
+        &release.url,
+        &archive,
+        &release.checksum,
+        FFMPEG_MAX_DOWNLOAD_BYTES,
+    )
+    .await
     {
         std::fs::remove_file(&archive).ok();
         return Err(VideoError::install(e));
@@ -974,8 +979,7 @@ fn extract_entries(
         .map_err(|e| format!("couldn't read ffmpeg tar.xz archive: {e}"))?;
 
     for item in entries {
-        let mut entry =
-            item.map_err(|e| format!("couldn't read ffmpeg archive entry: {e}"))?;
+        let entry = item.map_err(|e| format!("couldn't read ffmpeg archive entry: {e}"))?;
         // Never follow archive symlinks or hard links as executable payloads.
         if !entry.header().entry_type().is_file() {
             continue;
@@ -989,7 +993,10 @@ fn extract_entries(
             _ => continue,
         };
         let final_dest = dir.join(tool);
-        if staged.iter().any(|(_, final_path)| final_path == &final_dest) {
+        if staged
+            .iter()
+            .any(|(_, final_path)| final_path == &final_dest)
+        {
             return Err(format!("duplicate {tool} binary in the FFmpeg archive"));
         }
         let dest = dir.join(format!(".{tool}.new"));
@@ -1698,10 +1705,7 @@ fn ffmpeg_build_target() -> Option<&'static str> {
 /// Parse the semantic version from a static, versioned BtbN archive name.
 /// Shared-library builds, master builds, other architectures, and malformed
 /// version/branch combinations are rejected.
-fn ffmpeg_asset_version_for_target(
-    name: &str,
-    target: &str,
-) -> Option<([u32; 3], String)> {
+fn ffmpeg_asset_version_for_target(name: &str, target: &str) -> Option<([u32; 3], String)> {
     // Besides rejecting malformed names, this prevents an archive name from
     // containing path separators before it is joined to the install directory.
     if !valid_release_tag(name) {
@@ -1724,7 +1728,10 @@ fn ffmpeg_asset_version_for_target(
     {
         return None;
     }
-    Some((version, format!("{}.{}.{}", version[0], version[1], version[2])))
+    Some((
+        version,
+        format!("{}.{}.{}", version[0], version[1], version[2]),
+    ))
 }
 
 /// Fetch metadata for one supported static build. Asset selection and its digest
@@ -1741,8 +1748,7 @@ async fn fetch_latest_ffmpeg_asset() -> Option<FfmpegReleaseAsset> {
         .assets
         .iter()
         .filter_map(|asset| {
-            let (version, version_label) =
-                ffmpeg_asset_version_for_target(&asset.name, target)?;
+            let (version, version_label) = ffmpeg_asset_version_for_target(&asset.name, target)?;
             let checksum = asset.digest.as_deref()?.strip_prefix("sha256:")?;
             if checksum.len() != 64 || !checksum.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return None;
@@ -1767,8 +1773,7 @@ async fn fetch_latest_ffmpeg_asset() -> Option<FfmpegReleaseAsset> {
 /// Latest supported FFmpeg release version for the settings update hint.
 /// Returns None if release metadata, architecture, archive, or digest is missing.
 pub async fn latest_ffmpeg_tag() -> Option<String> {
-    let handle =
-        crate::runtime::tokio_rt().spawn(async move { fetch_latest_ffmpeg_asset().await });
+    let handle = crate::runtime::tokio_rt().spawn(async move { fetch_latest_ffmpeg_asset().await });
     handle.await.ok().flatten().map(|asset| asset.version)
 }
 
@@ -2216,10 +2221,7 @@ mod ffmpeg_archive_tests {
     use std::io::Cursor;
 
     fn fixture_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "grab-ffmpeg-{label}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("grab-ffmpeg-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -2307,7 +2309,10 @@ mod ffmpeg_archive_tests {
                 & 0o111,
             0
         );
-        assert!(!archive.exists(), "archive should be removed after extraction");
+        assert!(
+            !archive.exists(),
+            "archive should be removed after extraction"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2324,7 +2329,10 @@ mod ffmpeg_archive_tests {
         );
 
         let err = extract_ffmpeg_toolchain(&archive, &install_dir).unwrap_err();
-        assert!(err.contains("ffprobe binary not found"), "unexpected error: {err}");
+        assert!(
+            err.contains("ffprobe binary not found"),
+            "unexpected error: {err}"
+        );
         assert_eq!(
             std::fs::read(install_dir.join("ffmpeg")).unwrap(),
             b"existing-ffmpeg",

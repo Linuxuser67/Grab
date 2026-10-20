@@ -1214,6 +1214,7 @@ impl OpenState {
 #[derive(Clone)]
 pub struct AddCard {
     widget: gtk4::Widget,
+    nav: adw::NavigationView,
     open: Rc<dyn Fn(Option<String>)>,
     toggle: Rc<dyn Fn()>,
     open_torrent_picker: TorrentPickerOpener,
@@ -1224,6 +1225,12 @@ impl AddCard {
     /// The card widget, placed above the view stack in the window content.
     pub fn widget(&self) -> &gtk4::Widget {
         &self.widget
+    }
+
+    /// The card's navigation stack (form plus picker pages), so the window
+    /// can react to a picker page becoming visible.
+    pub fn navigation(&self) -> &adw::NavigationView {
+        &self.nav
     }
 
     /// Reveal the card, pre-filling `initial_url` when given (drops and
@@ -2932,6 +2939,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
 
     AddCard {
         widget: revealer.upcast(),
+        nav: nav.clone(),
         open,
         toggle,
         open_torrent_picker,

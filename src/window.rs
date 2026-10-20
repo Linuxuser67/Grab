@@ -690,6 +690,20 @@ pub fn build_window(
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     content.append(add_card.widget());
     stack.set_vexpand(true);
+    // A picker page is a selection task that needs height: while one is
+    // visible, the card takes the content area. The queue gets its space
+    // back as soon as the form page returns (pop, Escape, or card close).
+    {
+        let stack = stack.clone();
+        add_card
+            .navigation()
+            .connect_notify_local(Some("visible-page"), move |nav, _| {
+                let picker = nav
+                    .visible_page_tag()
+                    .is_some_and(|tag| tag.as_str() != "form");
+                stack.set_visible(!picker);
+            });
+    }
     content.append(&stack);
     toolbar.set_content(Some(&content));
     toasts.set_child(Some(&toolbar));

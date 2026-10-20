@@ -254,19 +254,6 @@ pub(crate) fn push_gallery_picker_page(
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
-    // Selection is positional: the indices are computed against the
-    // enumeration snapshot and become a gallery-dl `--range` on the queued
-    // job. A gallery that gained files in between shifts that mapping, so
-    // say so up front. (Queueing the selected file URLs themselves would be
-    // the robust fix and needs a design decision.)
-    let positional_note = gtk4::Label::builder()
-        .label(gettext(
-            "Selected by position; reopen this picker if the gallery changed",
-        ))
-        .css_classes(["dimmed", "caption"])
-        .halign(gtk4::Align::Start)
-        .build();
-    list_box.append(&positional_note);
     // Only the entries scroll; the recycling GridView fills the remaining
     // height whatever the enumeration produced (no pill-style height cap).
     list_box.append(grid.widget());
@@ -312,6 +299,11 @@ pub(crate) fn push_gallery_picker_page(
             if !add_btn_guard.is_sensitive() {
                 return;
             }
+            // Selection is positional: the indices are computed against the
+            // enumeration snapshot and become a gallery-dl `--range` on the
+            // queued job. A gallery that gained files in between shifts that
+            // mapping. (Queueing the selected file URLs themselves would be
+            // the robust fix and needs a design decision.)
             let selected = grid.selected_indices();
             if selected.is_empty() {
                 error_caption.set_text(&gettext("Select at least one file"));

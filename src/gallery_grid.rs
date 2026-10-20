@@ -7,11 +7,15 @@
 //! rubber-band and arrow-key selection pills never had.
 //!
 //! One cell is a mirrored `CheckButton` (the visual state) plus an
-//! ellipsized `Label` sized like a pill (24 chars). Selection state lives in
-//! `GtkMultiSelection`; the check only mirrors it in `bind` and through one
-//! `selection-changed` watch per realized cell. Titles are set in `bind`
-//! from the `StringObject` — plain text, since titles are untrusted and may
-//! carry `&`, `<`, RTL and bidi-control characters.
+//! ellipsized `Label` filling the rest of the cell. Columns cap at three:
+//! `GtkGridView` sizes columns from the cell's *minimum* width and clamps
+//! to its 7-column default, which sliced the picker into slivers and
+//! ellipsized every title to a few characters. Columns always divide the
+//! row width, so fewer of them just make each column wider. Selection state
+//! lives in `GtkMultiSelection`; the check only mirrors it in `bind` and
+//! through one `selection-changed` watch per realized cell. Titles are set
+//! in `bind` from the `StringObject` — plain text, since titles are
+//! untrusted and may carry `&`, `<`, RTL and bidi-control characters.
 
 use gtk4::prelude::*;
 use gtk4::{gdk, glib, pango};
@@ -229,6 +233,9 @@ impl GalleryGrid {
         let view = gtk4::GridView::builder()
             .model(&selection)
             .factory(&factory)
+            // Three columns max; the default 7 split the width into
+            // slivers and ellipsized every title to a few characters.
+            .max_columns(3)
             .enable_rubberband(true)
             // The click gesture does the selecting; activation makes no
             // sense in a picker.
@@ -286,7 +293,8 @@ impl GalleryGrid {
     }
 
     /// Selected entry indices, ascending, in store order == enumeration
-    /// order (the shifted-index caveat stays with the page's caption).
+    /// order (the shifted-index caveat is documented at the `--range`
+    /// mapping in `inline_gallery`).
     pub(crate) fn selected_indices(&self) -> Vec<usize> {
         let bitset = self.inner.selection.selection();
         (0..bitset.size())
@@ -475,6 +483,25 @@ mod tests {
         assert!(
             bound_titles.iter().any(|t| t.starts_with("item-")),
             "a realized cell must show its bound title: {bound_titles:?}"
+        );
+
+        // Three columns max, stretched across the row: at this 480px window
+        // each cell is ~160px and the label keeps most of it. The 7-column
+        // default squeezed the label into a sliver of its own cell.
+        let first_cell = cells[0]
+            .parent()
+            .and_downcast::<gtk4::Box>()
+            .expect("a realized cell box");
+        let first_label = first_cell
+            .first_child()
+            .and_then(|w| w.next_sibling())
+            .and_downcast::<gtk4::Label>()
+            .expect("a realized cell with a title label");
+        assert!(
+            first_label.width() * 2 > first_cell.width(),
+            "the title keeps most of its cell: {} of {}",
+            first_label.width(),
+            first_cell.width()
         );
 
         // Click-equivalent path (the model toggle the gesture performs); the

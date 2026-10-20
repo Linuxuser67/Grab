@@ -1095,8 +1095,11 @@ pub fn show(
                     let mut current: Vec<String> = Vec::new();
                     let mut indeterminate = installed.is_none();
                     if let Some((yt, ff, qjs, gdl, ffprobe_available)) = installed {
-                        match (yt.as_deref(), yt_tag.as_deref()) {
-                            (Some(installed), Some(tag))
+                        // Presence is independent for each binary. In particular,
+                        // resolve_libraries() must not hide all missing tools just
+                        // because a fresh profile has no yt-dlp yet.
+                        match (yt.as_ref(), yt_tag.as_deref()) {
+                            (Some((_, Some(installed))), Some(tag))
                                 if crate::video_tools::tool_update_available(installed, tag) =>
                             {
                                 updates.push(format!(
@@ -1105,48 +1108,45 @@ pub fn show(
                                     tag.trim()
                                 ));
                             }
-                            (Some(installed), Some(_)) => {
+                            (Some((_, Some(installed))), Some(_)) => {
                                 current.push(format!("yt-dlp {}", installed.trim()));
                             }
-                            _ => indeterminate = true,
+                            (Some(_), _) => indeterminate = true,
+                            (None, _) => missing.push("yt-dlp".to_string()),
                         }
-                        match (ff.as_deref(), ff_tag.as_deref()) {
-                            (Some(first_line), Some(tag)) => {
-                                let token = crate::video_tools::ffmpeg_version_token(first_line)
-                                    .unwrap_or(first_line);
-                                if crate::video_tools::ffmpeg_needs_update(
-                                    first_line,
-                                    tag,
-                                    ffprobe_available,
-                                ) {
-                                    updates.push(if ffprobe_available {
-                                        format!("ffmpeg {} → {}", token, tag.trim())
+                        if !ffprobe_available {
+                            if let Some((_, version)) = ff.as_ref() {
+                                let detail = version
+                                    .as_deref()
+                                    .and_then(crate::video_tools::ffmpeg_version_token)
+                                    .unwrap_or("repair required");
+                                updates.push(format!("ffmpeg {detail} (ffprobe missing)"));
+                            } else {
+                                missing.push("ffmpeg".to_string());
+                            }
+                        } else {
+                            match (ff.as_ref(), ff_tag.as_deref()) {
+                                (Some((_, Some(first_line))), Some(tag)) => {
+                                    let token = crate::video_tools::ffmpeg_version_token(first_line)
+                                        .unwrap_or(first_line);
+                                    if crate::video_tools::ffmpeg_needs_update(
+                                        first_line,
+                                        tag,
+                                        ffprobe_available,
+                                    ) {
+                                        updates.push(format!("ffmpeg {} → {}", token, tag.trim()));
                                     } else {
-                                        format!(
-                                            "ffmpeg {} → {} (ffprobe missing)",
-                                            token,
-                                            tag.trim()
-                                        )
-                                    });
-                                } else {
-                                    current.push(format!("ffmpeg {token}"));
+                                        current.push(format!("ffmpeg {token}"));
+                                    }
                                 }
+                                (Some(_), _) => indeterminate = true,
+                                (None, _) => missing.push("ffmpeg".to_string()),
                             }
-                            (Some(first_line), None) if !ffprobe_available => {
-                                let token = crate::video_tools::ffmpeg_version_token(first_line)
-                                    .unwrap_or(first_line);
-                                updates.push(format!("ffmpeg {token} (ffprobe missing)"));
-                            }
-                            (None, _) if !ffprobe_available => {
-                                updates.push("ffmpeg (ffprobe missing)".to_string());
-                            }
-                            _ => indeterminate = true,
                         }
-                        // quickjs is optional (provisioned for YouTube only):
-                        // judged when installed, never blocks the check.
-                        // If missing, offer to install it.
-                        match (qjs.as_deref(), qjs_tag.as_deref()) {
-                            (Some(installed), Some(tag))
+                        // Optional tools are offered for installation whenever
+                        // absent, even if their latest-release lookup is offline.
+                        match (qjs.as_ref(), qjs_tag.as_deref()) {
+                            (Some((_, Some(installed))), Some(tag))
                                 if crate::video_tools::tool_update_available(installed, tag) =>
                             {
                                 updates.push(format!(
@@ -1155,33 +1155,25 @@ pub fn show(
                                     tag.trim()
                                 ));
                             }
-                            (Some(installed), Some(_)) => {
+                            (Some((_, Some(installed))), Some(_)) => {
                                 current.push(format!("quickjs {}", installed.trim()));
                             }
-                            (None, Some(_)) => {
-                                missing.push(TOOL_QUICKJS.to_string());
-                            }
-                            _ => indeterminate = true,
+                            (Some(_), _) => indeterminate = true,
+                            (None, _) => missing.push(TOOL_QUICKJS.to_string()),
                         }
-                        // gallery-dl is optional (provisioned for galleries only):
-                        // judged when installed, never blocks the check.
-                        // If missing, offer to install it.
-                        match (gdl.as_deref(), gdl_tag.as_deref()) {
-                            (Some(_installed), Some(tag)) if gdl_needs_update => {
+                        match (gdl.as_ref(), gdl_tag.as_deref()) {
+                            (Some((_, Some(installed))), Some(tag)) if gdl_needs_update => {
                                 updates.push(format!(
                                     "gallery-dl {} → {}",
-                                    _installed.trim(),
+                                    installed.trim(),
                                     tag.trim()
                                 ));
                             }
-                            (Some(installed), Some(_)) => {
+                            (Some((_, Some(installed))), Some(_)) => {
                                 current.push(format!("gallery-dl {}", installed.trim()));
                             }
-                            (None, Some(_)) => {
-                                missing.push(TOOL_GALLERY_DL.to_string());
-                            }
-                            (None, _) => {}
-                            _ => indeterminate = true,
+                            (Some(_), _) => indeterminate = true,
+                            (None, _) => missing.push(TOOL_GALLERY_DL.to_string()),
                         }
                     }
                     if !missing.is_empty() || !updates.is_empty() {

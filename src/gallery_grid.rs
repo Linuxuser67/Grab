@@ -451,8 +451,8 @@ mod tests {
         let grid = GalleryGrid::new();
         // Small pickers hug the entries; long ones scroll within a bounded
         // viewport rather than claiming the full page height.
-        assert!(!grid.widget().vexpand());
-        assert!(grid.widget().propagate_natural_height());
+        assert!(!grid.widget().is_vexpand());
+        assert!(grid.widget().propagates_natural_height());
         assert_eq!(grid.widget().max_content_height(), MAX_PICKER_HEIGHT);
         assert_eq!(grid.len(), 0);
         assert!(grid.selected_indices().is_empty());

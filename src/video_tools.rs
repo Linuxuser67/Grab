@@ -1726,8 +1726,9 @@ fn ffmpeg_build_target() -> Option<&'static str> {
 }
 
 /// Parse the semantic version from a static, versioned BtbN archive name.
-/// Shared-library builds, master builds, other architectures, and malformed
-/// version/branch combinations are rejected.
+/// Accept both immutable patch-build names (n9.0.1-27-g...) and the upstream
+/// release-branch aliases (n9.0-latest). Shared-library builds, master builds,
+/// other architectures, and malformed version/branch combinations are rejected.
 fn ffmpeg_asset_version_for_target(name: &str, target: &str) -> Option<([u32; 3], String)> {
     // Besides rejecting malformed names, this prevents an archive name from
     // containing path separators before it is joined to the install directory.
@@ -1737,18 +1738,41 @@ fn ffmpeg_asset_version_for_target(name: &str, target: &str) -> Option<([u32; 3]
     let rest = name.strip_prefix("ffmpeg-n")?;
     let marker = format!("-{target}-gpl-");
     let (build, release_branch) = rest.split_once(&marker)?;
-    let version_token = build.split('-').next()?;
-    if version_token.split('.').count() != 3
-        || !version_token
-            .split('.')
-            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-    {
-        return None;
-    }
-    let version = parse_dotted_version(version_token)?;
-    if version_token != format!("{}.{}.{}", version[0], version[1], version[2])
-        || release_branch != format!("{}.{}.tar.xz", version[0], version[1])
-    {
+
+    // BtbN's current latest autobuild publishes checksum-bearing stable-branch
+    // assets named n9.0-latest / n8.1-latest rather than n9.0.1-<build>-g<sha>.
+    // These still identify a specific supported FFmpeg release branch, and the
+    // GitHub API provides a SHA-256 digest for each archive.
+    let version = if let Some(branch_version) = build.strip_suffix("-latest") {
+        if branch_version.split('.').count() != 2
+            || !branch_version
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return None;
+        }
+        let version = parse_dotted_version(branch_version)?;
+        if branch_version != format!("{}.{}", version[0], version[1]) {
+            return None;
+        }
+        version
+    } else {
+        let version_token = build.split('-').next()?;
+        if version_token.split('.').count() != 3
+            || !version_token
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return None;
+        }
+        let version = parse_dotted_version(version_token)?;
+        if version_token != format!("{}.{}.{}", version[0], version[1], version[2]) {
+            return None;
+        }
+        version
+    };
+
+    if release_branch != format!("{}.{}.tar.xz", version[0], version[1]) {
         return None;
     }
     Some((
@@ -2328,6 +2352,24 @@ mod ffmpeg_archive_tests {
                 "linuxarm64"
             ),
             Some(([8, 1, 3], "8.1.3".to_string()))
+        );
+        // Current BtbN latest assets use stable-branch aliases, not patch
+        // build names, so both supported Linux architectures must recognize
+        // them when GitHub exposes their SHA-256 digest.
+        assert_eq!(
+            ffmpeg_asset_version_for_target("ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz", "linux64"),
+            Some(([9, 0, 0], "9.0.0".to_string()))
+        );
+        assert_eq!(
+            ffmpeg_asset_version_for_target(
+                "ffmpeg-n8.1-latest-linuxarm64-gpl-8.1.tar.xz",
+                "linuxarm64"
+            ),
+            Some(([8, 1, 0], "8.1.0".to_string()))
+        );
+        assert_eq!(
+            ffmpeg_asset_version_for_target("ffmpeg-n9.0-latest-linux64-gpl-8.1.tar.xz", "linux64"),
+            None
         );
         assert_eq!(ffmpeg_asset_version_for_target(stable, "linuxarm64"), None);
         assert_eq!(

@@ -123,8 +123,11 @@ jobs:
           # No job pushes or fetches; don't persist the token in git config.
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      # --locked fails when the lock would need re-resolution; read-only otherwise.
-      - run: cargo metadata --locked --format-version 1 >/dev/null
+      # TEMP diagnostic: let Cargo regenerate the lock, then expose the exact diff.
+      - name: Diagnose generated Cargo.lock
+        run: |
+          cargo metadata --format-version 1 >/dev/null
+          git --no-pager diff -- Cargo.lock
       - run: ./build-aux/gen-cargo-sources.py --check
   # Read-only secret and supply-chain scanning: gitleaks over the full
   # history plus cargo-audit against the RustSec advisory DB. No system

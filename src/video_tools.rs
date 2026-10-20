@@ -2357,10 +2357,7 @@ mod ffmpeg_archive_tests {
         // build names, so both supported Linux architectures must recognize
         // them when GitHub exposes their SHA-256 digest.
         assert_eq!(
-            ffmpeg_asset_version_for_target(
-                "ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz",
-                "linux64"
-            ),
+            ffmpeg_asset_version_for_target("ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz", "linux64"),
             Some(([9, 0, 0], "9.0.0".to_string()))
         );
         assert_eq!(
@@ -2371,10 +2368,7 @@ mod ffmpeg_archive_tests {
             Some(([8, 1, 0], "8.1.0".to_string()))
         );
         assert_eq!(
-            ffmpeg_asset_version_for_target(
-                "ffmpeg-n9.0-latest-linux64-gpl-8.1.tar.xz",
-                "linux64"
-            ),
+            ffmpeg_asset_version_for_target("ffmpeg-n9.0-latest-linux64-gpl-8.1.tar.xz", "linux64"),
             None
         );
         assert_eq!(ffmpeg_asset_version_for_target(stable, "linuxarm64"), None);

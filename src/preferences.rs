@@ -701,8 +701,7 @@ pub fn show(
         spin: &adw::Spinner,
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
     ) {
-        let (row, btn, spin, action) =
-            (row.clone(), btn.clone(), spin.clone(), action.clone());
+        let (row, btn, spin, action) = (row.clone(), btn.clone(), spin.clone(), action.clone());
         btn.set_sensitive(false);
         spin.set_visible(true);
         // File presence is enough to decide Install vs Check. Do not run

@@ -1394,7 +1394,6 @@ dependencies = [
  "url",
  "xz2",
  "yt-dlp",
- "zip",
 ]
 
 [[package]]

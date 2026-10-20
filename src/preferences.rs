@@ -667,40 +667,6 @@ pub fn show(
             crate::video_tools::TOOL_PROBE_TIMEOUT,
         )
     }
-    fn tool_version(binary: &std::path::Path, version_arg: &str) -> Option<String> {
-        let first = tool_first_line(binary, version_arg)?;
-        // ffmpeg prints a whole sentence ("ffmpeg version n9.0.1 ..."):
-        // keep the version token so the row stays readable.
-        if binary
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy() == "ffmpeg")
-            && let Some(token) = first.split_whitespace().nth(2)
-        {
-            return Some(format!("ffmpeg {token}"));
-        }
-        Some(first)
-    }
-    /// Probe installed tool versions: `(yt-dlp, ffmpeg, quickjs?)` plus
-    /// gallery-dl; `None` when the core tools are missing, falling back to
-    /// the binary path if `--version` fails. quickjs is `None` when no
-    /// `qjs` is on hand — it is only provisioned for YouTube. Only tool
-    /// presence matters for the row ("Ready" vs "Not installed"); the
-    /// versions themselves are not shown.
-    fn installed_tool_versions() -> Option<(String, String, Option<String>, Option<String>)> {
-        crate::video::resolve_libraries().ok().map(|libs| {
-            let yt = tool_version(&libs.youtube, "--version")
-                .map(|v| format!("yt-dlp {v}"))
-                .unwrap_or_else(|| libs.youtube.display().to_string());
-            let ff = tool_version(&libs.ffmpeg, "-version")
-                .unwrap_or_else(|| libs.ffmpeg.display().to_string());
-            let qjs = crate::video_tools::find_quickjs()
-                .and_then(|p| tool_version(&p, "--version").map(|v| format!("quickjs {v}")));
-            let gdl = crate::gallery_tools::resolve_gallerydl()
-                .ok()
-                .and_then(|p| tool_version(&p, "--version").map(|v| format!("gallery-dl {v}")));
-            (yt, ff, qjs, gdl)
-        })
-    }
     /// What the tools-row button does: Install when tools are missing, Check to
     /// probe each tool's upstream for a newer release, Update once one is
     /// known. The check-then-act shape keeps a permanent Update button off

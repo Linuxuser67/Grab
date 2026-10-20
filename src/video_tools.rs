@@ -1560,6 +1560,25 @@ pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
     Some(ytdlp_browser.to_string())
 }
 
+/// Cookie source for a yt-dlp spawn that may also carry an extension handoff
+/// jar. The jar holds the browser's own cookies for this URL (same tab store,
+/// fresh, scoped), so it wins: `--cookies-from-browser` is redundant, and
+/// yt-dlp aborts the whole spawn when its keyring extraction fails (a stale
+/// login-keyring item is enough) even though the jar would have worked.
+/// The jar only holds cookies for the handoff URL's host, so a redirect chain
+/// landing on another host loses what browser extraction would have supplied
+/// there; handoffs stage the page the user is on, so that is accepted.
+pub(crate) fn cookies_browser_with_handoff<'a>(
+    cookies_browser: &'a str,
+    handoff_args: &[String],
+) -> &'a str {
+    if handoff_args.is_empty() {
+        cookies_browser
+    } else {
+        "none"
+    }
+}
+
 /// Shared trailing argv for every yt-dlp spawn: player-client workaround, JS
 /// runtime pin for YouTube, cookies, user agent, then the page URL
 /// behind `--`. One helper so these flags cannot drift between spawns (or let

@@ -4,7 +4,9 @@
 use crate::video_prefs::subtitle_cli_args;
 use crate::video_quality::quality_height;
 use crate::video_staging::{VideoManifest, dest_part_path, manifest_path, ytdlp_output_template};
-use crate::video_tools::{VideoError, ffmpeg_location_dir, ytdlp_identity_args};
+use crate::video_tools::{
+    VideoError, cookies_browser_with_handoff, ffmpeg_location_dir, ytdlp_identity_args,
+};
 use std::path::{Path, PathBuf};
 
 pub(crate) async fn write_manifest(
@@ -176,10 +178,12 @@ fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob) {
     args.extend(proxy_cli_args(job.proxy.as_ref()));
     // Extension handoff cookies ride every media leg too (the probe's leg is
     // separate). Before the identity args: those end argv with `-- <url>`.
-    args.extend(crate::extension_server::handoff_cookie_args(&job.page_url));
+    let handoff = crate::extension_server::handoff_cookie_args(&job.page_url);
+    let cookie_source = cookies_browser_with_handoff(&job.cookies_browser, &handoff);
+    args.extend(handoff);
     let handoff_ua = crate::extension_server::handoff_user_agent(&job.page_url);
     args.extend(ytdlp_identity_args(
-        &job.cookies_browser,
+        cookie_source,
         handoff_ua.as_deref(),
         &job.page_url,
     ));
@@ -332,10 +336,12 @@ pub(crate) fn live_capture_argv(
     args.extend(proxy_cli_args(job.proxy.as_ref()));
     // Extension handoff cookies ride the live capture too. Before the
     // identity args: those end argv with `-- <url>`.
-    args.extend(crate::extension_server::handoff_cookie_args(&job.page_url));
+    let handoff = crate::extension_server::handoff_cookie_args(&job.page_url);
+    let cookie_source = cookies_browser_with_handoff(&job.cookies_browser, &handoff);
+    args.extend(handoff);
     let handoff_ua = crate::extension_server::handoff_user_agent(&job.page_url);
     args.extend(ytdlp_identity_args(
-        &job.cookies_browser,
+        cookie_source,
         handoff_ua.as_deref(),
         &job.page_url,
     ));

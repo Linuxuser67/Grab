@@ -302,6 +302,9 @@ async fn stage_cookie_file(
         .arg("--skip-download");
     // Same identity argv as every other yt-dlp spawn (player-client
     // workaround, cookies, `--` URL guard): one helper so flags can't drift.
+    // Both cookie sources are intentional here: `--cookies` is this export's
+    // output file and `--cookies-from-browser` is what fills it, so this spawn
+    // must not use cookies_browser_with_handoff.
     cmd.args(crate::video_tools::ytdlp_identity_args(
         cookies_browser,
         None,

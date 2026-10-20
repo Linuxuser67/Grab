@@ -1959,7 +1959,7 @@ mod tests {
     }
 
     fn write_test_executable(path: &Path) {
-        std::fs::write(path, b"#!/bin/sh\\nexit 0\\n").unwrap();
+        std::fs::write(path, b"test").unwrap();
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }

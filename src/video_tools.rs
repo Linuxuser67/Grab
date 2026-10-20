@@ -347,9 +347,21 @@ pub(crate) fn find_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 /// clears Flatpak app data, those fallbacks must not make the fresh profile
 /// look like it already has Grab-managed tools. A complete FFmpeg install also
 /// requires ffprobe, not just ffmpeg.
+pub(crate) fn core_tools_available_in(dirs: &[PathBuf]) -> bool {
+    find_in_dirs("yt-dlp", dirs).is_some() && toolchain_dir_in(dirs).is_some()
+}
+
+/// Required tools available anywhere Grab can resolve them, including distro tools on PATH.
+pub(crate) fn core_tools_available() -> bool {
+    core_tools_available_in(&tool_search_dirs())
+}
+
+/// True only when Grab's private data directory owns the required media
+/// toolchain. On Flatpak this keeps a cleared app-data profile in Install state
+/// even if the runtime has unrelated fallbacks. A complete FFmpeg install also
+/// requires ffprobe, not just ffmpeg.
 pub(crate) fn managed_core_tools_installed_in(dir: &Path) -> bool {
-    let dirs = [dir.to_path_buf()];
-    find_in_dirs("yt-dlp", &dirs).is_some() && toolchain_dir_in(&dirs).is_some()
+    core_tools_available_in(&[dir.to_path_buf()])
 }
 
 pub(crate) fn managed_core_tools_installed() -> bool {
@@ -903,9 +915,9 @@ pub(crate) async fn ensure_quickjs(page_url: &str, proxied: bool) -> Result<(), 
     install_quickjs_locked().await.map(|_| ())
 }
 
-/// BtbN's versioned static GPL archives are larger than the old ZIPs; keep the
-/// download bounded while allowing the current x86-64 archive (~145 MiB).
-const FFMPEG_MAX_DOWNLOAD_BYTES: u64 = 192 * 1024 * 1024;
+/// BtbN's versioned static GPL archives are large and may grow between releases.
+/// Keep a hard cap while leaving room above the current ~145 MiB x86-64 archive.
+const FFMPEG_MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Download a versioned BtbN/FFmpeg-Builds static archive containing both
 /// `ffmpeg` and `ffprobe`. The asset SHA-256 is required and verified before
@@ -919,7 +931,7 @@ async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
     })?;
     let archive = dir.join(&release.name);
     // Use Grab's proxy-aware streaming client for the large archive, and refuse
-    // any payload whose size or SHA-256 does not match expectations.
+    // payloads over the size cap or whose SHA-256 differs from release metadata.
     if let Err(e) = download_to_file(
         &release.url,
         &archive,
@@ -1990,6 +2002,20 @@ mod tests {
         write_test_executable(&user_dir.join("ffprobe"));
         assert!(managed_core_tools_installed_in(&user_dir));
 
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn core_tools_available_accepts_a_complete_fallback_toolchain() {
+        let base = unique_dir("available-core-tools");
+        std::fs::create_dir_all(&base).unwrap();
+        for name in ["yt-dlp", "ffmpeg", "ffprobe"] {
+            write_test_executable(&base.join(name));
+        }
+        assert!(core_tools_available_in(std::slice::from_ref(&base)));
+
+        std::fs::remove_file(base.join("ffprobe")).unwrap();
+        assert!(!core_tools_available_in(std::slice::from_ref(&base)));
         std::fs::remove_dir_all(&base).ok();
     }
 

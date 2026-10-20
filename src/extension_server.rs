@@ -50,7 +50,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tokio::sync::oneshot;
@@ -238,7 +238,7 @@ struct HandoffStore {
 struct HandoffCookies {
     path: PathBuf,
     user_agent: Option<String>,
-    staged_at: Instant,
+    staged_at: SystemTime,
 }
 
 /// Cookie files handed off from the extension, keyed by canonical URL. Every
@@ -426,7 +426,7 @@ pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option
     let entry = HandoffCookies {
         path,
         user_agent,
-        staged_at: Instant::now(),
+        staged_at: SystemTime::now(),
     };
     if let Some(old) = store.by_key.insert(key.clone(), entry) {
         let _ = std::fs::remove_file(old.path);
@@ -473,25 +473,44 @@ fn handoff_entry(url: &str) -> Option<HandoffCookies> {
 
 /// Browser UA staged with a handoff's cookies, if any. Same lookup as the
 /// cookies (exact URL, then same-host fallback).
-pub(crate) fn handoff_user_agent(url: &str) -> Option<String> {
-    handoff_entry(url).and_then(|e| e.user_agent)
+pub(crate) fn handoff_user_agent(url: &str, browser: &str) -> Option<String> {
+    let live_browser = crate::video_tools::cookies_browser_spec(browser).is_some();
+    let now = SystemTime::now();
+    handoff_entry(url)
+        .filter(|entry| handoff_jar_usable_at(entry, live_browser, now))
+        .and_then(|entry| entry.user_agent)
 }
 
 /// True when a staged jar may replace `--cookies-from-browser`. With a live
 /// browser source, only a fresh jar wins; without one, a stale jar still
 /// beats sending no cookies at all.
-fn handoff_jar_usable_at(entry: &HandoffCookies, live_browser: bool, now: Instant) -> bool {
-    !live_browser || now.saturating_duration_since(entry.staged_at) < HANDOFF_FRESH
+fn handoff_jar_usable_at(entry: &HandoffCookies, live_browser: bool, now: SystemTime) -> bool {
+    // SystemTime includes suspend duration on Linux. A backwards wall-clock
+    // adjustment fails closed as stale when a live browser source exists.
+    !live_browser
+        || now
+            .duration_since(entry.staged_at)
+            .is_ok_and(|age| age < HANDOFF_FRESH)
 }
 
-fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: Instant) -> Vec<String> {
+fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: SystemTime) -> Vec<String> {
     let live_browser = crate::video_tools::cookies_browser_spec(cookies_browser).is_some();
     let entry = handoff_entry(page_url);
-    // The UA is an identity (cf_clearance is UA-bound), not part of the stale
-    // cookie snapshot: keep it when only the jar is dropped.
-    let user_agent = entry.as_ref().and_then(|e| e.user_agent.as_deref());
-    match entry.as_ref() {
-        Some(entry) if handoff_jar_usable_at(entry, live_browser, now) => {
+    // The user agent is tied to its cookie snapshot. Don't apply a stale
+    // extension UA to cookies exported from the configured live browser.
+    let jar_usable = entry
+        .as_ref()
+        .is_some_and(|entry| handoff_jar_usable_at(entry, live_browser, now));
+    let user_agent = if jar_usable {
+        entry.as_ref().and_then(|e| e.user_agent.as_deref())
+    } else {
+        None
+    };
+    match entry
+        .as_ref()
+        .filter(|entry| handoff_jar_usable_at(entry, live_browser, now))
+    {
+        Some(entry) => {
             let mut args = vec![
                 "--cookies".to_string(),
                 entry.path.to_string_lossy().into_owned(),
@@ -511,7 +530,7 @@ fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: Instant) 
 /// `--cookies-from-browser` matters: yt-dlp aborts the whole spawn when its
 /// keyring extraction fails, even when the jar would have worked.
 pub(crate) fn ytdlp_spawn_identity(cookies_browser: &str, page_url: &str) -> Vec<String> {
-    ytdlp_spawn_identity_at(cookies_browser, page_url, Instant::now())
+    ytdlp_spawn_identity_at(cookies_browser, page_url, SystemTime::now())
 }
 
 /// `--cookies` argv for a URL's staged handoff cookies, if any. Test helper;
@@ -529,10 +548,10 @@ pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
 /// browser source. A stale snapshot would override rotated cookies exported
 /// from the live browser, so withhold it and let gallery-dl use the export.
 pub(crate) fn live_handoff_cookie_path(url: &str, browser: &str) -> Option<PathBuf> {
-    live_handoff_cookie_path_at(url, browser, Instant::now())
+    live_handoff_cookie_path_at(url, browser, SystemTime::now())
 }
 
-fn live_handoff_cookie_path_at(url: &str, browser: &str, now: Instant) -> Option<PathBuf> {
+fn live_handoff_cookie_path_at(url: &str, browser: &str, now: SystemTime) -> Option<PathBuf> {
     let live_browser = crate::video_tools::cookies_browser_spec(browser).is_some();
     handoff_entry(url)
         .filter(|entry| handoff_jar_usable_at(entry, live_browser, now))
@@ -1260,7 +1279,7 @@ mod tests {
         let entry = HandoffCookies {
             path: PathBuf::from("/tmp/jar"),
             user_agent: None,
-            staged_at: Instant::now(),
+            staged_at: SystemTime::now(),
         };
         assert!(handoff_jar_usable_at(&entry, true, entry.staged_at));
         assert!(!handoff_jar_usable_at(
@@ -1281,7 +1300,7 @@ mod tests {
         let url = "https://freshness.example.com/v";
         let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
         store_handoff_cookies(url, path.clone(), Some("UA/1".into()));
-        let now = Instant::now();
+        let now = SystemTime::now();
         let fresh = ytdlp_spawn_identity_at("brave", url, now);
         assert_eq!(fresh[0], "--cookies");
         assert_eq!(fresh[1], path.to_string_lossy().into_owned());
@@ -1299,11 +1318,13 @@ mod tests {
                 .iter()
                 .any(|a| a.starts_with("--cookies-from-browser="))
         );
-        // The UA is an identity, not part of the stale cookie snapshot.
-        assert!(stale.iter().any(|a| a == "UA/1"));
-        // Without a live source the stale jar is still better than no cookies.
+        // The stale jar's UA must not be paired with the configured browser's
+        // live cookies; keep the UA only when the staged jar is used.
+        assert!(!stale.iter().any(|a| a == "UA/1"));
+        // Without a live source the stale jar and its UA remain the only source.
         let offline = ytdlp_spawn_identity_at("none", url, later);
         assert_eq!(offline[0], "--cookies");
+        assert!(offline.iter().any(|a| a == "UA/1"));
         clear_handoff_cookies();
     }
 
@@ -1314,7 +1335,7 @@ mod tests {
         let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
         store_handoff_cookies(url, path.clone(), Some("UA/1".into()));
 
-        let now = Instant::now();
+        let now = SystemTime::now();
         assert_eq!(
             live_handoff_cookie_path_at(url, "brave", now),
             Some(path.clone()),

@@ -671,7 +671,14 @@ pub fn show(
     /// Check filesystem paths only: do not launch subprocesses or contact upstream
     /// services just to choose between Install and Check for Updates.
     fn core_tools_installed() -> bool {
-        crate::video_tools::managed_core_tools_installed()
+        if crate::video_tools::in_flatpak() {
+            // A cleared Flatpak profile must still offer Grab-managed installs.
+            crate::video_tools::managed_core_tools_installed()
+        } else {
+            // Tarball/dev builds resolve distro tools from PATH; report their
+            // availability rather than claiming a usable system install is missing.
+            crate::video_tools::core_tools_available()
+        }
     }
     /// What the tools-row button does: Install when tools are missing, Check to
     /// probe each tool's upstream for a newer release, Update once one is
@@ -689,8 +696,22 @@ pub fn show(
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
         installed: bool,
     ) {
+        // Outside Flatpak, installation is user-managed: don't present an
+        // update action that actually opens installation instructions.
+        if !crate::video_tools::in_flatpak() {
+            row.set_subtitle(&gettext(if installed {
+                "Tools available"
+            } else {
+                "Not installed"
+            }));
+            btn.set_label(&gettext("How to Install"));
+            btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
+            action.set(ToolAction::Install);
+            return;
+        }
+        btn.set_tooltip_text(None);
         // Tool names live in the group description; the row carries state
-        // only, with no version strings or optional-tool noise.
+        // only, with no versions or optional-tool noise.
         if installed {
             row.set_subtitle(&gettext("Ready"));
             btn.set_label(&gettext("Check for Updates"));
@@ -987,12 +1008,6 @@ pub fn show(
         let dialog_weak = dialog.downgrade();
         let action = tool_action.clone();
         let pending = pending_updates.clone();
-        // Outside Flatpak the button guides through self-install; the
-        // automatic download stays Flatpak-only.
-        if !crate::video_tools::in_flatpak() {
-            btn.set_label(&gettext("How to Install"));
-            btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
-        }
         let settings_b = settings.clone();
         video_tools_btn.connect_clicked(move |_| {
             if !crate::video_tools::in_flatpak() {

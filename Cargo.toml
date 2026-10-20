@@ -50,8 +50,6 @@ xz2 = "0.1"
 [dev-dependencies]
 pretty_assertions = "1"
 proptest = "1"
-# Build a legacy ZIP fixture to ensure the tar.xz installer rejects it.
-zip = "8"
 
 [profile.release]
 opt-level = 3

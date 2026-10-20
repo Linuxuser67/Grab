@@ -50,11 +50,11 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="6.0.2~beta.2" date="2026-10-20">
+    <release version="6.0.2~beta.3" date="2026-10-20">
       <description>
         <ul>
-          <li>Gallery, playlist, and torrent pickers now hug small selections and use a bounded scrolling area for long lists.</li>
-          <li>Queueing selected gallery files closes the picker after the active GTK click handler returns, avoiding teardown during the button signal.</li>
+          <li>Video-tool setup now installs a static FFmpeg build that includes both ffmpeg and ffprobe.</li>
+          <li>Missing ffprobe triggers a repair offer, and downloaded tool archives are verified before installation.</li>
         </ul>
       </description>
     </release>

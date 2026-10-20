@@ -727,15 +727,23 @@ pub fn show(
         btn: &gtk4::Button,
         spin: &adw::Spinner,
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
+        generation: &std::rc::Rc<std::cell::Cell<u64>>,
     ) {
         spin.set_visible(false);
         btn.set_sensitive(false);
-        // Presence-only probe off the GTK thread; no network calls or subprocesses.
-        let (row, btn, action) = (row.clone(), btn.clone(), action.clone());
+        // A click or a newer refresh invalidates older presence probes, so a
+        // late completion cannot overwrite an action's state or re-enable it.
+        let probe_id = generation.get().wrapping_add(1);
+        generation.set(probe_id);
+        let (row, btn, action, generation) =
+            (row.clone(), btn.clone(), action.clone(), generation.clone());
         gtk4::glib::spawn_future_local(async move {
             let installed = gio::spawn_blocking(core_tools_installed)
                 .await
                 .unwrap_or(false);
+            if generation.get() != probe_id {
+                return;
+            }
             paint_tools_state(&row, &btn, &action, installed);
             btn.set_sensitive(true);
         });
@@ -991,6 +999,7 @@ pub fn show(
     // Nothing is probed on open: versions and updates are checked only when
     // the user presses Check for Updates.
     let tool_action = std::rc::Rc::new(std::cell::Cell::new(ToolAction::Install));
+    let tool_probe_generation = std::rc::Rc::new(std::cell::Cell::new(0u64));
     // Tools needing update (from the check); passed to install_progress::run
     // so the popup only shows what's actually downloading.
     let pending_updates: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
@@ -1007,18 +1016,22 @@ pub fn show(
         );
         let dialog_weak = dialog.downgrade();
         let action = tool_action.clone();
+        let generation = tool_probe_generation.clone();
         let pending = pending_updates.clone();
         let settings_b = settings.clone();
         video_tools_btn.connect_clicked(move |_| {
+            // Cancel any older local presence probe before starting an action.
+            generation.set(generation.get().wrapping_add(1));
             if !crate::video_tools::in_flatpak() {
                 let (row_b, btn_b, spin_b) = (row.clone(), btn.clone(), spin.clone());
                 let dialog_b = dialog_weak.clone();
                 let action_b = action.clone();
+                let generation_b = generation.clone();
                 crate::install_help::show(&btn, move || {
                     if dialog_b.upgrade().is_none() {
                         return;
                     }
-                    refresh_video_tools(&row_b, &btn_b, &spin_b, &action_b);
+                    refresh_video_tools(&row_b, &btn_b, &spin_b, &action_b, &generation_b);
                 });
                 return;
             }
@@ -1233,6 +1246,7 @@ pub fn show(
             let (row_err, row_ok) = (row.clone(), row.clone());
             let (dialog_err, dialog_ok) = (dialog_weak.clone(), dialog_weak.clone());
             let (btn_b, spin_b, action_b) = (btn.clone(), spin.clone(), action.clone());
+            let generation_ok = generation.clone();
             // For updates, only show the tools actually being downloaded.
             // For fresh installs, show all (None).
             let tools_filter = if action.get() == ToolAction::Update {
@@ -1253,7 +1267,7 @@ pub fn show(
                     if dialog_ok.upgrade().is_none() {
                         return;
                     }
-                    refresh_video_tools(&row_ok, &btn_b, &spin_b, &action_b);
+                    refresh_video_tools(&row_ok, &btn_b, &spin_b, &action_b, &generation_ok);
                 },
                 tools_filter,
             );
@@ -1266,6 +1280,7 @@ pub fn show(
         &video_tools_btn,
         &video_tools_spin,
         &tool_action,
+        &tool_probe_generation,
     );
     video_page.add(&video_quality_group);
     video_page.add(&video_auth_group);

@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.0.2~beta.5" date="2026-10-20">
+      <description>
+        <ul>
+          <li>FFmpeg and ffprobe installation now recognizes BtbN's current checksum-bearing Linux builds, fixing rejection of the upstream stable-branch filename format.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.0.2~beta.4" date="2026-10-20">
       <description>
         <ul>

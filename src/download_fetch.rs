@@ -99,10 +99,9 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
     let mut tries = 3;
     // Prefer a fresh extension handoff; a stale snapshot must not override
     // cookies from the currently configured browser profile.
-    if let Some(path) = crate::extension_server::live_handoff_cookie_path(
-        &ctx.url,
-        &ctx.opts.cookies_browser,
-    ) && let Ok(text) = tokio::fs::read_to_string(&path).await
+    if let Some(path) =
+        crate::extension_server::live_handoff_cookie_path(&ctx.url, &ctx.opts.cookies_browser)
+        && let Ok(text) = tokio::fs::read_to_string(&path).await
     {
         let (jar, count) = crate::cookies::jar_from_export(&text);
         if count > 0 {

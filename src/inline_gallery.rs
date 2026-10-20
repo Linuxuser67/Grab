@@ -96,7 +96,7 @@ pub(crate) struct GalleryAuth {
 /// Resolve gallery-dl auth for a URL: handoff jar first, browser export as
 /// fallback. Runs on the worker (not GTK main); the export can take 30s.
 pub(crate) async fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAuth {
-    let handoff_path = crate::extension_server::handoff_cookie_path(url);
+    let handoff_path = crate::extension_server::live_handoff_cookie_path(url, browser);
     let handoff_ua = crate::extension_server::handoff_user_agent(url);
     let staged = if handoff_path.is_none() {
         if browser.is_empty() || browser == "none" {

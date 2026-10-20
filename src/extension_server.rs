@@ -536,6 +536,20 @@ pub(crate) fn handoff_cookie_path(url: &str) -> Option<PathBuf> {
     handoff_cookie_file(url)
 }
 
+/// Handoff jar for gallery-dl when it is safe to use alongside the configured
+/// browser source. A stale snapshot would override rotated cookies exported
+/// from the live browser, so withhold it and let gallery-dl use the export.
+pub(crate) fn live_handoff_cookie_path(url: &str, browser: &str) -> Option<PathBuf> {
+    live_handoff_cookie_path_at(url, browser, Instant::now())
+}
+
+fn live_handoff_cookie_path_at(url: &str, browser: &str, now: Instant) -> Option<PathBuf> {
+    let live_browser = crate::video_tools::cookies_browser_spec(browser).is_some();
+    handoff_entry(url)
+        .filter(|entry| handoff_jar_usable_at(entry, live_browser, now))
+        .map(|entry| entry.path)
+}
+
 /// Drop a URL's staged handoff cookies and delete the file. Called when its
 /// download finishes; failures and aborts keep the entry (bounded) so a retry
 /// or resume still passes the challenge.
@@ -1301,6 +1315,34 @@ mod tests {
         // Without a live source the stale jar is still better than no cookies.
         let offline = ytdlp_spawn_identity_at("none", url, later);
         assert_eq!(offline[0], "--cookies");
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn live_handoff_path_withholds_a_stale_jar_only_with_a_live_browser() {
+        let _g = exclusive();
+        let url = "https://gallery-freshness.example.com/album";
+        let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
+        store_handoff_cookies(url, path.clone(), Some("UA/1".into()));
+
+        let now = Instant::now();
+        assert_eq!(
+            live_handoff_cookie_path_at(url, "brave", now),
+            Some(path.clone()),
+            "fresh handoff jars remain preferred"
+        );
+
+        let stale_at = now + HANDOFF_FRESH;
+        assert_eq!(
+            live_handoff_cookie_path_at(url, "brave", stale_at),
+            None,
+            "a stale jar must not override the live browser's rotated cookies"
+        );
+        assert_eq!(
+            live_handoff_cookie_path_at(url, "none", stale_at),
+            Some(path),
+            "without a browser source, the handoff jar is still the only cookie source"
+        );
         clear_handoff_cookies();
     }
 

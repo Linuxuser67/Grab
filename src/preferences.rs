@@ -671,7 +671,7 @@ pub fn show(
     /// Check filesystem paths only: do not launch subprocesses or contact upstream
     /// services just to choose between Install and Check for Updates.
     fn core_tools_installed() -> bool {
-        crate::video::resolve_libraries().is_ok()
+        crate::video_tools::managed_core_tools_installed()
     }
     /// What the tools-row button does: Install when tools are missing, Check to
     /// probe each tool's upstream for a newer release, Update once one is

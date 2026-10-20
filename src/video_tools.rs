@@ -889,32 +889,25 @@ pub(crate) async fn ensure_quickjs(page_url: &str, proxied: bool) -> Result<(), 
     install_quickjs_locked().await.map(|_| ())
 }
 
-/// Download cap for the ffmpeg archive: the static build is ~75MB, so 128MB
-/// is generous without letting a compromised endpoint fill the disk.
-const FFMPEG_MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
+/// BtbN's versioned static GPL archives are larger than the old ZIPs; keep the
+/// download bounded while allowing the current x86-64 archive (~145 MiB).
+const FFMPEG_MAX_DOWNLOAD_BYTES: u64 = 192 * 1024 * 1024;
 
-/// Download one boul2gom/ffmpeg-builds archive and extract `ffmpeg` + `ffprobe`
-/// into `dir`; returns the ffmpeg path. Await off the GTK thread.
+/// Download a versioned BtbN/FFmpeg-Builds static archive containing both
+/// `ffmpeg` and `ffprobe`. The asset SHA-256 is required and verified before
+/// extraction; awaits off the GTK thread.
 async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
-    use yt_dlp::client::deps::ffmpeg::FfmpegFetcher;
-
     ensure_lib_dir(&dir)?;
-    let release = FfmpegFetcher::default()
-        .fetch_binary()
+    let release = fetch_latest_ffmpeg_asset()
         .await
-        .map_err(VideoError::install)?;
-    // Fail closed: the crate verifies the digest if present, but skips silently
-    // if absent. Refuse to download an unverified toolchain.
-    let checksum = release.checksum.clone().ok_or_else(|| {
-        VideoError::install("ffmpeg release has no SHA-256 checksum; refusing unverified install")
-    })?;
+        .ok_or_else(|| VideoError::install(
+            "couldn't find a checksummed, versioned Linux FFmpeg build with ffprobe"
+        ))?;
     let archive = dir.join(&release.name);
-    // Download via our proxied client, not the crate's: the crate's HTTP
-    // client can't see Grab's app proxy, so the archive fetch would go out
-    // direct and reveal the machine's address. (The metadata fetch above
-    // still uses the crate client — one small API call.)
+    // Use Grab's proxy-aware streaming client for the large archive, and refuse
+    // any payload whose size or SHA-256 does not match expectations.
     if let Err(e) =
-        download_to_file(&release.url, &archive, &checksum, FFMPEG_MAX_DOWNLOAD_BYTES).await
+        download_to_file(&release.url, &archive, &release.checksum, FFMPEG_MAX_DOWNLOAD_BYTES).await
     {
         std::fs::remove_file(&archive).ok();
         return Err(VideoError::install(e));
@@ -925,9 +918,9 @@ async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
         .map_err(VideoError::install)
 }
 
-/// Extract `ffmpeg` and `ffprobe` from a static-build archive into `dir`, mark
-/// them executable and delete the archive. Entries match by file name, so flat
-/// zips and `bin/`-style layouts both work. A missing ffprobe is not an error.
+/// Extract both executables from BtbN's tar.xz archive. A missing `ffprobe`
+/// is a hard failure, and neither old binary is replaced unless both new tools
+/// have been fully extracted and marked executable.
 pub(crate) fn extract_ffmpeg_toolchain(archive: &Path, dir: &Path) -> Result<PathBuf, String> {
     // Always clean up the (large) archive, even when extraction fails.
     let result = extract_ffmpeg_toolchain_inner(archive, dir, MAX_EXTRACT_BYTES);
@@ -935,10 +928,9 @@ pub(crate) fn extract_ffmpeg_toolchain(archive: &Path, dir: &Path) -> Result<Pat
     result
 }
 
-/// Cap extracted binaries: the ffmpeg static build is ~75MB, so 200MB is
-/// generous. Enforced via take() — the zip header's size field can't be
-/// trusted against a decompression bomb.
-const MAX_EXTRACT_BYTES: u64 = 200 * 1024 * 1024;
+/// Bound each decompressed binary independently. The static GPL FFmpeg build
+/// carries many codecs and can exceed 200 MiB when linked into a single file.
+const MAX_EXTRACT_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(crate) fn extract_ffmpeg_toolchain_inner(
     archive: &Path,
@@ -967,65 +959,79 @@ fn extract_entries(
     max_bytes: u64,
     extracted: &mut Vec<PathBuf>,
 ) -> Result<PathBuf, String> {
-    use std::io::Read as _;
+    use std::io::{Read as _, Write as _};
     use std::os::unix::fs::PermissionsExt as _;
 
     let file = std::fs::File::open(archive)
         .map_err(|e| format!("couldn't open ffmpeg archive {}: {e}", archive.display()))?;
-    let mut zip =
-        zip::ZipArchive::new(file).map_err(|e| format!("couldn't read ffmpeg archive: {e}"))?;
+    let decoder = xz2::read::XzDecoder::new(file);
+    let mut tar = tar::Archive::new(decoder);
     let mut ffmpeg_path = None;
+    let mut ffprobe_found = false;
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for i in 0..zip.len() {
-        let entry = zip
-            .by_index(i)
-            .map_err(|e| format!("couldn't read ffmpeg archive entry: {e}"))?;
-        if entry.is_dir() {
+    let entries = tar
+        .entries()
+        .map_err(|e| format!("couldn't read ffmpeg tar.xz archive: {e}"))?;
+
+    for item in entries {
+        let mut entry =
+            item.map_err(|e| format!("couldn't read ffmpeg archive entry: {e}"))?;
+        // Never follow archive symlinks or hard links as executable payloads.
+        if !entry.header().entry_type().is_file() {
             continue;
         }
-        let tool = match Path::new(entry.name()).file_name().and_then(|n| n.to_str()) {
+        let entry_path = entry
+            .path()
+            .map_err(|e| format!("couldn't read ffmpeg archive path: {e}"))?;
+        let tool = match entry_path.file_name().and_then(|n| n.to_str()) {
             Some("ffmpeg") => "ffmpeg",
             Some("ffprobe") => "ffprobe",
             _ => continue,
         };
-        // Stage under a temp name: the live binary stays in place until every
-        // entry extracted fine, so a failed update never leaves no ffmpeg.
         let final_dest = dir.join(tool);
+        if staged.iter().any(|(_, final_path)| final_path == &final_dest) {
+            return Err(format!("duplicate {tool} binary in the FFmpeg archive"));
+        }
         let dest = dir.join(format!(".{tool}.new"));
-        // A planted symlink would divert the extracted binary (and the
-        // chmod) onto an arbitrary file: refuse instead of following it.
+        // A planted symlink would divert the extracted binary (and the chmod)
+        // onto an arbitrary file: refuse instead of following it.
         clear_dest_refusing_symlink(&dest)?;
         let mut out = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&dest)
             .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
-        // Track immediately: a failed copy or chmod must still remove the
-        // partial file.
         extracted.push(dest.clone());
         let n = std::io::copy(&mut entry.take(max_bytes + 1), &mut out)
             .map_err(|e| format!("couldn't extract {}: {e}", dest.display()))?;
-        // take() truncates silently: if we hit the cap, the entry is not the
-        // released binary (or it's a bomb). A truncated executable would fail
-        // mysteriously later — refuse it here. Reading max_bytes + 1 lets a
-        // legitimate entry of exactly max_bytes through. `copy`'s byte count
-        // is the check: no separate metadata() call that could fail open.
         if n > max_bytes {
             return Err(format!(
                 "{} in the ffmpeg archive exceeds the {max_bytes}-byte limit",
                 dest.display()
             ));
         }
+        out.flush()
+            .map_err(|e| format!("couldn't finish writing {}: {e}", dest.display()))?;
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("couldn't mark {} executable: {e}", dest.display()))?;
         staged.push((dest, final_dest.clone()));
         if tool == "ffmpeg" {
             ffmpeg_path = Some(final_dest);
+        } else {
+            ffprobe_found = true;
         }
     }
+
     if ffmpeg_path.is_none() {
         return Err("ffmpeg binary not found in the downloaded archive".to_string());
     }
+    if !ffprobe_found {
+        return Err(
+            "ffprobe binary not found in the downloaded archive; refusing an incomplete FFmpeg toolchain"
+                .to_string(),
+        );
+    }
+
     // Refuse to install over a symlink at the final destination: rename(2)
     // would replace it atomically, but a planted symlink is not ours to
     // remove, and the old code refused rather than diverting.
@@ -1655,18 +1661,86 @@ pub async fn latest_ytdlp_tag() -> Option<String> {
     handle.await.ok().flatten()
 }
 
-/// Latest release tag of the upstream Grab downloads ffmpeg from
-/// (boul2gom/ffmpeg-builds static builds); `None` when GitHub is unreachable.
+/// A versioned, checksummed FFmpeg archive selected from BtbN's latest
+/// autobuild release. We only accept the versioned release-branch archives, not
+/// the unversioned master build, because master has no parseable stable version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FfmpegReleaseAsset {
+    name: String,
+    url: String,
+    checksum: String,
+    version: String,
+}
+
+fn ffmpeg_build_target() -> Option<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Some("linux64"),
+        "aarch64" => Some("linuxarm64"),
+        _ => None,
+    }
+}
+
+/// Parse the semantic version from a static, versioned BtbN archive name.
+/// Shared-library builds, master builds, other architectures, and malformed
+/// version/branch combinations are rejected.
+fn ffmpeg_asset_version_for_target(
+    name: &str,
+    target: &str,
+) -> Option<([u32; 3], String)> {
+    let rest = name.strip_prefix("ffmpeg-n")?;
+    let marker = format!("-{target}-gpl-");
+    let (build, release_branch) = rest.split_once(&marker)?;
+    let version_token = build.split('-').next()?;
+    let version = parse_dotted_version(version_token)?;
+    if release_branch != format!("{}.{}.tar.xz", version[0], version[1]) {
+        return None;
+    }
+    Some((version, format!("{}.{}.{}", version[0], version[1], version[2])))
+}
+
+/// Fetch metadata for one supported static build. Asset selection and its digest
+/// both come from GitHub's release API; no checksum-less fallback is permitted.
+async fn fetch_latest_ffmpeg_asset() -> Option<FfmpegReleaseAsset> {
+    use yt_dlp::client::deps::github::GitHubFetcher;
+
+    let target = ffmpeg_build_target()?;
+    let fetcher = GitHubFetcher::new("BtbN", "FFmpeg-Builds");
+    let release = fetcher.fetch_latest_release(None).await.ok()?;
+    let prefix = "https://github.com/BtbN/FFmpeg-Builds/releases/download/";
+
+    release
+        .assets
+        .iter()
+        .filter_map(|asset| {
+            let (version, version_label) =
+                ffmpeg_asset_version_for_target(&asset.name, target)?;
+            let checksum = asset.digest.as_deref()?.strip_prefix("sha256:")?;
+            if checksum.len() != 64 || !checksum.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            if !asset.download_url.starts_with(prefix) {
+                return None;
+            }
+            Some((
+                version,
+                FfmpegReleaseAsset {
+                    name: asset.name.clone(),
+                    url: asset.download_url.clone(),
+                    checksum: checksum.to_string(),
+                    version: version_label,
+                },
+            ))
+        })
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, asset)| asset)
+}
+
+/// Latest supported FFmpeg release version for the settings update hint.
+/// Returns None if release metadata, architecture, archive, or digest is missing.
 pub async fn latest_ffmpeg_tag() -> Option<String> {
-    let handle = crate::runtime::tokio_rt().spawn(async move {
-        let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new("boul2gom", "ffmpeg-builds");
-        fetcher
-            .fetch_latest_release(None)
-            .await
-            .ok()
-            .map(|release| release.tag_name)
-    });
-    handle.await.ok().flatten()
+    let handle =
+        crate::runtime::tokio_rt().spawn(async move { fetch_latest_ffmpeg_asset().await });
+    handle.await.ok().flatten().map(|asset| asset.version)
 }
 
 /// Latest quickjs-ng release tag; `None` when GitHub is unreachable.
@@ -2103,6 +2177,132 @@ mod tests {
         // destination must never appear without a complete download.
         assert!(!part.exists(), "half-written .part survived a failed fetch");
         assert!(!dest.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod ffmpeg_archive_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn fixture_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "grab-ffmpeg-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_tar_xz(path: &Path, files: &[(&str, &[u8])]) {
+        let file = std::fs::File::create(path).unwrap();
+        let encoder = xz2::write::XzEncoder::new(file, 1);
+        let mut archive = tar::Builder::new(encoder);
+        for &(name, contents) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, name, Cursor::new(contents))
+                .unwrap();
+        }
+        archive.into_inner().unwrap().finish().unwrap();
+    }
+
+    #[test]
+    fn selects_only_versioned_static_gpl_archives_for_target() {
+        let stable = "ffmpeg-n9.0.2-29-g6dfaba896f-linux64-gpl-9.0.tar.xz";
+        assert_eq!(
+            ffmpeg_asset_version_for_target(stable, "linux64"),
+            Some(([9, 0, 2], "9.0.2".to_string()))
+        );
+        assert_eq!(
+            ffmpeg_asset_version_for_target(
+                "ffmpeg-n8.1.3-18-g46d899d7a0-linuxarm64-gpl-8.1.tar.xz",
+                "linuxarm64"
+            ),
+            Some(([8, 1, 3], "8.1.3".to_string()))
+        );
+        assert_eq!(ffmpeg_asset_version_for_target(stable, "linuxarm64"), None);
+        assert_eq!(
+            ffmpeg_asset_version_for_target(
+                "ffmpeg-N-127790-g56dbd4cd37-linux64-gpl.tar.xz",
+                "linux64"
+            ),
+            None
+        );
+        assert_eq!(
+            ffmpeg_asset_version_for_target(
+                "ffmpeg-n9.0.2-29-g6dfaba896f-linux64-gpl-shared-9.0.tar.xz",
+                "linux64"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_both_ffmpeg_and_ffprobe_from_tar_xz() {
+        let dir = fixture_dir("complete");
+        let archive = dir.join("fixture.tar.xz");
+        let install_dir = dir.join("lib");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        write_tar_xz(
+            &archive,
+            &[
+                ("ffmpeg-build/bin/ffmpeg", b"test-ffmpeg"),
+                ("ffmpeg-build/bin/ffprobe", b"test-ffprobe"),
+                ("ffmpeg-build/README", b"ignored"),
+            ],
+        );
+
+        let installed = extract_ffmpeg_toolchain(&archive, &install_dir).unwrap();
+        assert_eq!(installed, install_dir.join("ffmpeg"));
+        assert_eq!(std::fs::read(&installed).unwrap(), b"test-ffmpeg");
+        assert_eq!(
+            std::fs::read(install_dir.join("ffprobe")).unwrap(),
+            b"test-ffprobe"
+        );
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_ne!(
+            std::fs::metadata(&installed).unwrap().permissions().mode() & 0o111,
+            0
+        );
+        assert_ne!(
+            std::fs::metadata(install_dir.join("ffprobe"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+        assert!(!archive.exists(), "archive should be removed after extraction");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_ffprobe_fails_without_replacing_existing_ffmpeg() {
+        let dir = fixture_dir("missing-probe");
+        let archive = dir.join("fixture.tar.xz");
+        let install_dir = dir.join("lib");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::write(install_dir.join("ffmpeg"), b"existing-ffmpeg").unwrap();
+        write_tar_xz(
+            &archive,
+            &[("ffmpeg-build/bin/ffmpeg", b"replacement-ffmpeg")],
+        );
+
+        let err = extract_ffmpeg_toolchain(&archive, &install_dir).unwrap_err();
+        assert!(err.contains("ffprobe binary not found"), "unexpected error: {err}");
+        assert_eq!(
+            std::fs::read(install_dir.join("ffmpeg")).unwrap(),
+            b"existing-ffmpeg",
+            "incomplete update must preserve the old ffmpeg"
+        );
+        assert!(!install_dir.join("ffprobe").exists());
+        assert!(!install_dir.join(".ffmpeg.new").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

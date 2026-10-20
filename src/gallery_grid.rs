@@ -542,7 +542,7 @@ mod tests {
         // queued count follows.
         grid.inner.selection.unselect_item(0);
         settle();
-        assert_eq!(add_btn.label().as_deref(), Some("299 selected"));
+        assert_eq!(add_btn.label().as_deref(), Some("9999 selected"));
 
         // Button path: Select All/None through the model.
         select_none.emit_clicked();

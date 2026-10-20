@@ -334,6 +334,30 @@ fn entry_icon_for(has_text: bool, looking_up: bool, add_shown: bool, blocked: bo
     }
 }
 
+/// Records `text` as the latest entry text; false when it repeats. GTK emits
+/// `changed` even when `set_text` writes the identical string (verified on
+/// 4.24), so a programmatic write (handoff, queued drain) would otherwise read
+/// as an edit: it wiped a resolved collection and re-armed auto-add, running
+/// the lookup again.
+fn text_is_new(last: &mut String, text: &str) -> bool {
+    if *last == text {
+        return false;
+    }
+    last.clear();
+    last.push_str(text);
+    true
+}
+
+/// Flip the lookup state and lock editing while it resolves. An accidental
+/// keystroke would otherwise edit the URL, and any edit bumps the generation
+/// and aborts the probe. `set_editable` (not `set_sensitive`) keeps the text
+/// readable, selectable and copyable; the spinner cancels in place, and
+/// Escape or the card's X still close.
+fn set_looking_up(v: &VideoStep, looking_up: bool) {
+    v.looking_up.set(looking_up);
+    v.url_entry.set_editable(!looking_up);
+}
+
 /// Apply the derived icon state to the URL entry.
 pub(crate) fn sync_entry_icon(v: &VideoStep) {
     let icon = entry_icon_for(
@@ -354,9 +378,11 @@ pub(crate) fn sync_entry_icon(v: &VideoStep) {
         EntryIcon::Spinner => {
             v.url_entry
                 .set_icon_from_paintable(pos, Some(&v.spinner_paintable));
-            // No re-submit mid-lookup: Enter still says "still looking up".
-            v.url_entry.set_icon_activatable(pos, false);
-            v.url_entry.set_icon_tooltip_text(pos, None);
+            // The entry is locked while it resolves, so the spinner is the
+            // cancel affordance (closing the card would lose the URL).
+            v.url_entry.set_icon_activatable(pos, true);
+            v.url_entry
+                .set_icon_tooltip_text(pos, Some(&gettext("Cancel lookup")));
         }
         EntryIcon::None => {
             v.url_entry
@@ -435,9 +461,10 @@ fn reset_video_step(step: &VideoStep) {
     hide_video_step(step);
     // The media-type choice does not survive a close either.
     arm_mode_toggle(step, None);
-    // No lookup survives a close: clear the flag before the entry text is
-    // cleared below (its changed handler would otherwise keep the spinner).
-    step.looking_up.set(false);
+    // No lookup survives a close: clear the flag (and unlock the entry)
+    // before the entry text is cleared below (its changed handler would
+    // otherwise keep the spinner).
+    set_looking_up(step, false);
     sync_entry_icon(step);
     // Slide the Add button out: card is closing, gear + X slide back.
     step.action_revealer.set_reveal_child(false);
@@ -465,7 +492,7 @@ fn show_video_loading(v: &VideoStep) {
     v.toggle_items.borrow_mut().take();
     // The tick morphs into a spinner in place (browser-address-bar style):
     // no separate indicator beside the entry, no layout shift.
-    v.looking_up.set(true);
+    set_looking_up(v, true);
     sync_entry_icon(v);
     // Screen-reader announcement: the spinner alone is silent. Announced on
     // the entry itself — no persistent label change, the entry keeps its name.
@@ -478,7 +505,7 @@ fn show_video_loading(v: &VideoStep) {
 
 fn show_video_ready(v: &VideoStep) {
     hide_video_step(v);
-    v.looking_up.set(false);
+    set_looking_up(v, false);
     // Ensure the action revealer is visible: the fresh-preview path reaches
     // here without a show_video_loading (no new lookup to reveal it).
     v.action_revealer.set_visible(true);
@@ -502,7 +529,7 @@ fn show_video_ready(v: &VideoStep) {
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
     hide_video_step(v);
-    v.looking_up.set(false);
+    set_looking_up(v, false);
     // Lookup failed: nothing to add. Slide the Add button out (the
     // child-revealed handler hides it once the animation finishes); the
     // entry carries no icon — Install in the tools row owns recovery.
@@ -518,7 +545,7 @@ fn show_video_tools_missing(v: &VideoStep, message: &str) {
 
 pub(crate) fn show_video_error(v: &VideoStep, message: &str) {
     hide_video_step(v);
-    v.looking_up.set(false);
+    set_looking_up(v, false);
     // Lookup failed: nothing to add. Slide the Add button out (the
     // child-revealed handler hides it once the animation finishes); the
     // entry carries no icon — Retry in the error row owns recovery.
@@ -1161,7 +1188,7 @@ fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
     // the preview block stays hidden — but the probe resolved, so Add earns
     // its label like a single video; tapping it opens the title picker.
     hide_video_step(v);
-    v.looking_up.set(false);
+    set_looking_up(v, false);
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
     v.add_btn.set_icon_name("");
@@ -1976,6 +2003,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let close_kick = close_card.clone();
         let scheduled_at_kick = Rc::clone(&scheduled_at);
         let pending_kick = Rc::clone(&pending_url);
+        let nav_kick = nav.clone();
         Rc::new(move |probe_unlisted: bool| {
             // Twin suppression: a resolve for this URL is already running for the
             // current generation (Add pressed twice is the usual trigger) — don't
@@ -1997,6 +2025,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 close_b,
                 scheduled_at_b,
                 pending_b,
+                nav_b,
             ) = (
                 probe.clone(),
                 step2.clone(),
@@ -2008,6 +2037,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 close_kick.clone(),
                 scheduled_at_kick.clone(),
                 pending_kick.clone(),
+                nav_kick.clone(),
             );
             let lookup = glib::spawn_future_local(async move {
                 // Declared BEFORE the guard so it drops AFTER it (reverse
@@ -2020,7 +2050,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         let url_entry = url_b.clone();
                         Rc::new(move |next: String| {
                             url_entry.set_text(&next);
-                            url_entry.activate();
+                            // Submit one idle later: the changed handler settles
+                            // on a 0 ms timeout, and submitting in this turn reads
+                            // the previous URL's state while the deferred edit
+                            // aborts the kick.
+                            let entry = url_entry.clone();
+                            glib::idle_add_local_once(move || {
+                                entry.activate();
+                            });
                         })
                     },
                 };
@@ -2235,6 +2272,19 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                             "gallery-dl items await user selection"
                                         );
                                         show_gallery_ready(&step_b, card, &title);
+                                        // Every terminal state re-enables Add.
+                                        set_lookup_add(&lookup_add_b, true);
+                                        // With auto-add this lookup *is* the
+                                        // submit: a gallery needs a selection,
+                                        // so open the picker instead of
+                                        // stopping on the inline row.
+                                        if settings_b.auto_add_downloads() {
+                                            let opener =
+                                                step_b.gallery_select_opener.borrow().clone();
+                                            if let Some(open) = opener {
+                                                open();
+                                            }
+                                        }
                                         return;
                                     }
                                     crate::gallery_probe::ProbeOutcome::None => {
@@ -2435,6 +2485,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     Some(crate::video::ProbeResult::Playlist(pl.clone()));
                                 show_video_playlist(&step_b, &pl);
                                 set_lookup_add(&lookup_add_b, true);
+                                // Auto-add's lookup is the submit: a playlist
+                                // needs a selection, so open its picker too.
+                                if settings_b.auto_add_downloads() {
+                                    push_playlist_items_page(
+                                        &nav_b,
+                                        manager_b.clone(),
+                                        dest_b.clone(),
+                                        close_b.clone(),
+                                        pl,
+                                        scheduled_at_b.get(),
+                                    );
+                                }
                             }
                         }
                     }
@@ -2597,11 +2659,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let s = submit.clone();
         url_entry.connect_activate(move |_| s(SubmitSource::Enter));
     }
-    // Tick icon inside the entry submits like Enter.
+    // Tick icon inside the entry submits like Enter; the spinner cancels the
+    // running lookup (the entry is locked while it resolves).
     {
         let s = submit.clone();
+        let step = step.clone();
+        let probe = Rc::clone(&probe);
         url_entry.connect_icon_press(move |_, pos| {
-            if pos == gtk4::EntryIconPosition::Secondary {
+            if pos != gtk4::EntryIconPosition::Secondary {
+                return;
+            }
+            if step.looking_up.get() {
+                probe.borrow_mut().bump_generation();
+                abort_lookup(&step);
+                set_looking_up(&step, false);
+                sync_entry_icon(&step);
+            } else {
                 s(SubmitSource::Button);
             }
         });
@@ -2619,6 +2692,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let settings_auto = manager.settings().clone();
         let debounce: Rc<std::cell::RefCell<Option<glib::SourceId>>> =
             Rc::new(std::cell::RefCell::new(None));
+        let last_text: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
         // Only auto-trigger for URLs that look complete: a parseable
         // http(s) URL with a dotted host, or a magnet link. This avoids
         // firing on partial input while the user is still typing.
@@ -2631,9 +2705,19 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     && u.host_str().is_some_and(|h| h.contains('.'))
             })
         };
-        url_entry.connect_changed(move |row| {
-            clear_field_error(row);
-            let text = row.text().trim().to_string();
+        // GTK emits `changed` twice for a replace (clear, then insert). The
+        // 0 ms coalescing below drops the transient "" and the guard then
+        // ignores an identical re-set: neither may count as an edit that
+        // wipes the resolved collection and re-arms auto-add.
+        let entry = url_entry.clone();
+        let probe_sync = Rc::clone(&probe);
+        let step_sync = Rc::clone(&step2);
+        let apply = Rc::new(move || {
+            let text = entry.text().trim().to_string();
+            if !text_is_new(&mut last_text.borrow_mut(), &text) {
+                return;
+            }
+            clear_field_error(&entry);
             // Auto-add: debounce the lookup so it fires after the user
             // pauses typing/pasting, not on every keystroke.
             if settings_auto.auto_add_downloads() && url_looks_complete(&text) {
@@ -2675,16 +2759,31 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     probe.borrow_mut().info.take();
                 }
             }
-            // Editing mid-lookup stales the in-flight resolve so its
-            // completion is discarded — and aborts it, so the probes stop
-            // instead of reading to completion for a URL the user left.
-            probe.borrow_mut().bump_generation();
-            abort_lookup(&step2);
             // Any edit clears the lookup-in-flight state, and the icon
             // follows: the tick returns for non-empty text, the spinner
             // and the icon-less states clear.
-            step2.looking_up.set(false);
+            set_looking_up(&step2, false);
             sync_entry_icon(&step2);
+        });
+        let scheduled: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+        url_entry.connect_changed(move |_| {
+            // Stale *now*: a probe completing this turn must not slip past the
+            // edit and (with auto-add) queue the URL being replaced. Aborting
+            // here also stops the probes instead of letting them read to
+            // completion for a URL the user left.
+            probe_sync.borrow_mut().bump_generation();
+            abort_lookup(&step_sync);
+            if let Some(id) = scheduled.borrow_mut().take() {
+                id.remove();
+            }
+            let apply = apply.clone();
+            let scheduled_c = Rc::clone(&scheduled);
+            let id = glib::timeout_add_local(std::time::Duration::from_millis(0), move || {
+                *scheduled_c.borrow_mut() = None;
+                apply();
+                glib::ControlFlow::Break
+            });
+            *scheduled.borrow_mut() = Some(id);
         });
     }
 
@@ -3145,10 +3244,14 @@ fn make_gallery_picker_opener(
 
 fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, title: &str) {
     hide_video_step(v);
-    v.looking_up.set(false);
+    set_looking_up(v, false);
     v.is_gallery.set(true);
     // Store the card first so the filter handler can access it.
     *v.gallery_card.borrow_mut() = Some(card);
+    // A superseded enumeration can leave the button on "Loading…"; every
+    // resolved gallery row gets a working opener.
+    v.gallery_select_btn.set_sensitive(true);
+    v.gallery_select_btn.set_label(&gettext("Select files…"));
     // Reset filter to All.
     v.gallery_filter.set_active_name(Some("all"));
     refresh_gallery_info(v, title);
@@ -3184,6 +3287,20 @@ fn refresh_gallery_info(v: &VideoStep, title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_text_is_ignored() {
+        // The UI coalesces GTK's clear+insert pair before this guard runs;
+        // this pins the guard itself: an identical re-set is not an edit, so
+        // a resolved collection and the armed auto-add survive it.
+        let mut last = String::new();
+        assert!(text_is_new(&mut last, "https://example.com/gallery"));
+        assert!(!text_is_new(&mut last, "https://example.com/gallery"));
+        assert!(text_is_new(&mut last, "https://example.com/video"));
+        // Clearing is a real edit: close resets the form.
+        assert!(text_is_new(&mut last, ""));
+        assert!(!text_is_new(&mut last, ""));
+    }
 
     #[test]
     fn entry_icon_lookup_wins_over_everything() {

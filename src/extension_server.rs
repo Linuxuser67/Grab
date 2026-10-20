@@ -471,10 +471,6 @@ fn handoff_entry(url: &str) -> Option<HandoffCookies> {
     })
 }
 
-fn handoff_cookie_file(url: &str) -> Option<PathBuf> {
-    handoff_entry(url).map(|e| e.path)
-}
-
 /// Browser UA staged with a handoff's cookies, if any. Same lookup as the
 /// cookies (exact URL, then same-host fallback).
 pub(crate) fn handoff_user_agent(url: &str) -> Option<String> {
@@ -523,17 +519,24 @@ pub(crate) fn ytdlp_spawn_identity(cookies_browser: &str, page_url: &str) -> Vec
 /// freshness policy.
 #[cfg(test)]
 pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
-    match handoff_cookie_file(url) {
+    match handoff_entry(url).map(|e| e.path) {
         Some(p) => vec!["--cookies".to_string(), p.to_string_lossy().into_owned()],
         None => Vec::new(),
     }
 }
 
-/// Cookie jar for a URL's staged handoff cookies, if any. For reqwest-handled
-/// Path of the staged cookie file for `url`, if any. Peeks: the entry stays
-/// until the download finishes or is evicted.
-pub(crate) fn handoff_cookie_path(url: &str) -> Option<PathBuf> {
-    handoff_cookie_file(url)
+/// Handoff jar for gallery-dl when it is safe to use alongside the configured
+/// browser source. A stale snapshot would override rotated cookies exported
+/// from the live browser, so withhold it and let gallery-dl use the export.
+pub(crate) fn live_handoff_cookie_path(url: &str, browser: &str) -> Option<PathBuf> {
+    live_handoff_cookie_path_at(url, browser, Instant::now())
+}
+
+fn live_handoff_cookie_path_at(url: &str, browser: &str, now: Instant) -> Option<PathBuf> {
+    let live_browser = crate::video_tools::cookies_browser_spec(browser).is_some();
+    handoff_entry(url)
+        .filter(|entry| handoff_jar_usable_at(entry, live_browser, now))
+        .map(|entry| entry.path)
 }
 
 /// Drop a URL's staged handoff cookies and delete the file. Called when its
@@ -1305,6 +1308,34 @@ mod tests {
     }
 
     #[test]
+    fn live_handoff_path_withholds_a_stale_jar_only_with_a_live_browser() {
+        let _g = exclusive();
+        let url = "https://gallery-freshness.example.com/album";
+        let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
+        store_handoff_cookies(url, path.clone(), Some("UA/1".into()));
+
+        let now = Instant::now();
+        assert_eq!(
+            live_handoff_cookie_path_at(url, "brave", now),
+            Some(path.clone()),
+            "fresh handoff jars remain preferred"
+        );
+
+        let stale_at = now + HANDOFF_FRESH;
+        assert_eq!(
+            live_handoff_cookie_path_at(url, "brave", stale_at),
+            None,
+            "a stale jar must not override the live browser's rotated cookies"
+        );
+        assert_eq!(
+            live_handoff_cookie_path_at(url, "none", stale_at),
+            Some(path),
+            "without a browser source, the handoff jar is still the only cookie source"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[test]
     fn discard_handoff_cookies_removes_entry_and_file() {
         let _g = exclusive();
         let path =
@@ -1412,7 +1443,7 @@ mod tests {
         assert_eq!(status(&r2), "200", "{r2}");
         let _ = srv.rx.recv().await.expect("handoff");
         assert!(
-            handoff_cookie_path(url).is_none(),
+            live_handoff_cookie_path(url, "none").is_none(),
             "stale entry must be gone"
         );
         assert!(!staged.exists(), "staged file must be deleted");

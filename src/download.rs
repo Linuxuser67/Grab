@@ -2097,7 +2097,10 @@ impl DownloadManager {
             // Stage cookies inside the task (async context).
             // Prefer the extension's staged cookies ("Download with Grab");
             // fall back to browser export. Same order as the probe.
-            let handoff_path = crate::extension_server::handoff_cookie_path(&job.page_url);
+            let handoff_path = crate::extension_server::live_handoff_cookie_path(
+                &job.page_url,
+                &job.cookies_browser,
+            );
             let handoff_ua = crate::extension_server::handoff_user_agent(&job.page_url);
             let cookies_file: Option<crate::cookies::StagedCookies> = if handoff_path.is_some()
                 || job.cookies_browser.is_empty()

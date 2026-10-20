@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "grab"
-version = "6.0.2-beta.2"
+version = "6.1.0"
 dependencies = [
  "axum",
  "futures-util",

@@ -43,8 +43,9 @@ gettext-rs = "0.8"
 yt-dlp = { version = "2.8.3", default-features = false, features = ["rustls"] }
 libc = "0.2"
 thiserror = "2"
-# Zip extraction for the ffmpeg/ffprobe static-build installer.
-zip = "8"
+# Tar.xz extraction for the ffmpeg/ffprobe static-build installer.
+tar = "0.4"
+xz2 = "0.1"
 
 [dev-dependencies]
 pretty_assertions = "1"

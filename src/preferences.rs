@@ -680,26 +680,11 @@ pub fn show(
         }
         Some(first)
     }
-    /// Probe installed tool versions: `(yt-dlp, ffmpeg, quickjs?)` plus
-    /// gallery-dl; `None` when the core tools are missing, falling back to
-    /// the binary path if `--version` fails. quickjs is `None` when no
-    /// `qjs` is on hand — it is only provisioned for YouTube. Only tool
-    /// presence matters for the row ("Ready" vs "Not installed"); the
-    /// versions themselves are not shown.
-    fn installed_tool_versions() -> Option<(String, String, Option<String>, Option<String>)> {
-        crate::video::resolve_libraries().ok().map(|libs| {
-            let yt = tool_version(&libs.youtube, "--version")
-                .map(|v| format!("yt-dlp {v}"))
-                .unwrap_or_else(|| libs.youtube.display().to_string());
-            let ff = tool_version(&libs.ffmpeg, "-version")
-                .unwrap_or_else(|| libs.ffmpeg.display().to_string());
-            let qjs = crate::video_tools::find_quickjs()
-                .and_then(|p| tool_version(&p, "--version").map(|v| format!("quickjs {v}")));
-            let gdl = crate::gallery_tools::resolve_gallerydl()
-                .ok()
-                .and_then(|p| tool_version(&p, "--version").map(|v| format!("gallery-dl {v}")));
-            (yt, ff, qjs, gdl)
-        })
+    /// The row only needs to know whether both required video tools are present.
+/// Check filesystem paths only: do not launch subprocesses or contact upstream
+/// services just to choose between Install and Check for Updates.
+    fn core_tools_installed() -> bool {
+        crate::video::resolve_libraries().is_ok()
     }
     /// What the tools-row button does: Install when tools are missing, Check to
     /// probe each tool's upstream for a newer release, Update once one is
@@ -715,21 +700,18 @@ pub fn show(
         row: &adw::ActionRow,
         btn: &gtk4::Button,
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
-        probed: Option<(String, String, Option<String>, Option<String>)>,
+        installed: bool,
     ) {
-        match probed {
-            // Tool names live in the group description; the row carries
-            // state only: no versions, no ffmpeg/quickjs noise.
-            Some(_) => {
-                row.set_subtitle(&gettext("Ready"));
-                btn.set_label(&gettext("Check for Updates"));
-                action.set(ToolAction::Check);
-            }
-            None => {
-                row.set_subtitle(&gettext("Not installed"));
-                btn.set_label(&gettext("Install"));
-                action.set(ToolAction::Install);
-            }
+        // Tool names live in the group description; the row carries state
+        // only, with no version strings or optional-tool noise.
+        if installed {
+            row.set_subtitle(&gettext("Ready"));
+            btn.set_label(&gettext("Check for Updates"));
+            action.set(ToolAction::Check);
+        } else {
+            row.set_subtitle(&gettext("Not installed"));
+            btn.set_label(&gettext("Install"));
+            action.set(ToolAction::Install);
         }
     }
     fn refresh_video_tools(
@@ -739,14 +721,13 @@ pub fn show(
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
     ) {
         spin.set_visible(false);
-        // Probe off the GTK thread (three subprocesses), then paint.
+        // Presence-only probe off the GTK thread; no network calls or subprocesses.
         let (row, btn, action) = (row.clone(), btn.clone(), action.clone());
         gtk4::glib::spawn_future_local(async move {
-            let probed = gio::spawn_blocking(installed_tool_versions)
+            let installed = gio::spawn_blocking(core_tools_installed)
                 .await
-                .ok()
-                .flatten();
-            paint_tools_state(&row, &btn, &action, probed);
+                .unwrap_or(false);
+            paint_tools_state(&row, &btn, &action, installed);
         });
     }
     let video_page = adw::PreferencesPage::builder()
@@ -1004,8 +985,10 @@ pub fn show(
     // so the popup only shows what's actually downloading.
     let pending_updates: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
         std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    video_tools_btn.set_label(&gettext("Check for Updates"));
-    video_tools_row.set_subtitle(&gettext("Press Check for Updates to see versions"));
+    // Start in the safe fresh-install state; the local presence probe below
+    // switches to Check for Updates only when yt-dlp and ffmpeg are present.
+    video_tools_btn.set_label(&gettext("Install"));
+    video_tools_row.set_subtitle(&gettext("Not installed"));
     {
         let (row, btn, spin) = (
             video_tools_row.clone(),
@@ -1067,24 +1050,23 @@ pub fn show(
                     // upstream for its latest release tag: yt-dlp/yt-dlp,
                     // BtbN/FFmpeg-Builds, quickjs-ng/quickjs, gdl-org/builds.
                     let installed = gio::spawn_blocking(|| {
-                        crate::video::resolve_libraries().ok().map(|libs| {
-                            let yt = tool_first_line(&libs.youtube, "--version");
-                            let ff = tool_first_line(&libs.ffmpeg, "-version");
-                            let qjs = crate::video_tools::find_quickjs()
-                                .and_then(|p| tool_first_line(&p, "--version"));
-                            let gdl = crate::gallery_tools::resolve_gallerydl()
-                                .ok()
-                                .and_then(|p| tool_first_line(&p, "--version"));
-                            let ffprobe_available = crate::video_tools::toolchain_dir_in(
-                                &crate::video_tools::tool_search_dirs(),
-                            )
-                            .is_some();
-                            (yt, ff, qjs, gdl, ffprobe_available)
-                        })
+                        let dirs = crate::video_tools::tool_search_dirs();
+                        let inspect = |name: &str, version_arg: &str| {
+                            crate::video_tools::find_in_dirs(name, &dirs).map(|path| {
+                                let version = tool_first_line(&path, version_arg);
+                                (path, version)
+                            })
+                        };
+                        let yt = inspect("yt-dlp", "--version");
+                        let ff = inspect("ffmpeg", "-version");
+                        let qjs = inspect("qjs", "--version");
+                        let gdl = inspect("gallery-dl", "--version");
+                        let ffprobe_available =
+                            crate::video_tools::toolchain_dir_in(&dirs).is_some();
+                        (yt, ff, qjs, gdl, ffprobe_available)
                     })
                     .await
-                    .ok()
-                    .flatten();
+                    .ok();
                     // Upstream tags come from the update cache: a click reuses a
                     // check from the last 15 minutes. The lookups run on Grab's
                     // Tokio runtime inside update_cache, never on this GLib task.
@@ -1280,6 +1262,14 @@ pub fn show(
             );
         });
     }
+    // Do not make a fresh Flatpak-data profile ask for updates before its tools
+    // exist. This is a local executable-presence check, not an upstream lookup.
+    refresh_video_tools(
+        &video_tools_row,
+        &video_tools_btn,
+        &video_tools_spin,
+        &tool_action,
+    );
     video_page.add(&video_quality_group);
     video_page.add(&video_auth_group);
     video_page.add(&video_tools_group);

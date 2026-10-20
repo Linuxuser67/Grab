@@ -2102,7 +2102,8 @@ impl DownloadManager {
                 &job.page_url,
                 &job.cookies_browser,
             );
-            let handoff_ua = crate::extension_server::handoff_user_agent(&job.page_url, &job.cookies_browser);
+            let handoff_ua =
+                crate::extension_server::handoff_user_agent(&job.page_url, &job.cookies_browser);
             let cookies_file: Option<crate::cookies::StagedCookies> = if handoff_path.is_some()
                 || job.cookies_browser.is_empty()
                 || job.cookies_browser == "none"

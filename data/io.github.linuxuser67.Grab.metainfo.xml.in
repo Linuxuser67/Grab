@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.0.2~beta.4" date="2026-10-20">
+      <description>
+        <ul>
+          <li>Fresh Flatpak profiles now reliably offer installation until Grab-managed yt-dlp, FFmpeg, and ffprobe are present.</li>
+          <li>Browser-cookie handoff avoids stale cookie snapshots being paired with a newer user agent, and stale asynchronous tool checks can no longer overwrite newer state.</li>
+          <li>Gallery and collection pickers improve submission-state handling and selection-count coverage for very large result sets.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.0.2~beta.3" date="2026-10-20">
       <description>
         <ul>

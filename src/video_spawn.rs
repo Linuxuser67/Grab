@@ -8,9 +8,7 @@ use crate::video_probe::{
 };
 use crate::video_progress::{last_log_line, trace_format_lines};
 use crate::video_staging::{ensure_staging_dir, staging_root};
-use crate::video_tools::{
-    VideoError, cookies_browser_with_handoff, ensure_tool_versions, ytdlp_identity_args,
-};
+use crate::video_tools::{VideoError, ensure_tool_versions};
 use crate::video_types::{FetchedVideo, ProbeResult, VideoInfo};
 use gettextrs::gettext;
 use std::path::{Path, PathBuf};
@@ -62,19 +60,13 @@ pub(crate) async fn fetch_raw_dump_json(
     }
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(fetch_proxy));
-    // Extension handoff cookies (Cloudflare bypass): staged by the handoff
-    // receiver, peeked here. The entry outlives the probe — the subtitle
-    // probe and the media download spawn yt-dlp separately and need it too;
-    // the finished download discards it. Before the identity args: those end
-    // argv with `-- <url>`, past which yt-dlp reads positionals.
-    let handoff = crate::extension_server::handoff_cookie_args(url);
-    let cookie_source = cookies_browser_with_handoff(cookies_browser, &handoff);
-    args.extend(handoff);
-    // Browser UA travels with the handoff cookies (cf_clearance is UA-bound).
-    let handoff_ua = crate::extension_server::handoff_user_agent(url);
-    args.extend(ytdlp_identity_args(
-        cookie_source,
-        handoff_ua.as_deref(),
+    // Extension handoff (Cloudflare bypass): staged by the handoff receiver,
+    // peeked here. The entry outlives the probe — the subtitle probe and the
+    // media download spawn yt-dlp separately and need it too; the finished
+    // download discards it. The tail ends with `-- <url>`, past which yt-dlp
+    // reads positionals.
+    args.extend(crate::extension_server::ytdlp_spawn_identity(
+        cookies_browser,
         url,
     ));
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).

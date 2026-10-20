@@ -2867,16 +2867,20 @@ fn toolchain_dir_prefers_complete_toolchain() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// Build a zip archive with the given (entry name, contents) pairs.
-fn make_tool_zip(archive: &std::path::Path, entries: &[(&str, &[u8])]) {
+/// Build a tar.xz archive with the given (entry name, contents) pairs.
+fn make_tool_tar_xz(archive: &std::path::Path, entries: &[(&str, &[u8])]) {
     let file = std::fs::File::create(archive).unwrap();
-    let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default();
-    for (name, contents) in entries {
-        zip.start_file(*name, options).unwrap();
-        std::io::Write::write_all(&mut zip, contents).unwrap();
+    let encoder = xz2::write::XzEncoder::new(file, 1);
+    let mut tar = tar::Builder::new(encoder);
+    for &(name, contents) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(&mut header, name, std::io::Cursor::new(contents))
+            .unwrap();
     }
-    zip.finish().unwrap();
+    tar.into_inner().unwrap().finish().unwrap();
 }
 
 #[test]
@@ -2885,9 +2889,9 @@ fn extract_ffmpeg_toolchain_pulls_both_binaries() {
     let _ = std::fs::remove_dir_all(&base);
     let dir = base.join("out");
     std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
     // Nested layout (bin/-style); the extractor matches by file name.
-    make_tool_zip(
+    make_tool_tar_xz(
         &archive,
         &[("bin/ffmpeg", b"fake-ffmpeg"), ("ffprobe", b"fake-ffprobe")],
     );
@@ -2913,9 +2917,31 @@ fn extract_ffmpeg_toolchain_errors_without_ffmpeg() {
     let _ = std::fs::remove_dir_all(&base);
     let dir = base.join("out");
     std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.zip");
-    make_tool_zip(&archive, &[("ffprobe", b"fake-ffprobe")]);
+    let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
+    make_tool_tar_xz(&archive, &[("ffprobe", b"fake-ffprobe")]);
     assert!(extract_ffmpeg_toolchain(&archive, &dir).is_err());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn extract_ffmpeg_toolchain_rejects_legacy_zip_archive() {
+    use crate::video_tools::extract_ffmpeg_toolchain_inner;
+
+    let base = std::env::temp_dir().join(format!("grab-fftools-legacy-zip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("out");
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    // Valid ZIP magic but not a tar.xz stream. Testing the file signature is
+    // enough here; production fixtures above exercise successful tar.xz reads.
+    std::fs::write(&archive, b"PK\x03\x04legacy ZIP, not a tar.xz archive").unwrap();
+
+    assert!(
+        extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).is_err(),
+        "the tar.xz extractor must reject ZIP payloads"
+    );
+    assert!(!dir.join("ffmpeg").exists());
+    assert!(!dir.join("ffprobe").exists());
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -2927,9 +2953,9 @@ fn extract_ffmpeg_toolchain_inner_rejects_entry_over_cap() {
     let _ = std::fs::remove_dir_all(&base);
     let dir = base.join("out");
     std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
     // 4KB entry against a 1KB cap: must be refused, not silently truncated.
-    make_tool_zip(&archive, &[("ffmpeg", &vec![0x7f; 4096])]);
+    make_tool_tar_xz(&archive, &[("ffmpeg", &vec![0x7f; 4096])]);
     let err = extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).expect_err("cap must trip");
     assert!(err.contains("exceeds"), "unexpected error: {err}");
     // The partial file is removed, not left truncated on disk.
@@ -2945,10 +2971,14 @@ fn extract_ffmpeg_toolchain_inner_accepts_entry_at_cap() {
     let _ = std::fs::remove_dir_all(&base);
     let dir = base.join("out");
     std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
     // An entry of exactly the cap is legitimate: take(max + 1) reads it fully
-    // and the `> max` check lets it through.
-    make_tool_zip(&archive, &[("ffmpeg", &vec![0x7f; 1024])]);
+    // and the `> max` check lets it through. Include a small ffprobe too,
+    // because a successful toolchain install must contain both executables.
+    make_tool_tar_xz(
+        &archive,
+        &[("ffmpeg", &vec![0x7f; 1024]), ("ffprobe", b"tiny-probe")],
+    );
     let ffmpeg = extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).expect("at-cap entry ok");
     assert_eq!(ffmpeg, dir.join("ffmpeg"));
     assert_eq!(std::fs::read(dir.join("ffmpeg")).unwrap().len(), 1024);
@@ -2963,10 +2993,10 @@ fn extract_ffmpeg_toolchain_inner_cleans_up_partial_on_cap_trip() {
     let _ = std::fs::remove_dir_all(&base);
     let dir = base.join("out");
     std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
     // ffmpeg fits the cap but ffprobe doesn't: the trip must not leave a
     // half-installed toolchain behind.
-    make_tool_zip(
+    make_tool_tar_xz(
         &archive,
         &[("ffmpeg", b"tiny-ffmpeg"), ("ffprobe", &vec![0x7f; 4096])],
     );
@@ -2985,11 +3015,11 @@ fn extract_ffmpeg_toolchain_inner_cleans_up_on_non_cap_error() {
     let _ = std::fs::remove_dir_all(&base);
     let dir = base.join("out");
     std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
     // ffmpeg extracts fine, but a planted symlink at dir/ffprobe makes the
     // second extraction refuse: the already-extracted ffmpeg must not remain.
     std::os::unix::fs::symlink("/nonexistent", dir.join("ffprobe")).unwrap();
-    make_tool_zip(
+    make_tool_tar_xz(
         &archive,
         &[("ffmpeg", b"tiny-ffmpeg"), ("ffprobe", b"tiny-ffprobe")],
     );

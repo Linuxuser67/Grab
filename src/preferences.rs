@@ -1065,7 +1065,7 @@ pub fn show(
                     }
                     // Probe installed versions off-thread, then ask each tool's
                     // upstream for its latest release tag: yt-dlp/yt-dlp,
-                    // boul2gom/ffmpeg-builds, quickjs-ng/quickjs, gdl-org/builds.
+                    // BtbN/FFmpeg-Builds, quickjs-ng/quickjs, gdl-org/builds.
                     let installed = gio::spawn_blocking(|| {
                         crate::video::resolve_libraries().ok().map(|libs| {
                             let yt = tool_first_line(&libs.youtube, "--version");
@@ -1075,7 +1075,11 @@ pub fn show(
                             let gdl = crate::gallery_tools::resolve_gallerydl()
                                 .ok()
                                 .and_then(|p| tool_first_line(&p, "--version"));
-                            (yt, ff, qjs, gdl)
+                            let ffprobe_available = crate::video_tools::toolchain_dir_in(
+                                &crate::video_tools::tool_search_dirs(),
+                            )
+                            .is_some();
+                            (yt, ff, qjs, gdl, ffprobe_available)
                         })
                     })
                     .await
@@ -1108,7 +1112,7 @@ pub fn show(
                     let mut missing: Vec<String> = Vec::new();
                     let mut current: Vec<String> = Vec::new();
                     let mut indeterminate = installed.is_none();
-                    if let Some((yt, ff, qjs, gdl)) = installed {
+                    if let Some((yt, ff, qjs, gdl, ffprobe_available)) = installed {
                         match (yt.as_deref(), yt_tag.as_deref()) {
                             (Some(installed), Some(tag))
                                 if crate::video_tools::tool_update_available(installed, tag) =>
@@ -1128,11 +1132,31 @@ pub fn show(
                             (Some(first_line), Some(tag)) => {
                                 let token = crate::video_tools::ffmpeg_version_token(first_line)
                                     .unwrap_or(first_line);
-                                if crate::video_tools::tool_update_available(token, tag) {
-                                    updates.push(format!("ffmpeg {} → {}", token, tag.trim()));
+                                if crate::video_tools::ffmpeg_needs_update(
+                                    first_line,
+                                    tag,
+                                    ffprobe_available,
+                                ) {
+                                    updates.push(if ffprobe_available {
+                                        format!("ffmpeg {} → {}", token, tag.trim())
+                                    } else {
+                                        format!(
+                                            "ffmpeg {} → {} (ffprobe missing)",
+                                            token,
+                                            tag.trim()
+                                        )
+                                    });
                                 } else {
                                     current.push(format!("ffmpeg {token}"));
                                 }
+                            }
+                            (Some(first_line), None) if !ffprobe_available => {
+                                let token = crate::video_tools::ffmpeg_version_token(first_line)
+                                    .unwrap_or(first_line);
+                                updates.push(format!("ffmpeg {token} (ffprobe missing)"));
+                            }
+                            (None, _) if !ffprobe_available => {
+                                updates.push("ffmpeg (ffprobe missing)".to_string());
                             }
                             _ => indeterminate = true,
                         }

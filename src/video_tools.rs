@@ -1247,6 +1247,21 @@ pub(crate) fn tool_update_available(installed: &str, tag: &str) -> bool {
     }
 }
 
+/// Whether an FFmpeg install needs replacing. Treat an incomplete executable
+/// pair as outdated even when its FFmpeg version equals upstream: version-only
+/// checks would otherwise leave a same-version build without ffprobe broken.
+pub(crate) fn ffmpeg_needs_update(
+    installed_first_line: &str,
+    latest: &str,
+    complete_toolchain: bool,
+) -> bool {
+    if !complete_toolchain {
+        return true;
+    }
+    let installed = ffmpeg_version_token(installed_first_line).unwrap_or(installed_first_line);
+    tool_update_available(installed, latest)
+}
+
 /// Version token from an `ffmpeg -version` first line: the word after "version".
 /// `ffmpeg version 7.1.2 …` → `7.1.2`. Returns None if there's no "version"
 /// word or nothing follows it. A positional nth(2) would match "2000-2025" in
@@ -1687,12 +1702,26 @@ fn ffmpeg_asset_version_for_target(
     name: &str,
     target: &str,
 ) -> Option<([u32; 3], String)> {
+    // Besides rejecting malformed names, this prevents an archive name from
+    // containing path separators before it is joined to the install directory.
+    if !valid_release_tag(name) {
+        return None;
+    }
     let rest = name.strip_prefix("ffmpeg-n")?;
     let marker = format!("-{target}-gpl-");
     let (build, release_branch) = rest.split_once(&marker)?;
     let version_token = build.split('-').next()?;
+    if version_token.split('.').count() != 3
+        || !version_token
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
     let version = parse_dotted_version(version_token)?;
-    if release_branch != format!("{}.{}.tar.xz", version[0], version[1]) {
+    if version_token != format!("{}.{}.{}", version[0], version[1], version[2])
+        || release_branch != format!("{}.{}.tar.xz", version[0], version[1])
+    {
         return None;
     }
     Some((version, format!("{}.{}.{}", version[0], version[1], version[2])))
@@ -2412,5 +2441,13 @@ mod update_hint_tests {
         assert!(!extractor_failure("ERROR: Video unavailable"));
         assert!(!extractor_failure("ERROR: Private video"));
         assert!(!extractor_failure("ERROR: unable to download webpage"));
+    }
+
+    #[test]
+    fn missing_ffprobe_forces_ffmpeg_reinstall_even_at_same_version() {
+        let installed = "ffmpeg version n9.0.2-29-g6dfaba896f Copyright";
+        assert!(ffmpeg_needs_update(installed, "9.0.2", false));
+        assert!(!ffmpeg_needs_update(installed, "9.0.2", true));
+        assert!(ffmpeg_needs_update(installed, "9.0.3", true));
     }
 }

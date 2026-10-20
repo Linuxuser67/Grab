@@ -471,10 +471,6 @@ fn handoff_entry(url: &str) -> Option<HandoffCookies> {
     })
 }
 
-fn handoff_cookie_file(url: &str) -> Option<PathBuf> {
-    handoff_entry(url).map(|e| e.path)
-}
-
 /// Browser UA staged with a handoff's cookies, if any. Same lookup as the
 /// cookies (exact URL, then same-host fallback).
 pub(crate) fn handoff_user_agent(url: &str) -> Option<String> {
@@ -523,17 +519,10 @@ pub(crate) fn ytdlp_spawn_identity(cookies_browser: &str, page_url: &str) -> Vec
 /// freshness policy.
 #[cfg(test)]
 pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
-    match handoff_cookie_file(url) {
+    match handoff_entry(url).map(|e| e.path) {
         Some(p) => vec!["--cookies".to_string(), p.to_string_lossy().into_owned()],
         None => Vec::new(),
     }
-}
-
-/// Cookie jar for a URL's staged handoff cookies, if any. For reqwest-handled
-/// Path of the staged cookie file for `url`, if any. Peeks: the entry stays
-/// until the download finishes or is evicted.
-pub(crate) fn handoff_cookie_path(url: &str) -> Option<PathBuf> {
-    handoff_cookie_file(url)
 }
 
 /// Handoff jar for gallery-dl when it is safe to use alongside the configured
@@ -1454,7 +1443,7 @@ mod tests {
         assert_eq!(status(&r2), "200", "{r2}");
         let _ = srv.rx.recv().await.expect("handoff");
         assert!(
-            handoff_cookie_path(url).is_none(),
+            live_handoff_cookie_path(url, "none").is_none(),
             "stale entry must be gone"
         );
         assert!(!staged.exists(), "staged file must be deleted");

@@ -7322,7 +7322,7 @@ fn gallery_round_trip_failed() {
 fn gallery_remove_discards_handoff_cookies() {
     // Removing a gallery row must discard its handoff cookies (failed rows
     // keep them for retry, but removal means the user is done).
-    // Mutation: skip discard → handoff_cookie_path still returns Some.
+    // Mutation: skip discard → the handoff lookup still returns Some.
     let (_lock, _loop) = test_locks();
     let settings = test_settings();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -7346,7 +7346,7 @@ fn gallery_remove_discards_handoff_cookies() {
     // write_handoff_cookies only writes the file; the handoff receiver
     // registers it in the store once accepted — simulate that here.
     crate::extension_server::store_handoff_cookies(&job.page_url, path, None);
-    assert!(crate::extension_server::handoff_cookie_path(&job.page_url).is_some());
+    assert!(crate::extension_server::live_handoff_cookie_path(&job.page_url, "none").is_some());
     // Enqueue the gallery, then remove it.
     let item = m.enqueue_gallery(&job).expect("enqueue");
     let id = item.id();
@@ -7355,7 +7355,7 @@ fn gallery_remove_discards_handoff_cookies() {
     m.remove(id);
     // Cookies must be gone.
     assert!(
-        crate::extension_server::handoff_cookie_path(&job.page_url).is_none(),
+        crate::extension_server::live_handoff_cookie_path(&job.page_url, "none").is_none(),
         "handoff cookies not discarded on gallery removal"
     );
     crate::extension_server::discard_handoff_cookies(&job.page_url);

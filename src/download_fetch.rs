@@ -97,10 +97,12 @@ pub(crate) struct FetchCtx {
 pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
     let timeout = Duration::from_secs(30);
     let mut tries = 3;
-    // Handoff cookies (this exact URL's browser session) win over the
-    // Preferences export.
-    if let Some(path) = crate::extension_server::handoff_cookie_path(&ctx.url)
-        && let Ok(text) = tokio::fs::read_to_string(&path).await
+    // Prefer a fresh extension handoff; a stale snapshot must not override
+    // cookies from the currently configured browser profile.
+    if let Some(path) = crate::extension_server::live_handoff_cookie_path(
+        &ctx.url,
+        &ctx.opts.cookies_browser,
+    ) && let Ok(text) = tokio::fs::read_to_string(&path).await
     {
         let (jar, count) = crate::cookies::jar_from_export(&text);
         if count > 0 {

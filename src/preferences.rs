@@ -980,7 +980,7 @@ pub fn show(
     video_tools_group.add(&video_tools_row);
     // Nothing is probed on open: versions and updates are checked only when
     // the user presses Check for Updates.
-    let tool_action = std::rc::Rc::new(std::cell::Cell::new(ToolAction::Check));
+    let tool_action = std::rc::Rc::new(std::cell::Cell::new(ToolAction::Install));
     // Tools needing update (from the check); passed to install_progress::run
     // so the popup only shows what's actually downloading.
     let pending_updates: std::rc::Rc<std::cell::RefCell<Vec<String>>> =

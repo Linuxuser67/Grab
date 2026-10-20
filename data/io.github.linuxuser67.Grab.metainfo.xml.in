@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.1.0" date="2026-10-20">
+      <description>
+        <ul>
+          <li>Browser-cookie handoff now prefers fresh extension snapshots and withholds stale snapshots when a configured live browser can export current cookies, consistently across yt-dlp, gallery-dl, and direct HTTP downloads.</li>
+          <li>Collection pickers have clearer item titles, compact natural sizing for small selections, bounded scrolling for long lists, and safer queueing that avoids tearing down the picker during a GTK click handler.</li>
+          <li>Auto-add handles collection URLs more reliably and keeps lookups active when the same URL is entered again.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.0.2~beta.2" date="2026-10-20">
       <description>
         <ul>

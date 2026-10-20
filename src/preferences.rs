@@ -681,8 +681,8 @@ pub fn show(
         Some(first)
     }
     /// The row only needs to know whether both required video tools are present.
-/// Check filesystem paths only: do not launch subprocesses or contact upstream
-/// services just to choose between Install and Check for Updates.
+    /// Check filesystem paths only: do not launch subprocesses or contact upstream
+    /// services just to choose between Install and Check for Updates.
     fn core_tools_installed() -> bool {
         crate::video::resolve_libraries().is_ok()
     }
@@ -1127,8 +1127,9 @@ pub fn show(
                         } else {
                             match (ff.as_ref(), ff_tag.as_deref()) {
                                 (Some((_, Some(first_line))), Some(tag)) => {
-                                    let token = crate::video_tools::ffmpeg_version_token(first_line)
-                                        .unwrap_or(first_line);
+                                    let token =
+                                        crate::video_tools::ffmpeg_version_token(first_line)
+                                            .unwrap_or(first_line);
                                     if crate::video_tools::ffmpeg_needs_update(
                                         first_line,
                                         tag,

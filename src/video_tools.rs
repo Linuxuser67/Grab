@@ -342,11 +342,8 @@ pub(crate) fn find_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
     dirs.iter().map(|d| d.join(name)).find(|p| is_executable(p))
 }
 
-/// True only when Grab's private data directory owns the required media
-/// toolchain. Do not count `/app/bin` or PATH fallbacks here: after the user
-/// clears Flatpak app data, those fallbacks must not make the fresh profile
-/// look like it already has Grab-managed tools. A complete FFmpeg install also
-/// requires ffprobe, not just ffmpeg.
+/// True only when yt-dlp and a complete ffmpeg/ffprobe toolchain exist
+/// in the supplied search directories.
 pub(crate) fn core_tools_available_in(dirs: &[PathBuf]) -> bool {
     find_in_dirs("yt-dlp", dirs).is_some() && toolchain_dir_in(dirs).is_some()
 }

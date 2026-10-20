@@ -667,19 +667,6 @@ pub fn show(
             crate::video_tools::TOOL_PROBE_TIMEOUT,
         )
     }
-    fn tool_version(binary: &std::path::Path, version_arg: &str) -> Option<String> {
-        let first = tool_first_line(binary, version_arg)?;
-        // ffmpeg prints a whole sentence ("ffmpeg version n9.0.1 ..."):
-        // keep the version token so the row stays readable.
-        if binary
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy() == "ffmpeg")
-            && let Some(token) = first.split_whitespace().nth(2)
-        {
-            return Some(format!("ffmpeg {token}"));
-        }
-        Some(first)
-    }
     /// The row only needs to know whether both required video tools are present.
     /// Check filesystem paths only: do not launch subprocesses or contact upstream
     /// services just to choose between Install and Check for Updates.

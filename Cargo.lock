@@ -1386,13 +1386,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "url",
+ "xz2",
  "yt-dlp",
- "zip",
 ]
 
 [[package]]

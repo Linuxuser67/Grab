@@ -2911,6 +2911,18 @@ fn extract_ffmpeg_toolchain_pulls_both_binaries() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Build a legacy ZIP archive for negative format tests.
+fn make_tool_zip(archive: &std::path::Path, entries: &[(&str, &[u8])]) {
+    let file = std::fs::File::create(archive).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, contents) in entries {
+        zip.start_file(*name, options).unwrap();
+        std::io::Write::write_all(&mut zip, contents).unwrap();
+    }
+    zip.finish().unwrap();
+}
+
 #[test]
 fn extract_ffmpeg_toolchain_errors_without_ffmpeg() {
     let base = std::env::temp_dir().join(format!("grab-fftools-nofmpeg-{}", std::process::id()));
@@ -2920,6 +2932,29 @@ fn extract_ffmpeg_toolchain_errors_without_ffmpeg() {
     let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
     make_tool_tar_xz(&archive, &[("ffprobe", b"fake-ffprobe")]);
     assert!(extract_ffmpeg_toolchain(&archive, &dir).is_err());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn extract_ffmpeg_toolchain_rejects_legacy_zip_archive() {
+    use crate::video_tools::extract_ffmpeg_toolchain_inner;
+
+    let base = std::env::temp_dir().join(format!("grab-fftools-legacy-zip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("out");
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    make_tool_zip(
+        &archive,
+        &[("ffmpeg", b"fake-ffmpeg"), ("ffprobe", b"fake-ffprobe")],
+    );
+
+    assert!(
+        extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).is_err(),
+        "the tar.xz extractor must reject ZIP payloads"
+    );
+    assert!(!dir.join("ffmpeg").exists());
+    assert!(!dir.join("ffprobe").exists());
     let _ = std::fs::remove_dir_all(&base);
 }
 

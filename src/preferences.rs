@@ -715,21 +715,18 @@ pub fn show(
         row: &adw::ActionRow,
         btn: &gtk4::Button,
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
-        probed: Option<(String, String, Option<String>, Option<String>)>,
+        installed: bool,
     ) {
-        match probed {
-            // Tool names live in the group description; the row carries
-            // state only: no versions, no ffmpeg/quickjs noise.
-            Some(_) => {
-                row.set_subtitle(&gettext("Ready"));
-                btn.set_label(&gettext("Check for Updates"));
-                action.set(ToolAction::Check);
-            }
-            None => {
-                row.set_subtitle(&gettext("Not installed"));
-                btn.set_label(&gettext("Install"));
-                action.set(ToolAction::Install);
-            }
+        // The action row reports the required core tools only. Optional
+        // tools are provisioned on demand and do not block the Check button.
+        if installed {
+            row.set_subtitle(&gettext("Ready"));
+            btn.set_label(&gettext("Check for Updates"));
+            action.set(ToolAction::Check);
+        } else {
+            row.set_subtitle(&gettext("Not installed"));
+            btn.set_label(&gettext("Install"));
+            action.set(ToolAction::Install);
         }
     }
     fn refresh_video_tools(
@@ -738,15 +735,19 @@ pub fn show(
         spin: &adw::Spinner,
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
     ) {
-        spin.set_visible(false);
-        // Probe off the GTK thread (three subprocesses), then paint.
-        let (row, btn, action) = (row.clone(), btn.clone(), action.clone());
+        let (row, btn, spin, action) =
+            (row.clone(), btn.clone(), spin.clone(), action.clone());
+        btn.set_sensitive(false);
+        spin.set_visible(true);
+        // File presence is enough to decide Install vs Check. Do not run
+        // external tools on page open; version probes belong to an explicit check.
         gtk4::glib::spawn_future_local(async move {
-            let probed = gio::spawn_blocking(installed_tool_versions)
+            let installed = gio::spawn_blocking(|| crate::video::resolve_libraries().is_ok())
                 .await
-                .ok()
-                .flatten();
-            paint_tools_state(&row, &btn, &action, probed);
+                .unwrap_or(false);
+            spin.set_visible(false);
+            paint_tools_state(&row, &btn, &action, installed);
+            btn.set_sensitive(true);
         });
     }
     let video_page = adw::PreferencesPage::builder()
@@ -1085,6 +1086,21 @@ pub fn show(
                     .await
                     .ok()
                     .flatten();
+                    // Clearing Flatpak app data removes Grab-managed tool binaries.
+                    // In that state, checking upstream versions cannot tell us
+                    // anything useful; expose the install action without making
+                    // four network requests or reporting a misleading check error.
+                    if installed.is_none() {
+                        if dialog_b.upgrade().is_none() {
+                            return;
+                        }
+                        spin_b.set_visible(false);
+                        row_b.set_subtitle(&gettext("Not installed"));
+                        btn_b.set_label(&gettext("Install"));
+                        btn_b.set_sensitive(true);
+                        action_b.set(ToolAction::Install);
+                        return;
+                    }
                     // Upstream tags come from the update cache: a click reuses a
                     // check from the last 15 minutes. The lookups run on Grab's
                     // Tokio runtime inside update_cache, never on this GLib task.
@@ -1111,7 +1127,7 @@ pub fn show(
                     let mut updates: Vec<String> = Vec::new();
                     let mut missing: Vec<String> = Vec::new();
                     let mut current: Vec<String> = Vec::new();
-                    let mut indeterminate = installed.is_none();
+                    let mut indeterminate = false;
                     if let Some((yt, ff, qjs, gdl, ffprobe_available)) = installed {
                         match (yt.as_deref(), yt_tag.as_deref()) {
                             (Some(installed), Some(tag))
@@ -1296,4 +1312,16 @@ pub fn show(
     dialog.add(&net_page);
     dialog.add(&advanced_page);
     dialog.present(Some(parent));
+    // Wait until the core tools are confirmed before exposing "Check for
+    // Updates". Fresh installs and Flatpak-data purges should show Install.
+    if crate::video_tools::in_flatpak() {
+        video_tools_btn.set_label(&gettext("Checking installed tools…"));
+        video_tools_row.set_subtitle(&gettext("Checking installed tools…"));
+        refresh_video_tools(
+            &video_tools_row,
+            &video_tools_btn,
+            &video_tools_spin,
+            &tool_action,
+        );
+    }
 }

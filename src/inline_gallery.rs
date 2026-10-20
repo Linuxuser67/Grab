@@ -256,8 +256,8 @@ pub(crate) fn push_gallery_picker_page(
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
-    // Only the entries scroll; the recycling GridView fills the remaining
-    // height whatever the enumeration produced (no pill-style height cap).
+    // The grid keeps its natural height for small selections and caps its
+    // viewport for long galleries; the rest of the page stays content-sized.
     list_box.append(grid.widget());
     let error_caption = gtk4::Label::builder()
         .label("")
@@ -296,7 +296,6 @@ pub(crate) fn push_gallery_picker_page(
         let error_caption = error_caption.clone();
         let add_btn_click = add_btn.clone();
         let add_btn_guard = add_btn.clone();
-        let nav_pop = nav.clone();
         add_btn_click.connect_clicked(move |_| {
             if !add_btn_guard.is_sensitive() {
                 return;
@@ -341,8 +340,11 @@ pub(crate) fn push_gallery_picker_page(
             match manager.enqueue_gallery(&job) {
                 Ok(item) => {
                     apply_scheduled_at(&item, scheduled_at);
-                    nav_pop.pop();
-                    close_card();
+                    // Don't destroy the currently emitting button/page in its
+                    // own clicked callback. close_card already pops back to form;
+                    // defer that teardown until the signal has unwound.
+                    let close = close_card.clone();
+                    gtk4::glib::idle_add_local_once(move || close());
                 }
                 Err(e) => {
                     error_caption.set_text(&e);

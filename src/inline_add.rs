@@ -838,8 +838,8 @@ fn push_playlist_items_page(
             .build();
         list_box.append(&notice);
     }
-    // The recycling grid fills the remaining card height; captions stay
-    // outside so only the entries scroll.
+    // Small selections use their natural height; long lists scroll within
+    // the grid's capped viewport. Captions stay outside the scroll area.
     list_box.append(grid.widget());
     // The error caption lives under the list, like the old row list.
     let error_caption = gtk4::Label::builder()
@@ -1038,8 +1038,8 @@ fn push_torrent_picker_page(
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
-    // Same arrangement as the playlist picker: the grid fills the remaining
-    // height, captions stay outside.
+    // Same natural-height, capped-scrolling behavior as the playlist picker;
+    // captions stay outside the scroll area.
     list_box.append(grid.widget());
     let error_caption = gtk4::Label::builder()
         .label("")

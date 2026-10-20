@@ -37,6 +37,11 @@ struct Inner {
     count: RefCell<Option<CountSink>>,
 }
 
+/// The scrolled grid grows with small selections and scrolls after this cap.
+/// 420px leaves the card compact for a handful of entries while keeping a
+/// useful number visible in long galleries, playlists, and torrent pickers.
+const MAX_PICKER_HEIGHT: i32 = 420;
+
 /// Cloneable handle to the picker widgets (Rc inside, clone is cheap).
 #[derive(Clone)]
 pub(crate) struct GalleryGrid {
@@ -108,13 +113,14 @@ impl GalleryGrid {
         ensure_gap_css();
         let store = gtk4::StringList::new(&[]);
         let selection = gtk4::MultiSelection::new(Some(store.clone()));
-        // The ToolbarView content area stretches every page to full height;
-        // this vexpand makes the grid the child that takes it (the 480 cap
-        // was the pills' trick, unnecessary for a recycling view).
+        // Let the grid request its natural height for small selections. The
+        // cap makes long collections scroll inside the picker rather than
+        // stretching the whole card to the window's available height.
         let scrolled = gtk4::ScrolledWindow::builder()
             .hscrollbar_policy(gtk4::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(MAX_PICKER_HEIGHT)
             .build();
-        scrolled.set_vexpand(true);
 
         let factory = gtk4::SignalListItemFactory::new();
         // Selection watches live on the long-lived model; teardown disconnects
@@ -443,6 +449,11 @@ mod tests {
 
     fn empty_grid() {
         let grid = GalleryGrid::new();
+        // Small pickers hug the entries; long ones scroll within a bounded
+        // viewport rather than claiming the full page height.
+        assert!(!grid.widget().property::<bool>("vexpand"));
+        assert!(grid.widget().propagates_natural_height());
+        assert_eq!(grid.widget().max_content_height(), MAX_PICKER_HEIGHT);
         assert_eq!(grid.len(), 0);
         assert!(grid.selected_indices().is_empty());
         grid.append(&["only".to_string()]);
@@ -469,8 +480,8 @@ mod tests {
         });
         assert_eq!(add_btn.label().as_deref(), Some("300 selected"));
 
-        // The picker page's nesting exactly: captions inside a page box, the
-        // grid filling the remaining height (vexpand is the page's job).
+        // The picker page's nesting: captions live outside the grid's
+        // scroll area, and the grid keeps its natural height up to its cap.
         let page = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
         page.set_vexpand(true);
         page.append(grid.widget());

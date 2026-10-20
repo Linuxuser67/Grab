@@ -342,6 +342,20 @@ pub(crate) fn find_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
     dirs.iter().map(|d| d.join(name)).find(|p| is_executable(p))
 }
 
+/// True only when Grab's private data directory owns the required media
+/// toolchain. Do not count `/app/bin` or PATH fallbacks here: after the user
+/// clears Flatpak app data, those fallbacks must not make the fresh profile
+/// look like it already has Grab-managed tools. A complete FFmpeg install also
+/// requires ffprobe, not just ffmpeg.
+pub(crate) fn managed_core_tools_installed_in(dir: &Path) -> bool {
+    let dirs = [dir.to_path_buf()];
+    find_in_dirs("yt-dlp", &dirs).is_some() && toolchain_dir_in(&dirs).is_some()
+}
+
+pub(crate) fn managed_core_tools_installed() -> bool {
+    managed_core_tools_installed_in(&user_lib_dir())
+}
+
 /// Locate the yt-dlp and ffmpeg binaries, or say why they are missing.
 pub fn resolve_libraries() -> Result<Libraries, VideoError> {
     let dirs = tool_search_dirs();
@@ -1942,6 +1956,41 @@ mod tests {
     fn unique_dir(tag: &str) -> PathBuf {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         std::env::temp_dir().join(format!("grab-tools-{tag}-{}-{n}", std::process::id()))
+    }
+
+    fn write_test_executable(path: &Path) {
+        std::fs::write(path, b"#!/bin/sh\\nexit 0\\n").unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn managed_core_tools_require_private_complete_toolchain() {
+        let base = unique_dir("managed-core-tools");
+        let user_dir = base.join("user-libs");
+        let fallback_dir = base.join("fallback");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::create_dir_all(&fallback_dir).unwrap();
+
+        // Tools in runtime/PATH fallbacks must not make a cleared profile look
+        // installed. In particular the update button should remain Install.
+        for name in ["yt-dlp", "ffmpeg", "ffprobe"] {
+            write_test_executable(&fallback_dir.join(name));
+        }
+        let all_dirs = [user_dir.clone(), fallback_dir.clone()];
+        assert!(find_in_dirs("yt-dlp", &all_dirs).is_some());
+        assert!(toolchain_dir_in(&all_dirs).is_some());
+        assert!(!managed_core_tools_installed_in(&user_dir));
+
+        // User-managed yt-dlp and ffmpeg are still incomplete without ffprobe.
+        write_test_executable(&user_dir.join("yt-dlp"));
+        write_test_executable(&user_dir.join("ffmpeg"));
+        assert!(!managed_core_tools_installed_in(&user_dir));
+
+        write_test_executable(&user_dir.join("ffprobe"));
+        assert!(managed_core_tools_installed_in(&user_dir));
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

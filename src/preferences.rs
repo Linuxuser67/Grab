@@ -708,6 +708,7 @@ pub fn show(
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
     ) {
         spin.set_visible(false);
+        btn.set_sensitive(false);
         // Presence-only probe off the GTK thread; no network calls or subprocesses.
         let (row, btn, action) = (row.clone(), btn.clone(), action.clone());
         gtk4::glib::spawn_future_local(async move {
@@ -715,6 +716,7 @@ pub fn show(
                 .await
                 .unwrap_or(false);
             paint_tools_state(&row, &btn, &action, installed);
+            btn.set_sensitive(true);
         });
     }
     let video_page = adw::PreferencesPage::builder()

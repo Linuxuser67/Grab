@@ -198,7 +198,9 @@ impl GalleryGrid {
                             }
                         }
                     });
-                    handlers.borrow_mut().insert(list_item.as_ptr() as usize, id);
+                    handlers
+                        .borrow_mut()
+                        .insert(list_item.as_ptr() as usize, id);
                 }
             });
         }

@@ -3344,7 +3344,11 @@ mod tests {
     fn a_different_text_invalidates_the_live_lookup() {
         let last = "https://example.com/a";
         assert!(edit_invalidates_lookup(last, "https://example.com/b", true));
-        assert!(!edit_invalidates_lookup(last, "https://example.com/b", false));
+        assert!(!edit_invalidates_lookup(
+            last,
+            "https://example.com/b",
+            false
+        ));
     }
 
     #[test]

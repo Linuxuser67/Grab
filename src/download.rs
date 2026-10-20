@@ -1327,6 +1327,7 @@ impl DownloadManager {
                 return;
             }
         };
+        let handoff_ua = crate::extension_server::handoff_user_agent(&url, &opts.cookies_browser);
         let ctx = FetchCtx {
             client,
             url: url.clone(),
@@ -1352,7 +1353,7 @@ impl DownloadManager {
             },
             cookies: None,
             // Browser UA from the extension handoff (cf_clearance is UA-bound).
-            user_agent: crate::extension_server::handoff_user_agent(&url)
+            user_agent: handoff_ua
                 .unwrap_or_else(|| crate::download_net::DEFAULT_USER_AGENT.to_string()),
             timeout,
             tx,
@@ -2101,7 +2102,8 @@ impl DownloadManager {
                 &job.page_url,
                 &job.cookies_browser,
             );
-            let handoff_ua = crate::extension_server::handoff_user_agent(&job.page_url);
+            let handoff_ua =
+                crate::extension_server::handoff_user_agent(&job.page_url, &job.cookies_browser);
             let cookies_file: Option<crate::cookies::StagedCookies> = if handoff_path.is_some()
                 || job.cookies_browser.is_empty()
                 || job.cookies_browser == "none"

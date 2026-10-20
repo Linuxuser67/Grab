@@ -802,7 +802,7 @@ fn push_playlist_items_page(
     // Only the form opens a picker: auto-add can resolve a playlist while the
     // user is already in the gallery or torrent picker, and a second page
     // would stack on it.
-    if nav.visible_page_tag().as_deref() != Some("form") {
+    if !crate::window_rows::form_is_visible(nav) {
         return;
     }
 
@@ -1013,7 +1013,7 @@ fn push_torrent_picker_page(
     entries: Vec<crate::torrent::TorrentFileEntry>,
     scheduled_at: Rc<Cell<Option<i64>>>,
 ) {
-    if nav.visible_page_tag().as_deref() == Some("torrent") {
+    if !crate::window_rows::form_is_visible(nav) {
         return;
     }
 

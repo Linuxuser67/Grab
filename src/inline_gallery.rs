@@ -97,7 +97,7 @@ pub(crate) struct GalleryAuth {
 /// fallback. Runs on the worker (not GTK main); the export can take 30s.
 pub(crate) async fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAuth {
     let handoff_path = crate::extension_server::live_handoff_cookie_path(url, browser);
-    let handoff_ua = crate::extension_server::handoff_user_agent(url);
+    let handoff_ua = crate::extension_server::handoff_user_agent(url, browser);
     let staged = if handoff_path.is_none() {
         if browser.is_empty() || browser == "none" {
             None
@@ -243,7 +243,7 @@ pub(crate) fn push_gallery_picker_page(
 ) -> Option<GalleryPickerStream> {
     // Only the form opens a picker: another picker (playlist, torrent) may
     // already own the card.
-    if nav.visible_page_tag().as_deref() != Some("form") {
+    if !crate::window_rows::form_is_visible(nav) {
         return None;
     }
     let page_url = url.clone();

@@ -115,6 +115,12 @@ pub(crate) fn picker_enter_confirms(page: &adw::NavigationPage, add_btn: &gtk4::
     page.add_controller(key);
 }
 
+/// True only while the New Download card's form page owns navigation.
+/// Collection/torrent results must not stack picker pages over an active picker.
+pub(crate) fn form_is_visible(nav: &adw::NavigationView) -> bool {
+    nav.visible_page_tag().as_deref() == Some("form")
+}
+
 /// Compact picker header: back + title + dimmed count on one tight row.
 /// The auto `AdwHeaderBar` left the centered title floating in 48px of
 /// chrome with nothing else in it; a picker embedded in a card earns a

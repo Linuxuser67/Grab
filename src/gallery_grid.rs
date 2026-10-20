@@ -464,13 +464,13 @@ mod tests {
         assert_eq!(grid.selected_indices(), vec![0]);
     }
 
-    /// The recycling point: 300 entries, a bounded handful of realized
-    /// cells, and the queued count following the model the whole way.
+    /// Stress the recycling point with 10,000 entries: realized cells must
+    /// stay bounded and the queued count must follow the complete model.
     fn cells_recycle_and_count_follows() {
         let grid = GalleryGrid::new();
-        let titles: Vec<String> = (0..300).map(|i| format!("item-{i}")).collect();
+        let titles: Vec<String> = (0..10_000).map(|i| format!("item-{i}")).collect();
         grid.append(&titles);
-        assert_eq!(grid.len(), 300);
+        assert_eq!(grid.len(), 10_000);
 
         let add_btn = gtk4::Button::new();
         let select_all = gtk4::Button::new();
@@ -478,7 +478,7 @@ mod tests {
         grid.wire_selection_bar(&select_all, &select_none, &add_btn, |n| {
             format!("{n} selected")
         });
-        assert_eq!(add_btn.label().as_deref(), Some("300 selected"));
+        assert_eq!(add_btn.label().as_deref(), Some("10000 selected"));
 
         // The picker page's nesting: captions live outside the grid's
         // scroll area, and the grid keeps its natural height up to its cap.
@@ -492,14 +492,14 @@ mod tests {
         settle();
 
         let cells = collect_check_buttons(grid.widget().upcast_ref::<gtk4::Widget>());
-        println!("smoke: {} cells realized for 300 entries", cells.len());
+        println!("smoke: {} cells realized for 10000 entries", cells.len());
         assert!(
             !cells.is_empty(),
             "cells must be realized for the visible rows"
         );
         assert!(
-            cells.len() < 300,
-            "GridView must recycle: {} cells for 300 entries",
+            cells.len() < 10_000,
+            "GridView must recycle: {} cells for 10000 entries",
             cells.len()
         );
         let bound_titles: Vec<String> = cells
@@ -542,7 +542,7 @@ mod tests {
         // queued count follows.
         grid.inner.selection.unselect_item(0);
         settle();
-        assert_eq!(add_btn.label().as_deref(), Some("299 selected"));
+        assert_eq!(add_btn.label().as_deref(), Some("9999 selected"));
 
         // Button path: Select All/None through the model.
         select_none.emit_clicked();
@@ -551,15 +551,15 @@ mod tests {
         assert!(grid.selected_indices().is_empty());
         select_all.emit_clicked();
         settle();
-        assert_eq!(add_btn.label().as_deref(), Some("300 selected"));
+        assert_eq!(add_btn.label().as_deref(), Some("10000 selected"));
 
         // A late batch arrives selected with an existing pick untouched:
         // item-0 is out, the two late items are in.
         grid.inner.selection.unselect_item(0);
         grid.append(&["late-a".to_string(), "late-b".to_string()]);
         settle();
-        assert_eq!(grid.len(), 302);
-        assert_eq!(add_btn.label().as_deref(), Some("301 selected"));
+        assert_eq!(grid.len(), 10_002);
+        assert_eq!(add_btn.label().as_deref(), Some("10001 selected"));
         assert!(!grid.selected_indices().contains(&0));
     }
 

@@ -29,7 +29,8 @@ use crate::video_staging::{
     write_private,
 };
 use crate::video_tools::{
-    VideoError, ensure_tool_versions, resolve_libraries, ytdlp_identity_args,
+    VideoError, cookies_browser_with_handoff, ensure_tool_versions, resolve_libraries,
+    ytdlp_identity_args,
 };
 use crate::video_types::{FetchedVideo, VideoOutcome};
 use gettextrs::gettext;
@@ -1202,10 +1203,12 @@ pub(crate) async fn resolve_subtitle_lang(
     argv.extend(proxy_cli_args(job.proxy.as_ref()));
     // The subtitle probe extracts too, so it needs the handoff cookies like
     // every other leg. Before the identity args (`-- <url>` terminates argv).
-    argv.extend(crate::extension_server::handoff_cookie_args(&job.page_url));
+    let handoff = crate::extension_server::handoff_cookie_args(&job.page_url);
+    let cookie_source = cookies_browser_with_handoff(&job.cookies_browser, &handoff);
+    argv.extend(handoff);
     let handoff_ua = crate::extension_server::handoff_user_agent(&job.page_url);
     argv.extend(ytdlp_identity_args(
-        &job.cookies_browser,
+        cookie_source,
         handoff_ua.as_deref(),
         &job.page_url,
     ));

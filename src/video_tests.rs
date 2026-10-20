@@ -3130,6 +3130,19 @@ fn ytdlp_identity_args_pins_quickjs_for_youtube_with_cookies() {
 }
 
 #[test]
+fn cookies_browser_with_handoff_prefers_scoped_jar() {
+    use crate::video_tools::cookies_browser_with_handoff;
+
+    let handoff = vec!["--cookies".to_string(), "/tmp/jar".to_string()];
+    // The jar is the browser's own cookies for this URL: browser extraction is
+    // redundant, and its keyring failure aborts the spawn even though the jar
+    // would work.
+    assert_eq!(cookies_browser_with_handoff("brave", &handoff), "none");
+    assert_eq!(cookies_browser_with_handoff("brave", &[]), "brave");
+    assert_eq!(cookies_browser_with_handoff("none", &handoff), "none");
+}
+
+#[test]
 fn ytdlp_identity_args_skips_quickjs_pin_off_youtube() {
     // The runtime pin is YouTube-only: other sites keep yt-dlp's own runtime
     // discovery, so a system runtime is never disabled there.

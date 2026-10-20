@@ -131,12 +131,13 @@ pub(crate) async fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAut
 /// cancels yt-dlp: the user's video/gallery choice needs yt-dlp's result
 /// too, so a lookup takes the slower probe's time, not the faster one's.
 ///
-/// Cookies: yt-dlp probes with --cookies-from-browser, so it starts
-/// immediately; gallery-dl resolves its auth first (`resolve_gallery_auth`).
+/// Cookies: yt-dlp's source (handoff jar or --cookies-from-browser) needs no
+/// export step, so it starts immediately; gallery-dl resolves its auth first
+/// (`resolve_gallery_auth`).
 pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
     let url = ctx.url.to_string();
-    // yt-dlp starts immediately: it uses --cookies-from-browser, not the
-    // exported file below.
+    // yt-dlp starts immediately: it uses the handoff jar or
+    // --cookies-from-browser, not the exported file below.
     let ytdlp_fut = crate::video::fetch_video_infos(
         ctx.libs,
         url.clone(),

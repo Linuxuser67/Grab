@@ -17,9 +17,11 @@
 //! in `bind` from the `StringObject` — plain text, since titles are
 //! untrusted and may carry `&`, `<`, RTL and bidi-control characters.
 
+use gtk4::glib::object::ObjectType;
 use gtk4::prelude::*;
 use gtk4::{gdk, glib, pango};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 /// (weak add button, count label formatter) once wired — the add button
@@ -115,11 +117,16 @@ impl GalleryGrid {
         scrolled.set_vexpand(true);
 
         let factory = gtk4::SignalListItemFactory::new();
+        // Selection watches live on the long-lived model; teardown disconnects
+        // each cell's watch so a view that recreates cells doesn't accumulate
+        // dead handlers.
+        let selection_handlers: Rc<RefCell<HashMap<usize, glib::SignalHandlerId>>> =
+            Rc::new(RefCell::new(HashMap::new()));
         // Per realized cell: one row of widgets, a toggle gesture and one
-        // selection-changed watch. Cells are recycled, so
-        // all of this is paid a bounded handful of times, not per entry.
+        // selection-changed watch (disconnected at teardown).
         {
             let selection = selection.clone();
+            let handlers = Rc::clone(&selection_handlers);
             factory.connect_setup(move |_, object| {
                 let list_item = object
                     .downcast_ref::<gtk4::ListItem>()
@@ -181,7 +188,7 @@ impl GalleryGrid {
                 {
                     let item = item.clone();
                     let check_weak = check_weak.clone();
-                    selection.connect_selection_changed(move |model, _, _| {
+                    let id = selection.connect_selection_changed(move |model, _, _| {
                         if let Some(li) = item.upgrade()
                             && let Some(check) = check_weak.upgrade()
                         {
@@ -191,6 +198,7 @@ impl GalleryGrid {
                             }
                         }
                     });
+                    handlers.borrow_mut().insert(list_item.as_ptr() as usize, id);
                 }
             });
         }
@@ -227,6 +235,19 @@ impl GalleryGrid {
                 label.set_tooltip_text(Some(title.as_str()));
                 cell.update_property(&[gtk4::accessible::Property::Label(title.as_str())]);
                 check.set_active(selection.is_selected(list_item.position()));
+            });
+        }
+
+        {
+            let selection = selection.clone();
+            let handlers = Rc::clone(&selection_handlers);
+            factory.connect_teardown(move |_, object| {
+                let Some(list_item) = object.downcast_ref::<gtk4::ListItem>() else {
+                    return;
+                };
+                if let Some(id) = handlers.borrow_mut().remove(&(list_item.as_ptr() as usize)) {
+                    selection.disconnect(id);
+                }
             });
         }
 

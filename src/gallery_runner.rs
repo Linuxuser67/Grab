@@ -159,21 +159,32 @@ pub async fn run_gallery_download(
         let mut line_buf = Vec::new();
         // Same per-line ceiling as the JSONL reader: a broken or hostile
         // extractor must not inflate the ring without bound. A cap hit or a
-        // read error stops tail updates and ends the loop — the tail is
-        // diagnostic only.
-        while let Ok(Some(())) =
-            crate::gallery_probe::read_capped_line(&mut reader, &mut line_buf).await
-        {
-            let line = String::from_utf8_lossy(&line_buf)
-                .trim_end_matches(['\n', '\r'])
-                .to_owned();
-            // Debug: echo stderr live. The line is still captured below
-            // for the failure tail.
-            crate::backend_debug::echo_line(&line);
-            let mut buf = stderr_lines_clone.lock().unwrap();
-            buf.push(line);
-            if buf.len() > 20 {
-                buf.remove(0);
+        // read error stops tail updates — the tail is diagnostic only.
+        loop {
+            match crate::gallery_probe::read_capped_line(&mut reader, &mut line_buf).await {
+                Ok(Some(())) => {
+                    let line = String::from_utf8_lossy(&line_buf)
+                        .trim_end_matches(['\n', '\r'])
+                        .to_owned();
+                    // Debug: echo stderr live. The line is still captured
+                    // below for the failure tail.
+                    crate::backend_debug::echo_line(&line);
+                    let mut buf = stderr_lines_clone.lock().unwrap();
+                    buf.push(line);
+                    if buf.len() > 20 {
+                        buf.remove(0);
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    // A cap hit only stops tail storage; keep the pipe drained
+                    // so the child's next stderr write doesn't fail with EPIPE.
+                    // The run's own lifetime (and the 30 s post-exit bound)
+                    // covers the wait.
+                    let mut sink = tokio::io::sink();
+                    let _ = tokio::io::copy(&mut reader, &mut sink).await;
+                    break;
+                }
             }
         }
     });

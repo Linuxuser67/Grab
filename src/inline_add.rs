@@ -348,6 +348,13 @@ fn text_is_new(last: &mut String, text: &str) -> bool {
     true
 }
 
+/// True when `text` is a settled edit that invalidates a live lookup for
+/// `last`. Empty is not decidable synchronously: GTK emits it transiently
+/// while replacing text, so a real clear is handled by the 0 ms `apply`.
+fn edit_invalidates_lookup(last: &str, text: &str, looking_up: bool) -> bool {
+    looking_up && !text.is_empty() && text != last
+}
+
 /// Flip the lookup state and lock editing while it resolves. An accidental
 /// keystroke would otherwise edit the URL, and any edit bumps the generation
 /// and aborts the probe. `set_editable` (not `set_sensitive`) keeps the text
@@ -792,9 +799,10 @@ fn push_playlist_items_page(
     playlist: crate::media_types::PlaylistInfo,
     scheduled_at: Option<i64>,
 ) {
-    // Same guard as the video step: don't stack a second picker while one is
-    // already visible.
-    if nav.visible_page_tag().as_deref() == Some("playlist") {
+    // Only the form opens a picker: auto-add can resolve a playlist while the
+    // user is already in the gallery or torrent picker, and a second page
+    // would stack on it.
+    if nav.visible_page_tag().as_deref() != Some("form") {
         return;
     }
 
@@ -2706,16 +2714,24 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             })
         };
         // GTK emits `changed` twice for a replace (clear, then insert). The
-        // 0 ms coalescing below drops the transient "" and the guard then
-        // ignores an identical re-set: neither may count as an edit that
-        // wipes the resolved collection and re-arms auto-add.
+        // 0 ms coalescing below drops the transient "", the sync handler
+        // only invalidates on a settled non-empty change, and the guard then
+        // ignores an identical re-set: none may count as an edit that wipes
+        // the resolved collection and re-arms auto-add.
         let entry = url_entry.clone();
+        let last_text_sync = Rc::clone(&last_text);
         let probe_sync = Rc::clone(&probe);
         let step_sync = Rc::clone(&step2);
         let apply = Rc::new(move || {
             let text = entry.text().trim().to_string();
             if !text_is_new(&mut last_text.borrow_mut(), &text) {
                 return;
+            }
+            // The sync handler skips the transient empty; a settled clear
+            // still invalidates the lookup (0 ms later).
+            if text.is_empty() && step2.looking_up.get() {
+                probe.borrow_mut().bump_generation();
+                abort_lookup(&step2);
             }
             clear_field_error(&entry);
             // Auto-add: debounce the lookup so it fires after the user
@@ -2766,13 +2782,27 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             sync_entry_icon(&step2);
         });
         let scheduled: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
-        url_entry.connect_changed(move |_| {
-            // Stale *now*: a probe completing this turn must not slip past the
-            // edit and (with auto-add) queue the URL being replaced. Aborting
-            // here also stops the probes instead of letting them read to
-            // completion for a URL the user left.
-            probe_sync.borrow_mut().bump_generation();
-            abort_lookup(&step_sync);
+        url_entry.connect_changed(move |entry| {
+            // A re-set of the settled text (handoff, queued drain) is not an
+            // edit: aborting here would kill the live lookup while `apply`
+            // ignores the identical text, leaving the spinner up and the
+            // entry locked. Empty is skipped because GTK emits it transiently
+            // during a replace; `apply` aborts a real clear.
+            let text = entry.text().trim().to_string();
+            let looking_up = step_sync.looking_up.get();
+            if edit_invalidates_lookup(last_text_sync.borrow().as_str(), &text, looking_up) {
+                // Stale *now*: a probe completing this turn must not slip past
+                // the edit and (with auto-add) queue the URL being replaced.
+                // Aborting here also stops the probes instead of letting them
+                // read to completion for a URL the user left.
+                probe_sync.borrow_mut().bump_generation();
+                abort_lookup(&step_sync);
+                // The abort drops the task that would clear the lock; reset
+                // here so an edit that settles back to `last_text` can't
+                // leave the spinner up and the entry locked.
+                set_looking_up(&step_sync, false);
+                sync_entry_icon(&step_sync);
+            }
             if let Some(id) = scheduled.borrow_mut().take() {
                 id.remove();
             }
@@ -3300,6 +3330,21 @@ mod tests {
         // Clearing is a real edit: close resets the form.
         assert!(text_is_new(&mut last, ""));
         assert!(!text_is_new(&mut last, ""));
+    }
+
+    #[test]
+    fn identical_reset_keeps_the_live_lookup() {
+        let last = "https://example.com/video";
+        assert!(!edit_invalidates_lookup(last, last, true));
+        // GTK's transient clear half of a replace is not a settled edit.
+        assert!(!edit_invalidates_lookup(last, "", true));
+    }
+
+    #[test]
+    fn a_different_text_invalidates_the_live_lookup() {
+        let last = "https://example.com/a";
+        assert!(edit_invalidates_lookup(last, "https://example.com/b", true));
+        assert!(!edit_invalidates_lookup(last, "https://example.com/b", false));
     }
 
     #[test]

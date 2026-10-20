@@ -379,6 +379,10 @@ async fn run_to_completion(
     let err_task = tokio::spawn(async move {
         crate::video_spawn::read_bounded(stderr, MAX_PROBE_STDERR_BYTES).await
     });
+    // Abort handles survive the move into the join below: a failed run must
+    // not leave the drains detached on a pipe a descendant still holds.
+    let out_abort = out_task.abort_handle();
+    let err_abort = err_task.abort_handle();
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => {
             // Reaped: disarm so Drop can't reach a recycled PGID (contract).
@@ -388,6 +392,8 @@ async fn run_to_completion(
         // Wait failed: keep the guard armed — Drop then clears the group
         // safely (signal races resolve to ESRCH).
         Ok(Err(e)) => {
+            out_abort.abort();
+            err_abort.abort();
             return Err(GalleryError::install(format!(
                 "couldn't wait for gallery-dl: {e}"
             )));
@@ -395,6 +401,8 @@ async fn run_to_completion(
         Err(_) => {
             // Timed out: dead task ends the probe; the child dies with the
             // future (guard drop + kill_on_drop, grandchildren via killpg).
+            out_abort.abort();
+            err_abort.abort();
             return Err(GalleryError::probe(format!("{what} timed out")));
         }
     };
@@ -434,12 +442,17 @@ async fn run_to_completion(
         }
         Err(_) => {
             // EOF never came; the length caps already watch the bytes, so
-            // this is a pipe inherited by a surviving descendant. Kill the
-            // group by the recorded PGID (the guard disarmed at reap) and
-            // fail the probe instead of hanging it. The reap made the PGID
-            // reusable, so this does reopen the recycle window that disarm
-            // exists to avoid — accepted at this instant, the same tradeoff
-            // signal_group's policy tolerates when killing a timed-out group.
+            // this is a pipe inherited by a surviving descendant. Abort the
+            // drains, then kill the group by the recorded PGID (the guard
+            // disarmed at reap) and fail the probe instead of hanging it.
+            //
+            // The reap is up to 60 s old (DRAIN_AFTER_EXIT_TIMEOUT), so the
+            // PGID may be free or recycled: this is a best-effort signal for
+            // a descendant still in the group, not a guarantee. One that
+            // setsid'd away is unreachable and survives (now without pipe
+            // readers).
+            out_abort.abort();
+            err_abort.abort();
             #[cfg(unix)]
             if let Some(pgid) = pgid {
                 // SAFETY: constant signal number; ESRCH (already dead) is
@@ -750,9 +763,10 @@ pub(crate) async fn read_capped_line<R: tokio::io::AsyncBufRead + Unpin>(
         }
         reader.consume(taken);
         if buf.len() >= MAX_JSONL_LINE_BYTES {
-            return Err(std::io::Error::other(
-                "gallery-dl emitted a metadata line over 2 MiB",
-            ));
+            return Err(std::io::Error::other(format!(
+                "gallery-dl emitted a metadata line over {} MiB",
+                MAX_JSONL_LINE_BYTES / (1024 * 1024)
+            )));
         }
     }
 }
@@ -769,9 +783,9 @@ fn spawn_stderr_tail(
             // Same per-line ceiling as the JSONL reader: lines here are
             // diagnostic text, but a broken or hostile extractor must not
             // inflate the tail without bound. A cap hit or a read error
-            // stops tail updates — the child's stderr writes then block on
-            // the full pipe, which the run's own timeouts bound — because
-            // line-skipping machinery for a diagnostic ring buys nothing.
+            // stops tail updates and drains the rest so the child's stderr
+            // writes don't hit EPIPE; line-skipping machinery for a
+            // diagnostic ring buys nothing.
             loop {
                 line_buf.clear();
                 match read_capped_line(&mut reader, &mut line_buf).await {
@@ -785,7 +799,15 @@ fn spawn_stderr_tail(
                         }
                         t.push_back(line);
                     }
-                    Ok(None) | Err(_) => break,
+                    Ok(None) => break,
+                    Err(_) => {
+                        // A cap hit only stops tail storage; keep the pipe
+                        // drained so the child's next stderr write doesn't
+                        // fail with EPIPE. The run's timeout bounds this.
+                        let mut drain = tokio::io::sink();
+                        let _ = tokio::io::copy(&mut reader, &mut drain).await;
+                        break;
+                    }
                 }
             }
         }
@@ -1078,8 +1100,9 @@ mod capped_line_reader_tests {
         let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(content));
         let err = next(&mut reader).await.unwrap_err();
         assert!(err.to_string().contains("over 2 MiB"), "{err}");
-        // The error is sticky for the stream so far: a partial suffix still
-        // reads as whatever remains after the rejected line was left behind.
+        // The reader stops mid-line at the cap: the next call returns only
+        // the suffix left behind (here the terminator), not a resumable
+        // line. Both callers stop reading lines on Err.
         assert!(next(&mut reader).await.unwrap().is_some());
     }
 

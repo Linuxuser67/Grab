@@ -241,8 +241,9 @@ pub(crate) fn push_gallery_picker_page(
     filter: crate::gallery_argv::GalleryFilter,
     grid: GalleryGrid,
 ) -> Option<GalleryPickerStream> {
-    // Don't stack a second picker while one is already visible.
-    if nav.visible_page_tag().as_deref() == Some("gallery-picker") {
+    // Only the form opens a picker: another picker (playlist, torrent) may
+    // already own the card.
+    if nav.visible_page_tag().as_deref() != Some("form") {
         return None;
     }
     let page_url = url.clone();

@@ -486,24 +486,22 @@ mod tests {
         );
 
         // Three columns max, stretched across the row: at this 480px window
-        // each cell is ~160px, so a label gets ~120px. The 7-column default
-        // left it ~30px.
-        let first_label = cells
-            .iter()
-            .find_map(|check| {
-                check
-                    .parent()
-                    .and_downcast::<gtk4::Box>()?
-                    .first_child()
-                    .and_then(|w| w.next_sibling())
-                    .and_downcast::<gtk4::Label>()
-            })
+        // each cell is ~160px and the label keeps most of it. The 7-column
+        // default squeezed the label into a sliver of its own cell.
+        let first_cell = cells[0]
+            .parent()
+            .and_downcast::<gtk4::Box>()
+            .expect("a realized cell box");
+        let first_label = first_cell
+            .first_child()
+            .and_then(|w| w.next_sibling())
+            .and_downcast::<gtk4::Label>()
             .expect("a realized cell with a title label");
         assert!(
-            first_label.width() > grid.widget().width() / 5,
-            "a column gives the title a readable width: {} of {}",
+            first_label.width() * 2 > first_cell.width(),
+            "the title keeps most of its cell: {} of {}",
             first_label.width(),
-            grid.widget().width()
+            first_cell.width()
         );
 
         // Click-equivalent path (the model toggle the gesture performs); the

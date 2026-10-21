@@ -517,7 +517,9 @@ fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: SystemTim
     let entry = handoff_entry(page_url);
     // Filter once so the staged UA and cookie jar share the same freshness decision.
     let usable = entry.filter(|entry| handoff_jar_usable_at(entry, live_browser, now));
-    let user_agent = usable.as_ref().and_then(|entry| entry.user_agent.as_deref());
+    let user_agent = usable
+        .as_ref()
+        .and_then(|entry| entry.user_agent.as_deref());
     match usable {
         Some(entry) => {
             let mut args = vec![
@@ -1308,7 +1310,10 @@ mod tests {
         store_handoff_cookies(url, path.clone(), Some("UA/1".into()));
         let now = SystemTime::now();
 
-        assert_eq!(handoff_user_agent_at(url, "brave", now), Some("UA/1".into()));
+        assert_eq!(
+            handoff_user_agent_at(url, "brave", now),
+            Some("UA/1".into())
+        );
         assert_eq!(
             live_handoff_identity_at(url, "brave", now),
             Some((path.clone(), Some("UA/1".into())))
@@ -1318,7 +1323,10 @@ mod tests {
         assert_eq!(handoff_user_agent_at(url, "brave", stale_at), None);
         assert_eq!(live_handoff_identity_at(url, "brave", stale_at), None);
         // Without a configured browser, the staged jar and its UA remain the only source.
-        assert_eq!(handoff_user_agent_at(url, "none", stale_at), Some("UA/1".into()));
+        assert_eq!(
+            handoff_user_agent_at(url, "none", stale_at),
+            Some("UA/1".into())
+        );
         assert_eq!(
             live_handoff_identity_at(url, "none", stale_at),
             Some((path, Some("UA/1".into())))

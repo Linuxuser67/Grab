@@ -2654,5 +2654,4 @@ mod update_hint_tests {
         assert!(!extractor_failure("ERROR: Private video"));
         assert!(!extractor_failure("ERROR: unable to download webpage"));
     }
-
 }

@@ -45,7 +45,7 @@ pub use crate::video_staging::{
 };
 /// Facade: tool provisioning lives in [`video_tools`](crate::video_tools) now.
 pub use crate::video_tools::{
-    install_ffmpeg, install_quickjs, install_ytdlp, latest_quickjs_tag, latest_ytdlp_tag,
+    install_quickjs, install_ytdlp, latest_quickjs_tag, latest_ytdlp_tag,
     resolve_libraries,
 };
 /// Facade: probe identity lives in [`video_types`](crate::video_types) now.

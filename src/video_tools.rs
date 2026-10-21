@@ -1,6 +1,6 @@
-//! Tool provisioning: finding, vetting, installing and feeding yt-dlp/ffmpeg to
-//! every spawn. Leaf module: the dialog, prefs and engines consume it through the
-//! `video` facade.
+//! Tool resolution and managed provisioning for yt-dlp/QuickJS, plus system
+//! FFmpeg discovery and version checks. Leaf module: the dialog, prefs and engines
+//! consume it through the `video` facade.
 
 use crate::download_net::tool_client_builder_proxied;
 use gettextrs::gettext;
@@ -16,7 +16,7 @@ use yt_dlp::model::format::{Format, FormatType, Protocol};
 /// construction; match on the variant to branch the UI (install banner vs retry).
 #[derive(Debug, Error)]
 pub enum VideoError {
-    /// Neither the Flatpak bundle, the user library dir nor PATH has the tools.
+    /// A required toolchain is missing from the managed/system search paths.
     #[error("{0}")]
     MissingLibraries(String),
     /// The page could not be extracted (wrong URL, offline, …). Retryable.
@@ -349,16 +349,24 @@ fn ffmpeg_search_dirs_in(
     }
 }
 
+/// System FFmpeg/ffprobe search paths outside Flatpak. Do not use Grab's private
+/// tool directory: older copies may remain there from versions that downloaded
+/// FFmpeg, but Grab no longer manages or prefers them.
+fn system_ffmpeg_search_dirs() -> Vec<PathBuf> {
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).filter(|d| !d.as_os_str().is_empty()).collect())
+        .unwrap_or_default()
+}
+
 /// FFmpeg/ffprobe search order. Flatpak prefers an app-bundled `/app/bin` copy
-/// and otherwise uses the runtime's `/usr/bin`; it never searches the user
-/// library or PATH, where a stale FFmpeg could shadow the runtime. Non-Flatpak
-/// keeps the normal user-first order.
+/// and otherwise uses the runtime's `/usr/bin`. Other builds use system `PATH`.
+/// Grab's private tool directory is never searched.
 pub(crate) fn ffmpeg_search_dirs() -> Vec<PathBuf> {
     ffmpeg_search_dirs_in(
         in_flatpak(),
         Path::new(FLATPAK_APP_BIN),
         Path::new(FLATPAK_RUNTIME_BIN),
-        tool_search_dirs,
+        system_ffmpeg_search_dirs,
     )
 }
 
@@ -374,21 +382,15 @@ pub(crate) fn find_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
     dirs.iter().map(|d| d.join(name)).find(|p| is_executable(p))
 }
 
-/// True only when yt-dlp and a complete ffmpeg/ffprobe toolchain exist
-/// in the supplied search directories.
-pub(crate) fn core_tools_available_in(dirs: &[PathBuf]) -> bool {
-    find_in_dirs("yt-dlp", dirs).is_some() && toolchain_dir_in(dirs).is_some()
+/// True only when yt-dlp is available from its managed/search paths and a
+/// complete ffmpeg/ffprobe toolchain is available from the FFmpeg resolver.
+fn core_tools_available_in(yt_dlp_dirs: &[PathBuf], ffmpeg_dirs: &[PathBuf]) -> bool {
+    find_in_dirs("yt-dlp", yt_dlp_dirs).is_some() && toolchain_dir_in(ffmpeg_dirs).is_some()
 }
 
 /// Required tools available anywhere Grab can resolve them, including distro tools on PATH.
 pub(crate) fn core_tools_available() -> bool {
-    core_tools_available_in(&tool_search_dirs())
-}
-
-/// True only when the supplied directory owns the complete media toolchain.
-/// This is the non-Flatpak managed-install check.
-pub(crate) fn managed_core_tools_installed_in(dir: &Path) -> bool {
-    core_tools_available_in(&[dir.to_path_buf()])
+    core_tools_available_in(&tool_search_dirs(), &ffmpeg_search_dirs())
 }
 
 /// Flatpak readiness: yt-dlp is a Grab-managed user-dir install, while
@@ -399,9 +401,9 @@ fn flatpak_core_tools_installed_in(user_dir: &Path, app_bin: &Path, runtime_bin:
         && toolchain_dir_in(&[app_bin.to_path_buf(), runtime_bin.to_path_buf()]).is_some()
 }
 
-/// True when Grab's core video tools are ready. Outside Flatpak the user dir
-/// must own yt-dlp and a complete FFmpeg toolchain; under Flatpak yt-dlp is
-/// user-managed and FFmpeg comes from `/app/bin` or the runtime.
+/// True when the core video tools are ready. Under Flatpak yt-dlp must be in
+/// Grab's private directory and FFmpeg comes from `/app/bin` or the runtime;
+/// other builds resolve yt-dlp from the tool search paths and FFmpeg from system PATH.
 pub(crate) fn managed_core_tools_installed() -> bool {
     let user_dir = user_lib_dir();
     if in_flatpak() {
@@ -411,17 +413,19 @@ pub(crate) fn managed_core_tools_installed() -> bool {
             Path::new(FLATPAK_RUNTIME_BIN),
         )
     } else {
-        managed_core_tools_installed_in(&user_dir)
+        core_tools_available()
     }
 }
 
-/// Locate the yt-dlp and ffmpeg binaries, or say why they are missing.
+/// Locate yt-dlp and a complete FFmpeg/ffprobe pair, or say why they are missing.
 pub fn resolve_libraries() -> Result<Libraries, VideoError> {
     let youtube =
         find_in_dirs("yt-dlp", &tool_search_dirs()).ok_or_else(VideoError::missing_tools)?;
-    let ffmpeg =
-        find_in_dirs("ffmpeg", &ffmpeg_search_dirs()).ok_or_else(VideoError::missing_tools)?;
-    Ok(Libraries::new(youtube, ffmpeg))
+    // Resolve FFmpeg as a pair from one directory. A lone app-bundled ffmpeg
+    // must not shadow the runtime's complete ffmpeg/ffprobe toolchain.
+    let ffmpeg_dir =
+        toolchain_dir_in(&ffmpeg_search_dirs()).ok_or_else(VideoError::missing_tools)?;
+    Ok(Libraries::new(youtube, ffmpeg_dir.join("ffmpeg")))
 }
 
 /// Cached `--impersonate` support per yt-dlp binary, stamped with the
@@ -602,9 +606,8 @@ pub(crate) const LIVE_DOWNLOADER_ARGS: &str =
 /// mov-only: only passed when the merge target is mp4-family.
 pub(crate) const MERGER_FASTSTART_ARGS: &str = "Merger+ffmpeg:-movflags +faststart";
 
-/// Install just yt-dlp into the user library dir. Split from ffmpeg so the UI
-/// can report honest per-tool stages; the crate installer exposes no progress.
-/// Await from a spawned task — never block the GTK thread.
+/// Install yt-dlp into the user library directory. The crate installer exposes
+/// no progress, so await this from a spawned task — never block the GTK thread.
 /// yt-dlp binary size cap: the linux standalone is ~30MB; anything larger is
 /// not the released binary.
 const YTDLP_MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
@@ -660,29 +663,6 @@ async fn fetch_ytdlp_inner(
     tokio::fs::rename(part, dest)
         .await
         .map_err(|e| VideoError::install(format!("couldn't install {}: {e}", dest.display())))
-}
-
-/// Install the ffmpeg toolchain (ffmpeg *and* ffprobe) into the user library dir.
-/// The crate's installer only extracts `ffmpeg`, leaving `--ffmpeg-location`
-/// pointing at a dir without ffprobe — so Grab fetches the static build itself.
-/// Under Flatpak, FFmpeg comes from the runtime (or `/app/bin`) and this returns
-/// that path without downloading.
-#[allow(dead_code)]
-pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
-    // Flatpak uses the runtime's FFmpeg (or a future /app/bin bundle). Never
-    // download a user copy there; return what resolution will actually use.
-    if in_flatpak() {
-        return toolchain_dir_in(&ffmpeg_search_dirs())
-            .map(|dir| dir.join("ffmpeg"))
-            .ok_or_else(VideoError::missing_tools);
-    }
-    let dir = user_lib_dir();
-    let handle =
-        crate::runtime::tokio_rt().spawn(async move { install_ffmpeg_toolchain(dir).await });
-    match handle.await {
-        Ok(res) => res,
-        Err(e) => Err(VideoError::runtime(&e)),
-    }
 }
 
 /// quickjs-ng is Grab's pinned JS runtime for YouTube (a system runtime like
@@ -748,9 +728,7 @@ pub(crate) fn find_quickjs() -> Option<PathBuf> {
     find_in_dirs("qjs", &tool_search_dirs())
 }
 
-/// Install quickjs into the user library dir. Split from yt-dlp/ffmpeg so the
-/// UI can stage it separately; await off the GTK thread like the other
-/// installers.
+/// Install quickjs into the user library directory. Await off the GTK thread.
 pub async fn install_quickjs() -> Result<PathBuf, VideoError> {
     let _guard = quickjs_install_lock().lock().await;
     install_quickjs_locked().await
@@ -971,336 +949,6 @@ pub(crate) async fn ensure_quickjs(page_url: &str, proxied: bool) -> Result<(), 
         return Ok(());
     }
     install_quickjs_locked().await.map(|_| ())
-}
-
-/// BtbN's versioned static GPL archives are large and may grow between releases.
-/// Keep a hard cap while leaving room above the current ~145 MiB x86-64 archive.
-const FFMPEG_MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
-
-/// Download a versioned BtbN/FFmpeg-Builds static archive containing both
-/// `ffmpeg` and `ffprobe`. The asset SHA-256 is required and verified before
-/// extraction; awaits off the GTK thread.
-async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
-    ensure_lib_dir(&dir)?;
-    let release = fetch_latest_ffmpeg_asset().await.ok_or_else(|| {
-        VideoError::install(
-            "couldn't find a checksummed, versioned Linux FFmpeg build with ffprobe",
-        )
-    })?;
-    let archive = dir.join(&release.name);
-    // Use Grab's proxy-aware streaming client for the large archive, and refuse
-    // payloads over the size cap or whose SHA-256 differs from release metadata.
-    if let Err(e) = download_to_file(
-        &release.url,
-        &archive,
-        &release.checksum,
-        FFMPEG_MAX_DOWNLOAD_BYTES,
-    )
-    .await
-    {
-        std::fs::remove_file(&archive).ok();
-        return Err(VideoError::install(e));
-    }
-    tokio::task::spawn_blocking(move || extract_ffmpeg_toolchain(&archive, &dir))
-        .await
-        .map_err(VideoError::runtime)?
-        .map_err(VideoError::install)
-}
-
-/// Extract both executables from BtbN's tar.xz archive. A missing `ffprobe`
-/// is a hard failure, and neither old binary is replaced unless both new tools
-/// have been fully extracted and marked executable.
-pub(crate) fn extract_ffmpeg_toolchain(archive: &Path, dir: &Path) -> Result<PathBuf, String> {
-    // Always clean up the (large) archive, even when extraction fails.
-    let result = extract_ffmpeg_toolchain_inner(archive, dir, MAX_EXTRACT_BYTES);
-    std::fs::remove_file(archive).ok();
-    result
-}
-
-/// Bound each decompressed binary independently. The static GPL FFmpeg build
-/// carries many codecs and can exceed 200 MiB when linked into a single file.
-const MAX_EXTRACT_BYTES: u64 = 512 * 1024 * 1024;
-
-pub(crate) fn extract_ffmpeg_toolchain_inner(
-    archive: &Path,
-    dir: &Path,
-    max_bytes: u64,
-) -> Result<PathBuf, String> {
-    // Every file we create goes here; on ANY error the whole partial
-    // toolchain is removed, not just on the cap-trip path.
-    let mut extracted: Vec<PathBuf> = Vec::new();
-
-    let result = extract_entries(archive, dir, max_bytes, &mut extracted);
-
-    // Don't leave a half-installed toolchain behind on any failure.
-    if result.is_err() {
-        for path in extracted.drain(..) {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-
-    result
-}
-
-fn extract_entries(
-    archive: &Path,
-    dir: &Path,
-    max_bytes: u64,
-    extracted: &mut Vec<PathBuf>,
-) -> Result<PathBuf, String> {
-    use std::io::{Read as _, Write as _};
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let file = std::fs::File::open(archive)
-        .map_err(|e| format!("couldn't open ffmpeg archive {}: {e}", archive.display()))?;
-    let decoder = xz2::read::XzDecoder::new(file);
-    let mut tar = tar::Archive::new(decoder);
-    let mut ffmpeg_path = None;
-    let mut ffprobe_found = false;
-    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let entries = tar
-        .entries()
-        .map_err(|e| format!("couldn't read ffmpeg tar.xz archive: {e}"))?;
-
-    for item in entries {
-        let entry = item.map_err(|e| format!("couldn't read ffmpeg archive entry: {e}"))?;
-        // Never follow archive symlinks or hard links as executable payloads.
-        if !entry.header().entry_type().is_file() {
-            continue;
-        }
-        let entry_path = entry
-            .path()
-            .map_err(|e| format!("couldn't read ffmpeg archive path: {e}"))?;
-        let tool = match entry_path.file_name().and_then(|n| n.to_str()) {
-            Some("ffmpeg") => "ffmpeg",
-            Some("ffprobe") => "ffprobe",
-            _ => continue,
-        };
-        let final_dest = dir.join(tool);
-        if staged
-            .iter()
-            .any(|(_, final_path)| final_path == &final_dest)
-        {
-            return Err(format!("duplicate {tool} binary in the FFmpeg archive"));
-        }
-        let dest = dir.join(format!(".{tool}.new"));
-        // A planted symlink would divert the extracted binary (and the chmod)
-        // onto an arbitrary file: refuse instead of following it.
-        clear_dest_refusing_symlink(&dest)?;
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&dest)
-            .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
-        extracted.push(dest.clone());
-        let n = std::io::copy(&mut entry.take(max_bytes + 1), &mut out)
-            .map_err(|e| format!("couldn't extract {}: {e}", dest.display()))?;
-        if n > max_bytes {
-            return Err(format!(
-                "{} in the ffmpeg archive exceeds the {max_bytes}-byte limit",
-                dest.display()
-            ));
-        }
-        out.flush()
-            .map_err(|e| format!("couldn't finish writing {}: {e}", dest.display()))?;
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("couldn't mark {} executable: {e}", dest.display()))?;
-        staged.push((dest, final_dest.clone()));
-        if tool == "ffmpeg" {
-            ffmpeg_path = Some(final_dest);
-        } else {
-            ffprobe_found = true;
-        }
-    }
-
-    if ffmpeg_path.is_none() {
-        return Err("ffmpeg binary not found in the downloaded archive".to_string());
-    }
-    if !ffprobe_found {
-        return Err(
-            "ffprobe binary not found in the downloaded archive; refusing an incomplete FFmpeg toolchain"
-                .to_string(),
-        );
-    }
-
-    // Refuse to install over a symlink at the final destination: rename(2)
-    // would replace it atomically, but a planted symlink is not ours to
-    // remove, and the old code refused rather than diverting.
-    for (_, fin) in &staged {
-        if std::fs::symlink_metadata(fin)
-            .map(|m| m.is_symlink())
-            .unwrap_or(false)
-        {
-            return Err(format!(
-                "refusing to install over symlink {}",
-                fin.display()
-            ));
-        }
-    }
-    // rename(2) replaces atomically and never follows a symlink at the target.
-    // Three-phase transaction: back up, install, clean up. Any failure
-    // restores the previous toolchain instead of leaving a mixed install.
-    use std::io::ErrorKind::AlreadyExists;
-
-    let mut backups: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
-
-    // Phase 1: back up every existing binary.
-    // No live executable is replaced during this phase.
-    for (_, final_path) in &staged {
-        let metadata = match std::fs::symlink_metadata(final_path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                let rollback_errors = restore_ffmpeg_backups(&backups);
-                return Err(format!(
-                    "couldn't inspect {}: {error}{}",
-                    final_path.display(),
-                    if rollback_errors.is_empty() {
-                        String::new()
-                    } else {
-                        format!("; rollback failed: {}", rollback_errors.join("; "))
-                    }
-                ));
-            }
-        };
-
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            let rollback_errors = restore_ffmpeg_backups(&backups);
-            return Err(format!(
-                "refusing to replace non-regular tool destination {}{}",
-                final_path.display(),
-                if rollback_errors.is_empty() {
-                    String::new()
-                } else {
-                    format!("; rollback failed: {}", rollback_errors.join("; "))
-                }
-            ));
-        }
-
-        let name = final_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("ffmpeg-tool");
-
-        let mut moved = false;
-
-        // Use an atomic no-replace operation rather than `exists()` followed
-        // by `rename()`. A collision must never overwrite an older backup.
-        for sequence in 0..128 {
-            let backup = final_path
-                .with_file_name(format!(".{name}.backup-{}-{sequence}", std::process::id()));
-
-            match crate::file_names::rename_noreplace(final_path, &backup) {
-                Ok(()) => {
-                    backups.push((backup, final_path.clone()));
-                    moved = true;
-                    break;
-                }
-                Err(error) if error.kind() == AlreadyExists => continue,
-                Err(error) => {
-                    let rollback_errors = restore_ffmpeg_backups(&backups);
-                    return Err(format!(
-                        "couldn't back up {}: {error}{}",
-                        final_path.display(),
-                        if rollback_errors.is_empty() {
-                            String::new()
-                        } else {
-                            format!("; rollback failed: {}", rollback_errors.join("; "))
-                        }
-                    ));
-                }
-            }
-        }
-
-        if !moved {
-            let rollback_errors = restore_ffmpeg_backups(&backups);
-            return Err(format!(
-                "couldn't allocate a unique backup name for {}{}",
-                final_path.display(),
-                if rollback_errors.is_empty() {
-                    String::new()
-                } else {
-                    format!("; rollback failed: {}", rollback_errors.join("; "))
-                }
-            ));
-        }
-    }
-
-    // Phase 2: install the complete staged toolchain.
-    // rename_noreplace refuses a destination that appeared after the backup phase.
-    let mut installed: Vec<std::path::PathBuf> = Vec::new();
-
-    for (staged_path, final_path) in &staged {
-        if let Err(error) = crate::file_names::rename_noreplace(staged_path, final_path) {
-            let rollback_errors = rollback_ffmpeg_install(&backups, &installed);
-            return Err(format!(
-                "couldn't install {}: {error}{}",
-                final_path.display(),
-                if rollback_errors.is_empty() {
-                    String::new()
-                } else {
-                    format!("; rollback failed: {}", rollback_errors.join("; "))
-                }
-            ));
-        }
-
-        installed.push(final_path.clone());
-    }
-
-    // Phase 3: the complete new installation is present.
-    // Only now is it safe to remove the backups.
-    for (backup, _) in &backups {
-        if let Err(error) = std::fs::remove_file(backup) {
-            tracing::warn!(
-                "installed FFmpeg successfully but couldn't remove backup {}: {}",
-                backup.display(),
-                error
-            );
-        }
-    }
-
-    ffmpeg_path.ok_or_else(|| "ffmpeg binary not found in the downloaded archive".to_string())
-}
-
-fn restore_ffmpeg_backups(backups: &[(std::path::PathBuf, std::path::PathBuf)]) -> Vec<String> {
-    let mut errors = Vec::new();
-
-    // Restore in reverse order.
-    for (backup, original) in backups.iter().rev() {
-        match crate::file_names::rename_noreplace(backup, original) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => errors.push(format!(
-                "couldn't restore {} from {}: {error}",
-                original.display(),
-                backup.display()
-            )),
-        }
-    }
-
-    errors
-}
-
-fn rollback_ffmpeg_install(
-    backups: &[(std::path::PathBuf, std::path::PathBuf)],
-    installed: &[std::path::PathBuf],
-) -> Vec<String> {
-    let mut errors = Vec::new();
-
-    // Remove binaries installed by this transaction before restoring backups.
-    for path in installed.iter().rev() {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => errors.push(format!(
-                "couldn't remove partially installed {}: {error}",
-                path.display()
-            )),
-        }
-    }
-
-    errors.extend(restore_ffmpeg_backups(backups));
-    errors
 }
 
 /// Minimum accepted yt-dlp version by release date. Older binaries predate the
@@ -1752,116 +1400,6 @@ pub async fn latest_ytdlp_tag() -> Option<String> {
     handle.await.ok().flatten()
 }
 
-/// A versioned, checksummed FFmpeg archive selected from BtbN's latest
-/// autobuild release. We only accept the versioned release-branch archives, not
-/// the unversioned master build, because master has no parseable stable version.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FfmpegReleaseAsset {
-    name: String,
-    url: String,
-    checksum: String,
-    version: String,
-}
-
-fn ffmpeg_build_target() -> Option<&'static str> {
-    match std::env::consts::ARCH {
-        "x86_64" => Some("linux64"),
-        "aarch64" => Some("linuxarm64"),
-        _ => None,
-    }
-}
-
-/// Parse the semantic version from a static, versioned BtbN archive name.
-/// Accept both immutable patch-build names (n9.0.1-27-g...) and the upstream
-/// release-branch aliases (n9.0-latest). Shared-library builds, master builds,
-/// other architectures, and malformed version/branch combinations are rejected.
-fn ffmpeg_asset_version_for_target(name: &str, target: &str) -> Option<([u32; 3], String)> {
-    // Besides rejecting malformed names, this prevents an archive name from
-    // containing path separators before it is joined to the install directory.
-    if !valid_release_tag(name) {
-        return None;
-    }
-    let rest = name.strip_prefix("ffmpeg-n")?;
-    let marker = format!("-{target}-gpl-");
-    let (build, release_branch) = rest.split_once(&marker)?;
-
-    // BtbN's current latest autobuild publishes checksum-bearing stable-branch
-    // assets named n9.0-latest / n8.1-latest rather than n9.0.1-<build>-g<sha>.
-    // These still identify a specific supported FFmpeg release branch, and the
-    // GitHub API provides a SHA-256 digest for each archive.
-    let version = if let Some(branch_version) = build.strip_suffix("-latest") {
-        if branch_version.split('.').count() != 2
-            || !branch_version
-                .split('.')
-                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-        {
-            return None;
-        }
-        let version = parse_dotted_version(branch_version)?;
-        if branch_version != format!("{}.{}", version[0], version[1]) {
-            return None;
-        }
-        version
-    } else {
-        let version_token = build.split('-').next()?;
-        if version_token.split('.').count() != 3
-            || !version_token
-                .split('.')
-                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-        {
-            return None;
-        }
-        let version = parse_dotted_version(version_token)?;
-        if version_token != format!("{}.{}.{}", version[0], version[1], version[2]) {
-            return None;
-        }
-        version
-    };
-
-    if release_branch != format!("{}.{}.tar.xz", version[0], version[1]) {
-        return None;
-    }
-    Some((
-        version,
-        format!("{}.{}.{}", version[0], version[1], version[2]),
-    ))
-}
-
-/// Fetch metadata for one supported static build. Asset selection and its digest
-/// both come from GitHub's release API; no checksum-less fallback is permitted.
-async fn fetch_latest_ffmpeg_asset() -> Option<FfmpegReleaseAsset> {
-    use yt_dlp::client::deps::github::GitHubFetcher;
-
-    let target = ffmpeg_build_target()?;
-    let fetcher = GitHubFetcher::new("BtbN", "FFmpeg-Builds");
-    let release = fetcher.fetch_latest_release(None).await.ok()?;
-    let prefix = "https://github.com/BtbN/FFmpeg-Builds/releases/download/";
-
-    release
-        .assets
-        .iter()
-        .filter_map(|asset| {
-            let (version, _) = ffmpeg_asset_version_for_target(&asset.name, target)?;
-            let checksum = asset.digest.as_deref()?.strip_prefix("sha256:")?;
-            if checksum.len() != 64 || !checksum.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return None;
-            }
-            if !asset.download_url.starts_with(prefix) {
-                return None;
-            }
-            Some((
-                version,
-                FfmpegReleaseAsset {
-                    name: asset.name.clone(),
-                    url: asset.download_url.clone(),
-                    checksum: checksum.to_string(),
-                },
-            ))
-        })
-        .max_by_key(|(version, _)| *version)
-        .map(|(_, asset)| asset)
-}
-
 /// Latest quickjs-ng release tag; `None` when GitHub is unreachable.
 pub async fn latest_quickjs_tag() -> Option<String> {
     latest_quickjs_release().await.map(|(tag, _)| tag)
@@ -1959,22 +1497,14 @@ pub(crate) fn probe_first_line(
     (!first.is_empty()).then(|| first.to_string())
 }
 
-/// Display-ready version line for an installed tool binary: yt-dlp's
-/// `--version` output labeled ("2026.08.19" → "yt-dlp 2026.08.19"), ffmpeg's
-/// first line trimmed to its version token ("ffmpeg version n9.0.1 …" →
-/// "ffmpeg n9.0.1"). `None` when the binary can't be probed.
+/// Display-ready version line for an installed yt-dlp or QuickJS binary.
+/// yt-dlp's `--version` output is labeled ("2026.08.19" → "yt-dlp 2026.08.19");
+/// QuickJS' numeric version is labeled "quickjs 0.17.0".
 pub(crate) async fn tool_display_version(
     binary: PathBuf,
     version_arg: &'static str,
 ) -> Option<String> {
     let line = tool_first_line(binary.clone(), version_arg).await?;
-    if binary
-        .file_name()
-        .is_some_and(|n| n.to_string_lossy() == "ffmpeg")
-    {
-        let token = line.split_whitespace().nth(2)?;
-        return Some(format!("ffmpeg {token}"));
-    }
     if binary
         .file_name()
         .is_some_and(|n| n.to_string_lossy().starts_with("yt-dlp"))
@@ -2036,45 +1566,35 @@ mod tests {
     }
 
     #[test]
-    fn managed_core_tools_require_private_complete_toolchain() {
-        let base = unique_dir("managed-core-tools");
-        let user_dir = base.join("user-libs");
-        let fallback_dir = base.join("fallback");
-        std::fs::create_dir_all(&user_dir).unwrap();
-        std::fs::create_dir_all(&fallback_dir).unwrap();
-
-        // Tools in runtime/PATH fallbacks must not make a cleared profile look
-        // installed. In particular the update button should remain Install.
-        for name in ["yt-dlp", "ffmpeg", "ffprobe"] {
-            write_test_executable(&fallback_dir.join(name));
+    fn core_tools_availability_ignores_legacy_user_ffmpeg() {
+        let base = unique_dir("system-core-tools");
+        let user = base.join("user");
+        let system = base.join("system");
+        for dir in [&user, &system] {
+            std::fs::create_dir_all(dir).unwrap();
         }
-        let all_dirs = [user_dir.clone(), fallback_dir.clone()];
-        assert!(find_in_dirs("yt-dlp", &all_dirs).is_some());
-        assert!(toolchain_dir_in(&all_dirs).is_some());
-        assert!(!managed_core_tools_installed_in(&user_dir));
+        write_test_executable(&user.join("yt-dlp"));
+        write_test_executable(&user.join("ffmpeg"));
+        write_test_executable(&user.join("ffprobe"));
 
-        // User-managed yt-dlp and ffmpeg are still incomplete without ffprobe.
-        write_test_executable(&user_dir.join("yt-dlp"));
-        write_test_executable(&user_dir.join("ffmpeg"));
-        assert!(!managed_core_tools_installed_in(&user_dir));
+        // A legacy private FFmpeg copy is not enough: the resolver uses the
+        // system search paths now that Grab no longer installs FFmpeg.
+        assert!(!core_tools_available_in(
+            std::slice::from_ref(&user),
+            std::slice::from_ref(&system),
+        ));
+        write_test_executable(&system.join("ffmpeg"));
+        write_test_executable(&system.join("ffprobe"));
+        assert!(core_tools_available_in(
+            std::slice::from_ref(&user),
+            std::slice::from_ref(&system),
+        ));
 
-        write_test_executable(&user_dir.join("ffprobe"));
-        assert!(managed_core_tools_installed_in(&user_dir));
-
-        std::fs::remove_dir_all(&base).ok();
-    }
-
-    #[test]
-    fn core_tools_available_accepts_a_complete_fallback_toolchain() {
-        let base = unique_dir("available-core-tools");
-        std::fs::create_dir_all(&base).unwrap();
-        for name in ["yt-dlp", "ffmpeg", "ffprobe"] {
-            write_test_executable(&base.join(name));
-        }
-        assert!(core_tools_available_in(std::slice::from_ref(&base)));
-
-        std::fs::remove_file(base.join("ffprobe")).unwrap();
-        assert!(!core_tools_available_in(std::slice::from_ref(&base)));
+        std::fs::remove_file(system.join("ffprobe")).unwrap();
+        assert!(!core_tools_available_in(
+            std::slice::from_ref(&user),
+            std::slice::from_ref(&system),
+        ));
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -2084,26 +1604,30 @@ mod tests {
         let app = base.join("app");
         let runtime = base.join("runtime");
         let user = base.join("user");
-        for dir in [&app, &runtime, &user] {
+        let system = base.join("system");
+        for dir in [&app, &runtime, &user, &system] {
             std::fs::create_dir_all(dir).unwrap();
             write_test_executable(&dir.join("ffmpeg"));
             write_test_executable(&dir.join("ffprobe"));
         }
 
         // Flatpak prefers /app/bin, then the runtime, and never the user dir.
-        let dirs = ffmpeg_search_dirs_in(true, &app, &runtime, || vec![user.clone()]);
+        let dirs = ffmpeg_search_dirs_in(true, &app, &runtime, || vec![system.clone()]);
         assert_eq!(dirs, vec![app.clone(), runtime.clone()]);
         assert_eq!(find_in_dirs("ffmpeg", &dirs), Some(app.join("ffmpeg")));
         assert!(!dirs.contains(&user));
 
-        std::fs::remove_file(app.join("ffmpeg")).unwrap();
+        // A partial /app/bin toolchain must not shadow the complete runtime pair.
         std::fs::remove_file(app.join("ffprobe")).unwrap();
-        assert_eq!(find_in_dirs("ffmpeg", &dirs), Some(runtime.join("ffmpeg")));
+        assert_eq!(find_in_dirs("ffmpeg", &dirs), Some(app.join("ffmpeg")));
         assert_eq!(toolchain_dir_in(&dirs), Some(runtime.clone()));
 
-        // Non-Flatpak keeps the existing user-first order.
-        let dirs = ffmpeg_search_dirs_in(false, &app, &runtime, || vec![user.clone()]);
-        assert_eq!(dirs, vec![user.clone()]);
+        // Non-Flatpak resolution falls back to system paths, not the private
+        // tool directory where FFmpeg downloads from old releases may remain.
+        let dirs = ffmpeg_search_dirs_in(false, &app, &runtime, || vec![system.clone()]);
+        assert_eq!(dirs, vec![system.clone()]);
+        assert_eq!(find_in_dirs("ffmpeg", &dirs), Some(system.join("ffmpeg")));
+        assert!(!dirs.contains(&user));
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -2397,153 +1921,6 @@ mod tests {
         // destination must never appear without a complete download.
         assert!(!part.exists(), "half-written .part survived a failed fetch");
         assert!(!dest.exists());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-}
-
-#[cfg(test)]
-mod ffmpeg_archive_tests {
-    use super::*;
-    use std::io::Cursor;
-
-    fn fixture_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("grab-ffmpeg-{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn write_tar_xz(path: &Path, files: &[(&str, &[u8])]) {
-        let file = std::fs::File::create(path).unwrap();
-        let encoder = xz2::write::XzEncoder::new(file, 1);
-        let mut archive = tar::Builder::new(encoder);
-        for &(name, contents) in files {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(contents.len() as u64);
-            header.set_mode(0o755);
-            header.set_cksum();
-            archive
-                .append_data(&mut header, name, Cursor::new(contents))
-                .unwrap();
-        }
-        archive.into_inner().unwrap().finish().unwrap();
-    }
-
-    #[test]
-    fn selects_only_versioned_static_gpl_archives_for_target() {
-        let stable = "ffmpeg-n9.0.2-29-g6dfaba896f-linux64-gpl-9.0.tar.xz";
-        assert_eq!(
-            ffmpeg_asset_version_for_target(stable, "linux64"),
-            Some(([9, 0, 2], "9.0.2".to_string()))
-        );
-        assert_eq!(
-            ffmpeg_asset_version_for_target(
-                "ffmpeg-n8.1.3-18-g46d899d7a0-linuxarm64-gpl-8.1.tar.xz",
-                "linuxarm64"
-            ),
-            Some(([8, 1, 3], "8.1.3".to_string()))
-        );
-        // Current BtbN latest assets use stable-branch aliases, not patch
-        // build names, so both supported Linux architectures must recognize
-        // them when GitHub exposes their SHA-256 digest.
-        assert_eq!(
-            ffmpeg_asset_version_for_target("ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz", "linux64"),
-            Some(([9, 0, 0], "9.0.0".to_string()))
-        );
-        assert_eq!(
-            ffmpeg_asset_version_for_target(
-                "ffmpeg-n8.1-latest-linuxarm64-gpl-8.1.tar.xz",
-                "linuxarm64"
-            ),
-            Some(([8, 1, 0], "8.1.0".to_string()))
-        );
-        assert_eq!(
-            ffmpeg_asset_version_for_target("ffmpeg-n9.0-latest-linux64-gpl-8.1.tar.xz", "linux64"),
-            None
-        );
-        assert_eq!(ffmpeg_asset_version_for_target(stable, "linuxarm64"), None);
-        assert_eq!(
-            ffmpeg_asset_version_for_target(
-                "ffmpeg-N-127790-g56dbd4cd37-linux64-gpl.tar.xz",
-                "linux64"
-            ),
-            None
-        );
-        assert_eq!(
-            ffmpeg_asset_version_for_target(
-                "ffmpeg-n9.0.2-29-g6dfaba896f-linux64-gpl-shared-9.0.tar.xz",
-                "linux64"
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn extracts_both_ffmpeg_and_ffprobe_from_tar_xz() {
-        let dir = fixture_dir("complete");
-        let archive = dir.join("fixture.tar.xz");
-        let install_dir = dir.join("lib");
-        std::fs::create_dir_all(&install_dir).unwrap();
-        write_tar_xz(
-            &archive,
-            &[
-                ("ffmpeg-build/bin/ffmpeg", b"test-ffmpeg"),
-                ("ffmpeg-build/bin/ffprobe", b"test-ffprobe"),
-                ("ffmpeg-build/README", b"ignored"),
-            ],
-        );
-
-        let installed = extract_ffmpeg_toolchain(&archive, &install_dir).unwrap();
-        assert_eq!(installed, install_dir.join("ffmpeg"));
-        assert_eq!(std::fs::read(&installed).unwrap(), b"test-ffmpeg");
-        assert_eq!(
-            std::fs::read(install_dir.join("ffprobe")).unwrap(),
-            b"test-ffprobe"
-        );
-        use std::os::unix::fs::PermissionsExt as _;
-        assert_ne!(
-            std::fs::metadata(&installed).unwrap().permissions().mode() & 0o111,
-            0
-        );
-        assert_ne!(
-            std::fs::metadata(install_dir.join("ffprobe"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o111,
-            0
-        );
-        assert!(
-            !archive.exists(),
-            "archive should be removed after extraction"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn missing_ffprobe_fails_without_replacing_existing_ffmpeg() {
-        let dir = fixture_dir("missing-probe");
-        let archive = dir.join("fixture.tar.xz");
-        let install_dir = dir.join("lib");
-        std::fs::create_dir_all(&install_dir).unwrap();
-        std::fs::write(install_dir.join("ffmpeg"), b"existing-ffmpeg").unwrap();
-        write_tar_xz(
-            &archive,
-            &[("ffmpeg-build/bin/ffmpeg", b"replacement-ffmpeg")],
-        );
-
-        let err = extract_ffmpeg_toolchain(&archive, &install_dir).unwrap_err();
-        assert!(
-            err.contains("ffprobe binary not found"),
-            "unexpected error: {err}"
-        );
-        assert_eq!(
-            std::fs::read(install_dir.join("ffmpeg")).unwrap(),
-            b"existing-ffmpeg",
-            "incomplete update must preserve the old ffmpeg"
-        );
-        assert!(!install_dir.join("ffprobe").exists());
-        assert!(!install_dir.join(".ffmpeg.new").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -5,8 +5,8 @@ downloads are SHA-256 verified before installation.
 
 Grab does not download or update FFmpeg. Flatpak resolves `ffmpeg` and
 `ffprobe` from `/app/bin` or the GNOME runtime (`/usr/bin`). Other builds
-resolve an existing toolchain from the normal search path: the user tool
-directory, `/app/bin` if present, then `PATH`.
+resolve an existing toolchain from system `PATH`. Legacy FFmpeg copies in
+Grab's private tool directory are ignored.
 
 ## Digest source
 

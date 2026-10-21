@@ -323,6 +323,7 @@ fn valid_cookie_path(path: &str) -> bool {
 /// Returns the path, or None if there are no usable cookies or the write fails.
 /// Cookies whose domain or path is malformed, or whose domain does not cover
 /// the URL's host, are dropped.
+#[cfg(test)]
 pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<PathBuf> {
     write_handoff_cookies_with_count(url, cookies).map(|(path, _)| path)
 }

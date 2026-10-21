@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.0.2~beta.6" date="2026-10-21">
+      <description>
+        <ul>
+          <li>Stop downloading and managing FFmpeg: Flatpak builds resolve FFmpeg and ffprobe from the app or GNOME runtime, while other builds use the system PATH.</li>
+          <li>Update TLS certificate dependencies for current WebPKI security advisories.</li>
+          <li>Keep manual proxy settings directly below the proxy-mode selector.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.0.2~beta.5" date="2026-10-20">
       <description>
         <ul>

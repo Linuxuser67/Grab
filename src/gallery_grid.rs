@@ -33,6 +33,7 @@ struct Inner {
     /// `selected_indices` maps to a `--range` spec.
     store: gtk4::StringList,
     selection: gtk4::MultiSelection,
+    view: gtk4::GridView,
     scrolled: gtk4::ScrolledWindow,
     count: RefCell<Option<CountSink>>,
 }
@@ -262,9 +263,9 @@ impl GalleryGrid {
         let view = gtk4::GridView::builder()
             .model(&selection)
             .factory(&factory)
-            // Three columns max; the default 7 split the width into
-            // slivers and ellipsized every title to a few characters.
-            .max_columns(3)
+            // Start at one column for the empty model. `append` raises this
+            // to the current item count, capped at three, as results stream in.
+            .max_columns(store.n_items().clamp(1, 3))
             .enable_rubberband(true)
             // The click gesture does the selecting; activation makes no
             // sense in a picker.
@@ -290,6 +291,7 @@ impl GalleryGrid {
             inner: Rc::new(Inner {
                 store,
                 selection,
+                view: view.clone(),
                 scrolled,
                 count: RefCell::new(None),
             }),
@@ -304,6 +306,11 @@ impl GalleryGrid {
         let start = self.inner.store.n_items();
         let additions: Vec<&str> = titles.iter().map(String::as_str).collect();
         self.inner.store.splice(start, 0, &additions);
+        // Match the column limit to the number of available items. GTK's
+        // GridView needs at least one column even while the model is empty.
+        self.inner
+            .view
+            .set_max_columns(self.inner.store.n_items().clamp(1, 3));
         // The rest of the selection is untouched: a batch already streaming
         // in must not reset the user's current pick.
         self.inner
@@ -416,6 +423,7 @@ mod tests {
         selection_semantics();
         append_keeps_existing_selection();
         empty_grid();
+        column_count_tracks_streamed_item_count();
         cells_recycle_and_count_follows();
     }
 
@@ -462,6 +470,25 @@ mod tests {
         assert!(grid.selected_indices().is_empty());
         grid.select_all();
         assert_eq!(grid.selected_indices(), vec![0]);
+    }
+
+    /// Column count follows streamed model size, capped at three.
+    fn column_count_tracks_streamed_item_count() {
+        let grid = GalleryGrid::new();
+
+        assert_eq!((grid.len(), grid.inner.view.max_columns()), (0, 1));
+
+        grid.append(&["one".into()]);
+        assert_eq!((grid.len(), grid.inner.view.max_columns()), (1, 1));
+
+        grid.append(&["two".into()]);
+        assert_eq!((grid.len(), grid.inner.view.max_columns()), (2, 2));
+
+        grid.append(&["three".into()]);
+        assert_eq!((grid.len(), grid.inner.view.max_columns()), (3, 3));
+
+        grid.append(&["four".into(), "five".into()]);
+        assert_eq!((grid.len(), grid.inner.view.max_columns()), (5, 3));
     }
 
     /// Stress the recycling point with 10,000 entries: realized cells must

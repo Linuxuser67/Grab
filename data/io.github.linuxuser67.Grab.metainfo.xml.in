@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.0.2~beta.7" date="2026-10-21">
+      <description>
+        <ul>
+          <li>Gallery pickers now adapt their column count to small result sets, avoiding unused space when fewer than three items are available.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.0.2~beta.6" date="2026-10-21">
       <description>
         <ul>

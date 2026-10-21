@@ -6,6 +6,7 @@ use crate::download_net::tool_client_builder_proxied;
 use gettextrs::gettext;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
 use yt_dlp::client::deps::Libraries;
@@ -1609,6 +1610,32 @@ pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
         return Some(format!("{ytdlp_browser}:{}", dir.display()));
     }
     Some(ytdlp_browser.to_string())
+}
+
+/// One-way per-session latch: once direct browser-cookie extraction fails
+/// (e.g. a dangling keyring item), later spawns skip browser cookies so a
+/// preview or download can still run. A staged handoff jar still wins.
+/// Cleared when the browser preference changes or the app restarts.
+static BROWSER_COOKIES_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Mark direct browser-cookie extraction as failed for the rest of the session.
+pub(crate) fn mark_browser_cookies_failed() {
+    BROWSER_COOKIES_FAILED.store(true, Ordering::Relaxed);
+}
+
+/// Allow direct browser cookies again after the user picks a browser.
+pub(crate) fn clear_browser_cookies_failed() {
+    BROWSER_COOKIES_FAILED.store(false, Ordering::Relaxed);
+}
+
+/// Browser value for spawns: `none` once this session has seen a direct
+/// cookie-extraction failure, so the broken source is not retried per spawn.
+pub(crate) fn effective_cookies_browser(browser: &str) -> &str {
+    if BROWSER_COOKIES_FAILED.load(Ordering::Relaxed) && browser != "none" {
+        "none"
+    } else {
+        browser
+    }
 }
 
 /// Shared trailing argv for every yt-dlp spawn: player-client workaround, JS

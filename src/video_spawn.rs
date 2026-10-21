@@ -12,6 +12,7 @@ use crate::video_tools::{VideoError, ensure_tool_versions};
 use crate::video_types::{FetchedVideo, ProbeResult, VideoInfo};
 use gettextrs::gettext;
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use std::time::Duration;
 use yt_dlp::client::deps::Libraries;
 use yt_dlp::model::Video;
@@ -45,38 +46,28 @@ pub(crate) async fn read_bounded(
     ))
 }
 
-/// Fetch one page's raw `--dump-single-json`, then parse leniently. `flat_playlist` lists collection stubs; false runs full extraction.
-pub(crate) async fn fetch_raw_dump_json(
+/// One yt-dlp spawn's captured output. Callers decide whether a failed run is
+/// retryable.
+struct SpawnOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Run one yt-dlp process with bounded concurrent drains and timeout kill.
+async fn run_ytdlp_once(
     youtube_bin: &Path,
-    url: &str,
-    cookies_browser: &str,
-    timeout: Duration,
+    args: &[String],
     fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
-    flat_playlist: bool,
-) -> Result<serde_json::Value, VideoError> {
-    let mut args = vec!["--ignore-config".to_string(), "--no-progress".to_string()];
-    if flat_playlist {
-        args.push("--flat-playlist".to_string());
-    }
-    args.push("--dump-single-json".to_string());
-    args.extend(proxy_cli_args(fetch_proxy));
-    // Extension handoff (Cloudflare bypass): staged by the handoff receiver,
-    // peeked here. The entry outlives the probe — the subtitle probe and the
-    // media download spawn yt-dlp separately and need it too; the finished
-    // download discards it. The tail ends with `-- <url>`, past which yt-dlp
-    // reads positionals.
-    args.extend(crate::extension_server::ytdlp_spawn_identity(
-        cookies_browser,
-        url,
-    ));
-    // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
+    timeout: Duration,
+) -> Result<SpawnOutput, VideoError> {
     let mut cmd = ytdlp_command(youtube_bin);
     // Belt-and-braces with the ProcessGroupGuard below (which SIGKILLs the
     // process group on drop): if the drain is dropped, the child dies with
     // it either way. Download/capture spawns keep their guard-only shutdown
     // behavior; never set this via the shared ytdlp_command() builder.
     cmd.kill_on_drop(true);
-    cmd.args(&args);
+    cmd.args(args);
     apply_proxy_env(&mut cmd, fetch_proxy);
     // Debug: log the full argv before spawning. as_std() captures everything
     // including ytdlp_command()'s --impersonate flag.
@@ -131,13 +122,104 @@ pub(crate) async fn fetch_raw_dump_json(
     // Debug: echo the probe's stderr (not live — the probe is short-lived,
     // so post-hoc is fine).
     crate::backend_debug::echo_stderr(&stderr);
-    if !status.success() {
-        let detail = last_log_line(&String::from_utf8_lossy(&stderr), "yt-dlp reported failure");
+    Ok(SpawnOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// yt-dlp reports a missing keyring item as the bare secretstorage error;
+/// these are cookie-source failures a no-cookie retry can recover from.
+fn is_browser_cookie_error(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    [
+        "item does not exist",
+        "failed to extract cookies from browser",
+        "cookies database",
+        "secretstorage",
+        "failed to decrypt",
+        "could not decrypt",
+        "keyring",
+    ]
+    .iter()
+    .any(|needle| stderr.contains(needle))
+}
+
+/// True when a failed spawn has a direct browser cookie source and no staged
+/// jar to preserve, and its stderr points at cookie extraction.
+pub(crate) fn should_retry_without_cookies(args: &[String], stderr: &str) -> bool {
+    args.iter()
+        .any(|a| a.starts_with("--cookies-from-browser="))
+        && !args.iter().any(|a| a == "--cookies")
+        && is_browser_cookie_error(stderr)
+}
+
+/// Remove only the direct browser cookie flag; a staged jar, identity flags,
+/// proxy flags and the `-- <url>` tail stay intact.
+pub(crate) fn without_browser_cookies(args: &[String]) -> Vec<String> {
+    args.iter()
+        .filter(|a| !a.starts_with("--cookies-from-browser="))
+        .cloned()
+        .collect()
+}
+
+/// Fetch one page's raw `--dump-single-json`, then parse leniently. `flat_playlist` lists collection stubs; false runs full extraction.
+pub(crate) async fn fetch_raw_dump_json(
+    youtube_bin: &Path,
+    url: &str,
+    cookies_browser: &str,
+    timeout: Duration,
+    fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
+    flat_playlist: bool,
+) -> Result<serde_json::Value, VideoError> {
+    let mut args = vec!["--ignore-config".to_string(), "--no-progress".to_string()];
+    if flat_playlist {
+        args.push("--flat-playlist".to_string());
+    }
+    args.push("--dump-single-json".to_string());
+    args.extend(proxy_cli_args(fetch_proxy));
+    // Extension handoff (Cloudflare bypass): staged by the handoff receiver,
+    // peeked here. The entry outlives the probe — the subtitle probe and the
+    // media download spawn yt-dlp separately and need it too; the finished
+    // download discards it. The tail ends with `-- <url>`, past which yt-dlp
+    // reads positionals.
+    args.extend(crate::extension_server::ytdlp_spawn_identity(
+        cookies_browser,
+        url,
+    ));
+    let mut retried_without_cookies = false;
+    loop {
+        let output = run_ytdlp_once(youtube_bin, &args, fetch_proxy, timeout).await?;
+        if output.status.success() {
+            let value: serde_json::Value =
+                serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
+                    .map_err(VideoError::fetch)?;
+            return Ok(value);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = last_log_line(&stderr, "yt-dlp reported failure");
+        if !retried_without_cookies && should_retry_without_cookies(&args, &stderr) {
+            retried_without_cookies = true;
+            crate::video_tools::mark_browser_cookies_failed();
+            tracing::warn!(
+                host = %page_host(url),
+                error = %detail,
+                "browser cookie extraction failed; retrying without cookies"
+            );
+            args = without_browser_cookies(&args);
+            continue;
+        }
+        let detail = if retried_without_cookies {
+            format!(
+                "{detail} ({})",
+                gettext("browser cookies couldn't be read; retried without cookies")
+            )
+        } else {
+            detail
+        };
         return Err(VideoError::fetch(detail));
     }
-    let value: serde_json::Value =
-        serde_json::from_str(&String::from_utf8_lossy(&stdout)).map_err(VideoError::fetch)?;
-    Ok(value)
 }
 
 /// Strict single-video model for the download worker (full extraction; playlist output selects the picked entry or expands worker-side).

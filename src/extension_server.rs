@@ -474,6 +474,7 @@ fn handoff_entry(url: &str) -> Option<HandoffCookies> {
 /// Browser UA staged with a handoff's cookies, if any. Same lookup as the
 /// cookies (exact URL, then same-host fallback).
 pub(crate) fn handoff_user_agent(url: &str, browser: &str) -> Option<String> {
+    let browser = crate::video_tools::effective_cookies_browser(browser);
     let live_browser = crate::video_tools::cookies_browser_spec(browser).is_some();
     let now = SystemTime::now();
     handoff_entry(url)
@@ -530,6 +531,7 @@ fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: SystemTim
 /// `--cookies-from-browser` matters: yt-dlp aborts the whole spawn when its
 /// keyring extraction fails, even when the jar would have worked.
 pub(crate) fn ytdlp_spawn_identity(cookies_browser: &str, page_url: &str) -> Vec<String> {
+    let cookies_browser = crate::video_tools::effective_cookies_browser(cookies_browser);
     ytdlp_spawn_identity_at(cookies_browser, page_url, SystemTime::now())
 }
 
@@ -548,6 +550,7 @@ pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
 /// browser source. A stale snapshot would override rotated cookies exported
 /// from the live browser, so withhold it and let gallery-dl use the export.
 pub(crate) fn live_handoff_cookie_path(url: &str, browser: &str) -> Option<PathBuf> {
+    let browser = crate::video_tools::effective_cookies_browser(browser);
     live_handoff_cookie_path_at(url, browser, SystemTime::now())
 }
 

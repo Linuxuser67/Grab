@@ -41,7 +41,7 @@ use crate::video_runner::{
 };
 use crate::video_spawn::{
     ProcessGroupGuard, await_group_quiescence, fetch_raw_dump_json, fetch_video_page, reap_child,
-    ytdlp_command,
+    should_retry_without_cookies, without_browser_cookies, ytdlp_command,
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
@@ -6766,6 +6766,132 @@ fn fetch_video_page_surfaces_stderr_tail() {
         Err(e) => assert!(e.to_string().contains("boom detail"), "{e}"),
         ok => panic!("expected fetch error, got {ok:?}"),
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn browser_cookie_retry_only_recovers_extraction_failures() {
+    let args = vec![
+        "--cookies-from-browser=brave:/profile".to_string(),
+        "--".to_string(),
+        "https://example.com/".to_string(),
+    ];
+    for stderr in [
+        "ERROR: Item does not exist!",
+        "ERROR: could not find brave cookies database in \"/home/u/.config\"",
+        "ERROR: Failed to extract cookies from browser. Check '--cookies-from-browser'",
+        "ERROR: secretstorage is not installed",
+        "ERROR: Failed to decrypt with DPAPI",
+        "ERROR: Could not decrypt cookie file",
+        "ERROR: keyring is locked",
+    ] {
+        assert!(
+            should_retry_without_cookies(&args, stderr),
+            "expected a retry for {stderr}"
+        );
+    }
+    for stderr in [
+        "ERROR: [youtube] Sign in to confirm you're not a bot. Use --cookies-from-browser",
+        "ERROR: Video unavailable",
+    ] {
+        assert!(
+            !should_retry_without_cookies(&args, stderr),
+            "unexpected retry for {stderr}"
+        );
+    }
+}
+
+#[test]
+fn browser_cookie_retry_preserves_a_staged_jar() {
+    let args = vec![
+        "--cookies-from-browser=brave:/profile".to_string(),
+        "--cookies".to_string(),
+        "/tmp/grab-cookies.jar".to_string(),
+        "--".to_string(),
+        "https://example.com/".to_string(),
+    ];
+    assert!(!should_retry_without_cookies(
+        &args,
+        "ERROR: Item does not exist!"
+    ));
+}
+
+#[test]
+fn browser_cookie_retry_drops_only_the_browser_flag() {
+    let args = vec![
+        "--ignore-config".to_string(),
+        "--cookies-from-browser=brave:/profile".to_string(),
+        "--user-agent".to_string(),
+        "Grab/1".to_string(),
+        "--".to_string(),
+        "https://example.com/".to_string(),
+    ];
+    assert_eq!(
+        without_browser_cookies(&args),
+        vec![
+            "--ignore-config".to_string(),
+            "--user-agent".to_string(),
+            "Grab/1".to_string(),
+            "--".to_string(),
+            "https://example.com/".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn browser_cookie_keyring_failure_retries_without_cookies() {
+    crate::video_tools::clear_browser_cookies_failed();
+    let dir = std::env::temp_dir().join(format!("grab-cookie-retry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("args.log");
+    let bin = dir.join("fake-ytdlp");
+    std::fs::write(
+        &bin,
+        probe_guard(&format!(
+            "#!/bin/sh\n\
+             for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"{log}\"; done\n\
+             printf '%s\\n' '---' >> \"{log}\"\n\
+             for a in \"$@\"; do\n\
+               case \"$a\" in --cookies-from-browser=*) echo 'ERROR: Item does not exist!' >&2; exit 1;; esac\n\
+             done\n\
+             echo '{{\"title\":\"ok\"}}'\n",
+            log = log.display()
+        )),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let res = crate::runtime::tokio_rt().block_on(fetch_raw_dump_json(
+        &bin,
+        "https://cookie-retry.invalid/v",
+        "brave",
+        std::time::Duration::from_secs(5),
+        None,
+        false,
+    ));
+    assert!(res.is_ok(), "retry should recover: {res:?}");
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let mut attempts = calls.split("---").filter(|part| !part.trim().is_empty());
+    let first = attempts.next().expect("first attempt");
+    let retry = attempts.next().expect("retry attempt");
+    assert!(
+        first.contains("--cookies-from-browser="),
+        "first attempt must use browser cookies: {first}"
+    );
+    assert!(
+        !retry.contains("--cookies-from-browser="),
+        "retry must drop browser cookies: {retry}"
+    );
+    assert_eq!(
+        crate::video_tools::effective_cookies_browser("brave"),
+        "none",
+        "the session latch must keep later spawns cookie-free"
+    );
+    crate::video_tools::clear_browser_cookies_failed();
     let _ = std::fs::remove_dir_all(&dir);
 }
 

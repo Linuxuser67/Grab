@@ -864,6 +864,8 @@ pub fn show(
         let grant = cookies_override_row.downgrade();
         let restart = cookies_restart_row.downgrade();
         settings.connect_changed(Some(crate::settings::key::COOKIES_BROWSER), move |s, _| {
+            // A new browser choice may have a working cookie source again.
+            crate::video_tools::clear_browser_cookies_failed();
             if let (Some(grant), Some(restart)) = (grant.upgrade(), restart.upgrade()) {
                 sync_cookies_override_row(&grant, &restart, s);
             }

@@ -1451,6 +1451,27 @@ pub(crate) fn splice_before_terminator(argv: &mut Vec<String>, args: Vec<String>
     }
 }
 
+/// Live-capture argv with yt-dlp's ffmpeg location pinned. `ytdlp_command`
+/// prepends the user lib dir to PATH (for qjs), so without this a stale
+/// user-dir FFmpeg would win over the Flatpak runtime for live HLS.
+pub(crate) fn live_capture_argv_with_ffmpeg(
+    job: &VideoJob,
+    hls_format_id: &str,
+    out: &Path,
+    playlist_index: Option<usize>,
+    ffmpeg_bin: &Path,
+) -> Vec<String> {
+    let mut argv = live_capture_argv(job, hls_format_id, out, playlist_index);
+    splice_before_terminator(
+        &mut argv,
+        vec![
+            "--ffmpeg-location".to_string(),
+            crate::video_tools::ffmpeg_location_dir(ffmpeg_bin),
+        ],
+    );
+    argv
+}
+
 /// `--load-info-json` suffix for a live capture argv. Pure: returns the flag
 /// pair when a probe JSON path is available, empty otherwise.
 pub(crate) fn live_info_json_args(path: Option<&std::path::Path>) -> Vec<String> {
@@ -1600,7 +1621,8 @@ pub(crate) async fn run_live_ytdlp(
         // The builder argv ends with `-- <page URL>`: nothing may be appended
         // after it — anything past `--` becomes a positional URL. Splice the
         // --load-info-json pair before the terminator.
-        let mut argv = live_capture_argv(attempt, hls_format_id, &out, playlist_index);
+        let mut argv =
+            live_capture_argv_with_ffmpeg(attempt, hls_format_id, &out, playlist_index, ffmpeg_bin);
         splice_before_terminator(&mut argv, live_info_json_args(live_info_path.as_deref()));
         cmd.args(argv);
         apply_proxy_env(&mut cmd, job.proxy.as_ref());

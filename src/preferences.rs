@@ -672,7 +672,8 @@ pub fn show(
     /// services just to choose between Install and Check for Updates.
     fn core_tools_installed() -> bool {
         if crate::video_tools::in_flatpak() {
-            // A cleared Flatpak profile must still offer Grab-managed installs.
+            // Flatpak: yt-dlp is Grab-managed in the user dir, while FFmpeg
+            // comes from the runtime. A cleared profile still offers Install.
             crate::video_tools::managed_core_tools_installed()
         } else {
             // Tarball/dev builds resolve distro tools from PATH; report their
@@ -1068,18 +1069,20 @@ pub fn show(
                     // BtbN/FFmpeg-Builds, quickjs-ng/quickjs, gdl-org/builds.
                     let installed = gio::spawn_blocking(|| {
                         let dirs = crate::video_tools::tool_search_dirs();
-                        let inspect = |name: &str, version_arg: &str| {
-                            crate::video_tools::find_in_dirs(name, &dirs).map(|path| {
-                                let version = tool_first_line(&path, version_arg);
-                                (path, version)
-                            })
-                        };
-                        let yt = inspect("yt-dlp", "--version");
-                        let ff = inspect("ffmpeg", "-version");
-                        let qjs = inspect("qjs", "--version");
-                        let gdl = inspect("gallery-dl", "--version");
+                        let ff_dirs = crate::video_tools::ffmpeg_search_dirs();
+                        let inspect =
+                            |name: &str, version_arg: &str, dirs: &[std::path::PathBuf]| {
+                                crate::video_tools::find_in_dirs(name, dirs).map(|path| {
+                                    let version = tool_first_line(&path, version_arg);
+                                    (path, version)
+                                })
+                            };
+                        let yt = inspect("yt-dlp", "--version", &dirs);
+                        let ff = inspect("ffmpeg", "-version", &ff_dirs);
+                        let qjs = inspect("qjs", "--version", &dirs);
+                        let gdl = inspect("gallery-dl", "--version", &dirs);
                         let ffprobe_available =
-                            crate::video_tools::toolchain_dir_in(&dirs).is_some();
+                            crate::video_tools::toolchain_dir_in(&ff_dirs).is_some();
                         (yt, ff, qjs, gdl, ffprobe_available)
                     })
                     .await
@@ -1111,6 +1114,7 @@ pub fn show(
                     let mut missing: Vec<String> = Vec::new();
                     let mut current: Vec<String> = Vec::new();
                     let mut indeterminate = installed.is_none();
+                    let flatpak = crate::video_tools::in_flatpak();
                     if let Some((yt, ff, qjs, gdl, ffprobe_available)) = installed {
                         // Presence is independent for each binary. In particular,
                         // resolve_libraries() must not hide all missing tools just
@@ -1131,7 +1135,19 @@ pub fn show(
                             (Some(_), _) => indeterminate = true,
                             (None, _) => missing.push("yt-dlp".to_string()),
                         }
-                        if !ffprobe_available {
+                        if flatpak {
+                            // FFmpeg comes from the Flatpak runtime, not Grab:
+                            // show its version but never offer an install/update.
+                            match ff.as_ref() {
+                                Some((_, Some(first_line))) if ffprobe_available => {
+                                    let token =
+                                        crate::video_tools::ffmpeg_version_token(first_line)
+                                            .unwrap_or(first_line);
+                                    current.push(format!("ffmpeg {token} (runtime)"));
+                                }
+                                _ => indeterminate = true,
+                            }
+                        } else if !ffprobe_available {
                             if let Some((_, version)) = ff.as_ref() {
                                 let detail = version
                                     .as_deref()

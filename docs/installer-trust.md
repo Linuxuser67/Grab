@@ -1,7 +1,14 @@
 # Tool installer trust model
 
-Grab downloads yt-dlp, gallery-dl, ffmpeg, and quickjs from GitHub releases.
-Each download is SHA-256 verified before installation.
+Grab downloads yt-dlp, gallery-dl, and quickjs from GitHub releases; non-Flatpak
+builds also download ffmpeg. Each download is SHA-256 verified before
+installation.
+
+Flatpak builds use the `ffmpeg` and `ffprobe` provided by the GNOME runtime
+(`/usr/bin`), or an app-bundled copy in `/app/bin` if one is added later. Grab
+does not download FFmpeg under Flatpak, and the user-library copy is ignored so
+a stale FFmpeg cannot shadow the runtime. yt-dlp, gallery-dl, and quickjs still
+use the verified GitHub download path below.
 
 ## Digest source
 

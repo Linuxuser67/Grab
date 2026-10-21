@@ -171,10 +171,11 @@ pub fn run(
     };
     let do_yt = include("yt-dlp");
     let do_gdl = include("gallery-dl");
-    let do_ff = include("ffmpeg");
+    // Flatpak FFmpeg comes from the runtime; never install a user copy there.
+    let do_ff = include("ffmpeg") && !crate::video_tools::in_flatpak();
     let do_js = include("quickjs");
 
-    // Order: yt-dlp, gallery-dl (under yt-dlp), ffmpeg, quickjs.
+    // Order: yt-dlp, gallery-dl (under yt-dlp), ffmpeg (non-Flatpak), quickjs.
     let yt = ToolRow::new("yt-dlp", &gettext("yt-dlp install progress"), &active);
     let gdl = ToolRow::new(
         "gallery-dl",

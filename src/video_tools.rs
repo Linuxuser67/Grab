@@ -319,15 +319,47 @@ fn ensure_lib_dir_blocking(dir: &Path) -> std::io::Result<()> {
 /// `/app`; this is not an XDG rule. Absent outside Flatpak.
 const FLATPAK_APP_BIN: &str = "/app/bin";
 
-/// Tool search dirs, in priority order: the user's own installs first (so Update
-/// takes effect over a bundled copy), then `/app/bin` (Flatpak), then PATH. A
-/// stale user copy cannot pin old tools — the version floor refuses it.
+/// Flatpak runtime tools live in `/usr/bin`; an app-bundled copy would be in
+/// `/app/bin`.
+const FLATPAK_RUNTIME_BIN: &str = "/usr/bin";
+
+/// Tool search dirs for the self-updating tools, in priority order: the user's
+/// own installs first (so Update takes effect over a bundled copy), then
+/// `/app/bin` (Flatpak), then PATH. A stale user copy cannot pin old tools — the
+/// version floor refuses it. FFmpeg uses [`ffmpeg_search_dirs`] instead: under
+/// Flatpak a user copy must not shadow the runtime.
 pub(crate) fn tool_search_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![user_lib_dir(), PathBuf::from(FLATPAK_APP_BIN)];
     if let Some(path) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&path).filter(|d| !d.as_os_str().is_empty()));
     }
     dirs
+}
+
+fn ffmpeg_search_dirs_in(
+    flatpak: bool,
+    app_bin: &Path,
+    runtime_bin: &Path,
+    fallback: impl FnOnce() -> Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    if flatpak {
+        vec![app_bin.to_path_buf(), runtime_bin.to_path_buf()]
+    } else {
+        fallback()
+    }
+}
+
+/// FFmpeg/ffprobe search order. Flatpak prefers an app-bundled `/app/bin` copy
+/// and otherwise uses the runtime's `/usr/bin`; it never searches the user
+/// library or PATH, where a stale FFmpeg could shadow the runtime. Non-Flatpak
+/// keeps the normal user-first order.
+pub(crate) fn ffmpeg_search_dirs() -> Vec<PathBuf> {
+    ffmpeg_search_dirs_in(
+        in_flatpak(),
+        Path::new(FLATPAK_APP_BIN),
+        Path::new(FLATPAK_RUNTIME_BIN),
+        tool_search_dirs,
+    )
 }
 
 fn is_executable(p: &Path) -> bool {
@@ -353,23 +385,42 @@ pub(crate) fn core_tools_available() -> bool {
     core_tools_available_in(&tool_search_dirs())
 }
 
-/// True only when Grab's private data directory owns the required media
-/// toolchain. On Flatpak this keeps a cleared app-data profile in Install state
-/// even if the runtime has unrelated fallbacks. A complete FFmpeg install also
-/// requires ffprobe, not just ffmpeg.
+/// True only when the supplied directory owns the complete media toolchain.
+/// This is the non-Flatpak managed-install check.
 pub(crate) fn managed_core_tools_installed_in(dir: &Path) -> bool {
     core_tools_available_in(&[dir.to_path_buf()])
 }
 
+/// Flatpak readiness: yt-dlp is a Grab-managed user-dir install, while
+/// ffmpeg/ffprobe come from `/app/bin` or the runtime. A user-dir FFmpeg is
+/// deliberately ignored so a stale copy cannot shadow the runtime.
+fn flatpak_core_tools_installed_in(user_dir: &Path, app_bin: &Path, runtime_bin: &Path) -> bool {
+    find_in_dirs("yt-dlp", &[user_dir.to_path_buf()]).is_some()
+        && toolchain_dir_in(&[app_bin.to_path_buf(), runtime_bin.to_path_buf()]).is_some()
+}
+
+/// True when Grab's core video tools are ready. Outside Flatpak the user dir
+/// must own yt-dlp and a complete FFmpeg toolchain; under Flatpak yt-dlp is
+/// user-managed and FFmpeg comes from `/app/bin` or the runtime.
 pub(crate) fn managed_core_tools_installed() -> bool {
-    managed_core_tools_installed_in(&user_lib_dir())
+    let user_dir = user_lib_dir();
+    if in_flatpak() {
+        flatpak_core_tools_installed_in(
+            &user_dir,
+            Path::new(FLATPAK_APP_BIN),
+            Path::new(FLATPAK_RUNTIME_BIN),
+        )
+    } else {
+        managed_core_tools_installed_in(&user_dir)
+    }
 }
 
 /// Locate the yt-dlp and ffmpeg binaries, or say why they are missing.
 pub fn resolve_libraries() -> Result<Libraries, VideoError> {
-    let dirs = tool_search_dirs();
-    let youtube = find_in_dirs("yt-dlp", &dirs).ok_or_else(VideoError::missing_tools)?;
-    let ffmpeg = find_in_dirs("ffmpeg", &dirs).ok_or_else(VideoError::missing_tools)?;
+    let youtube =
+        find_in_dirs("yt-dlp", &tool_search_dirs()).ok_or_else(VideoError::missing_tools)?;
+    let ffmpeg =
+        find_in_dirs("ffmpeg", &ffmpeg_search_dirs()).ok_or_else(VideoError::missing_tools)?;
     Ok(Libraries::new(youtube, ffmpeg))
 }
 
@@ -541,7 +592,7 @@ fn kill_probe(child: &mut std::process::Child) {
 /// broadcaster drops frames; `-copyts -avoid_negative_ts make_zero` keeps the
 /// tracks aligned and `-fps_mode passthrough` avoids frame-rate munging on
 /// copy — all without re-encoding. `-fps_mode` needs ffmpeg 7+, which the
-/// current toolchain floor (9+) satisfies, so no version gating.
+/// current 7.0 toolchain floor satisfies, so no version gating.
 pub(crate) const LIVE_DOWNLOADER_ARGS: &str =
     "ffmpeg:-fps_mode passthrough -copyts -avoid_negative_ts make_zero";
 
@@ -614,7 +665,16 @@ async fn fetch_ytdlp_inner(
 /// Install the ffmpeg toolchain (ffmpeg *and* ffprobe) into the user library dir.
 /// The crate's installer only extracts `ffmpeg`, leaving `--ffmpeg-location`
 /// pointing at a dir without ffprobe — so Grab fetches the static build itself.
+/// Under Flatpak, FFmpeg comes from the runtime (or `/app/bin`) and this returns
+/// that path without downloading.
 pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
+    // Flatpak uses the runtime's FFmpeg (or a future /app/bin bundle). Never
+    // download a user copy there; return what resolution will actually use.
+    if in_flatpak() {
+        return toolchain_dir_in(&ffmpeg_search_dirs())
+            .map(|dir| dir.join("ffmpeg"))
+            .ok_or_else(VideoError::missing_tools);
+    }
     let dir = user_lib_dir();
     let handle =
         crate::runtime::tokio_rt().spawn(async move { install_ffmpeg_toolchain(dir).await });
@@ -1664,7 +1724,7 @@ pub(crate) fn toolchain_dir_in(dirs: &[PathBuf]) -> Option<PathBuf> {
 /// the directory). Prefers a dir with both tools, falling back to the binary's
 /// own dir when no complete toolchain is on hand.
 pub(crate) fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
-    toolchain_dir_in(&tool_search_dirs())
+    toolchain_dir_in(&ffmpeg_search_dirs())
         .or_else(|| ffmpeg_bin.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("/usr/bin"))
         .to_string_lossy()
@@ -2037,6 +2097,58 @@ mod tests {
 
         std::fs::remove_file(base.join("ffprobe")).unwrap();
         assert!(!core_tools_available_in(std::slice::from_ref(&base)));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn flatpak_ffmpeg_search_ignores_user_copy() {
+        let base = unique_dir("flatpak-ffmpeg-dirs");
+        let app = base.join("app");
+        let runtime = base.join("runtime");
+        let user = base.join("user");
+        for dir in [&app, &runtime, &user] {
+            std::fs::create_dir_all(dir).unwrap();
+            write_test_executable(&dir.join("ffmpeg"));
+            write_test_executable(&dir.join("ffprobe"));
+        }
+
+        // Flatpak prefers /app/bin, then the runtime, and never the user dir.
+        let dirs = ffmpeg_search_dirs_in(true, &app, &runtime, || vec![user.clone()]);
+        assert_eq!(dirs, vec![app.clone(), runtime.clone()]);
+        assert_eq!(find_in_dirs("ffmpeg", &dirs), Some(app.join("ffmpeg")));
+        assert!(!dirs.contains(&user));
+
+        std::fs::remove_file(app.join("ffmpeg")).unwrap();
+        std::fs::remove_file(app.join("ffprobe")).unwrap();
+        assert_eq!(find_in_dirs("ffmpeg", &dirs), Some(runtime.join("ffmpeg")));
+        assert_eq!(toolchain_dir_in(&dirs), Some(runtime.clone()));
+
+        // Non-Flatpak keeps the existing user-first order.
+        let dirs = ffmpeg_search_dirs_in(false, &app, &runtime, || vec![user.clone()]);
+        assert_eq!(dirs, vec![user.clone()]);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn flatpak_core_tools_use_runtime_ffmpeg_not_user_copy() {
+        let base = unique_dir("flatpak-core-tools");
+        let user = base.join("user");
+        let app = base.join("app");
+        let runtime = base.join("runtime");
+        for dir in [&user, &app, &runtime] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        write_test_executable(&user.join("yt-dlp"));
+        write_test_executable(&user.join("ffmpeg"));
+        write_test_executable(&user.join("ffprobe"));
+        assert!(!flatpak_core_tools_installed_in(&user, &app, &runtime));
+
+        write_test_executable(&runtime.join("ffmpeg"));
+        write_test_executable(&runtime.join("ffprobe"));
+        assert!(flatpak_core_tools_installed_in(&user, &app, &runtime));
+
+        std::fs::remove_file(user.join("yt-dlp")).unwrap();
+        assert!(!flatpak_core_tools_installed_in(&user, &app, &runtime));
         std::fs::remove_dir_all(&base).ok();
     }
 

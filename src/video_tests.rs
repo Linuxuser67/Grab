@@ -35,8 +35,8 @@ use crate::video_progress::{
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_runner::{
-    RecordingWatcherGuard, await_child, pick_subtitle_lang, remux_live_capture,
-    resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp,
+    RecordingWatcherGuard, await_child, live_capture_argv_with_ffmpeg, pick_subtitle_lang,
+    remux_live_capture, resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp,
     spawn_recording_watcher,
 };
 use crate::video_spawn::{
@@ -7167,6 +7167,26 @@ fn live_capture_argv_escapes_percent_in_stem() {
     let argv = live_capture_argv(&job, "h720", out, None);
     let o = argv.iter().position(|a| a == "-o").expect("-o");
     assert_eq!(argv[o + 1], "/tmp/staging/100%%.grab-1.mp4");
+}
+
+#[test]
+fn live_capture_argv_pins_ffmpeg_location() {
+    let job = live_test_job();
+    let out = std::path::Path::new("/tmp/staging/live.grab-1.mp4");
+    let argv = live_capture_argv_with_ffmpeg(
+        &job,
+        "h720",
+        out,
+        None,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+    );
+    let flag = argv
+        .iter()
+        .position(|a| a == "--ffmpeg-location")
+        .expect("--ffmpeg-location");
+    let term = argv.iter().position(|a| a == "--").expect("--");
+    assert!(flag < term);
+    assert!(!argv[flag + 1].is_empty());
 }
 
 #[test]

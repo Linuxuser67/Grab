@@ -472,30 +472,23 @@ mod tests {
         assert_eq!(grid.selected_indices(), vec![0]);
     }
 
-    /// Column count follows streamed model size but never exceeds three.
+    /// Column count follows streamed model size, capped at three.
     fn column_count_tracks_streamed_item_count() {
         let grid = GalleryGrid::new();
-        let max_columns = || grid.inner.view.property::<u32>("max-columns");
 
-        assert_eq!(grid.len(), 0);
-        assert_eq!(max_columns(), 1);
+        assert_eq!((grid.len(), grid.inner.view.max_columns()), (0, 1));
 
-        grid.append(&["one".to_string()]);
-        assert_eq!(grid.len(), 1);
-        assert_eq!(max_columns(), 1);
+        grid.append(&["one".into()]);
+        assert_eq!((grid.len(), grid.inner.view.max_columns()), (1, 1));
 
-        grid.append(&["two".to_string()]);
-        assert_eq!(grid.len(), 2);
-        assert_eq!(max_columns(), 2);
+        grid.append(&["two".into()]);
+        assert_eq!((grid.len(), grid.inner.view.max_columns()), (2, 2));
 
-        grid.append(&["three".to_string()]);
-        assert_eq!(grid.len(), 3);
-        assert_eq!(max_columns(), 3);
+        grid.append(&["three".into()]);
+        assert_eq!((grid.len(), grid.inner.view.max_columns()), (3, 3));
 
-        // Additional streamed batches keep the three-column cap.
-        grid.append(&["four".to_string(), "five".to_string()]);
-        assert_eq!(grid.len(), 5);
-        assert_eq!(max_columns(), 3);
+        grid.append(&["four".into(), "five".into()]);
+        assert_eq!((grid.len(), grid.inner.view.max_columns()), (5, 3));
     }
 
     /// Stress the recycling point with 10,000 entries: realized cells must

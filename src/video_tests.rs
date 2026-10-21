@@ -972,10 +972,13 @@ fn resume_attempt_labels_reresolve_as_resuming() {
     let dir = std::env::temp_dir().join(format!("grab-resume-label-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let libs = dir.join("xdg").join("grab").join("libs");
+    let system = dir.join("system");
     std::fs::create_dir_all(&libs).unwrap();
+    std::fs::create_dir_all(&system).unwrap();
     use std::os::unix::fs::PermissionsExt as _;
     for (name, body) in [
         ("yt-dlp", "#!/bin/sh\necho 2026.09.25\n"),
+        // Legacy private copies should be ignored by the FFmpeg resolver.
         ("ffmpeg", "#!/bin/sh\necho ffmpeg version 7.1.2\n"),
         ("ffprobe", "#!/bin/sh\nexit 0\n"),
     ] {
@@ -983,7 +986,15 @@ fn resume_attempt_labels_reresolve_as_resuming() {
         std::fs::write(&bin, body).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let _env = ScopedEnv::apply("/nonexistent-grab-test", &dir.join("xdg"));
+    for (name, body) in [
+        ("ffmpeg", "#!/bin/sh\necho ffmpeg version 7.1.2\n"),
+        ("ffprobe", "#!/bin/sh\nexit 0\n"),
+    ] {
+        let bin = system.join(name);
+        std::fs::write(&bin, body).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let _env = ScopedEnv::apply(system.to_str().expect("UTF-8 temp path"), &dir.join("xdg"));
 
     let item_id = 900_000 + std::process::id() as u64;
     let staging = dir.clone();

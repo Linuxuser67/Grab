@@ -36,7 +36,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, Query, Request, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -323,7 +323,14 @@ fn valid_cookie_path(path: &str) -> bool {
 /// Returns the path, or None if there are no usable cookies or the write fails.
 /// Cookies whose domain or path is malformed, or whose domain does not cover
 /// the URL's host, are dropped.
+#[cfg(test)]
 pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<PathBuf> {
+    write_handoff_cookies_with_count(url, cookies).map(|(path, _)| path)
+}
+
+/// Like `write_handoff_cookies`, but also reports how many cookies were
+/// serialized after scope and format validation.
+fn write_handoff_cookies_with_count(url: &str, cookies: &[Cookie]) -> Option<(PathBuf, usize)> {
     if cookies.is_empty() {
         return None;
     }
@@ -402,7 +409,7 @@ pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<Pat
     }
     let mut file = opts.open(&path).ok()?;
     file.write_all(content.as_bytes()).ok()?;
-    Some(path)
+    Some((path, written))
 }
 
 /// Store a cookie file for a URL. Called by the extension handoff once the
@@ -777,15 +784,30 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"))
 }
 
+/// Attach the number of cookies serialized into the staged jar.
+/// Invalid, out-of-scope, and malformed cookies are skipped by design, but
+/// the extension should be able to detect a partial cookie handoff.
+fn cookie_report_response(accepted: usize, status: StatusCode) -> Response {
+    let value = accepted
+        .to_string()
+        .parse::<HeaderValue>()
+        .expect("an integer is always a valid header value");
+    let mut response = status.into_response();
+    response
+        .headers_mut()
+        .insert("x-grab-cookies-accepted", value);
+    response
+}
+
 async fn handle_add(
     State(st): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: Bytes,
-) -> StatusCode {
+) -> Response {
     tracing::debug!("Extension handoff received");
     if !is_json_content_type(&headers) {
-        return StatusCode::UNSUPPORTED_MEDIA_TYPE;
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
     // A token, when sent, must verify: a stale pairing is an error the
     // extension should see, not something to quietly downgrade.
@@ -798,25 +820,25 @@ async fn handle_add(
                 .zip(token.to_str().ok())
                 .is_some_and(|(p, t)| p.verify_token(&body, t));
             if !valid {
-                return StatusCode::FORBIDDEN;
+                return StatusCode::FORBIDDEN.into_response();
             }
             true
         }
     };
     let req: AddRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
-        Err(e) if e.is_data() => return StatusCode::UNPROCESSABLE_ENTITY,
-        Err(_) => return StatusCode::BAD_REQUEST,
+        Err(e) if e.is_data() => return StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
     if req.url.trim().is_empty() {
-        return StatusCode::BAD_REQUEST;
+        return StatusCode::BAD_REQUEST.into_response();
     }
     if req.url.len() > crate::download_intake::MAX_URL_LEN {
-        return StatusCode::URI_TOO_LONG;
+        return StatusCode::URI_TOO_LONG.into_response();
     }
     // Bound cookie count: each is a small name/value pair.
     if req.cookies.len() > 100 {
-        return StatusCode::BAD_REQUEST;
+        return StatusCode::BAD_REQUEST.into_response();
     }
     // Unauthenticated callers always wait for the user's answer: any local
     // process can POST without a token, so silent queuing would let
@@ -838,19 +860,19 @@ async fn handle_add(
     // An authenticated handoff with no usable cookies discards the stale
     // entry: the new download must not reuse the old jar. Unauthenticated
     // callers never discard, so a local probe can't wipe entries.
-    let staged = if authenticated {
-        match write_handoff_cookies(&req.url, &req.cookies) {
-            Some(path) => {
+    let (staged, accepted_cookie_count) = if authenticated {
+        match write_handoff_cookies_with_count(&req.url, &req.cookies) {
+            Some((path, accepted)) => {
                 store_handoff_cookies(&req.url, path, req.user_agent);
-                true
+                (true, accepted)
             }
             None => {
                 discard_handoff_cookies(&req.url);
-                false
+                (false, 0)
             }
         }
     } else {
-        false
+        (false, 0)
     };
     match st.tx.try_send(handoff) {
         Ok(()) => {}
@@ -858,17 +880,17 @@ async fn handle_add(
             if staged {
                 discard_handoff_cookies(&req.url);
             }
-            return StatusCode::TOO_MANY_REQUESTS;
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
         }
         Err(TrySendError::Closed(_)) => {
             if staged {
                 discard_handoff_cookies(&req.url);
             }
-            return StatusCode::INTERNAL_SERVER_ERROR;
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
     let Some(answer) = answer else {
-        return StatusCode::OK;
+        return cookie_report_response(accepted_cookie_count, StatusCode::OK);
     };
     match tokio::time::timeout(st.confirm_wait, answer).await {
         Ok(Ok(outcome)) => {
@@ -876,18 +898,19 @@ async fn handle_add(
             if discard && staged {
                 discard_handoff_cookies(&req.url);
             }
-            status
+            cookie_report_response(if discard { 0 } else { accepted_cookie_count }, status)
         }
         outcome => {
             // Dropped unanswered or timed out.
             if staged {
                 discard_handoff_cookies(&req.url);
             }
-            if outcome.is_err() {
+            let status = if outcome.is_err() {
                 StatusCode::REQUEST_TIMEOUT
             } else {
                 StatusCode::CONFLICT
-            }
+            };
+            cookie_report_response(0, status)
         }
     }
 }
@@ -1453,6 +1476,11 @@ mod tests {
         )
         .await;
         assert_eq!(status(&r), "200", "{r}");
+        assert!(
+            r.to_ascii_lowercase()
+                .contains("x-grab-cookies-accepted: 1"),
+            "response must report the one cookie that was staged: {r}"
+        );
         let handoff = srv.rx.recv().await.expect("handoff");
         assert_eq!(handoff.url, "https://example.com/watch?v=7");
         // The probe (and later the download legs) resolve the same args.
@@ -1465,6 +1493,34 @@ mod tests {
         assert!(
             text.contains("example.com\tTRUE\t/\tFALSE\t0\tcf\tabc"),
             "{text}"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[tokio::test]
+    async fn handle_add_reports_cookies_dropped_by_scope_validation() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = r#"{"url":"https://example.com/file.zip","cookies":[{"name":"session","value":"abc","domain":"unrelated.example","host_only":false,"path":"/"}]}"#;
+        let tok = token(body);
+        let r = request(
+            srv.port,
+            &[("Host", &host), ("X-Grab-Token", &tok), JSON],
+            body,
+        )
+        .await;
+        assert_eq!(status(&r), "200", "{r}");
+        assert!(
+            r.to_ascii_lowercase()
+                .contains("x-grab-cookies-accepted: 0"),
+            "a cookie rejected by domain validation must be reported: {r}"
+        );
+        let handoff = srv.rx.recv().await.expect("handoff");
+        assert!(
+            handoff_cookie_args(&handoff.url).is_empty(),
+            "a rejected cookie must not be staged"
         );
         clear_handoff_cookies();
     }

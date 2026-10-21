@@ -354,7 +354,11 @@ fn ffmpeg_search_dirs_in(
 /// FFmpeg, but Grab no longer manages or prefers them.
 fn system_ffmpeg_search_dirs() -> Vec<PathBuf> {
     std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).filter(|d| !d.as_os_str().is_empty()).collect())
+        .map(|path| {
+            std::env::split_paths(&path)
+                .filter(|d| !d.as_os_str().is_empty())
+                .collect()
+        })
         .unwrap_or_default()
 }
 

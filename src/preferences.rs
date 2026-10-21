@@ -672,15 +672,7 @@ pub fn show(
     /// Check filesystem paths only: do not launch subprocesses or contact upstream
     /// services just to choose between Install and Check for Updates.
     fn core_tools_installed() -> bool {
-        if crate::video_tools::in_flatpak() {
-            // Flatpak: yt-dlp is Grab-managed in the user dir, while FFmpeg
-            // comes from the runtime. A cleared profile still offers Install.
-            crate::video_tools::managed_core_tools_installed()
-        } else {
-            // Tarball/dev builds resolve distro tools from PATH; report their
-            // availability rather than claiming a usable system install is missing.
-            crate::video_tools::core_tools_available()
-        }
+        crate::video_tools::managed_core_tools_installed()
     }
     /// What the tools-row button does: Install when tools are missing, Check to
     /// probe each tool's upstream for a newer release, Update once one is
@@ -706,7 +698,7 @@ pub fn show(
             } else {
                 "Not installed"
             }));
-            btn.set_label(&gettext("How to Install"));
+            btn.set_label(&gettext("Show Install Instructions"));
             btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
             action.set(ToolAction::Install);
             return;

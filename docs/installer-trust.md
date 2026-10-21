@@ -1,13 +1,18 @@
 # Tool installer trust model
 
-Grab downloads yt-dlp, gallery-dl, ffmpeg, and quickjs from GitHub releases.
-Each download is SHA-256 verified before installation.
+Grab downloads yt-dlp, gallery-dl, and quickjs from GitHub releases. Those
+downloads are SHA-256 verified before installation.
+
+Grab does not download or update FFmpeg. Flatpak resolves `ffmpeg` and
+`ffprobe` from `/app/bin` or the GNOME runtime (`/usr/bin`). Other builds
+resolve an existing toolchain from system `PATH`. Legacy FFmpeg copies in
+Grab's private tool directory are ignored.
 
 ## Digest source
 
-The SHA-256 digest comes from the **same GitHub API response** as the binary
-download URL (the release asset metadata). There is no separate checksum file
-or hardcoded pin.
+For tools Grab downloads, the SHA-256 digest comes from the **same GitHub API
+response** as the binary download URL (the release asset metadata). There is
+no separate checksum file or hardcoded pin.
 
 ## What this guards against
 

@@ -672,7 +672,8 @@ pub fn show(
     /// services just to choose between Install and Check for Updates.
     fn core_tools_installed() -> bool {
         if crate::video_tools::in_flatpak() {
-            // A cleared Flatpak profile must still offer Grab-managed installs.
+            // Flatpak: yt-dlp is Grab-managed in the user dir, while FFmpeg
+            // comes from the runtime. A cleared profile still offers Install.
             crate::video_tools::managed_core_tools_installed()
         } else {
             // Tarball/dev builds resolve distro tools from PATH; report their
@@ -1005,7 +1006,7 @@ pub fn show(
     let pending_updates: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
         std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     // Start in the safe fresh-install state; the local presence probe below
-    // switches to Check for Updates only when yt-dlp and ffmpeg are present.
+    // switches to Check for Updates only when the core tools are present.
     video_tools_btn.set_label(&gettext("Install"));
     video_tools_row.set_subtitle(&gettext("Not installed"));
     {
@@ -1063,9 +1064,9 @@ pub fn show(
                         btn_b.set_sensitive(true);
                         return;
                     }
-                    // Probe installed versions off-thread, then ask each tool's
-                    // upstream for its latest release tag: yt-dlp/yt-dlp,
-                    // BtbN/FFmpeg-Builds, quickjs-ng/quickjs, gdl-org/builds.
+                    // Probe installed versions off-thread, then ask each managed
+                    // tool's upstream for a newer release: yt-dlp/yt-dlp,
+                    // quickjs-ng/quickjs, gdl-org/builds.
                     let installed = gio::spawn_blocking(|| {
                         let dirs = crate::video_tools::tool_search_dirs();
                         let inspect = |name: &str, version_arg: &str| {
@@ -1075,12 +1076,9 @@ pub fn show(
                             })
                         };
                         let yt = inspect("yt-dlp", "--version");
-                        let ff = inspect("ffmpeg", "-version");
                         let qjs = inspect("qjs", "--version");
                         let gdl = inspect("gallery-dl", "--version");
-                        let ffprobe_available =
-                            crate::video_tools::toolchain_dir_in(&dirs).is_some();
-                        (yt, ff, qjs, gdl, ffprobe_available)
+                        (yt, qjs, gdl)
                     })
                     .await
                     .ok();
@@ -1090,7 +1088,6 @@ pub fn show(
                     let max_age = crate::update_cache::MANUAL_MAX_AGE_SECS;
                     let latest = crate::update_cache::latest(max_age).await;
                     let yt_tag = latest.ytdlp;
-                    let ff_tag = latest.ffmpeg;
                     let qjs_tag = latest.quickjs;
                     let gdl_tag = latest.gallerydl;
                     let gdl_digest = latest.gallerydl_digest;
@@ -1111,7 +1108,7 @@ pub fn show(
                     let mut missing: Vec<String> = Vec::new();
                     let mut current: Vec<String> = Vec::new();
                     let mut indeterminate = installed.is_none();
-                    if let Some((yt, ff, qjs, gdl, ffprobe_available)) = installed {
+                    if let Some((yt, qjs, gdl)) = installed {
                         // Presence is independent for each binary. In particular,
                         // resolve_libraries() must not hide all missing tools just
                         // because a fresh profile has no yt-dlp yet.
@@ -1130,36 +1127,6 @@ pub fn show(
                             }
                             (Some(_), _) => indeterminate = true,
                             (None, _) => missing.push("yt-dlp".to_string()),
-                        }
-                        if !ffprobe_available {
-                            if let Some((_, version)) = ff.as_ref() {
-                                let detail = version
-                                    .as_deref()
-                                    .and_then(crate::video_tools::ffmpeg_version_token)
-                                    .unwrap_or("repair required");
-                                updates.push(format!("ffmpeg {detail} (ffprobe missing)"));
-                            } else {
-                                missing.push("ffmpeg".to_string());
-                            }
-                        } else {
-                            match (ff.as_ref(), ff_tag.as_deref()) {
-                                (Some((_, Some(first_line))), Some(tag)) => {
-                                    let token =
-                                        crate::video_tools::ffmpeg_version_token(first_line)
-                                            .unwrap_or(first_line);
-                                    if crate::video_tools::ffmpeg_needs_update(
-                                        first_line,
-                                        tag,
-                                        ffprobe_available,
-                                    ) {
-                                        updates.push(format!("ffmpeg {} → {}", token, tag.trim()));
-                                    } else {
-                                        current.push(format!("ffmpeg {token}"));
-                                    }
-                                }
-                                (Some(_), _) => indeterminate = true,
-                                (None, _) => missing.push("ffmpeg".to_string()),
-                            }
                         }
                         // Optional tools are offered for installation whenever
                         // absent, even if their latest-release lookup is offline.

@@ -35,8 +35,8 @@ use crate::video_progress::{
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_runner::{
-    RecordingWatcherGuard, await_child, pick_subtitle_lang, remux_live_capture,
-    resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp,
+    RecordingWatcherGuard, await_child, live_capture_argv_with_ffmpeg, pick_subtitle_lang,
+    remux_live_capture, resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp,
     spawn_recording_watcher,
 };
 use crate::video_spawn::{
@@ -55,10 +55,9 @@ use crate::video_tools::VideoError;
 use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_override_command_for, browser_override_dirs,
     browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
-    ensure_tool_versions, extract_ffmpeg_toolchain, ffmpeg_version_token, find_in_dirs,
-    is_youtube_url, parse_dotted_version, quickjs_arch_supported, quickjs_download_url,
-    tool_update_available, toolchain_dir_in, user_lib_dir, ytdlp_identity_args,
-    ytdlp_supports_impersonation,
+    ensure_tool_versions, ffmpeg_version_token, find_in_dirs, is_youtube_url, parse_dotted_version,
+    quickjs_arch_supported, quickjs_download_url, tool_update_available, toolchain_dir_in,
+    user_lib_dir, ytdlp_identity_args, ytdlp_supports_impersonation,
 };
 use crate::video_types::FetchedVideo;
 use crate::video_types::codec_preference;
@@ -973,17 +972,29 @@ fn resume_attempt_labels_reresolve_as_resuming() {
     let dir = std::env::temp_dir().join(format!("grab-resume-label-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let libs = dir.join("xdg").join("grab").join("libs");
+    let system = dir.join("system");
     std::fs::create_dir_all(&libs).unwrap();
+    std::fs::create_dir_all(&system).unwrap();
     use std::os::unix::fs::PermissionsExt as _;
     for (name, body) in [
         ("yt-dlp", "#!/bin/sh\necho 2026.09.25\n"),
+        // Legacy private copies should be ignored by the FFmpeg resolver.
         ("ffmpeg", "#!/bin/sh\necho ffmpeg version 7.1.2\n"),
+        ("ffprobe", "#!/bin/sh\nexit 0\n"),
     ] {
         let bin = libs.join(name);
         std::fs::write(&bin, body).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let _env = ScopedEnv::apply("/nonexistent-grab-test", &dir.join("xdg"));
+    for (name, body) in [
+        ("ffmpeg", "#!/bin/sh\necho ffmpeg version 7.1.2\n"),
+        ("ffprobe", "#!/bin/sh\nexit 0\n"),
+    ] {
+        let bin = system.join(name);
+        std::fs::write(&bin, body).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let _env = ScopedEnv::apply(system.to_str().expect("UTF-8 temp path"), &dir.join("xdg"));
 
     let item_id = 900_000 + std::process::id() as u64;
     let staging = dir.clone();
@@ -2825,19 +2836,24 @@ fn fake_executable(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn user_installed_tools_win_over_bundle() {
-    // User dir holds our own binaries, PATH leads nowhere (no Flatpak bundle
-    // on a dev host); same order lets a user Update override the bundle.
+fn user_ytdlp_wins_and_legacy_user_ffmpeg_is_ignored() {
+    // yt-dlp remains managed in Grab's private directory. Old private FFmpeg
+    // and ffprobe copies must not override a complete system toolchain.
     let dir = std::env::temp_dir().join(format!("grab-userlibs-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let libs = dir.join("xdg").join("grab").join("libs");
+    let system = dir.join("system");
     std::fs::create_dir_all(&libs).unwrap();
+    std::fs::create_dir_all(&system).unwrap();
     fake_executable(&libs, "yt-dlp");
     fake_executable(&libs, "ffmpeg");
-    let _env = ScopedEnv::apply("/nonexistent-grab-test", &dir.join("xdg"));
-    let found = resolve_libraries().expect("user tools resolve");
+    fake_executable(&libs, "ffprobe");
+    let system_ffmpeg = fake_executable(&system, "ffmpeg");
+    fake_executable(&system, "ffprobe");
+    let _env = ScopedEnv::apply(system.to_str().expect("UTF-8 temp path"), &dir.join("xdg"));
+    let found = resolve_libraries().expect("user yt-dlp and system FFmpeg resolve");
     assert_eq!(found.youtube, libs.join("yt-dlp"));
-    assert_eq!(found.ffmpeg, libs.join("ffmpeg"));
+    assert_eq!(found.ffmpeg, system_ffmpeg);
     drop(_env);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2861,176 +2877,8 @@ fn toolchain_dir_prefers_complete_toolchain() {
         toolchain_dir_in(&[lone.clone(), full.clone(), empty]),
         Some(full.clone())
     );
-    // No complete toolchain anywhere: None, and the caller falls back
-    // to the resolved ffmpeg's own dir (previous behavior).
+    // Without a complete pair, callers must report missing tools.
     assert_eq!(toolchain_dir_in(&[lone]), None);
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-/// Build a tar.xz archive with the given (entry name, contents) pairs.
-fn make_tool_tar_xz(archive: &std::path::Path, entries: &[(&str, &[u8])]) {
-    let file = std::fs::File::create(archive).unwrap();
-    let encoder = xz2::write::XzEncoder::new(file, 1);
-    let mut tar = tar::Builder::new(encoder);
-    for &(name, contents) in entries {
-        let mut header = tar::Header::new_gnu();
-        header.set_size(contents.len() as u64);
-        header.set_mode(0o755);
-        header.set_cksum();
-        tar.append_data(&mut header, name, std::io::Cursor::new(contents))
-            .unwrap();
-    }
-    tar.into_inner().unwrap().finish().unwrap();
-}
-
-#[test]
-fn extract_ffmpeg_toolchain_pulls_both_binaries() {
-    let base = std::env::temp_dir().join(format!("grab-fftools-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dir = base.join("out");
-    std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
-    // Nested layout (bin/-style); the extractor matches by file name.
-    make_tool_tar_xz(
-        &archive,
-        &[("bin/ffmpeg", b"fake-ffmpeg"), ("ffprobe", b"fake-ffprobe")],
-    );
-    let ffmpeg = extract_ffmpeg_toolchain(&archive, &dir).expect("extracts");
-    assert_eq!(ffmpeg, dir.join("ffmpeg"));
-    assert_eq!(std::fs::read(dir.join("ffprobe")).unwrap(), b"fake-ffprobe");
-    // Executable bits are set and the archive is cleaned up.
-    use std::os::unix::fs::PermissionsExt as _;
-    for tool in ["ffmpeg", "ffprobe"] {
-        let mode = std::fs::metadata(dir.join(tool))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_ne!(mode & 0o111, 0, "{tool} is executable");
-    }
-    assert!(!archive.exists());
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn extract_ffmpeg_toolchain_errors_without_ffmpeg() {
-    let base = std::env::temp_dir().join(format!("grab-fftools-nofmpeg-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dir = base.join("out");
-    std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
-    make_tool_tar_xz(&archive, &[("ffprobe", b"fake-ffprobe")]);
-    assert!(extract_ffmpeg_toolchain(&archive, &dir).is_err());
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn extract_ffmpeg_toolchain_rejects_legacy_zip_archive() {
-    use crate::video_tools::extract_ffmpeg_toolchain_inner;
-
-    let base = std::env::temp_dir().join(format!("grab-fftools-legacy-zip-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dir = base.join("out");
-    std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.zip");
-    // Valid ZIP magic but not a tar.xz stream. Testing the file signature is
-    // enough here; production fixtures above exercise successful tar.xz reads.
-    std::fs::write(&archive, b"PK\x03\x04legacy ZIP, not a tar.xz archive").unwrap();
-
-    assert!(
-        extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).is_err(),
-        "the tar.xz extractor must reject ZIP payloads"
-    );
-    assert!(!dir.join("ffmpeg").exists());
-    assert!(!dir.join("ffprobe").exists());
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn extract_ffmpeg_toolchain_inner_rejects_entry_over_cap() {
-    use crate::video_tools::extract_ffmpeg_toolchain_inner;
-
-    let base = std::env::temp_dir().join(format!("grab-fftools-cap-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dir = base.join("out");
-    std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
-    // 4KB entry against a 1KB cap: must be refused, not silently truncated.
-    make_tool_tar_xz(&archive, &[("ffmpeg", &vec![0x7f; 4096])]);
-    let err = extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).expect_err("cap must trip");
-    assert!(err.contains("exceeds"), "unexpected error: {err}");
-    // The partial file is removed, not left truncated on disk.
-    assert!(!dir.join("ffmpeg").exists());
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn extract_ffmpeg_toolchain_inner_accepts_entry_at_cap() {
-    use crate::video_tools::extract_ffmpeg_toolchain_inner;
-
-    let base = std::env::temp_dir().join(format!("grab-fftools-atcap-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dir = base.join("out");
-    std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
-    // An entry of exactly the cap is legitimate: take(max + 1) reads it fully
-    // and the `> max` check lets it through. Include a small ffprobe too,
-    // because a successful toolchain install must contain both executables.
-    make_tool_tar_xz(
-        &archive,
-        &[("ffmpeg", &vec![0x7f; 1024]), ("ffprobe", b"tiny-probe")],
-    );
-    let ffmpeg = extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).expect("at-cap entry ok");
-    assert_eq!(ffmpeg, dir.join("ffmpeg"));
-    assert_eq!(std::fs::read(dir.join("ffmpeg")).unwrap().len(), 1024);
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn extract_ffmpeg_toolchain_inner_cleans_up_partial_on_cap_trip() {
-    use crate::video_tools::extract_ffmpeg_toolchain_inner;
-
-    let base = std::env::temp_dir().join(format!("grab-fftools-partial-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dir = base.join("out");
-    std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
-    // ffmpeg fits the cap but ffprobe doesn't: the trip must not leave a
-    // half-installed toolchain behind.
-    make_tool_tar_xz(
-        &archive,
-        &[("ffmpeg", b"tiny-ffmpeg"), ("ffprobe", &vec![0x7f; 4096])],
-    );
-    let err = extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).expect_err("cap must trip");
-    assert!(err.contains("exceeds"), "unexpected error: {err}");
-    assert!(!dir.join("ffmpeg").exists(), "partial ffmpeg left behind");
-    assert!(!dir.join("ffprobe").exists(), "partial ffprobe left behind");
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn extract_ffmpeg_toolchain_inner_cleans_up_on_non_cap_error() {
-    use crate::video_tools::extract_ffmpeg_toolchain_inner;
-
-    let base = std::env::temp_dir().join(format!("grab-fftools-symlink-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let dir = base.join("out");
-    std::fs::create_dir_all(&dir).unwrap();
-    let archive = base.join("ffmpeg-linux-x86_64.tar.xz");
-    // ffmpeg extracts fine, but a planted symlink at dir/ffprobe makes the
-    // second extraction refuse: the already-extracted ffmpeg must not remain.
-    std::os::unix::fs::symlink("/nonexistent", dir.join("ffprobe")).unwrap();
-    make_tool_tar_xz(
-        &archive,
-        &[("ffmpeg", b"tiny-ffmpeg"), ("ffprobe", b"tiny-ffprobe")],
-    );
-    assert!(extract_ffmpeg_toolchain_inner(&archive, &dir, 1024).is_err());
-    assert!(!dir.join("ffmpeg").exists(), "partial ffmpeg left behind");
-    // The planted symlink itself is not ours to remove.
-    assert!(
-        std::fs::symlink_metadata(dir.join("ffprobe"))
-            .unwrap()
-            .is_symlink()
-    );
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -7167,6 +7015,26 @@ fn live_capture_argv_escapes_percent_in_stem() {
     let argv = live_capture_argv(&job, "h720", out, None);
     let o = argv.iter().position(|a| a == "-o").expect("-o");
     assert_eq!(argv[o + 1], "/tmp/staging/100%%.grab-1.mp4");
+}
+
+#[test]
+fn live_capture_argv_pins_ffmpeg_location() {
+    let job = live_test_job();
+    let out = std::path::Path::new("/tmp/staging/live.grab-1.mp4");
+    let argv = live_capture_argv_with_ffmpeg(
+        &job,
+        "h720",
+        out,
+        None,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+    );
+    let flag = argv
+        .iter()
+        .position(|a| a == "--ffmpeg-location")
+        .expect("--ffmpeg-location");
+    let term = argv.iter().position(|a| a == "--").expect("--");
+    assert!(flag < term);
+    assert!(!argv[flag + 1].is_empty());
 }
 
 #[test]

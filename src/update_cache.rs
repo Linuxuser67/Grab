@@ -2,7 +2,7 @@
 //! button.
 //!
 //! GitHub's unauthenticated API allows 60 requests an hour per IP, so a click
-//! must not cost four requests each time. Every network lookup here runs on
+//! must not cost three requests each time. Every network lookup here runs on
 //! Grab's Tokio runtime: this module is awaited from GLib tasks, and reqwest
 //! and tokio::process panic when no Tokio runtime is entered.
 
@@ -18,7 +18,6 @@ pub const MANUAL_MAX_AGE_SECS: u64 = 15 * 60;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Latest {
     pub ytdlp: Option<String>,
-    pub ffmpeg: Option<String>,
     pub quickjs: Option<String>,
     pub gallerydl: Option<String>,
     pub gallerydl_digest: Option<String>,
@@ -28,10 +27,7 @@ impl Latest {
     /// Only a complete answer is cached. A partial one (rate limit, outage) is
     /// retried on the next check instead of being pinned for 15 minutes.
     fn is_complete(&self) -> bool {
-        self.ytdlp.is_some()
-            && self.ffmpeg.is_some()
-            && self.quickjs.is_some()
-            && self.gallerydl.is_some()
+        self.ytdlp.is_some() && self.quickjs.is_some() && self.gallerydl.is_some()
     }
 }
 
@@ -73,12 +69,11 @@ fn write_cache(path: &Path, stored: &Stored) {
     }
 }
 
-/// The four upstream lookups, awaited together. Each one already runs on the
+/// The three upstream lookups, awaited together. Each one already runs on the
 /// Tokio runtime, and [`latest`] calls this from inside that runtime.
 async fn fetch_all() -> Latest {
-    let (ytdlp, ffmpeg, quickjs, gallery) = tokio::join!(
+    let (ytdlp, quickjs, gallery) = tokio::join!(
         crate::video::latest_ytdlp_tag(),
-        crate::video::latest_ffmpeg_tag(),
         crate::video::latest_quickjs_tag(),
         crate::gallery_tools::latest_gallerydl_release(),
     );
@@ -88,7 +83,6 @@ async fn fetch_all() -> Latest {
     };
     Latest {
         ytdlp,
-        ffmpeg,
         quickjs,
         gallerydl,
         gallerydl_digest,
@@ -125,6 +119,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_cache_with_ffmpeg_field_is_accepted() {
+        let old = r#"{
+            "ytdlp":"2026.10.15",
+            "ffmpeg":"n8.0",
+            "quickjs":"0.17.0",
+            "gallerydl":"2026.10.15",
+            "gallerydl_digest":null
+        }"#;
+        let parsed: Latest = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.ytdlp.as_deref(), Some("2026.10.15"));
+        assert_eq!(parsed.quickjs.as_deref(), Some("0.17.0"));
+        assert_eq!(parsed.gallerydl.as_deref(), Some("2026.10.15"));
+    }
+
+    #[test]
     fn freshness_respects_age_and_clock_skew() {
         assert!(is_fresh(1_000, 1_500, 600));
         assert!(!is_fresh(1_000, 1_700, 600));
@@ -136,7 +145,6 @@ mod tests {
     fn only_a_complete_answer_is_cached() {
         let mut latest = Latest {
             ytdlp: Some("2026.10.15".into()),
-            ffmpeg: Some("n8.0".into()),
             quickjs: Some("v0.1".into()),
             gallerydl: Some("2026.10.15".into()),
             gallerydl_digest: None,

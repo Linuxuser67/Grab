@@ -520,7 +520,7 @@ fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: SystemTim
     let user_agent = usable
         .as_ref()
         .and_then(|entry| entry.user_agent.as_deref());
-    match usable {
+    match usable.as_ref() {
         Some(entry) => {
             let mut args = vec![
                 "--cookies".to_string(),

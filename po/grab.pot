@@ -422,10 +422,6 @@ msgstr ""
 msgid "yt-dlp install progress"
 msgstr ""
 
-#: src/install_progress.rs:162
-msgid "ffmpeg install progress"
-msgstr ""
-
 #: src/install_progress.rs:163
 msgid "quickjs install progress"
 msgstr ""
@@ -592,11 +588,15 @@ msgstr ""
 msgid "Select Folder"
 msgstr ""
 
-#: src/inline_add.rs:1768 src/preferences.rs:868
+#: src/inline_add.rs:1768
 msgid "How to Install"
 msgstr ""
 
-#: src/inline_add.rs:1769 src/preferences.rs:869
+#: src/preferences.rs:701
+msgid "Show Install Instructions"
+msgstr ""
+
+#: src/inline_add.rs:1769 src/preferences.rs:702
 msgid "Show terminal install instructions"
 msgstr ""
 

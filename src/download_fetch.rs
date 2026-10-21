@@ -97,15 +97,18 @@ pub(crate) struct FetchCtx {
 pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
     let timeout = Duration::from_secs(30);
     let mut tries = 3;
-    // Prefer a fresh extension handoff; a stale snapshot must not override
-    // cookies from the currently configured browser profile.
-    if let Some(path) =
-        crate::extension_server::live_handoff_cookie_path(&ctx.url, &ctx.opts.cookies_browser)
+    // Resolve the staged jar and its UA together, so a stale/missing/unreadable
+    // jar can never leave its UA paired with cookies exported from the live browser.
+    if let Some((path, handoff_ua)) =
+        crate::extension_server::live_handoff_identity(&ctx.url, &ctx.opts.cookies_browser)
         && let Ok(text) = tokio::fs::read_to_string(&path).await
     {
         let (jar, count) = crate::cookies::jar_from_export(&text);
         if count > 0 {
             ctx.cookies = Some(jar);
+            if let Some(user_agent) = handoff_ua {
+                ctx.user_agent = user_agent;
+            }
         }
     }
     // One export per attempt (jars are cheap next to downloads).

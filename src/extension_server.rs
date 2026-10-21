@@ -474,11 +474,30 @@ fn handoff_entry(url: &str) -> Option<HandoffCookies> {
 /// Browser UA staged with a handoff's cookies, if any. Same lookup as the
 /// cookies (exact URL, then same-host fallback).
 pub(crate) fn handoff_user_agent(url: &str, browser: &str) -> Option<String> {
+    handoff_user_agent_at(url, browser, SystemTime::now())
+}
+
+fn handoff_user_agent_at(url: &str, browser: &str, now: SystemTime) -> Option<String> {
+    live_handoff_entry_at(url, browser, now).and_then(|entry| entry.user_agent)
+}
+
+/// The staged jar and UA must be accepted as one identity: a download must not
+/// keep a handoff UA when the jar is stale or unreadable and browser cookies are exported.
+pub(crate) fn live_handoff_identity(url: &str, browser: &str) -> Option<(PathBuf, Option<String>)> {
+    live_handoff_identity_at(url, browser, SystemTime::now())
+}
+
+fn live_handoff_identity_at(
+    url: &str,
+    browser: &str,
+    now: SystemTime,
+) -> Option<(PathBuf, Option<String>)> {
+    live_handoff_entry_at(url, browser, now).map(|entry| (entry.path, entry.user_agent))
+}
+
+fn live_handoff_entry_at(url: &str, browser: &str, now: SystemTime) -> Option<HandoffCookies> {
     let live_browser = crate::video_tools::cookies_browser_spec(browser).is_some();
-    let now = SystemTime::now();
-    handoff_entry(url)
-        .filter(|entry| handoff_jar_usable_at(entry, live_browser, now))
-        .and_then(|entry| entry.user_agent)
+    handoff_entry(url).filter(|entry| handoff_jar_usable_at(entry, live_browser, now))
 }
 
 /// True when a staged jar may replace `--cookies-from-browser`. With a live
@@ -496,20 +515,10 @@ fn handoff_jar_usable_at(entry: &HandoffCookies, live_browser: bool, now: System
 fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: SystemTime) -> Vec<String> {
     let live_browser = crate::video_tools::cookies_browser_spec(cookies_browser).is_some();
     let entry = handoff_entry(page_url);
-    // The user agent is tied to its cookie snapshot. Don't apply a stale
-    // extension UA to cookies exported from the configured live browser.
-    let jar_usable = entry
-        .as_ref()
-        .is_some_and(|entry| handoff_jar_usable_at(entry, live_browser, now));
-    let user_agent = if jar_usable {
-        entry.as_ref().and_then(|e| e.user_agent.as_deref())
-    } else {
-        None
-    };
-    match entry
-        .as_ref()
-        .filter(|entry| handoff_jar_usable_at(entry, live_browser, now))
-    {
+    // Filter once so the staged UA and cookie jar share the same freshness decision.
+    let usable = entry.filter(|entry| handoff_jar_usable_at(entry, live_browser, now));
+    let user_agent = usable.as_ref().and_then(|entry| entry.user_agent.as_deref());
+    match usable {
         Some(entry) => {
             let mut args = vec![
                 "--cookies".to_string(),
@@ -552,10 +561,7 @@ pub(crate) fn live_handoff_cookie_path(url: &str, browser: &str) -> Option<PathB
 }
 
 fn live_handoff_cookie_path_at(url: &str, browser: &str, now: SystemTime) -> Option<PathBuf> {
-    let live_browser = crate::video_tools::cookies_browser_spec(browser).is_some();
-    handoff_entry(url)
-        .filter(|entry| handoff_jar_usable_at(entry, live_browser, now))
-        .map(|entry| entry.path)
+    live_handoff_entry_at(url, browser, now).map(|entry| entry.path)
 }
 
 /// Drop a URL's staged handoff cookies and delete the file. Called when its
@@ -1292,6 +1298,32 @@ mod tests {
             false,
             entry.staged_at + HANDOFF_FRESH
         ));
+    }
+
+    #[test]
+    fn handoff_user_agent_uses_the_same_freshness_policy_as_its_jar() {
+        let _g = exclusive();
+        let url = "https://ua-freshness.example.com/file";
+        let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
+        store_handoff_cookies(url, path.clone(), Some("UA/1".into()));
+        let now = SystemTime::now();
+
+        assert_eq!(handoff_user_agent_at(url, "brave", now), Some("UA/1".into()));
+        assert_eq!(
+            live_handoff_identity_at(url, "brave", now),
+            Some((path.clone(), Some("UA/1".into())))
+        );
+
+        let stale_at = now + HANDOFF_FRESH + Duration::from_secs(1);
+        assert_eq!(handoff_user_agent_at(url, "brave", stale_at), None);
+        assert_eq!(live_handoff_identity_at(url, "brave", stale_at), None);
+        // Without a configured browser, the staged jar and its UA remain the only source.
+        assert_eq!(handoff_user_agent_at(url, "none", stale_at), Some("UA/1".into()));
+        assert_eq!(
+            live_handoff_identity_at(url, "none", stale_at),
+            Some((path, Some("UA/1".into())))
+        );
+        clear_handoff_cookies();
     }
 
     #[test]

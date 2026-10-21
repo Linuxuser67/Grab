@@ -1327,7 +1327,6 @@ impl DownloadManager {
                 return;
             }
         };
-        let handoff_ua = crate::extension_server::handoff_user_agent(&url, &opts.cookies_browser);
         let ctx = FetchCtx {
             client,
             url: url.clone(),
@@ -1352,9 +1351,9 @@ impl DownloadManager {
                 lock
             },
             cookies: None,
-            // Browser UA from the extension handoff (cf_clearance is UA-bound).
-            user_agent: handoff_ua
-                .unwrap_or_else(|| crate::download_net::DEFAULT_USER_AGENT.to_string()),
+            // If a handoff jar is accepted at attempt start, run_download also
+            // applies its matching UA. Otherwise use the default with live-browser cookies.
+            user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
             timeout,
             tx,
         };

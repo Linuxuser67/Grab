@@ -50,6 +50,17 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.1.0" date="2026-10-21">
+      <description>
+        <ul>
+          <li>Gallery and collection pickers handle large result sets more reliably and adapt their layout to small selections.</li>
+          <li>Grab no longer downloads or manages FFmpeg: Flatpak builds use FFmpeg and ffprobe from the app or GNOME runtime, while other builds use the system PATH.</li>
+          <li>Hardened browser-cookie handoff and media-tool state checks to avoid stale state and improve missing-tool handling.</li>
+          <li>Updated TLS certificate dependencies and refreshed compatible Rust dependencies.</li>
+          <li>Made manual proxy settings easier to find in Preferences.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.0.2~beta.7" date="2026-10-21">
       <description>
         <ul>

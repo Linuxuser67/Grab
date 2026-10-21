@@ -667,6 +667,7 @@ async fn fetch_ytdlp_inner(
 /// pointing at a dir without ffprobe — so Grab fetches the static build itself.
 /// Under Flatpak, FFmpeg comes from the runtime (or `/app/bin`) and this returns
 /// that path without downloading.
+#[allow(dead_code)]
 pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
     // Flatpak uses the runtime's FFmpeg (or a future /app/bin bundle). Never
     // download a user copy there; return what resolution will actually use.
@@ -1337,21 +1338,6 @@ pub(crate) fn tool_update_available(installed: &str, tag: &str) -> bool {
     }
 }
 
-/// Whether an FFmpeg install needs replacing. Treat an incomplete executable
-/// pair as outdated even when its FFmpeg version equals upstream: version-only
-/// checks would otherwise leave a same-version build without ffprobe broken.
-pub(crate) fn ffmpeg_needs_update(
-    installed_first_line: &str,
-    latest: &str,
-    complete_toolchain: bool,
-) -> bool {
-    if !complete_toolchain {
-        return true;
-    }
-    let installed = ffmpeg_version_token(installed_first_line).unwrap_or(installed_first_line);
-    tool_update_available(installed, latest)
-}
-
 /// Version token from an `ffmpeg -version` first line: the word after "version".
 /// `ffmpeg version 7.1.2 …` → `7.1.2`. Returns None if there's no "version"
 /// word or nothing follows it. A positional nth(2) would match "2000-2025" in
@@ -1855,7 +1841,7 @@ async fn fetch_latest_ffmpeg_asset() -> Option<FfmpegReleaseAsset> {
         .assets
         .iter()
         .filter_map(|asset| {
-            let (version, version_label) = ffmpeg_asset_version_for_target(&asset.name, target)?;
+            let (version, _) = ffmpeg_asset_version_for_target(&asset.name, target)?;
             let checksum = asset.digest.as_deref()?.strip_prefix("sha256:")?;
             if checksum.len() != 64 || !checksum.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return None;
@@ -1869,19 +1855,11 @@ async fn fetch_latest_ffmpeg_asset() -> Option<FfmpegReleaseAsset> {
                     name: asset.name.clone(),
                     url: asset.download_url.clone(),
                     checksum: checksum.to_string(),
-                    version: version_label,
                 },
             ))
         })
         .max_by_key(|(version, _)| *version)
         .map(|(_, asset)| asset)
-}
-
-/// Latest supported FFmpeg release version for the settings update hint.
-/// Returns None if release metadata, architecture, archive, or digest is missing.
-pub async fn latest_ffmpeg_tag() -> Option<String> {
-    let handle = crate::runtime::tokio_rt().spawn(async move { fetch_latest_ffmpeg_asset().await });
-    handle.await.ok().flatten().map(|asset| asset.version)
 }
 
 /// Latest quickjs-ng release tag; `None` when GitHub is unreachable.
@@ -2677,11 +2655,4 @@ mod update_hint_tests {
         assert!(!extractor_failure("ERROR: unable to download webpage"));
     }
 
-    #[test]
-    fn missing_ffprobe_forces_ffmpeg_reinstall_even_at_same_version() {
-        let installed = "ffmpeg version n9.0.2-29-g6dfaba896f Copyright";
-        assert!(ffmpeg_needs_update(installed, "9.0.2", false));
-        assert!(!ffmpeg_needs_update(installed, "9.0.2", true));
-        assert!(ffmpeg_needs_update(installed, "9.0.3", true));
-    }
 }

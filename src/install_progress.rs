@@ -1,4 +1,4 @@
-//! Shared install-progress popover for the staged yt-dlp + ffmpeg install.
+//! Shared install-progress popover for Grab-managed media tools.
 //! Indeterminate pulsing bars (no byte progress); spinner becomes check/error per stage.
 
 use std::cell::{Cell, RefCell};
@@ -128,7 +128,7 @@ impl ToolRow {
     }
 }
 
-/// Staged yt-dlp + ffmpeg install under a shared popover anchored at `button`.
+/// Staged media-tool installation under a shared popover anchored at `button`.
 /// Rows go Waiting → Downloading → Installed; failure marks its row and leaves the popover open, success lingers briefly.
 /// Button stays sensitive: in-flight clicks re-open, post-failure clicks retry; `on_error`/`on_success` report to caller.
 pub fn run(
@@ -171,18 +171,15 @@ pub fn run(
     };
     let do_yt = include("yt-dlp");
     let do_gdl = include("gallery-dl");
-    // Flatpak FFmpeg comes from the runtime; never install a user copy there.
-    let do_ff = include("ffmpeg") && !crate::video_tools::in_flatpak();
     let do_js = include("quickjs");
 
-    // Order: yt-dlp, gallery-dl (under yt-dlp), ffmpeg (non-Flatpak), quickjs.
+    // Order: yt-dlp, gallery-dl (under yt-dlp), then quickjs.
     let yt = ToolRow::new("yt-dlp", &gettext("yt-dlp install progress"), &active);
     let gdl = ToolRow::new(
         "gallery-dl",
         &gettext("gallery-dl install progress"),
         &active,
     );
-    let ff = ToolRow::new("ffmpeg", &gettext("ffmpeg install progress"), &active);
     let js = ToolRow::new("quickjs", &gettext("quickjs install progress"), &active);
 
     let rows = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
@@ -196,9 +193,6 @@ pub fn run(
     }
     if do_gdl {
         rows.append(&gdl.widget());
-    }
-    if do_ff {
-        rows.append(&ff.widget());
     }
     if do_js {
         rows.append(&js.widget());
@@ -269,21 +263,6 @@ pub fn run(
                 .ok()
                 .flatten();
             gdl.set_installed(version);
-        }
-        if do_ff {
-            ff.set_downloading();
-            let ff_path = match crate::video::install_ffmpeg().await {
-                Ok(path) => path,
-                Err(e) => {
-                    let message = e.to_string();
-                    ff.set_failed(&message);
-                    RUNNING.with(|r| r.set(false));
-                    on_error(message);
-                    return;
-                }
-            };
-            let version = crate::video_tools::tool_display_version(ff_path, "-version").await;
-            ff.set_installed(version);
         }
         if do_js {
             // quickjs-ng is the JS runtime Grab pins for YouTube; installed up

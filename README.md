@@ -93,12 +93,13 @@ Undo with `flatpak override --user --reset io.github.linuxuser67.Grab`.
 
 ### Media tool installs
 
-Grab fetches its media tools (yt-dlp, gallery-dl, quickjs) from their upstream
-GitHub releases on first run, and Preferences → Check for Updates keeps them
-current. Flatpak builds use the GNOME runtime's `ffmpeg`/`ffprobe` instead of
-downloading FFmpeg. Each download is verified against the SHA-256 digest
-published in the same GitHub release before it is installed; a missing digest
-refuses the install.
+Grab fetches yt-dlp, gallery-dl, and quickjs from their upstream GitHub
+releases on first run; Preferences → Check for Updates keeps those tools
+current. FFmpeg and ffprobe are resolved from the available tool search paths
+(the GNOME runtime on Flatpak, or existing user installs and PATH on other
+builds). Grab does not download or update FFmpeg. Each downloaded tool is
+verified against the SHA-256 digest published in the same GitHub release
+before installation; a missing digest refuses the install.
 
 That digest detects corrupted or truncated downloads, not a compromised
 release — it shares the release's trust root. If you need a separate trust

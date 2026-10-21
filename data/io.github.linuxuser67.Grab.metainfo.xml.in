@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.1.1" date="2026-10-21">
+      <description>
+        <ul>
+          <li>Browser-extension handoff now reports how many cookies Grab accepts, allowing compatible extensions to warn when cookies are excluded by the target URL's scope or path.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.1.0" date="2026-10-21">
       <description>
         <ul>

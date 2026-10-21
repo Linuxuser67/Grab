@@ -342,7 +342,6 @@ pub fn show(
         &proxy_group.downgrade(),
         is_manual_proxy(&settings.proxy_mode()),
     );
-    net_page.add(&proxy_group);
 
     let notif_group = adw::PreferencesGroup::builder()
         .title(gettext("Notifications"))
@@ -484,6 +483,8 @@ pub fn show(
     dialog.add(&page);
 
     net_page.add(&net_group);
+    // Place conditional controls after the Proxy selector group.
+    net_page.add(&proxy_group);
 
     let torrent_page = adw::PreferencesPage::builder()
         .title(gettext("Torrent"))

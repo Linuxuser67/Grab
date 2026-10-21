@@ -329,10 +329,7 @@ pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<Pat
 
 /// Like `write_handoff_cookies`, but also reports how many cookies were
 /// serialized after scope and format validation.
-fn write_handoff_cookies_with_count(
-    url: &str,
-    cookies: &[Cookie],
-) -> Option<(PathBuf, usize)> {
+fn write_handoff_cookies_with_count(url: &str, cookies: &[Cookie]) -> Option<(PathBuf, usize)> {
     if cookies.is_empty() {
         return None;
     }
@@ -795,7 +792,9 @@ fn cookie_report_response(accepted: usize, status: StatusCode) -> Response {
         .parse::<HeaderValue>()
         .expect("an integer is always a valid header value");
     let mut response = status.into_response();
-    response.headers_mut().insert("x-grab-cookies-accepted", value);
+    response
+        .headers_mut()
+        .insert("x-grab-cookies-accepted", value);
     response
 }
 
@@ -898,10 +897,7 @@ async fn handle_add(
             if discard && staged {
                 discard_handoff_cookies(&req.url);
             }
-            cookie_report_response(
-                if discard { 0 } else { accepted_cookie_count },
-                status,
-            )
+            cookie_report_response(if discard { 0 } else { accepted_cookie_count }, status)
         }
         outcome => {
             // Dropped unanswered or timed out.
@@ -1480,7 +1476,8 @@ mod tests {
         .await;
         assert_eq!(status(&r), "200", "{r}");
         assert!(
-            r.to_ascii_lowercase().contains("x-grab-cookies-accepted: 1"),
+            r.to_ascii_lowercase()
+                .contains("x-grab-cookies-accepted: 1"),
             "response must report the one cookie that was staged: {r}"
         );
         let handoff = srv.rx.recv().await.expect("handoff");
@@ -1499,7 +1496,6 @@ mod tests {
         clear_handoff_cookies();
     }
 
-
     #[tokio::test]
     async fn handle_add_reports_cookies_dropped_by_scope_validation() {
         let _g = exclusive();
@@ -1516,7 +1512,8 @@ mod tests {
         .await;
         assert_eq!(status(&r), "200", "{r}");
         assert!(
-            r.to_ascii_lowercase().contains("x-grab-cookies-accepted: 0"),
+            r.to_ascii_lowercase()
+                .contains("x-grab-cookies-accepted: 0"),
             "a cookie rejected by domain validation must be reported: {r}"
         );
         let handoff = srv.rx.recv().await.expect("handoff");

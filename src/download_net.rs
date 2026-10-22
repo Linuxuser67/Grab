@@ -697,11 +697,7 @@ pub(crate) fn clear_public_resolution_for_tests() {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_local_or_private_host, is_private_ip, is_untrusted_handoff_host, lookup_filtered,
-        require_public_dns_filter, require_public_resolution, requires_public_dns_filter,
-        retain_public,
-    };
+    use super::*;
     use std::net::SocketAddr;
 
     fn sa(s: &str) -> SocketAddr {

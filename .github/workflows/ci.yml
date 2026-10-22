@@ -70,10 +70,9 @@ jobs:
       # errors internally; GRAB_REQUIRE_GALLERY_DL=1 turns skips into failures).
       # To enforce the gate locally: GRAB_REQUIRE_GALLERY_DL=1 cargo test
       - run: cargo test -- --test-threads=1 --nocapture
-      # The picker tests need a display: GtkMultiSelection asserts that GTK
-      # is initialized, so they are #[ignore]d for the plain run above. Xvfb
-      # supplies one; the test binary and its deps are already built. The
-      # trailing grep guards the ignore: zero matching tests would exit 0.
+      # Display-dependent picker and queue-view regressions are #[ignore]d
+      # for the plain run. Xvfb supplies a display for both test filters.
+      # The trailing grep guards the ignore: zero matching tests would exit 0.
       - name: UI tests (Xvfb)
         run: |
           set -o pipefail
@@ -84,6 +83,7 @@ jobs:
           export DISPLAY=:99
           export GSK_RENDERER=cairo
           cargo test picker_grid -- --ignored --test-threads=1 --nocapture | tee /tmp/ui-tests.log
+          cargo test queue_row_resynced_after_picker_returns_to_form -- --ignored --test-threads=1 --nocapture | tee -a /tmp/ui-tests.log
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' /tmp/ui-tests.log
           # A stray Gtk-CRITICAL (e.g. the measure flood from the drawn
           # warnings while the picker streams entries) must fail the step,

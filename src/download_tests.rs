@@ -2607,8 +2607,9 @@ fn expand_playlist_rows_use_titled_subfolder() {
         ]
         .into_boxed_slice(),
     };
-    let (added, total) = manager.expand_playlist_rows(parent.id(), &parent, &pl);
-    assert_eq!((added, total), (2, 2));
+    let (added, total, skipped_by_host_limit) =
+        manager.expand_playlist_rows(parent.id(), &parent, &pl);
+    assert_eq!((added, total, skipped_by_host_limit), (2, 2, 0));
     let sub = dest.join("My Mix: Vol. 1");
     assert!(sub.is_dir());
     let ids: Vec<u64> = manager.items().map(|it| it.id()).collect();

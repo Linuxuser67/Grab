@@ -292,12 +292,8 @@ fn queue_row_resynced_after_picker_returns_to_form() {
 
     // Simulate the exceptional timing: the model gets its persisted row while
     // the queue stack is hidden, but no manager change callback reaches sync().
-    let item = crate::download::DownloadItem::new(
-        1,
-        "https://example.com/gallery",
-        "Gallery",
-        "/tmp",
-    );
+    let item =
+        crate::download::DownloadItem::new(1, "https://example.com/gallery", "Gallery", "/tmp");
     item.set_is_gallery(true);
     manager.store().append(&item);
     assert_eq!(count_list_rows(window.upcast_ref()), 0);

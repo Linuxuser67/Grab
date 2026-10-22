@@ -249,3 +249,86 @@ fn media_icon_failed_reserves_red_for_failure() {
         assert!(!media_icon_failed(s), "{s:?} must not take the error tint");
     }
 }
+
+/// The downloads stack is hidden while a picker page is visible. If a queue
+/// update lands while hidden and its usual manager callback is missed, going
+/// back to the form must reconcile the model instead of leaving the queue blank
+/// until the next launch. Run under Xvfb with the UI-test command in ci.yml.
+#[test]
+#[ignore = "needs a display; run under Xvfb (see ci.yml)"]
+fn queue_row_resynced_after_picker_returns_to_form() {
+    unsafe {
+        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+        std::env::set_var("GSETTINGS_BACKEND", "memory");
+    }
+    gtk4::init().expect("gtk::init (run under Xvfb)");
+
+    let app = libadwaita::Application::builder()
+        .application_id("io.github.linuxuser67.Grab.UiTest")
+        .build();
+    let settings = crate::settings::AppSettings::new();
+    let manager = crate::download::DownloadManager::new(
+        gtk4::gio::ListStore::new::<crate::download::DownloadItem>(),
+        settings.clone(),
+    );
+    let toasts = std::rc::Rc::new(libadwaita::ToastOverlay::new());
+    let (window, _, add_card) =
+        crate::window::build_window(&app, manager.clone(), settings, toasts);
+
+    let nav = add_card.navigation();
+    let picker_child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    let picker_page = libadwaita::NavigationPage::builder()
+        .tag("gallery-picker")
+        .title("Gallery")
+        .child(&picker_child)
+        .build();
+    nav.push(&picker_page);
+    drain_gtk_events();
+    assert_eq!(nav.visible_page_tag().as_deref(), Some("gallery-picker"));
+
+    // Simulate the exceptional timing: the model gets its persisted row while
+    // the queue stack is hidden, but no manager change callback reaches sync().
+    let item = crate::download::DownloadItem::new(
+        1,
+        "https://example.com/gallery",
+        "Gallery",
+        "/tmp",
+    );
+    item.set_is_gallery(true);
+    manager.store().append(&item);
+    assert_eq!(count_list_rows(window.upcast_ref()), 0);
+
+    assert!(nav.pop());
+    drain_gtk_events();
+    assert_eq!(nav.visible_page_tag().as_deref(), Some("form"));
+    assert_eq!(
+        count_list_rows(window.upcast_ref()),
+        1,
+        "the hidden queue should be rebuilt when the form returns"
+    );
+    window.destroy();
+}
+
+fn drain_gtk_events() {
+    let context = gtk4::glib::MainContext::default();
+    for _ in 0..50 {
+        if !context.pending() {
+            break;
+        }
+        context.iteration(false);
+    }
+}
+
+fn count_list_rows(widget: &gtk4::Widget) -> usize {
+    let mut count = if widget.downcast_ref::<gtk4::ListBoxRow>().is_some() {
+        1
+    } else {
+        0
+    };
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        count += count_list_rows(&current);
+        child = current.next_sibling();
+    }
+    count
+}

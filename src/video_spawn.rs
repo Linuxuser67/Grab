@@ -342,10 +342,10 @@ pub(crate) fn insert_guarded_proxy_arg(
 /// Apply the loopback proxy when the initial page URL is a marked browser handoff.
 pub(crate) fn guard_untrusted_args(args: &mut Vec<String>) -> Result<Option<String>, VideoError> {
     let Some(separator) = args.iter().position(|arg| arg == "--") else {
-        return Ok(None);
+        return Err(VideoError::fetch("Extractor arguments are missing the URL terminator"));
     };
     let Some(page_url) = args.get(separator + 1) else {
-        return Ok(None);
+        return Err(VideoError::fetch("Extractor arguments are missing the URL after the terminator"));
     };
     let Some(host) = url::Url::parse(page_url)
         .ok()
@@ -641,6 +641,12 @@ mod tests {
             target.to_string(),
         ];
         assert!(insert_guarded_proxy_arg(&mut conflict, "http://127.0.0.1:43123").is_err());
+    }
+
+    #[test]
+    fn guarded_argv_without_url_terminator_fails_closed() {
+        let mut args = vec!["--ignore-config".to_string()];
+        assert!(guard_untrusted_args(&mut args).is_err());
     }
 
     #[test]

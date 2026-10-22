@@ -162,6 +162,11 @@
       <summary>Browser for video page cookies</summary>
       <description>Read cookies straight from this browser's profile for age-gated or member-only video pages. 'none' disables it.</description>
     </key>
+    <key name="yt-dlp-extractor-args" type="s">
+      <default>''</default>
+      <summary>Additional yt-dlp extractor arguments</summary>
+      <description>Optional extractor-specific KEY:ARGS value for site-specific settings. Passed as one argument, never through a shell. Empty keeps Grab's defaults.</description>
+    </key>
     <key name="last-auto-paste" type="s">
       <default>''</default>
       <summary>Digest of the last link inserted by clipboard auto-paste</summary>

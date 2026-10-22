@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use crate::gallery_argv::{GalleryJob, download_argv};
+use crate::gallery_argv::{GalleryJob, download_argv_with_proxy};
 use crate::gallery_progress::{GalleryProgress, ProgressLine, parse_progress_line};
 use crate::gallery_tools::GalleryError;
 use crate::video_spawn::ProcessGroupGuard;
@@ -98,6 +98,7 @@ fn redact_query_tokens(text: &str) -> String {
 ///
 /// Cancellation: drop the future; the child and its whole process group are
 /// SIGKILLed (own process group + `ProcessGroupGuard` + `kill_on_drop`).
+#[cfg(test)]
 pub async fn run_gallery_download(
     job: &GalleryJob,
     tool: &Path,
@@ -105,7 +106,29 @@ pub async fn run_gallery_download(
     user_agent: Option<&str>,
     on_progress: impl Fn(GalleryProgressUpdate),
 ) -> Result<GalleryResult, GalleryError> {
-    let mut argv = download_argv(
+    run_gallery_download_with_proxy(job, tool, cookies_file, user_agent, None, on_progress).await
+}
+
+pub async fn run_gallery_download_with_proxy(
+    job: &GalleryJob,
+    tool: &Path,
+    cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
+    on_progress: impl Fn(GalleryProgressUpdate),
+) -> Result<GalleryResult, GalleryError> {
+    let untrusted_handoff = url::Url::parse(&job.page_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| crate::download_net::is_untrusted_handoff_host(&host));
+    // Never let a user-configured proxy supersede or compete with the guarded
+    // proxy for an untrusted browser handoff.
+    if untrusted_handoff && proxy.is_some() {
+        return Err(GalleryError::probe(
+            "Cannot safely use a configured proxy for an untrusted browser handoff".to_string(),
+        ));
+    }
+    let mut argv = download_argv_with_proxy(
         tool,
         &job.page_url,
         &job.dest_dir,
@@ -114,12 +137,9 @@ pub async fn run_gallery_download(
         job.filter,
         job.speed_limit,
         job.range.as_deref(),
+        proxy,
     );
-    let guarded_proxy = if url::Url::parse(&job.page_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .is_some_and(|host| crate::download_net::is_untrusted_handoff_host(&host))
-    {
+    let guarded_proxy = if untrusted_handoff {
         let proxy = crate::subprocess_proxy::ensure_started().map_err(GalleryError::probe)?;
         crate::video_spawn::insert_guarded_proxy_arg(&mut argv, &proxy)
             .map_err(GalleryError::probe)?;
@@ -129,7 +149,9 @@ pub async fn run_gallery_download(
     };
 
     let mut cmd = Command::new(&argv[0]);
+    crate::video_spawn::prepend_user_lib_to_path(&mut cmd);
     cmd.args(&argv[1..]);
+    crate::video_spawn::apply_configured_proxy_env(&mut cmd, proxy);
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     // Pipe stdout for progress parsing; pipe stderr for failure context
     // (drained in a separate task so gallery-dl can't block on a full pipe).

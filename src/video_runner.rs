@@ -1473,6 +1473,11 @@ pub(crate) fn live_capture_argv_with_ffmpeg(
     ffmpeg_bin: &Path,
 ) -> Vec<String> {
     let mut argv = live_capture_argv(job, hls_format_id, out, playlist_index);
+    if crate::video_tools::ffmpeg_supports_hls_extension_picky(ffmpeg_bin)
+        && let Some(input_args) = argv.iter_mut().find(|arg| arg.starts_with("ffmpeg_i:"))
+    {
+        input_args.push_str(" -extension_picky 0");
+    }
     splice_before_terminator(
         &mut argv,
         vec![

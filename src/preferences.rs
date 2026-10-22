@@ -806,6 +806,23 @@ pub fn show(
         crate::video::codec_priority_value,
     );
     advanced_media_group.add(&video_codec);
+
+    let extractor_args = adw::EntryRow::builder()
+        .title(gettext("Additional yt-dlp extractor arguments"))
+        .build();
+    extractor_args.set_tooltip_text(Some(&gettext(
+        "Example: youtube:player_client=android. Passed as one yt-dlp argument, not executed by a shell; leave empty for Grab's defaults.",
+    )));
+    extractor_args.set_input_purpose(gtk4::InputPurpose::FreeForm);
+    settings
+        .bind(
+            crate::settings::key::YTDLP_EXTRACTOR_ARGS,
+            &extractor_args,
+            "text",
+        )
+        .build();
+    advanced_media_group.add(&extractor_args);
+
     let subtitle_labels = crate::video::subtitle_language_labels();
     let subtitle_refs: Vec<&str> = subtitle_labels.iter().map(String::as_str).collect();
     let subtitle_lang = adw::ComboRow::builder()

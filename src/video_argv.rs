@@ -278,9 +278,9 @@ pub(crate) fn unified_download_argv(
 
 /// yt-dlp `-f` spec for one HLS attempt over the page URL (muxed files win over lower splits).
 pub(crate) fn hls_format_spec(quality: &str, _pinned: Option<&str>) -> String {
-    // Never pin the exact HLS format ID: the manifest updates continuously
-    // (especially for live), so IDs go stale between probe and download.
-    // Select by height instead.
+    // The VOD HLS attempt intentionally uses yt-dlp's normal selector: HLS
+    // extractor IDs can go stale between probe and download, and the fallback
+    // selector must retain the established quality/audio fallback behavior.
     match quality_height(quality) {
         Some(h) => format!("bv*[height<={h}]+ba/b"),
         None => "bv*+ba/b".to_string(),
@@ -290,6 +290,8 @@ pub(crate) fn hls_format_spec(quality: &str, _pinned: Option<&str>) -> String {
 /// Live `-f` spec, pinned to HLS. The input-side `-seg_max_retry` option is
 /// HLS-demuxer-only; a non-HLS input (DASH/direct media) would reject it as unknown.
 pub(crate) fn live_hls_format_spec(quality: &str, _pinned: Option<&str>) -> String {
+    // Live capture passes HLS-demuxer-only options to FFmpeg, so keep the
+    // selected input on yt-dlp's native HLS protocol.
     const HLS: &str = "[protocol=m3u8_native]";
     match quality_height(quality) {
         Some(h) => format!("bv*[height<={h}]{HLS}+ba{HLS}/b{HLS}"),
@@ -586,4 +588,18 @@ pub(crate) fn dash_merge_argv(
         dest.to_string_lossy().into_owned(),
     ]);
     argv
+}
+
+#[cfg(test)]
+mod hls_protocol_family_tests {
+    use super::{hls_format_spec, live_hls_format_spec};
+
+    #[test]
+    fn vod_selector_keeps_quality_fallback_and_live_selector_is_native_hls() {
+        assert_eq!(hls_format_spec("best", None), "bv*+ba/b");
+        assert_eq!(
+            live_hls_format_spec("best", None),
+            "bv*[protocol=m3u8_native]+ba[protocol=m3u8_native]/b[protocol=m3u8_native]"
+        );
+    }
 }

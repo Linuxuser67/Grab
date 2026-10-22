@@ -946,6 +946,9 @@ fn push_playlist_items_page(
             let close_card = close_card.clone();
             let page_url = playlist.page_url.clone();
             let add_btn = add_btn.clone();
+            // The GTK clicked handler is an `Fn` and may run repeatedly;
+            // clone the shared collection-host state for each import future.
+            let guarded_child_hosts = guarded_child_hosts.clone();
             glib::spawn_future_local(async move {
                 // One blocking call for subdir creation + readdir.
                 let (dir, existing) = match gio::spawn_blocking(move || {

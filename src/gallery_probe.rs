@@ -274,10 +274,7 @@ pub(crate) fn collection_title(items: &[GalleryItem], url: &str) -> String {
 /// Apply DNS-filtering proxying when this page came from an untrusted
 /// browser handoff. The proxy filters every destination reached by the
 /// extractor, not just the initial page hostname.
-fn apply_guarded_proxy(
-    cmd: &mut tokio::process::Command,
-    url: &str,
-) -> Result<bool, GalleryError> {
+fn apply_guarded_proxy(cmd: &mut tokio::process::Command, url: &str) -> Result<bool, GalleryError> {
     let Some(host) = url::Url::parse(url)
         .ok()
         .and_then(|parsed| parsed.host_str().map(str::to_string))

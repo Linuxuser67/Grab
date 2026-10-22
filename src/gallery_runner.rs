@@ -121,7 +121,10 @@ pub async fn run_gallery_download(
         .filter(|host| crate::download_net::is_untrusted_handoff_host(host))
     {
         let proxy = crate::subprocess_proxy::ensure_started().map_err(GalleryError::probe)?;
-        let separator = argv.iter().position(|arg| arg == "--").unwrap_or(argv.len());
+        let separator = argv
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(argv.len());
         if argv[..separator].iter().any(|arg| arg == "--proxy") {
             return Err(GalleryError::probe(
                 "Cannot safely enforce public-address checks through a configured proxy",

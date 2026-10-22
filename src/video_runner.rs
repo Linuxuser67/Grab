@@ -1207,12 +1207,20 @@ pub(crate) async fn resolve_subtitle_lang(
         &job.cookies_browser,
         &job.page_url,
     ));
+    let guarded_proxy = match crate::video_spawn::guard_untrusted_args(&mut argv) {
+        Ok(proxy) => proxy,
+        Err(e) => {
+            tracing::warn!(error = %e, "subtitle probe refused without guarded extractor networking");
+            return Ok(None);
+        }
+    };
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(&argv);
     // Only stdout is drained below; a piped-but-unread stderr would block
     // yt-dlp once its warnings fill the pipe buffer.
     cmd.stderr(std::process::Stdio::null());
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
+    crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -1620,15 +1628,18 @@ pub(crate) async fn run_live_ytdlp(
         let _ = tokio::fs::remove_file(&out).await;
         let _ = tokio::fs::remove_file(&part).await;
         let _ = tokio::fs::remove_file(&state).await;
-        let mut cmd = ytdlp_command(youtube_bin);
         // The builder argv ends with `-- <page URL>`: nothing may be appended
         // after it — anything past `--` becomes a positional URL. Splice the
-        // --load-info-json pair before the terminator.
+        // --load-info-json pair before the terminator, then insert the guarded
+        // proxy before `--` when this row came from an unconfirmed handoff.
         let mut argv =
             live_capture_argv_with_ffmpeg(attempt, hls_format_id, &out, playlist_index, ffmpeg_bin);
         splice_before_terminator(&mut argv, live_info_json_args(live_info_path.as_deref()));
-        cmd.args(argv);
+        let guarded_proxy = crate::video_spawn::guard_untrusted_args(&mut argv)?;
+        let mut cmd = ytdlp_command(youtube_bin);
+        cmd.args(&argv);
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
+        crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
         let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
         // Without this guard a shutdown orphans the recorder (and the ffmpeg it may have started) still writing to the capture.
         let mut group = ProcessGroupGuard::new(&child);
@@ -2020,15 +2031,18 @@ pub(crate) async fn run_hls_ytdlp(
         Ok(lang) => lang,
         Err(()) => return Ok(None),
     };
-    let mut cmd = ytdlp_command(youtube_bin);
-    cmd.args(hls_download_argv(
+    let mut argv = hls_download_argv(
         &job,
         hls_format_id,
         ffmpeg_bin,
         &job.dest,
         playlist_index,
-    ));
+    );
+    let guarded_proxy = crate::video_spawn::guard_untrusted_args(&mut argv)?;
+    let mut cmd = ytdlp_command(youtube_bin);
+    cmd.args(&argv);
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
+    crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let mut group = ProcessGroupGuard::new(&child);
     // Progress lines may land on either stream depending on version;

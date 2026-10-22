@@ -314,6 +314,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn header_reader_preserves_bytes_after_the_header() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (read_tx, read_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_rx.await.unwrap();
+            read_header(&mut stream).await.unwrap()
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(
+                b"POST http://example.com/upload HTTP/1.1\r\nContent-Length: 4\r\n\r\nbody",
+            )
+            .await
+            .unwrap();
+        read_tx.send(()).unwrap();
+
+        let (header, trailing) = server.await.unwrap();
+        assert!(header.ends_with(b"\r\n\r\n"));
+        assert_eq!(trailing, b"body");
+    }
+
+    #[tokio::test]
     async fn proxy_rejects_private_connect_destinations() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let proxy_addr = listener.local_addr().unwrap();

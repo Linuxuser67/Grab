@@ -426,7 +426,8 @@ pub(crate) fn is_local_or_private_host(host: &str) -> bool {
 /// Exact hostnames originating from untrusted browser handoffs. Their
 /// restriction is also inherited explicitly by canonical page URLs and
 /// selected collection children; redirects use a separate resolver-only set.
-static UNTRUSTED_HANDOFF_HOSTS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+static UNTRUSTED_HANDOFF_HOSTS: OnceLock<Mutex<std::collections::HashSet<String>>> =
+    OnceLock::new();
 const UNTRUSTED_HANDOFF_HOSTS_CAP: usize = 4096;
 
 fn host_key(host: &str) -> String {
@@ -697,8 +698,9 @@ pub(crate) fn clear_public_resolution_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_local_or_private_host, is_private_ip, lookup_filtered, require_public_resolution,
-        is_untrusted_handoff_host, require_public_dns_filter, requires_public_dns_filter, retain_public,
+        is_local_or_private_host, is_private_ip, is_untrusted_handoff_host, lookup_filtered,
+        require_public_dns_filter, require_public_resolution, requires_public_dns_filter,
+        retain_public,
     };
     use std::net::SocketAddr;
 
@@ -873,13 +875,7 @@ mod tests {
         ] {
             assert!(is_local_or_private_host(h), "non-global: {h}");
         }
-        for h in [
-            "2001:db8::1",
-            "2001:2::1",
-            "2002::1",
-            "3fff::1",
-            "ff02::1",
-        ] {
+        for h in ["2001:db8::1", "2001:2::1", "2002::1", "3fff::1", "ff02::1"] {
             assert!(is_local_or_private_host(h), "non-global IPv6: {h}");
         }
         // v6: loopback, ULA, link-local, mapped v4.
@@ -918,11 +914,7 @@ mod tests {
         ] {
             assert!(is_local_or_private_host(h), "private (extended): {h}");
         }
-        for h in [
-            "64:ff9b::808:808",
-            "198.20.0.1",
-            "8.8.8.8",
-        ] {
+        for h in ["64:ff9b::808:808", "198.20.0.1", "8.8.8.8"] {
             assert!(!is_local_or_private_host(h), "public (extended): {h}");
         }
         // Dotless names resolve locally; dotted public names do not.

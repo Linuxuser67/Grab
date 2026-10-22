@@ -345,19 +345,13 @@ pub(crate) fn guard_untrusted_args(args: &mut Vec<String>) -> Result<Option<Stri
         ));
     }
     let proxy = crate::subprocess_proxy::ensure_started().map_err(VideoError::fetch)?;
-    args.splice(
-        separator..separator,
-        ["--proxy".to_string(), proxy.clone()],
-    );
+    args.splice(separator..separator, ["--proxy".to_string(), proxy.clone()]);
     Ok(Some(proxy))
 }
 
 /// Route yt-dlp's external FFmpeg downloader through the same HTTP proxy.
 /// yt-dlp's --proxy does not automatically cover every external downloader.
-pub(crate) fn apply_guarded_proxy_env(
-    cmd: &mut tokio::process::Command,
-    proxy: Option<&str>,
-) {
+pub(crate) fn apply_guarded_proxy_env(cmd: &mut tokio::process::Command, proxy: Option<&str>) {
     if let Some(proxy) = proxy {
         cmd.env("NO_PROXY", "")
             .env("no_proxy", "")

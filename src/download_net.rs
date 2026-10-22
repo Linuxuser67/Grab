@@ -484,8 +484,14 @@ pub(crate) fn is_untrusted_handoff_host(host: &str) -> bool {
 
 /// Cross-host redirects need a DNS-rebinding guard for reqwest connections,
 /// but must not mark an unrelated, user-added queue row as an untrusted
-/// browser handoff. Keep these resolver-only hosts in a separate bounded set.
-static PUBLIC_DNS_HOSTS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+/// browser handoff. Keep these resolver-only hosts in a separate bounded FIFO.
+#[derive(Default)]
+struct PublicDnsHosts {
+    hosts: std::collections::HashSet<String>,
+    insertion_order: std::collections::VecDeque<String>,
+}
+
+static PUBLIC_DNS_HOSTS: OnceLock<Mutex<PublicDnsHosts>> = OnceLock::new();
 const PUBLIC_DNS_HOSTS_CAP: usize = 4096;
 
 fn require_public_dns_filter(host: &str) -> bool {
@@ -498,21 +504,28 @@ fn require_public_dns_filter(host: &str) -> bool {
         Err(_) if is_local_or_private_host(&key) => return false,
         Err(_) => {}
     }
-    let mut set = lock_recover(PUBLIC_DNS_HOSTS.get_or_init(Default::default));
-    if set.contains(&key) {
+    let mut cache = lock_recover(PUBLIC_DNS_HOSTS.get_or_init(Default::default));
+    if cache.hosts.contains(&key) {
         return true;
     }
-    if set.len() >= PUBLIC_DNS_HOSTS_CAP {
-        return false;
+    // Redirect targets are checked immediately before their DNS lookup. When
+    // the cache is full, evict the oldest older entry and keep this new target.
+    if cache.hosts.len() >= PUBLIC_DNS_HOSTS_CAP {
+        if let Some(oldest) = cache.insertion_order.pop_front() {
+            cache.hosts.remove(&oldest);
+        }
     }
-    set.insert(key);
+    cache.hosts.insert(key.clone());
+    cache.insertion_order.push_back(key);
     true
 }
 
 fn requires_public_dns_filter(host: &str) -> bool {
     let key = host_key(host);
     is_untrusted_handoff_host(&key)
-        || lock_recover(PUBLIC_DNS_HOSTS.get_or_init(Default::default)).contains(&key)
+        || lock_recover(PUBLIC_DNS_HOSTS.get_or_init(Default::default))
+            .hosts
+            .contains(&key)
 }
 
 /// Extend an untrusted collection's public-only policy to each queued child URL.
@@ -770,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn redirect_dns_policy_cap_fails_closed_without_erasing_handoff_policy() {
+    fn redirect_dns_policy_cap_evicts_oldest_without_erasing_handoff_policy() {
         let handoffs = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let redirects = PUBLIC_DNS_HOSTS.get_or_init(Default::default);
         let previous_handoffs = {
@@ -785,8 +798,15 @@ mod tests {
         for i in 0..PUBLIC_DNS_HOSTS_CAP {
             assert!(require_public_dns_filter(&format!("redirect-{i}.example")));
         }
-        assert!(!require_public_dns_filter("redirect-overflow.example"));
+        assert!(require_public_dns_filter("redirect-overflow.example"));
         assert!(is_untrusted_handoff_host("handoff.example"));
+        {
+            let cache = lock_recover(redirects);
+            assert!(!cache.hosts.contains("redirect-0.example"));
+            assert!(cache.hosts.contains("redirect-overflow.example"));
+            assert_eq!(cache.hosts.len(), PUBLIC_DNS_HOSTS_CAP);
+            assert_eq!(cache.insertion_order.len(), PUBLIC_DNS_HOSTS_CAP);
+        }
         *lock_recover(handoffs) = previous_handoffs;
         *lock_recover(redirects) = previous_redirects;
     }

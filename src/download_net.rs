@@ -370,7 +370,7 @@ fn private_v6(a: Ipv6Addr) -> bool {
     // NAT64 may carry a global IPv4 address. Apply the IPv4 policy to that
     // embedded destination; deprecated IPv4-compatible ::/96 is never global.
     if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-        return embedded_v4(a).map_or(true, private_v4);
+        return embedded_v4(a).is_none_or(private_v4);
     }
     if s[..6] == [0; 6] {
         return true;

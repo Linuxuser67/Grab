@@ -7770,7 +7770,6 @@ fn delete_download_after_gallery_rename_trashes_renamed_folder() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-
 #[test]
 fn restoring_public_only_row_reinstates_its_host_policy() {
     let (_lock, _loop) = test_locks();

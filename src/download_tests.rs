@@ -7788,7 +7788,7 @@ fn restoring_public_only_row_reinstates_its_host_policy() {
 
     let item = manager.restore_existing(&stored).expect("restore guarded row");
     assert!(item.public_only());
-    assert!(crate::download_net::requires_public_resolution(host));
+    assert!(crate::download_net::is_untrusted_handoff_host(host));
 
     let _ = std::fs::remove_file(queue_file);
 }

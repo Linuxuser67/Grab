@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.1.2~beta.1" date="2026-10-22">
+      <description>
+        <ul>
+          <li>Gallery and collection pickers now refresh the download queue when returning to the main window, so newly selected items appear immediately.</li>
+          <li>Live HLS recordings now retry transient segment-open failures instead of skipping the affected segment.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.1.1" date="2026-10-21">
       <description>
         <ul>

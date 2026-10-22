@@ -19,9 +19,8 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 /// fail closed rather than silently bypassing a configured proxy or delegating
 /// target DNS resolution to it.
 pub(crate) fn validate_proxy_compatibility() -> Result<(), String> {
-    let opts = crate::download_net::DownloadOptions::from_settings(
-        &crate::settings::AppSettings::new(),
-    );
+    let opts =
+        crate::download_net::DownloadOptions::from_settings(&crate::settings::AppSettings::new());
     if opts.proxy_config()?.is_some()
         || [
             "HTTP_PROXY",
@@ -85,7 +84,10 @@ pub(crate) fn ensure_started() -> Result<String, String> {
         Err(_) => {
             // A concurrent caller won initialization. Its listener is active;
             // this one's listener is dropped without being spawned.
-            Ok(format!("http://{}", PROXY_ADDR.get().expect("proxy address initialized")))
+            Ok(format!(
+                "http://{}",
+                PROXY_ADDR.get().expect("proxy address initialized")
+            ))
         }
     }
 }
@@ -147,7 +149,10 @@ async fn connect_public(host: &str, port: u16) -> std::io::Result<TcpStream> {
         .unwrap_or(host);
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return if crate::download_net::is_private_ip(ip) {
-            Err(Error::new(ErrorKind::PermissionDenied, "private address refused"))
+            Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "private address refused",
+            ))
         } else {
             TcpStream::connect(SocketAddr::new(ip, port)).await
         };
@@ -176,9 +181,8 @@ async fn connect_public(host: &str, port: u16) -> std::io::Result<TcpStream> {
 }
 
 async fn reply_status(stream: &mut TcpStream, code: u16, reason: &str) {
-    let response = format!(
-        "HTTP/1.1 {code} {reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
-    );
+    let response =
+        format!("HTTP/1.1 {code} {reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
     let _ = stream.write_all(response.as_bytes()).await;
 }
 
@@ -199,7 +203,8 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
         return Ok(());
     };
     let mut parts = request_line.split_whitespace();
-    let (Some(method), Some(target), Some(version)) = (parts.next(), parts.next(), parts.next()) else {
+    let (Some(method), Some(target), Some(version)) = (parts.next(), parts.next(), parts.next())
+    else {
         reply_status(&mut client, 400, "Bad Request").await;
         return Ok(());
     };
@@ -316,9 +321,17 @@ mod tests {
     async fn refuses_private_ip_literals_before_connecting() {
         for host in ["127.0.0.1", "10.0.0.1", "::1", "[::1]", "fd00::1"] {
             let err = connect_public(host, 80).await.unwrap_err();
-            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{host}: {err}");
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "{host}: {err}"
+            );
         }
         let err = connect_public("localhost", 80).await.unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "localhost: {err}");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "localhost: {err}"
+        );
     }
 }

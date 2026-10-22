@@ -287,6 +287,16 @@ pub(crate) fn hls_format_spec(quality: &str, _pinned: Option<&str>) -> String {
     }
 }
 
+/// Live `-f` spec, pinned to HLS. The input-side `-seg_max_retry` option is
+/// HLS-demuxer-only; a non-HLS input (DASH/direct media) would reject it as unknown.
+pub(crate) fn live_hls_format_spec(quality: &str, _pinned: Option<&str>) -> String {
+    const HLS: &str = "[protocol=m3u8_native]";
+    match quality_height(quality) {
+        Some(h) => format!("bv*[height<={h}]{HLS}+ba{HLS}/b{HLS}"),
+        None => format!("bv*{HLS}+ba{HLS}/b{HLS}"),
+    }
+}
+
 /// yt-dlp argv for a live capture: kill-safe MPEG-TS, ffmpeg pinned as the
 /// live-HLS downloader per yt-dlp's own guidance ("Live HLS streams are not
 /// supported by the native downloader"). Pure.
@@ -304,9 +314,10 @@ pub(crate) fn live_capture_argv(
         "--progress-template".to_string(),
         YTDLP_PROGRESS_TEMPLATE.to_string(),
         "-f".to_string(),
-        hls_format_spec(&job.quality, Some(hls_format_id)),
+        live_hls_format_spec(&job.quality, Some(hls_format_id)),
         // Live m3u8 goes to ffmpeg (the native fragment downloader cannot
-        // do live HLS). Protocol-scoped so non-HLS formats stay native.
+        // do live HLS). The selector above is pinned to HLS so the
+        // input-side -seg_max_retry stays on an HLS demuxer.
         // --fragment-retries does not apply to ffmpeg, so it is not passed.
         "--downloader".to_string(),
         "m3u8:ffmpeg".to_string(),
@@ -322,6 +333,10 @@ pub(crate) fn live_capture_argv(
         // name but more than one file to download".
         "--downloader-args".to_string(),
         crate::video_tools::LIVE_DOWNLOADER_ARGS.to_string(),
+        // Input-scoped retry for a segment that fails to open during capture.
+        // yt-dlp's bare `ffmpeg:` key is the output position.
+        "--downloader-args".to_string(),
+        crate::video_tools::LIVE_INPUT_DOWNLOADER_ARGS.to_string(),
     ]);
     if job.is_live && job.live_from_start {
         args.push("--live-from-start".to_string());

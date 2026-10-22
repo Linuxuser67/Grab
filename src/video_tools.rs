@@ -604,6 +604,14 @@ fn kill_probe(child: &mut std::process::Child) {
 pub(crate) const LIVE_DOWNLOADER_ARGS: &str =
     "ffmpeg:-fps_mode passthrough -copyts -avoid_negative_ts make_zero";
 
+/// Input-side `--downloader-args` value for yt-dlp's ffmpeg downloader on live
+/// captures. `-seg_max_retry` is an HLS demuxer option (ffmpeg defaults it to
+/// 0, so a segment that fails to open is skipped immediately). Retries give a
+/// transient failure a chance to recover; this does not repair a corrupt body
+/// or renew an invalidated session. Keep the `ffmpeg_i:` scope: yt-dlp's bare
+/// `ffmpeg:` applies after `-i`.
+pub(crate) const LIVE_INPUT_DOWNLOADER_ARGS: &str = "ffmpeg_i:-seg_max_retry 3";
+
 /// `--postprocessor-args` value moving the moov atom to the front of merged
 /// mp4s so playback starts without a full scan. Scoped `Merger+ffmpeg` (per
 /// yt-dlp's `PP+EXE:ARGS` syntax) so metadata/subtitle fixups are untouched.

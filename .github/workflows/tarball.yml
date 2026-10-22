@@ -43,12 +43,41 @@ jobs:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: ./build-aux/check-release-consistency.py --tag "$TAG"
 
+      # Restore dependency caches before any setup that may download GBs.
+      # Keep the SDK independent from Cargo.lock so ordinary dependency updates
+      # do not invalidate the GNOME SDK and Rust extension cache.
+      - name: Cache GNOME SDK and Rust extension
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.local/share/flatpak
+            ~/.cache/flatpak
+          # The x86_64 runner shares the default-branch cache used by
+          # flatpak-build.yml. ARM64 must use a separate SDK cache because
+          # Flatpak refs contain architecture-specific binaries.
+          key: ${{ matrix.tarball_arch == 'x86_64' && format('flatpak-sdk-{0}-{1}', runner.os, hashFiles('build-aux/io.github.linuxuser67.Grab.json')) || format('tarball-sdk-{0}-{1}-{2}', runner.os, matrix.tarball_arch, hashFiles('build-aux/io.github.linuxuser67.Grab.json')) }}
+          restore-keys: ${{ matrix.tarball_arch == 'x86_64' && format('flatpak-sdk-{0}-', runner.os) || format('tarball-sdk-{0}-{1}-', runner.os, matrix.tarball_arch) }}
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cargo-home/registry
+          key: tarball-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            tarball-cargo-${{ runner.os }}-
+
+      # Keep APT network stalls distinct from package installation and bound
+      # either step, rather than consuming the entire job timeout without clues.
+      - name: Update APT package indexes
+        timeout-minutes: 20
+        run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
+
       - name: Install Flatpak tooling
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq flatpak
+        timeout-minutes: 20
+        run: sudo apt-get install -y -qq flatpak
 
       - name: Install GNOME SDK and Rust
+        timeout-minutes: 25
         run: |
           RUNTIME=$(python3 -c "import json; print(json.load(open('build-aux/io.github.linuxuser67.Grab.json'))['runtime-version'])")
           echo "RUNTIME=$RUNTIME" >> "$GITHUB_ENV"
@@ -59,24 +88,12 @@ jobs:
           # SDK, so cargo goes missing. Keep in sync with runtime-version.
           flatpak install --user -y flathub "org.gnome.Sdk//$RUNTIME" "org.freedesktop.Sdk.Extension.rust-stable//26.08"
 
-      # Same SDK layer cache as the Flatpak builds (immutable per
-      # runtime version), plus the cargo registry: `cargo vendor`
-      # below re-downloads every crate on each pristine run.
-      - name: Cache SDK and cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.local/share/flatpak
-            ~/.cache/flatpak
-            .cargo-home/registry
-          key: tarball-deps-${{ runner.os }}-${{ matrix.tarball_arch }}-${{ hashFiles('build-aux/io.github.linuxuser67.Grab.json', 'Cargo.lock') }}
-          restore-keys: |
-            tarball-deps-${{ runner.os }}-${{ matrix.tarball_arch }}-
 
       # Same offline-vendor trick as the Flatpak build, done by hand:
       # cargo vendor + a local source replacement, then meson install
       # into a staging dir. Everything runs inside the SDK sandbox.
       - name: Build install tree in the SDK
+        timeout-minutes: 50
         run: |
           flatpak run --command=bash --filesystem="$PWD" --share=network \
             --env=FLATPAK_ENABLE_SDK_EXT=rust-stable "org.gnome.Sdk//$RUNTIME" -c "

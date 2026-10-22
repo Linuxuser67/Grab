@@ -50,6 +50,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.2.1" date="2026-10-22">
+      <description>
+        <ul>
+          <li>Improved gallery-dl proxy handling across previews, counts, collection selection, and downloads, including discovery of Grab-managed tools by delegated downloaders.</li>
+          <li>Improved handling of selected HLS cases, including live .fmp4 segments, and routed unfamiliar gallery file types to the all-files picker.</li>
+          <li>Added validated yt-dlp extractor-specific arguments for site workarounds, with sensitive argument values redacted from debug output.</li>
+          <li>Unconfirmed browser handoffs now fail closed when a configured proxy prevents Grab from enforcing its destination-safety checks.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.2.0" date="2026-10-22">
       <description>
         <ul>

@@ -695,6 +695,7 @@ pub fn build_window(
     // back as soon as the form page returns (pop, Escape, or card close).
     {
         let stack = stack.clone();
+        let sync = Rc::clone(&sync);
         add_card
             .navigation()
             .connect_notify_local(Some("visible-page"), move |nav, _| {
@@ -702,6 +703,19 @@ pub fn build_window(
                     .visible_page_tag()
                     .is_some_and(|tag| tag.as_str() != "form");
                 stack.set_visible(!picker);
+                if !picker {
+                    // Let the navigation transition settle before reconciling.
+                    // Queue changes can land while the stack is hidden, and the
+                    // first visible allocation must see the latest model.
+                    let stack = stack.clone();
+                    let sync = Rc::clone(&sync);
+                    glib::idle_add_local_once(move || {
+                        if stack.is_visible() {
+                            sync();
+                            stack.queue_resize();
+                        }
+                    });
+                }
             });
     }
     content.append(&stack);

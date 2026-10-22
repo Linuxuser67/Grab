@@ -267,7 +267,10 @@ fn queue_row_resynced_after_picker_returns_to_form() {
 
     let app = libadwaita::Application::builder()
         .application_id("io.github.linuxuser67.Grab.UiTest")
+        .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
         .build();
+    app.register(None::<&gtk4::gio::Cancellable>)
+        .expect("register UI test application before building its window");
     let settings = crate::settings::AppSettings::new();
     let manager = crate::download::DownloadManager::new(
         gtk4::gio::ListStore::new::<crate::download::DownloadItem>(),
@@ -296,7 +299,7 @@ fn queue_row_resynced_after_picker_returns_to_form() {
         crate::download::DownloadItem::new(1, "https://example.com/gallery", "Gallery", "/tmp");
     item.set_is_gallery(true);
     manager.store().append(&item);
-    assert_eq!(count_list_rows(window.upcast_ref()), 0);
+    assert_eq!(count_queue_rows(window.upcast_ref()), 0);
 
     assert!(nav.pop());
     drain_gtk_events();
@@ -319,15 +322,37 @@ fn drain_gtk_events() {
     }
 }
 
-fn count_list_rows(widget: &gtk4::Widget) -> usize {
-    let mut count = if widget.downcast_ref::<gtk4::ListBoxRow>().is_some() {
-        1
-    } else {
-        0
-    };
+fn count_queue_rows(widget: &gtk4::Widget) -> usize {
+    if let Some(list) = widget.downcast_ref::<gtk4::ListBox>() {
+        let is_queue_section = list
+            .parent()
+            .and_downcast::<gtk4::Box>()
+            .and_then(|section| section.first_child())
+            .and_downcast::<gtk4::Label>()
+            .is_some_and(|label| {
+                [
+                    gettextrs::gettext("Active"),
+                    gettextrs::gettext("Queued"),
+                    gettextrs::gettext("Downloaded"),
+                ]
+                .iter()
+                .any(|title| title == label.text().as_str())
+            });
+        if is_queue_section {
+            let mut rows = 0;
+            let mut child = list.first_child();
+            while let Some(current) = child {
+                rows += usize::from(current.downcast_ref::<gtk4::ListBoxRow>().is_some());
+                child = current.next_sibling();
+            }
+            return rows;
+        }
+    }
+
+    let mut count = 0;
     let mut child = widget.first_child();
     while let Some(current) = child {
-        count += count_list_rows(&current);
+        count += count_queue_rows(&current);
         child = current.next_sibling();
     }
     count

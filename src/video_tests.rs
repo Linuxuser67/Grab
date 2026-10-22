@@ -8,9 +8,9 @@ use crate::media_types::{
 use crate::video_argv::{
     YTDLP_PROGRESS_TEMPLATE, apply_proxy_env, container_truth_name, dash_merge_argv,
     fallback_to_live_edge, hls_download_argv, hls_format_spec, live_capture_argv,
-    live_from_start_unsupported, live_remux_argv, merge_output_ext, part_fallback_spec,
-    playlist_scope_args, proxy_cli_args, unified_download_argv, unified_format_spec,
-    unified_output_template,
+    live_from_start_unsupported, live_hls_format_spec, live_remux_argv, merge_output_ext,
+    part_fallback_spec, playlist_scope_args, proxy_cli_args, unified_download_argv,
+    unified_format_spec, unified_output_template,
 };
 use crate::video_plan::{
     StreamSel, find_hls_format, find_usable_format, plan_streams, select_audio_original_first,
@@ -1925,6 +1925,20 @@ fn hls_format_spec_names_height_and_pin() {
 }
 
 #[test]
+fn live_hls_format_spec_scopes_protocol() {
+    // The input-side segment retry is HLS-demuxer-only; keep every selected
+    // input on m3u8_native so ffmpeg never sees it on a non-HLS input.
+    assert_eq!(
+        live_hls_format_spec("720p", None),
+        "bv*[height<=720][protocol=m3u8_native]+ba[protocol=m3u8_native]/b[protocol=m3u8_native]"
+    );
+    assert_eq!(
+        live_hls_format_spec("best", None),
+        "bv*[protocol=m3u8_native]+ba[protocol=m3u8_native]/b[protocol=m3u8_native]"
+    );
+}
+
+#[test]
 fn ytdlp_template_parses_absolute_counts() {
     let p = parse_ytdlp_template("[Grab];downloading;47448064;52428800;52428800;1293945;4")
         .expect("progress");
@@ -3760,7 +3774,7 @@ fn live_argv_pins_planner_id_in_mpegts() {
     // Pins are ignored; height-based selection instead.
     let argv = live_capture_argv(&job, "h1080", out, None);
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
-    assert_eq!(argv[f + 1], "bv*[height<=720]+ba/b");
+    assert_eq!(argv[f + 1], live_hls_format_spec("720p", None));
     assert!(argv.contains(&"--hls-use-mpegts".to_string()));
     // ffmpeg is the pinned live-HLS downloader; fragment-retries does not
     // apply to it, so the flag must be gone.
@@ -3782,7 +3796,7 @@ fn live_argv_pins_planner_id_in_mpegts() {
     let argv = live_capture_argv(&pinned, "h720", out, None);
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
     // Pins are ignored even when set; height-based selection.
-    assert_eq!(argv[f + 1], "bv*[height<=720]+ba/b");
+    assert_eq!(argv[f + 1], live_hls_format_spec("720p", None));
 }
 
 #[test]
@@ -7553,6 +7567,51 @@ fn live_capture_argv_keeps_flags_before_url_terminator() {
         .expect("--downloader-args missing");
     assert!(i < dd, "--downloader-args landed past --: {argv:?}");
     assert_eq!(argv[i + 1], crate::video_tools::LIVE_DOWNLOADER_ARGS);
+}
+
+#[test]
+fn live_capture_argv_scopes_segment_retry_to_input() {
+    // yt-dlp merges repeated --downloader-args by key; both pairs must land
+    // before the URL terminator and keep their distinct scopes.
+    let job = live_test_job();
+    let argv = live_capture_argv(
+        &job,
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live-grab-1.mp4"),
+        None,
+    );
+    let dd = argv
+        .iter()
+        .position(|a| a == "--")
+        .expect("no -- terminator");
+    let pairs: Vec<(usize, &str)> = argv
+        .windows(2)
+        .enumerate()
+        .filter(|(_, w)| w[0] == "--downloader-args")
+        .map(|(i, w)| (i, w[1].as_str()))
+        .collect();
+    assert_eq!(
+        pairs.len(),
+        2,
+        "expected output and input downloader args: {argv:?}"
+    );
+    assert!(
+        pairs.iter().all(|(i, _)| *i < dd),
+        "downloader args landed past --: {argv:?}"
+    );
+    let output = pairs
+        .iter()
+        .find(|(_, args)| *args == crate::video_tools::LIVE_DOWNLOADER_ARGS)
+        .expect("output downloader args missing");
+    let input = pairs
+        .iter()
+        .find(|(_, args)| *args == crate::video_tools::LIVE_INPUT_DOWNLOADER_ARGS)
+        .expect("input downloader args missing");
+    assert_eq!(output.1, crate::video_tools::LIVE_DOWNLOADER_ARGS);
+    assert_eq!(input.1, crate::video_tools::LIVE_INPUT_DOWNLOADER_ARGS);
+    assert!(crate::video_tools::LIVE_DOWNLOADER_ARGS.starts_with("ffmpeg:"));
+    assert!(!crate::video_tools::LIVE_DOWNLOADER_ARGS.starts_with("ffmpeg_i:"));
+    assert!(crate::video_tools::LIVE_INPUT_DOWNLOADER_ARGS.starts_with("ffmpeg_i:"));
 }
 
 // ── subtitle embedding ───────────────────────────────────────────────

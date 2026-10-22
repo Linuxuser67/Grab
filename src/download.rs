@@ -1673,10 +1673,10 @@ impl DownloadManager {
                             if item.status() != DownloadStatus::Cancelled
                                 && item.status() != DownloadStatus::Paused
                             {
-                                item.set_detail(e.to_string());
+                                item.set_detail(e.clone());
                                 item.set_status(DownloadStatus::Failed);
                                 this.torrent_pieces.borrow_mut().remove(&id);
-                                this.notify_finished(&item, Err(e.to_string()));
+                                this.notify_finished(&item, Err(e));
                             }
                         } else if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused

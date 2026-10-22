@@ -92,9 +92,7 @@ pub(crate) fn ensure_started() -> Result<String, String> {
     }
 }
 
-async fn read_header(
-    stream: &mut TcpStream,
-) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+async fn read_header(stream: &mut TcpStream) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
     let mut received = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     loop {

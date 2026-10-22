@@ -2031,13 +2031,7 @@ pub(crate) async fn run_hls_ytdlp(
         Ok(lang) => lang,
         Err(()) => return Ok(None),
     };
-    let mut argv = hls_download_argv(
-        &job,
-        hls_format_id,
-        ffmpeg_bin,
-        &job.dest,
-        playlist_index,
-    );
+    let mut argv = hls_download_argv(&job, hls_format_id, ffmpeg_bin, &job.dest, playlist_index);
     let guarded_proxy = crate::video_spawn::guard_untrusted_args(&mut argv)?;
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(&argv);

@@ -899,8 +899,7 @@ fn push_playlist_items_page(
     // Preserve this collection's accepted hosts across partial picker imports.
     // Otherwise repeatedly clicking Queue could reset the cap and eventually
     // register every host from a hostile playlist.
-    let guarded_child_hosts =
-        Rc::new(RefCell::new(std::collections::HashSet::new()));
+    let guarded_child_hosts = Rc::new(RefCell::new(std::collections::HashSet::new()));
 
     {
         let guarded_child_hosts = guarded_child_hosts.clone();
@@ -987,14 +986,12 @@ fn push_playlist_items_page(
                         crate::download_net::inherit_public_resolution_for_collection(
                             &page_url,
                             &item_page_url,
-                            &mut seen_hosts,
+                            &mut *seen_hosts,
                         )
                     };
                     match inheritance {
                         Ok(()) => {}
-                        Err(
-                            crate::download_net::CollectionHostError::TooManyDistinctHosts,
-                        ) => {
+                        Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
                             skipped_by_host_limit += 1;
                             // Keep the process-wide policy bounded across retries.
                             // Leave the row selected so the user can deselect it

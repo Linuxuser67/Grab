@@ -52,17 +52,19 @@ jobs:
           path: |
             ~/.local/share/flatpak
             ~/.cache/flatpak
-          key: tarball-sdk-${{ runner.os }}-${{ matrix.tarball_arch }}-${{ hashFiles('build-aux/io.github.linuxuser67.Grab.json') }}
-          restore-keys: |
-            tarball-sdk-${{ runner.os }}-${{ matrix.tarball_arch }}-
+          # The x86_64 runner shares the default-branch cache used by
+          # flatpak-build.yml. ARM64 must use a separate SDK cache because
+          # Flatpak refs contain architecture-specific binaries.
+          key: ${{ matrix.tarball_arch == 'x86_64' && format('flatpak-sdk-{0}-{1}', runner.os, hashFiles('build-aux/io.github.linuxuser67.Grab.json')) || format('tarball-sdk-{0}-{1}-{2}', runner.os, matrix.tarball_arch, hashFiles('build-aux/io.github.linuxuser67.Grab.json')) }}
+          restore-keys: ${{ matrix.tarball_arch == 'x86_64' && format('flatpak-sdk-{0}-', runner.os) || format('tarball-sdk-{0}-{1}-', runner.os, matrix.tarball_arch) }}
 
       - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cargo-home/registry
-          key: tarball-cargo-${{ runner.os }}-${{ matrix.tarball_arch }}-${{ hashFiles('Cargo.lock') }}
+          key: tarball-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            tarball-cargo-${{ runner.os }}-${{ matrix.tarball_arch }}-
+            tarball-cargo-${{ runner.os }}-
 
       # Keep APT network stalls distinct from package installation and bound
       # either step, rather than consuming the entire job timeout without clues.

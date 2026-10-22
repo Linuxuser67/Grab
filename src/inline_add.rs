@@ -728,7 +728,9 @@ fn submit_probe(
             if !crate::download_net::inherit_public_resolution(&submitted_url, &pl.page_url) {
                 show_video_error(
                     step,
-                    &gettext("The resolved collection could not be verified as a public destination."),
+                    &gettext(
+                        "The resolved collection could not be verified as a public destination.",
+                    ),
                 );
                 set_lookup_add(lookup_add, true);
                 return;

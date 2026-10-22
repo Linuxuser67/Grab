@@ -50,10 +50,12 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="6.1.2~beta.2" date="2026-10-22">
+    <release version="6.2.0" date="2026-10-22">
       <description>
         <ul>
-          <li>Hardened unconfirmed browser handoffs so extractor requests can only reach public internet addresses, and sensitive URL data is redacted from diagnostics.</li>
+          <li>Security: unconfirmed browser handoffs now restrict extractor traffic to public destinations, fail closed when the destination cannot be pinned safely, and redact sensitive URL details from diagnostics.</li>
+          <li>Gallery and collection selections now refresh the download queue when returning to the main window.</li>
+          <li>Live HLS recordings retry transient segment-open failures instead of skipping affected segments.</li>
         </ul>
       </description>
     </release>

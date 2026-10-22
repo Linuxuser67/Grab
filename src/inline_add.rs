@@ -630,6 +630,15 @@ fn submit_probed_single(
     v: &crate::video::VideoInfo,
     scheduled_at: Option<i64>,
 ) {
+    let submitted_url = step.url_entry.text().to_string();
+    if !crate::download_net::inherit_public_resolution(&submitted_url, &v.page_url) {
+        show_video_error(
+            step,
+            &gettext("The resolved media page could not be verified as a public destination."),
+        );
+        set_lookup_add(lookup_add, true);
+        return;
+    }
     let typed = step.name.text().trim().to_string();
     let audio_only = selected_audio_only(step);
     // Default name from the video title and id; the intake sanitizes it.
@@ -713,6 +722,19 @@ fn submit_probe(
             );
         }
         crate::video::ProbeResult::Playlist(pl) => {
+            // Preserve the untrusted handoff policy if yt-dlp canonicalized
+            // the collection URL to another hostname.
+            let submitted_url = step.url_entry.text().to_string();
+            if !crate::download_net::inherit_public_resolution(&submitted_url, &pl.page_url) {
+                show_video_error(
+                    step,
+                    &gettext(
+                        "The resolved collection could not be verified as a public destination.",
+                    ),
+                );
+                set_lookup_add(lookup_add, true);
+                return;
+            }
             // Collections queue through the item picker: one row per chosen
             // entry, each re-resolving its own page at download time. No
             // format choice here — pins don't apply across items.
@@ -874,7 +896,13 @@ fn push_playlist_items_page(
         ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
     });
 
+    // Preserve this collection's accepted hosts across partial picker imports.
+    // Otherwise repeatedly clicking Queue could reset the cap and eventually
+    // register every host from a hostile playlist.
+    let guarded_child_hosts = Rc::new(RefCell::new(std::collections::HashSet::new()));
+
     {
+        let guarded_child_hosts = guarded_child_hosts.clone();
         let close_card = close_card.clone();
         let grid = grid.clone();
         let add_btn_click = add_btn.clone();
@@ -918,6 +946,9 @@ fn push_playlist_items_page(
             let close_card = close_card.clone();
             let page_url = playlist.page_url.clone();
             let add_btn = add_btn.clone();
+            // The GTK clicked handler is an `Fn` and may run repeatedly;
+            // clone the shared collection-host state for each import future.
+            let guarded_child_hosts = guarded_child_hosts.clone();
             glib::spawn_future_local(async move {
                 // One blocking call for subdir creation + readdir.
                 let (dir, existing) = match gio::spawn_blocking(move || {
@@ -949,9 +980,34 @@ fn push_playlist_items_page(
                 // download the first segment once per row). Attempted unconditionally:
                 // highlights and non-story URLs return None and keep the tray.
                 let mut failed: Option<String> = None;
+                let mut skipped_by_host_limit = 0usize;
                 for (i, item) in &chosen {
                     let item_page_url = crate::video_probe::story_segment_url(&page_url, &item.id)
                         .unwrap_or_else(|| item.page_url.clone());
+                    let inheritance = {
+                        let mut seen_hosts = guarded_child_hosts.borrow_mut();
+                        crate::download_net::inherit_public_resolution_for_collection(
+                            &page_url,
+                            &item_page_url,
+                            &mut seen_hosts,
+                        )
+                    };
+                    match inheritance {
+                        Ok(()) => {}
+                        Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
+                            skipped_by_host_limit += 1;
+                            // Keep the process-wide policy bounded across retries.
+                            // Leave the row selected so the user can deselect it
+                            // after reading the explanation below the picker.
+                            continue;
+                        }
+                        Err(crate::download_net::CollectionHostError::UnsafeDestination) => {
+                            failed = Some(gettext(
+                                "A selected item was rejected because its destination could not be verified as public.",
+                            ));
+                            break;
+                        }
+                    }
                     let settings = manager.settings();
                     let name = default_name_for(settings, &item.title, false);
                     match manager.enqueue_video_staged(
@@ -984,7 +1040,43 @@ fn push_playlist_items_page(
                     grid.unselect(*i);
                 }
                 if let Some(e) = failed {
-                    error_caption.set_text(&e);
+                    let message = if skipped_by_host_limit > 0 {
+                        format!(
+                            "{e} {}",
+                            ngettext(
+                                "{n} item was also skipped because the collection exceeded the limit of {limit} distinct hosts.",
+                                "{n} items were also skipped because the collection exceeded the limit of {limit} distinct hosts.",
+                                skipped_by_host_limit as u32,
+                            )
+                            .replace("{n}", &skipped_by_host_limit.to_string())
+                            .replace(
+                                "{limit}",
+                                &crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+                                    .to_string(),
+                            )
+                        )
+                    } else {
+                        e
+                    };
+                    error_caption.set_text(&message);
+                    error_caption.set_visible(true);
+                    add_btn.set_sensitive(true);
+                    return;
+                }
+                if skipped_by_host_limit > 0 {
+                    error_caption.set_text(
+                        &ngettext(
+                            "Skipped {n} selected item because the collection exceeded the limit of {limit} distinct hosts.",
+                            "Skipped {n} selected items because the collection exceeded the limit of {limit} distinct hosts.",
+                            skipped_by_host_limit as u32,
+                        )
+                        .replace("{n}", &skipped_by_host_limit.to_string())
+                        .replace(
+                            "{limit}",
+                            &crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+                                .to_string(),
+                        ),
+                    );
                     error_caption.set_visible(true);
                     add_btn.set_sensitive(true);
                     return;

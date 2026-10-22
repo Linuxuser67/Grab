@@ -22,6 +22,7 @@ mod net_types;
 mod preferences;
 mod runtime;
 mod settings;
+mod subprocess_proxy;
 mod torrent;
 mod ui_util;
 mod update_cache;

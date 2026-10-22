@@ -17,6 +17,21 @@ use std::time::{Duration, Instant, SystemTime};
 /// temp paths unique across writers in the same process.
 static QUEUE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Re-register the network restriction persisted for a guarded queue row.
+/// Keep the download and gallery restore paths identical as the policy evolves.
+fn recheck_public_host(url: &str, kind: &str) -> Result<(), String> {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .ok_or_else(|| format!("Invalid guarded {kind} URL"))?;
+    if !crate::download_net::require_public_resolution(&host) {
+        return Err(format!(
+            "Could not restore the guarded {kind} because its host could not be verified as public"
+        ));
+    }
+    Ok(())
+}
+
 /// Facade: HTTP fetch engine lives in [`download_fetch`](crate::download_fetch)
 /// now (no re-exports: the manager consumes it here, tests import it directly).
 use crate::download_fetch::{
@@ -867,14 +882,14 @@ impl DownloadManager {
         id: u64,
         item: &DownloadItem,
         pl: &crate::media_types::PlaylistInfo,
-    ) -> (usize, usize) {
+    ) -> (usize, usize, usize) {
         let (quality, audio_only) = match self.video_source(id) {
             Some(crate::media_types::VideoSource::Page {
                 quality,
                 audio_only,
                 ..
             }) => (quality, audio_only),
-            _ => return (0, pl.total),
+            _ => return (0, pl.total, 0),
         };
         let dest_dir = self.resolve_dir(Some(&item.dest_dir()));
         let _batch = self.batch_guard();
@@ -885,6 +900,10 @@ impl DownloadManager {
         } else {
             dest_dir
         };
+        // The shared network-policy helper enforces a collection-local host
+        // cap for untrusted browser handoffs and remembers accepted hosts.
+        let mut guarded_child_hosts = HashSet::new();
+        let mut skipped_by_host_limit = 0usize;
         // One readdir for the whole expansion instead of one per entry.
         let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
         let mut added = 0;
@@ -894,6 +913,21 @@ impl DownloadManager {
             else {
                 continue;
             };
+            // Collection results are untrusted input. Keep the shared helper
+            // responsible for both policy inheritance and the distinct-host
+            // limit, so picker and automatic expansion behave identically.
+            match crate::download_net::inherit_public_resolution_for_collection(
+                &item.url(),
+                &url,
+                &mut guarded_child_hosts,
+            ) {
+                Ok(()) => {}
+                Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
+                    skipped_by_host_limit += 1;
+                    continue;
+                }
+                Err(crate::download_net::CollectionHostError::UnsafeDestination) => continue,
+            }
             // Match the interactive picker: carry each entry's title into its
             // output filename, falling back to an entry URL slug when needed.
             let remux = crate::video_prefs::remux_video_active(&self.settings.remux_video());
@@ -919,8 +953,9 @@ impl DownloadManager {
                 added += 1;
             }
         }
-        // Reported total, not attempted ("500 of 600").
-        (added, pl.total)
+        // Reported total, not attempted ("500 of 600"). Include a separate
+        // count for the security cap so the carrier row can explain omissions.
+        (added, pl.total, skipped_by_host_limit)
     }
 
     /// Re-queue one persisted entry, preserving its intent (paused/failed stay). Names restore verbatim to keep resume identity.
@@ -940,6 +975,12 @@ impl DownloadManager {
             ..
         } = stored;
         let url = normalize_url(raw_url)?;
+        // Legacy queues predate origin metadata. Preserve their established
+        // behavior; new rows persist an explicit value for browser handoffs.
+        let public_only = stored.public_only.unwrap_or(false);
+        if public_only {
+            recheck_public_host(&url, "download")?;
+        }
         if !sane_filename(raw_filename) {
             return Err(format!("Invalid filename in queue: {raw_filename}"));
         }
@@ -953,6 +994,7 @@ impl DownloadManager {
             &filename,
             dest_dir,
         );
+        item.set_public_only(public_only);
         // Resumed rows requeue; only settled rows keep their status.
         // Scheduled rows keep their status and timestamp; overdue ones queue immediately.
         let now = glib::DateTime::now_local()
@@ -1013,6 +1055,12 @@ impl DownloadManager {
     ) -> Result<DownloadItem, String> {
         let mut job = job.ok_or_else(|| "gallery entry missing job".to_string())?;
         let url = normalize_url(&stored.url)?;
+        // Legacy queues predate origin metadata; only new rows can prove
+        // they came from a browser handoff.
+        let public_only = stored.public_only.unwrap_or(false);
+        if public_only {
+            recheck_public_host(&url, "gallery")?;
+        }
         if !std::path::Path::new(&stored.dest_dir).is_absolute() {
             return Err(format!("Invalid destination in queue: {}", stored.dest_dir));
         }
@@ -1023,6 +1071,7 @@ impl DownloadManager {
         let id = self.claim_id(stored.id, std::path::Path::new(&stored.dest_dir));
         job.item_id = id;
         let item = DownloadItem::new(id, &url, &title, &stored.dest_dir);
+        item.set_public_only(public_only);
         item.set_is_gallery(true);
         let file_count = job.file_count.unwrap_or(0);
         item.set_gallery_file_count(file_count);
@@ -1063,6 +1112,13 @@ impl DownloadManager {
     }
 
     fn insert(self: &Rc<Self>, item: DownloadItem) -> DownloadItem {
+        if let Some(host) = url::Url::parse(&item.url())
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            && crate::download_net::is_untrusted_handoff_host(&host)
+        {
+            item.set_public_only(true);
+        }
         self.store.append(&item);
         self.persist_queue();
         self.changed();
@@ -1589,30 +1645,55 @@ impl DownloadManager {
                             break;
                         }
                         // Playlist expansion runs on the main thread where queueing is legal; the new rows are the feedback.
-                        let (added, total) = this.expand_playlist_rows(id, &item, &pl);
+                        let (added, total, skipped_by_host_limit) =
+                            this.expand_playlist_rows(id, &item, &pl);
+                        let skipped_detail = || {
+                            ngettext(
+                                "{skipped} item skipped because the collection exceeded the limit of {limit} distinct hosts",
+                                "{skipped} items skipped because the collection exceeded the limit of {limit} distinct hosts",
+                                skipped_by_host_limit as u32,
+                            )
+                            .replace("{skipped}", &skipped_by_host_limit.to_string())
+                            .replace(
+                                "{limit}",
+                                &crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+                                    .to_string(),
+                            )
+                        };
                         if added == 0 {
-                            let e = crate::video_probe::playlist_resolve_error(None);
+                            let e = if skipped_by_host_limit > 0 {
+                                format!(
+                                    "{}; {}",
+                                    crate::video_probe::playlist_resolve_error(None),
+                                    skipped_detail()
+                                )
+                            } else {
+                                crate::video_probe::playlist_resolve_error(None).to_string()
+                            };
                             if item.status() != DownloadStatus::Cancelled
                                 && item.status() != DownloadStatus::Paused
                             {
-                                item.set_detail(e.to_string());
+                                item.set_detail(e.clone());
                                 item.set_status(DownloadStatus::Failed);
                                 this.torrent_pieces.borrow_mut().remove(&id);
-                                this.notify_finished(&item, Err(e.to_string()));
+                                this.notify_finished(&item, Err(e));
                             }
                         } else if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
                             item.set_status(DownloadStatus::Done);
-                            item.set_detail(
-                                ngettext(
-                                    "Expanded into {added} of {total} item",
-                                    "Expanded into {added} of {total} items",
-                                    added as u32,
-                                )
-                                .replace("{added}", &added.to_string())
-                                .replace("{total}", &total.to_string()),
-                            );
+                            let detail = ngettext(
+                                "Expanded into {added} of {total} item",
+                                "Expanded into {added} of {total} items",
+                                added as u32,
+                            )
+                            .replace("{added}", &added.to_string())
+                            .replace("{total}", &total.to_string());
+                            item.set_detail(if skipped_by_host_limit > 0 {
+                                format!("{detail}; {}", skipped_detail())
+                            } else {
+                                detail
+                            });
                             item.set_progress(1.0);
                             this.pending_names.borrow_mut().remove(&id);
                             this.server_mtime.borrow_mut().remove(&id);
@@ -3228,6 +3309,7 @@ impl DownloadManager {
                         let lm = it.last_modified();
                         (!lm.is_empty()).then_some(lm.to_string())
                     },
+                    public_only: Some(it.public_only()),
                     gallery,
                 });
             }

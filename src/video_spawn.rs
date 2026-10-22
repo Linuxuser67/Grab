@@ -69,6 +69,7 @@ pub(crate) async fn fetch_raw_dump_json(
         cookies_browser,
         url,
     ));
+    let guarded_proxy = guard_untrusted_args(&mut args)?;
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin);
     // Belt-and-braces with the ProcessGroupGuard below (which SIGKILLs the
@@ -78,6 +79,7 @@ pub(crate) async fn fetch_raw_dump_json(
     cmd.kill_on_drop(true);
     cmd.args(&args);
     apply_proxy_env(&mut cmd, fetch_proxy);
+    apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     // Debug: log the full argv before spawning. as_std() captures everything
     // including ytdlp_command()'s --impersonate flag.
     crate::backend_debug::log_command(&cmd);
@@ -318,6 +320,64 @@ pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     cmd
 }
 
+/// Insert the guarded proxy before yt-dlp/gallery-dl's positional URL terminator.
+/// Shared by both runners so option placement and conflict checks stay identical.
+pub(crate) fn insert_guarded_proxy_arg(
+    args: &mut Vec<String>,
+    proxy: &str,
+) -> Result<(), &'static str> {
+    let Some(separator) = args.iter().position(|arg| arg == "--") else {
+        return Err("Extractor arguments are missing the URL terminator");
+    };
+    if args[..separator].iter().any(|arg| arg == "--proxy") {
+        return Err("Cannot safely enforce public-address checks through a configured proxy");
+    }
+    args.splice(
+        separator..separator,
+        ["--proxy".to_string(), proxy.to_string()],
+    );
+    Ok(())
+}
+
+/// Apply the loopback proxy when the initial page URL is a marked browser handoff.
+pub(crate) fn guard_untrusted_args(args: &mut Vec<String>) -> Result<Option<String>, VideoError> {
+    let Some(separator) = args.iter().position(|arg| arg == "--") else {
+        return Err(VideoError::fetch(
+            "Extractor arguments are missing the URL terminator",
+        ));
+    };
+    let Some(page_url) = args.get(separator + 1) else {
+        return Err(VideoError::fetch(
+            "Extractor arguments are missing the URL after the terminator",
+        ));
+    };
+    let Some(host) = url::Url::parse(page_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+    else {
+        return Ok(None);
+    };
+    if !crate::download_net::is_untrusted_handoff_host(&host) {
+        return Ok(None);
+    }
+    let proxy = crate::subprocess_proxy::ensure_started().map_err(VideoError::fetch)?;
+    insert_guarded_proxy_arg(args, &proxy).map_err(VideoError::fetch)?;
+    Ok(Some(proxy))
+}
+
+/// Route yt-dlp's external FFmpeg downloader through the same HTTP proxy.
+/// yt-dlp's --proxy does not automatically cover every external downloader.
+pub(crate) fn apply_guarded_proxy_env(cmd: &mut tokio::process::Command, proxy: Option<&str>) {
+    if let Some(proxy) = proxy {
+        cmd.env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .env("HTTP_PROXY", proxy)
+            .env("http_proxy", proxy)
+            .env("HTTPS_PROXY", proxy)
+            .env("https_proxy", proxy);
+    }
+}
+
 /// Spawn a `ytdlp_command` child and take its pipes.
 pub(crate) fn spawn_piped_ytdlp(
     mut cmd: tokio::process::Command,
@@ -353,14 +413,40 @@ pub(crate) fn drain_stderr_to_tail(
         let mut reader = tokio::io::BufReader::new(stderr);
         let mut tail = Vec::new();
         let mut pending = String::new();
+        // Redact complete stderr lines, not arbitrary read chunks: URLs and
+        // their query tokens can span reads. Drop overlong debug lines as a
+        // unit rather than risk printing a token fragment after the cap.
+        const MAX_DEBUG_LINE: usize = 64 * 1024;
+        let mut debug_line = Vec::new();
+        let mut discard_debug_line = false;
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    // Debug: echo raw stderr live. The bytes are still
-                    // captured below for parsing and the error tail.
-                    crate::backend_debug::echo_stderr(&buf[..n]);
+                    if crate::backend_debug::enabled() {
+                        for &byte in &buf[..n] {
+                            if byte == b'\n' {
+                                if discard_debug_line {
+                                    crate::backend_debug::echo_stderr(
+                                        b"[grab-backend] stderr line omitted (over limit)\n",
+                                    );
+                                } else {
+                                    debug_line.push(byte);
+                                    crate::backend_debug::echo_stderr(&debug_line);
+                                }
+                                debug_line.clear();
+                                discard_debug_line = false;
+                            } else if !discard_debug_line {
+                                if debug_line.len() >= MAX_DEBUG_LINE {
+                                    debug_line.clear();
+                                    discard_debug_line = true;
+                                } else {
+                                    debug_line.push(byte);
+                                }
+                            }
+                        }
+                    }
                     trace_format_lines(&mut pending, &buf[..n]);
                     tail.extend_from_slice(&buf[..n]);
                     if tail.len() > 8192 {
@@ -368,6 +454,9 @@ pub(crate) fn drain_stderr_to_tail(
                     }
                 }
             }
+        }
+        if crate::backend_debug::enabled() && !discard_debug_line && !debug_line.is_empty() {
+            crate::backend_debug::echo_stderr(&debug_line);
         }
         String::from_utf8_lossy(&tail).into_owned()
     })
@@ -533,6 +622,77 @@ pub(crate) fn discover_ytdlp_output(dest: &Path, after_move: Option<&str>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guarded_proxy_arg_precedes_url_terminator_and_rejects_existing_proxy() {
+        let target = "https://video.example.invalid/watch";
+        let mut args = vec![
+            "--ignore-config".to_string(),
+            "--".to_string(),
+            target.to_string(),
+        ];
+        insert_guarded_proxy_arg(&mut args, "http://127.0.0.1:43123")
+            .expect("guarded proxy should be inserted");
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(args[separator - 2], "--proxy");
+        assert_eq!(args[separator - 1], "http://127.0.0.1:43123");
+        assert_eq!(args[separator + 1], target);
+
+        let mut conflict = vec![
+            "--proxy".to_string(),
+            "http://example-proxy.invalid".to_string(),
+            "--".to_string(),
+            target.to_string(),
+        ];
+        assert!(insert_guarded_proxy_arg(&mut conflict, "http://127.0.0.1:43123").is_err());
+    }
+
+    #[test]
+    fn guarded_argv_without_url_terminator_fails_closed() {
+        let mut args = vec!["--ignore-config".to_string()];
+        assert!(guard_untrusted_args(&mut args).is_err());
+    }
+
+    #[test]
+    fn unmarked_user_entered_url_keeps_its_arguments() {
+        let url = format!(
+            "https://user-entered-{}.example.invalid/watch",
+            std::process::id()
+        );
+        let mut args = vec!["--ignore-config".to_string(), "--".to_string(), url];
+        let original = args.clone();
+        assert!(
+            guard_untrusted_args(&mut args)
+                .expect("ordinary user-entered URLs need no guarded proxy")
+                .is_none()
+        );
+        assert_eq!(args, original);
+    }
+
+    #[test]
+    fn guarded_proxy_environment_clears_bypasses_and_covers_external_downloaders() {
+        use std::ffi::OsStr;
+
+        let proxy = "http://127.0.0.1:43123";
+        let mut command = tokio::process::Command::new("ffmpeg");
+        apply_guarded_proxy_env(&mut command, Some(proxy));
+        let envs: Vec<_> = command
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(ToOwned::to_owned)))
+            .collect();
+        let get = |name: &str| {
+            envs.iter()
+                .find(|(key, _)| key == OsStr::new(name))
+                .and_then(|(_, value)| value.as_deref())
+        };
+        assert_eq!(get("NO_PROXY"), Some(OsStr::new("")));
+        assert_eq!(get("no_proxy"), Some(OsStr::new("")));
+        assert_eq!(get("HTTP_PROXY"), Some(OsStr::new(proxy)));
+        assert_eq!(get("http_proxy"), Some(OsStr::new(proxy)));
+        assert_eq!(get("HTTPS_PROXY"), Some(OsStr::new(proxy)));
+        assert_eq!(get("https_proxy"), Some(OsStr::new(proxy)));
+    }
 
     #[test]
     fn fetch_video_infos_reports_cancelled_when_pre_cancelled() {

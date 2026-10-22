@@ -44,9 +44,39 @@ pub fn log_command(cmd: &tokio::process::Command) {
     let program = std_cmd.get_program().to_string_lossy().into_owned();
     let args: Vec<String> = std_cmd
         .get_args()
-        .map(|a| a.to_string_lossy().into_owned())
+        .map(|a| redact_query_tokens(&a.to_string_lossy()))
         .collect();
     eprintln!("[grab-backend] spawn: {program} {}", args.join(" "));
+}
+
+/// Redact query strings and fragments from URL-shaped argument tokens before
+/// writing diagnostics. Signed media URLs often act as bearer credentials.
+fn redact_query_tokens(text: &str) -> String {
+    let is_special =
+        |b: u8| b.is_ascii_whitespace() || matches!(b, b'"' | b'\'' | b'(' | b')' | b'[' | b']');
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] < 0x80 && is_special(bytes[i]) {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && !(bytes[i] < 0x80 && is_special(bytes[i])) {
+            i += 1;
+        }
+        let token = &text[start..i];
+        match token.find("://").and_then(|_| token.find(['?', '#'])) {
+            Some(cut) => {
+                out.push_str(&token[..cut]);
+                out.push_str("(...)");
+            }
+            None => out.push_str(token),
+        }
+    }
+    out
 }
 
 /// Echo one already-split backend stderr line to the terminal. Cheap no-op
@@ -54,7 +84,10 @@ pub fn log_command(cmd: &tokio::process::Command) {
 /// captured for parsing and the failure tail.
 pub fn echo_line(line: &str) {
     if enabled() {
-        eprintln!("[grab-backend] gallery-dl stderr: {line}");
+        eprintln!(
+            "[grab-backend] gallery-dl stderr: {}",
+            redact_query_tokens(line)
+        );
     }
 }
 
@@ -64,7 +97,9 @@ pub fn echo_line(line: &str) {
 pub fn echo_stderr(chunk: &[u8]) {
     if enabled() {
         use std::io::Write as _;
-        let _ = std::io::stderr().write_all(chunk);
+        let raw = String::from_utf8_lossy(chunk);
+        let redacted = redact_query_tokens(&raw);
+        let _ = std::io::stderr().write_all(redacted.as_bytes());
     }
 }
 
@@ -72,6 +107,22 @@ pub fn echo_stderr(chunk: &[u8]) {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn command_url_redaction_hides_signed_query_and_fragment() {
+        assert_eq!(
+            redact_query_tokens("https://media.example/file?token=secret#segment"),
+            "https://media.example/file(...)"
+        );
+        assert_eq!(
+            redact_query_tokens("warning ('https://media.example/file?sig=secret')"),
+            "warning ('https://media.example/file(...)')"
+        );
+        assert_eq!(
+            redact_query_tokens("https://media.example/file plain"),
+            "https://media.example/file plain"
+        );
+    }
 
     #[test]
     fn parse_flag_table() {

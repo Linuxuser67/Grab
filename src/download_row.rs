@@ -40,6 +40,9 @@ mod imp {
         /// Resume validator fallback: Last-Modified header value (empty = none).
         #[property(get, set)]
         pub last_modified: RefCell<String>,
+        /// Public-only network policy inherited from an untrusted browser handoff.
+        #[property(get, set)]
+        pub public_only: Cell<bool>,
         /// True if this is a gallery download (image gallery via gallery-dl).
         #[property(get, set)]
         pub is_gallery: Cell<bool>,

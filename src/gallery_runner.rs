@@ -105,7 +105,7 @@ pub async fn run_gallery_download(
     user_agent: Option<&str>,
     on_progress: impl Fn(GalleryProgressUpdate),
 ) -> Result<GalleryResult, GalleryError> {
-    let argv = download_argv(
+    let mut argv = download_argv(
         tool,
         &job.page_url,
         &job.dest_dir,
@@ -115,9 +115,22 @@ pub async fn run_gallery_download(
         job.speed_limit,
         job.range.as_deref(),
     );
+    let guarded_proxy = if url::Url::parse(&job.page_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| crate::download_net::is_untrusted_handoff_host(&host))
+    {
+        let proxy = crate::subprocess_proxy::ensure_started().map_err(GalleryError::probe)?;
+        crate::video_spawn::insert_guarded_proxy_arg(&mut argv, &proxy)
+            .map_err(GalleryError::probe)?;
+        Some(proxy)
+    } else {
+        None
+    };
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
+    crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     // Pipe stdout for progress parsing; pipe stderr for failure context
     // (drained in a separate task so gallery-dl can't block on a full pipe).
     cmd.stdout(std::process::Stdio::piped());

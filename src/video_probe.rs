@@ -330,16 +330,21 @@ fn sanitize_format_entry(entry: &mut serde_json::Map<String, serde_json::Value>)
     entry.entry("format").or_insert(serde_json::json!(""));
     entry.entry("format_id").or_insert(serde_json::json!(""));
     entry.entry("http_headers").or_insert(serde_json::json!({}));
-    // Missing transport with an http(s) URL: plain HTTPS is the only sane
-    // default — without it the format is invisible to every selector below.
-    if !entry.get("protocol").is_some_and(|v| v.is_string()) {
-        let http = entry
+    // Infer the actual transport from the URL. In particular, never label
+    // an http:// URL as HTTPS: StreamSel::from_format deliberately rejects
+    // non-HTTPS sources, so this classification must not weaken that policy.
+    if !entry.get("protocol").is_some_and(|v| v.is_string())
+        && let Some(protocol) = entry
             .get("url")
             .and_then(|u| u.as_str())
-            .is_some_and(|u| u.starts_with("http://") || u.starts_with("https://"));
-        if http {
-            entry.insert("protocol".to_string(), serde_json::json!("https"));
-        }
+            .and_then(|raw| url::Url::parse(raw).ok())
+            .and_then(|url| match url.scheme() {
+                "http" => Some("http"),
+                "https" => Some("https"),
+                _ => None,
+            })
+    {
+        entry.insert("protocol".to_string(), serde_json::json!(protocol));
     }
     if !entry.get("ext").is_some_and(|v| v.is_string()) {
         // Missing container with a telling URL: sniff the path suffix
@@ -746,5 +751,55 @@ mod playlist_title_fallback_tests {
             .expect("playlist-shaped JSON");
         assert_eq!(&*playlist.title, "Actual collection title");
         assert_eq!(&*playlist.items[0].title, "Actual item title");
+    }
+}
+
+#[cfg(test)]
+mod sanitized_protocol_tests {
+    use super::sanitize_video_json;
+
+    #[test]
+    fn missing_protocol_is_inferred_from_the_actual_url_scheme() {
+        let mut https = serde_json::json!({
+            "formats": [{"url": "https://cdn.example/video.mp4"}]
+        });
+        sanitize_video_json(&mut https);
+        assert_eq!(https["formats"][0]["protocol"], "https");
+
+        let mut http = serde_json::json!({
+            "formats": [{"url": "http://cdn.example/video.mp4"}]
+        });
+        sanitize_video_json(&mut http);
+        assert_eq!(http["formats"][0]["protocol"], "http");
+    }
+
+    #[test]
+    fn unsupported_url_schemes_are_not_inferred_as_https() {
+        let mut value = serde_json::json!({
+            "formats": [{"url": "ftp://cdn.example/video.mp4"}]
+        });
+        sanitize_video_json(&mut value);
+        assert!(value["formats"][0].get("protocol").is_none());
+    }
+
+    #[test]
+    fn mislabeled_http_url_is_rejected_even_if_metadata_claims_https() {
+        let video = super::parse_single_video(serde_json::json!({
+            "id": "test",
+            "title": "test",
+            "formats": [{
+                "format": "test",
+                "format_id": "test",
+                "protocol": "https",
+                "url": "http://cdn.example/video.mp4",
+                "ext": "mp4",
+                "http_headers": {}
+            }]
+        }))
+        .expect("sparse format should be sanitized and parsed");
+        assert!(
+            crate::video_plan::StreamSel::from_format(&video.formats[0]).is_err(),
+            "an HTTP URL must not be accepted based only on its declared protocol"
+        );
     }
 }

@@ -350,7 +350,12 @@ fn private_v4(a: Ipv4Addr) -> bool {
         || o[0] == 0 // 0.0.0.0/8
         || (o[0] == 100 && (o[1] & 0xC0) == 64) // CGNAT 100.64/10
         || (o[0] == 198 && (o[1] & 0xFE) == 18) // benchmarking 198.18/15
-        || o[0] >= 240 // reserved 240/4 incl. broadcast
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0) // IETF protocol assignments
+        || (o[0] == 192 && o[1] == 0 && o[2] == 2) // TEST-NET-1
+        || (o[0] == 192 && o[1] == 88 && o[2] == 99) // deprecated 6to4 relay anycast
+        || (o[0] == 198 && o[1] == 51 && o[2] == 100) // TEST-NET-2
+        || (o[0] == 203 && o[1] == 0 && o[2] == 113) // TEST-NET-3
+        || o[0] >= 224 // multicast and reserved
 }
 
 /// IPv4 tucked into an IPv6 literal: NAT64 `64:ff9b::/96` and the deprecated IPv4-compatible `::a.b.c.d`.
@@ -361,12 +366,25 @@ fn embedded_v4(a: Ipv6Addr) -> Option<Ipv4Addr> {
 }
 
 fn private_v6(a: Ipv6Addr) -> bool {
+    let s = a.segments();
+    // NAT64 may carry a global IPv4 address. Apply the IPv4 policy to that
+    // embedded destination; deprecated IPv4-compatible ::/96 is never global.
+    if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        return embedded_v4(a).is_none_or(private_v4);
+    }
+    if s[..6] == [0; 6] {
+        return true;
+    }
     a.is_loopback()
         || a.is_unspecified()
-        || (a.segments()[0] & 0xFE00) == 0xFC00 // fc00::/7
-        || (a.segments()[0] & 0xFFC0) == 0xFE80 // fe80::/10
-        || (a.segments()[0] & 0xFFC0) == 0xFEC0 // deprecated site-local fec0::/10
-        || embedded_v4(a).is_some_and(private_v4)
+        || a.is_multicast()
+        // Global unicast space is 2000::/3. Everything outside it is
+        // non-global (ULA, link/site-local, unique-use and reserved space).
+        || (s[0] & 0xE000) != 0x2000
+        || (s[0] == 0x2001 && (s[1] & 0xFE00) == 0x0000) // IETF protocol assignments 2001::/23
+        || (s[0] == 0x2001 && s[1] == 0x0DB8) // documentation 2001:db8::/32
+        || s[0] == 0x2002 // deprecated 6to4 2002::/16
+        || (s[0] == 0x3FFF && (s[1] & 0xF000) == 0x0000) // documentation 3fff::/20
 }
 
 /// Whether an address is loopback, private, link-local, CGNAT, reserved or
@@ -405,14 +423,23 @@ pub(crate) fn is_local_or_private_host(host: &str) -> bool {
     }
 }
 
-/// Hostnames whose DNS answers must be public. A hostile page can point a
-/// public-looking name at 127.0.0.1 or the LAN, which no string check on the
-/// URL can see. Names land here when the request did not come from an
-/// explicit user action: an unconfirmed browser handoff, or a redirect hop to
-/// a different host. Typed and pasted URLs are not listed, so a user's own
-/// split-horizon name (`nas.example.com` -> 192.168.x.x) keeps working.
-static PUBLIC_ONLY_HOSTS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
-const PUBLIC_ONLY_HOSTS_CAP: usize = 4096;
+/// Exact hostnames originating from untrusted browser handoffs. Their
+/// restriction is also inherited explicitly by canonical page URLs and
+/// selected collection children; redirects use a separate resolver-only set.
+static UNTRUSTED_HANDOFF_HOSTS: OnceLock<Mutex<std::collections::HashSet<String>>> =
+    OnceLock::new();
+const UNTRUSTED_HANDOFF_HOSTS_CAP: usize = 4096;
+
+/// Maximum number of distinct child hosts one untrusted collection may add.
+/// Keep this in the shared network-policy layer so the automatic and picker
+/// expansion paths apply the same cap.
+pub(crate) const MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CollectionHostError {
+    TooManyDistinctHosts,
+    UnsafeDestination,
+}
 
 fn host_key(host: &str) -> String {
     host.trim_matches(|c| c == '[' || c == ']')
@@ -420,24 +447,142 @@ fn host_key(host: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Require `host` to resolve to public addresses only, for the rest of the
-/// session. IP literals and local-looking names are ignored: the former never
-/// touch DNS, the latter are intentionally local.
-pub(crate) fn require_public_resolution(host: &str) {
+/// Register a hostname or public IP literal for public-only resolution for the
+/// rest of the session. Private/local destinations are rejected here and must
+/// be handled only through the explicit-confirmation path.
+pub(crate) fn require_public_resolution(host: &str) -> bool {
     let key = host_key(host);
-    if key.is_empty() || key.parse::<IpAddr>().is_ok() || is_local_or_private_host(&key) {
-        return;
+    if key.is_empty() {
+        return false;
     }
-    let mut set = lock_recover(PUBLIC_ONLY_HOSTS.get_or_init(Default::default));
-    // Bounded against a flood of distinct names; hosts already connected keep their connection.
-    if set.len() >= PUBLIC_ONLY_HOSTS_CAP {
-        set.clear();
+    // Private literals/local names are allowed only through the separate
+    // explicit-confirmation path. Public IP literals are also recorded: the
+    // literal itself cannot rebind, but the extractor may follow links to other
+    // hosts and its whole request tree still needs the guarded proxy.
+    match key.parse::<IpAddr>() {
+        Ok(ip) if is_private_ip(ip) => return false,
+        Ok(_) => {}
+        Err(_) if is_local_or_private_host(&key) => return false,
+        Err(_) => {}
+    }
+    let mut set = lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default));
+    if policy_matches(&set, &key) {
+        return true;
+    }
+    // Preserve existing restrictions at capacity. The caller must reject a new
+    // untrusted destination rather than silently clearing the security policy.
+    if set.len() >= UNTRUSTED_HANDOFF_HOSTS_CAP {
+        return false;
     }
     set.insert(key);
+    true
 }
 
-fn requires_public_resolution(host: &str) -> bool {
-    lock_recover(PUBLIC_ONLY_HOSTS.get_or_init(Default::default)).contains(&host_key(host))
+/// Match only explicitly registered names. Canonicalized pages and
+/// queued collection children are registered via inherit_public_resolution;
+/// treating an entire parent domain as untrusted would also affect unrelated
+/// user-added rows on sibling subdomains.
+fn policy_matches(set: &std::collections::HashSet<String>, host: &str) -> bool {
+    set.contains(host)
+}
+
+pub(crate) fn is_untrusted_handoff_host(host: &str) -> bool {
+    policy_matches(
+        &lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default)),
+        &host_key(host),
+    )
+}
+
+/// Cross-host redirects need a DNS-rebinding guard for reqwest connections,
+/// but must not mark an unrelated, user-added queue row as an untrusted
+/// browser handoff. Keep these resolver-only hosts in a separate bounded FIFO.
+#[derive(Default)]
+struct PublicDnsHosts {
+    hosts: std::collections::HashSet<String>,
+    insertion_order: std::collections::VecDeque<String>,
+}
+
+static PUBLIC_DNS_HOSTS: OnceLock<Mutex<PublicDnsHosts>> = OnceLock::new();
+const PUBLIC_DNS_HOSTS_CAP: usize = 4096;
+
+fn require_public_dns_filter(host: &str) -> bool {
+    let key = host_key(host);
+    if key.is_empty() {
+        return false;
+    }
+    match key.parse::<IpAddr>() {
+        Ok(ip) => return !is_private_ip(ip),
+        Err(_) if is_local_or_private_host(&key) => return false,
+        Err(_) => {}
+    }
+    let mut cache = lock_recover(PUBLIC_DNS_HOSTS.get_or_init(Default::default));
+    if cache.hosts.contains(&key) {
+        return true;
+    }
+    // Redirect targets are checked immediately before their DNS lookup. When
+    // the cache is full, evict the oldest older entry and keep this new target.
+    if cache.hosts.len() >= PUBLIC_DNS_HOSTS_CAP
+        && let Some(oldest) = cache.insertion_order.pop_front()
+    {
+        cache.hosts.remove(&oldest);
+    }
+    cache.hosts.insert(key.clone());
+    cache.insertion_order.push_back(key);
+    true
+}
+
+fn requires_public_dns_filter(host: &str) -> bool {
+    let key = host_key(host);
+    is_untrusted_handoff_host(&key)
+        || lock_recover(PUBLIC_DNS_HOSTS.get_or_init(Default::default))
+            .hosts
+            .contains(&key)
+}
+
+/// Extend an untrusted collection's public-only policy to a selected or
+/// expanded child. A collection-local host set enforces the same per-collection
+/// cap in both picker and automatic expansion flows.
+pub(crate) fn inherit_public_resolution_for_collection(
+    parent_url: &str,
+    child_url: &str,
+    seen_hosts: &mut std::collections::HashSet<String>,
+) -> Result<(), CollectionHostError> {
+    let Some(parent) = url::Url::parse(parent_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+    else {
+        return Ok(());
+    };
+    if !is_untrusted_handoff_host(&parent) {
+        return Ok(());
+    }
+    let Some(child) = url::Url::parse(child_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+    else {
+        return Err(CollectionHostError::UnsafeDestination);
+    };
+    let key = host_key(&child);
+    if !seen_hosts.contains(&key) && seen_hosts.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
+        return Err(CollectionHostError::TooManyDistinctHosts);
+    }
+    if !require_public_resolution(&child) {
+        return Err(CollectionHostError::UnsafeDestination);
+    }
+    // Insert only after the global handoff policy has accepted the hostname.
+    seen_hosts.insert(key);
+    Ok(())
+}
+
+/// Single-child convenience path for callers that are not expanding a
+/// collection; no collection-local limit applies.
+pub(crate) fn inherit_public_resolution(parent_url: &str, child_url: &str) -> bool {
+    inherit_public_resolution_for_collection(
+        parent_url,
+        child_url,
+        &mut std::collections::HashSet::new(),
+    )
+    .is_ok()
 }
 
 /// Drop private addresses from a DNS answer; a mixed answer keeps its public part.
@@ -473,7 +618,7 @@ impl reqwest::dns::Resolve for GuardedResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let host = name.as_str().to_owned();
         Box::pin(async move {
-            let addrs = lookup_filtered(&host, requires_public_resolution(&host)).await?;
+            let addrs = lookup_filtered(&host, requires_public_dns_filter(&host)).await?;
             Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
         })
     }
@@ -508,10 +653,16 @@ fn redirect_policy() -> reqwest::redirect::Policy {
             // user: its name must not resolve into local space either.
             if let Some(target) = attempt.url().host_str()
                 && attempt.previous().last().and_then(|u| u.host_str()) != Some(target)
+                && !to_private
+                && !require_public_dns_filter(target)
             {
-                require_public_resolution(target);
+                // A changed public-host redirect is untrusted. Stop rather
+                // than exceeding the bounded host-policy set; private-to-private
+                // LAN redirects remain permitted after an explicit local start.
+                attempt.stop()
+            } else {
+                attempt.follow()
             }
-            attempt.follow()
         }
     })
 }
@@ -587,11 +738,18 @@ pub(crate) fn tool_client_builder_proxied() -> Result<reqwest::ClientBuilder, St
 }
 
 #[cfg(test)]
+pub(crate) fn clear_public_resolution_for_tests() {
+    lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default)).clear();
+    {
+        let mut cache = lock_recover(PUBLIC_DNS_HOSTS.get_or_init(Default::default));
+        cache.hosts.clear();
+        cache.insertion_order.clear();
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{
-        is_local_or_private_host, is_private_ip, lookup_filtered, require_public_resolution,
-        requires_public_resolution, retain_public,
-    };
+    use super::*;
     use std::net::SocketAddr;
 
     fn sa(s: &str) -> SocketAddr {
@@ -616,15 +774,155 @@ mod tests {
     }
 
     #[test]
-    fn public_resolution_marks_names_only() {
-        require_public_resolution("Marked-Name.EXAMPLE.");
-        assert!(requires_public_resolution("marked-name.example"));
-        // Literals and local-looking names are never listed.
+    fn public_resolution_marks_only_public_destinations() {
+        let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        let previous = {
+            let mut set = lock_recover(cache);
+            std::mem::take(&mut *set)
+        };
+        assert!(require_public_resolution("Marked-Name.EXAMPLE."));
+        assert!(is_untrusted_handoff_host("marked-name.example"));
+        // Public literals are recorded so extractor subprocesses can guard
+        // the wider request tree, even though the literal itself cannot rebind.
+        assert!(require_public_resolution("8.8.8.8"));
+        assert!(is_untrusted_handoff_host("8.8.8.8"));
         for h in ["127.0.0.1", "[::1]", "localhost", "printer.local", "nas"] {
-            require_public_resolution(h);
-            assert!(!requires_public_resolution(h), "must not mark {h}");
+            assert!(!require_public_resolution(h), "must reject {h}");
+            assert!(!is_untrusted_handoff_host(h), "must not mark {h}");
         }
-        assert!(!requires_public_resolution("never-marked.example"));
+        assert!(!is_untrusted_handoff_host("never-marked.example"));
+        *lock_recover(cache) = previous;
+    }
+
+    #[test]
+    fn redirect_dns_policy_does_not_mark_user_queue_rows_as_untrusted() {
+        assert!(require_public_dns_filter("redirect-only.example"));
+        assert!(requires_public_dns_filter("redirect-only.example"));
+        assert!(!is_untrusted_handoff_host("redirect-only.example"));
+    }
+
+    #[test]
+    fn untrusted_policy_is_exact_and_children_are_registered_explicitly() {
+        let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        let previous = {
+            let mut set = lock_recover(cache);
+            std::mem::take(&mut *set)
+        };
+        assert!(require_public_resolution("www.example.com"));
+        assert!(is_untrusted_handoff_host("www.example.com"));
+        assert!(!is_untrusted_handoff_host("example.com"));
+        assert!(!is_untrusted_handoff_host("cdn.www.example.com"));
+        assert!(inherit_public_resolution(
+            "https://www.example.com/list",
+            "https://example.com/video.mp4"
+        ));
+        assert!(is_untrusted_handoff_host("example.com"));
+        assert!(!is_untrusted_handoff_host("other-example.com"));
+        *lock_recover(cache) = previous;
+    }
+
+    #[test]
+    fn collection_host_limit_is_shared_and_counts_only_accepted_hosts() {
+        let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        let previous = {
+            let mut set = lock_recover(cache);
+            std::mem::take(&mut *set)
+        };
+        assert!(require_public_resolution("collection-limit.example"));
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
+            inherit_public_resolution_for_collection(
+                "https://collection-limit.example/list",
+                &format!("https://child-{i}.example/video"),
+                &mut seen,
+            )
+            .expect("each host below the limit should be accepted");
+        }
+        assert_eq!(seen.len(), MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION);
+        assert_eq!(
+            inherit_public_resolution_for_collection(
+                "https://collection-limit.example/list",
+                "https://too-many.example/video",
+                &mut seen,
+            ),
+            Err(CollectionHostError::TooManyDistinctHosts)
+        );
+        assert!(!is_untrusted_handoff_host("too-many.example"));
+        // Repeated hosts remain allowed after the limit; they do not consume
+        // another slot or become unguarded.
+        inherit_public_resolution_for_collection(
+            "https://collection-limit.example/list",
+            "https://child-0.example/another-video",
+            &mut seen,
+        )
+        .expect("an already-counted host should remain accepted");
+        assert_eq!(seen.len(), MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION);
+        *lock_recover(cache) = previous;
+    }
+
+    #[test]
+    fn redirect_dns_policy_cap_evicts_oldest_without_erasing_handoff_policy() {
+        let handoffs = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        let redirects = PUBLIC_DNS_HOSTS.get_or_init(Default::default);
+        let previous_handoffs = {
+            let mut set = lock_recover(handoffs);
+            std::mem::take(&mut *set)
+        };
+        let previous_redirects = {
+            let mut set = lock_recover(redirects);
+            std::mem::take(&mut *set)
+        };
+        assert!(require_public_resolution("handoff.example"));
+        for i in 0..PUBLIC_DNS_HOSTS_CAP {
+            assert!(require_public_dns_filter(&format!("redirect-{i}.example")));
+        }
+        assert!(require_public_dns_filter("redirect-overflow.example"));
+        assert!(is_untrusted_handoff_host("handoff.example"));
+        {
+            let cache = lock_recover(redirects);
+            assert!(!cache.hosts.contains("redirect-0.example"));
+            assert!(cache.hosts.contains("redirect-overflow.example"));
+            assert_eq!(cache.hosts.len(), PUBLIC_DNS_HOSTS_CAP);
+            assert_eq!(cache.insertion_order.len(), PUBLIC_DNS_HOSTS_CAP);
+        }
+        *lock_recover(handoffs) = previous_handoffs;
+        *lock_recover(redirects) = previous_redirects;
+    }
+
+    #[test]
+    fn untrusted_collection_policy_is_inherited_by_queued_children() {
+        let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        let previous = {
+            let mut set = lock_recover(cache);
+            std::mem::take(&mut *set)
+        };
+        assert!(require_public_resolution("collection.example"));
+        assert!(inherit_public_resolution(
+            "https://collection.example/list",
+            "https://cdn.example/video.mp4"
+        ));
+        assert!(is_untrusted_handoff_host("cdn.example"));
+        assert!(!inherit_public_resolution(
+            "https://collection.example/list",
+            "http://127.0.0.1/admin"
+        ));
+        *lock_recover(cache) = previous;
+    }
+
+    #[test]
+    fn public_resolution_cap_preserves_existing_rules_and_fails_closed() {
+        let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        let previous = {
+            let mut set = lock_recover(cache);
+            std::mem::take(&mut *set)
+        };
+        for i in 0..UNTRUSTED_HANDOFF_HOSTS_CAP {
+            assert!(require_public_resolution(&format!("test-{i}.example")));
+        }
+        assert!(is_untrusted_handoff_host("test-0.example"));
+        assert!(!require_public_resolution("overflow.example"));
+        assert!(is_untrusted_handoff_host("test-0.example"));
+        *lock_recover(cache) = previous;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -658,9 +956,21 @@ mod tests {
             "1.1.1.1",
             "100.63.255.255",
             "100.128.0.1",
-            "203.0.113.7",
+            "93.184.216.34",
         ] {
             assert!(!is_local_or_private_host(h), "public: {h}");
+        }
+        for h in [
+            "192.0.2.1",
+            "198.51.100.1",
+            "203.0.113.7",
+            "224.0.0.1",
+            "239.255.255.255",
+        ] {
+            assert!(is_local_or_private_host(h), "non-global: {h}");
+        }
+        for h in ["2001:db8::1", "2001:2::1", "2002::1", "3fff::1", "ff02::1"] {
+            assert!(is_local_or_private_host(h), "non-global IPv6: {h}");
         }
         // v6: loopback, ULA, link-local, mapped v4.
         for h in [
@@ -687,6 +997,7 @@ mod tests {
             "64:ff9b::a00:1",
             "::127.0.0.1",
             "::7f00:1",
+            "::808:808",
             "fec0::1",
             "fe80::1%eth0",
             "198.18.0.1",
@@ -697,12 +1008,7 @@ mod tests {
         ] {
             assert!(is_local_or_private_host(h), "private (extended): {h}");
         }
-        for h in [
-            "64:ff9b::808:808",
-            "198.20.0.1",
-            "239.255.255.255",
-            "8.8.8.8",
-        ] {
+        for h in ["64:ff9b::808:808", "198.20.0.1", "8.8.8.8"] {
             assert!(!is_local_or_private_host(h), "public (extended): {h}");
         }
         // Dotless names resolve locally; dotted public names do not.

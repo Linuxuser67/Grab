@@ -78,6 +78,10 @@ pub(crate) struct StoredItem {
     pub(crate) etag: Option<String>,
     #[serde(default)]
     pub(crate) last_modified: Option<String>,
+    /// Whether this row originated from an untrusted handoff and must retain public-only network checks.
+    /// Additive for old queue files.
+    #[serde(default)]
+    pub(crate) public_only: Option<bool>,
     /// Gallery job payload (raw Value: a bad shape in one entry must not
     /// quarantine the whole queue). Additive, no version bump.
     /// `None` = not a gallery row or predates the field.
@@ -89,4 +93,37 @@ pub(crate) struct StoredItem {
 pub(crate) struct StoredQueue {
     pub(crate) version: u32,
     pub(crate) items: Vec<StoredItem>,
+}
+
+#[cfg(test)]
+mod public_only_metadata_tests {
+    use super::StoredItem;
+
+    #[test]
+    fn legacy_queue_item_without_public_only_field_is_compatible() {
+        let item: StoredItem = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com/file.mp4",
+            "dest_dir": "/tmp/downloads",
+            "filename": "file.mp4",
+            "status": "queued",
+            "progress": 0.0
+        }))
+        .expect("legacy queue item should deserialize");
+        assert_eq!(item.public_only, None);
+    }
+
+    #[test]
+    fn public_only_metadata_round_trips() {
+        let item: StoredItem = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com/file.mp4",
+            "dest_dir": "/tmp/downloads",
+            "filename": "file.mp4",
+            "status": "queued",
+            "public_only": true
+        }))
+        .expect("new queue item should deserialize");
+        assert_eq!(item.public_only, Some(true));
+        let serialized = serde_json::to_value(item).expect("queue item should serialize");
+        assert_eq!(serialized["public_only"], true);
+    }
 }

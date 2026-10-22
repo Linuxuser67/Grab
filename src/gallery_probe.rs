@@ -271,6 +271,30 @@ pub(crate) fn collection_title(items: &[GalleryItem], url: &str) -> String {
     crate::file_names::title_from_url(url)
 }
 
+/// Apply DNS-filtering proxying when this page came from an untrusted
+/// browser handoff. The proxy filters every destination reached by the
+/// extractor, not just the initial page hostname.
+fn apply_guarded_proxy(cmd: &mut tokio::process::Command, url: &str) -> Result<bool, GalleryError> {
+    let Some(host) = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+    else {
+        return Ok(false);
+    };
+    if !crate::download_net::is_untrusted_handoff_host(&host) {
+        return Ok(false);
+    }
+    let proxy = crate::subprocess_proxy::ensure_started().map_err(GalleryError::probe)?;
+    cmd.arg("--proxy").arg(&proxy);
+    cmd.env("NO_PROXY", "")
+        .env("no_proxy", "")
+        .env("HTTP_PROXY", &proxy)
+        .env("http_proxy", &proxy)
+        .env("HTTPS_PROXY", &proxy)
+        .env("https_proxy", &proxy);
+    Ok(true)
+}
+
 /// Run the gallery-dl probe: `gallery-dl --config-ignore -j --no-download
 /// --range 1-5 <url>`. Document mode, not jsonl: the probe isn't streamed,
 /// and jsonl mode drops a fatal extraction error's `[-1]` message (see
@@ -309,6 +333,7 @@ pub async fn probe_gallery(
     for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
         cmd.arg(arg);
     }
+    apply_guarded_proxy(&mut cmd, url)?;
     // `--` last: guards against URLs starting with `-` being parsed as options.
     cmd.arg("--").arg(url);
     let output = run_to_completion(cmd, PROBE_TIMEOUT, "gallery-dl probe").await?;
@@ -526,7 +551,7 @@ fn enumerate_command(
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
     jsonl: bool,
-) -> tokio::process::Command {
+) -> Result<tokio::process::Command, GalleryError> {
     let mut cmd = tokio::process::Command::new(tool);
     // See probe_gallery: a dropped enumeration future must kill the child.
     cmd.kill_on_drop(true);
@@ -548,8 +573,9 @@ fn enumerate_command(
     for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
         cmd.arg(arg);
     }
+    apply_guarded_proxy(&mut cmd, url)?;
     cmd.arg("--").arg(url);
-    cmd
+    Ok(cmd)
 }
 
 /// Wall-clock bound for the document-mode enumeration. It buffers the whole
@@ -567,7 +593,7 @@ pub(crate) async fn enumerate_gallery_files(
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
 ) -> Result<Vec<GalleryItem>, GalleryError> {
-    let cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, false);
+    let cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, false)?;
     let output = run_to_completion(cmd, ENUMERATE_TIMEOUT, "gallery-dl enumerate").await?;
     if !output.status.success() {
         return Err(GalleryError::probe(exit_message(
@@ -600,7 +626,7 @@ pub(crate) async fn enumerate_gallery_files_streamed(
     items_tx: tokio::sync::mpsc::UnboundedSender<GalleryItem>,
 ) -> Result<usize, GalleryError> {
     // Same line-streaming shape as the yt-dlp runner (see video_runner.rs).
-    let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, true);
+    let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, true)?;
     // stdout is the line stream; stderr is kept as a short tail for the
     // error text, drained concurrently so gallery-dl never blocks on a full pipe.
     cmd.stdout(std::process::Stdio::piped())
@@ -1015,11 +1041,23 @@ pub async fn count_gallery_files(
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
 ) -> Option<u32> {
-    let argv = crate::gallery_argv::count_argv(tool, url, cookies_file, user_agent, filter);
+    let mut argv = crate::gallery_argv::count_argv(tool, url, cookies_file, user_agent, filter);
+    let guarded_proxy = if url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .is_some_and(|host| crate::download_net::is_untrusted_handoff_host(&host))
+    {
+        let proxy = crate::subprocess_proxy::ensure_started().ok()?;
+        crate::video_spawn::insert_guarded_proxy_arg(&mut argv, &proxy).ok()?;
+        Some(proxy)
+    } else {
+        None
+    };
     let mut cmd = tokio::process::Command::new(&argv[0]);
     // See probe_gallery: a timed-out count must not orphan gallery-dl.
     cmd.kill_on_drop(true);
     cmd.args(&argv[1..]);
+    crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     // Debug: log the full argv before spawning.
     crate::backend_debug::log_command(&cmd);
     let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())

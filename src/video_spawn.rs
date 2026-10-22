@@ -320,11 +320,8 @@ pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     cmd
 }
 
-/// Apply the guarded loopback proxy to argv whose initial page came from
-/// an untrusted browser handoff. The option must precede the `--` URL
-/// terminator or yt-dlp treats it as another URL.
 /// Insert the guarded proxy before yt-dlp/gallery-dl's positional URL terminator.
-/// Shared by both runners so their option placement and conflict checks stay identical.
+/// Shared by both runners so option placement and conflict checks stay identical.
 pub(crate) fn insert_guarded_proxy_arg(
     args: &mut Vec<String>,
     proxy: &str,
@@ -342,6 +339,7 @@ pub(crate) fn insert_guarded_proxy_arg(
     Ok(())
 }
 
+/// Apply the loopback proxy when the initial page URL is a marked browser handoff.
 pub(crate) fn guard_untrusted_args(args: &mut Vec<String>) -> Result<Option<String>, VideoError> {
     let Some(separator) = args.iter().position(|arg| arg == "--") else {
         return Ok(None);
@@ -632,10 +630,8 @@ mod tests {
         insert_guarded_proxy_arg(&mut args, "http://127.0.0.1:43123")
             .expect("guarded proxy should be inserted");
         let separator = args.iter().position(|arg| arg == "--").unwrap();
-        assert_eq!(&args[separator - 2..separator], [
-            "--proxy",
-            "http://127.0.0.1:43123"
-        ]);
+        assert_eq!(args[separator - 2], "--proxy");
+        assert_eq!(args[separator - 1], "http://127.0.0.1:43123");
         assert_eq!(args[separator + 1], target);
 
         let mut conflict = vec![

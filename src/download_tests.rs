@@ -7785,7 +7785,9 @@ fn restoring_public_only_row_reinstates_its_host_policy() {
     );
     stored.public_only = Some(true);
 
-    let item = manager.restore_existing(&stored).expect("restore guarded row");
+    let item = manager
+        .restore_existing(&stored)
+        .expect("restore guarded row");
     assert!(item.public_only());
     assert!(crate::download_net::is_untrusted_handoff_host(host));
 

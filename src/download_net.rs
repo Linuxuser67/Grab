@@ -510,10 +510,10 @@ fn require_public_dns_filter(host: &str) -> bool {
     }
     // Redirect targets are checked immediately before their DNS lookup. When
     // the cache is full, evict the oldest older entry and keep this new target.
-    if cache.hosts.len() >= PUBLIC_DNS_HOSTS_CAP {
-        if let Some(oldest) = cache.insertion_order.pop_front() {
-            cache.hosts.remove(&oldest);
-        }
+    if cache.hosts.len() >= PUBLIC_DNS_HOSTS_CAP
+        && let Some(oldest) = cache.insertion_order.pop_front()
+    {
+        cache.hosts.remove(&oldest);
     }
     cache.hosts.insert(key.clone());
     cache.insertion_order.push_back(key);

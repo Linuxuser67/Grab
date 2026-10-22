@@ -49,7 +49,6 @@ pub fn log_command(cmd: &tokio::process::Command) {
     eprintln!("[grab-backend] spawn: {program} {}", args.join(" "));
 }
 
-
 /// Redact query strings and fragments from URL-shaped argument tokens before
 /// writing diagnostics. Signed media URLs often act as bearer credentials.
 fn redact_query_tokens(text: &str) -> String {

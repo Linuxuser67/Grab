@@ -1668,7 +1668,7 @@ impl DownloadManager {
                                     skipped_detail()
                                 )
                             } else {
-                                crate::video_probe::playlist_resolve_error(None)
+                                crate::video_probe::playlist_resolve_error(None).to_string()
                             };
                             if item.status() != DownloadStatus::Cancelled
                                 && item.status() != DownloadStatus::Paused

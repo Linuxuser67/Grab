@@ -563,9 +563,7 @@ pub(crate) fn inherit_public_resolution_for_collection(
         return Err(CollectionHostError::UnsafeDestination);
     };
     let key = host_key(&child);
-    if !seen_hosts.contains(&key)
-        && seen_hosts.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
-    {
+    if !seen_hosts.contains(&key) && seen_hosts.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
         return Err(CollectionHostError::TooManyDistinctHosts);
     }
     if !require_public_resolution(&child) {

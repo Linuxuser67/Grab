@@ -347,7 +347,9 @@ pub(crate) fn guard_untrusted_args(args: &mut Vec<String>) -> Result<Option<Stri
         ));
     };
     let Some(page_url) = args.get(separator + 1) else {
-        return Err(VideoError::fetch("Extractor arguments are missing the URL after the terminator"));
+        return Err(VideoError::fetch(
+            "Extractor arguments are missing the URL after the terminator",
+        ));
     };
     let Some(host) = url::Url::parse(page_url)
         .ok()

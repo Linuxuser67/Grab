@@ -971,14 +971,31 @@ fn push_playlist_items_page(
                 // download the first segment once per row). Attempted unconditionally:
                 // highlights and non-story URLs return None and keep the tray.
                 let mut failed: Option<String> = None;
+                let mut guarded_child_hosts = std::collections::HashSet::new();
+                let mut skipped_by_host_limit = 0usize;
                 for (i, item) in &chosen {
                     let item_page_url = crate::video_probe::story_segment_url(&page_url, &item.id)
                         .unwrap_or_else(|| item.page_url.clone());
-                    if !crate::download_net::inherit_public_resolution(&page_url, &item_page_url) {
-                        failed = Some(gettext(
-                            "A selected item was rejected because its destination could not be verified as public.",
-                        ));
-                        break;
+                    match crate::download_net::inherit_public_resolution_for_collection(
+                        &page_url,
+                        &item_page_url,
+                        &mut guarded_child_hosts,
+                    ) {
+                        Ok(()) => {}
+                        Err(
+                            crate::download_net::CollectionHostError::TooManyDistinctHosts,
+                        ) => {
+                            skipped_by_host_limit += 1;
+                            // Keep this row selected so the user can remove it
+                            // after seeing why the picker could not queue it.
+                            continue;
+                        }
+                        Err(crate::download_net::CollectionHostError::UnsafeDestination) => {
+                            failed = Some(gettext(
+                                "A selected item was rejected because its destination could not be verified as public.",
+                            ));
+                            break;
+                        }
                     }
                     let settings = manager.settings();
                     let name = default_name_for(settings, &item.title, false);
@@ -1012,7 +1029,43 @@ fn push_playlist_items_page(
                     grid.unselect(*i);
                 }
                 if let Some(e) = failed {
-                    error_caption.set_text(&e);
+                    let message = if skipped_by_host_limit > 0 {
+                        format!(
+                            "{e} {}",
+                            ngettext(
+                                "{n} item was also skipped because the collection exceeded the limit of {limit} distinct hosts.",
+                                "{n} items were also skipped because the collection exceeded the limit of {limit} distinct hosts.",
+                                skipped_by_host_limit as u32,
+                            )
+                            .replace("{n}", &skipped_by_host_limit.to_string())
+                            .replace(
+                                "{limit}",
+                                &crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+                                    .to_string(),
+                            )
+                        )
+                    } else {
+                        e
+                    };
+                    error_caption.set_text(&message);
+                    error_caption.set_visible(true);
+                    add_btn.set_sensitive(true);
+                    return;
+                }
+                if skipped_by_host_limit > 0 {
+                    error_caption.set_text(
+                        &ngettext(
+                            "Skipped {n} selected item because the collection exceeded the limit of {limit} distinct hosts.",
+                            "Skipped {n} selected items because the collection exceeded the limit of {limit} distinct hosts.",
+                            skipped_by_host_limit as u32,
+                        )
+                        .replace("{n}", &skipped_by_host_limit.to_string())
+                        .replace(
+                            "{limit}",
+                            &crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+                                .to_string(),
+                        ),
+                    );
                     error_caption.set_visible(true);
                     add_btn.set_sensitive(true);
                     return;

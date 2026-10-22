@@ -305,7 +305,7 @@ fn queue_row_resynced_after_picker_returns_to_form() {
     drain_gtk_events();
     assert_eq!(nav.visible_page_tag().as_deref(), Some("form"));
     assert_eq!(
-        count_list_rows(window.upcast_ref()),
+        count_queue_rows(window.upcast_ref()),
         1,
         "the hidden queue should be rebuilt when the form returns"
     );

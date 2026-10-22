@@ -1041,11 +1041,23 @@ pub async fn count_gallery_files(
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
 ) -> Option<u32> {
-    let argv = crate::gallery_argv::count_argv(tool, url, cookies_file, user_agent, filter);
+    let mut argv = crate::gallery_argv::count_argv(tool, url, cookies_file, user_agent, filter);
+    let guarded_proxy = if url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .is_some_and(|host| crate::download_net::is_untrusted_handoff_host(&host))
+    {
+        let proxy = crate::subprocess_proxy::ensure_started().ok()?;
+        crate::video_spawn::insert_guarded_proxy_arg(&mut argv, &proxy).ok()?;
+        Some(proxy)
+    } else {
+        None
+    };
     let mut cmd = tokio::process::Command::new(&argv[0]);
     // See probe_gallery: a timed-out count must not orphan gallery-dl.
     cmd.kill_on_drop(true);
     cmd.args(&argv[1..]);
+    crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     // Debug: log the full argv before spawning.
     crate::backend_debug::log_command(&cmd);
     let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())

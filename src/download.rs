@@ -17,6 +17,21 @@ use std::time::{Duration, Instant, SystemTime};
 /// temp paths unique across writers in the same process.
 static QUEUE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Re-register the network restriction persisted for a guarded queue row.
+/// Keep the download and gallery restore paths identical as the policy evolves.
+fn recheck_public_host(url: &str, kind: &str) -> Result<(), String> {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .ok_or_else(|| format!("Invalid guarded {kind} URL"))?;
+    if !crate::download_net::require_public_resolution(&host) {
+        return Err(format!(
+            "Could not restore the guarded {kind} because its host could not be verified as public"
+        ));
+    }
+    Ok(())
+}
+
 /// Facade: HTTP fetch engine lives in [`download_fetch`](crate::download_fetch)
 /// now (no re-exports: the manager consumes it here, tests import it directly).
 use crate::download_fetch::{
@@ -885,6 +900,15 @@ impl DownloadManager {
         } else {
             dest_dir
         };
+        // A hostile collection must not exhaust the process-wide handoff-host
+        // policy with thousands of unique child hostnames. Limit newly seen
+        // child hosts for this one collection while allowing repeated hosts.
+        const MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION: usize = 64;
+        let parent_is_untrusted = url::Url::parse(&item.url())
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_string))
+            .is_some_and(|host| crate::download_net::is_untrusted_handoff_host(&host));
+        let mut guarded_child_hosts = HashSet::new();
         // One readdir for the whole expansion instead of one per entry.
         let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
         let mut added = 0;
@@ -894,8 +918,26 @@ impl DownloadManager {
             else {
                 continue;
             };
-            // Collection results are untrusted input. Carry the parent's
-            // public-only network policy to each child before it can be queued.
+            // Collection results are untrusted input. Cap their distinct hosts
+            // before registering them globally; once the cap is reached, skip
+            // further children from new hosts but continue accepting repeats.
+            if parent_is_untrusted {
+                let Some(host) = url::Url::parse(&url)
+                    .ok()
+                    .and_then(|parsed| parsed.host_str().map(str::to_string))
+                else {
+                    continue;
+                };
+                let host = host.trim_end_matches('.').to_ascii_lowercase();
+                if !guarded_child_hosts.contains(&host)
+                    && guarded_child_hosts.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+                {
+                    continue;
+                }
+                guarded_child_hosts.insert(host);
+            }
+            // Carry the parent's public-only network policy to each child
+            // before it can be queued.
             if !crate::download_net::inherit_public_resolution(&item.url(), &url) {
                 continue;
             }
@@ -949,13 +991,7 @@ impl DownloadManager {
         // behavior; new rows persist an explicit value for browser handoffs.
         let public_only = stored.public_only.unwrap_or(false);
         if public_only {
-            let host = url::Url::parse(&url)
-                .ok()
-                .and_then(|parsed| parsed.host_str().map(str::to_string))
-                .ok_or_else(|| "Invalid guarded download URL".to_string())?;
-            if !crate::download_net::require_public_resolution(&host) {
-                return Err("Could not restore the guarded download because its host could not be verified as public".to_string());
-            }
+            recheck_public_host(&url, "download")?;
         }
         if !sane_filename(raw_filename) {
             return Err(format!("Invalid filename in queue: {raw_filename}"));
@@ -1035,13 +1071,7 @@ impl DownloadManager {
         // they came from a browser handoff.
         let public_only = stored.public_only.unwrap_or(false);
         if public_only {
-            let host = url::Url::parse(&url)
-                .ok()
-                .and_then(|parsed| parsed.host_str().map(str::to_string))
-                .ok_or_else(|| "Invalid guarded gallery URL".to_string())?;
-            if !crate::download_net::require_public_resolution(&host) {
-                return Err("Could not restore the guarded gallery because its host could not be verified as public".to_string());
-            }
+            recheck_public_host(&url, "gallery")?;
         }
         if !std::path::Path::new(&stored.dest_dir).is_absolute() {
             return Err(format!("Invalid destination in queue: {}", stored.dest_dir));

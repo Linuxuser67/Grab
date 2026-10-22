@@ -695,6 +695,7 @@ pub fn build_window(
     // back as soon as the form page returns (pop, Escape, or card close).
     {
         let stack = stack.clone();
+        let sync = Rc::clone(&sync);
         add_card
             .navigation()
             .connect_notify_local(Some("visible-page"), move |nav, _| {
@@ -702,6 +703,12 @@ pub fn build_window(
                     .visible_page_tag()
                     .is_some_and(|tag| tag.as_str() != "form");
                 stack.set_visible(!picker);
+                // Queue changes can occur while this stack is hidden. Reconcile
+                // once it becomes visible again so an enqueue whose refresh was
+                // missed while navigating cannot leave a blank queue until restart.
+                if !picker {
+                    sync();
+                }
             });
     }
     content.append(&stack);

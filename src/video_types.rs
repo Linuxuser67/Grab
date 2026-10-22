@@ -168,6 +168,40 @@ pub struct VideoInfo {
     pub fetchable: bool,
 }
 
+/// Treat yt-dlp's two structured live indicators as complementary. Some
+/// extractors populate `live_status` without setting `is_live`; matching only
+/// the boolean can route a live HLS stream through the VOD download path.
+/// Do not classify upcoming or previously-live videos as currently live.
+pub(crate) fn yt_dlp_reports_currently_live(is_live: Option<bool>, live_status: &str) -> bool {
+    is_live == Some(true) || live_status == "is_live"
+}
+
+#[cfg(test)]
+mod live_status_detection_tests {
+    use super::yt_dlp_reports_currently_live;
+
+    #[test]
+    fn detects_live_status_when_boolean_is_missing_or_false() {
+        assert!(yt_dlp_reports_currently_live(None, "is_live"));
+        assert!(yt_dlp_reports_currently_live(Some(false), "is_live"));
+    }
+
+    #[test]
+    fn boolean_live_marker_still_takes_precedence_as_positive_evidence() {
+        assert!(yt_dlp_reports_currently_live(Some(true), ""));
+        assert!(yt_dlp_reports_currently_live(Some(true), "not_live"));
+    }
+
+    #[test]
+    fn does_not_treat_upcoming_or_ended_streams_as_live() {
+        assert!(!yt_dlp_reports_currently_live(None, "is_upcoming"));
+        assert!(!yt_dlp_reports_currently_live(Some(false), "was_live"));
+        assert!(!yt_dlp_reports_currently_live(None, "post_live"));
+        assert!(!yt_dlp_reports_currently_live(None, "not_live"));
+        assert!(!yt_dlp_reports_currently_live(None, ""));
+    }
+}
+
 impl VideoInfo {
     pub(crate) fn from(v: &Video, fallback_page: &str, newest_first: bool) -> Self {
         let page_url = v
@@ -180,7 +214,7 @@ impl VideoInfo {
             title: v.title.clone().into_boxed_str(),
             page_url: page_url.into_boxed_str(),
             formats: video_format_options(v, newest_first),
-            is_live: v.is_live.unwrap_or(false),
+            is_live: yt_dlp_reports_currently_live(v.is_live, &v.live_status),
             fetchable: has_fetchable_media(v),
         }
     }

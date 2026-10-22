@@ -705,7 +705,11 @@ pub(crate) fn tool_client_builder_proxied() -> Result<reqwest::ClientBuilder, St
 #[cfg(test)]
 pub(crate) fn clear_public_resolution_for_tests() {
     lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default)).clear();
-    lock_recover(PUBLIC_DNS_HOSTS.get_or_init(Default::default)).clear();
+    {
+        let mut cache = lock_recover(PUBLIC_DNS_HOSTS.get_or_init(Default::default));
+        cache.hosts.clear();
+        cache.insertion_order.clear();
+    }
 }
 
 #[cfg(test)]

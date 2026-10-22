@@ -52,12 +52,27 @@ jobs:
           restore-keys: |
             flatpak-sdk-${{ runner.os }}-
 
+      # flatpak-builder keeps downloaded source archives outside the clean
+      # build directory. Cache them separately so --force-clean remains a
+      # pristine compile while crate/source downloads can be reused.
+      - name: Cache Flatpak Builder downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/flatpak-builder
+          key: flatpak-builder-sources-${{ runner.os }}-${{ hashFiles('build-aux/io.github.linuxuser67.Grab.json', 'Cargo.lock') }}
+          restore-keys: |
+            flatpak-builder-sources-${{ runner.os }}-
+
+      - name: Update APT package indexes
+        timeout-minutes: 20
+        run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
+
       - name: Install Flatpak tooling
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq flatpak flatpak-builder python3
+        timeout-minutes: 20
+        run: sudo apt-get install -y -qq flatpak flatpak-builder python3
 
       - name: Install GNOME SDK and Platform
+        timeout-minutes: 25
         run: |
           RUNTIME=$(python3 -c "import json; print(json.load(open('build-aux/io.github.linuxuser67.Grab.json'))['runtime-version'])")
           flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
@@ -69,6 +84,7 @@ jobs:
       # --user: the flathub remote above is user-scoped, so dependency
       # resolution must run in user scope too (system scope can't see it).
       - name: Flatpak build
+        timeout-minutes: 50
         run: >
           flatpak-builder ${{ inputs.force-clean && '--force-clean' || '' }} --user
           --repo=flatpak-repo --install-deps-from=flathub build

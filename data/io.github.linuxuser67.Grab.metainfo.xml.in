@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.1.2~beta.2" date="2026-10-22">
+      <description>
+        <ul>
+          <li>Hardened unconfirmed browser handoffs so extractor requests can only reach public internet addresses, and sensitive URL data is redacted from diagnostics.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.1.2~beta.1" date="2026-10-22">
       <description>
         <ul>

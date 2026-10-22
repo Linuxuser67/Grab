@@ -115,10 +115,10 @@ pub async fn run_gallery_download(
         job.speed_limit,
         job.range.as_deref(),
     );
-    let guarded_proxy = if let Some(host) = url::Url::parse(&job.page_url)
+    let guarded_proxy = if url::Url::parse(&job.page_url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_string))
-        .filter(|host| crate::download_net::is_untrusted_handoff_host(host))
+        .is_some_and(|host| crate::download_net::is_untrusted_handoff_host(&host))
     {
         let proxy = crate::subprocess_proxy::ensure_started().map_err(GalleryError::probe)?;
         let separator = argv
@@ -130,7 +130,7 @@ pub async fn run_gallery_download(
                 "Cannot safely enforce public-address checks through a configured proxy",
             ));
         }
-        argv.splice(separator..separator, ["--proxy".to_string(), proxy]);
+        argv.splice(separator..separator, ["--proxy".to_string(), proxy.clone()]);
         Some(proxy)
     } else {
         None

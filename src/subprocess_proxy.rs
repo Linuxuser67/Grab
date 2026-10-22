@@ -92,19 +92,33 @@ pub(crate) fn ensure_started() -> Result<String, String> {
     }
 }
 
-async fn read_header(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
-    let mut header = Vec::with_capacity(1024);
-    let mut byte = [0u8; 1];
-    while header.len() < MAX_HEADER_BYTES {
-        if stream.read(&mut byte).await? == 0 {
+async fn read_header(
+    stream: &mut TcpStream,
+) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+    let mut received = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    loop {
+        let count = stream.read(&mut chunk).await?;
+        if count == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "proxy client closed before request headers",
             ));
         }
-        header.push(byte[0]);
-        if header.ends_with(b"\r\n\r\n") {
-            return Ok(header);
+        received.extend_from_slice(&chunk[..count]);
+        if let Some(end) = received
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|position| position + 4)
+        {
+            if end > MAX_HEADER_BYTES {
+                break;
+            }
+            let trailing = received.split_off(end);
+            return Ok((received, trailing));
+        }
+        if received.len() >= MAX_HEADER_BYTES {
+            break;
         }
     }
     Err(std::io::Error::new(
@@ -187,8 +201,8 @@ async fn reply_status(stream: &mut TcpStream, code: u16, reason: &str) {
 }
 
 async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
-    let header = match read_header(&mut client).await {
-        Ok(header) => header,
+    let (header, trailing) = match read_header(&mut client).await {
+        Ok(parts) => parts,
         Err(e) => {
             if e.kind() == std::io::ErrorKind::InvalidData {
                 reply_status(&mut client, 431, "Request Header Fields Too Large").await;
@@ -225,6 +239,9 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
+        if !trailing.is_empty() {
+            upstream.write_all(&trailing).await?;
+        }
         let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
         return Ok(());
     }
@@ -271,6 +288,9 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
     }
     forwarded.push_str("Connection: close\r\n\r\n");
     upstream.write_all(forwarded.as_bytes()).await?;
+    if !trailing.is_empty() {
+        upstream.write_all(&trailing).await?;
+    }
     let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
     Ok(())
 }

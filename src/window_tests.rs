@@ -1,5 +1,3 @@
-use gtk4::glib::object::Cast as _;
-use gtk4::prelude::*;
 use crate::download::DownloadStatus;
 use crate::inline_add::{fmt_item_duration, playlist_count_label};
 use crate::media_types::PlaylistKind;
@@ -7,6 +5,8 @@ use crate::window_rows::{
     PulseTick, RowMedia, StopCopy, media_icon_failed, pulse_tick, row_media, should_pulse,
     stop_copy,
 };
+use gtk4::glib::object::Cast as _;
+use gtk4::prelude::*;
 
 #[test]
 fn stop_copy_distinguishes_a_live_capture_from_a_discard() {
@@ -276,6 +276,8 @@ fn queue_row_resynced_after_picker_returns_to_form() {
     let toasts = std::rc::Rc::new(libadwaita::ToastOverlay::new());
     let (window, _, add_card) =
         crate::window::build_window(&app, manager.clone(), settings, toasts);
+    window.present();
+    drain_gtk_events();
 
     let nav = add_card.navigation();
     let picker_child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);

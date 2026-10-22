@@ -1,3 +1,5 @@
+use gtk4::glib::object::Cast as _;
+use gtk4::prelude::*;
 use crate::download::DownloadStatus;
 use crate::inline_add::{fmt_item_duration, playlist_count_label};
 use crate::media_types::PlaylistKind;

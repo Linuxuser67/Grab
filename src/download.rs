@@ -882,14 +882,14 @@ impl DownloadManager {
         id: u64,
         item: &DownloadItem,
         pl: &crate::media_types::PlaylistInfo,
-    ) -> (usize, usize) {
+    ) -> (usize, usize, usize) {
         let (quality, audio_only) = match self.video_source(id) {
             Some(crate::media_types::VideoSource::Page {
                 quality,
                 audio_only,
                 ..
             }) => (quality, audio_only),
-            _ => return (0, pl.total),
+            _ => return (0, pl.total, 0),
         };
         let dest_dir = self.resolve_dir(Some(&item.dest_dir()));
         let _batch = self.batch_guard();
@@ -900,15 +900,10 @@ impl DownloadManager {
         } else {
             dest_dir
         };
-        // A hostile collection must not exhaust the process-wide handoff-host
-        // policy with thousands of unique child hostnames. Limit newly seen
-        // child hosts for this one collection while allowing repeated hosts.
-        const MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION: usize = 64;
-        let parent_is_untrusted = url::Url::parse(&item.url())
-            .ok()
-            .and_then(|parsed| parsed.host_str().map(str::to_string))
-            .is_some_and(|host| crate::download_net::is_untrusted_handoff_host(&host));
+        // The shared network-policy helper enforces a collection-local host
+        // cap for untrusted browser handoffs and remembers accepted hosts.
         let mut guarded_child_hosts = HashSet::new();
+        let mut skipped_by_host_limit = 0usize;
         // One readdir for the whole expansion instead of one per entry.
         let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
         let mut added = 0;
@@ -918,33 +913,20 @@ impl DownloadManager {
             else {
                 continue;
             };
-            // Collection results are untrusted input. Cap their distinct hosts
-            // before registering them globally; once the cap is reached, skip
-            // further children from new hosts but continue accepting repeats.
-            let guarded_child_host = if parent_is_untrusted {
-                let Some(host) = url::Url::parse(&url)
-                    .ok()
-                    .and_then(|parsed| parsed.host_str().map(str::to_string))
-                else {
-                    continue;
-                };
-                let host = host.trim_end_matches('.').to_ascii_lowercase();
-                if !guarded_child_hosts.contains(&host)
-                    && guarded_child_hosts.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
-                {
+            // Collection results are untrusted input. Keep the shared helper
+            // responsible for both policy inheritance and the distinct-host
+            // limit, so picker and automatic expansion behave identically.
+            match crate::download_net::inherit_public_resolution_for_collection(
+                &item.url(),
+                &url,
+                &mut guarded_child_hosts,
+            ) {
+                Ok(()) => {}
+                Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
+                    skipped_by_host_limit += 1;
                     continue;
                 }
-                Some(host)
-            } else {
-                None
-            };
-            // Carry the parent's public-only network policy to each child
-            // before it can be queued.
-            if !crate::download_net::inherit_public_resolution(&item.url(), &url) {
-                continue;
-            }
-            if let Some(host) = guarded_child_host {
-                guarded_child_hosts.insert(host);
+                Err(crate::download_net::CollectionHostError::UnsafeDestination) => continue,
             }
             // Match the interactive picker: carry each entry's title into its
             // output filename, falling back to an entry URL slug when needed.
@@ -971,8 +953,9 @@ impl DownloadManager {
                 added += 1;
             }
         }
-        // Reported total, not attempted ("500 of 600").
-        (added, pl.total)
+        // Reported total, not attempted ("500 of 600"). Include a separate
+        // count for the security cap so the carrier row can explain omissions.
+        (added, pl.total, skipped_by_host_limit)
     }
 
     /// Re-queue one persisted entry, preserving its intent (paused/failed stay). Names restore verbatim to keep resume identity.
@@ -1662,9 +1645,31 @@ impl DownloadManager {
                             break;
                         }
                         // Playlist expansion runs on the main thread where queueing is legal; the new rows are the feedback.
-                        let (added, total) = this.expand_playlist_rows(id, &item, &pl);
+                        let (added, total, skipped_by_host_limit) =
+                            this.expand_playlist_rows(id, &item, &pl);
+                        let skipped_detail = || {
+                            ngettext(
+                                "{skipped} item skipped because the collection exceeded the limit of {limit} distinct hosts",
+                                "{skipped} items skipped because the collection exceeded the limit of {limit} distinct hosts",
+                                skipped_by_host_limit as u32,
+                            )
+                            .replace("{skipped}", &skipped_by_host_limit.to_string())
+                            .replace(
+                                "{limit}",
+                                &crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+                                    .to_string(),
+                            )
+                        };
                         if added == 0 {
-                            let e = crate::video_probe::playlist_resolve_error(None);
+                            let e = if skipped_by_host_limit > 0 {
+                                format!(
+                                    "{}; {}",
+                                    crate::video_probe::playlist_resolve_error(None),
+                                    skipped_detail()
+                                )
+                            } else {
+                                crate::video_probe::playlist_resolve_error(None)
+                            };
                             if item.status() != DownloadStatus::Cancelled
                                 && item.status() != DownloadStatus::Paused
                             {
@@ -1677,15 +1682,18 @@ impl DownloadManager {
                             && item.status() != DownloadStatus::Paused
                         {
                             item.set_status(DownloadStatus::Done);
-                            item.set_detail(
-                                ngettext(
-                                    "Expanded into {added} of {total} item",
-                                    "Expanded into {added} of {total} items",
-                                    added as u32,
-                                )
-                                .replace("{added}", &added.to_string())
-                                .replace("{total}", &total.to_string()),
-                            );
+                            let detail = ngettext(
+                                "Expanded into {added} of {total} item",
+                                "Expanded into {added} of {total} items",
+                                added as u32,
+                            )
+                            .replace("{added}", &added.to_string())
+                            .replace("{total}", &total.to_string());
+                            item.set_detail(if skipped_by_host_limit > 0 {
+                                format!("{detail}; {}", skipped_detail())
+                            } else {
+                                detail
+                            });
                             item.set_progress(1.0);
                             this.pending_names.borrow_mut().remove(&id);
                             this.server_mtime.borrow_mut().remove(&id);

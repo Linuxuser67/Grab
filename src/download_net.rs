@@ -430,6 +430,17 @@ static UNTRUSTED_HANDOFF_HOSTS: OnceLock<Mutex<std::collections::HashSet<String>
     OnceLock::new();
 const UNTRUSTED_HANDOFF_HOSTS_CAP: usize = 4096;
 
+/// Maximum number of distinct child hosts one untrusted collection may add.
+/// Keep this in the shared network-policy layer so the automatic and picker
+/// expansion paths apply the same cap.
+pub(crate) const MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CollectionHostError {
+    TooManyDistinctHosts,
+    UnsafeDestination,
+}
+
 fn host_key(host: &str) -> String {
     host.trim_matches(|c| c == '[' || c == ']')
         .trim_end_matches('.')
@@ -528,26 +539,52 @@ fn requires_public_dns_filter(host: &str) -> bool {
             .contains(&key)
 }
 
-/// Extend an untrusted collection's public-only policy to each queued child URL.
-/// Returns false if the child's host cannot be safely marked (private/local or
-/// the bounded policy set is full); callers must not enqueue that child.
-pub(crate) fn inherit_public_resolution(parent_url: &str, child_url: &str) -> bool {
+/// Extend an untrusted collection's public-only policy to a selected or
+/// expanded child. A collection-local host set enforces the same per-collection
+/// cap in both picker and automatic expansion flows.
+pub(crate) fn inherit_public_resolution_for_collection(
+    parent_url: &str,
+    child_url: &str,
+    seen_hosts: &mut std::collections::HashSet<String>,
+) -> Result<(), CollectionHostError> {
     let Some(parent) = url::Url::parse(parent_url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_string))
     else {
-        return true;
+        return Ok(());
     };
     if !is_untrusted_handoff_host(&parent) {
-        return true;
+        return Ok(());
     }
     let Some(child) = url::Url::parse(child_url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_string))
     else {
-        return false;
+        return Err(CollectionHostError::UnsafeDestination);
     };
-    require_public_resolution(&child)
+    let key = host_key(&child);
+    if !seen_hosts.contains(&key)
+        && seen_hosts.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+    {
+        return Err(CollectionHostError::TooManyDistinctHosts);
+    }
+    if !require_public_resolution(&child) {
+        return Err(CollectionHostError::UnsafeDestination);
+    }
+    // Insert only after the global handoff policy has accepted the hostname.
+    seen_hosts.insert(key);
+    Ok(())
+}
+
+/// Single-child convenience path for callers that are not expanding a
+/// collection; no collection-local limit applies.
+pub(crate) fn inherit_public_resolution(parent_url: &str, child_url: &str) -> bool {
+    inherit_public_resolution_for_collection(
+        parent_url,
+        child_url,
+        &mut std::collections::HashSet::new(),
+    )
+    .is_ok()
 }
 
 /// Drop private addresses from a DNS answer; a mixed answer keeps its public part.
@@ -783,6 +820,45 @@ mod tests {
         ));
         assert!(is_untrusted_handoff_host("example.com"));
         assert!(!is_untrusted_handoff_host("other-example.com"));
+        *lock_recover(cache) = previous;
+    }
+
+    #[test]
+    fn collection_host_limit_is_shared_and_counts_only_accepted_hosts() {
+        let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        let previous = {
+            let mut set = lock_recover(cache);
+            std::mem::take(&mut *set)
+        };
+        assert!(require_public_resolution("collection-limit.example"));
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
+            inherit_public_resolution_for_collection(
+                "https://collection-limit.example/list",
+                &format!("https://child-{i}.example/video"),
+                &mut seen,
+            )
+            .expect("each host below the limit should be accepted");
+        }
+        assert_eq!(seen.len(), MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION);
+        assert_eq!(
+            inherit_public_resolution_for_collection(
+                "https://collection-limit.example/list",
+                "https://too-many.example/video",
+                &mut seen,
+            ),
+            Err(CollectionHostError::TooManyDistinctHosts)
+        );
+        assert!(!is_untrusted_handoff_host("too-many.example"));
+        // Repeated hosts remain allowed after the limit; they do not consume
+        // another slot or become unguarded.
+        inherit_public_resolution_for_collection(
+            "https://collection-limit.example/list",
+            "https://child-0.example/another-video",
+            &mut seen,
+        )
+        .expect("an already-counted host should remain accepted");
+        assert_eq!(seen.len(), MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION);
         *lock_recover(cache) = previous;
     }
 

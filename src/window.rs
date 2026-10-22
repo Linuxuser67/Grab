@@ -703,11 +703,18 @@ pub fn build_window(
                     .visible_page_tag()
                     .is_some_and(|tag| tag.as_str() != "form");
                 stack.set_visible(!picker);
-                // Queue changes can occur while this stack is hidden. Reconcile
-                // once it becomes visible again so an enqueue whose refresh was
-                // missed while navigating cannot leave a blank queue until restart.
                 if !picker {
-                    sync();
+                    // Let the navigation transition settle before reconciling.
+                    // Queue changes can land while the stack is hidden, and the
+                    // first visible allocation must see the latest model.
+                    let stack = stack.clone();
+                    let sync = Rc::clone(&sync);
+                    glib::idle_add_local_once(move || {
+                        if stack.is_visible() {
+                            sync();
+                            stack.queue_resize();
+                        }
+                    });
                 }
             });
     }

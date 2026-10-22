@@ -921,7 +921,7 @@ impl DownloadManager {
             // Collection results are untrusted input. Cap their distinct hosts
             // before registering them globally; once the cap is reached, skip
             // further children from new hosts but continue accepting repeats.
-            if parent_is_untrusted {
+            let guarded_child_host = if parent_is_untrusted {
                 let Some(host) = url::Url::parse(&url)
                     .ok()
                     .and_then(|parsed| parsed.host_str().map(str::to_string))
@@ -934,12 +934,17 @@ impl DownloadManager {
                 {
                     continue;
                 }
-                guarded_child_hosts.insert(host);
-            }
+                Some(host)
+            } else {
+                None
+            };
             // Carry the parent's public-only network policy to each child
             // before it can be queued.
             if !crate::download_net::inherit_public_resolution(&item.url(), &url) {
                 continue;
+            }
+            if let Some(host) = guarded_child_host {
+                guarded_child_hosts.insert(host);
             }
             // Match the interactive picker: carry each entry's title into its
             // output filename, falling back to an entry URL slug when needed.

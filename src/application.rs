@@ -348,11 +348,10 @@ fn dispatch_handoff(
         && let Some(host) = uri.host_str()
         && !crate::download_net::is_local_or_private_host(host)
     {
-        // Only card-routed pages spawn extractors. Plain file and .torrent
-        // handoffs use Grab's guarded HTTP client and need no local proxy.
-        if handoff_goes_to_card(&uri)
-            && let Err(e) = crate::subprocess_proxy::validate_proxy_compatibility()
-        {
+        // Upstream proxies resolve targets themselves, bypassing Grab's DNS
+        // filter for both extractor and direct-file requests. Refuse every
+        // unconfirmed handoff while such a proxy is configured.
+        if let Err(e) = crate::subprocess_proxy::validate_proxy_compatibility() {
             toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
             answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
             return;

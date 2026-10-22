@@ -651,9 +651,11 @@ mod tests {
         );
         let mut args = vec!["--ignore-config".to_string(), "--".to_string(), url];
         let original = args.clone();
-        assert!(guard_untrusted_args(&mut args)
-            .expect("ordinary user-entered URLs need no guarded proxy")
-            .is_none());
+        assert!(
+            guard_untrusted_args(&mut args)
+                .expect("ordinary user-entered URLs need no guarded proxy")
+                .is_none()
+        );
         assert_eq!(args, original);
     }
 

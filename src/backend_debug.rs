@@ -42,11 +42,40 @@ pub fn log_command(cmd: &tokio::process::Command) {
     }
     let std_cmd = cmd.as_std();
     let program = std_cmd.get_program().to_string_lossy().into_owned();
-    let args: Vec<String> = std_cmd
-        .get_args()
-        .map(|a| redact_query_tokens(&a.to_string_lossy()))
-        .collect();
+    let mut args = Vec::new();
+    let mut redact_next_extractor_args = false;
+    for arg in std_cmd.get_args() {
+        let text = arg.to_string_lossy();
+        if redact_next_extractor_args {
+            args.push(redact_extractor_args(&text));
+            redact_next_extractor_args = false;
+        } else if text == "--extractor-args" {
+            args.push(text.into_owned());
+            redact_next_extractor_args = true;
+        } else if let Some(value) = text.strip_prefix("--extractor-args=") {
+            args.push(format!("--extractor-args={}", redact_extractor_args(value)));
+        } else {
+            args.push(redact_query_tokens(&text));
+        }
+    }
     eprintln!("[grab-backend] spawn: {program} {}", args.join(" "));
+}
+
+/// Hide all extractor-argument values in diagnostics. User settings may contain
+/// PO tokens or credentials that are not URL query parameters.
+fn redact_extractor_args(text: &str) -> String {
+    let Some((extractor, args)) = text.split_once(':') else {
+        return "(redacted)".to_string();
+    };
+    let args = args
+        .split(';')
+        .map(|entry| match entry.split_once('=') {
+            Some((key, _)) => format!("{key}=(redacted)"),
+            None => entry.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    format!("{extractor}:{args}")
 }
 
 /// Redact query strings and fragments from URL-shaped argument tokens before
@@ -107,6 +136,15 @@ pub fn echo_stderr(chunk: &[u8]) {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn extractor_argument_redaction_hides_token_values() {
+        assert_eq!(
+            redact_extractor_args("youtube:player_client=android;po_token=secret"),
+            "youtube:player_client=(redacted);po_token=(redacted)"
+        );
+        assert_eq!(redact_extractor_args("no-colon-secret"), "(redacted)");
+    }
 
     #[test]
     fn command_url_redaction_hides_signed_query_and_fragment() {

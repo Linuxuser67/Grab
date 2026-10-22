@@ -143,18 +143,19 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
         url.clone(),
         ctx.browser.clone(),
         ctx.newest_first,
-        ctx.proxy,
+        ctx.proxy.clone(),
         None,
     );
     // gallery-dl needs its auth first (handoff jar preferred); the export
     // runs while yt-dlp is already probing.
     let gallery_fut = async {
         let auth = resolve_gallery_auth(&url, &ctx.browser).await;
-        let r = crate::gallery_probe::probe_gallery(
+        let r = crate::gallery_probe::probe_gallery_with_proxy(
             &ctx.tool,
             &url,
             auth.cookies_path.as_deref(),
             auth.user_agent.as_deref(),
+            ctx.proxy.as_ref(),
         )
         .await;
         // The auth (and its staged jar) must outlive the probe.

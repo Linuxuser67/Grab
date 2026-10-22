@@ -101,18 +101,52 @@ pub(crate) fn video_domain(host: &str) -> bool {
         .any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
 
-/// Whether a resolved page carries anything fetchable: at least one
-/// plain-HTTPS or HLS-manifest format with a URL and no DRM. The dialog
-/// probe offers the video path for unlisted pages on this.
+/// True when a URL identifies an HTTPS HLS manifest, even if the model maps
+/// the extractor's protocol label to Unknown.
+pub(crate) fn https_m3u8_url(raw: &str) -> bool {
+    url::Url::parse(raw).is_ok_and(|u| {
+        u.scheme() == "https"
+            && u.host_str().is_some()
+            && u.path().to_ascii_lowercase().ends_with(".m3u8")
+    })
+}
+
+/// Only accept known direct HTTPS formats or a clearly identified HTTPS HLS manifest.
+/// Unknown protocols are not promoted to direct files: that could truncate DASH
+/// into a single fragment.
 pub fn has_fetchable_media(video: &Video) -> bool {
     video.formats.iter().any(|f| {
-        matches!(f.protocol, Protocol::Https | Protocol::M3U8Native)
-            && !matches!(f.has_drm, Some(DrmStatus::Yes))
-            && f.download_info
-                .url
-                .as_deref()
-                .is_some_and(|u| !u.trim().is_empty())
+        if matches!(f.has_drm, Some(DrmStatus::Yes)) {
+            return false;
+        }
+        let Some(raw) = f.download_info.url.as_deref() else {
+            return false;
+        };
+        if f.protocol == Protocol::M3U8Native {
+            return url::Url::parse(raw)
+                .is_ok_and(|u| u.scheme() == "https" && u.host_str().is_some());
+        }
+        if https_m3u8_url(raw) {
+            return true;
+        }
+        f.protocol == Protocol::Https
+            && url::Url::parse(raw).is_ok_and(|u| {
+                u.scheme() == "https"
+                    && u.host_str().is_some()
+                    && !u.path().to_ascii_lowercase().ends_with(".mpd")
+            })
     })
+}
+
+#[cfg(test)]
+mod raw_hls_url_tests {
+    use super::https_m3u8_url;
+    #[test]
+    fn recognizes_only_https_m3u8_manifests() {
+        assert!(https_m3u8_url("https://cdn.example/video.m3u8?token=abc"));
+        assert!(!https_m3u8_url("http://cdn.example/video.m3u8"));
+        assert!(!https_m3u8_url("https://cdn.example/video.mp4"));
+    }
 }
 
 /// Extraction result, kept deliberately small: the queue row needs the
@@ -234,7 +268,13 @@ fn best_direct_by_height(
     use std::collections::HashMap;
     let mut best: HashMap<u32, &Format> = HashMap::new();
     for f in formats {
-        if f.protocol != Protocol::Https {
+        if f.protocol != Protocol::Https
+            || f.download_info.url.as_deref().is_some_and(|raw| {
+                https_m3u8_url(raw)
+                    || url::Url::parse(raw)
+                        .is_ok_and(|u| u.path().to_ascii_lowercase().ends_with(".mpd"))
+            })
+        {
             continue;
         }
         if matches!(f.has_drm, Some(DrmStatus::Yes)) {
@@ -276,7 +316,9 @@ fn best_direct_by_height(
 /// to label-safe chars so bidi overrides or newlines can't spoof the dropdown.
 /// Pure.
 fn format_short_label(f: &Format) -> String {
-    if f.protocol == Protocol::M3U8Native {
+    if f.protocol == Protocol::M3U8Native
+        || f.download_info.url.as_deref().is_some_and(https_m3u8_url)
+    {
         return "HLS".to_string();
     }
     let raw = f.codec_info.video_codec.as_deref().unwrap_or("?");
@@ -408,13 +450,19 @@ impl HlsSel {
     /// playlist URL. The URL is validated but not stored — runners re-resolve
     /// by id. `pub(crate)` for the planner in `video_plan.rs`.
     pub(crate) fn from_format(f: &Format) -> Option<Self> {
-        if f.protocol != Protocol::M3U8Native {
-            return None;
-        }
         if matches!(f.has_drm, Some(DrmStatus::Yes)) {
             return None;
         }
-        f.download_info.url.clone().filter(|u| !u.is_empty())?;
+        let raw = f.download_info.url.as_deref()?;
+        let parsed = url::Url::parse(raw).ok()?;
+        if parsed.scheme() != "https" || parsed.host_str().is_none() {
+            return None;
+        }
+        // Native HLS can use opaque URLs; a generic protocol label is accepted
+        // only when the URL itself ends in .m3u8.
+        if f.protocol != Protocol::M3U8Native && !https_m3u8_url(raw) {
+            return None;
+        }
         Some(Self {
             format_id: f.format_id.clone(),
             height: f.video_resolution.height.filter(|&h| h > 0),

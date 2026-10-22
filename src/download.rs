@@ -2155,6 +2155,17 @@ impl DownloadManager {
             }
         };
 
+        let proxy = match DownloadOptions::from_settings(&self.settings).proxy_config() {
+            Ok(proxy) => proxy,
+            Err(e) => {
+                item.set_detail(e);
+                item.set_status(DownloadStatus::Failed);
+                self.changed();
+                self.start_next();
+                return;
+            }
+        };
+
         // Channel for progress/finished messages (tokio -> glib).
         #[derive(Debug)]
         enum GalleryMsg {
@@ -2205,13 +2216,14 @@ impl DownloadManager {
             } else {
                 None
             };
-            let result = crate::gallery_runner::run_gallery_download(
+            let result = crate::gallery_runner::run_gallery_download_with_proxy(
                 &job,
                 &tool,
                 handoff_path
                     .as_deref()
                     .or_else(|| cookies_file.as_ref().map(|c| c.path())),
                 handoff_ua.as_deref(),
+                proxy.as_ref(),
                 |update| {
                     let _ = tx.send(GalleryMsg::Progress(update));
                 },

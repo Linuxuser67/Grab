@@ -1738,11 +1738,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     glib::spawn_future_local(async move {
                         let url_for_count = url.clone();
                         let filter_c = filter;
-                        // Extract cookies_browser before spawn: AppSettings is !Send.
-                        let browser = crate::settings::AppSettings::new().cookies_browser();
+                        // Read settings before spawn: AppSettings is !Send.
+                        let count_settings = crate::settings::AppSettings::new();
+                        let browser = count_settings.cookies_browser();
+                        let proxy =
+                            crate::download::DownloadOptions::from_settings(&count_settings)
+                                .proxy_config();
                         // Run auth + count on Tokio worker (not GTK main).
                         let count_result = crate::runtime::tokio_rt()
                             .spawn(async move {
+                                let proxy = match proxy {
+                                    Ok(proxy) => proxy,
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "gallery count proxy invalid");
+                                        return None;
+                                    }
+                                };
                                 // Unified auth: handoff jar first, browser
                                 // export as fallback (was handoff-only: auth-
                                 // gated galleries could count zero here but
@@ -1753,12 +1764,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 )
                                 .await;
                                 if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                                    crate::gallery_probe::count_gallery_files(
+                                    crate::gallery_probe::count_gallery_files_with_proxy(
                                         &tool,
                                         &url_for_count,
                                         auth.cookies_path.as_deref(),
                                         auth.user_agent.as_deref(),
                                         filter_c,
+                                        proxy.as_ref(),
                                     )
                                     .await
                                 } else {
@@ -3210,7 +3222,10 @@ fn make_gallery_picker_opener(
         let dest3 = dest2.clone();
         let close3 = close2.clone();
         let scheduled3 = scheduled2.clone();
-        let browser3 = crate::settings::AppSettings::new().cookies_browser();
+        let picker_settings = crate::settings::AppSettings::new();
+        let browser3 = picker_settings.cookies_browser();
+        let proxy3 =
+            crate::download::DownloadOptions::from_settings(&picker_settings).proxy_config();
         glib::spawn_future_local(async move {
             let restore_btn = || {
                 step3.gallery_select_btn.set_sensitive(true);
@@ -3220,6 +3235,14 @@ fn make_gallery_picker_opener(
             // only logging: the user clicked a button and deserves feedback.
             let show_error = |msg: &str| {
                 step3.gallery_info.set_subtitle(msg);
+            };
+            let proxy3 = match proxy3 {
+                Ok(proxy) => proxy,
+                Err(e) => {
+                    restore_btn();
+                    show_error(&e);
+                    return;
+                }
             };
             let tool = match crate::gallery_argv::resolve_tool() {
                 Ok(t) => t,
@@ -3240,13 +3263,14 @@ fn make_gallery_picker_opener(
                 // list nothing here but download fine).
                 let auth =
                     crate::inline_gallery::resolve_gallery_auth(&url_c, browser3.as_str()).await;
-                let r = crate::gallery_probe::enumerate_gallery_files_streamed(
+                let r = crate::gallery_probe::enumerate_gallery_files_streamed_with_proxy(
                     &tool,
                     &url_c,
                     auth.cookies_path.as_deref(),
                     auth.user_agent.as_deref(),
                     filter,
                     items_tx,
+                    proxy3.as_ref(),
                 )
                 .await;
                 drop(auth);

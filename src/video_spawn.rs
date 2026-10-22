@@ -16,7 +16,33 @@ use std::time::Duration;
 use yt_dlp::client::deps::Libraries;
 use yt_dlp::model::Video;
 
-/// How long one metadata extraction may take before it counts as failed (never park the dialog on its spinner).
+/// Prepend Grab-managed tools to PATH without hiding system tools. gallery-dl may
+/// delegate HLS/DASH transfers to yt-dlp, which otherwise is invisible in Flatpak.
+pub(crate) fn prepend_user_lib_to_path(cmd: &mut tokio::process::Command) {
+    let mut paths = vec![crate::video_tools::user_lib_dir()];
+    if let Some(path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&path));
+    }
+    if let Ok(path) = std::env::join_paths(paths) {
+        cmd.env("PATH", path);
+    }
+}
+
+/// Propagate Grab's configured proxy to gallery-dl and delegated downloader processes.
+pub(crate) fn apply_configured_proxy_env(
+    cmd: &mut tokio::process::Command,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
+) {
+    if let Some(proxy) = proxy {
+        cmd.env("HTTP_PROXY", &proxy.cli_url)
+            .env("http_proxy", &proxy.cli_url)
+            .env("HTTPS_PROXY", &proxy.cli_url)
+            .env("https_proxy", &proxy.cli_url)
+            .env("NO_PROXY", &proxy.no_proxy_env)
+            .env("no_proxy", &proxy.no_proxy_env);
+    }
+}
+
 const FETCH_TIMEOUT_SECS: u64 = 60;
 
 /// Byte ceilings for drained child pipes (the timeout bounds time, not memory; stdout carries the JSON document).
@@ -304,15 +330,7 @@ pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let lib_dir = crate::video_tools::user_lib_dir();
-    let path = std::env::var_os("PATH").map(|p| {
-        let mut paths = vec![lib_dir];
-        paths.extend(std::env::split_paths(&p));
-        std::env::join_paths(paths).unwrap_or(p)
-    });
-    if let Some(path) = path {
-        cmd.env("PATH", path);
-    }
+    prepend_user_lib_to_path(&mut cmd);
     #[cfg(unix)]
     {
         cmd.process_group(0);

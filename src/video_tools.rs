@@ -610,7 +610,23 @@ pub(crate) const LIVE_DOWNLOADER_ARGS: &str =
 /// transient failure a chance to recover; this does not repair a corrupt body
 /// or renew an invalidated session. Keep the `ffmpeg_i:` scope: yt-dlp's bare
 /// `ffmpeg:` applies after `-i`.
-pub(crate) const LIVE_INPUT_DOWNLOADER_ARGS: &str = "ffmpeg_i:-seg_max_retry 3";
+/// fMP4 HLS URLs often end in .fmp4 while FFmpeg detects MOV/MP4.
+pub(crate) const LIVE_INPUT_DOWNLOADER_ARGS: &str = "ffmpeg_i:-allowed_extensions 3gp,aac,avi,ac3,eac3,flac,mkv,m3u8,m4a,m4s,m4v,mpg,mov,mp2,mp3,mp4,mpeg,mpegts,ogg,ogv,oga,ts,vob,vtt,wav,webvtt,cmfv,cmfa,ec3,fmp4 -seg_max_retry 3";
+
+pub(crate) fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bool {
+    let Ok(output) = std::process::Command::new(ffmpeg_bin)
+        .args(["-hide_banner", "-h", "demuxer=hls"])
+        .output()
+    else {
+        return false;
+    };
+    let help = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    help.contains("extension_picky")
+}
 
 /// `--postprocessor-args` value moving the moov atom to the front of merged
 /// mp4s so playback starts without a full scan. Scoped `Merger+ffmpeg` (per
@@ -1317,10 +1333,28 @@ pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
     Some(ytdlp_browser.to_string())
 }
 
-/// Shared trailing argv for every yt-dlp spawn: player-client workaround, JS
-/// runtime pin for YouTube, cookies, user agent, then the page URL
-/// behind `--`. One helper so these flags cannot drift between spawns (or let
-/// a hostile URL parse as a flag).
+/// Validate one extractor-specific KEY:ARGS entry. It is never shell-expanded,
+/// but control characters, malformed keys and oversized values are rejected.
+pub(crate) fn validated_ytdlp_extractor_args(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+        return None;
+    }
+    let (key, args) = value.split_once(':')?;
+    if key.is_empty()
+        || !key.as_bytes()[0].is_ascii_alphanumeric()
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        || args.trim().is_empty()
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+/// Shared trailing argv for every yt-dlp spawn: built-in/custom extractor args,
+/// JS runtime pin for YouTube, cookies, UA, then the page URL behind `--`.
 pub(crate) fn ytdlp_identity_args(
     cookies_browser: &str,
     user_agent: Option<&str>,
@@ -1332,8 +1366,35 @@ pub(crate) fn ytdlp_identity_args(
     // only enters yt-dlp's default rotation when a JS runtime is available
     // (e.g. quickjs on PATH), so exclude it everywhere. Scoped to the
     // youtube extractor: a no-op for other sites.
-    args.push("--extractor-args".to_string());
-    args.push("youtube:player_client=default,-web".to_string());
+    let extra_args =
+        validated_ytdlp_extractor_args(&crate::settings::AppSettings::new().ytdlp_extractor_args());
+    match extra_args {
+        Some(extra_args) => {
+            let (extractor, settings) = extra_args.split_once(':').expect("validated KEY:ARGS");
+            if extractor == "youtube" {
+                let overrides_player_client = settings
+                    .split(';')
+                    .filter_map(|entry| entry.split_once('='))
+                    .any(|(key, _)| key.trim() == "player_client");
+                let merged = if overrides_player_client {
+                    extra_args
+                } else {
+                    format!("youtube:player_client=default,-web;{settings}")
+                };
+                args.push("--extractor-args".to_string());
+                args.push(merged);
+            } else {
+                args.push("--extractor-args".to_string());
+                args.push("youtube:player_client=default,-web".to_string());
+                args.push("--extractor-args".to_string());
+                args.push(extra_args);
+            }
+        }
+        None => {
+            args.push("--extractor-args".to_string());
+            args.push("youtube:player_client=default,-web".to_string());
+        }
+    }
     // Pin quickjs-ng for YouTube (disabling other runtimes, since only deno is
     // on by default). Scoped to YouTube; skipped where quickjs-ng ships no
     // release, where yt-dlp keeps its own runtime discovery.
@@ -1354,6 +1415,26 @@ pub(crate) fn ytdlp_identity_args(
     args.push("--".to_string());
     args.push(page_url.to_string());
     args
+}
+
+#[cfg(test)]
+mod extractor_args_compat_tests {
+    use super::validated_ytdlp_extractor_args;
+    #[test]
+    fn accepts_site_specific_values() {
+        assert_eq!(
+            validated_ytdlp_extractor_args(" youtube:player_client=android ").as_deref(),
+            Some("youtube:player_client=android")
+        );
+        assert!(validated_ytdlp_extractor_args("instagram:api_version=sample").is_some());
+    }
+    #[test]
+    fn rejects_malformed_control_chars_and_oversized_values() {
+        assert!(validated_ytdlp_extractor_args("").is_none());
+        assert!(validated_ytdlp_extractor_args("--bad:flag").is_none());
+        assert!(validated_ytdlp_extractor_args("youtube:\nplayer_client=android").is_none());
+        assert!(validated_ytdlp_extractor_args(&"x".repeat(4097)).is_none());
+    }
 }
 
 /// First search dir holding a complete ffmpeg toolchain (`ffmpeg` plus `ffprobe`).

@@ -130,6 +130,7 @@ fn format_range(start: usize, end: usize) -> String {
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn download_argv(
     tool: &Path,
@@ -140,6 +141,31 @@ pub fn download_argv(
     filter: GalleryFilter,
     speed_limit: Option<u64>,
     range: Option<&str>,
+) -> Vec<String> {
+    download_argv_with_proxy(
+        tool,
+        url,
+        dest_dir,
+        cookies_file,
+        user_agent,
+        filter,
+        speed_limit,
+        range,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn download_argv_with_proxy(
+    tool: &Path,
+    url: &str,
+    dest_dir: &Path,
+    cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
+    filter: GalleryFilter,
+    speed_limit: Option<u64>,
+    range: Option<&str>,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Vec<String> {
     let mut argv = vec![
         tool.to_string_lossy().to_string(),
@@ -182,6 +208,8 @@ pub fn download_argv(
     }
     // Instagram rate-limits aggressively: throttle requests.
     argv.extend(instagram_throttle_args(url, true));
+    argv.extend(crate::video_argv::proxy_cli_args(proxy));
+    // Guarded browser handoffs reject configured proxies rather than bypassing public-address checks.
     // `--` guards against URLs starting with `-` being parsed as options.
     argv.push("--".to_string());
     argv.push(url.to_string());
@@ -197,12 +225,24 @@ pub fn is_instagram_url(url: &str) -> bool {
 /// Build the gallery-dl count argv (`-g` lists direct URLs, one per line).
 /// Build argv for counting files in a gallery (probe).
 /// Used by the gallery card UI to show "N files" before download.
+#[cfg(test)]
 pub fn count_argv(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
     user_agent: Option<&str>,
     filter: GalleryFilter,
+) -> Vec<String> {
+    count_argv_with_proxy(tool, url, cookies_file, user_agent, filter, None)
+}
+
+pub fn count_argv_with_proxy(
+    tool: &Path,
+    url: &str,
+    cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
+    filter: GalleryFilter,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Vec<String> {
     let mut argv = vec![
         tool.to_string_lossy().to_string(),
@@ -226,6 +266,7 @@ pub fn count_argv(
     // Instagram throttling for the extraction requests (no --sleep: count
     // doesn't download files).
     argv.extend(instagram_throttle_args(url, false));
+    argv.extend(crate::video_argv::proxy_cli_args(proxy));
     argv.push("--".to_string());
     argv.push(url.to_string());
     argv
@@ -484,6 +525,40 @@ mod tests {
                 .map(|pos| argv[pos..=pos + 1].to_vec())
                 .unwrap_or_default();
             assert_eq!(found, expected, "filter {filter:?}");
+        }
+    }
+
+    #[test]
+    fn proxy_argv_precedes_url_terminator_for_download_and_count() {
+        let proxy = crate::net_types::ResolvedProxy {
+            proxies: vec![reqwest::Proxy::all("http://127.0.0.1:8080").unwrap()],
+            cli_url: "http://127.0.0.1:8080".into(),
+            no_proxy_env: "localhost,127.0.0.1,::1".into(),
+            cache_key: "test".into(),
+        };
+        let a = download_argv_with_proxy(
+            &tool(),
+            "https://example.com/",
+            Path::new("/tmp/dest"),
+            None,
+            None,
+            GalleryFilter::All,
+            None,
+            None,
+            Some(&proxy),
+        );
+        let b = count_argv_with_proxy(
+            &tool(),
+            "https://example.com/",
+            None,
+            None,
+            GalleryFilter::All,
+            Some(&proxy),
+        );
+        for argv in [a, b] {
+            let end = argv.iter().position(|x| x == "--").unwrap();
+            assert_eq!(argv[end - 2], "--proxy");
+            assert_eq!(argv[end - 1], "http://127.0.0.1:8080");
         }
     }
 

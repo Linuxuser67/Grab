@@ -61,6 +61,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy
+      # Save this under the default-branch scope so tag-triggered release
+      # workflows can restore it; caches created by one release tag are not
+      # available to a different tag. The tarball job uses this exact key
+      # and path for its in-SDK cargo vendor step.
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cargo-home/registry
+          key: tarball-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            tarball-cargo-${{ runner.os }}-
+      - name: Use shared Cargo registry path
+        run: echo "CARGO_HOME=$GITHUB_WORKSPACE/.cargo-home" >> "$GITHUB_ENV"
       - run: cargo clippy --all-targets -- -D warnings
       # Serial: the suite shares one glib default MainContext across test
       # threads, and glib futures are bound to their spawning thread, so

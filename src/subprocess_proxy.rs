@@ -75,6 +75,7 @@ pub(crate) fn ensure_started() -> Result<String, String> {
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "guarded extractor proxy accept failed");
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
                     }
                 }

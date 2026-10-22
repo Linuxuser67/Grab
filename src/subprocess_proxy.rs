@@ -324,9 +324,7 @@ mod tests {
 
         let mut client = TcpStream::connect(addr).await.unwrap();
         client
-            .write_all(
-                b"POST http://example.com/upload HTTP/1.1\r\nContent-Length: 4\r\n\r\nbody",
-            )
+            .write_all(b"POST http://example.com/upload HTTP/1.1\r\nContent-Length: 4\r\n\r\nbody")
             .await
             .unwrap();
         read_tx.send(()).unwrap();

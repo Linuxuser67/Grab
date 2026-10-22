@@ -896,7 +896,14 @@ fn push_playlist_items_page(
         ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
     });
 
+    // Preserve this collection's accepted hosts across partial picker imports.
+    // Otherwise repeatedly clicking Queue could reset the cap and eventually
+    // register every host from a hostile playlist.
+    let guarded_child_hosts =
+        Rc::new(RefCell::new(std::collections::HashSet::new()));
+
     {
+        let guarded_child_hosts = guarded_child_hosts.clone();
         let close_card = close_card.clone();
         let grid = grid.clone();
         let add_btn_click = add_btn.clone();
@@ -971,23 +978,28 @@ fn push_playlist_items_page(
                 // download the first segment once per row). Attempted unconditionally:
                 // highlights and non-story URLs return None and keep the tray.
                 let mut failed: Option<String> = None;
-                let mut guarded_child_hosts = std::collections::HashSet::new();
                 let mut skipped_by_host_limit = 0usize;
                 for (i, item) in &chosen {
                     let item_page_url = crate::video_probe::story_segment_url(&page_url, &item.id)
                         .unwrap_or_else(|| item.page_url.clone());
-                    match crate::download_net::inherit_public_resolution_for_collection(
-                        &page_url,
-                        &item_page_url,
-                        &mut guarded_child_hosts,
-                    ) {
+                    let inheritance = {
+                        let mut seen_hosts = guarded_child_hosts.borrow_mut();
+                        crate::download_net::inherit_public_resolution_for_collection(
+                            &page_url,
+                            &item_page_url,
+                            &mut seen_hosts,
+                        )
+                    };
+                    match inheritance {
                         Ok(()) => {}
                         Err(
                             crate::download_net::CollectionHostError::TooManyDistinctHosts,
                         ) => {
                             skipped_by_host_limit += 1;
-                            // Keep this row selected so the user can remove it
-                            // after seeing why the picker could not queue it.
+                            // Keep the process-wide policy bounded across retries
+                            // and remove this row from the current selection so
+                            // the next Queue press doesn't retry it silently.
+                            grid.unselect(*i);
                             continue;
                         }
                         Err(crate::download_net::CollectionHostError::UnsafeDestination) => {

@@ -179,7 +179,7 @@ async fn run_video_download_inner(
     };
 
     // Dialog-less rows skip the picker, so refresh live-ness from resolve metadata: without this a live row takes the HLS VOD path and never reaches capture. Flipping the job field keeps every downstream use consistent.
-    if !job.is_live && video.is_live.unwrap_or(false) {
+    if !job.is_live && crate::video_types::yt_dlp_reports_currently_live(video.is_live, &video.live_status) {
         job.is_live = true;
         tx.send(EngineMsg::LiveDetected).ok();
     }

@@ -630,6 +630,15 @@ fn submit_probed_single(
     v: &crate::video::VideoInfo,
     scheduled_at: Option<i64>,
 ) {
+    let submitted_url = step.url_entry.text().to_string();
+    if !crate::download_net::inherit_public_resolution(&submitted_url, &v.page_url) {
+        show_video_error(
+            step,
+            &gettext("The resolved media page could not be verified as a public destination."),
+        );
+        set_lookup_add(lookup_add, true);
+        return;
+    }
     let typed = step.name.text().trim().to_string();
     let audio_only = selected_audio_only(step);
     // Default name from the video title and id; the intake sanitizes it.
@@ -713,6 +722,17 @@ fn submit_probe(
             );
         }
         crate::video::ProbeResult::Playlist(pl) => {
+            // Preserve the untrusted handoff policy if yt-dlp canonicalized
+            // the collection URL to another hostname.
+            let submitted_url = step.url_entry.text().to_string();
+            if !crate::download_net::inherit_public_resolution(&submitted_url, &pl.page_url) {
+                show_video_error(
+                    step,
+                    &gettext("The resolved collection could not be verified as a public destination."),
+                );
+                set_lookup_add(lookup_add, true);
+                return;
+            }
             // Collections queue through the item picker: one row per chosen
             // entry, each re-resolving its own page at download time. No
             // format choice here — pins don't apply across items.
@@ -952,6 +972,12 @@ fn push_playlist_items_page(
                 for (i, item) in &chosen {
                     let item_page_url = crate::video_probe::story_segment_url(&page_url, &item.id)
                         .unwrap_or_else(|| item.page_url.clone());
+                    if !crate::download_net::inherit_public_resolution(&page_url, &item_page_url) {
+                        failed = Some(gettext(
+                            "A selected item was rejected because its destination could not be verified as public.",
+                        ));
+                        break;
+                    }
                     let settings = manager.settings();
                     let name = default_name_for(settings, &item.title, false);
                     match manager.enqueue_video_staged(

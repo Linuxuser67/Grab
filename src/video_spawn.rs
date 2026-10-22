@@ -69,6 +69,7 @@ pub(crate) async fn fetch_raw_dump_json(
         cookies_browser,
         url,
     ));
+    let guarded_proxy = guard_untrusted_args(&mut args)?;
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin);
     // Belt-and-braces with the ProcessGroupGuard below (which SIGKILLs the
@@ -78,6 +79,7 @@ pub(crate) async fn fetch_raw_dump_json(
     cmd.kill_on_drop(true);
     cmd.args(&args);
     apply_proxy_env(&mut cmd, fetch_proxy);
+    apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     // Debug: log the full argv before spawning. as_std() captures everything
     // including ytdlp_command()'s --impersonate flag.
     crate::backend_debug::log_command(&cmd);
@@ -318,6 +320,54 @@ pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     cmd
 }
 
+/// Apply the guarded loopback proxy to argv whose initial page came from
+/// an untrusted browser handoff. The option must precede the `--` URL
+/// terminator or yt-dlp treats it as another URL.
+pub(crate) fn guard_untrusted_args(args: &mut Vec<String>) -> Result<Option<String>, VideoError> {
+    let Some(separator) = args.iter().position(|arg| arg == "--") else {
+        return Ok(None);
+    };
+    let Some(page_url) = args.get(separator + 1) else {
+        return Ok(None);
+    };
+    let Some(host) = url::Url::parse(page_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+    else {
+        return Ok(None);
+    };
+    if !crate::download_net::is_untrusted_handoff_host(&host) {
+        return Ok(None);
+    }
+    if args[..separator].iter().any(|arg| arg == "--proxy") {
+        return Err(VideoError::fetch(
+            "Cannot safely enforce public-address checks through a configured proxy",
+        ));
+    }
+    let proxy = crate::subprocess_proxy::ensure_started().map_err(VideoError::fetch)?;
+    args.splice(
+        separator..separator,
+        ["--proxy".to_string(), proxy.clone()],
+    );
+    Ok(Some(proxy))
+}
+
+/// Route yt-dlp's external FFmpeg downloader through the same HTTP proxy.
+/// yt-dlp's --proxy does not automatically cover every external downloader.
+pub(crate) fn apply_guarded_proxy_env(
+    cmd: &mut tokio::process::Command,
+    proxy: Option<&str>,
+) {
+    if let Some(proxy) = proxy {
+        cmd.env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .env("HTTP_PROXY", proxy)
+            .env("http_proxy", proxy)
+            .env("HTTPS_PROXY", proxy)
+            .env("https_proxy", proxy);
+    }
+}
+
 /// Spawn a `ytdlp_command` child and take its pipes.
 pub(crate) fn spawn_piped_ytdlp(
     mut cmd: tokio::process::Command,
@@ -353,14 +403,40 @@ pub(crate) fn drain_stderr_to_tail(
         let mut reader = tokio::io::BufReader::new(stderr);
         let mut tail = Vec::new();
         let mut pending = String::new();
+        // Redact complete stderr lines, not arbitrary read chunks: URLs and
+        // their query tokens can span reads. Drop overlong debug lines as a
+        // unit rather than risk printing a token fragment after the cap.
+        const MAX_DEBUG_LINE: usize = 64 * 1024;
+        let mut debug_line = Vec::new();
+        let mut discard_debug_line = false;
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    // Debug: echo raw stderr live. The bytes are still
-                    // captured below for parsing and the error tail.
-                    crate::backend_debug::echo_stderr(&buf[..n]);
+                    if crate::backend_debug::enabled() {
+                        for &byte in &buf[..n] {
+                            if byte == b'\n' {
+                                if discard_debug_line {
+                                    crate::backend_debug::echo_stderr(
+                                        b"[grab-backend] stderr line omitted (over limit)\n",
+                                    );
+                                } else {
+                                    debug_line.push(byte);
+                                    crate::backend_debug::echo_stderr(&debug_line);
+                                }
+                                debug_line.clear();
+                                discard_debug_line = false;
+                            } else if !discard_debug_line {
+                                if debug_line.len() >= MAX_DEBUG_LINE {
+                                    debug_line.clear();
+                                    discard_debug_line = true;
+                                } else {
+                                    debug_line.push(byte);
+                                }
+                            }
+                        }
+                    }
                     trace_format_lines(&mut pending, &buf[..n]);
                     tail.extend_from_slice(&buf[..n]);
                     if tail.len() > 8192 {
@@ -368,6 +444,9 @@ pub(crate) fn drain_stderr_to_tail(
                     }
                 }
             }
+        }
+        if crate::backend_debug::enabled() && !discard_debug_line && !debug_line.is_empty() {
+            crate::backend_debug::echo_stderr(&debug_line);
         }
         String::from_utf8_lossy(&tail).into_owned()
     })

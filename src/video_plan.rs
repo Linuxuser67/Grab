@@ -268,7 +268,11 @@ impl StreamSel {
         if matches!(f.has_drm, Some(DrmStatus::Yes)) {
             return Err(VideoError::unavailable());
         }
-        if f.download_info.url.is_none() {
+        // The extractor's protocol label is metadata, not proof of the
+        // transport used by the actual URL. Enforce HTTPS on both values.
+        if !f.download_info.url.as_deref().is_some_and(|raw| {
+            url::Url::parse(raw).is_ok_and(|url| url.scheme() == "https")
+        }) {
             return Err(VideoError::unavailable());
         }
         Ok(Self {

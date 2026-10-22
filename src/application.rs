@@ -339,10 +339,31 @@ fn dispatch_handoff(
         s.add_card.clone(),
         s.settings.clone(),
     );
-    if !handoff_should_confirm(via_grab, &uri, settings.auto_add_downloads()) {
-        if via_grab && let Some(host) = uri.host_str() {
-            crate::download_net::require_public_resolution(host);
+    let requires_confirmation =
+        handoff_should_confirm(via_grab, &uri, settings.auto_add_downloads());
+    // Only a browser handoff that skips confirmation is untrusted. Confirmed
+    // handoffs and user-entered URLs retain the normal proxy/resolver behavior.
+    if via_grab
+        && !requires_confirmation
+        && let Some(host) = uri.host_str()
+        && !crate::download_net::is_local_or_private_host(host)
+    {
+        // Reject before marking the hostname: without a chainable upstream
+        // proxy, destination pinning cannot be enforced safely through one.
+        if let Err(e) = crate::subprocess_proxy::validate_proxy_compatibility() {
+            toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+            answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
+            return;
         }
+        if !crate::download_net::require_public_resolution(host) {
+            toasts.add_toast(adw::Toast::new(&gettext(
+                "This browser handoff cannot be accepted safely: the safe-host limit was reached.",
+            )));
+            answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
+            return;
+        }
+    }
+    if !requires_confirmation {
         // Route async (remote torrent fetch needs to complete before ack).
         glib::spawn_future_local(async move {
             let routed = route_open_uri(manager, toasts, add_card, settings, uri).await;

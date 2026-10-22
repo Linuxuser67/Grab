@@ -894,6 +894,11 @@ impl DownloadManager {
             else {
                 continue;
             };
+            // Collection results are untrusted input. Carry the parent's
+            // public-only network policy to each child before it can be queued.
+            if !crate::download_net::inherit_public_resolution(&item.url(), &url) {
+                continue;
+            }
             // Match the interactive picker: carry each entry's title into its
             // output filename, falling back to an entry URL slug when needed.
             let remux = crate::video_prefs::remux_video_active(&self.settings.remux_video());
@@ -940,6 +945,18 @@ impl DownloadManager {
             ..
         } = stored;
         let url = normalize_url(raw_url)?;
+        // Legacy queues predate origin metadata. Preserve their established
+        // behavior; new rows persist an explicit value for browser handoffs.
+        let public_only = stored.public_only.unwrap_or(false);
+        if public_only {
+            let host = url::Url::parse(&url)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(str::to_string))
+                .ok_or_else(|| "Invalid guarded download URL".to_string())?;
+            if !crate::download_net::require_public_resolution(&host) {
+                return Err("Could not restore the guarded download because its host could not be verified as public".to_string());
+            }
+        }
         if !sane_filename(raw_filename) {
             return Err(format!("Invalid filename in queue: {raw_filename}"));
         }
@@ -953,6 +970,7 @@ impl DownloadManager {
             &filename,
             dest_dir,
         );
+        item.set_public_only(public_only);
         // Resumed rows requeue; only settled rows keep their status.
         // Scheduled rows keep their status and timestamp; overdue ones queue immediately.
         let now = glib::DateTime::now_local()
@@ -1013,6 +1031,18 @@ impl DownloadManager {
     ) -> Result<DownloadItem, String> {
         let mut job = job.ok_or_else(|| "gallery entry missing job".to_string())?;
         let url = normalize_url(&stored.url)?;
+        // Legacy queues predate origin metadata; only new rows can prove
+        // they came from a browser handoff.
+        let public_only = stored.public_only.unwrap_or(false);
+        if public_only {
+            let host = url::Url::parse(&url)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(str::to_string))
+                .ok_or_else(|| "Invalid guarded gallery URL".to_string())?;
+            if !crate::download_net::require_public_resolution(&host) {
+                return Err("Could not restore the guarded gallery because its host could not be verified as public".to_string());
+            }
+        }
         if !std::path::Path::new(&stored.dest_dir).is_absolute() {
             return Err(format!("Invalid destination in queue: {}", stored.dest_dir));
         }
@@ -1023,6 +1053,7 @@ impl DownloadManager {
         let id = self.claim_id(stored.id, std::path::Path::new(&stored.dest_dir));
         job.item_id = id;
         let item = DownloadItem::new(id, &url, &title, &stored.dest_dir);
+        item.set_public_only(public_only);
         item.set_is_gallery(true);
         let file_count = job.file_count.unwrap_or(0);
         item.set_gallery_file_count(file_count);
@@ -1063,6 +1094,13 @@ impl DownloadManager {
     }
 
     fn insert(self: &Rc<Self>, item: DownloadItem) -> DownloadItem {
+        if let Some(host) = url::Url::parse(&item.url())
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            && crate::download_net::is_untrusted_handoff_host(&host)
+        {
+            item.set_public_only(true);
+        }
         self.store.append(&item);
         self.persist_queue();
         self.changed();
@@ -3228,6 +3266,7 @@ impl DownloadManager {
                         let lm = it.last_modified();
                         (!lm.is_empty()).then_some(lm.to_string())
                     },
+                    public_only: Some(it.public_only()),
                     gallery,
                 });
             }

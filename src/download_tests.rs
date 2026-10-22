@@ -58,6 +58,7 @@ fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus)
         scheduled_at: None,
         etag: None,
         last_modified: None,
+        public_only: None,
         gallery: None,
     }
 }
@@ -124,6 +125,7 @@ fn drain_sizing(manager: &DownloadManager) {
 }
 
 fn test_settings() -> crate::settings::AppSettings {
+    crate::download_net::clear_public_resolution_for_tests();
     // SAFETY: single-threaded setup phase (cargo runs with --test-threads=1).
     unsafe {
         std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
@@ -553,6 +555,7 @@ fn overcap_queue_keeps_active_first() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            public_only: None,
             gallery: None,
         },
         StoredItem {
@@ -570,6 +573,7 @@ fn overcap_queue_keeps_active_first() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            public_only: None,
             gallery: None,
         },
     ];
@@ -589,6 +593,7 @@ fn overcap_queue_keeps_active_first() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            public_only: None,
             gallery: None,
         });
     }
@@ -1230,6 +1235,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            public_only: None,
             gallery: None,
         },
         StoredItem {
@@ -1247,6 +1253,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            public_only: None,
             gallery: None,
         },
     ];
@@ -1362,6 +1369,7 @@ fn mismatched_video_source_dropped_on_restore() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            public_only: None,
             gallery: None,
         }],
     };
@@ -1415,6 +1423,7 @@ fn done_video_keeps_page_source_on_restore() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            public_only: None,
             gallery: None,
         }],
     };
@@ -2728,6 +2737,7 @@ fn queue_roundtrip_and_mapping() {
                 scheduled_at: None,
                 etag: None,
                 last_modified: None,
+                public_only: None,
                 gallery: None,
             },
             StoredItem {
@@ -2745,6 +2755,7 @@ fn queue_roundtrip_and_mapping() {
                 scheduled_at: None,
                 etag: None,
                 last_modified: None,
+                public_only: None,
                 gallery: None,
             },
         ],
@@ -2916,6 +2927,7 @@ fn batch_restore_hundred_done() {
             scheduled_at: None,
             etag: None,
             last_modified: None,
+            public_only: None,
             gallery: None,
         })
         .collect();
@@ -3128,6 +3140,7 @@ fn restore_preserves_intent() {
         scheduled_at: None,
         etag: None,
         last_modified: None,
+        public_only: None,
         gallery: None,
     })
     .collect();
@@ -3847,6 +3860,7 @@ fn killed_segmented_resume_starts_over() {
                 scheduled_at: None,
                 etag: None,
                 last_modified: None,
+                public_only: None,
                 gallery: None,
             }],
         })
@@ -7024,6 +7038,7 @@ fn gallery_stored_item(status: DownloadStatus, job: Option<serde_json::Value>) -
         scheduled_at: None,
         etag: None,
         last_modified: None,
+        public_only: None,
         gallery: job,
     }
 }
@@ -7753,4 +7768,27 @@ fn delete_download_after_gallery_rename_trashes_renamed_folder() {
     let _ = std::fs::remove_dir_all(trash.join("files/renamed"));
     let _ = std::fs::remove_file(trash.join("info/renamed.trashinfo"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+#[test]
+fn restoring_public_only_row_reinstates_its_host_policy() {
+    let (_lock, _loop) = test_locks();
+    let queue_file = test_queue_file("public-only-restore");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let host = "public-only-restore.invalid";
+    let mut stored = stored_row(
+        &format!("https://{host}/file.mp4"),
+        "/tmp/dl",
+        "file.mp4",
+        DownloadStatus::Paused,
+    );
+    stored.public_only = Some(true);
+
+    let item = manager.restore_existing(&stored).expect("restore guarded row");
+    assert!(item.public_only());
+    assert!(crate::download_net::requires_public_resolution(host));
+
+    let _ = std::fs::remove_file(queue_file);
 }

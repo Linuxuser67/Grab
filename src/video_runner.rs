@@ -715,9 +715,12 @@ async fn run_ytdlp_attempt(
     timeout: Duration,
 ) -> Result<(Option<()>, Option<String>, Option<StopIntent>), VideoError> {
     use tokio::io::AsyncBufReadExt as _;
+    let mut guarded_argv = argv.to_vec();
+    let guarded_proxy = crate::video_spawn::guard_untrusted_args(&mut guarded_argv)?;
     let mut cmd = ytdlp_command(youtube_bin);
-    cmd.args(argv);
+    cmd.args(&guarded_argv);
     apply_proxy_env(&mut cmd, proxy);
+    crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let mut group = ProcessGroupGuard::new(&child);
     // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout: only silence does. The merge phase uses a generous wall-clock instead of the stall deadline (see `await_child`).

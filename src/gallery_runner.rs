@@ -105,7 +105,7 @@ pub async fn run_gallery_download(
     user_agent: Option<&str>,
     on_progress: impl Fn(GalleryProgressUpdate),
 ) -> Result<GalleryResult, GalleryError> {
-    let argv = download_argv(
+    let mut argv = download_argv(
         tool,
         &job.page_url,
         &job.dest_dir,
@@ -115,9 +115,34 @@ pub async fn run_gallery_download(
         job.speed_limit,
         job.range.as_deref(),
     );
+    let guarded_proxy = if let Some(host) = url::Url::parse(&job.page_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .filter(|host| crate::download_net::is_untrusted_handoff_host(host))
+    {
+        let proxy = crate::subprocess_proxy::ensure_started().map_err(GalleryError::probe)?;
+        let separator = argv.iter().position(|arg| arg == "--").unwrap_or(argv.len());
+        if argv[..separator].iter().any(|arg| arg == "--proxy") {
+            return Err(GalleryError::probe(
+                "Cannot safely enforce public-address checks through a configured proxy",
+            ));
+        }
+        argv.splice(separator..separator, ["--proxy".to_string(), proxy]);
+        Some(proxy)
+    } else {
+        None
+    };
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
+    if let Some(proxy) = guarded_proxy.as_deref() {
+        cmd.env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .env("HTTP_PROXY", proxy)
+            .env("http_proxy", proxy)
+            .env("HTTPS_PROXY", proxy)
+            .env("https_proxy", proxy);
+    }
     // Pipe stdout for progress parsing; pipe stderr for failure context
     // (drained in a separate task so gallery-dl can't block on a full pipe).
     cmd.stdout(std::process::Stdio::piped());

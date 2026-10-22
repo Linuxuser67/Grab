@@ -305,11 +305,21 @@ async fn stage_cookie_file(
     // Both cookie sources are intentional here: `--cookies` is this export's
     // output file and `--cookies-from-browser` is what fills it, so this spawn
     // must not use the handoff-aware ytdlp_spawn_identity.
-    cmd.args(crate::video_tools::ytdlp_identity_args(
+    let mut identity_args = crate::video_tools::ytdlp_identity_args(
         cookies_browser,
         None,
         page_url,
-    ));
+    );
+    let guarded_proxy = match crate::video_spawn::guard_untrusted_args(&mut identity_args) {
+        Ok(guarded) => guarded,
+        Err(e) => {
+            tracing::debug!(error = %e, "refusing cookie export without guarded extractor networking");
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+    };
+    cmd.args(&identity_args);
+    crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());

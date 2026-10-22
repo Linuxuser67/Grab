@@ -989,7 +989,7 @@ fn push_playlist_items_page(
                         crate::download_net::inherit_public_resolution_for_collection(
                             &page_url,
                             &item_page_url,
-                            &mut *seen_hosts,
+                            &mut seen_hosts,
                         )
                     };
                     match inheritance {

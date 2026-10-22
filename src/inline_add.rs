@@ -996,10 +996,9 @@ fn push_playlist_items_page(
                             crate::download_net::CollectionHostError::TooManyDistinctHosts,
                         ) => {
                             skipped_by_host_limit += 1;
-                            // Keep the process-wide policy bounded across retries
-                            // and remove this row from the current selection so
-                            // the next Queue press doesn't retry it silently.
-                            grid.unselect(*i);
+                            // Keep the process-wide policy bounded across retries.
+                            // Leave the row selected so the user can deselect it
+                            // after reading the explanation below the picker.
                             continue;
                         }
                         Err(crate::download_net::CollectionHostError::UnsafeDestination) => {

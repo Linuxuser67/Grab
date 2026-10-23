@@ -895,7 +895,6 @@ pub(crate) async fn download_to_file(
 /// Stream a download body into `dest`, enforcing the size cap while
 /// streaming instead of buffering the whole body up front: a compromised
 /// endpoint must not be able to fill memory or disk before we notice.
-/// (Currently only the quickjs download uses this helper.)
 /// Split from `download_to_file` so the cap is pinnable with a synthetic
 /// stream — pushing 8 MiB through a loopback test server proved flaky.
 async fn write_capped_stream<S, B, E>(

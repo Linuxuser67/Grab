@@ -7407,6 +7407,16 @@ fn gallery_cancelled_not_persisted() {
 }
 
 #[test]
+fn queue_serializes_compact() {
+    let (_lock, _loop) = test_locks();
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let json = m.serialize_queue().unwrap();
+    // Compact output keeps large queues under the 10 MB restore cap longer.
+    assert!(!json.contains('\n'));
+}
+
+#[test]
 fn gallery_legacy_backend_converts() {
     let (_lock, _loop) = test_locks();
     // Pre-B4 row: video_source with backend "gallerydl", no gallery field.

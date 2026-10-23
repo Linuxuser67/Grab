@@ -1266,7 +1266,8 @@ impl DownloadManager {
         // Startup restore runs asynchronously in production. Don't start a newly
         // queued URL before persisted active rows have been inserted, or we can
         // briefly exceed the configured concurrency limit.
-        if self.restore_pending.get() || !self.restore_complete.get() || self.shutdown_started.get() {
+        if self.restore_pending.get() || !self.restore_complete.get() || self.shutdown_started.get()
+        {
             return;
         }
         // Prune finished discard finalizers so the registry doesn't grow per removed row.
@@ -3579,9 +3580,10 @@ impl DownloadManager {
                         // Keep the start/persist gates closed until the entire
                         // model apply and its staging sweeps have completed.
                         manager.restore_dirty.set(false);
-                        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            manager.apply_restored_queue(pending)
-                        }));
+                        let applied =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                manager.apply_restored_queue(pending)
+                            }));
                         if let Err(payload) = applied {
                             let message = payload
                                 .downcast_ref::<String>()

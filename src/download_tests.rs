@@ -6604,9 +6604,15 @@ fn scheduler_starts_and_stops() {
         .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
         .unwrap();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let future = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(1)
+        .unwrap()
+        .to_unix();
+    let _item = schedule_test_item(&m, future);
     m.start_scheduler();
     assert!(m.scheduler_source.borrow().is_some());
-    // Idempotent: a second start must not install a second timer.
+    // Repeated starts keep one scheduled wake armed.
     m.start_scheduler();
     m.stop_scheduler();
     assert!(m.scheduler_source.borrow().is_none());
@@ -6620,6 +6626,12 @@ fn toggling_preference_stops_and_restarts_scheduler() {
         .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
         .unwrap();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+    let future = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(1)
+        .unwrap()
+        .to_unix();
+    let _item = schedule_test_item(&m, future);
     m.start_scheduler();
     assert!(m.scheduler_source.borrow().is_some());
     settings
@@ -6627,7 +6639,7 @@ fn toggling_preference_stops_and_restarts_scheduler() {
         .unwrap();
     assert!(
         m.scheduler_source.borrow().is_none(),
-        "disabling the preference removes the 30s timer"
+        "disabling the preference removes the scheduled wake"
     );
     settings
         .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
@@ -6643,17 +6655,23 @@ fn dropping_manager_removes_scheduler_source() {
         .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
         .unwrap();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let future = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(1)
+        .unwrap()
+        .to_unix();
+    let _item = schedule_test_item(&m, future);
     m.start_scheduler();
-    // Grab the live Source object before dropping the manager.
+    // Grab the live one-shot Source before dropping the manager.
     let source = {
         let borrow = m.scheduler_source.borrow();
-        let id = borrow.as_ref().expect("scheduler source installed");
+        let id = borrow.as_ref().expect("scheduled wake installed");
         glib::MainContext::default()
             .find_source_by_id(id)
             .expect("source present in context")
     };
     drop(m);
-    // Drop must remove the 30s tick; a leaked source would survive in the
+    // Drop must remove the scheduled wake; a leaked source would survive in the
     // context and trip a later test's thread guard when dispatched.
     assert!(
         source.is_destroyed(),

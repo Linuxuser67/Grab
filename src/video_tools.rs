@@ -1587,8 +1587,7 @@ pub(crate) enum ToolProbeError {
 
 /// Upper bound for version probes: long enough for cold Python startup, but
 /// prevents a wedged executable from keeping previews/preferences pending forever.
-pub(crate) const TOOL_PROBE_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(30);
+pub(crate) const TOOL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A child JoinHandle that is aborted if its awaiting future is dropped.
 /// Tokio normally detaches a JoinHandle on drop; this wrapper propagates caller
@@ -1735,7 +1734,11 @@ async fn run_version_probe_uncached(
         return Err(ToolProbeError::FailedExit);
     }
     let text = String::from_utf8(output.stdout).map_err(|_| ToolProbeError::InvalidOutput)?;
-    let first = text.lines().next().ok_or(ToolProbeError::EmptyOutput)?.trim();
+    let first = text
+        .lines()
+        .next()
+        .ok_or(ToolProbeError::EmptyOutput)?
+        .trim();
     if first.is_empty() {
         return Err(ToolProbeError::EmptyOutput);
     }
@@ -1897,12 +1900,9 @@ mod tests {
         write_test_script(&binary, "#!/bin/sh\nsleep 5\nprintf 'never-reached\\n'\n");
 
         let start = std::time::Instant::now();
-        let result = run_version_probe_uncached(
-            &binary,
-            "--version",
-            std::time::Duration::from_millis(50),
-        )
-        .await;
+        let result =
+            run_version_probe_uncached(&binary, "--version", std::time::Duration::from_millis(50))
+                .await;
         assert_eq!(result, Err(ToolProbeError::Timeout));
         assert!(
             start.elapsed() < std::time::Duration::from_secs(2),

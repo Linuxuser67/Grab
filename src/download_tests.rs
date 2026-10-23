@@ -6679,6 +6679,32 @@ fn dropping_manager_removes_scheduler_source() {
     );
 }
 
+#[test]
+fn shutdown_stops_scheduler_and_preserves_future_schedule() {
+    let settings = test_settings();
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
+        .unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let due = glib::DateTime::now_local()
+        .unwrap()
+        .add_seconds(30.0)
+        .unwrap()
+        .to_unix();
+    let item = schedule_test_item(&m, due);
+    m.start_scheduler();
+    assert!(m.scheduler_source.borrow().is_some());
+
+    m.shutdown();
+
+    assert!(
+        m.scheduler_source.borrow().is_none(),
+        "shutdown must remove scheduled wakeups before joining workers"
+    );
+    assert_eq!(item.status(), DownloadStatus::Scheduled);
+    assert_eq!(item.scheduled_at(), due);
+}
+
 /// If-Range header is sent when the session validator is set.
 /// The fixture server logs the If-Range header; we assert it matches.
 #[test]

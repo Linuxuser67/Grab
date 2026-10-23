@@ -22,6 +22,9 @@ pub enum VideoError {
     /// The page could not be extracted (wrong URL, offline, …). Retryable.
     #[error("{0}")]
     Fetch(String),
+    /// A tool was present but its version command exceeded the probe deadline.
+    #[error("{0}")]
+    ToolProbeTimeout(String),
     /// Background task machinery failed (panic/join) — internal.
     #[error("{0}")]
     Runtime(String),
@@ -37,6 +40,14 @@ pub enum VideoError {
 impl VideoError {
     pub(crate) fn missing_tools() -> Self {
         Self::MissingLibraries(gettext("Media downloads need the yt-dlp support tools"))
+    }
+    pub(crate) fn tool_probe_failure(error: ToolProbeError) -> Self {
+        match error {
+            ToolProbeError::Timeout => Self::ToolProbeTimeout(gettext(
+                "Checking the media support tools timed out. Please try again.",
+            )),
+            _ => Self::missing_tools(),
+        }
     }
     pub(crate) fn fetch(e: impl std::fmt::Display) -> Self {
         Self::Fetch(
@@ -1548,7 +1559,10 @@ pub async fn latest_quickjs_release() -> Option<(String, Option<String>)> {
 }
 
 /// Shared cached version probe used by the download-time toolchain guard.
-async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<String> {
+async fn tool_first_line(
+    binary: PathBuf,
+    version_arg: &'static str,
+) -> Result<String, ToolProbeError> {
     probe_first_line(&binary, version_arg).await
 }
 
@@ -1559,6 +1573,22 @@ pub(crate) fn extractor_failure(log: &str) -> bool {
         .iter()
         .any(|marker| log.contains(marker))
 }
+
+/// Why an installed tool's version probe did not return a version line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolProbeError {
+    Spawn,
+    FailedExit,
+    EmptyOutput,
+    InvalidOutput,
+    Timeout,
+    Runtime,
+}
+
+/// Upper bound for version probes: long enough for cold Python startup, but
+/// prevents a wedged executable from keeping previews/preferences pending forever.
+pub(crate) const TOOL_PROBE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
 
 /// A child JoinHandle that is aborted if its awaiting future is dropped.
 /// Tokio normally detaches a JoinHandle on drop; this wrapper propagates caller
@@ -1601,7 +1631,10 @@ static TOOL_VERSION_PROBE_LOCKS: OnceLock<
 /// Run `binary version_arg` asynchronously and return the first output line.
 /// Successful results are cached by path, argument, modification time and size.
 /// A per-key async lock ensures simultaneous callers share one cold probe.
-pub(crate) async fn probe_first_line(binary: &Path, version_arg: &str) -> Option<String> {
+pub(crate) async fn probe_first_line(
+    binary: &Path,
+    version_arg: &str,
+) -> Result<String, ToolProbeError> {
     let binary = binary.to_path_buf();
     let version_arg = version_arg.to_owned();
     if tokio::runtime::Handle::try_current().is_ok() {
@@ -1612,12 +1645,14 @@ pub(crate) async fn probe_first_line(binary: &Path, version_arg: &str) -> Option
                 .spawn(async move { cached_tool_first_line(binary, version_arg).await }),
         )
         .await
-        .ok()
-        .flatten()
+        .map_err(|_| ToolProbeError::Runtime)?
     }
 }
 
-async fn cached_tool_first_line(binary: PathBuf, version_arg: String) -> Option<String> {
+async fn cached_tool_first_line(
+    binary: PathBuf,
+    version_arg: String,
+) -> Result<String, ToolProbeError> {
     let key = (binary.clone(), version_arg.clone());
     let probe_lock = {
         let locks = TOOL_VERSION_PROBE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -1639,12 +1674,12 @@ async fn cached_tool_first_line(binary: PathBuf, version_arg: String) -> Option<
         if let Some(entry) = cache.get(&key)
             && entry.stamp == stamp
         {
-            return Some(entry.line.clone());
+            return Ok(entry.line.clone());
         }
         cache.remove(&key);
     }
 
-    let line = run_version_probe_uncached(&binary, &version_arg).await?;
+    let line = run_version_probe_uncached(&binary, &version_arg, TOOL_PROBE_TIMEOUT).await?;
     // Don't cache a result if the executable was replaced while the child ran
     // or the path no longer has a verifiable file stamp.
     let after = impersonate_stamp(&binary);
@@ -1662,13 +1697,16 @@ async fn cached_tool_first_line(binary: PathBuf, version_arg: String) -> Option<
             },
         );
     }
-    Some(line)
+    Ok(line)
 }
 
-/// Run the actual version command. No deadline is imposed: a slow cold start
-/// can finish rather than being misreported as missing media tools. The child
-/// is kill-on-drop, so cancelling the owning future stops the process.
-async fn run_version_probe_uncached(binary: &Path, version_arg: &str) -> Option<String> {
+/// Run a version command. Waiting is asynchronous, but a defensive deadline
+/// still distinguishes a slow/hung installed binary from a genuinely missing tool.
+async fn run_version_probe_uncached(
+    binary: &Path,
+    version_arg: &str,
+    timeout: std::time::Duration,
+) -> Result<String, ToolProbeError> {
     use std::process::Stdio;
 
     let mut command = tokio::process::Command::new(binary);
@@ -1678,14 +1716,30 @@ async fn run_version_probe_uncached(binary: &Path, version_arg: &str) -> Option<
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let child = command.spawn().ok()?;
-    let output = child.wait_with_output().await.ok()?;
-    if !output.status.success() {
-        return None;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.as_std_mut().process_group(0);
     }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let first = text.lines().next()?.trim();
-    (!first.is_empty()).then(|| first.to_owned())
+    let child = command.spawn().map_err(|_| ToolProbeError::Spawn)?;
+    let pid = child.id().unwrap_or_default();
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(_)) => return Err(ToolProbeError::FailedExit),
+        Err(_) => {
+            kill_probe_group(pid);
+            return Err(ToolProbeError::Timeout);
+        }
+    };
+    if !output.status.success() {
+        return Err(ToolProbeError::FailedExit);
+    }
+    let text = String::from_utf8(output.stdout).map_err(|_| ToolProbeError::InvalidOutput)?;
+    let first = text.lines().next().ok_or(ToolProbeError::EmptyOutput)?.trim();
+    if first.is_empty() {
+        return Err(ToolProbeError::EmptyOutput);
+    }
+    Ok(first.to_owned())
 }
 
 /// Display-ready version line for an installed yt-dlp or QuickJS binary.
@@ -1695,7 +1749,7 @@ pub(crate) async fn tool_display_version(
     binary: PathBuf,
     version_arg: &'static str,
 ) -> Option<String> {
-    let line = tool_first_line(binary.clone(), version_arg).await?;
+    let line = tool_first_line(binary.clone(), version_arg).await.ok()?;
     if binary
         .file_name()
         .is_some_and(|n| n.to_string_lossy().starts_with("yt-dlp"))
@@ -1720,12 +1774,12 @@ pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, St
         tool_first_line(libs.youtube.clone(), "--version"),
         tool_first_line(libs.ffmpeg.clone(), "-version")
     );
-    let yt = yt.ok_or_else(VideoError::missing_tools)?;
+    let yt = yt.map_err(VideoError::tool_probe_failure)?;
     let fresh = parse_dotted_version(&yt).is_some_and(|v| v >= MIN_YTDLP_VERSION);
     if !fresh {
         return Err(VideoError::outdated());
     }
-    let ff = ff.ok_or_else(VideoError::missing_tools)?;
+    let ff = ff.map_err(VideoError::tool_probe_failure)?;
     // ffmpeg version line looks like "ffmpeg version 7.1.2 ...": take the token
     // right after "version". A find_map over all tokens would match "2000-2025"
     // in git builds ("ffmpeg version N-... Copyright (c) 2000-2025") as 2000.

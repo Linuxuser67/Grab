@@ -6681,6 +6681,7 @@ fn dropping_manager_removes_scheduler_source() {
 
 #[test]
 fn shutdown_stops_scheduler_and_preserves_future_schedule() {
+    let queue_file = test_queue_file("shutdown-scheduler");
     let settings = test_settings();
     settings
         .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
@@ -6703,6 +6704,7 @@ fn shutdown_stops_scheduler_and_preserves_future_schedule() {
     );
     assert_eq!(item.status(), DownloadStatus::Scheduled);
     assert_eq!(item.scheduled_at(), due);
+    let _ = std::fs::remove_file(queue_file);
 }
 
 /// If-Range header is sent when the session validator is set.

@@ -135,35 +135,77 @@ pub(crate) async fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAut
 /// export step, so it starts immediately; gallery-dl resolves its auth first
 /// (`resolve_gallery_auth`).
 pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
+    let started = std::time::Instant::now();
     let url = ctx.url.to_string();
-    // yt-dlp starts immediately: it uses the handoff jar or
-    // --cookies-from-browser, not the exported file below.
-    let ytdlp_fut = crate::video::fetch_video_infos(
-        ctx.libs,
-        url.clone(),
-        ctx.browser.clone(),
-        ctx.newest_first,
-        ctx.proxy.clone(),
-        None,
-    );
-    // gallery-dl needs its auth first (handoff jar preferred); the export
-    // runs while yt-dlp is already probing.
+    let browser = ctx.browser;
+    let proxy = ctx.proxy;
+    let tool = ctx.tool;
+    let libs = ctx.libs;
+    let newest_first = ctx.newest_first;
+
+    // Keep both probes: yt-dlp resolves video and playlist metadata while
+    // gallery-dl determines whether the URL also exposes a selectable gallery.
+    let ytdlp_browser = browser.clone();
+    let ytdlp_proxy = proxy.clone();
+    let ytdlp_fut = async {
+        let phase_started = std::time::Instant::now();
+        let result = crate::video::fetch_video_infos(
+            libs,
+            url.clone(),
+            ytdlp_browser,
+            newest_first,
+            ytdlp_proxy,
+            None,
+        )
+        .await;
+        tracing::info!(
+            elapsed_ms = phase_started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "yt-dlp URL lookup completed"
+        );
+        result
+    };
+
+    // Auth preparation is timed separately because exporting browser cookies
+    // may be a substantial fraction of lookup latency on some configurations.
     let gallery_fut = async {
-        let auth = resolve_gallery_auth(&url, &ctx.browser).await;
-        let r = crate::gallery_probe::probe_gallery_with_proxy(
-            &ctx.tool,
+        let auth_started = std::time::Instant::now();
+        let auth = resolve_gallery_auth(&url, &browser).await;
+        tracing::info!(
+            elapsed_ms = auth_started.elapsed().as_millis() as u64,
+            has_cookies = auth.cookies_path.is_some(),
+            has_user_agent = auth.user_agent.is_some(),
+            "gallery-dl authentication preparation completed"
+        );
+
+        let probe_started = std::time::Instant::now();
+        let result = crate::gallery_probe::probe_gallery_with_proxy(
+            &tool,
             &url,
             auth.cookies_path.as_deref(),
             auth.user_agent.as_deref(),
-            ctx.proxy.as_ref(),
+            proxy.as_ref(),
         )
         .await;
         // The auth (and its staged jar) must outlive the probe.
         drop(auth);
-        r
+        tracing::info!(
+            elapsed_ms = probe_started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            has_items = matches!(&result, Ok(Some(items)) if !items.is_empty()),
+            "gallery-dl URL lookup completed"
+        );
+        result
     };
 
     let (ytdlp, gallery) = tokio::join!(ytdlp_fut, gallery_fut);
+    tracing::info!(
+        host = %crate::video_probe::page_host(&url),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        ytdlp_success = ytdlp.is_ok(),
+        gallery_success = gallery.is_ok(),
+        "dual-backend URL lookup completed"
+    );
     DualProbeOutcome::Complete { gallery, ytdlp }
 }
 

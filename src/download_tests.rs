@@ -6625,10 +6625,7 @@ fn async_shutdown_preserves_queue_file_if_restore_never_completed() {
     let saved = br#"{"version":7,"items":[{"sentinel":"keep"}]}"#;
     std::fs::write(&queue_file, saved).unwrap();
 
-    let manager = DownloadManager::new(
-        gio::ListStore::new::<DownloadItem>(),
-        test_settings(),
-    );
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
     // Simulate a worker/apply failure: the in-memory model is not authoritative.
     manager.restore_complete.set(false);
     manager.restore_pending.set(false);

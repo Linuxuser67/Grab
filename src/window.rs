@@ -583,7 +583,7 @@ pub fn build_window(
             // Only hide to background while bytes are actually moving; paused
             // items (or none) quit normally, since "continues in the
             // background" would be a lie with nothing transferring.
-            if m.has_transferring() {
+            if m.has_transferring() && !m.is_shutting_down() {
                 win.set_visible(false);
                 request_background();
                 if m.background_notifications_enabled()

@@ -7060,9 +7060,9 @@ fn live_capture_argv_pins_ffmpeg_location() {
         true,
     );
     assert!(
-        enabled.iter().any(|arg| {
-            arg.starts_with("ffmpeg_i:") && arg.contains("-extension_picky 0")
-        }),
+        enabled
+            .iter()
+            .any(|arg| { arg.starts_with("ffmpeg_i:") && arg.contains("-extension_picky 0") }),
         "supported FFmpeg must receive the relaxed HLS extension check"
     );
 }

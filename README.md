@@ -93,14 +93,16 @@ Undo with `flatpak override --user --reset io.github.linuxuser67.Grab`.
 
 ### Media tool installs
 
-Grab fetches yt-dlp and gallery-dl from upstream GitHub releases.
-Flatpak builds provision the latest stable Deno release for YouTube extraction;
+Grab fetches yt-dlp and Deno from upstream GitHub releases and the stable
+gallery-dl Linux executable from the official Codeberg releases. Flatpak
+builds provision the latest stable Deno release for YouTube extraction;
 tarball/dev builds require a supported Deno installation. Preferences → Check
 for Updates keeps these tools current. FFmpeg and ffprobe are resolved from
 `/app/bin` or the GNOME runtime on Flatpak, or from system `PATH` on other
-builds. Grab does not download or update FFmpeg. Each downloaded tool is
-verified against the SHA-256 digest published in the same GitHub release
-before installation; a missing digest refuses the install.
+builds. Grab does not download or update FFmpeg. yt-dlp and Deno are verified
+against the SHA-256 digests published in their release metadata; gallery-dl is
+verified against the official `SHA256SUMS` file attached to its Codeberg
+release. A missing or invalid digest refuses the install.
 
 That digest detects corrupted or truncated downloads, not a compromised
 release — it shares the release's trust root. If you need a separate trust

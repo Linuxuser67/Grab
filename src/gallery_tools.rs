@@ -13,8 +13,7 @@ use crate::video_tools::{download_to_file, ensure_lib_dir, user_lib_dir};
 const GALLERYDL_MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const CODEBERG_RELEASE_API: &str =
     "https://codeberg.org/api/v1/repos/mikf/gallery-dl/releases/latest";
-const CODEBERG_RELEASES_BASE: &str =
-    "https://codeberg.org/mikf/gallery-dl/releases/download";
+const CODEBERG_RELEASES_BASE: &str = "https://codeberg.org/mikf/gallery-dl/releases/download";
 /// Asset names used by stable Codeberg releases.
 const LINUX_ASSET: &str = "gallery-dl.bin";
 const CHECKSUMS_ASSET: &str = "SHA256SUMS";
@@ -134,9 +133,9 @@ fn parse_codeberg_release_metadata(body: &str) -> Option<(String, String, String
     let assets = release.get("assets")?.as_array()?;
 
     let asset_url = |name: &str, expected: &str| -> Option<String> {
-        let asset = assets.iter().find(|asset| {
-            asset.get("name").and_then(serde_json::Value::as_str) == Some(name)
-        })?;
+        let asset = assets
+            .iter()
+            .find(|asset| asset.get("name").and_then(serde_json::Value::as_str) == Some(name))?;
         let url = asset.get("browser_download_url")?.as_str()?;
         (url == expected).then(|| url.to_owned())
     };
@@ -187,8 +186,7 @@ async fn latest_gallerydl_asset() -> Option<(String, Option<String>, String)> {
             .text()
             .await
             .ok()?;
-        let (tag, download_url, checksums_url) =
-            parse_codeberg_release_metadata(&release_body)?;
+        let (tag, download_url, checksums_url) = parse_codeberg_release_metadata(&release_body)?;
 
         let checksums = client
             .get(&checksums_url)
@@ -333,12 +331,10 @@ mod tests {
             .is_none()
         );
         assert!(
-            parse_codeberg_release_metadata(
-                &valid.replace(
-                    "https://codeberg.org/mikf/gallery-dl/releases/download/v1.32.17/gallery-dl.bin",
-                    "https://attacker.invalid/gallery-dl.bin"
-                )
-            )
+            parse_codeberg_release_metadata(&valid.replace(
+                "https://codeberg.org/mikf/gallery-dl/releases/download/v1.32.17/gallery-dl.bin",
+                "https://attacker.invalid/gallery-dl.bin"
+            ))
             .is_none()
         );
         assert!(codeberg_asset_url("v1.32.17/../../evil", LINUX_ASSET).is_none());

@@ -3843,13 +3843,36 @@ impl DownloadManager {
         if !joined {
             tracing::warn!("shutdown: async join deadline elapsed; persisting without truncating partial files");
         } else {
+            // Truncating a partially written segmented file is filesystem I/O;
+            // keep it off GTK's main context just like the task joins above.
             let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
-            for id in ids {
-                if let Some(item) = self.find(id)
-                    && let Some(st) = self.segment_state.borrow_mut().get_mut(&id)
-                {
-                    truncate_to_prefix(&item.file_path(), st);
-                    st.forget_beyond_prefix();
+            let truncations: Vec<_> = ids
+                .iter()
+                .filter_map(|id| {
+                    let item = self.find(*id)?;
+                    let state = self.segment_state.borrow().get(id).cloned()?;
+                    Some((item.file_path(), state))
+                })
+                .collect();
+            match tokio_rt()
+                .spawn_blocking(move || {
+                    for (path, state) in truncations {
+                        truncate_to_prefix(&path, &state);
+                    }
+                })
+                .await
+            {
+                Ok(()) => {
+                    for id in ids {
+                        if let Some(st) = self.segment_state.borrow_mut().get_mut(&id) {
+                            st.forget_beyond_prefix();
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Keep the original bitmap if we could not reconcile the
+                    // on-disk prefix; it is safer than persisting a false one.
+                    tracing::warn!("shutdown: partial-file reconciliation worker failed: {e}");
                 }
             }
         }

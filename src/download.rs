@@ -3941,8 +3941,8 @@ impl DownloadManager {
     /// so the only thing a longer bound buys is a longer frozen quit.
     const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
 
-    /// Abort running tasks and persist the queue for the next launch. Normal
-    /// window close uses shutdown_async to avoid blocking the GTK context.
+    /// Abort running tasks and persist the queue for the next launch. The
+    /// GTK close/Quit path uses begin_async_shutdown and finish_async_shutdown.
     pub fn shutdown(&self) {
         if self.shutdown_finished.get() || self.shutdown_started.replace(true) {
             return;
@@ -3960,14 +3960,6 @@ impl DownloadManager {
         }
         self.stop_scheduler();
         true
-    }
-
-    /// Asynchronous lifecycle path for an orderly window close.
-    pub async fn shutdown_async(self: &Rc<Self>) {
-        if !self.begin_async_shutdown() {
-            return;
-        }
-        self.finish_async_shutdown().await;
     }
 
     /// Finish a shutdown previously reserved by begin_async_shutdown.

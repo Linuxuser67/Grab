@@ -919,6 +919,22 @@ async fn subtitle_degrade(
     Ok(())
 }
 
+/// Whether FFmpeg failed to finalize the MP4 because it could not represent
+/// the input's timestamps. These failures are worth one timestamp-repair pass;
+/// disk-full and other unrelated failures should not trigger another full read.
+fn needs_live_timestamp_repair(log: &str) -> bool {
+    let log = log.to_ascii_lowercase();
+    [
+        "pts/dts pair unsupported",
+        "non-monotonous dts",
+        "non monotonically increasing dts",
+        "non-monotonically increasing dts",
+        "not yet implemented in ffmpeg",
+    ]
+    .iter()
+    .any(|needle| log.contains(needle))
+}
+
 /// Remux a stopped live capture into place. ffmpeg writes `<dest>.part` and the result is renamed to `dest` only on success: a bare `final.<n>.<ext>` is always worth keeping, a `.part` never is.
 pub(crate) async fn remux_live_capture(
     ffmpeg_bin: &Path,
@@ -931,8 +947,12 @@ pub(crate) async fn remux_live_capture(
     let mut partial = dest.as_os_str().to_os_string();
     partial.push(".part");
     let partial = PathBuf::from(partial);
-    // Two attempts: with the bsf, then bare. The loop always exits via break.
+    // Try the normal remux with and without the AAC bitstream filter. If
+    // FFmpeg reports a timestamp/muxer limitation, retry with regenerated PTS
+    // and rebased timestamps; the fallback is intentionally not used on normal
+    // captures because it can change the original timeline.
     let mut with_bsf = true;
+    let mut repair_timestamps = false;
     loop {
         // Never unlink the output path blindly: a foreign file may have
         // appeared since the slot scan. ffmpeg runs without `-y` and will
@@ -944,7 +964,12 @@ pub(crate) async fn remux_live_capture(
         }
         let mut cmd = tokio::process::Command::new(ffmpeg_bin);
         cmd.args(live_remux_argv(
-            ts_path, &partial, audio_only, with_bsf, page_url,
+            ts_path,
+            &partial,
+            audio_only,
+            with_bsf,
+            repair_timestamps,
+            page_url,
         ));
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -991,6 +1016,19 @@ pub(crate) async fn remux_live_capture(
             };
         }
         let detail = last_log_line(&log_tail, "ffmpeg reported failure");
+        if !repair_timestamps && needs_live_timestamp_repair(&log_tail) {
+            tracing::warn!(
+                error = %detail,
+                "live remux retrying with timestamp recovery"
+            );
+            // FFmpeg failed on an input timestamp pattern that can be repaired.
+            // Start with the AAC fixup enabled; if that still fails, the loop
+            // will also test the repaired path without the bitstream filter.
+            let _ = tokio::fs::remove_file(&partial).await;
+            repair_timestamps = true;
+            with_bsf = true;
+            continue;
+        }
         if with_bsf {
             tracing::debug!(error = %detail, "live remux without bsf, retrying bare");
             // The failed attempt may have left a partial output. The retry must

@@ -54,9 +54,9 @@ use crate::video_staging::{
 use crate::video_tools::VideoError;
 use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_override_command_for, browser_override_dirs,
-    browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
-    ensure_tool_versions, ffmpeg_version_token, find_in_dirs, is_youtube_url, parse_dotted_version,
-    deno_arch_supported, deno_download_url_for_arch, tool_update_available, toolchain_dir_in,
+    browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, deno_arch_supported,
+    deno_download_url_for_arch, distro_packages, ensure_tool_versions, ffmpeg_version_token,
+    find_in_dirs, is_youtube_url, parse_dotted_version, tool_update_available, toolchain_dir_in,
     user_lib_dir, ytdlp_identity_args, ytdlp_supports_impersonation,
 };
 use crate::video_types::FetchedVideo;
@@ -2346,10 +2346,7 @@ fn distro_packages_id_like_fallback() {
     let neon = "ID=neon\nID_LIKE=\"ubuntu debian\"\nNAME=KDE neon\n";
     let found = distro_packages(neon).expect("ID_LIKE fallback");
     assert_eq!(found.distro, "KDE neon");
-    assert_eq!(
-        found.install_all,
-        "sudo apt install yt-dlp ffmpeg"
-    );
+    assert_eq!(found.install_all, "sudo apt install yt-dlp ffmpeg");
 }
 
 #[test]

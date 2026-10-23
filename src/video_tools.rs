@@ -2435,7 +2435,6 @@ mod tests {
         assert!(err.contains("sha256 mismatch"), "unexpected error: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
-
 }
 
 #[cfg(test)]

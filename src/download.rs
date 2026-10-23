@@ -273,6 +273,7 @@ pub(crate) struct RemovedSnapshot {
     pub started: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RestoreState {
     /// Queue restore has not yet finished.
     Pending,
@@ -4112,7 +4113,7 @@ impl DownloadManager {
         }
         #[cfg(not(test))]
         {
-            if self.restore_complete.get() && !self.restore_pending.get() {
+            if self.restore_state.get() == RestoreState::Ready {
                 if let (Some(text), Some(tx)) =
                     (self.serialize_queue_inner(true), &*self.persist_tx.borrow())
                 {

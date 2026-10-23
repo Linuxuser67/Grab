@@ -581,7 +581,7 @@ pub fn build_window(
         });
     }
 
-// hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
+    // hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
     let ever_shown = Rc::new(Cell::new(false));
     {
         let m = Rc::clone(&manager);

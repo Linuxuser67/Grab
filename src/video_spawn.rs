@@ -339,7 +339,8 @@ pub async fn fetch_video_infos(
         Ok::<_, VideoError>((
             ProbeResult::Single(VideoInfo::from(&video, &url, newest_first)),
             Some(raw_json),
-        )));
+        ))
+    });
     // Dropping the caller's future aborts the worker: the yt-dlp child dies
     // with it (kill_on_drop) instead of probing on detached.
     let _abort_on_drop = AbortOnDrop(handle.abort_handle());

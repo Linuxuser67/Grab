@@ -227,6 +227,8 @@ pub struct DownloadManager {
     shutdown_finished: Cell<bool>,
     /// Prevent new queued rows from starting until saved active rows are restored.
     restore_pending: Cell<bool>,
+    /// Production queue loader; retained so orderly shutdown waits before persisting.
+    restore_task: RefCell<Option<glib::JoinHandle<()>>>,
     /// Queue persist channel: `watch` keeps only the latest value, so rapid
     /// state changes coalesce to a single write. The tokio task (below) is the
     /// sole writer, which makes writes ordered by construction.
@@ -441,6 +443,7 @@ impl DownloadManager {
             shutdown_started: Cell::new(false),
             shutdown_finished: Cell::new(false),
             restore_pending: Cell::new(false),
+            restore_task: RefCell::new(None),
             persist_tx: RefCell::new(persist_tx),
             persist_task: RefCell::new(persist_task),
         });
@@ -3209,6 +3212,11 @@ impl DownloadManager {
     }
 
     fn persist_queue(&self) {
+        // Avoid overwriting the saved queue with an incomplete in-memory model
+        // while the asynchronous startup restore is still reading it.
+        if self.restore_pending.get() {
+            return;
+        }
         // `watch::send_replace` keeps only the latest value: rapid state changes
         // coalesce to a single write by the persist task.
         // Tests need determinism: they persist then immediately restore in a
@@ -3527,7 +3535,7 @@ impl DownloadManager {
         #[cfg(not(test))]
         {
             let weak = Rc::downgrade(self);
-            glib::spawn_future_local(async move {
+            let task = glib::spawn_future_local(async move {
                 let loaded = tokio_rt()
                     .spawn_blocking(move || Self::load_restore_queue(queue_file))
                     .await;
@@ -3547,6 +3555,7 @@ impl DownloadManager {
                     }
                 }
             });
+            self.restore_task.replace(Some(task));
         }
     }
 
@@ -3821,6 +3830,13 @@ impl DownloadManager {
     pub async fn shutdown_async(self: &Rc<Self>) {
         if self.shutdown_finished.get() || self.shutdown_started.replace(true) {
             return;
+        }
+        // The queue reader and model applier must finish first. Otherwise a
+        // shutdown snapshot taken from an empty startup model could replace
+        // the still-valid queue file.
+        let restore_task = self.restore_task.borrow_mut().take();
+        if let Some(task) = restore_task {
+            task.await;
         }
         self.draining.set(true);
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();

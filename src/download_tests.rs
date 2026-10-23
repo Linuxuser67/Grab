@@ -6689,6 +6689,87 @@ fn shutdown_preserves_queue_file_while_restore_is_pending() {
 }
 
 #[test]
+fn close_during_restore_bypasses_background_hide_and_preserves_queue() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("close-during-restore");
+    let saved = br#"{"version":7,"items":[{"sentinel":"restore-in-flight"}]}"#;
+    std::fs::write(&queue_file, saved).unwrap();
+
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.restore_pending.set(true);
+    manager.restore_complete.set(false);
+    manager.restore_ready.send_replace(false);
+
+    // This is the state seen when restore inserts a formerly active row as Queued
+    // before the original close is replayed.
+    let queued = DownloadItem::new(
+        8_001,
+        "https://example.com/restored.zip",
+        "restored.zip",
+        "/tmp/dl",
+    );
+    queued.set_status(DownloadStatus::Queued);
+    manager.store().append(&queued);
+    assert!(manager.has_transferring());
+
+    let shutdown_requested = std::cell::Cell::new(false);
+    assert!(crate::application::begin_shutdown_once(
+        &manager,
+        &shutdown_requested
+    ));
+    assert!(
+        !crate::window::should_hide_to_background(
+            manager.has_transferring(),
+            manager.is_shutting_down()
+        ),
+        "the replayed close must destroy/close the window instead of hiding it"
+    );
+
+    crate::runtime::tokio_rt().block_on(manager.finish_async_shutdown());
+    assert_eq!(
+        std::fs::read(&queue_file).unwrap(),
+        saved,
+        "the incomplete restore model must not replace the saved queue"
+    );
+    let _ = std::fs::remove_file(queue_file);
+}
+
+#[test]
+fn explicit_quit_claims_async_shutdown_while_a_transfer_is_active() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("quit-during-transfer");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let active = DownloadItem::new(
+        8_002,
+        "https://example.com/active.zip",
+        "active.zip",
+        "/tmp/dl",
+    );
+    active.set_status(DownloadStatus::Downloading);
+    manager.store().append(&active);
+    assert!(manager.has_transferring());
+
+    let shutdown_requested = std::cell::Cell::new(false);
+    assert!(crate::application::begin_shutdown_once(
+        &manager,
+        &shutdown_requested
+    ));
+    assert!(shutdown_requested.get());
+    assert!(
+        !crate::window::should_hide_to_background(
+            manager.has_transferring(),
+            manager.is_shutting_down()
+        ),
+        "explicit Quit must bypass the ordinary close-to-background policy"
+    );
+
+    crate::runtime::tokio_rt().block_on(manager.finish_async_shutdown());
+    assert!(manager.is_shutting_down());
+    let _ = std::fs::remove_file(queue_file);
+}
+
+#[test]
 fn toggling_preference_stops_and_restarts_scheduler() {
     let settings = test_settings();
     // The memory backend is process-global: pin the starting value.

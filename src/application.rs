@@ -1069,7 +1069,10 @@ mod tests {
     use gtk4::gio;
     use gtk4::prelude::*;
 
-    fn auto_add_test_settings(enabled: bool, tag: &str) -> (crate::settings::AppSettings, std::path::PathBuf) {
+    fn auto_add_test_settings(
+        enabled: bool,
+        tag: &str,
+    ) -> (crate::settings::AppSettings, std::path::PathBuf) {
         let queue_file = std::env::temp_dir().join(format!(
             "grab-auto-add-{}-{tag}.json",
             std::process::id()
@@ -1139,15 +1142,29 @@ mod tests {
         );
         let uri = "https://example.com/file.zip".parse::<url::Url>().unwrap();
 
-        assert!(
-            handoff_should_confirm(true, &uri, settings.auto_add_downloads()),
-            "without auto-add, the direct-file handoff must take the confirmation path"
-        );
-        assert_eq!(
-            manager.store().n_items(),
-            0,
-            "a direct URL must not be queued before the user confirms"
-        );
+        {
+            let batch = manager.batch_guard();
+            assert!(
+                handoff_should_confirm(true, &uri, settings.auto_add_downloads()),
+                "without auto-add, the direct-file handoff must take the confirmation path"
+            );
+            assert_eq!(
+                manager.store().n_items(),
+                0,
+                "a direct URL must not be queued before the user confirms"
+            );
+
+            // This is the confirmation dialog's acceptance route: once the
+            // user approves, it invokes the same direct enqueue path as auto-add.
+            enqueue_direct_handoff(&manager, &uri)
+                .expect("a confirmed direct handoff should enqueue");
+            assert_eq!(manager.store().n_items(), 1);
+            assert!(
+                manager.begin_async_shutdown(),
+                "gate starts before closing the test batch"
+            );
+            drop(batch);
+        }
         drop(manager);
         let _ = std::fs::remove_file(queue_file);
     }

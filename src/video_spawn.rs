@@ -97,7 +97,7 @@ pub(crate) async fn fetch_raw_dump_json(
     ));
     let guarded_proxy = guard_untrusted_args(&mut args)?;
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
-    let mut cmd = ytdlp_command(youtube_bin);
+    let mut cmd = ytdlp_command(youtube_bin).await;
     // Belt-and-braces with the ProcessGroupGuard below (which SIGKILLs the
     // process group on drop): if the drain is dropped, the child dies with
     // it either way. Download/capture spawns keep their guard-only shutdown
@@ -310,7 +310,7 @@ async fn await_probe(
 /// yt-dlp spawn with null stdin, piped outputs, and its own process group (so timeouts kill the whole tree).
 /// The user lib dir heads PATH so yt-dlp's challenge solver finds Grab-installed
 /// `qjs`; a system `qjs` elsewhere on PATH still works when Grab never installed one.
-pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
+pub(crate) async fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(youtube_bin);
     // Impersonation is user-selectable (Preferences → Advanced): yt-dlp's
     // docs make it opt-in and warn that forcing it on every request may hurt
@@ -324,7 +324,7 @@ pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     let target = crate::settings::AppSettings::new().impersonate_browser();
     let target =
         crate::video_prefs::impersonate_value(crate::video_prefs::impersonate_index(&target));
-    if !target.is_empty() && crate::video_tools::ytdlp_supports_impersonation(youtube_bin) {
+    if !target.is_empty() && crate::video_tools::ytdlp_supports_impersonation(youtube_bin).await {
         cmd.arg("--impersonate").arg(target);
     }
     cmd.stdin(std::process::Stdio::null())

@@ -666,7 +666,15 @@ pub fn show(
         version_arg: &str,
         dirs: &[std::path::PathBuf],
     ) -> Option<(std::path::PathBuf, Option<String>)> {
-        let path = crate::video_tools::find_in_dirs(name, dirs)?;
+        // PATH can contain slow mounts; keep executable checks off the GTK
+        // context along with the asynchronous version subprocess.
+        let name = name.to_owned();
+        let dirs = dirs.to_vec();
+        let path = crate::runtime::tokio_rt()
+            .spawn_blocking(move || crate::video_tools::find_in_dirs(&name, &dirs))
+            .await
+            .ok()
+            .flatten()?;
         let version = crate::video_tools::probe_first_line(&path, version_arg).await;
         Some((path, version))
     }

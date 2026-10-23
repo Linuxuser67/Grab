@@ -385,10 +385,7 @@ pub(crate) fn live_remux_argv(
     if repair_timestamps {
         argv.extend(["-fflags".to_string(), "+genpts+igndts".to_string()]);
     }
-    argv.extend([
-        "-i".to_string(),
-        ts_path.to_string_lossy().into_owned(),
-    ]);
+    argv.extend(["-i".to_string(), ts_path.to_string_lossy().into_owned()]);
     if audio_only {
         argv.extend(["-map".to_string(), "0:a?".to_string()]);
     } else {
@@ -660,7 +657,10 @@ mod live_remux_argv_tests {
 
         assert!(fflags < input, "input timestamp flags must precede -i");
         assert_eq!(args[fflags + 1], "+genpts+igndts");
-        assert!(avoid_negative_ts > input, "timestamp rebasing is an output option");
+        assert!(
+            avoid_negative_ts > input,
+            "timestamp rebasing is an output option"
+        );
         assert_eq!(args[avoid_negative_ts + 1], "make_zero");
     }
 }

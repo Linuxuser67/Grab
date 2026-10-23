@@ -6604,12 +6604,168 @@ fn scheduler_starts_and_stops() {
         .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
         .unwrap();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let future = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(1)
+        .unwrap()
+        .to_unix();
+    let _item = schedule_test_item(&m, future);
     m.start_scheduler();
     assert!(m.scheduler_source.borrow().is_some());
-    // Idempotent: a second start must not install a second timer.
+    // Repeated starts keep one scheduled wake armed.
     m.start_scheduler();
     m.stop_scheduler();
     assert!(m.scheduler_source.borrow().is_none());
+}
+
+#[test]
+fn restore_task_guard_releases_waiters_without_claiming_success() {
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.restore_state.set(RestoreState::Pending);
+    manager.restore_ready.send_replace(false);
+    let ready = manager.restore_ready.subscribe();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = RestoreTaskGuard {
+            manager: Rc::downgrade(&manager),
+            finished: false,
+        };
+        panic!("simulated restore-task panic");
+    }));
+    assert!(panicked.is_err());
+    assert_eq!(manager.restore_state.get(), RestoreState::Failed);
+    assert!(manager.restore_failed());
+    assert!(
+        *ready.borrow(),
+        "waiters must be released after task failure"
+    );
+}
+
+#[test]
+fn async_shutdown_preserves_queue_file_if_restore_never_completed() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("shutdown-restore-failed");
+    let saved = br#"{"version":7,"items":[{"sentinel":"keep"}]}"#;
+    std::fs::write(&queue_file, saved).unwrap();
+
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    // Simulate a worker/apply failure: the in-memory model is not authoritative.
+    manager.restore_state.set(RestoreState::Failed);
+    assert!(manager.restore_failed());
+
+    assert!(manager.begin_async_shutdown());
+    crate::runtime::tokio_rt().block_on(manager.finish_async_shutdown());
+
+    assert_eq!(
+        std::fs::read(&queue_file).unwrap(),
+        saved,
+        "shutdown must not overwrite the last saved queue after a failed restore"
+    );
+    let _ = std::fs::remove_file(queue_file);
+}
+
+#[test]
+fn shutdown_preserves_queue_file_while_restore_is_pending() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("shutdown-restore-pending");
+    let saved = br#"{"version":7,"items":[{"sentinel":"still-loading"}]}"#;
+    std::fs::write(&queue_file, saved).unwrap();
+
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.restore_state.set(RestoreState::Pending);
+
+    assert!(manager.begin_async_shutdown());
+    crate::runtime::tokio_rt().block_on(manager.finish_async_shutdown());
+
+    assert_eq!(
+        std::fs::read(&queue_file).unwrap(),
+        saved,
+        "shutdown during restore must preserve the unmodified saved queue"
+    );
+    let _ = std::fs::remove_file(queue_file);
+}
+
+#[test]
+fn close_during_restore_bypasses_background_hide_and_preserves_queue() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("close-during-restore");
+    let saved = br#"{"version":7,"items":[{"sentinel":"restore-in-flight"}]}"#;
+    std::fs::write(&queue_file, saved).unwrap();
+
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.restore_state.set(RestoreState::Pending);
+    manager.restore_ready.send_replace(false);
+
+    // This is the state seen when restore inserts a formerly active row as Queued
+    // before the original close is replayed.
+    let queued = DownloadItem::new(
+        8_001,
+        "https://example.com/restored.zip",
+        "restored.zip",
+        "/tmp/dl",
+    );
+    queued.set_status(DownloadStatus::Queued);
+    manager.store().append(&queued);
+    assert!(manager.has_transferring());
+
+    let shutdown_requested = std::cell::Cell::new(false);
+    assert!(crate::application::begin_shutdown_once(
+        &manager,
+        &shutdown_requested
+    ));
+    assert!(
+        manager.restore_should_abort(),
+        "the restore task must observe a close/Quit claim before applying the loaded queue"
+    );
+    assert!(
+        !crate::window::should_hide_to_background(
+            manager.has_transferring(),
+            manager.is_shutting_down()
+        ),
+        "the replayed close must destroy/close the window instead of hiding it"
+    );
+
+    crate::runtime::tokio_rt().block_on(manager.finish_async_shutdown());
+    assert_eq!(
+        std::fs::read(&queue_file).unwrap(),
+        saved,
+        "the incomplete restore model must not replace the saved queue"
+    );
+    let _ = std::fs::remove_file(queue_file);
+}
+
+#[test]
+fn explicit_quit_claims_async_shutdown_while_a_transfer_is_active() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("quit-during-transfer");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let active = DownloadItem::new(
+        8_002,
+        "https://example.com/active.zip",
+        "active.zip",
+        "/tmp/dl",
+    );
+    active.set_status(DownloadStatus::Downloading);
+    manager.store().append(&active);
+    assert!(manager.has_transferring());
+
+    let shutdown_requested = std::cell::Cell::new(false);
+    assert!(crate::application::begin_shutdown_once(
+        &manager,
+        &shutdown_requested
+    ));
+    assert!(shutdown_requested.get());
+    assert!(
+        !crate::window::should_hide_to_background(
+            manager.has_transferring(),
+            manager.is_shutting_down()
+        ),
+        "explicit Quit must bypass the ordinary close-to-background policy"
+    );
+
+    crate::runtime::tokio_rt().block_on(manager.finish_async_shutdown());
+    assert!(manager.is_shutting_down());
+    let _ = std::fs::remove_file(queue_file);
 }
 
 #[test]
@@ -6620,6 +6776,12 @@ fn toggling_preference_stops_and_restarts_scheduler() {
         .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
         .unwrap();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+    let future = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(1)
+        .unwrap()
+        .to_unix();
+    let _item = schedule_test_item(&m, future);
     m.start_scheduler();
     assert!(m.scheduler_source.borrow().is_some());
     settings
@@ -6627,7 +6789,7 @@ fn toggling_preference_stops_and_restarts_scheduler() {
         .unwrap();
     assert!(
         m.scheduler_source.borrow().is_none(),
-        "disabling the preference removes the 30s timer"
+        "disabling the preference removes the scheduled wake"
     );
     settings
         .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
@@ -6643,22 +6805,117 @@ fn dropping_manager_removes_scheduler_source() {
         .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
         .unwrap();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let future = glib::DateTime::now_local()
+        .unwrap()
+        .add_hours(1)
+        .unwrap()
+        .to_unix();
+    let _item = schedule_test_item(&m, future);
     m.start_scheduler();
-    // Grab the live Source object before dropping the manager.
+    // Grab the live one-shot Source before dropping the manager.
     let source = {
         let borrow = m.scheduler_source.borrow();
-        let id = borrow.as_ref().expect("scheduler source installed");
+        let id = borrow.as_ref().expect("scheduled wake installed");
         glib::MainContext::default()
             .find_source_by_id(id)
             .expect("source present in context")
     };
     drop(m);
-    // Drop must remove the 30s tick; a leaked source would survive in the
+    // Drop must remove the scheduled wake; a leaked source would survive in the
     // context and trip a later test's thread guard when dispatched.
     assert!(
         source.is_destroyed(),
         "dropping the manager removes the scheduler source"
     );
+}
+
+#[test]
+fn scheduler_fires_and_rearms_for_the_next_scheduled_row() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("scheduler-fired");
+    let settings = test_settings();
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
+        .unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let now = glib::DateTime::now_local().unwrap().to_unix();
+    let first_due = now + 1;
+    let second_due = now + 4;
+    let first = schedule_test_item(&manager, first_due);
+    let second = schedule_test_item(&manager, second_due);
+    // Occupy every engine slot so due rows can transition to Queued without
+    // starting real network downloads inside this lifecycle test.
+    let occupied_ids: Vec<u64> = (0..manager.max_concurrent())
+        .map(|index| {
+            let id = u64::MAX - index as u64;
+            let handle = crate::runtime::tokio_rt().spawn(std::future::pending::<()>());
+            manager.running.borrow_mut().insert(id, handle);
+            id
+        })
+        .collect();
+    manager.start_scheduler();
+    assert!(manager.scheduler_source.borrow().is_some());
+
+    let ctx = glib::MainContext::default();
+    let first_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while first.status() == DownloadStatus::Scheduled && std::time::Instant::now() < first_deadline
+    {
+        ctx.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(first.status(), DownloadStatus::Queued);
+    assert_eq!(first.scheduled_at(), 0);
+    assert_eq!(second.status(), DownloadStatus::Scheduled);
+    assert!(
+        manager.scheduler_source.borrow().is_some(),
+        "the one-shot wake must be re-armed for the next scheduled row"
+    );
+
+    let second_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while second.status() == DownloadStatus::Scheduled
+        && std::time::Instant::now() < second_deadline
+    {
+        ctx.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(second.status(), DownloadStatus::Queued);
+    assert_eq!(second.scheduled_at(), 0);
+    assert!(
+        manager.scheduler_source.borrow().is_none(),
+        "the timer should be removed when no scheduled rows remain"
+    );
+    // Normal shutdown aborts and joins the sentinel engine tasks too.
+    assert_eq!(manager.running.borrow().len(), occupied_ids.len());
+    manager.shutdown();
+    let _ = std::fs::remove_file(queue_file);
+}
+
+#[test]
+fn shutdown_stops_scheduler_and_preserves_future_schedule() {
+    let queue_file = test_queue_file("shutdown-scheduler");
+    let settings = test_settings();
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
+        .unwrap();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let due = glib::DateTime::now_local()
+        .unwrap()
+        .add_seconds(30.0)
+        .unwrap()
+        .to_unix();
+    let item = schedule_test_item(&m, due);
+    m.start_scheduler();
+    assert!(m.scheduler_source.borrow().is_some());
+
+    m.shutdown();
+
+    assert!(
+        m.scheduler_source.borrow().is_none(),
+        "shutdown must remove scheduled wakeups before joining workers"
+    );
+    assert_eq!(item.status(), DownloadStatus::Scheduled);
+    assert_eq!(item.scheduled_at(), due);
+    let _ = std::fs::remove_file(queue_file);
 }
 
 /// If-Range header is sent when the session validator is set.

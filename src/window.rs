@@ -184,6 +184,12 @@ fn request_background() {
     });
 }
 
+/// Hide on ordinary close while downloads transfer, but let an explicit
+/// asynchronous shutdown finish closing the window.
+pub(crate) fn should_hide_to_background(has_transferring: bool, shutting_down: bool) -> bool {
+    has_transferring && !shutting_down
+}
+
 pub fn build_window(
     app: &adw::Application,
     manager: Rc<DownloadManager>,
@@ -583,7 +589,7 @@ pub fn build_window(
             // Only hide to background while bytes are actually moving; paused
             // items (or none) quit normally, since "continues in the
             // background" would be a lie with nothing transferring.
-            if m.has_transferring() {
+            if should_hide_to_background(m.has_transferring(), m.is_shutting_down()) {
                 win.set_visible(false);
                 request_background();
                 if m.background_notifications_enabled()
@@ -749,11 +755,14 @@ pub fn build_window(
             // transferring, since paused rows persist across launches and
             // counting them would strand a hidden zombie.
             let idle_hidden = armed.get()
+                && !m.is_shutting_down()
                 && !m.has_transferring()
                 && w.upgrade().is_some_and(|win| !win.is_visible());
             if idle_hidden && let Some(app) = app_weak.upgrade() {
                 app.withdraw_notification(BACKGROUND_NOTIF_ID);
-                app.quit();
+                // Reuse the action's async shutdown path even when the final
+                // background transfer finishes while the window is hidden.
+                app.activate_action("quit", None);
             }
         });
         manager.set_on_change({

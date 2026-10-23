@@ -6,7 +6,7 @@ use crate::download_net::tool_client_builder_proxied;
 use gettextrs::gettext;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
 use yt_dlp::client::deps::Libraries;
 use yt_dlp::model::DrmStatus;
@@ -22,6 +22,9 @@ pub enum VideoError {
     /// The page could not be extracted (wrong URL, offline, …). Retryable.
     #[error("{0}")]
     Fetch(String),
+    /// A tool was present but its version command exceeded the probe deadline.
+    #[error("{0}")]
+    ToolProbeTimeout(String),
     /// Background task machinery failed (panic/join) — internal.
     #[error("{0}")]
     Runtime(String),
@@ -37,6 +40,14 @@ pub enum VideoError {
 impl VideoError {
     pub(crate) fn missing_tools() -> Self {
         Self::MissingLibraries(gettext("Media downloads need the yt-dlp support tools"))
+    }
+    pub(crate) fn tool_probe_failure(error: ToolProbeError) -> Self {
+        match error {
+            ToolProbeError::Timeout => Self::ToolProbeTimeout(gettext(
+                "Checking the media support tools timed out. Please try again.",
+            )),
+            _ => Self::missing_tools(),
+        }
     }
     pub(crate) fn fetch(e: impl std::fmt::Display) -> Self {
         Self::Fetch(
@@ -134,6 +145,7 @@ impl VideoError {
         match self {
             Self::MissingLibraries(s) => Self::MissingLibraries(format!("{s}{suffix}")),
             Self::Fetch(s) => Self::Fetch(format!("{s}{suffix}")),
+            Self::ToolProbeTimeout(s) => Self::ToolProbeTimeout(format!("{s}{suffix}")),
             Self::Runtime(s) => Self::Runtime(format!("{s}{suffix}")),
             Self::Message(s) => Self::Message(format!("{s}{suffix}")),
             Self::Cancelled => Self::Cancelled,
@@ -432,167 +444,205 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
     Ok(Libraries::new(youtube, ffmpeg_dir.join("ffmpeg")))
 }
 
-/// Cached `--impersonate` support per yt-dlp binary, stamped with the
-/// binary's `(mtime, len)`: an in-place yt-dlp update flips the stamp, so
-/// the next spawn re-probes instead of serving the old binary's answer.
-#[derive(Clone, Copy)]
-struct ImpersonateEntry {
-    stamp: (Option<std::time::SystemTime>, u64),
-    supported: bool,
+/// Modification time and size used to invalidate executable-probe caches.
+type FileStamp = (Option<std::time::SystemTime>, u64);
+
+const FAILED_PROBE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+struct ProbeCacheEntry<V, E> {
+    stamp: FileStamp,
+    cached_at: std::time::Instant,
+    result: Result<V, E>,
 }
 
-static IMPERSONATE_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, ImpersonateEntry>>> = OnceLock::new();
+struct ProbeCache<K, V, E> {
+    values: Mutex<HashMap<K, ProbeCacheEntry<V, E>>>,
+    locks: Mutex<HashMap<K, Arc<tokio::sync::Mutex<()>>>>,
+}
 
-/// Stat stamp for the support cache; a missing binary reports `(None, 0)`.
-fn impersonate_stamp(youtube_bin: &Path) -> (Option<std::time::SystemTime>, u64) {
-    std::fs::metadata(youtube_bin)
+impl<K, V, E> ProbeCache<K, V, E>
+where
+    K: Eq + std::hash::Hash + Clone,
+    V: Clone,
+    E: Clone,
+{
+    fn new() -> Self {
+        Self {
+            values: Mutex::new(HashMap::new()),
+            locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn get_or_probe<F, Fut>(
+        &'static self,
+        key: K,
+        binary: &Path,
+        failure_ttl: std::time::Duration,
+        probe: F,
+    ) -> Result<V, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<V, E>>,
+    {
+        let probe_lock = {
+            let mut locks = self.locks.lock().unwrap_or_else(|p| p.into_inner());
+            if locks.len() > 128 {
+                // Preserve locks owned by a probe or its waiters; removing one
+                // while in use could permit two probes for the key.
+                locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+            }
+            locks
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = probe_lock.lock().await;
+        let stamp = file_stamp(binary);
+        {
+            let mut values = self.values.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(entry) = values.get(&key)
+                && entry.stamp == stamp
+                && (entry.result.is_ok() || entry.cached_at.elapsed() < failure_ttl)
+            {
+                return entry.result.clone();
+            }
+            values.remove(&key);
+        }
+
+        let result = probe().await;
+        let after = file_stamp(binary);
+        if stamp != (None, 0) && stamp == after && (result.is_ok() || !failure_ttl.is_zero()) {
+            let mut values = self.values.lock().unwrap_or_else(|p| p.into_inner());
+            if values.len() >= 128 {
+                let evict = values.keys().find(|existing| *existing != &key).cloned();
+                if let Some(evict) = evict {
+                    values.remove(&evict);
+                }
+            }
+            values.insert(
+                key,
+                ProbeCacheEntry {
+                    stamp,
+                    cached_at: std::time::Instant::now(),
+                    result: result.clone(),
+                },
+            );
+        }
+        result
+    }
+}
+
+fn file_stamp(binary: &Path) -> FileStamp {
+    std::fs::metadata(binary)
         .map(|m| (m.modified().ok(), m.len()))
         .unwrap_or((None, 0))
 }
 
-/// Whether yt-dlp's `--impersonate` flag is known-supported for this binary.
-/// Sync, never blocks a worker: returns the cached probe result, or `false` (the
-/// safe default) while the probe is still running. The first call kicks the
-/// probe off on the blocking pool so a wedged binary (up to ~15 s) doesn't
-/// park the download; the next download gets the cached answer.
-pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
-    let cache = IMPERSONATE_SUPPORT.get_or_init(|| Mutex::new(HashMap::new()));
-    let stamp = impersonate_stamp(youtube_bin);
-    // A poisoned cache must never panic the caller: skip the read and fall
-    // through to the safe default; the next call retries the lock.
-    if let Ok(mut guard) = cache.lock() {
-        if let Some(entry) = guard.get(youtube_bin) {
-            if entry.stamp == stamp {
-                return entry.supported;
-            }
-            // The binary changed in place (an update): drop the stale
-            // answer and let the claim below re-probe.
-            guard.remove(youtube_bin);
-        }
-        // Claim the key with the safe default so concurrent first calls don't
-        // spawn duplicate probes; the background fill overwrites it.
-        guard.insert(
-            youtube_bin.to_path_buf(),
-            ImpersonateEntry {
-                stamp,
-                supported: false,
-            },
-        );
+static IMPERSONATE_CACHE: OnceLock<ProbeCache<PathBuf, bool, ()>> = OnceLock::new();
+
+/// Whether yt-dlp's --impersonate flag is supported by this binary.
+/// The probe is asynchronous and forwarded to Tokio when called outside a
+/// runtime context. Failed probes are shared briefly, then retried; the 15-second
+/// process deadline prevents a wedged executable from blocking indefinitely.
+pub(crate) async fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
+    let key = youtube_bin.to_path_buf();
+    if tokio::runtime::Handle::try_current().is_err() {
+        return AbortOnDrop(
+            crate::runtime::tokio_rt()
+                .spawn(async move { ytdlp_supports_impersonation_cached(key).await }),
+        )
+        .await
+        .unwrap_or(false);
     }
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::spawn(warm_impersonation_cache(youtube_bin.to_path_buf()));
-        false
-    } else {
-        // Blocking 15s probe: must never run on the GTK thread. Debug-guard
-        // so a future caller moving this onto the UI thread fails loudly in
-        // development instead of hanging the UI in production.
-        debug_assert!(
-            !glib::MainContext::default().is_owner(),
-            "ytdlp impersonation probe must not block the GTK thread"
-        );
-        let supported = probe_impersonate_support(youtube_bin);
-        if let Ok(mut guard) = cache.lock() {
-            guard.insert(
-                youtube_bin.to_path_buf(),
-                ImpersonateEntry { stamp, supported },
-            );
-        }
-        supported
-    }
+    ytdlp_supports_impersonation_cached(key).await
 }
 
-/// Probe once on the blocking pool and cache the result. Spawned in the
-/// background by `ytdlp_supports_impersonation`; on a join failure the
-/// fallback claims `(None, 0)` + unsupported, which cannot collide with a
-/// real binary's stamp — the next call sees a stamp mismatch and re-probes,
-/// so a panicking fill can never wedge a wrong-but-sticky answer.
-async fn warm_impersonation_cache(youtube_bin: std::path::PathBuf) {
-    // Stat + probe run together on the blocking pool; the stamp recorded
-    // here is the one the probe actually ran against.
-    let fallback = youtube_bin.clone();
-    let (key, stamp, supported) = tokio::task::spawn_blocking(move || {
-        let stamp = impersonate_stamp(&youtube_bin);
-        let supported = probe_impersonate_support(&youtube_bin);
-        (youtube_bin, stamp, supported)
-    })
-    .await
-    .unwrap_or((fallback, (None, 0), false));
-    // A poisoned cache drops the fill silently instead of panicking the
-    // background task: the next call re-probes and re-caches.
-    if let Ok(mut guard) = IMPERSONATE_SUPPORT
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-    {
-        guard.insert(key, ImpersonateEntry { stamp, supported });
-    }
-}
-
-/// One-shot `--list-impersonate-targets` probe: a `Chrome` row without an
-/// "(unavailable)" marker means curl_cffi can impersonate. Any spawn failure,
-/// non-zero exit, or timeout resolves to `false` — a wedged binary must not
-/// hang the spawn that is being prepared, and must not leave children behind.
-fn probe_impersonate_support(youtube_bin: &Path) -> bool {
-    use std::io::Read as _;
-    #[cfg(unix)]
-    use std::os::unix::process::CommandExt as _;
-    let mut cmd = std::process::Command::new(youtube_bin);
-    cmd.arg("--list-impersonate-targets")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    cmd.process_group(0);
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(_) => return false,
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let exited_cleanly = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.success(),
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    kill_probe(&mut child);
-                    return false;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            Err(_) => {
-                kill_probe(&mut child);
-                return false;
-            }
-        }
-    };
-    if !exited_cleanly {
-        return false;
-    }
-    let mut out = String::new();
-    let read_ok = child
-        .stdout
-        .take()
-        .is_some_and(|mut pipe| pipe.read_to_string(&mut out).is_ok());
-    read_ok
-        && out.lines().any(|line| {
-            let line = line.to_ascii_lowercase();
-            line.contains("chrome") && !line.contains("unavailable")
+async fn ytdlp_supports_impersonation_cached(key: PathBuf) -> bool {
+    let binary = key.clone();
+    let probe_binary = binary.clone();
+    IMPERSONATE_CACHE
+        .get_or_init(ProbeCache::new)
+        .get_or_probe(key, &binary, FAILED_PROBE_CACHE_TTL, || async move {
+            probe_impersonate_support(&probe_binary).await
         })
+        .await
+        .unwrap_or(false)
 }
 
-/// Best-effort kill of a wedged probe: the whole process group, so a binary
-/// that ignores its flags takes its children down with it. Always reaps.
-fn kill_probe(child: &mut std::process::Child) {
+/// One-shot `--list-impersonate-targets` probe. The 15-second limit is retained
+/// as a guard against a genuinely wedged executable; process waiting and output
+/// draining are asynchronous. Timeout cleanup signals the whole process group.
+async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ()> {
+    use std::process::Stdio;
+    let mut command = tokio::process::Command::new(youtube_bin);
+    command
+        .arg("--list-impersonate-targets")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
     #[cfg(unix)]
     {
-        let pid = child.id();
-        // try_wait just reported it still running, so the group is ours.
-        // SAFETY: constant signal number; ESRCH (raced exit) is harmless.
+        use std::os::unix::process::CommandExt as _;
+        command.as_std_mut().process_group(0);
+    }
+    let child = command.spawn().map_err(|_| ())?;
+    let pid = child.id().unwrap_or_default();
+    let mut group = ProbeProcessGroup::new(pid);
+    match tokio::time::timeout(std::time::Duration::from_secs(15), child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            // The child has exited, regardless of its exit code. Do not let
+            // the drop guard signal a process group whose PID may be reused.
+            group.disarm();
+            if !output.status.success() {
+                return Err(());
+            }
+            let out = String::from_utf8_lossy(&output.stdout);
+            let supported = out.lines().any(|line| {
+                let line = line.to_ascii_lowercase();
+                line.contains("chrome") && !line.contains("unavailable")
+            });
+            Ok(supported)
+        }
+        Err(_) | Ok(Err(_)) => Err(()),
+    }
+}
+
+/// Best-effort process-group cleanup when a probe is cancelled or times out.
+/// The command independently configures kill-on-drop for the direct child.
+struct ProbeProcessGroup {
+    pid: u32,
+    armed: bool,
+}
+
+impl ProbeProcessGroup {
+    fn new(pid: u32) -> Self {
+        Self { pid, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProbeProcessGroup {
+    fn drop(&mut self) {
+        if self.armed {
+            kill_probe_group(self.pid);
+        }
+    }
+}
+
+fn kill_probe_group(pid: u32) {
+    #[cfg(unix)]
+    if pid != 0 {
+        // SAFETY: constant signal; ESRCH is harmless if the child raced exit.
         unsafe {
             libc::killpg(pid as libc::pid_t, libc::SIGKILL);
         }
     }
     #[cfg(not(unix))]
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = pid;
 }
 
 /// `--downloader-args` value for yt-dlp's ffmpeg downloader on live captures.
@@ -613,19 +663,70 @@ pub(crate) const LIVE_DOWNLOADER_ARGS: &str =
 /// fMP4 HLS URLs often end in .fmp4 while FFmpeg detects MOV/MP4.
 pub(crate) const LIVE_INPUT_DOWNLOADER_ARGS: &str = "ffmpeg_i:-allowed_extensions 3gp,aac,avi,ac3,eac3,flac,mkv,m3u8,m4a,m4s,m4v,mpg,mov,mp2,mp3,mp4,mpeg,mpegts,ogg,ogv,oga,ts,vob,vtt,wav,webvtt,cmfv,cmfa,ec3,fmp4 -seg_max_retry 3";
 
-pub(crate) fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bool {
-    let Ok(output) = std::process::Command::new(ffmpeg_bin)
+static FFMPEG_HLS_CACHE: OnceLock<ProbeCache<PathBuf, bool, ()>> = OnceLock::new();
+
+/// Whether this FFmpeg supports the HLS demuxer's extension_picky option.
+pub(crate) async fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bool {
+    let key = ffmpeg_bin.to_path_buf();
+    if tokio::runtime::Handle::try_current().is_err() {
+        return AbortOnDrop(
+            crate::runtime::tokio_rt()
+                .spawn(async move { ffmpeg_supports_hls_extension_picky_cached(key).await }),
+        )
+        .await
+        .unwrap_or(false);
+    }
+    ffmpeg_supports_hls_extension_picky_cached(key).await
+}
+
+async fn ffmpeg_supports_hls_extension_picky_cached(key: PathBuf) -> bool {
+    let binary = key.clone();
+    let probe_binary = binary.clone();
+    FFMPEG_HLS_CACHE
+        .get_or_init(ProbeCache::new)
+        .get_or_probe(key, &binary, FAILED_PROBE_CACHE_TTL, || async move {
+            probe_ffmpeg_hls_extension_picky(&probe_binary).await
+        })
+        .await
+        .unwrap_or(false)
+}
+
+async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Result<bool, ()> {
+    use std::process::Stdio;
+    let mut command = tokio::process::Command::new(ffmpeg_bin);
+    command
         .args(["-hide_banner", "-h", "demuxer=hls"])
-        .output()
-    else {
-        return false;
-    };
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.as_std_mut().process_group(0);
+    }
+    let child = command.spawn().map_err(|_| ())?;
+    let pid = child.id().unwrap_or_default();
+    let mut group = ProbeProcessGroup::new(pid);
+    let output =
+        match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+            .await
+        {
+            Ok(Ok(output)) => {
+                group.disarm();
+                output
+            }
+            Err(_) | Ok(Err(_)) => return Err(()),
+        };
+    if !output.status.success() {
+        return Err(());
+    }
     let help = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    help.contains("extension_picky")
+    Ok(help.contains("extension_picky"))
 }
 
 /// `--postprocessor-args` value moving the moov atom to the front of merged
@@ -1524,21 +1625,6 @@ pub async fn latest_quickjs_release() -> Option<(String, Option<String>)> {
     handle.await.ok().flatten()
 }
 
-/// Run `binary --version` off the caller's thread and return its first output
-/// line. `None` covers missing binaries, spawn failures and empty output alike.
-/// Uses the shared runtime's handle directly so the GTK thread (no tokio
-/// context entered) can call it.
-async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<String> {
-    crate::runtime::tokio_rt()
-        .spawn_blocking(move || probe_first_line(&binary, version_arg, TOOL_PROBE_TIMEOUT))
-        .await
-        .ok()
-        .flatten()
-}
-
-/// A hung or wedged tool binary must not stall every lookup or the settings page.
-pub(crate) const TOOL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// Whether a failed yt-dlp log shows the extractor breaking, which a newer
 /// yt-dlp usually fixes. Removed or private videos and network errors don't match.
 pub(crate) fn extractor_failure(log: &str) -> bool {
@@ -1547,46 +1633,127 @@ pub(crate) fn extractor_failure(log: &str) -> bool {
         .any(|marker| log.contains(marker))
 }
 
-/// First stdout line of `binary version_arg`, or `None` on spawn failure, non-zero exit, empty output or timeout (the child is killed on timeout). Blocking: call off the GTK thread.
-pub(crate) fn probe_first_line(
+/// Why an installed tool's version probe did not return a version line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolProbeError {
+    Spawn,
+    FailedExit,
+    EmptyOutput,
+    InvalidOutput,
+    Timeout,
+    Runtime,
+}
+
+/// Upper bound for version probes: long enough for cold Python startup, but
+/// prevents a wedged executable from keeping previews/preferences pending forever.
+pub(crate) const TOOL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A child JoinHandle that is aborted if its awaiting future is dropped.
+/// Tokio normally detaches a JoinHandle on drop; this wrapper propagates caller
+/// cancellation to the task so its `kill_on_drop` subprocess is cleaned up too.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Unpin for AbortOnDrop<T> {}
+
+impl<T> std::future::Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::future::Future::poll(std::pin::Pin::new(&mut self.get_mut().0), cx)
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+type ToolVersionKey = (PathBuf, String);
+
+static TOOL_VERSION_CACHE: OnceLock<ProbeCache<ToolVersionKey, String, ToolProbeError>> =
+    OnceLock::new();
+
+pub(crate) async fn probe_first_line(
+    binary: &Path,
+    version_arg: &str,
+) -> Result<String, ToolProbeError> {
+    let binary = binary.to_path_buf();
+    let version_arg = version_arg.to_owned();
+    if tokio::runtime::Handle::try_current().is_ok() {
+        cached_tool_first_line(binary, version_arg).await
+    } else {
+        AbortOnDrop(
+            crate::runtime::tokio_rt()
+                .spawn(async move { cached_tool_first_line(binary, version_arg).await }),
+        )
+        .await
+        .map_err(|_| ToolProbeError::Runtime)?
+    }
+}
+
+async fn cached_tool_first_line(
+    binary: PathBuf,
+    version_arg: String,
+) -> Result<String, ToolProbeError> {
+    let key = (binary.clone(), version_arg);
+    let probe_key = key.clone();
+    TOOL_VERSION_CACHE
+        .get_or_init(ProbeCache::new)
+        .get_or_probe(key, &binary, FAILED_PROBE_CACHE_TTL, || async move {
+            run_version_probe_uncached(&probe_key.0, &probe_key.1, TOOL_PROBE_TIMEOUT).await
+        })
+        .await
+}
+
+/// Run a version command. Waiting is asynchronous, but a defensive deadline
+/// still distinguishes a slow/hung installed binary from a genuinely missing tool.
+async fn run_version_probe_uncached(
     binary: &Path,
     version_arg: &str,
     timeout: std::time::Duration,
-) -> Option<String> {
-    use std::io::Read as _;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(binary)
+) -> Result<String, ToolProbeError> {
+    use std::process::Stdio;
+
+    let mut command = tokio::process::Command::new(binary);
+    command
         .arg(version_arg)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        stdout.read_to_string(&mut text).ok().map(|_| text)
-    });
-    let deadline = std::time::Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-    if !status.success() {
-        return None;
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.as_std_mut().process_group(0);
     }
-    let text = reader.join().ok()??;
-    let first = text.lines().next()?.trim();
-    (!first.is_empty()).then(|| first.to_string())
+    let child = command.spawn().map_err(|_| ToolProbeError::Spawn)?;
+    let pid = child.id().unwrap_or_default();
+    let mut group = ProbeProcessGroup::new(pid);
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            group.disarm();
+            output
+        }
+        Ok(Err(_)) => return Err(ToolProbeError::FailedExit),
+        Err(_) => return Err(ToolProbeError::Timeout),
+    };
+    if !output.status.success() {
+        return Err(ToolProbeError::FailedExit);
+    }
+    let text = String::from_utf8(output.stdout).map_err(|_| ToolProbeError::InvalidOutput)?;
+    let first = text
+        .lines()
+        .next()
+        .ok_or(ToolProbeError::EmptyOutput)?
+        .trim();
+    if first.is_empty() {
+        return Err(ToolProbeError::EmptyOutput);
+    }
+    Ok(first.to_owned())
 }
 
 /// Display-ready version line for an installed yt-dlp or QuickJS binary.
@@ -1596,7 +1763,7 @@ pub(crate) async fn tool_display_version(
     binary: PathBuf,
     version_arg: &'static str,
 ) -> Option<String> {
-    let line = tool_first_line(binary.clone(), version_arg).await?;
+    let line = probe_first_line(&binary, version_arg).await.ok()?;
     if binary
         .file_name()
         .is_some_and(|n| n.to_string_lossy().starts_with("yt-dlp"))
@@ -1618,15 +1785,15 @@ pub(crate) async fn tool_display_version(
 pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, String), VideoError> {
     // ffmpeg takes a single-dash -version; --version is an error there.
     let (yt, ff) = tokio::join!(
-        tool_first_line(libs.youtube.clone(), "--version"),
-        tool_first_line(libs.ffmpeg.clone(), "-version")
+        probe_first_line(&libs.youtube, "--version"),
+        probe_first_line(&libs.ffmpeg, "-version")
     );
-    let yt = yt.ok_or_else(VideoError::missing_tools)?;
+    let yt = yt.map_err(VideoError::tool_probe_failure)?;
     let fresh = parse_dotted_version(&yt).is_some_and(|v| v >= MIN_YTDLP_VERSION);
     if !fresh {
         return Err(VideoError::outdated());
     }
-    let ff = ff.ok_or_else(VideoError::missing_tools)?;
+    let ff = ff.map_err(VideoError::tool_probe_failure)?;
     // ffmpeg version line looks like "ffmpeg version 7.1.2 ...": take the token
     // right after "version". A find_map over all tokens would match "2000-2025"
     // in git builds ("ffmpeg version N-... Copyright (c) 2000-2025") as 2000.
@@ -1655,6 +1822,225 @@ mod tests {
         std::fs::write(path, b"test").unwrap();
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn write_test_script(path: &Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn async_version_probe_reads_first_line_from_a_successful_tool() {
+        let base = unique_dir("version-probe-success");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("yt-dlp");
+        write_test_script(
+            &binary,
+            "#!/bin/sh\nprintf '2026.10.21.233146\\nignored second line\\n'\n",
+        );
+
+        assert_eq!(
+            probe_first_line(&binary, "--version").await.unwrap(),
+            "2026.10.21.233146"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn successful_version_probe_is_cached_until_the_binary_changes() {
+        let base = unique_dir("version-probe-cache");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("yt-dlp");
+        let counter = base.join("counter");
+        write_test_script(
+            &binary,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf 'cached-one\\n'\n",
+                counter.display()
+            ),
+        );
+
+        assert_eq!(
+            probe_first_line(&binary, "--version").await.unwrap(),
+            "cached-one"
+        );
+        assert_eq!(
+            probe_first_line(&binary, "--version").await.unwrap(),
+            "cached-one"
+        );
+        assert_eq!(std::fs::read(&counter).unwrap(), b"x");
+
+        write_test_script(
+            &binary,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf 'cached-two-longer\\n'\n",
+                counter.display()
+            ),
+        );
+        assert_eq!(
+            probe_first_line(&binary, "--version").await.unwrap(),
+            "cached-two-longer"
+        );
+        assert_eq!(std::fs::read(&counter).unwrap(), b"xx");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn async_version_probe_rejects_a_nonzero_exit() {
+        let base = unique_dir("version-probe-failure");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("yt-dlp");
+        write_test_script(
+            &binary,
+            "#!/bin/sh\nprintf '2026.10.21.233146\\n'\nexit 1\n",
+        );
+
+        assert_eq!(
+            probe_first_line(&binary, "--version").await,
+            Err(ToolProbeError::FailedExit)
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn async_version_probe_times_out_for_a_hung_tool() {
+        let base = unique_dir("version-probe-timeout");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("yt-dlp");
+        write_test_script(&binary, "#!/bin/sh\nsleep 5\nprintf 'never-reached\\n'\n");
+
+        let start = std::time::Instant::now();
+        let result =
+            run_version_probe_uncached(&binary, "--version", std::time::Duration::from_millis(50))
+                .await;
+        assert_eq!(result, Err(ToolProbeError::Timeout));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "the probe did not enforce its deadline: {:?}",
+            start.elapsed()
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn concurrent_version_probes_share_one_cold_process() {
+        let base = unique_dir("version-probe-concurrent");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("yt-dlp");
+        let counter = base.join("counter");
+        write_test_script(
+            &binary,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.1\nprintf 'shared\\n'\n",
+                counter.display()
+            ),
+        );
+
+        let (first, second) = tokio::join!(
+            probe_first_line(&binary, "--version"),
+            probe_first_line(&binary, "--version")
+        );
+        assert_eq!(first.unwrap(), "shared");
+        assert_eq!(second.unwrap(), "shared");
+        assert_eq!(std::fs::read(&counter).unwrap(), b"x");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn concurrent_failed_version_probes_share_a_short_negative_cache() {
+        let base = unique_dir("version-probe-failure-cache");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("yt-dlp");
+        let counter = base.join("counter");
+        write_test_script(
+            &binary,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.1\nexit 1\n",
+                counter.display()
+            ),
+        );
+
+        let (first, second) = tokio::join!(
+            probe_first_line(&binary, "--version"),
+            probe_first_line(&binary, "--version")
+        );
+        assert_eq!(first, Err(ToolProbeError::FailedExit));
+        assert_eq!(second, Err(ToolProbeError::FailedExit));
+        assert_eq!(
+            probe_first_line(&binary, "--version").await,
+            Err(ToolProbeError::FailedExit)
+        );
+        assert_eq!(std::fs::read(&counter).unwrap(), b"x");
+
+        tokio::time::sleep(FAILED_PROBE_CACHE_TTL + std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            probe_first_line(&binary, "--version").await,
+            Err(ToolProbeError::FailedExit)
+        );
+        assert_eq!(std::fs::read(&counter).unwrap(), b"xx");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn impersonation_probe_caches_unsupported_but_retries_failures() {
+        let base = unique_dir("impersonation-failure-cache");
+        std::fs::create_dir_all(&base).unwrap();
+
+        let unsupported = base.join("yt-dlp-unsupported");
+        let unsupported_count = base.join("unsupported-count");
+        write_test_script(
+            &unsupported,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf 'Chrome (unavailable)\\n'\n",
+                unsupported_count.display()
+            ),
+        );
+        assert!(!ytdlp_supports_impersonation(&unsupported).await);
+        assert!(!ytdlp_supports_impersonation(&unsupported).await);
+        assert_eq!(std::fs::read(&unsupported_count).unwrap(), b"x");
+
+        let failed = base.join("yt-dlp-failed");
+        let failed_count = base.join("failed-count");
+        write_test_script(
+            &failed,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.1\nexit 1\n",
+                failed_count.display()
+            ),
+        );
+        assert!(!ytdlp_supports_impersonation(&failed).await);
+        assert!(!ytdlp_supports_impersonation(&failed).await);
+        assert_eq!(std::fs::read(&failed_count).unwrap(), b"x");
+
+        tokio::time::sleep(FAILED_PROBE_CACHE_TTL + std::time::Duration::from_millis(50)).await;
+        assert!(!ytdlp_supports_impersonation(&failed).await);
+        assert_eq!(std::fs::read(&failed_count).unwrap(), b"xx");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn failed_hls_probe_is_shared_briefly_then_retried() {
+        let base = unique_dir("hls-failure-cache");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("ffmpeg");
+        let counter = base.join("counter");
+        write_test_script(
+            &binary,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.1\nexit 1\n",
+                counter.display()
+            ),
+        );
+
+        assert!(!ffmpeg_supports_hls_extension_picky(&binary).await);
+        assert!(!ffmpeg_supports_hls_extension_picky(&binary).await);
+        assert_eq!(std::fs::read(&counter).unwrap(), b"x");
+
+        tokio::time::sleep(FAILED_PROBE_CACHE_TTL + std::time::Duration::from_millis(50)).await;
+        assert!(!ffmpeg_supports_hls_extension_picky(&binary).await);
+        assert_eq!(std::fs::read(&counter).unwrap(), b"xx");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

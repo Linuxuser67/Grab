@@ -661,12 +661,25 @@ pub fn show(
     torrent_page.add(&torrent_net_group);
 
     // Video pages resolve via yt-dlp tools; this page holds defaults plus tool setup.
-    fn tool_first_line(binary: &std::path::Path, version_arg: &str) -> Option<String> {
-        crate::video_tools::probe_first_line(
-            binary,
-            version_arg,
-            crate::video_tools::TOOL_PROBE_TIMEOUT,
-        )
+    async fn inspect_tool_version(
+        name: &str,
+        version_arg: &str,
+        dirs: &[std::path::PathBuf],
+    ) -> Option<(
+        std::path::PathBuf,
+        Result<String, crate::video_tools::ToolProbeError>,
+    )> {
+        // PATH can contain slow mounts; keep executable checks off the GTK
+        // context along with the asynchronous version subprocess.
+        let name = name.to_owned();
+        let dirs = dirs.to_vec();
+        let path = crate::runtime::tokio_rt()
+            .spawn_blocking(move || crate::video_tools::find_in_dirs(&name, &dirs))
+            .await
+            .ok()
+            .flatten()?;
+        let version = crate::video_tools::probe_first_line(&path, version_arg).await;
+        Some((path, version))
     }
     /// The row only needs to know whether both required video tools are present.
     /// Check filesystem paths only: do not launch subprocesses or contact upstream
@@ -1077,21 +1090,13 @@ pub fn show(
                     // Probe installed versions off-thread, then ask each managed
                     // tool's upstream for a newer release: yt-dlp/yt-dlp,
                     // quickjs-ng/quickjs, gdl-org/builds.
-                    let installed = gio::spawn_blocking(|| {
-                        let dirs = crate::video_tools::tool_search_dirs();
-                        let inspect = |name: &str, version_arg: &str| {
-                            crate::video_tools::find_in_dirs(name, &dirs).map(|path| {
-                                let version = tool_first_line(&path, version_arg);
-                                (path, version)
-                            })
-                        };
-                        let yt = inspect("yt-dlp", "--version");
-                        let qjs = inspect("qjs", "--version");
-                        let gdl = inspect("gallery-dl", "--version");
-                        (yt, qjs, gdl)
-                    })
-                    .await
-                    .ok();
+                    let dirs = crate::video_tools::tool_search_dirs();
+                    let (yt, qjs, gdl) = tokio::join!(
+                        inspect_tool_version("yt-dlp", "--version", &dirs),
+                        inspect_tool_version("qjs", "--version", &dirs),
+                        inspect_tool_version("gallery-dl", "--version", &dirs),
+                    );
+                    let installed = Some((yt, qjs, gdl));
                     // Upstream tags come from the update cache: a click reuses a
                     // check from the last 15 minutes. The lookups run on Grab's
                     // Tokio runtime inside update_cache, never on this GLib task.
@@ -1117,13 +1122,14 @@ pub fn show(
                     let mut updates: Vec<String> = Vec::new();
                     let mut missing: Vec<String> = Vec::new();
                     let mut current: Vec<String> = Vec::new();
+                    let mut timed_out: Vec<String> = Vec::new();
                     let mut indeterminate = installed.is_none();
                     if let Some((yt, qjs, gdl)) = installed {
                         // Presence is independent for each binary. In particular,
                         // resolve_libraries() must not hide all missing tools just
                         // because a fresh profile has no yt-dlp yet.
                         match (yt.as_ref(), yt_tag.as_deref()) {
-                            (Some((_, Some(installed))), Some(tag))
+                            (Some((_, Ok(installed))), Some(tag))
                                 if crate::video_tools::tool_update_available(installed, tag) =>
                             {
                                 updates.push(format!(
@@ -1132,8 +1138,13 @@ pub fn show(
                                     tag.trim()
                                 ));
                             }
-                            (Some((_, Some(installed))), Some(_)) => {
+                            (Some((_, Ok(installed))), Some(_)) => {
                                 current.push(format!("yt-dlp {}", installed.trim()));
+                            }
+                            (Some((_, Ok(_))), None) => indeterminate = true,
+                            (Some((_, Err(crate::video_tools::ToolProbeError::Timeout))), _) => {
+                                timed_out.push("yt-dlp".to_string());
+                                indeterminate = true;
                             }
                             (Some(_), _) => indeterminate = true,
                             (None, _) => missing.push("yt-dlp".to_string()),
@@ -1141,7 +1152,7 @@ pub fn show(
                         // Optional tools are offered for installation whenever
                         // absent, even if their latest-release lookup is offline.
                         match (qjs.as_ref(), qjs_tag.as_deref()) {
-                            (Some((_, Some(installed))), Some(tag))
+                            (Some((_, Ok(installed))), Some(tag))
                                 if crate::video_tools::tool_update_available(installed, tag) =>
                             {
                                 updates.push(format!(
@@ -1150,22 +1161,32 @@ pub fn show(
                                     tag.trim()
                                 ));
                             }
-                            (Some((_, Some(installed))), Some(_)) => {
+                            (Some((_, Ok(installed))), Some(_)) => {
                                 current.push(format!("quickjs {}", installed.trim()));
+                            }
+                            (Some((_, Ok(_))), None) => indeterminate = true,
+                            (Some((_, Err(crate::video_tools::ToolProbeError::Timeout))), _) => {
+                                timed_out.push("quickjs".to_string());
+                                indeterminate = true;
                             }
                             (Some(_), _) => indeterminate = true,
                             (None, _) => missing.push(TOOL_QUICKJS.to_string()),
                         }
                         match (gdl.as_ref(), gdl_tag.as_deref()) {
-                            (Some((_, Some(installed))), Some(tag)) if gdl_needs_update => {
+                            (Some((_, Ok(installed))), Some(tag)) if gdl_needs_update => {
                                 updates.push(format!(
                                     "gallery-dl {} → {}",
                                     installed.trim(),
                                     tag.trim()
                                 ));
                             }
-                            (Some((_, Some(installed))), Some(_)) => {
+                            (Some((_, Ok(installed))), Some(_)) => {
                                 current.push(format!("gallery-dl {}", installed.trim()));
+                            }
+                            (Some((_, Ok(_))), None) => indeterminate = true,
+                            (Some((_, Err(crate::video_tools::ToolProbeError::Timeout))), _) => {
+                                timed_out.push("gallery-dl".to_string());
+                                indeterminate = true;
                             }
                             (Some(_), _) => indeterminate = true,
                             (None, _) => missing.push(TOOL_GALLERY_DL.to_string()),
@@ -1196,6 +1217,12 @@ pub fn show(
                                     .replace("{list}", &updates.join(", ")),
                             );
                         }
+                        if !timed_out.is_empty() {
+                            parts.push(
+                                gettext("Timed out checking: {list}")
+                                    .replace("{list}", &timed_out.join(", ")),
+                            );
+                        }
                         row_b.set_subtitle(&parts.join(" • "));
                         // Button says "Install" if anything is missing (you can't
                         // update what isn't there), else "Update".
@@ -1205,6 +1232,13 @@ pub fn show(
                             btn_b.set_label(&gettext("Update"));
                         }
                         action_b.set(ToolAction::Update);
+                    } else if !timed_out.is_empty() {
+                        row_b.set_subtitle(
+                            &gettext("Timed out checking: {list}")
+                                .replace("{list}", &timed_out.join(", ")),
+                        );
+                        btn_b.set_label(&gettext("Check for Updates"));
+                        action_b.set(ToolAction::Check);
                     } else if !indeterminate {
                         row_b.set_subtitle(
                             &gettext("Up to date • {list}").replace("{list}", &current.join(" • ")),

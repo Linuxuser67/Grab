@@ -9,6 +9,18 @@ use gtk4::glib::object::Cast as _;
 use gtk4::prelude::*;
 
 #[test]
+fn close_hides_only_for_background_transfers_not_during_shutdown() {
+    use crate::window::should_hide_to_background;
+
+    assert!(should_hide_to_background(true, false));
+    assert!(!should_hide_to_background(false, false));
+    assert!(
+        !should_hide_to_background(true, true),
+        "async shutdown must bypass the background-hide handler"
+    );
+}
+
+#[test]
 fn stop_copy_distinguishes_a_live_capture_from_a_discard() {
     // Stop inverts by row: normal downloads discard, live captures keep the recording.
     // Shipped both as "Cancel" with no feedback, so live users couldn't tell it was safe.

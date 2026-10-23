@@ -256,6 +256,13 @@ enum Routed {
     Failed,
 }
 
+/// Enqueue a URI that the handoff classifier has identified as a direct file
+/// or magnet. Separated from the GTK/toast routing so auto-add's queueing path
+/// can be exercised without networking or opening a confirmation dialog.
+fn enqueue_direct_handoff(manager: &Rc<DownloadManager>, uri: &url::Url) -> Result<(), String> {
+    manager.enqueue(uri.as_str(), None, None).map(|_| ())
+}
+
 async fn route_open_uri(
     manager: Rc<DownloadManager>,
     toasts: Rc<adw::ToastOverlay>,
@@ -303,8 +310,8 @@ async fn route_open_uri(
         add_card.open(Some(uri.as_str().to_string()));
         return Routed::OpenedCard;
     }
-    match manager.enqueue(uri.as_str(), None, None) {
-        Ok(_) => Routed::Queued,
+    match enqueue_direct_handoff(&manager, &uri) {
+        Ok(()) => Routed::Queued,
         Err(e) => {
             toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
             Routed::Failed
@@ -439,11 +446,137 @@ impl From<Routed> for crate::extension_server::HandoffOutcome {
     }
 }
 
+/// Process files opened through GApplication after startup has installed
+/// the state and the queue manager has restored its saved rows.
+fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
+    glib::spawn_future_local(async move {
+        s.manager.wait_for_restore().await;
+        if s.manager.is_shutting_down() {
+            return;
+        }
+        if s.manager.restore_failed() {
+            s.toasts.add_toast(adw::Toast::new(&gettext(
+                "Could not process opened files because the saved queue could not be restored.",
+            )));
+            return;
+        }
+        for f in files {
+            // grab: links arrive here from the browser extension; restore
+            // the original URL so the normal routing below applies.
+            let via_grab = f
+                .uri()
+                .parse::<url::Url>()
+                .is_ok_and(|u| u.scheme() == "grab");
+            let uri_text = normalize_grab_uri(&f.uri());
+            // magnet: links arrive here when Grab is the system's magnet
+            // handler; enqueue validates them like pasted links.
+            if let Ok(uri) = uri_text.parse::<url::Url>()
+                && matches!(uri.scheme(), "http" | "https" | "magnet")
+            {
+                dispatch_handoff(&s, uri, via_grab, None);
+                continue;
+            }
+            if let Some(path) = f.path() {
+                // .torrent files go to the torrent intake.
+                if path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
+                {
+                    let (manager, toasts, add_card) =
+                        (s.manager.clone(), s.toasts.clone(), s.add_card.clone());
+                    let stem = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "download".to_string());
+                    let file_name = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| format!("{stem}.torrent"));
+                    glib::spawn_future_local(async move {
+                        let bytes =
+                            gio::spawn_blocking(move || crate::torrent::read_torrent_bytes(&path))
+                                .await
+                                .ok()
+                                .flatten();
+                        let Some(bytes) = bytes else {
+                            toasts.add_toast(adw::Toast::new(&gettext(
+                                "Could not read that .torrent file",
+                            )));
+                            return;
+                        };
+                        // Multi-file torrents offer per-file switches in the
+                        // inline picker's right-sliding page.
+                        match crate::torrent::torrent_file_list(&bytes) {
+                            Ok((_, entries)) if entries.len() > 1 => {
+                                add_card.open_torrent_picker(file_name, bytes, entries);
+                            }
+                            Ok(_) => {
+                                if let Err(e) =
+                                    manager.enqueue_torrent_file(bytes, &stem, None, None)
+                                {
+                                    toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(
+                                        &e,
+                                    )));
+                                }
+                            }
+                            Err(e) => {
+                                toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+                            }
+                        }
+                    });
+                    continue;
+                }
+                // Only .torrent files open as files now; anything else
+                // explains itself instead of queuing garbage rows.
+                s.toasts.add_toast(adw::Toast::new(&gettext(
+                    "Only .torrent files can be opened directly",
+                )));
+            }
+        }
+        s.window.present();
+    });
+}
+
+/// Route startup-open requests once the application state exists; retain them otherwise.
+/// Keeping this decision in one place makes early D-Bus/URI delivery testable.
+fn dispatch_open_files_or_defer(
+    state: Option<Rc<State>>,
+    pending: &RefCell<Vec<gio::File>>,
+    files: Vec<gio::File>,
+) {
+    if let Some(state) = state {
+        handle_open_files(state, files);
+    } else {
+        pending.borrow_mut().extend(files);
+    }
+}
+
+fn take_pending_open_files(pending: &RefCell<Vec<gio::File>>) -> Vec<gio::File> {
+    std::mem::take(&mut *pending.borrow_mut())
+}
+
+/// Atomically claim the one permitted orderly-shutdown attempt.
+/// Ordinary close and explicit Quit share this gate to avoid racing persistence.
+pub(crate) fn begin_shutdown_once(
+    manager: &DownloadManager,
+    shutdown_requested: &std::cell::Cell<bool>,
+) -> bool {
+    !shutdown_requested.replace(true) && manager.begin_async_shutdown()
+}
+
 pub fn setup(app: &adw::Application) {
     let state: Rc<RefCell<Option<Rc<State>>>> = Rc::new(RefCell::new(None));
+    // GApplication can deliver open requests before startup has installed State.
+    // Retain them and dispatch once the main window and queue manager exist.
+    let pending_open_files: Rc<RefCell<Vec<gio::File>>> = Rc::new(RefCell::new(Vec::new()));
+    // Set synchronously before scheduling shutdown work so close and explicit
+    // Quit cannot race each other before shutdown_async is first polled.
+    let shutdown_requested = Rc::new(std::cell::Cell::new(false));
 
     {
         let st = Rc::clone(&state);
+        let pending_open_files = Rc::clone(&pending_open_files);
+        let shutdown_requested = Rc::clone(&shutdown_requested);
         app.connect_startup(move |app| {
             // Browser extension integration via HTTP (see extension_server):
             // the server forwards URLs here, and we enqueue them like
@@ -455,16 +588,75 @@ pub fn setup(app: &adw::Application) {
             manager.start_scheduler();
 
             let toasts = Rc::new(adw::ToastOverlay::new());
-            register_actions(app, &st);
+            register_actions(app, &st, &shutdown_requested);
             let win = window::build_window(app, manager.clone(), settings.clone(), toasts.clone());
+            win.2.widget().set_sensitive(false);
             st.borrow_mut().replace(Rc::new(State {
                 manager: manager.clone(),
                 settings,
-                toasts,
-                window: win.0,
+                toasts: toasts.clone(),
+                window: win.0.clone(),
                 search_toggle: win.1,
-                add_card: win.2,
+                add_card: win.2.clone(),
             }));
+            {
+                let manager = manager.clone();
+                let card = win.2.clone();
+                let toasts = toasts.clone();
+                glib::spawn_future_local(async move {
+                    manager.wait_for_restore().await;
+                    if manager.restore_failed() {
+                        toasts.add_toast(adw::Toast::new(&gettext(
+                            "Could not restore the saved queue. The original queue file was preserved; restart Grab to try again.",
+                        )));
+                    } else if !manager.is_shutting_down() {
+                        card.widget().set_sensitive(true);
+                    }
+                });
+            }
+            let pending = take_pending_open_files(&pending_open_files);
+            if !pending.is_empty()
+                && let Some(s) = st.borrow().as_ref().cloned()
+            {
+                handle_open_files(s, pending);
+            }
+
+            // The normal close path must not block GTK while joining tasks or
+            // flushing queue state. Stop the first close, wait asynchronously,
+            // then replay the close once shutdown is complete.
+            let manager_weak = Rc::downgrade(&manager);
+            let closing = Rc::new(std::cell::Cell::new(false));
+            let close_ready = Rc::new(std::cell::Cell::new(false));
+            win.0.connect_close_request({
+                let closing = closing.clone();
+                let close_ready = close_ready.clone();
+                let shutdown_requested = shutdown_requested.clone();
+                move |window| {
+                    if close_ready.get() {
+                        return glib::Propagation::Proceed;
+                    }
+                    if closing.replace(true) {
+                        return glib::Propagation::Stop;
+                    }
+                    let Some(manager) = manager_weak.upgrade() else {
+                        return glib::Propagation::Proceed;
+                    };
+                    if !begin_shutdown_once(&manager, shutdown_requested.as_ref()) {
+                        return glib::Propagation::Stop;
+                    }
+                    window.set_sensitive(false);
+                    let window = window.clone();
+                    let closing_done = closing.clone();
+                    let ready = close_ready.clone();
+                    glib::MainContext::default().spawn_local(async move {
+                        manager.finish_async_shutdown().await;
+                        ready.set(true);
+                        closing_done.set(false);
+                        window.close();
+                    });
+                    glib::Propagation::Stop
+                }
+            });
 
             // Extension HTTP server -> download queue bridge. Routes through
             // the same confirm dialog and route_open_uri as grab:// handoffs.
@@ -482,6 +674,18 @@ pub fn setup(app: &adw::Application) {
                         Some(s) => s,
                         None => continue,
                     };
+                    s.manager.wait_for_restore().await;
+                    if s.manager.is_shutting_down() {
+                        answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
+                        continue;
+                    }
+                    if s.manager.restore_failed() {
+                        s.toasts.add_toast(adw::Toast::new(&gettext(
+                            "Browser links cannot be queued because the saved queue could not be restored.",
+                        )));
+                        answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
+                        continue;
+                    }
                     // The extension sends the real URL (it unwraps grab:// in JS).
                     // The text is not echoed: it is attacker-controllable.
                     let Ok(uri) = url_text.parse::<url::Url>() else {
@@ -517,88 +721,10 @@ pub fn setup(app: &adw::Application) {
 
     {
         let st = Rc::clone(&state);
+        let pending = Rc::clone(&pending_open_files);
         app.connect_open(move |_, files, _| {
-            let s = match st.borrow().as_ref().cloned() {
-                Some(s) => s,
-                None => return,
-            };
-            for f in files {
-                // grab: links arrive here from the browser extension; restore
-                // the original URL so the normal routing below applies.
-                let via_grab = f
-                    .uri()
-                    .parse::<url::Url>()
-                    .is_ok_and(|u| u.scheme() == "grab");
-                let uri_text = normalize_grab_uri(&f.uri());
-                // magnet: links arrive here when Grab is the system's magnet
-                // handler; enqueue validates them like pasted links.
-                if let Ok(uri) = uri_text.parse::<url::Url>()
-                    && matches!(uri.scheme(), "http" | "https" | "magnet")
-                {
-                    dispatch_handoff(&s, uri, via_grab, None);
-                    continue;
-                }
-                if let Some(path) = f.path() {
-                    // .torrent files go to the torrent intake.
-                    if path
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
-                    {
-                        let (manager, toasts, add_card) =
-                            (s.manager.clone(), s.toasts.clone(), s.add_card.clone());
-                        let stem = path
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "download".to_string());
-                        let file_name = path
-                            .file_name()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| format!("{stem}.torrent"));
-                        glib::spawn_future_local(async move {
-                            let bytes = gio::spawn_blocking(move || {
-                                crate::torrent::read_torrent_bytes(&path)
-                            })
-                            .await
-                            .ok()
-                            .flatten();
-                            let Some(bytes) = bytes else {
-                                toasts.add_toast(adw::Toast::new(&gettext(
-                                    "Could not read that .torrent file",
-                                )));
-                                return;
-                            };
-                            // Multi-file torrents offer per-file switches in the
-                            // inline picker's right-sliding page.
-                            match crate::torrent::torrent_file_list(&bytes) {
-                                Ok((_, entries)) if entries.len() > 1 => {
-                                    add_card.open_torrent_picker(file_name, bytes, entries);
-                                }
-                                Ok(_) => {
-                                    if let Err(e) =
-                                        manager.enqueue_torrent_file(bytes, &stem, None, None)
-                                    {
-                                        toasts.add_toast(adw::Toast::new(
-                                            &crate::ui_util::esc_markup(&e),
-                                        ));
-                                    }
-                                }
-                                Err(e) => {
-                                    toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(
-                                        &e,
-                                    )));
-                                }
-                            }
-                        });
-                        continue;
-                    }
-                    // Only .torrent files open as files now; anything else
-                    // explains itself instead of queuing garbage rows.
-                    s.toasts.add_toast(adw::Toast::new(&gettext(
-                        "Only .torrent files can be opened directly",
-                    )));
-                }
-            }
-            s.window.present();
+            let state_now = st.borrow().as_ref().cloned();
+            dispatch_open_files_or_defer(state_now, &pending, files.to_vec());
         });
     }
 
@@ -672,7 +798,11 @@ fn confirm_download(
     dialog.present(Some(parent));
 }
 
-fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>) {
+fn register_actions(
+    app: &adw::Application,
+    st: &Rc<RefCell<Option<Rc<State>>>>,
+    shutdown_requested: &Rc<std::cell::Cell<bool>>,
+) {
     let entries = [
         {
             let st = Rc::clone(st);
@@ -895,9 +1025,32 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                 })
                 .build()
         },
-        gio::ActionEntry::builder("quit")
-            .activate(|app: &adw::Application, _, _| app.quit())
-            .build(),
+        {
+            let st = Rc::clone(st);
+            let shutdown_requested = Rc::clone(shutdown_requested);
+            gio::ActionEntry::builder("quit")
+                .activate(move |app: &adw::Application, _, _| {
+                    // Explicit Quit must not pass through close-request's
+                    // "hide to background" behavior used for ordinary closes.
+                    if let Some(s) = st.borrow().as_ref().cloned() {
+                        // Claim shutdown synchronously, before yielding to the
+                        // GLib context, so a concurrent close cannot start a
+                        // second task that quits before persistence finishes.
+                        if !begin_shutdown_once(&s.manager, shutdown_requested.as_ref()) {
+                            return;
+                        }
+                        let app = app.clone();
+                        glib::MainContext::default().spawn_local(async move {
+                            s.window.set_sensitive(false);
+                            s.manager.finish_async_shutdown().await;
+                            app.quit();
+                        });
+                    } else {
+                        app.quit();
+                    }
+                })
+                .build()
+        },
         gio::ActionEntry::builder("present")
             .activate(|app: &adw::Application, _, _| app.activate())
             .build(),
@@ -908,11 +1061,164 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
 #[cfg(test)]
 mod tests {
     use super::{
-        TorrentFetchError, check_remote_torrent_uri, fetch_remote_torrent_bytes,
-        grab_handoff_needs_confirm, handoff_should_confirm, is_remote_torrent_url,
-        normalize_grab_uri,
+        Routed, TorrentFetchError, check_remote_torrent_uri, dispatch_open_files_or_defer,
+        enqueue_direct_handoff, fetch_remote_torrent_bytes, grab_handoff_needs_confirm,
+        handoff_should_confirm, is_remote_torrent_url, normalize_grab_uri, take_pending_open_files,
     };
+    use crate::download::DownloadManager;
     use gettextrs::gettext;
+    use gtk4::gio;
+    use gtk4::prelude::*;
+
+    fn auto_add_test_settings(
+        enabled: bool,
+        tag: &str,
+    ) -> (crate::settings::AppSettings, std::path::PathBuf) {
+        let queue_file =
+            std::env::temp_dir().join(format!("grab-auto-add-{}-{tag}.json", std::process::id()));
+        let _ = std::fs::remove_file(&queue_file);
+        // Cargo test runs this suite serially in CI; isolate the GSettings schema,
+        // memory backend, and persisted queue so no real network transfer starts.
+        unsafe {
+            std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+            std::env::set_var("GSETTINGS_BACKEND", "memory");
+            std::env::set_var("GRAB_QUEUE_FILE", &queue_file);
+        }
+        let settings = crate::settings::AppSettings::new();
+        settings
+            .set_boolean(crate::settings::key::AUTO_ADD_DOWNLOADS, enabled)
+            .expect("set auto-add preference");
+        (settings, queue_file)
+    }
+
+    #[test]
+    fn auto_add_public_direct_handoff_reaches_queue_and_reports_queued() {
+        let (settings, queue_file) = auto_add_test_settings(true, "enabled");
+        let manager = DownloadManager::new(
+            gio::ListStore::new::<crate::download::DownloadItem>(),
+            settings.clone(),
+        );
+        let uri = "https://example.com/file.zip".parse::<url::Url>().unwrap();
+
+        {
+            // Keep the row queued during the assertion; reserve async shutdown
+            // before closing the batch, so the test can prove queueing without
+            // starting a real network transfer.
+            let batch = manager.batch_guard();
+            assert!(
+                !handoff_should_confirm(true, &uri, settings.auto_add_downloads()),
+                "a public direct-file handoff skips confirmation when auto-add is enabled"
+            );
+            enqueue_direct_handoff(&manager, &uri).expect("direct handoff should enqueue");
+            assert_eq!(manager.store().n_items(), 1);
+            let item = manager
+                .store()
+                .item(0)
+                .and_downcast::<crate::download::DownloadItem>()
+                .expect("the handoff created a download row");
+            assert_eq!(item.url(), uri.as_str());
+            assert_eq!(item.status(), crate::download::DownloadStatus::Queued);
+            assert!(manager.begin_async_shutdown());
+            drop(batch);
+        }
+
+        let queued_outcome = crate::extension_server::HandoffOutcome::from(Routed::Queued);
+        assert_eq!(
+            crate::extension_server::handoff_outcome_response(&queued_outcome),
+            (axum::http::StatusCode::OK, false),
+            "the browser extension should be told the URL was accepted"
+        );
+        drop(manager);
+        let _ = std::fs::remove_file(queue_file);
+    }
+
+    #[test]
+    fn auto_add_disabled_keeps_direct_handoff_behind_confirmation() {
+        let (settings, queue_file) = auto_add_test_settings(false, "disabled");
+        let manager = DownloadManager::new(
+            gio::ListStore::new::<crate::download::DownloadItem>(),
+            settings.clone(),
+        );
+        let uri = "https://example.com/file.zip".parse::<url::Url>().unwrap();
+
+        {
+            let batch = manager.batch_guard();
+            assert!(
+                handoff_should_confirm(true, &uri, settings.auto_add_downloads()),
+                "without auto-add, the direct-file handoff must take the confirmation path"
+            );
+            assert_eq!(
+                manager.store().n_items(),
+                0,
+                "a direct URL must not be queued before the user confirms"
+            );
+
+            // This is the confirmation dialog's acceptance route: once the
+            // user approves, it invokes the same direct enqueue path as auto-add.
+            enqueue_direct_handoff(&manager, &uri)
+                .expect("a confirmed direct handoff should enqueue");
+            assert_eq!(manager.store().n_items(), 1);
+            assert!(
+                manager.begin_async_shutdown(),
+                "gate starts before closing the test batch"
+            );
+            drop(batch);
+        }
+        drop(manager);
+        let _ = std::fs::remove_file(queue_file);
+    }
+
+    #[test]
+    fn auto_add_still_requires_confirmation_for_private_direct_handoffs() {
+        let (settings, queue_file) = auto_add_test_settings(true, "private");
+        let manager = DownloadManager::new(
+            gio::ListStore::new::<crate::download::DownloadItem>(),
+            settings.clone(),
+        );
+        let uri = "http://192.168.1.1/file.zip".parse::<url::Url>().unwrap();
+
+        assert!(settings.auto_add_downloads());
+        assert!(
+            handoff_should_confirm(true, &uri, settings.auto_add_downloads()),
+            "auto-add must not bypass confirmation for a private-network target"
+        );
+        assert_eq!(
+            manager.store().n_items(),
+            0,
+            "the private URL must not be queued by the automatic route"
+        );
+        drop(manager);
+        let _ = std::fs::remove_file(queue_file);
+    }
+
+    #[test]
+    fn open_requests_before_state_installation_are_retained_and_drained() {
+        let pending = std::cell::RefCell::new(Vec::new());
+        dispatch_open_files_or_defer(
+            None,
+            &pending,
+            vec![gio::File::for_uri("grab://example.com/first.zip")],
+        );
+        dispatch_open_files_or_defer(
+            None,
+            &pending,
+            vec![gio::File::for_uri("magnet:?xt=urn:btih:startup-intake")],
+        );
+
+        assert_eq!(pending.borrow().len(), 2);
+        let drained = take_pending_open_files(&pending);
+        assert_eq!(
+            drained
+                .iter()
+                .map(|file| file.uri().to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "grab://example.com/first.zip".to_string(),
+                "magnet:?xt=urn:btih:startup-intake".to_string(),
+            ]
+        );
+        assert!(pending.borrow().is_empty());
+    }
 
     #[test]
     fn remote_torrent_url_detection() {

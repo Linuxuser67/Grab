@@ -6743,8 +6743,7 @@ fn scheduler_fires_and_rearms_for_the_next_scheduled_row() {
 
     let ctx = glib::MainContext::default();
     let first_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while first.status() == DownloadStatus::Scheduled
-        && std::time::Instant::now() < first_deadline
+    while first.status() == DownloadStatus::Scheduled && std::time::Instant::now() < first_deadline
     {
         ctx.iteration(false);
         std::thread::sleep(std::time::Duration::from_millis(5));

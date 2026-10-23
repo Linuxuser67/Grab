@@ -3268,7 +3268,7 @@ impl DownloadManager {
         {
             if self.restore_pending.get() {
                 tracing::warn!(
-                    "shutdown: restore still pending; preserving saved queue rather than writing an incomplete snapshot"
+                    "shutdown: restore still pending; preserving saved queue rather than writing                      an incomplete snapshot"
                 );
             } else if let (Some(text), Some(tx)) =
                 (self.serialize_queue_inner(true), &*self.persist_tx.borrow())

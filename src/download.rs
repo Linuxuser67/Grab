@@ -3885,6 +3885,9 @@ impl DownloadManager {
         if self.shutdown_finished.get() || self.shutdown_started.replace(true) {
             return;
         }
+        // A scheduled item may become due while shutdown awaits worker joins or
+        // persistence. Stop the wake now so closing cannot consume its schedule.
+        self.stop_scheduler();
         // The queue reader and model applier must finish first. Otherwise a
         // shutdown snapshot taken from an empty startup model could replace
         // the still-valid queue file.
@@ -3997,6 +4000,7 @@ impl DownloadManager {
     }
 
     pub(crate) fn shutdown_with_timeout(&self, timeout: Duration) {
+        self.stop_scheduler();
         self.draining.set(true);
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
         // Discard workers first through their retained abort handles: aborting a finalizer would detach its worker instead of stopping it. Finalizers are awaited (not aborted) so cleanup still runs.

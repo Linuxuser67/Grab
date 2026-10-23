@@ -432,9 +432,8 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
     Ok(Libraries::new(youtube, ffmpeg_dir.join("ffmpeg")))
 }
 
-/// Cached `--impersonate` support per yt-dlp binary, stamped with the
-/// binary's `(mtime, len)`: an in-place yt-dlp update flips the stamp, so
-/// the next spawn re-probes instead of serving the old binary's answer.
+/// Cached `--impersonate` support per yt-dlp binary, stamped with its
+/// modification time and size so an in-place update invalidates the answer.
 #[derive(Clone, Copy)]
 struct ImpersonateEntry {
     stamp: (Option<std::time::SystemTime>, u64),
@@ -443,6 +442,11 @@ struct ImpersonateEntry {
 
 static IMPERSONATE_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, ImpersonateEntry>>> = OnceLock::new();
 
+/// Serialize cold probes for the same executable without blocking Tokio workers.
+static IMPERSONATE_PROBE_LOCKS: OnceLock<
+    Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+> = OnceLock::new();
+
 /// Stat stamp for the support cache; a missing binary reports `(None, 0)`.
 fn impersonate_stamp(youtube_bin: &Path) -> (Option<std::time::SystemTime>, u64) {
     std::fs::metadata(youtube_bin)
@@ -450,54 +454,53 @@ fn impersonate_stamp(youtube_bin: &Path) -> (Option<std::time::SystemTime>, u64)
         .unwrap_or((None, 0))
 }
 
-/// Whether yt-dlp's `--impersonate` flag is known-supported for this binary.
-/// This path is deliberately non-blocking, including when called from GTK.
-/// The first call returns the conservative default while an async probe warms
-/// the cache; later calls use the result. A binary stamp invalidates stale data.
-pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
-    let cache = IMPERSONATE_SUPPORT.get_or_init(|| Mutex::new(HashMap::new()));
-    let stamp = impersonate_stamp(youtube_bin);
-    if let Ok(mut guard) = cache.lock() {
-        if let Some(entry) = guard.get(youtube_bin) {
-            if entry.stamp == stamp {
-                return entry.supported;
-            }
-            guard.remove(youtube_bin);
+/// Whether yt-dlp's `--impersonate` flag is supported by this binary.
+///
+/// Callers are already on the async media path, so await the result rather than
+/// silently omitting a user-selected target on the first, cold-cache request.
+/// The per-binary async lock deduplicates simultaneous probes without blocking
+/// the GTK main context or a Tokio worker. The subprocess probe retains its
+/// defensive 15-second safety limit.
+pub(crate) async fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
+    let key = youtube_bin.to_path_buf();
+    let probe_lock = {
+        let locks = IMPERSONATE_PROBE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut locks = locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _guard = probe_lock.lock().await;
+
+    let stamp = impersonate_stamp(&key);
+    {
+        let mut cache = IMPERSONATE_SUPPORT
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = cache.get(&key)
+            && entry.stamp == stamp
+        {
+            return entry.supported;
         }
-        // Claim the key first, so concurrent first calls do not duplicate work.
-        guard.insert(
-            youtube_bin.to_path_buf(),
-            ImpersonateEntry {
-                stamp,
-                supported: false,
-            },
-        );
+        cache.remove(&key);
     }
 
-    let binary = youtube_bin.to_path_buf();
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::spawn(warm_impersonation_cache(binary));
-    } else {
-        crate::runtime::tokio_rt().spawn(warm_impersonation_cache(binary));
+    let supported = probe_impersonate_support(&key).await;
+    // Never publish a result for a binary that changed while it was probed,
+    // and fail closed for this call rather than using a stale positive result.
+    if stamp != impersonate_stamp(&key) {
+        return false;
     }
-    false
-}
-
-/// Warm the cache on Tokio's async process driver rather than occupying a
-/// blocking-pool thread polling a child every few milliseconds.
-async fn warm_impersonation_cache(youtube_bin: PathBuf) {
-    let stamp = impersonate_stamp(&youtube_bin);
-    let supported = probe_impersonate_support(&youtube_bin).await;
-    // Do not publish a result for a binary that changed while it was probed.
-    if stamp != impersonate_stamp(&youtube_bin) {
-        return;
-    }
-    if let Ok(mut guard) = IMPERSONATE_SUPPORT
+    IMPERSONATE_SUPPORT
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-    {
-        guard.insert(youtube_bin, ImpersonateEntry { stamp, supported });
-    }
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, ImpersonateEntry { stamp, supported });
+    supported
 }
 
 /// One-shot `--list-impersonate-targets` probe. The 15-second limit is retained

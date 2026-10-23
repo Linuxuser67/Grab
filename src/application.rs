@@ -463,7 +463,9 @@ pub fn setup(app: &adw::Application) {
                 let restore_card = win.2.clone();
                 glib::spawn_future_local(async move {
                     restore_manager.wait_for_restore().await;
-                    restore_card.widget().set_sensitive(true);
+                    if !restore_manager.is_shutting_down() {
+                        restore_card.widget().set_sensitive(true);
+                    }
                 });
             }
             st.borrow_mut().replace(Rc::new(State {
@@ -524,6 +526,9 @@ pub fn setup(app: &adw::Application) {
                         None => continue,
                     };
                     s.manager.wait_for_restore().await;
+                    if s.manager.is_shutting_down() {
+                        continue;
+                    }
                     // The extension sends the real URL (it unwraps grab:// in JS).
                     // The text is not echoed: it is attacker-controllable.
                     let Ok(uri) = url_text.parse::<url::Url>() else {
@@ -567,6 +572,9 @@ pub fn setup(app: &adw::Application) {
             let files = files.to_vec();
             glib::spawn_future_local(async move {
                 s.manager.wait_for_restore().await;
+                if s.manager.is_shutting_down() {
+                    return;
+                }
                 for f in files {
                     // grab: links arrive here from the browser extension; restore
                     // the original URL so the normal routing below applies.

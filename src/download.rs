@@ -3606,6 +3606,11 @@ impl DownloadManager {
         }
     }
 
+    /// Whether the manager has begun or completed shutdown.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown_started.get() || self.draining.get() || self.shutdown_finished.get()
+    }
+
     /// File reading, size/version caps, JSON parsing, and pure stored-item
     /// validation run on a blocking worker. No GTK/GObject values are created.
     fn load_restore_queue(queue_file: std::path::PathBuf) -> Option<Vec<PendingRestore>> {

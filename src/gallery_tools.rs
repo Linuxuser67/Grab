@@ -170,10 +170,7 @@ fn parse_sha256sums(body: &str, filename: &str) -> Option<String> {
     found
 }
 
-async fn bounded_response_text(
-    response: reqwest::Response,
-    max_bytes: usize,
-) -> Option<String> {
+async fn bounded_response_text(response: reqwest::Response, max_bytes: usize) -> Option<String> {
     if response
         .content_length()
         .is_some_and(|length| length > max_bytes as u64)

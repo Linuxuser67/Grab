@@ -6619,6 +6619,32 @@ fn scheduler_starts_and_stops() {
 }
 
 #[test]
+fn async_shutdown_preserves_queue_file_if_restore_never_completed() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("shutdown-restore-failed");
+    let saved = br#"{"version":7,"items":[{"sentinel":"keep"}]}"#;
+    std::fs::write(&queue_file, saved).unwrap();
+
+    let manager = DownloadManager::new(
+        gio::ListStore::new::<DownloadItem>(),
+        test_settings(),
+    );
+    // Simulate a worker/apply failure: the in-memory model is not authoritative.
+    manager.restore_complete.set(false);
+    manager.restore_pending.set(false);
+    assert!(manager.restore_failed());
+
+    crate::runtime::tokio_rt().block_on(manager.shutdown_async());
+
+    assert_eq!(
+        std::fs::read(&queue_file).unwrap(),
+        saved,
+        "shutdown must not overwrite the last saved queue after a failed restore"
+    );
+    let _ = std::fs::remove_file(queue_file);
+}
+
+#[test]
 fn toggling_preference_stops_and_restarts_scheduler() {
     let settings = test_settings();
     // The memory backend is process-global: pin the starting value.
@@ -6677,6 +6703,40 @@ fn dropping_manager_removes_scheduler_source() {
         source.is_destroyed(),
         "dropping the manager removes the scheduler source"
     );
+}
+
+#[test]
+fn scheduler_fires_a_due_row_and_removes_its_one_shot_timer() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("scheduler-fired");
+    let settings = test_settings();
+    settings
+        .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
+        .unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let due = glib::DateTime::now_local()
+        .unwrap()
+        .add_seconds(1.0)
+        .unwrap()
+        .to_unix();
+    let item = schedule_test_item(&manager, due);
+    manager.start_scheduler();
+    assert!(manager.scheduler_source.borrow().is_some());
+
+    let ctx = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    while item.status() == DownloadStatus::Scheduled && std::time::Instant::now() < deadline {
+        ctx.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(item.status(), DownloadStatus::Queued);
+    assert_eq!(item.scheduled_at(), 0);
+    assert!(
+        manager.scheduler_source.borrow().is_none(),
+        "no one-shot timer remains when the queue has no scheduled rows"
+    );
+    manager.stop_scheduler();
+    let _ = std::fs::remove_file(queue_file);
 }
 
 #[test]

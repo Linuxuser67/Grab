@@ -661,12 +661,14 @@ pub fn show(
     torrent_page.add(&torrent_net_group);
 
     // Video pages resolve via yt-dlp tools; this page holds defaults plus tool setup.
-    fn tool_first_line(binary: &std::path::Path, version_arg: &str) -> Option<String> {
-        crate::video_tools::probe_first_line(
-            binary,
-            version_arg,
-            crate::video_tools::TOOL_PROBE_TIMEOUT,
-        )
+    async fn inspect_tool_version(
+        name: &str,
+        version_arg: &str,
+        dirs: &[std::path::PathBuf],
+    ) -> Option<(std::path::PathBuf, Option<String>)> {
+        let path = crate::video_tools::find_in_dirs(name, dirs)?;
+        let version = crate::video_tools::probe_first_line(&path, version_arg).await;
+        Some((path, version))
     }
     /// The row only needs to know whether both required video tools are present.
     /// Check filesystem paths only: do not launch subprocesses or contact upstream
@@ -1077,21 +1079,18 @@ pub fn show(
                     // Probe installed versions off-thread, then ask each managed
                     // tool's upstream for a newer release: yt-dlp/yt-dlp,
                     // quickjs-ng/quickjs, gdl-org/builds.
-                    let installed = gio::spawn_blocking(|| {
-                        let dirs = crate::video_tools::tool_search_dirs();
-                        let inspect = |name: &str, version_arg: &str| {
-                            crate::video_tools::find_in_dirs(name, &dirs).map(|path| {
-                                let version = tool_first_line(&path, version_arg);
-                                (path, version)
-                            })
-                        };
-                        let yt = inspect("yt-dlp", "--version");
-                        let qjs = inspect("qjs", "--version");
-                        let gdl = inspect("gallery-dl", "--version");
-                        (yt, qjs, gdl)
-                    })
-                    .await
-                    .ok();
+                    let dirs = crate::video_tools::tool_search_dirs();
+                    let installed = crate::runtime::tokio_rt()
+                        .spawn(async move {
+                            let (yt, qjs, gdl) = tokio::join!(
+                                inspect_tool_version("yt-dlp", "--version", &dirs),
+                                inspect_tool_version("qjs", "--version", &dirs),
+                                inspect_tool_version("gallery-dl", "--version", &dirs),
+                            );
+                            (yt, qjs, gdl)
+                        })
+                        .await
+                        .ok();
                     // Upstream tags come from the update cache: a click reuses a
                     // check from the last 15 minutes. The lookups run on Grab's
                     // Tokio runtime inside update_cache, never on this GLib task.

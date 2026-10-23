@@ -1530,14 +1530,11 @@ pub async fn latest_quickjs_release() -> Option<(String, Option<String>)> {
 /// context entered) can call it.
 async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<String> {
     crate::runtime::tokio_rt()
-        .spawn_blocking(move || probe_first_line(&binary, version_arg, TOOL_PROBE_TIMEOUT))
+        .spawn(async move { probe_first_line(&binary, version_arg).await })
         .await
         .ok()
         .flatten()
 }
-
-/// A hung or wedged tool binary must not stall every lookup or the settings page.
-pub(crate) const TOOL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Whether a failed yt-dlp log shows the extractor breaking, which a newer
 /// yt-dlp usually fixes. Removed or private videos and network errors don't match.
@@ -1547,46 +1544,29 @@ pub(crate) fn extractor_failure(log: &str) -> bool {
         .any(|marker| log.contains(marker))
 }
 
-/// First stdout line of `binary version_arg`, or `None` on spawn failure, non-zero exit, empty output or timeout (the child is killed on timeout). Blocking: call off the GTK thread.
-pub(crate) fn probe_first_line(
-    binary: &Path,
-    version_arg: &str,
-    timeout: std::time::Duration,
-) -> Option<String> {
-    use std::io::Read as _;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(binary)
+/// Run a tool's version probe as an asynchronous subprocess.
+///
+/// This must be awaited on Grab's Tokio runtime, not directly from the GTK
+/// main thread. There is no wall-clock timeout: cold starts can finish
+/// naturally, and the child is killed if the probing task is cancelled.
+pub(crate) async fn probe_first_line(binary: &Path, version_arg: &str) -> Option<String> {
+    use std::process::Stdio;
+
+    let mut command = tokio::process::Command::new(binary);
+    command
         .arg(version_arg)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        stdout.read_to_string(&mut text).ok().map(|_| text)
-    });
-    let deadline = std::time::Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-    if !status.success() {
+        .kill_on_drop(true);
+    let child = command.spawn().ok()?;
+    let output = child.wait_with_output().await.ok()?;
+    if !output.status.success() {
         return None;
     }
-    let text = reader.join().ok()??;
+    let text = String::from_utf8(output.stdout).ok()?;
     let first = text.lines().next()?.trim();
-    (!first.is_empty()).then(|| first.to_string())
+    (!first.is_empty()).then(|| first.to_owned())
 }
 
 /// Display-ready version line for an installed yt-dlp or QuickJS binary.
@@ -1655,6 +1635,43 @@ mod tests {
         std::fs::write(path, b"test").unwrap();
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn write_test_script(path: &Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn async_version_probe_reads_first_line_from_a_successful_tool() {
+        let base = unique_dir("version-probe-success");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("yt-dlp");
+        write_test_script(
+            &binary,
+            "#!/bin/sh\nprintf '2026.10.21.233146\\nignored second line\\n'\n",
+        );
+
+        assert_eq!(
+            probe_first_line(&binary, "--version").await.as_deref(),
+            Some("2026.10.21.233146")
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn async_version_probe_rejects_a_nonzero_exit() {
+        let base = unique_dir("version-probe-failure");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("yt-dlp");
+        write_test_script(
+            &binary,
+            "#!/bin/sh\nprintf '2026.10.21.233146\\n'\nexit 1\n",
+        );
+
+        assert_eq!(probe_first_line(&binary, "--version").await, None);
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

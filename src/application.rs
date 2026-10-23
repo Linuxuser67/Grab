@@ -1073,10 +1073,8 @@ mod tests {
         enabled: bool,
         tag: &str,
     ) -> (crate::settings::AppSettings, std::path::PathBuf) {
-        let queue_file = std::env::temp_dir().join(format!(
-            "grab-auto-add-{}-{tag}.json",
-            std::process::id()
-        ));
+        let queue_file =
+            std::env::temp_dir().join(format!("grab-auto-add-{}-{tag}.json", std::process::id()));
         let _ = std::fs::remove_file(&queue_file);
         // Cargo test runs this suite serially in CI; isolate the GSettings schema,
         // memory backend, and persisted queue so no real network transfer starts.

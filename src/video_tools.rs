@@ -825,7 +825,9 @@ fn deno_download_url_for_arch(tag: &str, arch: &str) -> Option<String> {
         return None;
     }
     let asset = deno_asset_name_for_arch(arch)?;
-    Some(format!("https://github.com/denoland/deno/releases/download/{tag}/{asset}"))
+    Some(format!(
+        "https://github.com/denoland/deno/releases/download/{tag}/{asset}"
+    ))
 }
 
 fn valid_sha256_digest(value: &str) -> bool {
@@ -840,9 +842,10 @@ fn parse_deno_release_metadata(body: &str, arch: &str) -> Option<DenoRelease> {
     }
     let expected_url = deno_download_url_for_arch(&tag, arch)?;
     let asset_name = deno_asset_name_for_arch(arch)?;
-    let asset = release.get("assets")?.as_array()?.iter().find(|asset| {
-        asset.get("name").and_then(serde_json::Value::as_str) == Some(asset_name)
-    })?;
+    let asset =
+        release.get("assets")?.as_array()?.iter().find(|asset| {
+            asset.get("name").and_then(serde_json::Value::as_str) == Some(asset_name)
+        })?;
     let download_url = asset.get("browser_download_url")?.as_str()?.to_owned();
     // Only accept the expected upstream asset URL; never fetch a URL supplied
     // by arbitrary release metadata, even when the digest field is present.
@@ -855,7 +858,11 @@ fn parse_deno_release_metadata(body: &str, arch: &str) -> Option<DenoRelease> {
         .and_then(|value| value.strip_prefix("sha256:"))
         .filter(|value| valid_sha256_digest(value))
         .map(str::to_owned);
-    Some(DenoRelease { tag, download_url, sha256 })
+    Some(DenoRelease {
+        tag,
+        download_url,
+        sha256,
+    })
 }
 
 async fn latest_deno_release() -> Option<DenoRelease> {
@@ -1000,7 +1007,10 @@ fn extract_deno_archive(archive_path: &Path, dest: &Path) -> Result<(), String> 
     if binary.name() != "deno" || !binary.is_file() {
         return Err("Deno archive entry is not the expected executable".to_string());
     }
-    if binary.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000) {
+    if binary
+        .unix_mode()
+        .is_some_and(|mode| mode & 0o170000 == 0o120000)
+    {
         return Err("Deno archive executable must not be a symbolic link".to_string());
     }
     let expected_size = binary.size();
@@ -1036,7 +1046,8 @@ fn extract_deno_archive(archive_path: &Path, dest: &Path) -> Result<(), String> 
     if total != expected_size {
         return Err("Deno executable size does not match the archive metadata".to_string());
     }
-    output.sync_all()
+    output
+        .sync_all()
         .map_err(|error| format!("couldn't flush {}: {error}", dest.display()))?;
     Ok(())
 }
@@ -1665,8 +1676,10 @@ mod extractor_args_compat_tests {
 
     #[test]
     fn youtube_runtime_args_pin_deno_without_a_quickjs_fallback() {
-        let with_path =
-            ytdlp_runtime_args("https://youtu.be/example", Some(Path::new("/grab/libs/deno")));
+        let with_path = ytdlp_runtime_args(
+            "https://youtu.be/example",
+            Some(Path::new("/grab/libs/deno")),
+        );
         assert_eq!(
             with_path.iter().map(String::as_str).collect::<Vec<_>>(),
             vec!["--no-js-runtimes", "--js-runtimes", "deno:/grab/libs/deno"]
@@ -2309,14 +2322,9 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         // Unroutable URL: the symlink guard must fire before any I/O.
-        let err = download_to_file(
-            "http://127.0.0.1:1/nope",
-            &link,
-            "dummy",
-            (8 * 1024 * 1024),
-        )
-        .await
-        .unwrap_err();
+        let err = download_to_file("http://127.0.0.1:1/nope", &link, "dummy", (8 * 1024 * 1024))
+            .await
+            .unwrap_err();
         assert!(err.contains("symlink"), "unexpected error: {err}");
         assert_eq!(std::fs::read(&target).unwrap(), b"precious");
         std::fs::remove_dir_all(&dir).ok();
@@ -2428,7 +2436,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-
 }
 
 #[cfg(test)]
@@ -2441,18 +2448,27 @@ mod deno_release_tests {
             assert!(valid_release_tag(good), "rejected good tag: {good}");
         }
         for evil in [
-            "", "v2.9.8;touch pwned", "../../etc/passwd", "v2.9.8\n",
-            "tag with spaces", "https://evil.example/x", "v2.9.8$HOME",
+            "",
+            "v2.9.8;touch pwned",
+            "../../etc/passwd",
+            "v2.9.8\n",
+            "tag with spaces",
+            "https://evil.example/x",
+            "v2.9.8$HOME",
         ] {
             assert!(!valid_release_tag(evil), "accepted evil tag: {evil:?}");
         }
         assert_eq!(
             deno_download_url_for_arch("v2.9.8", "x86_64").as_deref(),
-            Some("https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip")
+            Some(
+                "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip"
+            )
         );
         assert_eq!(
             deno_download_url_for_arch("v2.9.8", "aarch64").as_deref(),
-            Some("https://github.com/denoland/deno/releases/download/v2.9.8/deno-aarch64-unknown-linux-gnu.zip")
+            Some(
+                "https://github.com/denoland/deno/releases/download/v2.9.8/deno-aarch64-unknown-linux-gnu.zip"
+            )
         );
         assert!(deno_download_url_for_arch("v2.9.8", "riscv64").is_none());
         assert!(deno_download_url_for_arch("../main", "x86_64").is_none());
@@ -2473,7 +2489,12 @@ mod deno_release_tests {
         );
         assert!(parse_deno_release_metadata(&bad_url, "x86_64").is_none());
         let bad_digest = body.replace(digest, "abc123");
-        assert!(parse_deno_release_metadata(&bad_digest, "x86_64").unwrap().sha256.is_none());
+        assert!(
+            parse_deno_release_metadata(&bad_digest, "x86_64")
+                .unwrap()
+                .sha256
+                .is_none()
+        );
         assert!(parse_deno_release_metadata(&body, "unsupported").is_none());
     }
 
@@ -2498,7 +2519,10 @@ mod deno_release_tests {
             archive.finish().unwrap();
         }
         extract_deno_archive(&archive_path, &extracted).unwrap();
-        assert_eq!(std::fs::read(&extracted).unwrap(), b"expected executable bytes");
+        assert_eq!(
+            std::fs::read(&extracted).unwrap(),
+            b"expected executable bytes"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

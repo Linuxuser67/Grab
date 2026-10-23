@@ -130,7 +130,10 @@ mod tests {
         }"#;
         let parsed: Latest = serde_json::from_str(old).unwrap();
         assert_eq!(parsed.ytdlp.as_deref(), Some("2026.10.15"));
-        assert_eq!(parsed.deno, None, "legacy QuickJS cache cannot stand in for Deno");
+        assert_eq!(
+            parsed.deno, None,
+            "legacy QuickJS cache cannot stand in for Deno"
+        );
         assert!(!parsed.is_complete());
         assert_eq!(parsed.gallerydl.as_deref(), Some("2026.10.15"));
     }

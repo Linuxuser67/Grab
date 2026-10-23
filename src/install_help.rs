@@ -133,6 +133,9 @@ mod tests {
 
     #[test]
     fn official_deno_release_link_is_stable_upstream() {
-        assert_eq!(DENO_RELEASES_URL, "https://github.com/denoland/deno/releases");
+        assert_eq!(
+            DENO_RELEASES_URL,
+            "https://github.com/denoland/deno/releases"
+        );
     }
 }

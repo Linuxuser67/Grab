@@ -1155,11 +1155,7 @@ pub fn show(
                             (Some((_, Ok(installed))), Some(tag))
                                 if crate::video_tools::tool_update_available(installed, tag) =>
                             {
-                                updates.push(format!(
-                                    "deno {} → {}",
-                                    installed.trim(),
-                                    tag.trim()
-                                ));
+                                updates.push(format!("deno {} → {}", installed.trim(), tag.trim()));
                             }
                             (Some((_, Ok(installed))), Some(_)) => {
                                 current.push(format!("Deno {}", installed.trim()));

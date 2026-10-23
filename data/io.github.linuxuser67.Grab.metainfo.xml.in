@@ -50,6 +50,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.3.0~beta.2" date="2026-10-23">
+      <description>
+        <ul>
+          <li>Media URL lookup now logs phase timings for yt-dlp tool checks, JavaScript runtime readiness, metadata extraction and parsing, plus gallery authentication and lookup. Both probes and existing routing behavior are preserved to help measure latency before further performance changes.</li>
+          <li>Live recordings that fail final MP4 remuxing due to timestamp/trailer errors now retry with constrained video/audio mapping and timestamp recovery options.</li>
+          <li>Quit now hides the window immediately while bounded asynchronous cleanup finishes, and an in-progress queue restore no longer delays shutdown indefinitely or overwrites the saved queue.</li>
+          <li>Fixed AppStream version lookup for prerelease builds.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.3.0~beta.1" date="2026-10-23">
       <description>
         <ul>

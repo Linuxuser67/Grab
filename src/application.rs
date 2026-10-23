@@ -931,7 +931,10 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
             .activate(|app: &adw::Application, _, _| {
                 // Regular Quit closes the window through its asynchronous
                 // shutdown path. Keep app.quit for the no-window fallback.
-                if let Some(window) = app.active_window().or_else(|| app.windows().into_iter().next()) {
+                if let Some(window) = app
+                    .active_window()
+                    .or_else(|| app.windows().into_iter().next())
+                {
                     window.close();
                 } else {
                     app.quit();

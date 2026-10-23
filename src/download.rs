@@ -3603,99 +3603,99 @@ impl DownloadManager {
             // JSON parsing and per-row validation completed off-thread.
             // GObject construction and model mutation stay on this context.
             for p in pending {
-                    match p.item.status {
-                        DownloadStatus::Done => {
-                            // Gallery Done rows need their flags; insert_history
-                            // builds a plain row. restore_existing keeps Done.
-                            if p.gallery_job.is_some() {
-                                let mut restored_item = p.item.clone();
-                                restored_item.segments = p.segments;
-                                // Carry the gallery job through.
-                                match self.restore_existing_gallery(&restored_item, p.gallery_job) {
-                                    Ok(_) => {}
-                                    Err(e) => tracing::warn!("skipping queue entry: {e}"),
-                                }
-                            } else {
-                                let video_source = p.item.video_source.clone();
-                                self.insert_history(
-                                    p.item.url,
-                                    p.item.dest_dir,
-                                    p.item.filename,
-                                    p.item.progress,
-                                    p.output_dir,
-                                    video_source,
-                                );
-                            }
-                        }
-                        status => {
-                            // Re-stage the intake file selection BEFORE restore_existing: insert → start_next → spawn_torrent reads it synchronously, so staging after is too late.
-                            if let Some(sel) = p.item.selected_files.clone()
-                                && let Ok(url) = normalize_url(&p.item.url)
-                            {
-                                crate::torrent::stage_selection(&url, sel);
-                            }
+                match p.item.status {
+                    DownloadStatus::Done => {
+                        // Gallery Done rows need their flags; insert_history
+                        // builds a plain row. restore_existing keeps Done.
+                        if p.gallery_job.is_some() {
                             let mut restored_item = p.item.clone();
-                            restored_item.status = status;
                             restored_item.segments = p.segments;
-                            let result = if let Some(job) = p.gallery_job {
-                                self.restore_existing_gallery(&restored_item, Some(job))
-                            } else {
-                                self.restore_existing(&restored_item)
-                            };
-                            match result {
-                                Ok(restored) => {
-                                    // Re-attach the recorded engine folder.
-                                    if let Some(dir) = p.output_dir.clone() {
-                                        restored.set_output_dir(dir);
-                                    }
-                                }
+                            // Carry the gallery job through.
+                            match self.restore_existing_gallery(&restored_item, p.gallery_job) {
+                                Ok(_) => {}
                                 Err(e) => tracing::warn!("skipping queue entry: {e}"),
                             }
+                        } else {
+                            let video_source = p.item.video_source.clone();
+                            self.insert_history(
+                                p.item.url,
+                                p.item.dest_dir,
+                                p.item.filename,
+                                p.item.progress,
+                                p.output_dir,
+                                video_source,
+                            );
+                        }
+                    }
+                    status => {
+                        // Re-stage the intake file selection BEFORE restore_existing: insert → start_next → spawn_torrent reads it synchronously, so staging after is too late.
+                        if let Some(sel) = p.item.selected_files.clone()
+                            && let Ok(url) = normalize_url(&p.item.url)
+                        {
+                            crate::torrent::stage_selection(&url, sel);
+                        }
+                        let mut restored_item = p.item.clone();
+                        restored_item.status = status;
+                        restored_item.segments = p.segments;
+                        let result = if let Some(job) = p.gallery_job {
+                            self.restore_existing_gallery(&restored_item, Some(job))
+                        } else {
+                            self.restore_existing(&restored_item)
+                        };
+                        match result {
+                            Ok(restored) => {
+                                // Re-attach the recorded engine folder.
+                                if let Some(dir) = p.output_dir.clone() {
+                                    restored.set_output_dir(dir);
+                                }
+                            }
+                            Err(e) => tracing::warn!("skipping queue entry: {e}"),
                         }
                     }
                 }
-            } // Guard drops: persist once, refresh the UI, kick the scheduler.
-            // Drop archives and staged selections no row references anymore; sweep session orphans whose rows vanished in a crash.
-            let referenced: std::collections::HashSet<String> = self
+            }
+        } // Guard drops: persist once, refresh the UI, kick the scheduler.
+        // Drop archives and staged selections no row references anymore; sweep session orphans whose rows vanished in a crash.
+        let referenced: std::collections::HashSet<String> = self
+            .items()
+            .map(|it| it.url().to_string())
+            .filter(|u| crate::torrent::is_torrent_url(u))
+            .collect();
+        crate::torrent::sweep_archives(&referenced);
+        // Same for staged file selections (a future re-add stages fresh at intake).
+        crate::torrent::prune_selections(&referenced);
+        // Crash/kill leftovers: only restored rows reuse their staging ids, so a
+        // numeric staging dir with no live row can never resume. Reclaimed
+        // here, after restore and before any worker starts; completed
+        // `final.*` recordings are preserved (the user's only copy).
+        let live: std::collections::HashSet<u64> = self.items().map(|it| it.id()).collect();
+        // Legacy tmp root first, then every destination dir: `grab-<id>-*`
+        // files for items no longer live are reclaimed with the keep-set
+        // (ids are session-unique).
+        let mut dest_dirs = std::collections::HashSet::new();
+        for it in self.items() {
+            dest_dirs.insert(it.dest_dir());
+        }
+        for dest_dir in dest_dirs {
+            crate::video::sweep_dest_staging(std::path::Path::new(&dest_dir), &live);
+        }
+        // Stale cookie dumps from crashes: plaintext session cookies must
+        // not linger on disk.
+        crate::cookies::sweep_cookie_staging();
+        // No session yet: the sweep below would no-op, so skip the store walk.
+        if crate::torrent::session_handle().is_some() {
+            let keep: std::collections::HashSet<String> = self
                 .items()
-                .map(|it| it.url().to_string())
-                .filter(|u| crate::torrent::is_torrent_url(u))
+                .filter(|it| {
+                    it.status() != DownloadStatus::Done && crate::torrent::is_torrent(&it.url())
+                })
+                .filter_map(|it| crate::torrent::info_hash_for_url(&it.url()))
                 .collect();
-            crate::torrent::sweep_archives(&referenced);
-            // Same for staged file selections (a future re-add stages fresh at intake).
-            crate::torrent::prune_selections(&referenced);
-            // Crash/kill leftovers: only restored rows reuse their staging ids, so a
-            // numeric staging dir with no live row can never resume. Reclaimed
-            // here, after restore and before any worker starts; completed
-            // `final.*` recordings are preserved (the user's only copy).
-            let live: std::collections::HashSet<u64> = self.items().map(|it| it.id()).collect();
-            // Legacy tmp root first, then every destination dir: `grab-<id>-*`
-            // files for items no longer live are reclaimed with the keep-set
-            // (ids are session-unique).
-            let mut dest_dirs = std::collections::HashSet::new();
-            for it in self.items() {
-                dest_dirs.insert(it.dest_dir());
-            }
-            for dest_dir in dest_dirs {
-                crate::video::sweep_dest_staging(std::path::Path::new(&dest_dir), &live);
-            }
-            // Stale cookie dumps from crashes: plaintext session cookies must
-            // not linger on disk.
-            crate::cookies::sweep_cookie_staging();
-            // No session yet: the sweep below would no-op, so skip the store walk.
-            if crate::torrent::session_handle().is_some() {
-                let keep: std::collections::HashSet<String> = self
-                    .items()
-                    .filter(|it| {
-                        it.status() != DownloadStatus::Done && crate::torrent::is_torrent(&it.url())
-                    })
-                    .filter_map(|it| crate::torrent::info_hash_for_url(&it.url()))
-                    .collect();
-                tokio_rt().spawn(async move {
-                    crate::torrent::sweep_session_orphans(&keep).await;
-                });
-            }
-    }
+            tokio_rt().spawn(async move {
+                crate::torrent::sweep_session_orphans(&keep).await;
+            });
+        }
+}
 
     /// Arm a one-shot wake for the earliest scheduled row. A one-minute
     /// fallback handles wall-clock changes; ordinary due items wake at their

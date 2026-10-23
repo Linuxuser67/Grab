@@ -511,10 +511,7 @@ where
 
         let result = probe().await;
         let after = file_stamp(binary);
-        if stamp != (None, 0)
-            && stamp == after
-            && (result.is_ok() || !failure_ttl.is_zero())
-        {
+        if stamp != (None, 0) && stamp == after && (result.is_ok() || !failure_ttl.is_zero()) {
             let mut values = self.values.lock().unwrap_or_else(|p| p.into_inner());
             if values.len() >= 128 {
                 let evict = values.keys().find(|existing| *existing != &key).cloned();
@@ -550,9 +547,12 @@ static IMPERSONATE_CACHE: OnceLock<ProbeCache<PathBuf, bool, ()>> = OnceLock::ne
 pub(crate) async fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
     let key = youtube_bin.to_path_buf();
     if tokio::runtime::Handle::try_current().is_err() {
-        return AbortOnDrop(crate::runtime::tokio_rt().spawn(async move {
-            ytdlp_supports_impersonation_cached(key).await
-        })).await.unwrap_or(false);
+        return AbortOnDrop(
+            crate::runtime::tokio_rt()
+                .spawn(async move { ytdlp_supports_impersonation_cached(key).await }),
+        )
+        .await
+        .unwrap_or(false);
     }
     ytdlp_supports_impersonation_cached(key).await
 }
@@ -575,8 +575,12 @@ async fn ytdlp_supports_impersonation_cached(key: PathBuf) -> bool {
 async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ()> {
     use std::process::Stdio;
     let mut command = tokio::process::Command::new(youtube_bin);
-    command.arg("--list-impersonate-targets")
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    command
+        .arg("--list-impersonate-targets")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -585,12 +589,7 @@ async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ()> {
     let child = command.spawn().map_err(|_| ())?;
     let pid = child.id().unwrap_or_default();
     let mut group = ProbeProcessGroup::new(pid);
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        child.wait_with_output(),
-    )
-    .await
-    {
+    match tokio::time::timeout(std::time::Duration::from_secs(15), child.wait_with_output()).await {
         Ok(Ok(output)) => {
             group.disarm();
             if !output.status.success() {
@@ -668,9 +667,8 @@ pub(crate) async fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bo
     let key = ffmpeg_bin.to_path_buf();
     if tokio::runtime::Handle::try_current().is_err() {
         return AbortOnDrop(
-            crate::runtime::tokio_rt().spawn(async move {
-                ffmpeg_supports_hls_extension_picky_cached(key).await
-            }),
+            crate::runtime::tokio_rt()
+                .spawn(async move { ffmpeg_supports_hls_extension_picky_cached(key).await }),
         )
         .await
         .unwrap_or(false);
@@ -707,18 +705,16 @@ async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Result<bool, ()>
     let child = command.spawn().map_err(|_| ())?;
     let pid = child.id().unwrap_or_default();
     let mut group = ProbeProcessGroup::new(pid);
-    let output = match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(Ok(output)) => {
-            group.disarm();
-            output
-        }
-        Err(_) | Ok(Err(_)) => return Err(()),
-    };
+    let output =
+        match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+            .await
+        {
+            Ok(Ok(output)) => {
+                group.disarm();
+                output
+            }
+            Err(_) | Ok(Err(_)) => return Err(()),
+        };
     if !output.status.success() {
         return Err(());
     }

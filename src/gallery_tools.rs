@@ -1,23 +1,24 @@
 //! gallery-dl tool provisioning: download, verify, update, resolve.
 //!
-//! Mirrors the yt-dlp installer pattern in `video_tools.rs`: nightly channel,
-//! SHA-256 verified against release metadata, fail-closed without a digest.
-//! The nightly builds live in the separate `gdl-org/builds` repo
-//! (the Codeberg repo is the source; GitHub hosts the built binaries).
+//! Uses the latest stable release published by the official Codeberg repository.
+//! The Linux executable is verified against the release's SHA256SUMS attachment;
+//! installation fails closed if the release or checksum cannot be verified.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use crate::video_tools::{download_to_file, ensure_lib_dir, user_lib_dir};
 
-/// Max bytes for the gallery-dl binary download (nightly is ~47MB; cap at 128MB).
+/// Maximum download size for the stable gallery-dl Linux executable (128 MiB).
 const GALLERYDL_MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
-
-/// Nightly builds repo (owner, repo) for the standalone binaries.
-const BUILDS_OWNER: &str = "gdl-org";
-const BUILDS_REPO: &str = "builds";
-/// Asset name of the Linux standalone binary in the nightly releases.
-const LINUX_ASSET: &str = "gallery-dl_linux";
+const CODEBERG_RELEASE_API: &str =
+    "https://codeberg.org/api/v1/repos/mikf/gallery-dl/releases/latest";
+const CODEBERG_RELEASES_BASE: &str = "https://codeberg.org/mikf/gallery-dl/releases/download";
+/// Asset names used by stable Codeberg releases.
+const LINUX_ASSET: &str = "gallery-dl.bin";
+const CHECKSUMS_ASSET: &str = "SHA256SUMS";
+const RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
+const CHECKSUMS_MAX_BYTES: usize = 256 * 1024;
 
 /// Errors from gallery-dl tool provisioning.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -45,8 +46,8 @@ impl GalleryError {
     }
 }
 
-/// Latest nightly gallery-dl release as `(tag, SHA-256 digest of its asset)`.
-/// One GitHub lookup on the Tokio runtime; `None` on any network/API failure.
+/// Latest stable gallery-dl release as `(tag, SHA-256 digest of its asset)`.
+/// Codeberg release metadata and its SHA256SUMS attachment are checked on Tokio.
 pub async fn latest_gallerydl_release() -> Option<(String, Option<String>)> {
     latest_gallerydl_asset()
         .await
@@ -100,32 +101,136 @@ pub fn gallerydl_needs_update(managed: Option<Option<&str>>, latest_digest: Opti
     }
 }
 
-/// Latest nightly asset: `(download_url, sha256_digest, tag)`.
-/// `None` on any network/API failure; digest is `None` when the release
-/// metadata lacks one (the installer then fails closed).
+/// Latest stable asset: `(download_url, sha256_digest, tag)`.
+/// Any API failure, draft/prerelease, unexpected asset URL, or missing checksum
+/// makes the release unavailable rather than weakening verification.
+fn valid_release_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.bytes().all(|b| {
+            matches!(
+                b,
+                b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'.' | b'-' | b'+' | b'_'
+            )
+        })
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn codeberg_asset_url(tag: &str, asset_name: &str) -> Option<String> {
+    valid_release_tag(tag).then(|| format!("{CODEBERG_RELEASES_BASE}/{tag}/{asset_name}"))
+}
+
+/// Accept only the expected assets in a stable release from the official project.
+/// Do not download arbitrary URLs returned by release metadata.
+fn parse_codeberg_release_metadata(body: &str) -> Option<(String, String, String)> {
+    let release: serde_json::Value = serde_json::from_str(body).ok()?;
+    if release.get("draft")?.as_bool()? || release.get("prerelease")?.as_bool()? {
+        return None;
+    }
+    let tag = release.get("tag_name")?.as_str()?.to_owned();
+    let expected_binary_url = codeberg_asset_url(&tag, LINUX_ASSET)?;
+    let expected_checksums_url = codeberg_asset_url(&tag, CHECKSUMS_ASSET)?;
+    let assets = release.get("assets")?.as_array()?;
+
+    let asset_url = |name: &str, expected: &str| -> Option<String> {
+        let asset = assets
+            .iter()
+            .find(|asset| asset.get("name").and_then(serde_json::Value::as_str) == Some(name))?;
+        let url = asset.get("browser_download_url")?.as_str()?;
+        (url == expected).then(|| url.to_owned())
+    };
+
+    let binary_url = asset_url(LINUX_ASSET, &expected_binary_url)?;
+    let checksums_url = asset_url(CHECKSUMS_ASSET, &expected_checksums_url)?;
+    Some((tag, binary_url, checksums_url))
+}
+
+/// Parse standard sha256sum output, requiring one unambiguous entry for the
+/// named asset. The file is served alongside the binary in the same release.
+fn parse_sha256sums(body: &str, filename: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for line in body.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(digest) = fields.next() else {
+            continue;
+        };
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        if name.strip_prefix('*').unwrap_or(name) != filename {
+            continue;
+        }
+        if fields.next().is_some() || !valid_sha256_digest(digest) || found.is_some() {
+            return None;
+        }
+        found = Some(digest.to_ascii_lowercase());
+    }
+    found
+}
+
+async fn bounded_response_text(response: reqwest::Response, max_bytes: usize) -> Option<String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return None;
+    }
+
+    use futures_util::StreamExt as _;
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).ok()
+}
+
 async fn latest_gallerydl_asset() -> Option<(String, Option<String>, String)> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
-        let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new(BUILDS_OWNER, BUILDS_REPO);
-        let release = fetcher.fetch_latest_release(None).await.ok()?;
-        let asset = release.assets.iter().find(|a| a.name == LINUX_ASSET)?;
-        let digest = asset
-            .digest
-            .as_deref()
-            .and_then(|d| d.strip_prefix("sha256:"))
-            .map(str::to_owned);
-        Some((asset.download_url.clone(), digest, release.tag_name.clone()))
+        let client = crate::download_net::tool_client_builder_proxied()
+            .ok()?
+            .user_agent(concat!("Grab/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .ok()?;
+        let response = client
+            .get(CODEBERG_RELEASE_API)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        let release_body = bounded_response_text(response, RELEASE_METADATA_MAX_BYTES).await?;
+        let (tag, download_url, checksums_url) = parse_codeberg_release_metadata(&release_body)?;
+
+        let response = client
+            .get(&checksums_url)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        let checksums = bounded_response_text(response, CHECKSUMS_MAX_BYTES).await?;
+        let digest = parse_sha256sums(&checksums, LINUX_ASSET)?;
+        Some((download_url, Some(digest), tag))
     });
     handle.await.ok().flatten()
 }
 
-/// Install (or update) gallery-dl from the nightly channel into the user lib dir.
-/// Fails closed when the release metadata carries no SHA-256 digest.
+/// Install (or update) gallery-dl from the latest stable Codeberg release.
+/// Fails closed when its published SHA256SUMS file lacks a valid binary digest.
 pub async fn install_gallerydl() -> Result<PathBuf, GalleryError> {
     let (url, digest, _) = latest_gallerydl_asset()
         .await
         .ok_or_else(|| GalleryError::install("couldn't determine the latest gallery-dl release"))?;
     // Fail closed: no digest means no verified install. The digest comes from
-    // GitHub's API alongside the binary; absent means we can't verify.
+    // the SHA256SUMS attachment published with the same Codeberg release.
     let digest = digest.ok_or_else(|| {
         GalleryError::install(
             "gallery-dl release has no SHA-256 digest; refusing unverified install",
@@ -197,6 +302,83 @@ pub async fn gallerydl_display_version(path: &Path) -> Result<String, GalleryErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codeberg_stable_release_metadata_accepts_only_expected_assets() {
+        let body = r#"{
+            "tag_name":"v1.32.17",
+            "draft":false,
+            "prerelease":false,
+            "assets":[
+                {
+                    "name":"gallery-dl.bin",
+                    "browser_download_url":"https://codeberg.org/mikf/gallery-dl/releases/download/v1.32.17/gallery-dl.bin"
+                },
+                {
+                    "name":"SHA256SUMS",
+                    "browser_download_url":"https://codeberg.org/mikf/gallery-dl/releases/download/v1.32.17/SHA256SUMS"
+                }
+            ]
+        }"#;
+        let release = parse_codeberg_release_metadata(body).unwrap();
+        assert_eq!(release.0, "v1.32.17");
+        assert_eq!(
+            release.1,
+            "https://codeberg.org/mikf/gallery-dl/releases/download/v1.32.17/gallery-dl.bin"
+        );
+        assert_eq!(
+            release.2,
+            "https://codeberg.org/mikf/gallery-dl/releases/download/v1.32.17/SHA256SUMS"
+        );
+    }
+
+    #[test]
+    fn codeberg_release_parser_rejects_prereleases_and_untrusted_asset_urls() {
+        let valid = r#"{
+            "tag_name":"v1.32.17",
+            "draft":false,
+            "prerelease":false,
+            "assets":[
+                {"name":"gallery-dl.bin","browser_download_url":"https://codeberg.org/mikf/gallery-dl/releases/download/v1.32.17/gallery-dl.bin"},
+                {"name":"SHA256SUMS","browser_download_url":"https://codeberg.org/mikf/gallery-dl/releases/download/v1.32.17/SHA256SUMS"}
+            ]
+        }"#;
+        assert!(
+            parse_codeberg_release_metadata(
+                &valid.replace("\"prerelease\":false", "\"prerelease\":true")
+            )
+            .is_none()
+        );
+        assert!(
+            parse_codeberg_release_metadata(&valid.replace(
+                "https://codeberg.org/mikf/gallery-dl/releases/download/v1.32.17/gallery-dl.bin",
+                "https://attacker.invalid/gallery-dl.bin"
+            ))
+            .is_none()
+        );
+        assert!(codeberg_asset_url("v1.32.17/../../evil", LINUX_ASSET).is_none());
+    }
+
+    #[test]
+    fn sha256sums_requires_one_valid_entry_for_the_linux_asset() {
+        let digest = "a".repeat(64);
+        let sums = format!("{digest}  other.bin\n{digest} *gallery-dl.bin\n");
+        assert_eq!(parse_sha256sums(&sums, LINUX_ASSET), Some(digest.clone()));
+        let invalid = format!(
+            "{digest}  gallery-dl.bin\n{}  gallery-dl.bin\n",
+            "b".repeat(64)
+        );
+        assert!(parse_sha256sums(&invalid, LINUX_ASSET).is_none());
+        let trailing_fields = format!("{digest}  gallery-dl.bin trailing-data\n");
+        assert!(parse_sha256sums(&trailing_fields, LINUX_ASSET).is_none());
+        assert!(
+            parse_sha256sums(
+                &format!("{}  gallery-dl.bin\n", "not-a-digest"),
+                LINUX_ASSET
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn gallerydl_needs_update_follows_the_binary_not_a_sidecar() {

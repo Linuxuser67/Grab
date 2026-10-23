@@ -50,7 +50,7 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
             link_row(
                 &group,
                 "gallery-dl",
-                "https://github.com/gdl-org/builds/releases",
+                "https://codeberg.org/mikf/gallery-dl/releases",
             );
             content.append(&group);
         }

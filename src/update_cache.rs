@@ -1,10 +1,10 @@
 //! Cache for upstream "latest release" lookups, used by the Check for Updates
 //! button.
 //!
-//! GitHub's unauthenticated API allows 60 requests an hour per IP, so a click
-//! must not cost three requests each time. Every network lookup here runs on
-//! Grab's Tokio runtime: this module is awaited from GLib tasks, and reqwest
-//! and tokio::process panic when no Tokio runtime is entered.
+//! Upstream release endpoints may rate-limit repeated checks, so cache the
+//! result across manual clicks. Gallery-dl's stable Codeberg lookup also reads
+//! its release checksum file. Network lookups run on Grab's Tokio runtime;
+//! this module is awaited from GLib tasks, and reqwest panics without a runtime.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -27,7 +27,10 @@ impl Latest {
     /// Only a complete answer is cached. A partial one (rate limit, outage) is
     /// retried on the next check instead of being pinned for 15 minutes.
     fn is_complete(&self) -> bool {
-        self.ytdlp.is_some() && self.deno.is_some() && self.gallerydl.is_some()
+        self.ytdlp.is_some()
+            && self.deno.is_some()
+            && self.gallerydl.is_some()
+            && self.gallerydl_digest.is_some()
     }
 }
 
@@ -151,10 +154,13 @@ mod tests {
         let mut latest = Latest {
             ytdlp: Some("2026.10.15".into()),
             deno: Some("v2.9.8".into()),
-            gallerydl: Some("2026.10.15".into()),
-            gallerydl_digest: None,
+            gallerydl: Some("v1.32.17".into()),
+            gallerydl_digest: Some("a".repeat(64)),
         };
         assert!(latest.is_complete());
+        latest.gallerydl_digest = None;
+        assert!(!latest.is_complete());
+        latest.gallerydl_digest = Some("a".repeat(64));
         latest.deno = None;
         assert!(!latest.is_complete());
     }

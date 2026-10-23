@@ -1088,8 +1088,8 @@ pub fn show(
                         return;
                     }
                     // Probe installed versions off-thread, then ask each managed
-                    // tool's upstream for a newer release: yt-dlp/yt-dlp,
-                    // denoland/deno, gdl-org/builds.
+                    // tool's upstream for a newer stable release: yt-dlp/yt-dlp,
+                    // denoland/deno, and mikf/gallery-dl on Codeberg.
                     let dirs = crate::video_tools::tool_search_dirs();
                     let (yt, deno, gdl) = tokio::join!(
                         inspect_tool_version("yt-dlp", "--version", &dirs),

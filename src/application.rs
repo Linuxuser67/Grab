@@ -1063,7 +1063,7 @@ mod tests {
 
     #[test]
     fn open_requests_before_state_installation_are_retained_and_drained() {
-        let pending = RefCell::new(Vec::new());
+        let pending = std::cell::RefCell::new(Vec::new());
         dispatch_open_files_or_defer(
             None,
             &pending,
@@ -1078,7 +1078,7 @@ mod tests {
         assert_eq!(pending.borrow().len(), 2);
         let drained = take_pending_open_files(&pending);
         assert_eq!(
-            drained.iter().map(gio::File::uri).collect::<Vec<_>>(),
+            drained.iter().map(|file| file.uri()).collect::<Vec<_>>(),
             vec![
                 "grab://example.com/first.zip".to_string(),
                 "magnet:?xt=urn:btih:startup-intake".to_string(),

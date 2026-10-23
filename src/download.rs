@@ -231,6 +231,8 @@ pub struct DownloadManager {
     restore_dirty: Cell<bool>,
     /// Production queue loader; retained so orderly shutdown waits before persisting.
     restore_task: RefCell<Option<glib::JoinHandle<()>>>,
+    /// Multi-subscriber readiness signal; external URL intake waits until IDs are restored.
+    restore_ready: tokio::sync::watch::Sender<bool>,
     /// Queue persist channel: `watch` keeps only the latest value, so rapid
     /// state changes coalesce to a single write. The tokio task (below) is the
     /// sole writer, which makes writes ordered by construction.
@@ -415,6 +417,7 @@ impl DownloadManager {
         #[cfg(test)]
         let (persist_tx, persist_task) = (None, None);
 
+        let (restore_ready, _) = tokio::sync::watch::channel(false);
         let this = Rc::new(Self {
             store,
             settings,
@@ -447,6 +450,7 @@ impl DownloadManager {
             restore_pending: Cell::new(false),
             restore_dirty: Cell::new(false),
             restore_task: RefCell::new(None),
+            restore_ready,
             persist_tx: RefCell::new(persist_tx),
             persist_task: RefCell::new(persist_task),
         });
@@ -3540,7 +3544,10 @@ impl DownloadManager {
             self.restore_pending.set(false);
             if let Some(pending) = pending {
                 self.apply_restored_queue(pending);
+            } else {
+                self.start_next();
             }
+            self.restore_ready.send_replace(true);
         }
         #[cfg(not(test))]
         {
@@ -3554,6 +3561,7 @@ impl DownloadManager {
                 };
                 manager.restore_pending.set(false);
                 if manager.draining.get() {
+                    manager.restore_ready.send_replace(true);
                     return;
                 }
                 match loaded {
@@ -3577,8 +3585,23 @@ impl DownloadManager {
                         manager.start_next();
                     }
                 }
+                manager.restore_ready.send_replace(true);
             });
             self.restore_task.replace(Some(task));
+        }
+    }
+
+    /// Wait until persisted rows have been applied to the model. Multiple
+    /// app-level intake paths may wait concurrently without consuming a shared handle.
+    pub async fn wait_for_restore(&self) {
+        let mut ready = self.restore_ready.subscribe();
+        loop {
+            if *ready.borrow() {
+                return;
+            }
+            if ready.changed().await.is_err() {
+                return;
+            }
         }
     }
 

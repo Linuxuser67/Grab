@@ -1,7 +1,9 @@
 # Tool installer trust model
 
-Grab downloads yt-dlp, gallery-dl, and quickjs from GitHub releases. Those
-downloads are SHA-256 verified before installation.
+Grab downloads yt-dlp, gallery-dl, and Deno from GitHub releases. Downloads
+are SHA-256 verified before installation. Deno is downloaded as the official
+Linux ZIP archive; Grab extracts only the expected executable after checking
+the archive digest and enforcing compressed and uncompressed size limits.
 
 Grab does not download or update FFmpeg. Flatpak resolves `ffmpeg` and
 `ffprobe` from `/app/bin` or the GNOME runtime (`/usr/bin`). Other builds

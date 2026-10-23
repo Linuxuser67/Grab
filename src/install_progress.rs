@@ -171,16 +171,16 @@ pub fn run(
     };
     let do_yt = include("yt-dlp");
     let do_gdl = include("gallery-dl");
-    let do_js = include("quickjs");
+    let do_deno = include("deno");
 
-    // Order: yt-dlp, gallery-dl (under yt-dlp), then quickjs.
+    // Order: yt-dlp, gallery-dl (under yt-dlp), then Deno.
     let yt = ToolRow::new("yt-dlp", &gettext("yt-dlp install progress"), &active);
     let gdl = ToolRow::new(
         "gallery-dl",
         &gettext("gallery-dl install progress"),
         &active,
     );
-    let js = ToolRow::new("quickjs", &gettext("quickjs install progress"), &active);
+    let deno = ToolRow::new("Deno", &gettext("deno install progress"), &active);
 
     let rows = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     // HIG card padding: 12, matching the rest of the app (not 18).
@@ -194,8 +194,8 @@ pub fn run(
     if do_gdl {
         rows.append(&gdl.widget());
     }
-    if do_js {
-        rows.append(&js.widget());
+    if do_deno {
+        rows.append(&deno.widget());
     }
     let pop = gtk4::Popover::new();
     pop.set_child(Some(&rows));
@@ -264,22 +264,22 @@ pub fn run(
                 .flatten();
             gdl.set_installed(version);
         }
-        if do_js {
-            // quickjs-ng is the JS runtime Grab pins for YouTube; installed up
+        if do_deno {
+            // Deno is Grab's JavaScript runtime for YouTube; installed up
             // front so YouTube spawns never wait on a lazy install.
-            js.set_downloading();
-            let js_path = match crate::video::install_quickjs().await {
+            deno.set_downloading();
+            let deno_path = match crate::video::install_deno().await {
                 Ok(path) => path,
                 Err(e) => {
                     let message = e.to_string();
-                    js.set_failed(&message);
+                    deno.set_failed(&message);
                     RUNNING.with(|r| r.set(false));
                     on_error(message);
                     return;
                 }
             };
-            let version = crate::video_tools::tool_display_version(js_path, "--version").await;
-            js.set_installed(version);
+            let version = crate::video_tools::tool_display_version(deno_path, "--version").await;
+            deno.set_installed(version);
         }
 
         // Linger on checkmarks so completion registers, then close.

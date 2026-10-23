@@ -1,4 +1,4 @@
-//! Guided yt-dlp/ffmpeg/quickjs install for tarball/dev builds (Flatpak Install is the only sandbox path).
+//! Guided yt-dlp/ffmpeg/Deno install for tarball/dev builds (Flatpak Install is the only sandbox path).
 
 use adw::prelude::*;
 use gettextrs::gettext;
@@ -6,6 +6,8 @@ use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
+
+const DENO_RELEASES_URL: &str = "https://github.com/denoland/deno/releases";
 
 /// Show the install-help dialog; `on_check` re-resolves tools and refreshes the caller.
 pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() + 'static) {
@@ -26,19 +28,16 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
                 .title(pkgs.distro.clone())
                 .build();
             command_row(&group, &gettext("Install tools"), &pkgs.install_all);
-            // No distro quickjs package: the command above installs only
-            // yt-dlp and ffmpeg, so link the upstream quickjs releases
-            // instead of dead-ending.
-            for (tool, url) in extra_link_rows(&pkgs) {
-                link_row(&group, tool, url);
-            }
+            // Deno is installed from the verified upstream release, not a
+            // distro package; always show its official release page.
+            link_row(&group, "Deno", DENO_RELEASES_URL);
             content.append(&group);
         }
         None => {
             let group = adw::PreferencesGroup::builder()
                 .title(gettext("Install the tools manually"))
                 .description(gettext(
-                    "Install yt-dlp, ffmpeg, quickjs and gallery-dl yourself and make sure they are on your PATH.",
+                    "Install yt-dlp, ffmpeg, Deno and gallery-dl yourself and make sure they are on your PATH.",
                 ))
                 .build();
             link_row(
@@ -47,11 +46,7 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
                 "https://github.com/yt-dlp/yt-dlp#installation",
             );
             link_row(&group, "ffmpeg", "https://ffmpeg.org/download.html");
-            link_row(
-                &group,
-                "quickjs",
-                "https://github.com/quickjs-ng/quickjs/releases",
-            );
+            link_row(&group, "Deno", DENO_RELEASES_URL);
             link_row(
                 &group,
                 "gallery-dl",
@@ -117,18 +112,6 @@ pub(crate) fn command_row(
     row
 }
 
-/// Link rows the distro group needs beyond the install command: the upstream
-/// quickjs releases when the distro has no quickjs package (the command then
-/// covers only yt-dlp and ffmpeg). Pure so tests pin the dialog's rows
-/// without needing a display.
-fn extra_link_rows(pkgs: &crate::video_tools::DistroPackages) -> Vec<(&'static str, &'static str)> {
-    if pkgs.has_quickjs_package {
-        Vec::new()
-    } else {
-        vec![("quickjs", "https://github.com/quickjs-ng/quickjs/releases")]
-    }
-}
-
 /// One outbound-link row for the manual fallback.
 fn link_row(group: &adw::PreferencesGroup, tool: &str, url: &'static str) {
     let row = adw::ActionRow::builder().title(tool).build();
@@ -147,29 +130,9 @@ fn link_row(group: &adw::PreferencesGroup, tool: &str, url: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::video_tools::DistroPackages;
-
-    fn pkgs(has_quickjs_package: bool) -> DistroPackages {
-        DistroPackages {
-            distro: "Void".to_string(),
-            install_all: "sudo xbps-install -S yt-dlp ffmpeg".to_string(),
-            has_quickjs_package,
-        }
-    }
 
     #[test]
-    fn quickjs_link_row_appears_without_distro_package() {
-        // The dialog must not dead-end on distros without a quickjs package:
-        // the upstream releases link has to be among the group's rows.
-        assert_eq!(
-            extra_link_rows(&pkgs(false)),
-            vec![("quickjs", "https://github.com/quickjs-ng/quickjs/releases")]
-        );
-    }
-
-    #[test]
-    fn no_quickjs_link_row_with_distro_package() {
-        // The install command already covers quickjs here; no extra row.
-        assert!(extra_link_rows(&pkgs(true)).is_empty());
+    fn official_deno_release_link_is_stable_upstream() {
+        assert_eq!(DENO_RELEASES_URL, "https://github.com/denoland/deno/releases");
     }
 }

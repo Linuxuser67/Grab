@@ -3543,6 +3543,7 @@ impl DownloadManager {
         let queue_file = Self::queue_file();
         self.restore_ready.send_replace(false);
         self.restore_pending.set(true);
+        self.restore_complete.set(false);
         #[cfg(test)]
         {
             // Unit tests rely on restore being observable synchronously.

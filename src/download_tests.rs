@@ -6655,7 +6655,8 @@ fn async_shutdown_preserves_queue_file_if_restore_never_completed() {
     manager.restore_pending.set(false);
     assert!(manager.restore_failed());
 
-    crate::runtime::tokio_rt().block_on(manager.shutdown_async());
+    assert!(manager.begin_async_shutdown());
+    crate::runtime::tokio_rt().block_on(manager.finish_async_shutdown());
 
     assert_eq!(
         std::fs::read(&queue_file).unwrap(),
@@ -6676,7 +6677,8 @@ fn shutdown_preserves_queue_file_while_restore_is_pending() {
     manager.restore_pending.set(true);
     manager.restore_complete.set(false);
 
-    crate::runtime::tokio_rt().block_on(manager.shutdown_async());
+    assert!(manager.begin_async_shutdown());
+    crate::runtime::tokio_rt().block_on(manager.finish_async_shutdown());
 
     assert_eq!(
         std::fs::read(&queue_file).unwrap(),

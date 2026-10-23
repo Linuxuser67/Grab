@@ -137,16 +137,24 @@ pub(crate) async fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAut
 pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
     let started = std::time::Instant::now();
     let url = ctx.url.to_string();
+    let browser = ctx.browser;
+    let proxy = ctx.proxy;
+    let tool = ctx.tool;
+    let libs = ctx.libs;
+    let newest_first = ctx.newest_first;
+
     // Keep both probes: yt-dlp resolves video and playlist metadata while
     // gallery-dl determines whether the URL also exposes a selectable gallery.
+    let ytdlp_browser = browser.clone();
+    let ytdlp_proxy = proxy.clone();
     let ytdlp_fut = async {
         let phase_started = std::time::Instant::now();
         let result = crate::video::fetch_video_infos(
-            ctx.libs,
+            libs,
             url.clone(),
-            ctx.browser.clone(),
-            ctx.newest_first,
-            ctx.proxy.clone(),
+            ytdlp_browser,
+            newest_first,
+            ytdlp_proxy,
             None,
         )
         .await;
@@ -157,11 +165,12 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
         );
         result
     };
+
     // Auth preparation is timed separately because exporting browser cookies
     // may be a substantial fraction of lookup latency on some configurations.
     let gallery_fut = async {
         let auth_started = std::time::Instant::now();
-        let auth = resolve_gallery_auth(&url, &ctx.browser).await;
+        let auth = resolve_gallery_auth(&url, &browser).await;
         tracing::info!(
             elapsed_ms = auth_started.elapsed().as_millis() as u64,
             has_cookies = auth.cookies_path.is_some(),
@@ -171,11 +180,11 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
 
         let probe_started = std::time::Instant::now();
         let result = crate::gallery_probe::probe_gallery_with_proxy(
-            &ctx.tool,
+            &tool,
             &url,
             auth.cookies_path.as_deref(),
             auth.user_agent.as_deref(),
-            ctx.proxy.as_ref(),
+            proxy.as_ref(),
         )
         .await;
         // The auth (and its staged jar) must outlive the probe.

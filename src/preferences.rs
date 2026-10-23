@@ -665,7 +665,7 @@ pub fn show(
         name: &str,
         version_arg: &str,
         dirs: &[std::path::PathBuf],
-    ) -> Option<(std::path::PathBuf, Option<String>)> {
+    ) -> Option<(std::path::PathBuf, Result<String, crate::video_tools::ToolProbeError>)> {
         // PATH can contain slow mounts; keep executable checks off the GTK
         // context along with the asynchronous version subprocess.
         let name = name.to_owned();
@@ -1119,13 +1119,14 @@ pub fn show(
                     let mut updates: Vec<String> = Vec::new();
                     let mut missing: Vec<String> = Vec::new();
                     let mut current: Vec<String> = Vec::new();
+                    let mut timed_out: Vec<String> = Vec::new();
                     let mut indeterminate = installed.is_none();
                     if let Some((yt, qjs, gdl)) = installed {
                         // Presence is independent for each binary. In particular,
                         // resolve_libraries() must not hide all missing tools just
                         // because a fresh profile has no yt-dlp yet.
                         match (yt.as_ref(), yt_tag.as_deref()) {
-                            (Some((_, Some(installed))), Some(tag))
+                            (Some((_, Ok(installed))), Some(tag))
                                 if crate::video_tools::tool_update_available(installed, tag) =>
                             {
                                 updates.push(format!(
@@ -1134,8 +1135,13 @@ pub fn show(
                                     tag.trim()
                                 ));
                             }
-                            (Some((_, Some(installed))), Some(_)) => {
+                            (Some((_, Ok(installed))), Some(_)) => {
                                 current.push(format!("yt-dlp {}", installed.trim()));
+                            }
+                            (Some((_, Ok(_))), None) => indeterminate = true,
+                            (Some((_, Err(crate::video_tools::ToolProbeError::Timeout))), _) => {
+                                timed_out.push("yt-dlp".to_string());
+                                indeterminate = true;
                             }
                             (Some(_), _) => indeterminate = true,
                             (None, _) => missing.push("yt-dlp".to_string()),
@@ -1143,7 +1149,7 @@ pub fn show(
                         // Optional tools are offered for installation whenever
                         // absent, even if their latest-release lookup is offline.
                         match (qjs.as_ref(), qjs_tag.as_deref()) {
-                            (Some((_, Some(installed))), Some(tag))
+                            (Some((_, Ok(installed))), Some(tag))
                                 if crate::video_tools::tool_update_available(installed, tag) =>
                             {
                                 updates.push(format!(
@@ -1152,22 +1158,32 @@ pub fn show(
                                     tag.trim()
                                 ));
                             }
-                            (Some((_, Some(installed))), Some(_)) => {
+                            (Some((_, Ok(installed))), Some(_)) => {
                                 current.push(format!("quickjs {}", installed.trim()));
+                            }
+                            (Some((_, Ok(_))), None) => indeterminate = true,
+                            (Some((_, Err(crate::video_tools::ToolProbeError::Timeout))), _) => {
+                                timed_out.push("quickjs".to_string());
+                                indeterminate = true;
                             }
                             (Some(_), _) => indeterminate = true,
                             (None, _) => missing.push(TOOL_QUICKJS.to_string()),
                         }
                         match (gdl.as_ref(), gdl_tag.as_deref()) {
-                            (Some((_, Some(installed))), Some(tag)) if gdl_needs_update => {
+                            (Some((_, Ok(installed))), Some(tag)) if gdl_needs_update => {
                                 updates.push(format!(
                                     "gallery-dl {} → {}",
                                     installed.trim(),
                                     tag.trim()
                                 ));
                             }
-                            (Some((_, Some(installed))), Some(_)) => {
+                            (Some((_, Ok(installed))), Some(_)) => {
                                 current.push(format!("gallery-dl {}", installed.trim()));
+                            }
+                            (Some((_, Ok(_))), None) => indeterminate = true,
+                            (Some((_, Err(crate::video_tools::ToolProbeError::Timeout))), _) => {
+                                timed_out.push("gallery-dl".to_string());
+                                indeterminate = true;
                             }
                             (Some(_), _) => indeterminate = true,
                             (None, _) => missing.push(TOOL_GALLERY_DL.to_string()),
@@ -1198,6 +1214,12 @@ pub fn show(
                                     .replace("{list}", &updates.join(", ")),
                             );
                         }
+                        if !timed_out.is_empty() {
+                            parts.push(
+                                gettext("Timed out checking: {list}")
+                                    .replace("{list}", &timed_out.join(", ")),
+                            );
+                        }
                         row_b.set_subtitle(&parts.join(" • "));
                         // Button says "Install" if anything is missing (you can't
                         // update what isn't there), else "Update".
@@ -1207,6 +1229,13 @@ pub fn show(
                             btn_b.set_label(&gettext("Update"));
                         }
                         action_b.set(ToolAction::Update);
+                    } else if !timed_out.is_empty() {
+                        row_b.set_subtitle(
+                            &gettext("Timed out checking: {list}")
+                                .replace("{list}", &timed_out.join(", ")),
+                        );
+                        btn_b.set_label(&gettext("Check for Updates"));
+                        action_b.set(ToolAction::Check);
                     } else if !indeterminate {
                         row_b.set_subtitle(
                             &gettext("Up to date • {list}").replace("{list}", &current.join(" • ")),

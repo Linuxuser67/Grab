@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::video_tools::{download_to_file, ensure_lib_dir, user_lib_dir};
 
-/// Maximum download size for the stable gallery-dl Linux executable.
+/// Maximum download size for the stable gallery-dl Linux executable (128 MiB).
 const GALLERYDL_MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const CODEBERG_RELEASE_API: &str =
     "https://codeberg.org/api/v1/repos/mikf/gallery-dl/releases/latest";
@@ -45,8 +45,8 @@ impl GalleryError {
     }
 }
 
-/// Latest nightly gallery-dl release as `(tag, SHA-256 digest of its asset)`.
-/// One GitHub lookup on the Tokio runtime; `None` on any network/API failure.
+/// Latest stable gallery-dl release as `(tag, SHA-256 digest of its asset)`.
+/// Codeberg release metadata and its SHA256SUMS attachment are checked on Tokio.
 pub async fn latest_gallerydl_release() -> Option<(String, Option<String>)> {
     latest_gallerydl_asset()
         .await

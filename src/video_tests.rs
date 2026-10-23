@@ -5521,7 +5521,7 @@ fn reap_child_reaps_the_signalled_child() {
 
     // Spawn inside the runtime: tokio's process API needs a reactor.
     let pid = crate::runtime::tokio_rt().block_on(async {
-        let mut child = ytdlp_command(&sleeper).spawn().unwrap();
+        let mut child = ytdlp_command(&sleeper).await.spawn().unwrap();
         let pid = child.id().expect("freshly spawned child has a pid") as libc::pid_t;
         let mut group = ProcessGroupGuard::new(&child);
         reap_child(&mut child, &mut group).await;

@@ -4040,7 +4040,9 @@ impl DownloadManager {
         if self.restore_state.get() == RestoreState::Pending
             && let Some(task) = restore_task
         {
-            tracing::warn!("shutdown: cancelling in-progress queue restore; preserving saved queue");
+            tracing::warn!(
+                "shutdown: cancelling in-progress queue restore; preserving saved queue"
+            );
             task.abort();
         }
         self.draining.set(true);

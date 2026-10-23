@@ -990,6 +990,13 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                     // Explicit Quit must not pass through close-request's
                     // "hide to background" behavior used for ordinary closes.
                     if let Some(s) = st.borrow().as_ref().cloned() {
+                        // An ordinary close may already be waiting for this
+                        // manager's async shutdown. Do not start a second call:
+                        // shutdown_async is idempotent, but a duplicate caller
+                        // must not quit before the first caller finishes flushing.
+                        if s.manager.is_shutting_down() {
+                            return;
+                        }
                         let app = app.clone();
                         glib::MainContext::default().spawn_local(async move {
                             s.window.set_sensitive(false);

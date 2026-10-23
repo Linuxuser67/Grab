@@ -515,17 +515,21 @@ where
             && stamp == after
             && (result.is_ok() || !failure_ttl.is_zero())
         {
-            self.values
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(
-                    key,
-                    ProbeCacheEntry {
-                        stamp,
-                        cached_at: std::time::Instant::now(),
-                        result: result.clone(),
-                    },
-                );
+            let mut values = self.values.lock().unwrap_or_else(|p| p.into_inner());
+            if values.len() >= 128 {
+                let evict = values.keys().find(|existing| *existing != &key).cloned();
+                if let Some(evict) = evict {
+                    values.remove(&evict);
+                }
+            }
+            values.insert(
+                key,
+                ProbeCacheEntry {
+                    stamp,
+                    cached_at: std::time::Instant::now(),
+                    result: result.clone(),
+                },
+            );
         }
         result
     }
@@ -555,10 +559,14 @@ pub(crate) async fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
 
 async fn ytdlp_supports_impersonation_cached(key: PathBuf) -> bool {
     let binary = key.clone();
-    IMPERSONATE_CACHE.get_or_init(ProbeCache::new)
+    let probe_binary = binary.clone();
+    IMPERSONATE_CACHE
+        .get_or_init(ProbeCache::new)
         .get_or_probe(key, &binary, FAILED_PROBE_CACHE_TTL, || async move {
-            probe_impersonate_support(&binary).await
-        }).await.unwrap_or(false)
+            probe_impersonate_support(&probe_binary).await
+        })
+        .await
+        .unwrap_or(false)
 }
 
 /// One-shot `--list-impersonate-targets` probe. The 15-second limit is retained
@@ -683,17 +691,25 @@ async fn ffmpeg_supports_hls_extension_picky_cached(key: PathBuf) -> bool {
 
 async fn ffmpeg_supports_hls_extension_picky_cached(key: PathBuf) -> bool {
     let binary = key.clone();
-    FFMPEG_HLS_CACHE.get_or_init(ProbeCache::new)
+    let probe_binary = binary.clone();
+    FFMPEG_HLS_CACHE
+        .get_or_init(ProbeCache::new)
         .get_or_probe(key, &binary, FAILED_PROBE_CACHE_TTL, || async move {
-            probe_ffmpeg_hls_extension_picky(&binary).await
-        }).await.unwrap_or(false)
+            probe_ffmpeg_hls_extension_picky(&probe_binary).await
+        })
+        .await
+        .unwrap_or(false)
 }
 
 async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Result<bool, ()> {
     use std::process::Stdio;
     let mut command = tokio::process::Command::new(ffmpeg_bin);
-    command.args(["-hide_banner", "-h", "demuxer=hls"])
-        .stdin(Stdio::null()).kill_on_drop(true);
+    command
+        .args(["-hide_banner", "-h", "demuxer=hls"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;

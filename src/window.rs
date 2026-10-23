@@ -755,6 +755,7 @@ pub fn build_window(
             // transferring, since paused rows persist across launches and
             // counting them would strand a hidden zombie.
             let idle_hidden = armed.get()
+                && !m.is_shutting_down()
                 && !m.has_transferring()
                 && w.upgrade().is_some_and(|win| !win.is_visible());
             if idle_hidden && let Some(app) = app_weak.upgrade() {

@@ -6621,8 +6621,7 @@ fn scheduler_starts_and_stops() {
 #[test]
 fn restore_task_guard_releases_waiters_without_claiming_success() {
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
-    manager.restore_pending.set(true);
-    manager.restore_complete.set(false);
+    manager.restore_state.set(RestoreState::Pending);
     manager.restore_ready.send_replace(false);
     let ready = manager.restore_ready.subscribe();
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -6633,8 +6632,7 @@ fn restore_task_guard_releases_waiters_without_claiming_success() {
         panic!("simulated restore-task panic");
     }));
     assert!(panicked.is_err());
-    assert!(!manager.restore_pending.get());
-    assert!(!manager.restore_complete.get());
+    assert_eq!(manager.restore_state.get(), RestoreState::Failed);
     assert!(manager.restore_failed());
     assert!(
         *ready.borrow(),
@@ -6651,8 +6649,7 @@ fn async_shutdown_preserves_queue_file_if_restore_never_completed() {
 
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
     // Simulate a worker/apply failure: the in-memory model is not authoritative.
-    manager.restore_complete.set(false);
-    manager.restore_pending.set(false);
+    manager.restore_state.set(RestoreState::Failed);
     assert!(manager.restore_failed());
 
     assert!(manager.begin_async_shutdown());
@@ -6674,8 +6671,7 @@ fn shutdown_preserves_queue_file_while_restore_is_pending() {
     std::fs::write(&queue_file, saved).unwrap();
 
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
-    manager.restore_pending.set(true);
-    manager.restore_complete.set(false);
+    manager.restore_state.set(RestoreState::Pending);
 
     assert!(manager.begin_async_shutdown());
     crate::runtime::tokio_rt().block_on(manager.finish_async_shutdown());
@@ -6696,8 +6692,7 @@ fn close_during_restore_bypasses_background_hide_and_preserves_queue() {
     std::fs::write(&queue_file, saved).unwrap();
 
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
-    manager.restore_pending.set(true);
-    manager.restore_complete.set(false);
+    manager.restore_state.set(RestoreState::Pending);
     manager.restore_ready.send_replace(false);
 
     // This is the state seen when restore inserts a formerly active row as Queued
@@ -6717,6 +6712,10 @@ fn close_during_restore_bypasses_background_hide_and_preserves_queue() {
         &manager,
         &shutdown_requested
     ));
+    assert!(
+        manager.restore_should_abort(),
+        "the restore task must observe a close/Quit claim before applying the loaded queue"
+    );
     assert!(
         !crate::window::should_hide_to_background(
             manager.has_transferring(),

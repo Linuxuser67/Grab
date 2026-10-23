@@ -6761,9 +6761,16 @@ fn scheduler_fires_and_rearms_for_the_next_scheduled_row() {
     let second_due = now + 4;
     let first = schedule_test_item(&manager, first_due);
     let second = schedule_test_item(&manager, second_due);
-    // Allow scheduler transitions but prevent the resulting Queued rows from
+    // Occupy every engine slot so due rows can transition to Queued without
     // starting real network downloads inside this lifecycle test.
-    manager.shutdown_started.set(true);
+    let occupied_ids: Vec<u64> = (0..manager.max_concurrent())
+        .map(|index| {
+            let id = u64::MAX - index as u64;
+            let handle = crate::runtime::tokio_rt().spawn(std::future::pending::<()>());
+            manager.running.borrow_mut().insert(id, handle);
+            id
+        })
+        .collect();
     manager.start_scheduler();
     assert!(manager.scheduler_source.borrow().is_some());
 
@@ -6795,7 +6802,9 @@ fn scheduler_fires_and_rearms_for_the_next_scheduled_row() {
         manager.scheduler_source.borrow().is_none(),
         "the timer should be removed when no scheduled rows remain"
     );
-    manager.stop_scheduler();
+    // Normal shutdown aborts and joins the sentinel engine tasks too.
+    assert_eq!(manager.running.borrow().len(), occupied_ids.len());
+    manager.shutdown();
     let _ = std::fs::remove_file(queue_file);
 }
 

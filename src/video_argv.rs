@@ -638,7 +638,7 @@ mod live_remux_argv_tests {
             .filter(|pair| pair[0] == "-map")
             .map(|pair| pair[1].as_str())
             .collect();
-        assert_eq!(maps, ["0:v?", "0:a?"]);
+        assert_eq!(maps, vec!["0:v?", "0:a?"]);
     }
 
     #[test]

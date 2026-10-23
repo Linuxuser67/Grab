@@ -759,7 +759,9 @@ pub(crate) fn should_hide_to_background(has_transferring: bool, shutting_down: b
                 && w.upgrade().is_some_and(|win| !win.is_visible());
             if idle_hidden && let Some(app) = app_weak.upgrade() {
                 app.withdraw_notification(BACKGROUND_NOTIF_ID);
-                app.quit();
+                // Reuse the action's async shutdown path even when the final
+                // background transfer finishes while the window is hidden.
+                app.activate_action("quit", None);
             }
         });
         manager.set_on_change({

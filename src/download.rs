@@ -293,6 +293,7 @@ struct RestoreSweepPlan {
     referenced: HashSet<String>,
     live: HashSet<u64>,
     dest_dirs: HashSet<String>,
+    selections: Vec<(String, Vec<usize>)>,
     session_keep: Option<HashSet<String>>,
 }
 
@@ -3801,6 +3802,7 @@ impl DownloadManager {
         self: &Rc<Self>,
         pending: Vec<PendingRestore>,
     ) -> RestoreSweepPlan {
+        let mut selections = Vec::new();
         {
             let _batch = self.batch_guard();
             // JSON parsing and per-row validation completed off-thread.
@@ -3828,13 +3830,12 @@ impl DownloadManager {
                         }
                     }
                     status => {
-                        // Re-stage selected files before restore_existing: the row
-                        // stays gated until restore finalization, so it cannot start
-                        // between insertion and completion of this restore.
+                        // Restore staging on the blocking worker after model
+                        // insertion. The start gate remains closed until then.
                         if let Some(sel) = p.item.selected_files.clone()
                             && let Ok(url) = normalize_url(&p.item.url)
                         {
-                            crate::torrent::stage_selection(&url, sel);
+                            selections.push((url, sel));
                         }
                         let mut restored_item = p.item.clone();
                         restored_item.status = status;
@@ -3877,11 +3878,15 @@ impl DownloadManager {
             referenced,
             live,
             dest_dirs,
+            selections,
             session_keep,
         }
     }
 
     fn run_restore_sweeps(plan: RestoreSweepPlan) -> Option<HashSet<String>> {
+        for (url, selected_files) in plan.selections {
+            crate::torrent::stage_selection(&url, selected_files);
+        }
         crate::torrent::sweep_archives(&plan.referenced);
         crate::torrent::prune_selections(&plan.referenced);
         for dest_dir in plan.dest_dirs {

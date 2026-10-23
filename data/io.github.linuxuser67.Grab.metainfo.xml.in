@@ -50,6 +50,17 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.3.0~beta.1" date="2026-10-23">
+      <description>
+        <ul>
+          <li>Live HLS capture now accepts generic HTTPS .m3u8 manifests as a fallback when the native HLS protocol is unavailable.</li>
+          <li>Media-tool version and capability probes run asynchronously and share cached results, reducing repeated subprocess launches and keeping the GTK interface responsive.</li>
+          <li>Queue restoration, file reconciliation, and shutdown now use explicit lifecycle guards and move blocking work off the GTK main thread; failed restores preserve the saved queue.</li>
+          <li>Improved startup URL handoff, scheduler wakeups, process cleanup, and regression coverage for startup and shutdown races.</li>
+          <li>Updated the ctutils security dependency to version 0.4.4.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.2.2" date="2026-10-23">
       <description>
         <ul>

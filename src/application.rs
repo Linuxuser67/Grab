@@ -535,10 +535,14 @@ pub fn setup(app: &adw::Application) {
     // GApplication can deliver open requests before startup has installed State.
     // Retain them and dispatch once the main window and queue manager exist.
     let pending_open_files: Rc<RefCell<Vec<gio::File>>> = Rc::new(RefCell::new(Vec::new()));
+    // Set synchronously before scheduling shutdown work so close and explicit
+    // Quit cannot race each other before shutdown_async is first polled.
+    let shutdown_requested = Rc::new(std::cell::Cell::new(false));
 
     {
         let st = Rc::clone(&state);
         let pending_open_files = Rc::clone(&pending_open_files);
+        let shutdown_requested = Rc::clone(&shutdown_requested);
         app.connect_startup(move |app| {
             // Browser extension integration via HTTP (see extension_server):
             // the server forwards URLs here, and we enqueue them like
@@ -550,7 +554,7 @@ pub fn setup(app: &adw::Application) {
             manager.start_scheduler();
 
             let toasts = Rc::new(adw::ToastOverlay::new());
-            register_actions(app, &st);
+            register_actions(app, &st, &shutdown_requested);
             let win = window::build_window(app, manager.clone(), settings.clone(), toasts.clone());
             win.2.widget().set_sensitive(false);
             st.borrow_mut().replace(Rc::new(State {
@@ -592,6 +596,7 @@ pub fn setup(app: &adw::Application) {
             win.0.connect_close_request({
                 let closing = closing.clone();
                 let close_ready = close_ready.clone();
+                let shutdown_requested = shutdown_requested.clone();
                 move |window| {
                     if close_ready.get() {
                         return glib::Propagation::Proceed;
@@ -602,6 +607,9 @@ pub fn setup(app: &adw::Application) {
                     let Some(manager) = manager_weak.upgrade() else {
                         return glib::Propagation::Proceed;
                     };
+                    if shutdown_requested.replace(true) {
+                        return glib::Propagation::Stop;
+                    }
                     window.set_sensitive(false);
                     let window = window.clone();
                     let closing_done = closing.clone();
@@ -760,7 +768,11 @@ fn confirm_download(
     dialog.present(Some(parent));
 }
 
-fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>) {
+fn register_actions(
+    app: &adw::Application,
+    st: &Rc<RefCell<Option<Rc<State>>>>,
+    shutdown_requested: &Rc<std::cell::Cell<bool>>,
+) {
     let entries = [
         {
             let st = Rc::clone(st);
@@ -985,16 +997,16 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
         },
         {
             let st = Rc::clone(st);
+            let shutdown_requested = Rc::clone(shutdown_requested);
             gio::ActionEntry::builder("quit")
                 .activate(move |app: &adw::Application, _, _| {
                     // Explicit Quit must not pass through close-request's
                     // "hide to background" behavior used for ordinary closes.
                     if let Some(s) = st.borrow().as_ref().cloned() {
-                        // An ordinary close may already be waiting for this
-                        // manager's async shutdown. Do not start a second call:
-                        // shutdown_async is idempotent, but a duplicate caller
-                        // must not quit before the first caller finishes flushing.
-                        if s.manager.is_shutting_down() {
+                        // Claim shutdown synchronously, before yielding to the
+                        // GLib context, so a concurrent close cannot start a
+                        // second task that quits before persistence finishes.
+                        if shutdown_requested.replace(true) || s.manager.is_shutting_down() {
                             return;
                         }
                         let app = app.clone();

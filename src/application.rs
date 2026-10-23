@@ -486,12 +486,11 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| format!("{stem}.torrent"));
                     glib::spawn_future_local(async move {
-                        let bytes = gio::spawn_blocking(move || {
-                            crate::torrent::read_torrent_bytes(&path)
-                        })
-                        .await
-                        .ok()
-                        .flatten();
+                        let bytes =
+                            gio::spawn_blocking(move || crate::torrent::read_torrent_bytes(&path))
+                                .await
+                                .ok()
+                                .flatten();
                         let Some(bytes) = bytes else {
                             toasts.add_toast(adw::Toast::new(&gettext(
                                 "Could not read that .torrent file",
@@ -508,15 +507,13 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
                                 if let Err(e) =
                                     manager.enqueue_torrent_file(bytes, &stem, None, None)
                                 {
-                                    toasts.add_toast(adw::Toast::new(
-                                        &crate::ui_util::esc_markup(&e),
-                                    ));
+                                    toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(
+                                        &e,
+                                    )));
                                 }
                             }
                             Err(e) => {
-                                toasts.add_toast(adw::Toast::new(
-                                    &crate::ui_util::esc_markup(&e),
-                                ));
+                                toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
                             }
                         }
                     });

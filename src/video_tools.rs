@@ -820,7 +820,7 @@ pub(crate) fn valid_release_tag(tag: &str) -> bool {
         })
 }
 
-fn deno_download_url_for_arch(tag: &str, arch: &str) -> Option<String> {
+pub(crate) fn deno_download_url_for_arch(tag: &str, arch: &str) -> Option<String> {
     if !valid_release_tag(tag) {
         return None;
     }
@@ -2322,7 +2322,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         // Unroutable URL: the symlink guard must fire before any I/O.
-        let err = download_to_file("http://127.0.0.1:1/nope", &link, "dummy", (8 * 1024 * 1024))
+        let err = download_to_file("http://127.0.0.1:1/nope", &link, "dummy", 8 * 1024 * 1024)
             .await
             .unwrap_err();
         assert!(err.contains("symlink"), "unexpected error: {err}");
@@ -2373,7 +2373,7 @@ mod tests {
             &dest,
             "http://127.0.0.1/deno",
             "dummy",
-            (8 * 1024 * 1024),
+            8 * 1024 * 1024,
         )
         .await
         .unwrap_err();
@@ -2384,7 +2384,7 @@ mod tests {
         // The over-limit chunk is rejected before it is written: the partial
         // never grows past the cap.
         let written = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-        assert!(written <= (8 * 1024 * 1024));
+        assert!(written <= 8 * 1024 * 1024);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2404,7 +2404,7 @@ mod tests {
             &dest,
             "http://127.0.0.1/deno",
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
-            (8 * 1024 * 1024),
+            8 * 1024 * 1024,
         )
         .await
         .unwrap();
@@ -2428,7 +2428,7 @@ mod tests {
             &dest,
             "http://127.0.0.1/deno",
             "0000000000000000000000000000000000000000000000000000000000000000",
-            (8 * 1024 * 1024),
+            8 * 1024 * 1024,
         )
         .await
         .unwrap_err();
@@ -2441,6 +2441,16 @@ mod tests {
 #[cfg(test)]
 mod deno_release_tests {
     use super::*;
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "grab-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     #[test]
     fn release_tag_and_asset_url_are_validated() {

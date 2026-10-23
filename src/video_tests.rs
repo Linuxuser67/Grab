@@ -56,7 +56,7 @@ use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_override_command_for, browser_override_dirs,
     browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
     ensure_tool_versions, ffmpeg_version_token, find_in_dirs, is_youtube_url, parse_dotted_version,
-    quickjs_arch_supported, quickjs_download_url, tool_update_available, toolchain_dir_in,
+    deno_arch_supported, deno_download_url_for_arch, tool_update_available, toolchain_dir_in,
     user_lib_dir, ytdlp_identity_args, ytdlp_supports_impersonation,
 };
 use crate::video_types::FetchedVideo;
@@ -2302,28 +2302,28 @@ fn distro_packages_known_ids() {
         distro_packages(fedora).map(|d| (d.distro, d.install_all)),
         Some((
             "Fedora".to_string(),
-            "sudo dnf install yt-dlp ffmpeg quickjs-ng".to_string(),
+            "sudo dnf install yt-dlp ffmpeg".to_string(),
         ))
     );
     let ubuntu = "ID=ubuntu\nID_LIKE=debian\nNAME=Ubuntu\n";
     assert_eq!(
         distro_packages(ubuntu).map(|d| d.install_all),
-        Some("sudo apt install yt-dlp ffmpeg quickjs-ng".to_string())
+        Some("sudo apt install yt-dlp ffmpeg".to_string())
     );
     let arch = "ID=arch\nNAME=Arch\n";
     assert_eq!(
         distro_packages(arch).map(|d| d.install_all),
-        Some("sudo pacman -S yt-dlp ffmpeg quickjs-ng".to_string())
+        Some("sudo pacman -S yt-dlp ffmpeg".to_string())
     );
 }
 
 #[test]
-fn distro_packages_quickjs() {
-    // quickjs-ng joins the one-line command where a distro package is known.
+fn distro_packages_do_not_include_a_javascript_runtime() {
+    // Deno is provisioned from its verified official release, not the OS package list.
     let neon = "ID=neon\nID_LIKE=\"ubuntu debian\"\nNAME=KDE neon\n";
     assert_eq!(
         distro_packages(neon).map(|d| d.install_all),
-        Some("sudo apt install yt-dlp ffmpeg quickjs-ng".to_string())
+        Some("sudo apt install yt-dlp ffmpeg".to_string())
     );
     // No known distro package (openSUSE, Void, Solus): left out rather than
     // showing a command that would fail.
@@ -2348,7 +2348,7 @@ fn distro_packages_id_like_fallback() {
     assert_eq!(found.distro, "KDE neon");
     assert_eq!(
         found.install_all,
-        "sudo apt install yt-dlp ffmpeg quickjs-ng"
+        "sudo apt install yt-dlp ffmpeg"
     );
 }
 
@@ -2896,41 +2896,38 @@ fn toolchain_dir_prefers_complete_toolchain() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-// ── quickjs provisioning (default JS runtime) ──────────────────────────
+// ── Deno provisioning (YouTube JavaScript runtime) ─────────────────────
 
 #[test]
-fn quickjs_download_url_follows_given_release_tag_and_arch() {
-    let url = quickjs_download_url("v0.17.0").expect("test arch is supported");
+fn deno_download_url_follows_release_tag_and_arch() {
     let arch = std::env::consts::ARCH;
-    assert!(
-        url.starts_with("https://github.com/quickjs-ng/quickjs/releases/download/v0.17.0/"),
-        "unexpected url: {url}"
+    assert_eq!(
+        deno_arch_supported(),
+        deno_download_url_for_arch("v2.9.8", arch).is_some()
     );
-    assert!(
-        url.ends_with(&format!("qjs-linux-{arch}")),
-        "unexpected url: {url}"
+    let Some(url) = deno_download_url_for_arch("v2.9.8", arch) else {
+        return;
+    };
+    assert_eq!(
+        url,
+        format!(
+            "https://github.com/denoland/deno/releases/download/v2.9.8/{}",
+            match arch {
+                "x86_64" => "deno-x86_64-unknown-linux-gnu.zip",
+                "aarch64" => "deno-aarch64-unknown-linux-gnu.zip",
+                _ => unreachable!("unsupported arch should not have a Deno asset"),
+            }
+        )
     );
-    assert!(
-        !url.ends_with(".zip"),
-        "qjs ships as a bare binary, not an archive: {url}"
-    );
-    // A newer tag flows straight into the URL: the installer follows latest.
-    let newer = quickjs_download_url("v9.9.9").expect("test arch is supported");
+    assert!(url.ends_with(".zip"), "Deno release is an archive: {url}");
+    let newer = deno_download_url_for_arch("v9.9.9", arch).unwrap();
     assert!(
         newer.contains("/releases/download/v9.9.9/"),
         "tag not honored: {newer}"
     );
 }
 
-#[test]
-fn quickjs_arch_supported_mirrors_download_url() {
-    assert_eq!(
-        quickjs_arch_supported(),
-        quickjs_download_url("v0.17.0").is_some()
-    );
-}
-
-// ── dotted version parsing (ffmpeg / quickjs update check) ─────────────
+// ── dotted version parsing (ffmpeg / Deno update check) ─────────────
 
 #[test]
 fn parse_dotted_version_handles_upstream_shapes() {
@@ -3005,14 +3002,18 @@ fn ffmpeg_version_token_takes_word_after_version() {
 }
 
 #[test]
-fn ytdlp_identity_args_pins_quickjs_for_youtube_with_cookies() {
+fn ytdlp_identity_args_pins_deno_for_youtube_with_cookies() {
     let args = ytdlp_identity_args("firefox", None, "https://www.youtube.com/watch?v=abc");
     let pos = args
         .iter()
         .position(|a| a == "--no-js-runtimes")
         .expect("pins js runtimes");
     assert_eq!(args[pos + 1], "--js-runtimes");
-    assert_eq!(args[pos + 2], "quickjs");
+    assert!(
+        args[pos + 2] == "deno" || args[pos + 2].starts_with("deno:"),
+        "YouTube must pin Deno, not another JS runtime: {:?}",
+        &args[pos..pos + 3]
+    );
     // The pin must precede `--`: the page URL stays behind the separator.
     let sep = args
         .iter()
@@ -3022,7 +3023,7 @@ fn ytdlp_identity_args_pins_quickjs_for_youtube_with_cookies() {
 }
 
 #[test]
-fn ytdlp_identity_args_skips_quickjs_pin_off_youtube() {
+fn ytdlp_identity_args_skips_deno_pin_off_youtube() {
     // The runtime pin is YouTube-only: other sites keep yt-dlp's own runtime
     // discovery, so a system runtime is never disabled there.
     for (browser, url) in [

@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.2.2" date="2026-10-23">
+      <description>
+        <ul>
+          <li>Live streams reported through yt-dlp's live status are now detected correctly instead of taking the finished-video path.</li>
+          <li>Large download queues are saved more compactly, reducing the risk of the saved queue being set aside at startup.</li>
+          <li>Browser-extension cookie handoffs now enforce owner-only staging-directory permissions, including directories left readable by earlier versions.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.2.1" date="2026-10-22">
       <description>
         <ul>

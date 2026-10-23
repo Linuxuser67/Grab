@@ -6,7 +6,7 @@ use libadwaita as adw;
 
 /// Tool identifiers for the install filter. Must match the strings in
 /// `install_progress.rs` `include()` calls exactly.
-const TOOL_QUICKJS: &str = "quickjs";
+const TOOL_DENO: &str = "deno";
 const TOOL_GALLERY_DL: &str = "gallery-dl";
 
 /// Two-way ComboRow <-> GSettings sync via index/value mapping (plain bind can't map index vs string).
@@ -1089,21 +1089,21 @@ pub fn show(
                     }
                     // Probe installed versions off-thread, then ask each managed
                     // tool's upstream for a newer release: yt-dlp/yt-dlp,
-                    // quickjs-ng/quickjs, gdl-org/builds.
+                    // denoland/deno, gdl-org/builds.
                     let dirs = crate::video_tools::tool_search_dirs();
-                    let (yt, qjs, gdl) = tokio::join!(
+                    let (yt, deno, gdl) = tokio::join!(
                         inspect_tool_version("yt-dlp", "--version", &dirs),
-                        inspect_tool_version("qjs", "--version", &dirs),
+                        inspect_tool_version("deno", "--version", &dirs),
                         inspect_tool_version("gallery-dl", "--version", &dirs),
                     );
-                    let installed = Some((yt, qjs, gdl));
+                    let installed = Some((yt, deno, gdl));
                     // Upstream tags come from the update cache: a click reuses a
                     // check from the last 15 minutes. The lookups run on Grab's
                     // Tokio runtime inside update_cache, never on this GLib task.
                     let max_age = crate::update_cache::MANUAL_MAX_AGE_SECS;
                     let latest = crate::update_cache::latest(max_age).await;
                     let yt_tag = latest.ytdlp;
-                    let qjs_tag = latest.quickjs;
+                    let deno_tag = latest.deno;
                     let gdl_tag = latest.gallerydl;
                     let gdl_digest = latest.gallerydl_digest;
                     // Grab's own gallery-dl is judged by its bytes, read off-thread.
@@ -1124,7 +1124,7 @@ pub fn show(
                     let mut current: Vec<String> = Vec::new();
                     let mut timed_out: Vec<String> = Vec::new();
                     let mut indeterminate = installed.is_none();
-                    if let Some((yt, qjs, gdl)) = installed {
+                    if let Some((yt, deno, gdl)) = installed {
                         // Presence is independent for each binary. In particular,
                         // resolve_libraries() must not hide all missing tools just
                         // because a fresh profile has no yt-dlp yet.
@@ -1151,26 +1151,22 @@ pub fn show(
                         }
                         // Optional tools are offered for installation whenever
                         // absent, even if their latest-release lookup is offline.
-                        match (qjs.as_ref(), qjs_tag.as_deref()) {
+                        match (deno.as_ref(), deno_tag.as_deref()) {
                             (Some((_, Ok(installed))), Some(tag))
                                 if crate::video_tools::tool_update_available(installed, tag) =>
                             {
-                                updates.push(format!(
-                                    "quickjs {} → {}",
-                                    installed.trim(),
-                                    tag.trim()
-                                ));
+                                updates.push(format!("deno {} → {}", installed.trim(), tag.trim()));
                             }
                             (Some((_, Ok(installed))), Some(_)) => {
-                                current.push(format!("quickjs {}", installed.trim()));
+                                current.push(format!("Deno {}", installed.trim()));
                             }
                             (Some((_, Ok(_))), None) => indeterminate = true,
                             (Some((_, Err(crate::video_tools::ToolProbeError::Timeout))), _) => {
-                                timed_out.push("quickjs".to_string());
+                                timed_out.push("Deno".to_string());
                                 indeterminate = true;
                             }
                             (Some(_), _) => indeterminate = true,
-                            (None, _) => missing.push(TOOL_QUICKJS.to_string()),
+                            (None, _) => missing.push(TOOL_DENO.to_string()),
                         }
                         match (gdl.as_ref(), gdl_tag.as_deref()) {
                             (Some((_, Ok(installed))), Some(tag)) if gdl_needs_update => {

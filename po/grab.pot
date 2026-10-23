@@ -390,7 +390,7 @@ msgstr ""
 
 #: src/install_help.rs:76
 msgid ""
-"Install yt-dlp, ffmpeg and quickjs yourself and make sure they are on your "
+"Install yt-dlp, ffmpeg, Deno and gallery-dl yourself and make sure they are on your "
 "PATH, then press Check Again."
 msgstr ""
 
@@ -422,8 +422,8 @@ msgstr ""
 msgid "yt-dlp install progress"
 msgstr ""
 
-#: src/install_progress.rs:163
-msgid "quickjs install progress"
+#: src/install_progress.rs:183
+msgid "deno install progress"
 msgstr ""
 
 #: src/inline_add.rs:125

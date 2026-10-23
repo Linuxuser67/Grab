@@ -212,6 +212,13 @@ async fn stage_cookie_file(
     page_url: &str,
     timeout: Duration,
 ) -> Option<PathBuf> {
+    // Every YouTube yt-dlp invocation pins Deno, including this cookie-export
+    // probe. Prepare it first so a fresh install doesn't silently lose browser
+    // cookies while the metadata lookup provisions the runtime concurrently.
+    if let Err(error) = crate::video_tools::ensure_deno(page_url).await {
+        tracing::debug!(error = %error, "Deno unavailable for YouTube cookie export");
+        return None;
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = crate::download_net::cookie_staging_dir()?;

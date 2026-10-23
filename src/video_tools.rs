@@ -1,4 +1,4 @@
-//! Tool resolution and managed provisioning for yt-dlp/QuickJS, plus system
+//! Tool resolution and managed provisioning for yt-dlp/Deno, plus system
 //! FFmpeg discovery and version checks. Leaf module: the dialog, prefs and engines
 //! consume it through the `video` facade.
 
@@ -176,15 +176,9 @@ pub(crate) fn in_flatpak() -> bool {
 pub(crate) struct DistroPackages {
     /// Pretty distro name for the dialog title, e.g. "Fedora".
     pub distro: String,
-    /// One-line install command for all three tools, e.g.
-    /// "sudo dnf install yt-dlp ffmpeg quickjs-ng". quickjs-ng is appended
-    /// only where a distro package is known — not on openSUSE, Void or
-    /// Solus, where the command would fail.
+    /// One-line distro command for yt-dlp and ffmpeg. Deno is provisioned
+    /// separately from its verified upstream stable release.
     pub install_all: String,
-    /// Whether the distro has a known quickjs package (i.e. `install_all`
-    /// covers quickjs). Where false, the install-help dialog must also show
-    /// the upstream quickjs release link, or those distros dead-end.
-    pub has_quickjs_package: bool,
 }
 
 fn package_manager(id: &str) -> Option<&'static str> {
@@ -201,21 +195,6 @@ fn package_manager(id: &str) -> Option<&'static str> {
         "gentoo" => Some("sudo emerge --ask"),
         "void" => Some("sudo xbps-install -S"),
         "solus" => Some("sudo eopkg install"),
-        _ => None,
-    }
-}
-
-/// Distro package name for the quickjs-ng JS runtime. Verified against the
-/// distro package trackers: Fedora, Debian/Ubuntu, Arch, Alpine and Gentoo
-/// all ship `quickjs-ng`; openSUSE, Void and Solus do not, so those resolve
-/// to `None` and the install-help row is hidden there.
-fn quickjs_package(id: &str) -> Option<&'static str> {
-    match id {
-        "fedora" | "rhel" | "centos" | "almalinux" | "rocky" => Some("quickjs-ng"),
-        "ubuntu" | "debian" | "pop" | "linuxmint" | "elementary" | "zorin" => Some("quickjs-ng"),
-        "arch" | "manjaro" | "endeavouros" | "cachyos" => Some("quickjs-ng"),
-        "alpine" => Some("quickjs-ng"),
-        "gentoo" => Some("quickjs-ng"),
         _ => None,
     }
 }
@@ -241,13 +220,9 @@ pub(crate) fn distro_packages(os_release: &str) -> Option<DistroPackages> {
     let id = id?;
     let pm =
         package_manager(id).or_else(|| id_like.split_whitespace().find_map(package_manager))?;
-    let quickjs_pkg =
-        quickjs_package(id).or_else(|| id_like.split_whitespace().find_map(quickjs_package));
-    let quickjs = quickjs_pkg.map(|pkg| format!(" {pkg}")).unwrap_or_default();
     Some(DistroPackages {
         distro: name.unwrap_or(id).to_string(),
-        install_all: format!("{pm} yt-dlp ffmpeg{quickjs}"),
-        has_quickjs_package: quickjs_pkg.is_some(),
+        install_all: format!("{pm} yt-dlp ffmpeg"),
     })
 }
 
@@ -794,24 +769,33 @@ async fn fetch_ytdlp_inner(
         .map_err(|e| VideoError::install(format!("couldn't install {}: {e}", dest.display())))
 }
 
-/// quickjs-ng is Grab's pinned JS runtime for YouTube (a system runtime like
-/// deno, which yt-dlp prefers by default, must never shadow it). The release
-/// follows the quickjs-ng latest tag; installs fail closed without GitHub's
-/// per-asset SHA-256 digest, verified while streaming. Hard cap on the
-/// download: the asset is ~2.5MB, so anything larger is not the released binary.
-const QUICKJS_MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
+/// Stable Deno Linux archives are published by denoland/deno with per-asset SHA-256 digests.
+const DENO_MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
+const DENO_MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
+const DENO_LATEST_RELEASE_API: &str = "https://api.github.com/repos/denoland/deno/releases/latest";
+const DENO_MIN_VERSION: [u32; 3] = [2, 3, 0];
 
-/// Whether this build's arch has a quickjs-ng release to fetch. Gate for the
-/// update check and the installer; where false, yt-dlp keeps its own runtime
-/// discovery.
-pub(crate) fn quickjs_arch_supported() -> bool {
-    matches!(std::env::consts::ARCH, "x86_64" | "aarch64")
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DenoRelease {
+    tag: String,
+    download_url: String,
+    sha256: Option<String>,
 }
 
-/// Whether a page URL is YouTube: the only site where Grab pins quickjs-ng as
-/// yt-dlp's JS runtime (its authenticated player clients need a JS runtime to
-/// yield any formats). Everywhere else yt-dlp keeps its own runtime discovery,
-/// so a system runtime there is never shadowed or disabled.
+fn deno_asset_name_for_arch(arch: &str) -> Option<&'static str> {
+    match arch {
+        "x86_64" => Some("deno-x86_64-unknown-linux-gnu.zip"),
+        "aarch64" => Some("deno-aarch64-unknown-linux-gnu.zip"),
+        _ => None,
+    }
+}
+
+pub(crate) fn deno_arch_supported() -> bool {
+    deno_asset_name_for_arch(std::env::consts::ARCH).is_some()
+}
+
+/// Whether a page URL is YouTube. The only site for which Grab explicitly
+/// selects Deno; other sites retain yt-dlp's normal runtime discovery.
 pub(crate) fn is_youtube_url(page_url: &str) -> bool {
     let host = url::Url::parse(page_url)
         .ok()
@@ -825,22 +809,7 @@ pub(crate) fn is_youtube_url(page_url: &str) -> bool {
         || host.ends_with(".youtube-nocookie.com")
 }
 
-/// Download URL for a quickjs-ng release tag, mapped from the build arch
-/// to its asset names. The asset is the `qjs` binary itself, not an archive.
-/// `None` on architectures quickjs-ng doesn't ship.
-pub(crate) fn quickjs_download_url(version: &str) -> Option<String> {
-    if !quickjs_arch_supported() {
-        return None;
-    }
-    let arch = std::env::consts::ARCH;
-    Some(format!(
-        "https://github.com/quickjs-ng/quickjs/releases/download/{version}/qjs-linux-{arch}"
-    ))
-}
-
-/// Release tags are interpolated into the quickjs download URL, so reject
-/// anything outside the tag character set (`A-Za-z0-9._+-`) before it can
-/// shape a request.
+/// Reject unexpected release tags before they can shape an asset URL.
 pub(crate) fn valid_release_tag(tag: &str) -> bool {
     !tag.is_empty()
         && tag.bytes().all(|b| {
@@ -851,95 +820,236 @@ pub(crate) fn valid_release_tag(tag: &str) -> bool {
         })
 }
 
-/// Locate a `qjs` binary: user lib dir first (Grab-installed), then `/app/bin`,
-/// then PATH for a system copy. `None` when no JS runtime is on hand.
-pub(crate) fn find_quickjs() -> Option<PathBuf> {
-    find_in_dirs("qjs", &tool_search_dirs())
+pub(crate) fn deno_download_url_for_arch(tag: &str, arch: &str) -> Option<String> {
+    if !valid_release_tag(tag) {
+        return None;
+    }
+    let asset = deno_asset_name_for_arch(arch)?;
+    Some(format!(
+        "https://github.com/denoland/deno/releases/download/{tag}/{asset}"
+    ))
 }
 
-/// Install quickjs into the user library directory. Await off the GTK thread.
-pub async fn install_quickjs() -> Result<PathBuf, VideoError> {
-    let _guard = quickjs_install_lock().lock().await;
-    install_quickjs_locked().await
+fn valid_sha256_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// One lock for every quickjs install path: both use the fixed `qjs.part`.
-fn quickjs_install_lock() -> &'static tokio::sync::Mutex<()> {
+fn parse_deno_release_metadata(body: &str, arch: &str) -> Option<DenoRelease> {
+    let release: serde_json::Value = serde_json::from_str(body).ok()?;
+    let tag = release.get("tag_name")?.as_str()?.to_owned();
+    if !valid_release_tag(&tag) {
+        return None;
+    }
+    let expected_url = deno_download_url_for_arch(&tag, arch)?;
+    let asset_name = deno_asset_name_for_arch(arch)?;
+    let asset =
+        release.get("assets")?.as_array()?.iter().find(|asset| {
+            asset.get("name").and_then(serde_json::Value::as_str) == Some(asset_name)
+        })?;
+    let download_url = asset.get("browser_download_url")?.as_str()?.to_owned();
+    // Only accept the expected upstream asset URL; never fetch a URL supplied
+    // by arbitrary release metadata, even when the digest field is present.
+    if download_url != expected_url {
+        return None;
+    }
+    let sha256 = asset
+        .get("digest")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.strip_prefix("sha256:"))
+        .filter(|value| valid_sha256_digest(value))
+        .map(str::to_owned);
+    Some(DenoRelease {
+        tag,
+        download_url,
+        sha256,
+    })
+}
+
+async fn latest_deno_release() -> Option<DenoRelease> {
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        let client = tool_client_builder_proxied()
+            .ok()?
+            .user_agent(concat!("Grab/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .ok()?;
+        let response = client
+            .get(DENO_LATEST_RELEASE_API)
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        let body = response.text().await.ok()?;
+        parse_deno_release_metadata(&body, std::env::consts::ARCH)
+    });
+    handle.await.ok().flatten()
+}
+
+/// Latest stable Deno tag. GitHub's /releases/latest excludes prereleases.
+pub async fn latest_deno_tag() -> Option<String> {
+    latest_deno_release().await.map(|release| release.tag)
+}
+
+/// Locate Deno in managed-first search order.
+pub(crate) fn find_deno() -> Option<PathBuf> {
+    find_in_dirs("deno", &tool_search_dirs())
+}
+
+/// Install or update the latest stable Deno release. Await off the GTK thread.
+pub async fn install_deno() -> Result<PathBuf, VideoError> {
+    let _guard = deno_install_lock().lock().await;
+    install_deno_locked().await
+}
+
+fn deno_install_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// Install with `quickjs_install_lock` already held by the caller.
-async fn install_quickjs_locked() -> Result<PathBuf, VideoError> {
+async fn install_deno_locked() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
-    let handle = crate::runtime::tokio_rt().spawn(async move { install_quickjs_binary(dir).await });
+    let handle = crate::runtime::tokio_rt().spawn(async move { install_deno_binary(dir).await });
     match handle.await {
-        Ok(res) => res,
-        Err(e) => Err(VideoError::runtime(&e)),
+        Ok(result) => result,
+        Err(error) => Err(VideoError::runtime(&error)),
     }
 }
 
-async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
-    let (tag, digest) = latest_quickjs_release()
+async fn install_deno_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
+    let release = latest_deno_release()
         .await
-        .ok_or_else(|| VideoError::install("couldn't determine the latest quickjs-ng release"))?;
-    // Fail closed: no digest means no verified install. The digest comes from
-    // GitHub's API alongside the binary; absent means we can't verify.
-    let digest = digest.ok_or_else(|| {
-        VideoError::install("quickjs-ng release has no SHA-256 digest; refusing unverified install")
+        .ok_or_else(|| VideoError::install("couldn't determine the latest stable Deno release"))?;
+    let digest = release.sha256.ok_or_else(|| {
+        VideoError::install("Deno release has no SHA-256 digest; refusing unverified install")
     })?;
-    if !valid_release_tag(&tag) {
+    ensure_lib_dir(&dir)?;
+    let archive = dir.join("deno.zip.part");
+    let part = dir.join("deno.part");
+    let dest = dir.join("deno");
+    if let Err(error) = download_to_file(
+        &release.download_url,
+        &archive,
+        &digest,
+        DENO_MAX_ARCHIVE_BYTES,
+    )
+    .await
+    {
+        std::fs::remove_file(&archive).ok();
+        return Err(VideoError::install(error));
+    }
+
+    let archive_for_worker = archive.clone();
+    let part_for_worker = part.clone();
+    let extracted = tokio::task::spawn_blocking(move || {
+        extract_deno_archive(&archive_for_worker, &part_for_worker)
+    })
+    .await
+    .map_err(|error| format!("Deno archive extraction task failed: {error}"))
+    .and_then(|result| result);
+    std::fs::remove_file(&archive).ok();
+    if let Err(error) = extracted {
+        std::fs::remove_file(&part).ok();
+        return Err(VideoError::install(error));
+    }
+
+    use std::os::unix::fs::PermissionsExt as _;
+    if let Err(error) =
+        tokio::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755)).await
+    {
+        std::fs::remove_file(&part).ok();
         return Err(VideoError::install(format!(
-            "quickjs-ng published an unexpected release tag: {tag}"
+            "couldn't mark {} executable: {error}",
+            part.display()
         )));
     }
-    let url = quickjs_download_url(&tag)
-        .ok_or_else(|| VideoError::install("quickjs has no release for this architecture"))?;
-    ensure_lib_dir(&dir)?;
-    // Download straight to `qjs.part`: a failed download must never leave a
-    // half-written `qjs` behind for `find_quickjs` to mistake as installed.
-    let dest = dir.join("qjs");
-    let part = dir.join("qjs.part");
-    fetch_quickjs(&url, &part, &dest, &digest)
-        .await
-        .map(|_| dest)
-}
-
-/// Fetch the `qjs` binary, mark it executable, and move it into place.
-/// Size-capped while streaming; the asset is the released binary itself.
-/// Cleans up the `.part` file on any failure, so a half-written binary is
-/// never left behind for a later run to mistake as usable.
-async fn fetch_quickjs(
-    url: &str,
-    part: &Path,
-    dest: &Path,
-    digest: &str,
-) -> Result<(), VideoError> {
-    let result = fetch_quickjs_inner(url, part, dest, digest).await;
-    if result.is_err() {
-        std::fs::remove_file(part).ok();
+    match std::fs::symlink_metadata(&dest) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            std::fs::remove_file(&part).ok();
+            return Err(VideoError::install(format!(
+                "refusing to replace Deno through symlink {}",
+                dest.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            std::fs::remove_file(&part).ok();
+            return Err(VideoError::install(format!(
+                "couldn't inspect {}: {error}",
+                dest.display()
+            )));
+        }
     }
-    result
+    if let Err(error) = tokio::fs::rename(&part, &dest).await {
+        std::fs::remove_file(&part).ok();
+        return Err(VideoError::install(format!(
+            "couldn't install {}: {error}",
+            dest.display()
+        )));
+    }
+    Ok(dest)
 }
 
-async fn fetch_quickjs_inner(
-    url: &str,
-    part: &Path,
-    dest: &Path,
-    digest: &str,
-) -> Result<(), VideoError> {
-    download_to_file(url, part, digest, QUICKJS_MAX_DOWNLOAD_BYTES)
-        .await
-        .map_err(VideoError::install)?;
-    use std::os::unix::fs::PermissionsExt as _;
-    tokio::fs::set_permissions(part, std::fs::Permissions::from_mode(0o755))
-        .await
-        .map_err(|e| {
-            VideoError::install(format!("couldn't mark {} executable: {e}", part.display()))
-        })?;
-    tokio::fs::rename(part, dest)
-        .await
-        .map_err(|e| VideoError::install(format!("couldn't install {}: {e}", dest.display())))
+/// Extract only the expected executable from the verified archive; never unpack
+/// arbitrary archive paths to disk.
+fn extract_deno_archive(archive_path: &Path, dest: &Path) -> Result<(), String> {
+    use std::io::{Read as _, Write as _};
+
+    clear_dest_refusing_symlink(dest)?;
+    let file = std::fs::File::open(archive_path)
+        .map_err(|error| format!("couldn't open Deno archive: {error}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|error| format!("invalid Deno archive: {error}"))?;
+    let mut binary = archive
+        .by_name("deno")
+        .map_err(|error| format!("Deno archive has no deno executable: {error}"))?;
+    if binary.name() != "deno" || !binary.is_file() {
+        return Err("Deno archive entry is not the expected executable".to_string());
+    }
+    if binary
+        .unix_mode()
+        .is_some_and(|mode| mode & 0o170000 == 0o120000)
+    {
+        return Err("Deno archive executable must not be a symbolic link".to_string());
+    }
+    let expected_size = binary.size();
+    if expected_size == 0 || expected_size > DENO_MAX_BINARY_BYTES {
+        return Err(format!(
+            "Deno executable size is outside the accepted limit ({DENO_MAX_BINARY_BYTES} bytes)"
+        ));
+    }
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .map_err(|error| format!("couldn't create {}: {error}", dest.display()))?;
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = binary
+            .read(&mut buffer)
+            .map_err(|error| format!("couldn't extract Deno executable: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        total = total.saturating_add(count as u64);
+        if total > DENO_MAX_BINARY_BYTES {
+            return Err(format!(
+                "Deno executable exceeds the accepted size limit ({DENO_MAX_BINARY_BYTES} bytes)"
+            ));
+        }
+        output
+            .write_all(&buffer[..count])
+            .map_err(|error| format!("couldn't write {}: {error}", dest.display()))?;
+    }
+    if total != expected_size {
+        return Err("Deno executable size does not match the archive metadata".to_string());
+    }
+    output
+        .sync_all()
+        .map_err(|error| format!("couldn't flush {}: {error}", dest.display()))?;
+    Ok(())
 }
 
 /// Pre-create guard for tool downloads and extracts: a planted symlink at
@@ -1056,27 +1166,43 @@ where
     Ok(())
 }
 
-/// Ensure Grab's quickjs is on hand for a YouTube page URL, installing it on
-/// first use. Concurrent callers serialize on a single install and re-check
-/// after waiting. No-op off YouTube (nothing else needs it) and on
-/// architectures quickjs-ng doesn't ship: yt-dlp then falls back to its own
-/// runtime discovery.
-pub(crate) async fn ensure_quickjs(page_url: &str, proxied: bool) -> Result<(), VideoError> {
-    if !is_youtube_url(page_url) || find_quickjs().is_some() || !quickjs_arch_supported() {
+/// Ensure an up-to-date Deno runtime is available for YouTube JS challenges.
+pub(crate) async fn ensure_deno(page_url: &str) -> Result<(), VideoError> {
+    if !is_youtube_url(page_url) {
         return Ok(());
     }
-    // The silent download is Flatpak-only (elsewhere the settings button guides
-    // a manual install), and never runs while an app proxy is configured: the
-    // installer's client does not use it, so the fetch would go out direct and
-    // reveal the machine's address to GitHub mid-download.
-    if proxied || !in_flatpak() {
+    if let Some(path) = find_deno() {
+        if let Ok(version) = probe_first_line(&path, "--version").await
+            && parse_dotted_version(&version).is_some_and(|v| v >= DENO_MIN_VERSION)
+        {
+            return Ok(());
+        }
+        if !in_flatpak() {
+            return Err(VideoError::runtime(
+                "Deno 2.3.0 or newer is required for YouTube extraction; update Deno, then retry",
+            ));
+        }
+        tracing::info!(path = %path.display(), "installed Deno is too old or could not be probed; updating to latest stable");
+    } else if !deno_arch_supported() {
+        return Err(VideoError::runtime(
+            "Deno is required for YouTube extraction on this architecture; install a supported Deno build and retry",
+        ));
+    } else if !in_flatpak() {
+        return Err(VideoError::runtime(
+            "Deno is required for YouTube extraction. Install Deno 2.3.0 or newer, then retry",
+        ));
+    }
+
+    // The installer honors Grab's configured app proxy and accepts only the
+    // official architecture-specific asset with its release API SHA-256.
+    let _guard = deno_install_lock().lock().await;
+    if let Some(path) = find_deno()
+        && let Ok(version) = probe_first_line(&path, "--version").await
+        && parse_dotted_version(&version).is_some_and(|v| v >= DENO_MIN_VERSION)
+    {
         return Ok(());
     }
-    let _guard = quickjs_install_lock().lock().await;
-    if find_quickjs().is_some() {
-        return Ok(());
-    }
-    install_quickjs_locked().await.map(|_| ())
+    install_deno_locked().await.map(|_| ())
 }
 
 /// Minimum accepted yt-dlp version by release date. Older binaries predate the
@@ -1453,6 +1579,22 @@ pub(crate) fn validated_ytdlp_extractor_args(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
+/// Explicit Deno runtime flags used for YouTube extraction.
+/// No other JavaScript runtime is enabled as a fallback.
+fn ytdlp_runtime_args(page_url: &str, deno_path: Option<&Path>) -> Vec<String> {
+    if !is_youtube_url(page_url) {
+        return Vec::new();
+    }
+    let runtime = deno_path
+        .map(|path| format!("deno:{}", path.display()))
+        .unwrap_or_else(|| "deno".to_string());
+    vec![
+        "--no-js-runtimes".to_string(),
+        "--js-runtimes".to_string(),
+        runtime,
+    ]
+}
+
 /// Shared trailing argv for every yt-dlp spawn: built-in/custom extractor args,
 /// JS runtime pin for YouTube, cookies, UA, then the page URL behind `--`.
 pub(crate) fn ytdlp_identity_args(
@@ -1464,7 +1606,7 @@ pub(crate) fn ytdlp_identity_args(
     // YouTube force-enables SABR-only streaming for the `web` player client
     // (yt-dlp#12482): its URL-less formats fail the whole extraction. `web`
     // only enters yt-dlp's default rotation when a JS runtime is available
-    // (e.g. quickjs on PATH), so exclude it everywhere. Scoped to the
+    // (e.g. Deno on PATH), so exclude it everywhere. Scoped to the
     // youtube extractor: a no-op for other sites.
     let extra_args =
         validated_ytdlp_extractor_args(&crate::settings::AppSettings::new().ytdlp_extractor_args());
@@ -1495,14 +1637,7 @@ pub(crate) fn ytdlp_identity_args(
             args.push("youtube:player_client=default,-web".to_string());
         }
     }
-    // Pin quickjs-ng for YouTube (disabling other runtimes, since only deno is
-    // on by default). Scoped to YouTube; skipped where quickjs-ng ships no
-    // release, where yt-dlp keeps its own runtime discovery.
-    if is_youtube_url(page_url) && quickjs_arch_supported() {
-        args.push("--no-js-runtimes".to_string());
-        args.push("--js-runtimes".to_string());
-        args.push("quickjs".to_string());
-    }
+    args.extend(ytdlp_runtime_args(page_url, find_deno().as_deref()));
     if let Some(spec) = cookies_browser_spec(cookies_browser) {
         args.push(format!("--cookies-from-browser={spec}"));
     }
@@ -1519,7 +1654,9 @@ pub(crate) fn ytdlp_identity_args(
 
 #[cfg(test)]
 mod extractor_args_compat_tests {
-    use super::validated_ytdlp_extractor_args;
+    use super::{validated_ytdlp_extractor_args, ytdlp_runtime_args};
+    use std::path::Path;
+
     #[test]
     fn accepts_site_specific_values() {
         assert_eq!(
@@ -1528,12 +1665,31 @@ mod extractor_args_compat_tests {
         );
         assert!(validated_ytdlp_extractor_args("instagram:api_version=sample").is_some());
     }
+
     #[test]
     fn rejects_malformed_control_chars_and_oversized_values() {
         assert!(validated_ytdlp_extractor_args("").is_none());
         assert!(validated_ytdlp_extractor_args("--bad:flag").is_none());
         assert!(validated_ytdlp_extractor_args("youtube:\nplayer_client=android").is_none());
         assert!(validated_ytdlp_extractor_args(&"x".repeat(4097)).is_none());
+    }
+
+    #[test]
+    fn youtube_runtime_args_pin_deno_without_a_quickjs_fallback() {
+        let with_path = ytdlp_runtime_args(
+            "https://youtu.be/example",
+            Some(Path::new("/grab/libs/deno")),
+        );
+        assert_eq!(
+            with_path.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["--no-js-runtimes", "--js-runtimes", "deno:/grab/libs/deno"]
+        );
+        let on_path = ytdlp_runtime_args("https://youtube.com/watch?v=example", None);
+        assert_eq!(
+            on_path.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["--no-js-runtimes", "--js-runtimes", "deno"]
+        );
+        assert!(ytdlp_runtime_args("https://example.org/video", None).is_empty());
     }
 }
 
@@ -1589,38 +1745,6 @@ pub async fn latest_ytdlp_tag() -> Option<String> {
             .await
             .ok()
             .map(|release| release.tag_name)
-    });
-    handle.await.ok().flatten()
-}
-
-/// Latest quickjs-ng release tag; `None` when GitHub is unreachable.
-pub async fn latest_quickjs_tag() -> Option<String> {
-    latest_quickjs_release().await.map(|(tag, _)| tag)
-}
-
-/// SHA-256 digest for a release asset, stripped of the "sha256:" prefix.
-/// Returns None if the asset is absent or has no digest: callers fail closed.
-fn digest_for_asset(release: &yt_dlp::client::deps::Release, name: &str) -> Option<String> {
-    release
-        .assets
-        .iter()
-        .find(|a| a.name == name)
-        .and_then(|a| a.digest.as_deref())
-        .and_then(|d| d.strip_prefix("sha256:"))
-        .map(str::to_owned)
-}
-
-/// Latest quickjs-ng release tag and its SHA-256 digest for this architecture.
-/// The digest comes from GitHub's release API (`digest: "sha256:…"` per asset).
-/// Returns None if the digest is absent: we fail closed rather than install
-/// an unverified binary.
-pub async fn latest_quickjs_release() -> Option<(String, Option<String>)> {
-    let handle = crate::runtime::tokio_rt().spawn(async move {
-        let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new("quickjs-ng", "quickjs");
-        let release = fetcher.fetch_latest_release(None).await.ok()?;
-        let want = format!("qjs-linux-{}", std::env::consts::ARCH);
-        let digest = digest_for_asset(&release, &want);
-        Some((release.tag_name, digest))
     });
     handle.await.ok().flatten()
 }
@@ -1753,12 +1877,20 @@ async fn run_version_probe_uncached(
     if first.is_empty() {
         return Err(ToolProbeError::EmptyOutput);
     }
+    if binary
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy() == "deno")
+        && let Some(version) = first
+            .strip_prefix("deno ")
+            .and_then(|rest| rest.split_whitespace().next())
+    {
+        return Ok(version.to_owned());
+    }
     Ok(first.to_owned())
 }
 
-/// Display-ready version line for an installed yt-dlp or QuickJS binary.
-/// yt-dlp's `--version` output is labeled ("2026.08.19" → "yt-dlp 2026.08.19");
-/// QuickJS' numeric version is labeled "quickjs 0.17.0".
+/// Display-ready version line for an installed yt-dlp or Deno binary.
+/// Deno and yt-dlp versions are normalized to their dotted version tokens.
 pub(crate) async fn tool_display_version(
     binary: PathBuf,
     version_arg: &'static str,
@@ -1772,10 +1904,9 @@ pub(crate) async fn tool_display_version(
     }
     if binary
         .file_name()
-        .is_some_and(|n| n.to_string_lossy() == "qjs")
+        .is_some_and(|n| n.to_string_lossy() == "deno")
     {
-        // `qjs --version` prints just "0.17.0".
-        return Some(format!("quickjs {line}"));
+        return Some(format!("Deno {line}"));
     }
     Some(line)
 }
@@ -2133,33 +2264,14 @@ mod tests {
     }
 
     #[test]
-    fn distro_packages_reports_quickjs_coverage() {
-        // Distros with a known quickjs package get it in the install
-        // command; distros without one (Void, Solus, openSUSE) omit it, and
-        // the dialog must fall back to the upstream release link there.
+    fn distro_packages_only_include_yt_dlp_and_ffmpeg() {
         let fedora = distro_packages("ID=fedora\nNAME=\"Fedora Linux\"\n").unwrap();
-        assert!(fedora.has_quickjs_package);
-        assert!(
-            fedora.install_all.contains("quickjs-ng"),
-            "{}",
-            fedora.install_all
-        );
-
-        let void = distro_packages("ID=void\nNAME=\"Void Linux\"\n").unwrap();
-        assert!(!void.has_quickjs_package);
-        assert!(
-            !void.install_all.contains("quickjs"),
-            "{}",
-            void.install_all
-        );
-
-        let solus = distro_packages("ID=solus\nNAME=\"Solus\"\n").unwrap();
-        assert!(!solus.has_quickjs_package);
-
-        // ID_LIKE fallback: a derivative inherits the parent's packages.
+        assert_eq!(fedora.install_all, "sudo dnf install yt-dlp ffmpeg");
+        let void = distro_packages("ID=void\nNAME=\"Void\"\n").unwrap();
+        assert_eq!(void.install_all, "sudo xbps-install -S yt-dlp ffmpeg");
         let derivative =
             distro_packages("ID=neon\nID_LIKE=\"ubuntu debian\"\nNAME=\"KDE neon\"\n").unwrap();
-        assert!(derivative.has_quickjs_package);
+        assert_eq!(derivative.install_all, "sudo apt install yt-dlp ffmpeg");
     }
 
     #[test]
@@ -2168,7 +2280,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("target");
         std::fs::write(&target, b"precious").unwrap();
-        let link = dir.join("qjs.part");
+        let link = dir.join("deno.part");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         let err = clear_dest_refusing_symlink(&link).unwrap_err();
@@ -2183,7 +2295,7 @@ mod tests {
     fn clear_dest_refusing_symlink_clears_regular_file() {
         let dir = unique_dir("regular");
         std::fs::create_dir_all(&dir).unwrap();
-        let part = dir.join("qjs.part");
+        let part = dir.join("deno.part");
         std::fs::write(&part, b"stale").unwrap();
 
         clear_dest_refusing_symlink(&part).unwrap();
@@ -2196,7 +2308,7 @@ mod tests {
         let dir = unique_dir("missing");
         std::fs::create_dir_all(&dir).unwrap();
 
-        clear_dest_refusing_symlink(&dir.join("qjs.part")).unwrap();
+        clear_dest_refusing_symlink(&dir.join("deno.part")).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2206,18 +2318,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("target");
         std::fs::write(&target, b"precious").unwrap();
-        let link = dir.join("qjs.part");
+        let link = dir.join("deno.part");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         // Unroutable URL: the symlink guard must fire before any I/O.
-        let err = download_to_file(
-            "http://127.0.0.1:1/nope",
-            &link,
-            "dummy",
-            QUICKJS_MAX_DOWNLOAD_BYTES,
-        )
-        .await
-        .unwrap_err();
+        let err = download_to_file("http://127.0.0.1:1/nope", &link, "dummy", 8 * 1024 * 1024)
+            .await
+            .unwrap_err();
         assert!(err.contains("symlink"), "unexpected error: {err}");
         assert_eq!(std::fs::read(&target).unwrap(), b"precious");
         std::fs::remove_dir_all(&dir).ok();
@@ -2241,12 +2348,12 @@ mod tests {
         }
         // The tag is interpolated into the download URL, so whatever passes
         // here must survive URL interpolation unchanged.
-        let tag = "v0.17.0";
+        let tag = "v2.9.8";
         assert!(valid_release_tag(tag));
-        let url = quickjs_download_url(tag).unwrap();
+        let url = deno_download_url_for_arch(tag, "x86_64").unwrap();
         assert!(
-            url.ends_with("/releases/download/v0.17.0/qjs-linux-x86_64")
-                || url.ends_with("/releases/download/v0.17.0/qjs-linux-aarch64")
+            url.ends_with("/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip")
+                || url.ends_with("/releases/download/v2.9.8/deno-aarch64-unknown-linux-gnu.zip")
         );
     }
 
@@ -2259,14 +2366,14 @@ mod tests {
             futures_util::stream::iter((0..129).map(|_| Ok::<Vec<u8>, String>(vec![0u8; 65536])));
         let dir = unique_dir("cap-stream");
         std::fs::create_dir_all(&dir).unwrap();
-        let dest = dir.join("qjs.part");
+        let dest = dir.join("deno.part");
 
         let err = write_capped_stream(
             Box::pin(chunks),
             &dest,
-            "http://127.0.0.1/qjs",
+            "http://127.0.0.1/deno",
             "dummy",
-            QUICKJS_MAX_DOWNLOAD_BYTES,
+            8 * 1024 * 1024,
         )
         .await
         .unwrap_err();
@@ -2277,7 +2384,7 @@ mod tests {
         // The over-limit chunk is rejected before it is written: the partial
         // never grows past the cap.
         let written = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-        assert!(written <= QUICKJS_MAX_DOWNLOAD_BYTES);
+        assert!(written <= 8 * 1024 * 1024);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2290,14 +2397,14 @@ mod tests {
         ]);
         let dir = unique_dir("cap-stream-ok");
         std::fs::create_dir_all(&dir).unwrap();
-        let dest = dir.join("qjs.part");
+        let dest = dir.join("deno.part");
 
         write_capped_stream(
             Box::pin(chunks),
             &dest,
-            "http://127.0.0.1/qjs",
+            "http://127.0.0.1/deno",
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
-            QUICKJS_MAX_DOWNLOAD_BYTES,
+            8 * 1024 * 1024,
         )
         .await
         .unwrap();
@@ -2314,157 +2421,118 @@ mod tests {
         ]);
         let dir = unique_dir("cap-stream-badhash");
         std::fs::create_dir_all(&dir).unwrap();
-        let dest = dir.join("qjs.part");
+        let dest = dir.join("deno.part");
 
         let err = write_capped_stream(
             Box::pin(chunks),
             &dest,
-            "http://127.0.0.1/qjs",
+            "http://127.0.0.1/deno",
             "0000000000000000000000000000000000000000000000000000000000000000",
-            QUICKJS_MAX_DOWNLOAD_BYTES,
+            8 * 1024 * 1024,
         )
         .await
         .unwrap_err();
         assert!(err.contains("sha256 mismatch"), "unexpected error: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
-
-    #[tokio::test]
-    async fn fetch_quickjs_removes_half_written_part() {
-        // The server promises a megabyte but hangs up after one chunk: the
-        // download fails mid-stream with a half-written `.part` on disk.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            use std::io::{Read as _, Write as _};
-            // A failed accept must never silently drop the listener: the
-            // client's queued connection would get RST and fail with a
-            // confusing request error instead of the truncation below.
-            let mut stream = None;
-            for _ in 0..20 {
-                match listener.accept() {
-                    Ok((s, _)) => {
-                        stream = Some(s);
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("test server: accept failed ({e}), retrying");
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                }
-            }
-            let mut stream = stream.expect("test server: accept kept failing");
-            // Read the request before responding: exiting with the request
-            // still unread makes the kernel RST the connection, and if that
-            // RST lands before the client's request write the fetch fails
-            // with "error sending request" instead of the truncation below.
-            // With the request consumed, close() sends a clean FIN.
-            let mut req = Vec::new();
-            let mut buf = [0u8; 1024];
-            loop {
-                match stream.read(&mut buf) {
-                    Ok(0) => return, // client went away
-                    Ok(n) => {
-                        req.extend_from_slice(&buf[..n]);
-                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    Err(_) => return,
-                }
-            }
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n"
-            )
-            .ok();
-            // One chunk, then hang up: the body is truncated mid-download.
-            stream.write_all(&[0u8; 4096]).ok();
-        });
-
-        let dir = unique_dir("qjs-truncated");
-        std::fs::create_dir_all(&dir).unwrap();
-        let part = dir.join("qjs.part");
-        let dest = dir.join("qjs");
-        let err = fetch_quickjs(&format!("http://{addr}/qjs"), &part, &dest, "dummy")
-            .await
-            .unwrap_err();
-        // The failure must be the mid-stream truncation — not a connect
-        // failure, which would pass the assertions below vacuously.
-        assert!(
-            err.to_string().contains("couldn't read"),
-            "unexpected error: {err}"
-        );
-        // The half-written `.part` must not survive a failed fetch, and the
-        // destination must never appear without a complete download.
-        assert!(!part.exists(), "half-written .part survived a failed fetch");
-        assert!(!dest.exists());
-        std::fs::remove_dir_all(&dir).ok();
-    }
 }
 
 #[cfg(test)]
-mod digest_tests {
+mod deno_release_tests {
     use super::*;
 
-    /// Build a minimal Release from JSON for testing digest extraction.
-    fn release_from_json(json: &str) -> yt_dlp::client::deps::Release {
-        serde_json::from_str(json).expect("test Release JSON must parse")
+    fn unique_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "grab-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 
     #[test]
-    fn digest_for_asset_extracts_sha256() {
-        let release = release_from_json(
-            r#"{
-            "tag_name": "v1.0.0",
-            "assets": [
-                {"name": "qjs-linux-x86_64", "browser_download_url": "https://example.com/qjs-x64", "digest": "sha256:abc123"},
-                {"name": "qjs-linux-aarch64", "browser_download_url": "https://example.com/qjs-arm64", "digest": "sha256:def456"}
-            ]
-        }"#,
+    fn release_tag_and_asset_url_are_validated() {
+        for good in ["v2.9.8", "v0.17.0", "2026.08.19", "v9.0.2-static", "a+b_c"] {
+            assert!(valid_release_tag(good), "rejected good tag: {good}");
+        }
+        for evil in [
+            "",
+            "v2.9.8;touch pwned",
+            "../../etc/passwd",
+            "v2.9.8\n",
+            "tag with spaces",
+            "https://evil.example/x",
+            "v2.9.8$HOME",
+        ] {
+            assert!(!valid_release_tag(evil), "accepted evil tag: {evil:?}");
+        }
+        assert_eq!(
+            deno_download_url_for_arch("v2.9.8", "x86_64").as_deref(),
+            Some(
+                "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip"
+            )
         );
         assert_eq!(
-            digest_for_asset(&release, "qjs-linux-x86_64").as_deref(),
-            Some("abc123")
+            deno_download_url_for_arch("v2.9.8", "aarch64").as_deref(),
+            Some(
+                "https://github.com/denoland/deno/releases/download/v2.9.8/deno-aarch64-unknown-linux-gnu.zip"
+            )
         );
-        assert_eq!(
-            digest_for_asset(&release, "qjs-linux-aarch64").as_deref(),
-            Some("def456")
-        );
+        assert!(deno_download_url_for_arch("v2.9.8", "riscv64").is_none());
+        assert!(deno_download_url_for_arch("../main", "x86_64").is_none());
     }
 
     #[test]
-    fn digest_for_asset_returns_none_when_missing() {
-        // No digest field: fail-closed path.
-        let release = release_from_json(
-            r#"{
-            "tag_name": "v1.0.0",
-            "assets": [
-                {"name": "qjs-linux-x86_64", "browser_download_url": "https://example.com/qjs-x64"}
-            ]
-        }"#,
+    fn release_metadata_requires_expected_asset_and_sha256() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let body = format!(
+            r#"{{"tag_name":"v2.9.8","assets":[{{"name":"deno-x86_64-unknown-linux-gnu.zip","browser_download_url":"https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip","digest":"sha256:{digest}"}}]}}"#
         );
-        assert_eq!(digest_for_asset(&release, "qjs-linux-x86_64"), None);
+        let release = parse_deno_release_metadata(&body, "x86_64").unwrap();
+        assert_eq!(release.tag, "v2.9.8");
+        assert_eq!(release.sha256.as_deref(), Some(digest));
+        let bad_url = body.replace(
+            "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip",
+            "https://attacker.example/deno.zip",
+        );
+        assert!(parse_deno_release_metadata(&bad_url, "x86_64").is_none());
+        let bad_digest = body.replace(digest, "abc123");
+        assert!(
+            parse_deno_release_metadata(&bad_digest, "x86_64")
+                .unwrap()
+                .sha256
+                .is_none()
+        );
+        assert!(parse_deno_release_metadata(&body, "unsupported").is_none());
+    }
 
-        // Asset not found.
-        let release = release_from_json(
-            r#"{
-            "tag_name": "v1.0.0",
-            "assets": []
-        }"#,
+    #[test]
+    fn archive_extraction_only_accepts_the_expected_binary() {
+        use std::io::Write as _;
+        let dir = unique_dir("deno-archive");
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive_path = dir.join("deno.zip");
+        let extracted = dir.join("deno.part");
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut archive = zip::ZipWriter::new(file);
+            archive
+                .start_file(
+                    "deno",
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored),
+                )
+                .unwrap();
+            archive.write_all(b"expected executable bytes").unwrap();
+            archive.finish().unwrap();
+        }
+        extract_deno_archive(&archive_path, &extracted).unwrap();
+        assert_eq!(
+            std::fs::read(&extracted).unwrap(),
+            b"expected executable bytes"
         );
-        assert_eq!(digest_for_asset(&release, "qjs-linux-x86_64"), None);
-
-        // Digest without sha256: prefix.
-        let release = release_from_json(
-            r#"{
-            "tag_name": "v1.0.0",
-            "assets": [
-                {"name": "qjs-linux-x86_64", "browser_download_url": "https://example.com/qjs-x64", "digest": "md5:abc123"}
-            ]
-        }"#,
-        );
-        assert_eq!(digest_for_asset(&release, "qjs-linux-x86_64"), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

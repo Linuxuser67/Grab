@@ -86,9 +86,9 @@ async fn run_video_download_inner(
     let staging = ensure_staging_dir_in(&loc.root, &loc.dir)?;
     let libs = resolve_libraries()?;
     let (yt_version, ff_version) = ensure_tool_versions(&libs).await?;
-    // quickjs-ng is the JS runtime Grab pins for YouTube; make sure it's
+    // Deno is Grab's JavaScript runtime for YouTube; make sure it's
     // installed before a YouTube spawn that may need to solve JS challenges.
-    crate::video_tools::ensure_quickjs(&job.page_url, job.proxy.is_some()).await?;
+    crate::video_tools::ensure_deno(&job.page_url).await?;
     tracing::debug!(
         item_id = job.item_id,
         host = %page_host(&job.page_url),
@@ -1501,7 +1501,7 @@ pub(crate) fn splice_before_terminator(argv: &mut Vec<String>, args: Vec<String>
 }
 
 /// Live-capture argv with yt-dlp's ffmpeg location pinned. `ytdlp_command`
-/// prepends the user lib dir to PATH (for qjs), so without this a stale
+/// prepends the user lib dir to PATH (for Deno), so without this a stale
 /// user-dir FFmpeg would win over the Flatpak runtime for live HLS.
 pub(crate) fn live_capture_argv_with_ffmpeg(
     job: &VideoJob,

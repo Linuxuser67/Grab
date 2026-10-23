@@ -755,7 +755,7 @@ pub(crate) fn cookie_staging_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Client builder for tool installs (ffmpeg, quickjs, yt-dlp): honors env
+/// Client builder for tool installs (ffmpeg, Deno, yt-dlp): honors env
 /// proxies via reqwest's default. See `tool_client_builder_proxied` for the
 /// variant that also honors Grab's app proxy (Preferences → Network).
 pub(crate) fn tool_client_builder() -> reqwest::ClientBuilder {

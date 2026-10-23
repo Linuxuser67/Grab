@@ -18,7 +18,7 @@ pub const MANUAL_MAX_AGE_SECS: u64 = 15 * 60;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Latest {
     pub ytdlp: Option<String>,
-    pub quickjs: Option<String>,
+    pub deno: Option<String>,
     pub gallerydl: Option<String>,
     pub gallerydl_digest: Option<String>,
 }
@@ -27,7 +27,7 @@ impl Latest {
     /// Only a complete answer is cached. A partial one (rate limit, outage) is
     /// retried on the next check instead of being pinned for 15 minutes.
     fn is_complete(&self) -> bool {
-        self.ytdlp.is_some() && self.quickjs.is_some() && self.gallerydl.is_some()
+        self.ytdlp.is_some() && self.deno.is_some() && self.gallerydl.is_some()
     }
 }
 
@@ -72,9 +72,9 @@ fn write_cache(path: &Path, stored: &Stored) {
 /// The three upstream lookups, awaited together. Each one already runs on the
 /// Tokio runtime, and [`latest`] calls this from inside that runtime.
 async fn fetch_all() -> Latest {
-    let (ytdlp, quickjs, gallery) = tokio::join!(
+    let (ytdlp, deno, gallery) = tokio::join!(
         crate::video::latest_ytdlp_tag(),
-        crate::video::latest_quickjs_tag(),
+        crate::video::latest_deno_tag(),
         crate::gallery_tools::latest_gallerydl_release(),
     );
     let (gallerydl, gallerydl_digest) = match gallery {
@@ -83,7 +83,7 @@ async fn fetch_all() -> Latest {
     };
     Latest {
         ytdlp,
-        quickjs,
+        deno,
         gallerydl,
         gallerydl_digest,
     }
@@ -96,6 +96,7 @@ pub async fn latest(max_age: u64) -> Latest {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let path = cache_path();
         if let Some(stored) = read_cache(&path)
+            && stored.latest.is_complete()
             && is_fresh(stored.checked_at, now_secs(), max_age)
         {
             return stored.latest;
@@ -129,7 +130,11 @@ mod tests {
         }"#;
         let parsed: Latest = serde_json::from_str(old).unwrap();
         assert_eq!(parsed.ytdlp.as_deref(), Some("2026.10.15"));
-        assert_eq!(parsed.quickjs.as_deref(), Some("0.17.0"));
+        assert_eq!(
+            parsed.deno, None,
+            "legacy QuickJS cache cannot stand in for Deno"
+        );
+        assert!(!parsed.is_complete());
         assert_eq!(parsed.gallerydl.as_deref(), Some("2026.10.15"));
     }
 
@@ -145,12 +150,12 @@ mod tests {
     fn only_a_complete_answer_is_cached() {
         let mut latest = Latest {
             ytdlp: Some("2026.10.15".into()),
-            quickjs: Some("v0.1".into()),
+            deno: Some("v2.9.8".into()),
             gallerydl: Some("2026.10.15".into()),
             gallerydl_digest: None,
         };
         assert!(latest.is_complete());
-        latest.quickjs = None;
+        latest.deno = None;
         assert!(!latest.is_complete());
     }
 }

@@ -24,6 +24,12 @@ struct State {
     add_card: crate::inline_add::AddCard,
 }
 
+/// Convert Cargo/SemVer prerelease separators to AppStream's release-version syntax.
+/// AppStream requires '~' for prereleases so they sort before the corresponding stable version.
+fn appstream_release_version(version: &str) -> String {
+    version.replace("-beta.", "~beta.").replace("-alpha.", "~alpha.")
+}
+
 /// True for an http(s) URL pointing at a .torrent file (case-insensitive).
 fn is_remote_torrent_url(uri: &url::Url) -> bool {
     matches!(uri.scheme(), "http" | "https")
@@ -973,10 +979,15 @@ fn register_actions(
                         let about = if registered {
                             // Name/version/notes come from the metainfo
                             // catalog; icon and license can't, so literal.
-                            let about = adw::AboutDialog::from_appdata(
-                                METAINFO,
-                                Some(env!("GRAB_VERSION")),
-                            );
+                            // AppStream uses '~' for prereleases, while the compiled
+                            // application version uses Cargo's '-'. Pass the AppStream
+                            // spelling for release-note lookup to avoid a missing-release
+                            // critical, then restore the user-facing package version.
+                            let appstream_version =
+                                appstream_release_version(env!("GRAB_VERSION"));
+                            let about =
+                                adw::AboutDialog::from_appdata(METAINFO, Some(&appstream_version));
+                            about.set_version(env!("GRAB_VERSION"));
                             about.set_application_icon(APP_ID);
                             about.set_license_type(gtk4::License::Gpl30Only);
                             about
@@ -1550,6 +1561,19 @@ mod tests {
         )
     }
 
+    #[test]
+    fn appstream_release_version_uses_tilde_for_prereleases_only() {
+        assert_eq!(
+            appstream_release_version("6.3.0-beta.1"),
+            "6.3.0~beta.1"
+        );
+        assert_eq!(
+            appstream_release_version("6.3.0-alpha.2"),
+            "6.3.0~alpha.2"
+        );
+        assert_eq!(appstream_release_version("6.2.2"), "6.2.2");
+    }
+
     /// The About dialog (`from_appdata`) shows the newest metainfo release as
     /// the app version: a Cargo bump without a matching entry ships a stale one.
     #[test]
@@ -1560,8 +1584,11 @@ mod tests {
             .max_by_key(|v| version_key(v))
             .expect("at least one release")
             .clone();
-        // Normalize AppStream's '~' to Cargo's '-': 5.6.8~beta.1 == 5.6.8-beta.1.
-        assert_eq!(newest.replace('~', "-"), env!("CARGO_PKG_VERSION"));
+        // Use the same AppStream spelling as the About dialog's release-note lookup.
+        assert_eq!(
+            newest,
+            appstream_release_version(env!("CARGO_PKG_VERSION"))
+        );
     }
 
     /// The newest entry must also be first: `from_appdata` reads the leading

@@ -256,6 +256,13 @@ enum Routed {
     Failed,
 }
 
+/// Enqueue a URI that the handoff classifier has identified as a direct file
+/// or magnet. Separated from the GTK/toast routing so auto-add's queueing path
+/// can be exercised without networking or opening a confirmation dialog.
+fn enqueue_direct_handoff(manager: &Rc<DownloadManager>, uri: &url::Url) -> Result<(), String> {
+    manager.enqueue(uri.as_str(), None, None).map(|_| ())
+}
+
 async fn route_open_uri(
     manager: Rc<DownloadManager>,
     toasts: Rc<adw::ToastOverlay>,
@@ -303,8 +310,8 @@ async fn route_open_uri(
         add_card.open(Some(uri.as_str().to_string()));
         return Routed::OpenedCard;
     }
-    match manager.enqueue(uri.as_str(), None, None) {
-        Ok(_) => Routed::Queued,
+    match enqueue_direct_handoff(&manager, &uri) {
+        Ok(()) => Routed::Queued,
         Err(e) => {
             toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
             Routed::Failed
@@ -1054,13 +1061,119 @@ fn register_actions(
 #[cfg(test)]
 mod tests {
     use super::{
-        TorrentFetchError, check_remote_torrent_uri, dispatch_open_files_or_defer,
-        fetch_remote_torrent_bytes, grab_handoff_needs_confirm, handoff_should_confirm,
-        is_remote_torrent_url, normalize_grab_uri, take_pending_open_files,
+        Routed, TorrentFetchError, check_remote_torrent_uri, dispatch_open_files_or_defer,
+        enqueue_direct_handoff, fetch_remote_torrent_bytes, grab_handoff_needs_confirm,
+        handoff_should_confirm, is_remote_torrent_url, normalize_grab_uri, take_pending_open_files,
     };
     use gettextrs::gettext;
     use gtk4::gio;
     use gtk4::prelude::*;
+
+    fn auto_add_test_settings(enabled: bool, tag: &str) -> (crate::settings::AppSettings, std::path::PathBuf) {
+        let queue_file = std::env::temp_dir().join(format!(
+            "grab-auto-add-{}-{tag}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&queue_file);
+        // Cargo test runs this suite serially in CI; isolate the GSettings schema,
+        // memory backend, and persisted queue so no real network transfer starts.
+        unsafe {
+            std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+            std::env::set_var("GSETTINGS_BACKEND", "memory");
+            std::env::set_var("GRAB_QUEUE_FILE", &queue_file);
+        }
+        let settings = crate::settings::AppSettings::new();
+        settings
+            .set_boolean(crate::settings::key::AUTO_ADD_DOWNLOADS, enabled)
+            .expect("set auto-add preference");
+        (settings, queue_file)
+    }
+
+    #[test]
+    fn auto_add_public_direct_handoff_reaches_queue_and_reports_queued() {
+        let (settings, queue_file) = auto_add_test_settings(true, "enabled");
+        let manager = DownloadManager::new(
+            gio::ListStore::new::<crate::download::DownloadItem>(),
+            settings.clone(),
+        );
+        let uri = "https://example.com/file.zip".parse::<url::Url>().unwrap();
+
+        {
+            // Keep the row queued during the assertion; reserve async shutdown
+            // before closing the batch, so the test can prove queueing without
+            // starting a real network transfer.
+            let batch = manager.batch_guard();
+            assert!(
+                !handoff_should_confirm(true, &uri, settings.auto_add_downloads()),
+                "a public direct-file handoff skips confirmation when auto-add is enabled"
+            );
+            enqueue_direct_handoff(&manager, &uri).expect("direct handoff should enqueue");
+            assert_eq!(manager.store().n_items(), 1);
+            let item = manager
+                .store()
+                .item(0)
+                .and_downcast::<crate::download::DownloadItem>()
+                .expect("the handoff created a download row");
+            assert_eq!(item.url(), uri.as_str());
+            assert_eq!(item.status(), crate::download::DownloadStatus::Queued);
+            assert!(manager.begin_async_shutdown());
+            drop(batch);
+        }
+
+        let queued_outcome = crate::extension_server::HandoffOutcome::from(Routed::Queued);
+        assert_eq!(
+            crate::extension_server::handoff_outcome_response(&queued_outcome),
+            (axum::http::StatusCode::OK, false),
+            "the browser extension should be told the URL was accepted"
+        );
+        drop(manager);
+        let _ = std::fs::remove_file(queue_file);
+    }
+
+    #[test]
+    fn auto_add_disabled_keeps_direct_handoff_behind_confirmation() {
+        let (settings, queue_file) = auto_add_test_settings(false, "disabled");
+        let manager = DownloadManager::new(
+            gio::ListStore::new::<crate::download::DownloadItem>(),
+            settings.clone(),
+        );
+        let uri = "https://example.com/file.zip".parse::<url::Url>().unwrap();
+
+        assert!(
+            handoff_should_confirm(true, &uri, settings.auto_add_downloads()),
+            "without auto-add, the direct-file handoff must take the confirmation path"
+        );
+        assert_eq!(
+            manager.store().n_items(),
+            0,
+            "a direct URL must not be queued before the user confirms"
+        );
+        drop(manager);
+        let _ = std::fs::remove_file(queue_file);
+    }
+
+    #[test]
+    fn auto_add_still_requires_confirmation_for_private_direct_handoffs() {
+        let (settings, queue_file) = auto_add_test_settings(true, "private");
+        let manager = DownloadManager::new(
+            gio::ListStore::new::<crate::download::DownloadItem>(),
+            settings.clone(),
+        );
+        let uri = "http://192.168.1.1/file.zip".parse::<url::Url>().unwrap();
+
+        assert!(settings.auto_add_downloads());
+        assert!(
+            handoff_should_confirm(true, &uri, settings.auto_add_downloads()),
+            "auto-add must not bypass confirmation for a private-network target"
+        );
+        assert_eq!(
+            manager.store().n_items(),
+            0,
+            "the private URL must not be queued by the automatic route"
+        );
+        drop(manager);
+        let _ = std::fs::remove_file(queue_file);
+    }
 
     #[test]
     fn open_requests_before_state_installation_are_retained_and_drained() {

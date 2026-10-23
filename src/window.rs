@@ -184,6 +184,12 @@ fn request_background() {
     });
 }
 
+/// Hide on ordinary close while downloads transfer, but let an explicit
+/// asynchronous shutdown finish closing the window.
+pub(crate) fn should_hide_to_background(has_transferring: bool, shutting_down: bool) -> bool {
+    has_transferring && !shutting_down
+}
+
 pub fn build_window(
     app: &adw::Application,
     manager: Rc<DownloadManager>,
@@ -574,12 +580,6 @@ pub fn build_window(
             sync();
         });
     }
-
-    /// Hide on ordinary close while downloads transfer, but let an explicit
-/// asynchronous shutdown finish closing the window.
-pub(crate) fn should_hide_to_background(has_transferring: bool, shutting_down: bool) -> bool {
-    has_transferring && !shutting_down
-}
 
 // hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
     let ever_shown = Rc::new(Cell::new(false));

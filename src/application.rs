@@ -1065,6 +1065,7 @@ mod tests {
         enqueue_direct_handoff, fetch_remote_torrent_bytes, grab_handoff_needs_confirm,
         handoff_should_confirm, is_remote_torrent_url, normalize_grab_uri, take_pending_open_files,
     };
+    use crate::download::DownloadManager;
     use gettextrs::gettext;
     use gtk4::gio;
     use gtk4::prelude::*;

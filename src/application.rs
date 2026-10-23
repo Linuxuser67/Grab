@@ -652,7 +652,10 @@ pub fn setup(app: &adw::Application) {
                     if !begin_shutdown_once(&manager, shutdown_requested.as_ref()) {
                         return glib::Propagation::Stop;
                     }
+                    // Hide immediately so orderly background cleanup does not
+                    // leave a disabled window on screen while shutdown drains.
                     window.set_sensitive(false);
+                    window.set_visible(false);
                     let window = window.clone();
                     let closing_done = closing.clone();
                     let ready = close_ready.clone();
@@ -1053,7 +1056,10 @@ fn register_actions(
                         }
                         let app = app.clone();
                         glib::MainContext::default().spawn_local(async move {
+                            // Explicit Quit must feel immediate even though we
+                            // keep the process alive to flush the queue safely.
                             s.window.set_sensitive(false);
+                            s.window.set_visible(false);
                             s.manager.finish_async_shutdown().await;
                             app.quit();
                         });

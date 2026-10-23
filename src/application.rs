@@ -1006,9 +1006,7 @@ fn register_actions(
                         // Claim shutdown synchronously, before yielding to the
                         // GLib context, so a concurrent close cannot start a
                         // second task that quits before persistence finishes.
-                        if shutdown_requested.replace(true)
-                            || !s.manager.begin_async_shutdown()
-                        {
+                        if shutdown_requested.replace(true) || !s.manager.begin_async_shutdown() {
                             return;
                         }
                         let app = app.clone();

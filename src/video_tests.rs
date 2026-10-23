@@ -1925,16 +1925,16 @@ fn hls_format_spec_names_height_and_pin() {
 }
 
 #[test]
-fn live_hls_format_spec_scopes_protocol() {
-    // The input-side segment retry is HLS-demuxer-only; keep every selected
-    // input on m3u8_native so ffmpeg never sees it on a non-HLS input.
+fn live_hls_format_spec_accepts_native_and_generic_https_manifests() {
+    // Native HLS is preferred. Generic HTTPS fallback matches only a manifest
+    // URL whose path ends in .m3u8, before any query string or fragment.
     assert_eq!(
         live_hls_format_spec("720p", None),
-        "bv*[height<=720][protocol=m3u8_native]+ba[protocol=m3u8_native]/b[protocol=m3u8_native]"
+        "(bv*[height<=720][protocol=m3u8_native]+ba[protocol=m3u8_native]/b[protocol=m3u8_native])/(bv*[height<=720][url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)']+ba[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)']/b[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)'])"
     );
     assert_eq!(
         live_hls_format_spec("best", None),
-        "bv*[protocol=m3u8_native]+ba[protocol=m3u8_native]/b[protocol=m3u8_native]"
+        "(bv*[protocol=m3u8_native]+ba[protocol=m3u8_native]/b[protocol=m3u8_native])/(bv*[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)']+ba[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)']/b[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)'])"
     );
 }
 
@@ -3776,13 +3776,13 @@ fn live_argv_pins_planner_id_in_mpegts() {
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
     assert_eq!(argv[f + 1], live_hls_format_spec("720p", None));
     assert!(argv.contains(&"--hls-use-mpegts".to_string()));
-    // ffmpeg is the pinned live-HLS downloader; fragment-retries does not
-    // apply to it, so the flag must be gone.
-    let d = argv
-        .iter()
-        .position(|a| a == "--downloader")
-        .expect("has --downloader");
-    assert_eq!(argv[d + 1], "m3u8:ffmpeg");
+    // FFmpeg handles both native HLS and generic HTTPS manifest formats.
+    let downloaders: Vec<&str> = argv
+        .windows(2)
+        .filter(|w| w[0] == "--downloader")
+        .map(|w| w[1].as_str())
+        .collect();
+    assert_eq!(downloaders, vec!["m3u8:ffmpeg", "http:ffmpeg"]);
     assert!(!argv.iter().any(|a| a == "--fragment-retries"));
     // Record-now means the live edge: no live-from-start, no unbounded wait loop.
     assert!(!argv.iter().any(|a| a == "--live-from-start"));

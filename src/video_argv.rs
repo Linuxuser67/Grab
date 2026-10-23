@@ -287,15 +287,21 @@ pub(crate) fn hls_format_spec(quality: &str, _pinned: Option<&str>) -> String {
     }
 }
 
-/// Live `-f` spec, pinned to HLS. The input-side `-seg_max_retry` option is
-/// HLS-demuxer-only; a non-HLS input (DASH/direct media) would reject it as unknown.
+/// Live `-f` spec, restricted to HLS manifests because the input-side
+/// `-seg_max_retry` option is only valid for FFmpeg's HLS demuxer.
 pub(crate) fn live_hls_format_spec(quality: &str, _pinned: Option<&str>) -> String {
-    // Live capture passes HLS-demuxer-only options to FFmpeg, so keep the
-    // selected input on yt-dlp's native HLS protocol.
-    const HLS: &str = "[protocol=m3u8_native]";
+    const NATIVE_HLS: &str = "[protocol=m3u8_native]";
+    // Some extractors label an HTTPS .m3u8 manifest as a generic HTTPS format.
+    // Anchor the regex before the query/fragment so a .m3u8 in a query cannot
+    // accidentally classify a direct-media URL as a manifest.
+    const MANIFEST_URL: &str = "[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)']";
     match quality_height(quality) {
-        Some(h) => format!("bv*[height<={h}]{HLS}+ba{HLS}/b{HLS}"),
-        None => format!("bv*{HLS}+ba{HLS}/b{HLS}"),
+        Some(h) => format!(
+            "(bv*[height<={h}]{NATIVE_HLS}+ba{NATIVE_HLS}/b{NATIVE_HLS})/(bv*[height<={h}]{MANIFEST_URL}+ba{MANIFEST_URL}/b{MANIFEST_URL})"
+        ),
+        None => format!(
+            "(bv*{NATIVE_HLS}+ba{NATIVE_HLS}/b{NATIVE_HLS})/(bv*{MANIFEST_URL}+ba{MANIFEST_URL}/b{MANIFEST_URL})"
+        ),
     }
 }
 
@@ -317,12 +323,14 @@ pub(crate) fn live_capture_argv(
         YTDLP_PROGRESS_TEMPLATE.to_string(),
         "-f".to_string(),
         live_hls_format_spec(&job.quality, Some(hls_format_id)),
-        // Live m3u8 goes to ffmpeg (the native fragment downloader cannot
-        // do live HLS). The selector above is pinned to HLS so the
-        // input-side -seg_max_retry stays on an HLS demuxer.
-        // --fragment-retries does not apply to ffmpeg, so it is not passed.
+        // Route native HLS formats through FFmpeg, and also cover generic
+        // HTTPS formats only when the selector identifies an .m3u8 manifest.
+        // This keeps the HLS-only input options off ordinary direct-media URLs.
+        // --fragment-retries does not apply to FFmpeg, so it is not passed.
         "--downloader".to_string(),
         "m3u8:ffmpeg".to_string(),
+        "--downloader".to_string(),
+        "http:ffmpeg".to_string(),
         "--hls-use-mpegts".to_string(),
         "-o".to_string(),
         ytdlp_output_template(out),
@@ -595,11 +603,15 @@ mod hls_protocol_family_tests {
     use super::{hls_format_spec, live_hls_format_spec};
 
     #[test]
-    fn vod_selector_keeps_quality_fallback_and_live_selector_is_native_hls() {
+    fn vod_selector_stays_unchanged_and_live_selector_accepts_both_hls_labels() {
         assert_eq!(hls_format_spec("best", None), "bv*+ba/b");
         assert_eq!(
             live_hls_format_spec("best", None),
-            "bv*[protocol=m3u8_native]+ba[protocol=m3u8_native]/b[protocol=m3u8_native]"
+            "(bv*[protocol=m3u8_native]+ba[protocol=m3u8_native]/b[protocol=m3u8_native])/(bv*[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)']+ba[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)']/b[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)'])"
+        );
+        assert_eq!(
+            live_hls_format_spec("720p", None),
+            "(bv*[height<=720][protocol=m3u8_native]+ba[protocol=m3u8_native]/b[protocol=m3u8_native])/(bv*[height<=720][url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)']+ba[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)']/b[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)'])"
         );
     }
 }

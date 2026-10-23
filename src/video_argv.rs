@@ -370,6 +370,7 @@ pub(crate) fn live_remux_argv(
     dest: &Path,
     audio_only: bool,
     with_bsf: bool,
+    repair_timestamps: bool,
     page_url: &str,
 ) -> Vec<String> {
     let mut argv = vec![
@@ -377,13 +378,28 @@ pub(crate) fn live_remux_argv(
         "-loglevel".to_string(),
         "warning".to_string(),
         "-nostats".to_string(),
+    ];
+    // A stopped HLS capture may contain a discontinuous timestamp after a
+    // broadcaster changes its timeline. The repair pass asks FFmpeg to rebuild
+    // PTS and ignore inconsistent DTS; keep these input-scoped, before -i.
+    if repair_timestamps {
+        argv.extend(["-fflags".to_string(), "+genpts+igndts".to_string()]);
+    }
+    argv.extend([
         "-i".to_string(),
         ts_path.to_string_lossy().into_owned(),
-    ];
+    ]);
     if audio_only {
         argv.extend(["-map".to_string(), "0:a?".to_string()]);
     } else {
-        argv.extend(["-map".to_string(), "0".to_string()]);
+        // A live HLS capture may expose subtitle/data tracks that MP4 cannot
+        // mux. Only carry its actual media streams into the finished file.
+        argv.extend([
+            "-map".to_string(),
+            "0:v?".to_string(),
+            "-map".to_string(),
+            "0:a?".to_string(),
+        ]);
     }
     argv.extend([
         "-dn".to_string(),
@@ -394,6 +410,10 @@ pub(crate) fn live_remux_argv(
     // TS AAC needs the ADTS-to-ASC fixup (mirrors yt-dlp's own FixupM3u8); anything else remuxes on retry.
     if with_bsf {
         argv.extend(["-bsf:a".to_string(), "aac_adtstoasc".to_string()]);
+    }
+    if repair_timestamps {
+        // Rebase negative or discontinuous input timestamps for the MP4 muxer.
+        argv.extend(["-avoid_negative_ts".to_string(), "make_zero".to_string()]);
     }
     let page_url = page_url.trim();
     if !page_url.is_empty() {
@@ -596,6 +616,53 @@ pub(crate) fn dash_merge_argv(
         dest.to_string_lossy().into_owned(),
     ]);
     argv
+}
+
+#[cfg(test)]
+mod live_remux_argv_tests {
+    use super::live_remux_argv;
+    use std::path::Path;
+
+    #[test]
+    fn live_video_remux_maps_only_video_and_audio_streams() {
+        let args = live_remux_argv(
+            Path::new("capture.mp4"),
+            Path::new("finished.mp4.part"),
+            false,
+            true,
+            false,
+            "https://example.com/live",
+        );
+        let maps: Vec<&str> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-map")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(maps, ["0:v?", "0:a?"]);
+    }
+
+    #[test]
+    fn timestamp_repair_flags_are_scoped_around_input_and_output() {
+        let args = live_remux_argv(
+            Path::new("capture.mp4"),
+            Path::new("finished.mp4.part"),
+            false,
+            true,
+            true,
+            "https://example.com/live",
+        );
+        let fflags = args.iter().position(|arg| arg == "-fflags").unwrap();
+        let input = args.iter().position(|arg| arg == "-i").unwrap();
+        let avoid_negative_ts = args
+            .iter()
+            .position(|arg| arg == "-avoid_negative_ts")
+            .unwrap();
+
+        assert!(fflags < input, "input timestamp flags must precede -i");
+        assert_eq!(args[fflags + 1], "+genpts+igndts");
+        assert!(avoid_negative_ts > input, "timestamp rebasing is an output option");
+        assert_eq!(args[avoid_negative_ts + 1], "make_zero");
+    }
 }
 
 #[cfg(test)]

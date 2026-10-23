@@ -6,6 +6,7 @@ use gettextrs::gettext;
 use gtk4::gio;
 use gtk4::gio::prelude::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Default)]
@@ -705,6 +706,53 @@ pub(crate) fn validate_secure_dir(dir: &std::path::Path) -> bool {
 #[cfg(not(unix))]
 pub(crate) fn validate_secure_dir(_dir: &std::path::Path) -> bool {
     true
+}
+
+/// Private 0700 staging dir for cookie files: `$XDG_RUNTIME_DIR/grab-cookies`,
+/// or `$XDG_CACHE_HOME`/`~/.cache` when unavailable. Shared by the handoff
+/// receiver and cookie exports; tightens an existing merely-readable dir so a
+/// 0755 leftover cannot expose staged file names.
+pub(crate) fn cookie_staging_dir() -> Option<PathBuf> {
+    let base = match std::env::var("XDG_RUNTIME_DIR") {
+        Ok(s) if !s.is_empty() => PathBuf::from(s),
+        _ => match std::env::var("XDG_CACHE_HOME") {
+            Ok(s) if !s.is_empty() => PathBuf::from(s),
+            _ => PathBuf::from(std::env::var_os("HOME")?).join(".cache"),
+        },
+    };
+    let dir = base.join("grab-cookies");
+    // Ensure the parent exists (e.g., ~/.cache may not exist yet).
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Create 0700 atomically: DirBuilder::mode sets permissions at creation,
+    // avoiding a chmod race window.
+    use std::os::unix::fs::DirBuilderExt as _;
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            tracing::debug!(error = %e, "cookie staging dir create failed");
+            return None;
+        }
+    }
+    if !validate_secure_dir(&dir) {
+        return None;
+    }
+    // Group/world-writable dirs were refused above; this tightens a dir that is
+    // merely readable by others (e.g. 0755) down to 0700.
+    use std::os::unix::fs::PermissionsExt as _;
+    if let Ok(md) = std::fs::metadata(&dir) {
+        let mut perms = md.permissions();
+        if perms.mode() & 0o077 != 0 {
+            perms.set_mode(0o700);
+            if let Err(e) = std::fs::set_permissions(&dir, perms) {
+                tracing::debug!(error = %e, "cookie staging dir chmod failed");
+                return None;
+            }
+        }
+    }
+    Some(dir)
 }
 
 /// Client builder for tool installs (ffmpeg, quickjs, yt-dlp): honors env

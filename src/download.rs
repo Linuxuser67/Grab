@@ -3330,7 +3330,9 @@ impl DownloadManager {
             version: QUEUE_VERSION,
             items,
         };
-        let text = match serde_json::to_string_pretty(&data) {
+        // Compact output cuts queue size ~3x but does not enforce the 10 MB
+        // restore cap; a very large paused set can still be quarantined.
+        let text = match serde_json::to_string(&data) {
             Ok(text) => text,
             Err(e) => {
                 tracing::error!("could not serialize download queue: {e}");

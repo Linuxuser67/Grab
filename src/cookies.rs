@@ -105,62 +105,6 @@ pub(crate) fn jar_from_export(text: &str) -> (Arc<reqwest::cookie::Jar>, usize) 
     (jar, count)
 }
 
-/// Secure directory for cookie dumps: `$XDG_RUNTIME_DIR/grab-cookies` (0700,
-/// owned by us) instead of the shared `/tmp/grab-video`. Falls back to
-/// `$XDG_CACHE_HOME/grab-cookies` (or `~/.cache/grab-cookies` if
-/// `XDG_CACHE_HOME` is unset or empty) when `XDG_RUNTIME_DIR` is unavailable:
-/// the home dir is not world-writable, so the `/tmp` pre-created-parent
-/// TOCTOU does not apply. Verifies uid ownership so a pre-created directory
-/// by another user is rejected.
-pub(crate) fn cookie_staging_dir() -> Option<PathBuf> {
-    let base = match std::env::var("XDG_RUNTIME_DIR") {
-        Ok(s) if !s.is_empty() => PathBuf::from(s),
-        _ => {
-            // Fallback: XDG_CACHE_HOME or ~/.cache (user-owned, not world-writable).
-            match std::env::var("XDG_CACHE_HOME") {
-                Ok(s) if !s.is_empty() => PathBuf::from(s),
-                _ => {
-                    let home = std::env::var("HOME").ok()?;
-                    PathBuf::from(home).join(".cache")
-                }
-            }
-        }
-    };
-    let dir = base.join("grab-cookies");
-    // Ensure the parent exists (e.g., ~/.cache may not exist yet).
-    if let Some(parent) = dir.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // Create 0700 atomically: DirBuilder::mode sets permissions at creation,
-    // avoiding a chmod race window.
-    use std::os::unix::fs::DirBuilderExt as _;
-    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => {
-            tracing::debug!(error = %e, "cookie staging dir create failed");
-            return None;
-        }
-    }
-    #[cfg(unix)]
-    {
-        if !crate::download_net::validate_secure_dir(&dir) {
-            return None;
-        }
-        // Group/world-writable dirs were refused above; this tightens a dir that is
-        // merely readable by others (e.g. 0755) down to 0700.
-        use std::os::unix::fs::PermissionsExt as _;
-        if let Ok(md) = std::fs::metadata(&dir) {
-            let mut perms = md.permissions();
-            if perms.mode() & 0o077 != 0 {
-                perms.set_mode(0o700);
-                let _ = std::fs::set_permissions(&dir, perms);
-            }
-        }
-    }
-    Some(dir)
-}
-
 /// Sweep stale cookie dumps left by crashes: runs at startup before any
 /// worker starts, so nothing live is removed.
 pub(crate) fn sweep_cookie_staging() {
@@ -186,8 +130,8 @@ pub(crate) fn sweep_cookie_staging() {
             true
         }
     };
-    // Clean the current dir (if XDG_RUNTIME_DIR is available).
-    if let Some(dir) = cookie_staging_dir()
+    // Clean the current dir (runtime dir, or cache fallback).
+    if let Some(dir) = crate::download_net::cookie_staging_dir()
         && let Ok(entries) = std::fs::read_dir(&dir)
     {
         for entry in entries.filter_map(|e| e.ok()) {
@@ -270,7 +214,7 @@ async fn stage_cookie_file(
 ) -> Option<PathBuf> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = cookie_staging_dir()?;
+    let dir = crate::download_net::cookie_staging_dir()?;
     // Unique per attempt, created atomically owner-only: a planted symlink fails instead of diverting the dump.
     let path: PathBuf = loop {
         let candidate: PathBuf = dir.join(format!(

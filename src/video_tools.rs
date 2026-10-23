@@ -649,6 +649,12 @@ async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Option<bool> {
     Some(help.contains("extension_picky"))
 }
 
+/// `--postprocessor-args` value moving the moov atom to the front of merged
+/// mp4s so playback starts without a full scan. Scoped `Merger+ffmpeg` (per
+/// yt-dlp's `PP+EXE:ARGS` syntax) so metadata/subtitle fixups are untouched.
+/// mov-only: only passed when the merge target is mp4-family.
+pub(crate) const MERGER_FASTSTART_ARGS: &str = "Merger+ffmpeg:-movflags +faststart";
+
 /// Install yt-dlp into the user library directory. The crate installer exposes
 /// no progress, so await this from a spawned task — never block the GTK thread.
 /// yt-dlp binary size cap: the linux standalone is ~30MB; anything larger is

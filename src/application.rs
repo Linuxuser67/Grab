@@ -628,9 +628,9 @@ pub fn setup(app: &adw::Application) {
                                         }
                                     }
                                     Err(e) => {
-                                        toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(
-                                            &e,
-                                        )));
+                                        toasts.add_toast(adw::Toast::new(
+                                            &crate::ui_util::esc_markup(&e),
+                                        ));
                                     }
                                 }
                             });

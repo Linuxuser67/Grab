@@ -7041,6 +7041,7 @@ fn live_capture_argv_pins_ffmpeg_location() {
         out,
         None,
         std::path::Path::new("/usr/bin/ffmpeg"),
+        false,
     );
     let flag = argv
         .iter()

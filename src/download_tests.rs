@@ -6725,7 +6725,7 @@ fn dropping_manager_removes_scheduler_source() {
 }
 
 #[test]
-fn scheduler_fires_a_due_row_and_removes_its_one_shot_timer() {
+fn scheduler_fires_and_rearms_for_the_next_scheduled_row() {
     let (_queue_lock, _main_loop_lock) = test_locks();
     let queue_file = test_queue_file("scheduler-fired");
     let settings = test_settings();
@@ -6733,26 +6733,42 @@ fn scheduler_fires_a_due_row_and_removes_its_one_shot_timer() {
         .set_boolean(crate::settings::key::ENABLE_SCHEDULED_DOWNLOADS, true)
         .unwrap();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    let due = glib::DateTime::now_local()
-        .unwrap()
-        .add_seconds(1.0)
-        .unwrap()
-        .to_unix();
-    let item = schedule_test_item(&manager, due);
+    let now = glib::DateTime::now_local().unwrap().to_unix();
+    let first_due = now + 1;
+    let second_due = now + 4;
+    let first = schedule_test_item(&manager, first_due);
+    let second = schedule_test_item(&manager, second_due);
     manager.start_scheduler();
     assert!(manager.scheduler_source.borrow().is_some());
 
     let ctx = glib::MainContext::default();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
-    while item.status() == DownloadStatus::Scheduled && std::time::Instant::now() < deadline {
+    let first_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while first.status() == DownloadStatus::Scheduled
+        && std::time::Instant::now() < first_deadline
+    {
         ctx.iteration(false);
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    assert_eq!(item.status(), DownloadStatus::Queued);
-    assert_eq!(item.scheduled_at(), 0);
+    assert_eq!(first.status(), DownloadStatus::Queued);
+    assert_eq!(first.scheduled_at(), 0);
+    assert_eq!(second.status(), DownloadStatus::Scheduled);
+    assert!(
+        manager.scheduler_source.borrow().is_some(),
+        "the one-shot wake must be re-armed for the next scheduled row"
+    );
+
+    let second_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while second.status() == DownloadStatus::Scheduled
+        && std::time::Instant::now() < second_deadline
+    {
+        ctx.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(second.status(), DownloadStatus::Queued);
+    assert_eq!(second.scheduled_at(), 0);
     assert!(
         manager.scheduler_source.borrow().is_none(),
-        "no one-shot timer remains when the queue has no scheduled rows"
+        "the timer should be removed when no scheduled rows remain"
     );
     manager.stop_scheduler();
     let _ = std::fs::remove_file(queue_file);

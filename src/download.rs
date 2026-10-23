@@ -225,6 +225,8 @@ pub struct DownloadManager {
     /// Guards normal async shutdown and the synchronous fallback.
     shutdown_started: Cell<bool>,
     shutdown_finished: Cell<bool>,
+    /// Prevent new queued rows from starting until saved active rows are restored.
+    restore_pending: Cell<bool>,
     /// Queue persist channel: `watch` keeps only the latest value, so rapid
     /// state changes coalesce to a single write. The tokio task (below) is the
     /// sole writer, which makes writes ordered by construction.
@@ -438,6 +440,7 @@ impl DownloadManager {
             scheduler_refresh: RefCell::new(None),
             shutdown_started: Cell::new(false),
             shutdown_finished: Cell::new(false),
+            restore_pending: Cell::new(false),
             persist_tx: RefCell::new(persist_tx),
             persist_task: RefCell::new(persist_task),
         });
@@ -1246,6 +1249,12 @@ impl DownloadManager {
     }
 
     fn start_next(self: &Rc<Self>) {
+        // Startup restore runs asynchronously in production. Don't start a newly
+        // queued URL before persisted active rows have been inserted, or we can
+        // briefly exceed the configured concurrency limit.
+        if self.restore_pending.get() {
+            return;
+        }
         // Prune finished discard finalizers so the registry doesn't grow per removed row.
         self.discards
             .borrow_mut()
@@ -3158,10 +3167,6 @@ impl DownloadManager {
     }
 
     /// Remove stale `queue.json.tmp.*` files left by crashed writes.
-    fn sweep_stale_tmp() {
-        Self::sweep_stale_tmp_at(&Self::queue_file());
-    }
-
     fn sweep_stale_tmp_at(qf: &std::path::Path) {
         let Some(dir) = qf.parent() else { return };
         let Some(name) = qf.file_name().and_then(|n| n.to_str()) else {
@@ -3186,10 +3191,6 @@ impl DownloadManager {
     /// Move a broken queue file aside so the next persist starts fresh.
     /// Uses the first free `queue.json.bak`, `queue.json.bak.1`, ... slot —
     /// never clobbers a previous backup, never deletes.
-    fn quarantine_queue() {
-        Self::quarantine_queue_at(&Self::queue_file());
-    }
-
     fn quarantine_queue_at(queue_file: &std::path::Path) {
         let base = queue_file.with_extension("json.bak");
         let mut target = base.clone();
@@ -3513,10 +3514,13 @@ impl DownloadManager {
     /// Only the later ListStore/model insertion is applied on the main context.
     pub fn restore_queue(self: &Rc<Self>) {
         let queue_file = Self::queue_file();
+        self.restore_pending.set(true);
         #[cfg(test)]
         {
             // Unit tests rely on restore being observable synchronously.
-            if let Some(pending) = Self::load_restore_queue(queue_file) {
+            let pending = Self::load_restore_queue(queue_file);
+            self.restore_pending.set(false);
+            if let Some(pending) = pending {
                 self.apply_restored_queue(pending);
             }
         }
@@ -3527,16 +3531,20 @@ impl DownloadManager {
                 let loaded = tokio_rt()
                     .spawn_blocking(move || Self::load_restore_queue(queue_file))
                     .await;
+                let Some(manager) = weak.upgrade() else {
+                    return;
+                };
+                manager.restore_pending.set(false);
+                if manager.draining.get() {
+                    return;
+                }
                 match loaded {
-                    Ok(Some(pending)) => {
-                        if let Some(manager) = weak.upgrade()
-                            && !manager.draining.get()
-                        {
-                            manager.apply_restored_queue(pending);
-                        }
+                    Ok(Some(pending)) => manager.apply_restored_queue(pending),
+                    Ok(None) => manager.start_next(),
+                    Err(e) => {
+                        tracing::error!("download queue restore worker failed: {e}");
+                        manager.start_next();
                     }
-                    Ok(None) => {}
-                    Err(e) => tracing::error!("download queue restore worker failed: {e}"),
                 }
             });
         }
@@ -3695,7 +3703,7 @@ impl DownloadManager {
                 crate::torrent::sweep_session_orphans(&keep).await;
             });
         }
-}
+    }
 
     /// Arm a one-shot wake for the earliest scheduled row. A one-minute
     /// fallback handles wall-clock changes; ordinary due items wake at their

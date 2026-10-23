@@ -10394,8 +10394,8 @@ fn impersonate_test_dir(name: &str) -> std::path::PathBuf {
     dir
 }
 
-#[test]
-fn impersonation_probe_true_when_chrome_available() {
+#[tokio::test]
+async fn impersonation_probe_true_when_chrome_available() {
     let dir = impersonate_test_dir("avail");
     let bin = fake_ytdlp_impersonate(
         &dir,
@@ -10403,12 +10403,12 @@ fn impersonation_probe_true_when_chrome_available() {
             "[info] Available impersonate targets\nClient      OS       Source\nChrome-131  macOS-14   curl_cffi\n",
         ),
     );
-    assert!(ytdlp_supports_impersonation(&bin));
+    assert!(ytdlp_supports_impersonation(&bin).await);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn impersonation_probe_false_when_all_unavailable() {
+#[tokio::test]
+async fn impersonation_probe_false_when_all_unavailable() {
     let dir = impersonate_test_dir("unavail");
     let bin = fake_ytdlp_impersonate(
         &dir,
@@ -10416,15 +10416,15 @@ fn impersonation_probe_false_when_all_unavailable() {
             "[info] Available impersonate targets\nClient  OS  Source\nChrome  -   curl_cffi (unavailable)\n",
         ),
     );
-    assert!(!ytdlp_supports_impersonation(&bin));
+    assert!(!ytdlp_supports_impersonation(&bin).await);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn impersonation_probe_false_on_probe_failure() {
+#[tokio::test]
+async fn impersonation_probe_false_on_probe_failure() {
     let dir = impersonate_test_dir("fail");
     let bin = fake_ytdlp_impersonate(&dir, None);
-    assert!(!ytdlp_supports_impersonation(&bin));
+    assert!(!ytdlp_supports_impersonation(&bin).await);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -10488,8 +10488,8 @@ fn impersonate_helpers_fall_back_to_none() {
     assert_eq!(crate::video_prefs::impersonate_value(3), "safari");
 }
 
-#[test]
-fn ytdlp_command_omits_impersonate_by_default() {
+#[tokio::test]
+async fn ytdlp_command_omits_impersonate_by_default() {
     schema_env_once();
     let dir = impersonate_test_dir("cmd-default");
     let bin = fake_ytdlp_impersonate(
@@ -10498,7 +10498,8 @@ fn ytdlp_command_omits_impersonate_by_default() {
     );
     // The default target is None: even a fully supported binary must not
     // receive --impersonate unless the user picked a browser.
-    let args: Vec<String> = ytdlp_command(&bin)
+    let command = ytdlp_command(&bin).await;
+    let args: Vec<String> = command
         .as_std()
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
@@ -10507,8 +10508,8 @@ fn ytdlp_command_omits_impersonate_by_default() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn ytdlp_command_uses_the_selected_impersonate_target() {
+#[tokio::test]
+async fn ytdlp_command_uses_the_selected_impersonate_target() {
     schema_env_once();
     let dir = impersonate_test_dir("cmd-selected");
     let bin = fake_ytdlp_impersonate(
@@ -10519,7 +10520,8 @@ fn ytdlp_command_uses_the_selected_impersonate_target() {
     settings
         .set_string(crate::settings::key::IMPERSONATE_BROWSER, "edge")
         .unwrap();
-    let args: Vec<String> = ytdlp_command(&bin)
+    let command = ytdlp_command(&bin).await;
+    let args: Vec<String> = command
         .as_std()
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
@@ -10533,8 +10535,8 @@ fn ytdlp_command_uses_the_selected_impersonate_target() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn ytdlp_command_skips_impersonate_when_unsupported() {
+#[tokio::test]
+async fn ytdlp_command_skips_impersonate_when_unsupported() {
     schema_env_once();
     let dir = impersonate_test_dir("cmd-off");
     let bin = fake_ytdlp_impersonate(&dir, None);
@@ -10544,7 +10546,8 @@ fn ytdlp_command_skips_impersonate_when_unsupported() {
     settings
         .set_string(crate::settings::key::IMPERSONATE_BROWSER, "edge")
         .unwrap();
-    let args: Vec<String> = ytdlp_command(&bin)
+    let command = ytdlp_command(&bin).await;
+    let args: Vec<String> = command
         .as_std()
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
@@ -10558,19 +10561,19 @@ fn ytdlp_command_skips_impersonate_when_unsupported() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn ytdlp_support_probe_reprobes_after_an_in_place_binary_update() {
+#[tokio::test]
+async fn ytdlp_support_probe_reprobes_after_an_in_place_binary_update() {
     schema_env_once();
     let dir = impersonate_test_dir("probe-stamp");
     let bin = fake_ytdlp_impersonate(
         &dir,
         Some("[info] Available impersonate targets\nClient  OS  Source\nChrome  -  curl_cffi\n"),
     );
-    assert!(ytdlp_supports_impersonation(&bin));
+    assert!(ytdlp_supports_impersonation(&bin).await);
     // Overwrite the same path with a build that lacks curl_cffi: the
     // (mtime, len) stamp flips, so the cached answer must not survive.
     std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
-    assert!(!ytdlp_supports_impersonation(&bin));
+    assert!(!ytdlp_supports_impersonation(&bin).await);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

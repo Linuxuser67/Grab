@@ -7050,6 +7050,21 @@ fn live_capture_argv_pins_ffmpeg_location() {
     let term = argv.iter().position(|a| a == "--").expect("--");
     assert!(flag < term);
     assert!(!argv[flag + 1].is_empty());
+
+    let enabled = live_capture_argv_with_ffmpeg(
+        &job,
+        "h720",
+        out,
+        None,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        true,
+    );
+    assert!(
+        enabled.iter().any(|arg| {
+            arg.starts_with("ffmpeg_i:") && arg.contains("-extension_picky 0")
+        }),
+        "supported FFmpeg must receive the relaxed HLS extension check"
+    );
 }
 
 #[test]

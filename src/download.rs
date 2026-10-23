@@ -3536,6 +3536,7 @@ impl DownloadManager {
     /// Only the later ListStore/model insertion is applied on the main context.
     pub fn restore_queue(self: &Rc<Self>) {
         let queue_file = Self::queue_file();
+        self.restore_ready.send_replace(false);
         self.restore_pending.set(true);
         #[cfg(test)]
         {

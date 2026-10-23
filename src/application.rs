@@ -569,79 +569,79 @@ pub fn setup(app: &adw::Application) {
                 s.manager.wait_for_restore().await;
                 for f in files {
                     // grab: links arrive here from the browser extension; restore
-                // the original URL so the normal routing below applies.
-                let via_grab = f
-                    .uri()
-                    .parse::<url::Url>()
-                    .is_ok_and(|u| u.scheme() == "grab");
-                let uri_text = normalize_grab_uri(&f.uri());
-                // magnet: links arrive here when Grab is the system's magnet
-                // handler; enqueue validates them like pasted links.
-                if let Ok(uri) = uri_text.parse::<url::Url>()
-                    && matches!(uri.scheme(), "http" | "https" | "magnet")
-                {
-                    dispatch_handoff(&s, uri, via_grab, None);
-                    continue;
-                }
-                if let Some(path) = f.path() {
-                    // .torrent files go to the torrent intake.
-                    if path
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
+                    // the original URL so the normal routing below applies.
+                    let via_grab = f
+                        .uri()
+                        .parse::<url::Url>()
+                        .is_ok_and(|u| u.scheme() == "grab");
+                    let uri_text = normalize_grab_uri(&f.uri());
+                    // magnet: links arrive here when Grab is the system's magnet
+                    // handler; enqueue validates them like pasted links.
+                    if let Ok(uri) = uri_text.parse::<url::Url>()
+                        && matches!(uri.scheme(), "http" | "https" | "magnet")
                     {
-                        let (manager, toasts, add_card) =
-                            (s.manager.clone(), s.toasts.clone(), s.add_card.clone());
-                        let stem = path
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "download".to_string());
-                        let file_name = path
-                            .file_name()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| format!("{stem}.torrent"));
-                        glib::spawn_future_local(async move {
-                            let bytes = gio::spawn_blocking(move || {
-                                crate::torrent::read_torrent_bytes(&path)
-                            })
-                            .await
-                            .ok()
-                            .flatten();
-                            let Some(bytes) = bytes else {
-                                toasts.add_toast(adw::Toast::new(&gettext(
-                                    "Could not read that .torrent file",
-                                )));
-                                return;
-                            };
-                            // Multi-file torrents offer per-file switches in the
-                            // inline picker's right-sliding page.
-                            match crate::torrent::torrent_file_list(&bytes) {
-                                Ok((_, entries)) if entries.len() > 1 => {
-                                    add_card.open_torrent_picker(file_name, bytes, entries);
-                                }
-                                Ok(_) => {
-                                    if let Err(e) =
-                                        manager.enqueue_torrent_file(bytes, &stem, None, None)
-                                    {
-                                        toasts.add_toast(adw::Toast::new(
-                                            &crate::ui_util::esc_markup(&e),
-                                        ));
-                                    }
-                                }
-                                Err(e) => {
-                                    toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(
-                                        &e,
-                                    )));
-                                }
-                            }
-                        });
+                        dispatch_handoff(&s, uri, via_grab, None);
                         continue;
                     }
-                    // Only .torrent files open as files now; anything else
-                    // explains itself instead of queuing garbage rows.
-                    s.toasts.add_toast(adw::Toast::new(&gettext(
-                        "Only .torrent files can be opened directly",
-                    )));
-                }
+                    if let Some(path) = f.path() {
+                        // .torrent files go to the torrent intake.
+                        if path
+                            .extension()
+                            .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
+                        {
+                            let (manager, toasts, add_card) =
+                                (s.manager.clone(), s.toasts.clone(), s.add_card.clone());
+                            let stem = path
+                                .file_stem()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "download".to_string());
+                            let file_name = path
+                                .file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| format!("{stem}.torrent"));
+                            glib::spawn_future_local(async move {
+                                let bytes = gio::spawn_blocking(move || {
+                                    crate::torrent::read_torrent_bytes(&path)
+                                })
+                                .await
+                                .ok()
+                                .flatten();
+                                let Some(bytes) = bytes else {
+                                    toasts.add_toast(adw::Toast::new(&gettext(
+                                        "Could not read that .torrent file",
+                                    )));
+                                    return;
+                                };
+                                // Multi-file torrents offer per-file switches in the
+                                // inline picker's right-sliding page.
+                                match crate::torrent::torrent_file_list(&bytes) {
+                                    Ok((_, entries)) if entries.len() > 1 => {
+                                        add_card.open_torrent_picker(file_name, bytes, entries);
+                                    }
+                                    Ok(_) => {
+                                        if let Err(e) =
+                                            manager.enqueue_torrent_file(bytes, &stem, None, None)
+                                        {
+                                            toasts.add_toast(adw::Toast::new(
+                                                &crate::ui_util::esc_markup(&e),
+                                            ));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(
+                                            &e,
+                                        )));
+                                    }
+                                }
+                            });
+                            continue;
+                        }
+                        // Only .torrent files open as files now; anything else
+                        // explains itself instead of queuing garbage rows.
+                        s.toasts.add_toast(adw::Toast::new(&gettext(
+                            "Only .torrent files can be opened directly",
+                        )));
+                    }
                 }
                 s.window.present();
             });

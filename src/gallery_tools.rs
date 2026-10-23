@@ -160,7 +160,7 @@ fn parse_sha256sums(body: &str, filename: &str) -> Option<String> {
         if name.strip_prefix('*').unwrap_or(name) != filename {
             continue;
         }
-        if !valid_sha256_digest(digest) || found.is_some() {
+        if fields.next().is_some() || !valid_sha256_digest(digest) || found.is_some() {
             return None;
         }
         found = Some(digest.to_ascii_lowercase());
@@ -350,6 +350,8 @@ mod tests {
             "b".repeat(64)
         );
         assert!(parse_sha256sums(&invalid, LINUX_ASSET).is_none());
+        let trailing_fields = format!("{digest}  gallery-dl.bin trailing-data\n");
+        assert!(parse_sha256sums(&trailing_fields, LINUX_ASSET).is_none());
         assert!(
             parse_sha256sums(
                 &format!("{}  gallery-dl.bin\n", "not-a-digest"),

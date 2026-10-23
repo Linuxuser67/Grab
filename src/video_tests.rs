@@ -10446,32 +10446,22 @@ fn fake_ytdlp_slow_impersonate(dir: &std::path::Path, delay_secs: u64) -> std::p
 
 #[tokio::test]
 async fn impersonation_probe_never_blocks_the_async_worker() {
-    // Regression: the probe used to park the calling async worker for up to
-    // ~15 s. Now the first call returns the safe default immediately and the
-    // probe fills the cache in the background.
+    // A slow child must suspend this future, not park the Tokio worker.
     let dir = impersonate_test_dir("nonblocking");
     let bin = fake_ytdlp_slow_impersonate(&dir, 3);
     let start = std::time::Instant::now();
-    assert!(
-        !ytdlp_supports_impersonation(&bin),
-        "unknown support must default to false, not block"
-    );
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(1),
-        "sync probe blocked the async worker: {:?}",
-        start.elapsed()
-    );
-    // The background fill eventually records the real answer.
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            if ytdlp_supports_impersonation(&bin) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (supported, heartbeat_elapsed) = tokio::join!(
+        ytdlp_supports_impersonation(&bin),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            start.elapsed()
         }
-    })
-    .await
-    .expect("background probe did not fill the cache");
+    );
+    assert!(supported, "the delayed probe should report Chrome support");
+    assert!(
+        heartbeat_elapsed < std::time::Duration::from_secs(1),
+        "the subprocess probe starved the async worker: {heartbeat_elapsed:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

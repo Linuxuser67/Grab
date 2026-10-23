@@ -1471,9 +1471,10 @@ pub(crate) fn live_capture_argv_with_ffmpeg(
     out: &Path,
     playlist_index: Option<usize>,
     ffmpeg_bin: &Path,
+    extension_picky_supported: bool,
 ) -> Vec<String> {
     let mut argv = live_capture_argv(job, hls_format_id, out, playlist_index);
-    if crate::video_tools::ffmpeg_supports_hls_extension_picky(ffmpeg_bin)
+    if extension_picky_supported
         && let Some(input_args) = argv.iter_mut().find(|arg| arg.starts_with("ffmpeg_i:"))
     {
         input_args.push_str(" -extension_picky 0");
@@ -1637,8 +1638,18 @@ pub(crate) async fn run_live_ytdlp(
         // after it — anything past `--` becomes a positional URL. Splice the
         // --load-info-json pair before the terminator, then insert the guarded
         // proxy before `--` when this row came from an unconfirmed handoff.
-        let mut argv =
-            live_capture_argv_with_ffmpeg(attempt, hls_format_id, &out, playlist_index, ffmpeg_bin);
+        // Probe the HLS option asynchronously. The result is stamped and cached,
+        // so retries avoid spawning another FFmpeg help process.
+        let extension_picky_supported =
+            crate::video_tools::ffmpeg_supports_hls_extension_picky(ffmpeg_bin).await;
+        let mut argv = live_capture_argv_with_ffmpeg(
+            attempt,
+            hls_format_id,
+            &out,
+            playlist_index,
+            ffmpeg_bin,
+            extension_picky_supported,
+        );
         splice_before_terminator(&mut argv, live_info_json_args(live_info_path.as_deref()));
         let guarded_proxy = crate::video_spawn::guard_untrusted_args(&mut argv)?;
         let mut cmd = ytdlp_command(youtube_bin);

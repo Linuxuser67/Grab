@@ -6,7 +6,7 @@ use crate::download_net::tool_client_builder_proxied;
 use gettextrs::gettext;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
 use yt_dlp::client::deps::Libraries;
 use yt_dlp::model::DrmStatus;
@@ -451,148 +451,106 @@ fn impersonate_stamp(youtube_bin: &Path) -> (Option<std::time::SystemTime>, u64)
 }
 
 /// Whether yt-dlp's `--impersonate` flag is known-supported for this binary.
-/// Sync, never blocks a worker: returns the cached probe result, or `false` (the
-/// safe default) while the probe is still running. The first call kicks the
-/// probe off on the blocking pool so a wedged binary (up to ~15 s) doesn't
-/// park the download; the next download gets the cached answer.
+/// This path is deliberately non-blocking, including when called from GTK.
+/// The first call returns the conservative default while an async probe warms
+/// the cache; later calls use the result. A binary stamp invalidates stale data.
 pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
     let cache = IMPERSONATE_SUPPORT.get_or_init(|| Mutex::new(HashMap::new()));
     let stamp = impersonate_stamp(youtube_bin);
-    // A poisoned cache must never panic the caller: skip the read and fall
-    // through to the safe default; the next call retries the lock.
     if let Ok(mut guard) = cache.lock() {
         if let Some(entry) = guard.get(youtube_bin) {
             if entry.stamp == stamp {
                 return entry.supported;
             }
-            // The binary changed in place (an update): drop the stale
-            // answer and let the claim below re-probe.
             guard.remove(youtube_bin);
         }
-        // Claim the key with the safe default so concurrent first calls don't
-        // spawn duplicate probes; the background fill overwrites it.
+        // Claim the key first, so concurrent first calls do not duplicate work.
         guard.insert(
             youtube_bin.to_path_buf(),
-            ImpersonateEntry {
-                stamp,
-                supported: false,
-            },
+            ImpersonateEntry { stamp, supported: false },
         );
     }
+
+    let binary = youtube_bin.to_path_buf();
     if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::spawn(warm_impersonation_cache(youtube_bin.to_path_buf()));
-        false
+        tokio::spawn(warm_impersonation_cache(binary));
     } else {
-        // Blocking 15s probe: must never run on the GTK thread. Debug-guard
-        // so a future caller moving this onto the UI thread fails loudly in
-        // development instead of hanging the UI in production.
-        debug_assert!(
-            !glib::MainContext::default().is_owner(),
-            "ytdlp impersonation probe must not block the GTK thread"
-        );
-        let supported = probe_impersonate_support(youtube_bin);
-        if let Ok(mut guard) = cache.lock() {
-            guard.insert(
-                youtube_bin.to_path_buf(),
-                ImpersonateEntry { stamp, supported },
-            );
-        }
-        supported
+        crate::runtime::tokio_rt().spawn(warm_impersonation_cache(binary));
     }
+    false
 }
 
-/// Probe once on the blocking pool and cache the result. Spawned in the
-/// background by `ytdlp_supports_impersonation`; on a join failure the
-/// fallback claims `(None, 0)` + unsupported, which cannot collide with a
-/// real binary's stamp — the next call sees a stamp mismatch and re-probes,
-/// so a panicking fill can never wedge a wrong-but-sticky answer.
-async fn warm_impersonation_cache(youtube_bin: std::path::PathBuf) {
-    // Stat + probe run together on the blocking pool; the stamp recorded
-    // here is the one the probe actually ran against.
-    let fallback = youtube_bin.clone();
-    let (key, stamp, supported) = tokio::task::spawn_blocking(move || {
-        let stamp = impersonate_stamp(&youtube_bin);
-        let supported = probe_impersonate_support(&youtube_bin);
-        (youtube_bin, stamp, supported)
-    })
-    .await
-    .unwrap_or((fallback, (None, 0), false));
-    // A poisoned cache drops the fill silently instead of panicking the
-    // background task: the next call re-probes and re-caches.
+/// Warm the cache on Tokio's async process driver rather than occupying a
+/// blocking-pool thread polling a child every few milliseconds.
+async fn warm_impersonation_cache(youtube_bin: PathBuf) {
+    let stamp = impersonate_stamp(&youtube_bin);
+    let supported = probe_impersonate_support(&youtube_bin).await;
+    // Do not publish a result for a binary that changed while it was probed.
+    if stamp != impersonate_stamp(&youtube_bin) {
+        return;
+    }
     if let Ok(mut guard) = IMPERSONATE_SUPPORT
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
     {
-        guard.insert(key, ImpersonateEntry { stamp, supported });
+        guard.insert(youtube_bin, ImpersonateEntry { stamp, supported });
     }
 }
 
-/// One-shot `--list-impersonate-targets` probe: a `Chrome` row without an
-/// "(unavailable)" marker means curl_cffi can impersonate. Any spawn failure,
-/// non-zero exit, or timeout resolves to `false` — a wedged binary must not
-/// hang the spawn that is being prepared, and must not leave children behind.
-fn probe_impersonate_support(youtube_bin: &Path) -> bool {
-    use std::io::Read as _;
-    #[cfg(unix)]
-    use std::os::unix::process::CommandExt as _;
-    let mut cmd = std::process::Command::new(youtube_bin);
-    cmd.arg("--list-impersonate-targets")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    cmd.process_group(0);
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(_) => return false,
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let exited_cleanly = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.success(),
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    kill_probe(&mut child);
-                    return false;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            Err(_) => {
-                kill_probe(&mut child);
-                return false;
-            }
-        }
-    };
-    if !exited_cleanly {
-        return false;
-    }
-    let mut out = String::new();
-    let read_ok = child
-        .stdout
-        .take()
-        .is_some_and(|mut pipe| pipe.read_to_string(&mut out).is_ok());
-    read_ok
-        && out.lines().any(|line| {
-            let line = line.to_ascii_lowercase();
-            line.contains("chrome") && !line.contains("unavailable")
-        })
-}
-
-/// Best-effort kill of a wedged probe: the whole process group, so a binary
-/// that ignores its flags takes its children down with it. Always reaps.
-fn kill_probe(child: &mut std::process::Child) {
+/// One-shot `--list-impersonate-targets` probe. The 15-second limit is retained
+/// as a guard against a genuinely wedged executable; process waiting and output
+/// draining are asynchronous. Timeout cleanup signals the whole process group.
+async fn probe_impersonate_support(youtube_bin: &Path) -> bool {
+    use std::process::Stdio;
+    let mut command = tokio::process::Command::new(youtube_bin);
+    command
+        .arg("--list-impersonate-targets")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
     #[cfg(unix)]
     {
-        let pid = child.id();
-        // try_wait just reported it still running, so the group is ours.
-        // SAFETY: constant signal number; ESRCH (raced exit) is harmless.
+        use std::os::unix::process::CommandExt as _;
+        command.as_std_mut().process_group(0);
+    }
+    let Ok(child) = command.spawn() else {
+        return false;
+    };
+    let pid = child.id().unwrap_or_default();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) if output.status.success() => {
+            let out = String::from_utf8_lossy(&output.stdout);
+            out.lines().any(|line| {
+                let line = line.to_ascii_lowercase();
+                line.contains("chrome") && !line.contains("unavailable")
+            })
+        }
+        Err(_) => {
+            kill_probe_group(pid);
+            false
+        }
+        Ok(Err(_)) | Ok(Ok(_)) => false,
+    }
+}
+
+/// Best-effort group cleanup for a timed-out probe. The direct child is also
+/// configured with `kill_on_drop`, so cancellation cannot leave it running.
+fn kill_probe_group(pid: u32) {
+    #[cfg(unix)]
+    if pid != 0 {
+        // SAFETY: constant signal; ESRCH is harmless if the child raced exit.
         unsafe {
             libc::killpg(pid as libc::pid_t, libc::SIGKILL);
         }
     }
     #[cfg(not(unix))]
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = pid;
 }
 
 /// `--downloader-args` value for yt-dlp's ffmpeg downloader on live captures.
@@ -613,26 +571,81 @@ pub(crate) const LIVE_DOWNLOADER_ARGS: &str =
 /// fMP4 HLS URLs often end in .fmp4 while FFmpeg detects MOV/MP4.
 pub(crate) const LIVE_INPUT_DOWNLOADER_ARGS: &str = "ffmpeg_i:-allowed_extensions 3gp,aac,avi,ac3,eac3,flac,mkv,m3u8,m4a,m4s,m4v,mpg,mov,mp2,mp3,mp4,mpeg,mpegts,ogg,ogv,oga,ts,vob,vtt,wav,webvtt,cmfv,cmfa,ec3,fmp4 -seg_max_retry 3";
 
-pub(crate) fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bool {
-    let Ok(output) = std::process::Command::new(ffmpeg_bin)
-        .args(["-hide_banner", "-h", "demuxer=hls"])
-        .output()
-    else {
+#[derive(Clone, Copy)]
+struct FfmpegHlsSupportEntry {
+    stamp: (Option<std::time::SystemTime>, u64),
+    supported: bool,
+}
+
+static FFMPEG_HLS_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, FfmpegHlsSupportEntry>>> =
+    OnceLock::new();
+
+static FFMPEG_HLS_PROBE_LOCKS: OnceLock<
+    Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+> = OnceLock::new();
+
+/// Whether this FFmpeg supports the HLS demuxer's `extension_picky` option.
+/// Waiting is asynchronous and the result is reused until the executable stamp changes.
+pub(crate) async fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bool {
+    let key = ffmpeg_bin.to_path_buf();
+    let probe_lock = {
+        let locks = FFMPEG_HLS_PROBE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut locks = locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _guard = probe_lock.lock().await;
+    let stamp = impersonate_stamp(ffmpeg_bin);
+    if let Ok(mut cache) = FFMPEG_HLS_SUPPORT.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        if let Some(entry) = cache.get(&key) {
+            if entry.stamp == stamp {
+                return entry.supported;
+            }
+        }
+        cache.remove(&key);
+    }
+
+    let Some(supported) = probe_ffmpeg_hls_extension_picky(ffmpeg_bin).await else {
         return false;
     };
+    let after = impersonate_stamp(ffmpeg_bin);
+    if stamp != (None, 0) && stamp == after {
+        if let Ok(mut cache) = FFMPEG_HLS_SUPPORT.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+            cache.insert(key, FfmpegHlsSupportEntry { stamp, supported });
+        }
+    }
+    supported
+}
+
+async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Option<bool> {
+    use std::process::Stdio;
+
+    let mut command = tokio::process::Command::new(ffmpeg_bin);
+    command
+        .args(["-hide_banner", "-h", "demuxer=hls"])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    // This is a tiny help query, not a download. Keep a defensive upper bound
+    // for broken executables while normal process waiting remains asynchronous.
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        command.output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
     let help = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    help.contains("extension_picky")
+    Some(help.contains("extension_picky"))
 }
-
-/// `--postprocessor-args` value moving the moov atom to the front of merged
-/// mp4s so playback starts without a full scan. Scoped `Merger+ffmpeg` (per
-/// yt-dlp's `PP+EXE:ARGS` syntax) so metadata/subtitle fixups are untouched.
-/// mov-only: only passed when the merge target is mp4-family.
-pub(crate) const MERGER_FASTSTART_ARGS: &str = "Merger+ffmpeg:-movflags +faststart";
 
 /// Install yt-dlp into the user library directory. The crate installer exposes
 /// no progress, so await this from a spawned task — never block the GTK thread.
@@ -1524,16 +1537,9 @@ pub async fn latest_quickjs_release() -> Option<(String, Option<String>)> {
     handle.await.ok().flatten()
 }
 
-/// Run `binary --version` off the caller's thread and return its first output
-/// line. `None` covers missing binaries, spawn failures and empty output alike.
-/// Uses the shared runtime's handle directly so the GTK thread (no tokio
-/// context entered) can call it.
+/// Shared cached version probe used by the download-time toolchain guard.
 async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<String> {
-    crate::runtime::tokio_rt()
-        .spawn(async move { probe_first_line(&binary, version_arg).await })
-        .await
-        .ok()
-        .flatten()
+    probe_first_line(&binary, version_arg).await
 }
 
 /// Whether a failed yt-dlp log shows the extractor breaking, which a newer
@@ -1544,12 +1550,100 @@ pub(crate) fn extractor_failure(log: &str) -> bool {
         .any(|marker| log.contains(marker))
 }
 
-/// Run a tool's version probe as an asynchronous subprocess.
-///
-/// This must be awaited on Grab's Tokio runtime, not directly from the GTK
-/// main thread. There is no wall-clock timeout: cold starts can finish
-/// naturally, and the child is killed if the probing task is cancelled.
+/// A child JoinHandle that is aborted if its awaiting future is dropped.
+/// Tokio normally detaches a JoinHandle on drop; this wrapper propagates caller
+/// cancellation to the task so its `kill_on_drop` subprocess is cleaned up too.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Unpin for AbortOnDrop<T> {}
+
+impl<T> std::future::Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::future::Future::poll(std::pin::Pin::new(&mut self.get_mut().0), cx)
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[derive(Clone)]
+struct ToolVersionEntry {
+    stamp: (Option<std::time::SystemTime>, u64),
+    line: String,
+}
+
+type ToolVersionKey = (PathBuf, String);
+
+static TOOL_VERSION_CACHE: OnceLock<Mutex<HashMap<ToolVersionKey, ToolVersionEntry>>> =
+    OnceLock::new();
+static TOOL_VERSION_PROBE_LOCKS: OnceLock<
+    Mutex<HashMap<ToolVersionKey, Arc<tokio::sync::Mutex<()>>>>,
+> = OnceLock::new();
+
+/// Run `binary version_arg` asynchronously and return the first output line.
+/// Successful results are cached by path, argument, modification time and size.
+/// A per-key async lock ensures simultaneous callers share one cold probe.
 pub(crate) async fn probe_first_line(binary: &Path, version_arg: &str) -> Option<String> {
+    let binary = binary.to_path_buf();
+    let version_arg = version_arg.to_owned();
+    if tokio::runtime::Handle::try_current().is_ok() {
+        cached_tool_first_line(binary, version_arg).await
+    } else {
+        AbortOnDrop(crate::runtime::tokio_rt().spawn(async move {
+            cached_tool_first_line(binary, version_arg).await
+        }))
+        .await
+        .ok()
+        .flatten()
+    }
+}
+
+async fn cached_tool_first_line(binary: PathBuf, version_arg: String) -> Option<String> {
+    let key = (binary.clone(), version_arg.clone());
+    let probe_lock = {
+        let locks = TOOL_VERSION_PROBE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut locks = locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _guard = probe_lock.lock().await;
+    let stamp = impersonate_stamp(&binary);
+
+    if let Ok(mut cache) = TOOL_VERSION_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        if let Some(entry) = cache.get(&key) {
+            if entry.stamp == stamp {
+                return Some(entry.line.clone());
+            }
+        }
+        cache.remove(&key);
+    }
+
+    let line = run_version_probe_uncached(&binary, &version_arg).await?;
+    // Don't cache a result if the executable was replaced while the child ran
+    // or the path no longer has a verifiable file stamp.
+    let after = impersonate_stamp(&binary);
+    if stamp != (None, 0) && stamp == after {
+        if let Ok(mut cache) = TOOL_VERSION_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+            cache.insert(key, ToolVersionEntry { stamp, line: line.clone() });
+        }
+    }
+    Some(line)
+}
+
+/// Run the actual version command. No deadline is imposed: a slow cold start
+/// can finish rather than being misreported as missing media tools. The child
+/// is kill-on-drop, so cancelling the owning future stops the process.
+async fn run_version_probe_uncached(binary: &Path, version_arg: &str) -> Option<String> {
     use std::process::Stdio;
 
     let mut command = tokio::process::Command::new(binary);
@@ -1657,6 +1751,39 @@ mod tests {
             probe_first_line(&binary, "--version").await.as_deref(),
             Some("2026.10.21.233146")
         );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn successful_version_probe_is_cached_until_the_binary_changes() {
+        let base = unique_dir("version-probe-cache");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("yt-dlp");
+        let counter = base.join("counter");
+        write_test_script(
+            &binary,
+            &format!("#!/bin/sh\nprintf x >> '{}'\nprintf 'cached-one\\n'\n", counter.display()),
+        );
+
+        assert_eq!(
+            probe_first_line(&binary, "--version").await.as_deref(),
+            Some("cached-one")
+        );
+        assert_eq!(
+            probe_first_line(&binary, "--version").await.as_deref(),
+            Some("cached-one")
+        );
+        assert_eq!(std::fs::read(&counter).unwrap(), b"x");
+
+        write_test_script(
+            &binary,
+            &format!("#!/bin/sh\nprintf x >> '{}'\nprintf 'cached-two-longer\\n'\n", counter.display()),
+        );
+        assert_eq!(
+            probe_first_line(&binary, "--version").await.as_deref(),
+            Some("cached-two-longer")
+        );
+        assert_eq!(std::fs::read(&counter).unwrap(), b"xx");
         std::fs::remove_dir_all(&base).ok();
     }
 

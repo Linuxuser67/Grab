@@ -3841,7 +3841,10 @@ impl DownloadManager {
     /// fallback handles wall-clock changes; ordinary due items wake at their
     /// own deadline instead of waiting for a fixed 30-second polling interval.
     pub fn start_scheduler(self: &Rc<Self>) {
-        if !self.settings.scheduled_downloads_enabled() {
+        if self.shutdown_started.get()
+            || self.shutdown_finished.get()
+            || !self.settings.scheduled_downloads_enabled()
+        {
             return;
         }
         if self.scheduler_refresh.borrow().is_none() {
@@ -3899,7 +3902,9 @@ impl DownloadManager {
 
     /// Start or stop the scheduler to match the scheduling preference.
     pub fn sync_scheduler(self: &Rc<Self>) {
-        if self.settings.scheduled_downloads_enabled() {
+        if self.shutdown_started.get() || self.shutdown_finished.get() {
+            self.stop_scheduler();
+        } else if self.settings.scheduled_downloads_enabled() {
             self.start_scheduler();
         } else {
             self.stop_scheduler();
@@ -3946,14 +3951,30 @@ impl DownloadManager {
         self.shutdown_finished.set(true);
     }
 
+    /// Reserve asynchronous shutdown synchronously at the close/Quit event.
+    /// This gates queued work and removes scheduler wakeups before the caller
+    /// yields to the GLib context.
+    pub(crate) fn begin_async_shutdown(&self) -> bool {
+        if self.shutdown_finished.get() || self.shutdown_started.replace(true) {
+            return false;
+        }
+        self.stop_scheduler();
+        true
+    }
+
     /// Asynchronous lifecycle path for an orderly window close.
     pub async fn shutdown_async(self: &Rc<Self>) {
-        if self.shutdown_finished.get() || self.shutdown_started.replace(true) {
+        if !self.begin_async_shutdown() {
             return;
         }
-        // A scheduled item may become due while shutdown awaits worker joins or
-        // persistence. Stop the wake now so closing cannot consume its schedule.
-        self.stop_scheduler();
+        self.finish_async_shutdown().await;
+    }
+
+    /// Finish a shutdown previously reserved by begin_async_shutdown.
+    pub(crate) async fn finish_async_shutdown(self: &Rc<Self>) {
+        if self.shutdown_finished.get() {
+            return;
+        }
         // The queue reader and model applier must finish first. Otherwise a
         // shutdown snapshot taken from an empty startup model could replace
         // the still-valid queue file.

@@ -6623,6 +6623,7 @@ fn restore_task_guard_releases_waiters_without_claiming_success() {
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
     manager.restore_pending.set(true);
     manager.restore_complete.set(false);
+    manager.restore_ready.send_replace(false);
     let ready = manager.restore_ready.subscribe();
     {
         let _guard = RestoreTaskGuard {
@@ -6659,6 +6660,27 @@ fn async_shutdown_preserves_queue_file_if_restore_never_completed() {
         std::fs::read(&queue_file).unwrap(),
         saved,
         "shutdown must not overwrite the last saved queue after a failed restore"
+    );
+    let _ = std::fs::remove_file(queue_file);
+}
+
+#[test]
+fn shutdown_preserves_queue_file_while_restore_is_pending() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("shutdown-restore-pending");
+    let saved = br#"{"version":7,"items":[{"sentinel":"still-loading"}]}"#;
+    std::fs::write(&queue_file, saved).unwrap();
+
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.restore_pending.set(true);
+    manager.restore_complete.set(false);
+
+    crate::runtime::tokio_rt().block_on(manager.shutdown_async());
+
+    assert_eq!(
+        std::fs::read(&queue_file).unwrap(),
+        saved,
+        "shutdown during restore must preserve the unmodified saved queue"
     );
     let _ = std::fs::remove_file(queue_file);
 }

@@ -556,16 +556,6 @@ pub fn setup(app: &adw::Application) {
             register_actions(app, &st);
             let win = window::build_window(app, manager.clone(), settings.clone(), toasts.clone());
             win.2.widget().set_sensitive(false);
-            {
-                let restore_manager = manager.clone();
-                let restore_card = win.2.clone();
-                glib::spawn_future_local(async move {
-                    restore_manager.wait_for_restore().await;
-                    if !restore_manager.is_shutting_down() {
-                        restore_card.widget().set_sensitive(true);
-                    }
-                });
-            }
             st.borrow_mut().replace(Rc::new(State {
                 manager: manager.clone(),
                 settings,
@@ -615,6 +605,7 @@ pub fn setup(app: &adw::Application) {
                     let Some(manager) = manager_weak.upgrade() else {
                         return glib::Propagation::Proceed;
                     };
+                    window.set_sensitive(false);
                     let window = window.clone();
                     let closing_done = closing.clone();
                     let ready = close_ready.clone();
@@ -646,6 +637,14 @@ pub fn setup(app: &adw::Application) {
                     };
                     s.manager.wait_for_restore().await;
                     if s.manager.is_shutting_down() {
+                        answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
+                        continue;
+                    }
+                    if s.manager.restore_failed() {
+                        s.toasts.add_toast(adw::Toast::new(&gettext(
+                            "Browser links cannot be queued because the saved queue could not be restored.",
+                        )));
+                        answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
                         continue;
                     }
                     // The extension sends the real URL (it unwraps grab:// in JS).
@@ -987,20 +986,25 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                 })
                 .build()
         },
-        gio::ActionEntry::builder("quit")
-            .activate(|app: &adw::Application, _, _| {
-                // Regular Quit closes the window through its asynchronous
-                // shutdown path. Keep app.quit for the no-window fallback.
-                if let Some(window) = app
-                    .active_window()
-                    .or_else(|| app.windows().into_iter().next())
-                {
-                    window.close();
-                } else {
-                    app.quit();
-                }
-            })
-            .build(),
+        {
+            let st = Rc::clone(st);
+            gio::ActionEntry::builder("quit")
+                .activate(move |app: &adw::Application, _, _| {
+                    // Explicit Quit must not pass through close-request's
+                    // "hide to background" behavior used for ordinary closes.
+                    if let Some(s) = st.borrow().as_ref().cloned() {
+                        let app = app.clone();
+                        glib::MainContext::default().spawn_local(async move {
+                            s.window.set_sensitive(false);
+                            s.manager.shutdown_async().await;
+                            app.quit();
+                        });
+                    } else {
+                        app.quit();
+                    }
+                })
+                .build()
+        },
         gio::ActionEntry::builder("present")
             .activate(|app: &adw::Application, _, _| app.activate())
             .build(),

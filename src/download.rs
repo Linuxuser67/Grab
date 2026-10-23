@@ -3811,8 +3811,7 @@ impl DownloadManager {
         const CLOCK_CHANGE_RECHECK_SECS: i64 = 60;
         let delay = next_due
             .saturating_sub(now)
-            .max(1)
-            .min(CLOCK_CHANGE_RECHECK_SECS) as u32;
+            .clamp(1, CLOCK_CHANGE_RECHECK_SECS) as u32;
         let weak = Rc::downgrade(self);
         let id = glib::timeout_add_seconds_local_once(delay, move || {
             if let Some(manager) = weak.upgrade() {

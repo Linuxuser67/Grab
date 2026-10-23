@@ -434,7 +434,9 @@ fn live_remux_retries_known_mp4_timestamp_mux_failures_only() {
     assert!(needs_live_timestamp_repair(
         "[out#0/mp4] Error writing trailer: Not yet implemented in FFmpeg, patches welcome"
     ));
-    assert!(needs_live_timestamp_repair("[mp4] pts/dts pair unsupported"));
+    assert!(needs_live_timestamp_repair(
+        "[mp4] pts/dts pair unsupported"
+    ));
     assert!(needs_live_timestamp_repair(
         "Non-monotonous DTS in output stream 0:1"
     ));

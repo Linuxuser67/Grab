@@ -225,11 +225,9 @@ pub struct DownloadManager {
     /// Guards normal async shutdown and the synchronous fallback.
     shutdown_started: Cell<bool>,
     shutdown_finished: Cell<bool>,
-    /// Prevent new queued rows from starting until saved active rows are restored.
-    restore_pending: Cell<bool>,
-    /// False until queue restore and model application complete successfully.
-    /// When false after restore_pending clears, the original queue file must be preserved.
-    restore_complete: Cell<bool>,
+    /// Explicit restore lifecycle; Failed prevents partial models from overwriting
+    /// the last known-good queue file and releases intake waiters.
+    restore_state: Cell<RestoreState>,
     /// Queue mutations received while loading are persisted after restore completes.
     restore_dirty: Cell<bool>,
     /// Production queue loader; retained so orderly shutdown waits before persisting.
@@ -275,6 +273,28 @@ pub(crate) struct RemovedSnapshot {
     pub started: bool,
 }
 
+enum RestoreState {
+    /// Queue restore has not yet finished.
+    Pending,
+    /// Queue restore and synchronous staging cleanup finished successfully.
+    Ready,
+    /// Queue restore failed; keep the persisted queue file untouched.
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreOutcome {
+    Succeeded,
+    Failed,
+}
+
+struct RestoreSweepPlan {
+    referenced: HashSet<String>,
+    live: HashSet<u64>,
+    dest_dirs: HashSet<String>,
+    session_keep: Option<HashSet<String>>,
+}
+
 /// One validated queue entry awaiting the restore apply phase (module level so a mid-loop failure never leaves half-spawned engines).
 struct PendingRestore {
     item: StoredItem,
@@ -284,8 +304,8 @@ struct PendingRestore {
 }
 
 /// Makes unexpected restore-task exits observable to every waiting intake path.
-/// A failed or panicked restore leaves restore_complete false, so persistence
-/// retains the original file rather than serializing a partial model.
+/// Releases intake waiters when a restore task exits unexpectedly and records
+/// failure rather than allowing a partial model to replace the saved queue.
 struct RestoreTaskGuard {
     manager: std::rc::Weak<DownloadManager>,
     finished: bool,
@@ -297,8 +317,11 @@ impl Drop for RestoreTaskGuard {
             return;
         }
         if let Some(manager) = self.manager.upgrade() {
-            manager.restore_pending.set(false);
-            manager.restore_ready.send_replace(true);
+            if manager.restore_state.get() == RestoreState::Pending {
+                manager.finish_restore(RestoreOutcome::Failed);
+            } else {
+                manager.restore_ready.send_replace(true);
+            }
         }
     }
 }
@@ -470,8 +493,11 @@ impl DownloadManager {
             scheduler_refresh: RefCell::new(None),
             shutdown_started: Cell::new(false),
             shutdown_finished: Cell::new(false),
-            restore_pending: Cell::new(false),
-            restore_complete: Cell::new(cfg!(test)),
+            restore_state: Cell::new(if cfg!(test) {
+                RestoreState::Ready
+            } else {
+                RestoreState::Pending
+            }),
             restore_dirty: Cell::new(false),
             restore_task: RefCell::new(None),
             restore_ready,
@@ -1286,8 +1312,7 @@ impl DownloadManager {
         // Startup restore runs asynchronously in production. Don't start a newly
         // queued URL before persisted active rows have been inserted, or we can
         // briefly exceed the configured concurrency limit.
-        if self.restore_pending.get() || !self.restore_complete.get() || self.shutdown_started.get()
-        {
+        if self.restore_state.get() != RestoreState::Ready || self.shutdown_started.get() {
             return;
         }
         // Prune finished discard finalizers so the registry doesn't grow per removed row.
@@ -3246,7 +3271,7 @@ impl DownloadManager {
     fn persist_queue(&self) {
         // Avoid overwriting the saved queue with an incomplete in-memory model
         // while the asynchronous startup restore is still reading it.
-        if self.restore_pending.get() || !self.restore_complete.get() {
+        if self.restore_state.get() != RestoreState::Ready {
             self.restore_dirty.set(true);
             return;
         }
@@ -3288,15 +3313,14 @@ impl DownloadManager {
     /// Tests write synchronously (no channel/task in test builds).
     fn persist_for_shutdown(&self) {
         #[cfg(test)]
-        if self.restore_complete.get()
-            && !self.restore_pending.get()
+        if self.restore_state.get() == RestoreState::Ready
             && let Some(text) = self.serialize_queue_inner(true)
         {
             Self::write_queue_file(&text);
         }
         #[cfg(not(test))]
         {
-            if self.restore_pending.get() || !self.restore_complete.get() {
+            if self.restore_state.get() != RestoreState::Ready {
                 tracing::warn!(
                     "shutdown: queue restore did not complete; preserving the saved queue file"
                 );
@@ -3559,26 +3583,23 @@ impl DownloadManager {
     }
 
     /// Read and validate the saved queue away from GTK's main context.
-    /// Only the later ListStore/model insertion is applied on the main context.
+    /// Only ListStore/model mutation is applied on the main context; disk sweeps
+    /// are sent to Tokio's blocking pool before restore becomes Ready.
     pub fn restore_queue(self: &Rc<Self>) {
         let queue_file = Self::queue_file();
         self.restore_ready.send_replace(false);
-        self.restore_pending.set(true);
-        self.restore_complete.set(false);
+        self.restore_state.set(RestoreState::Pending);
         #[cfg(test)]
         {
-            // Unit tests rely on restore being observable synchronously.
+            // Test fixtures keep restore synchronous, but share finalization and
+            // the same sweep implementation with production.
             let pending = Self::load_restore_queue(queue_file);
             if let Some(pending) = pending {
-                self.apply_restored_queue(pending);
+                let plan = self.apply_restored_queue(pending);
+                let keep = Self::run_restore_sweeps(plan);
+                Self::schedule_session_orphan_sweep(keep);
             }
-            self.restore_pending.set(false);
-            self.restore_complete.set(true);
-            if self.restore_dirty.replace(false) {
-                self.persist_queue();
-            }
-            self.start_next();
-            self.restore_ready.send_replace(true);
+            self.finish_restore(RestoreOutcome::Succeeded);
         }
         #[cfg(not(test))]
         {
@@ -3594,58 +3615,73 @@ impl DownloadManager {
                 let Some(manager) = weak.upgrade() else {
                     return;
                 };
-                if manager.draining.get() {
-                    manager.restore_pending.set(false);
-                    manager.restore_ready.send_replace(true);
+                // Close/Quit claims shutdown synchronously. Do not apply even a
+                // successfully decoded queue after that claim: preserve its file.
+                if manager.restore_should_abort() {
+                    manager.finish_restore(RestoreOutcome::Failed);
+                    completion.finished = true;
                     return;
                 }
                 match loaded {
                     Ok(Some(pending)) => {
-                        // Keep the start/persist gates closed until the entire
-                        // model apply and its staging sweeps have completed.
                         manager.restore_dirty.set(false);
-                        let applied =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                manager.apply_restored_queue(pending)
-                            }));
-                        if let Err(payload) = applied {
-                            let message = payload
-                                .downcast_ref::<String>()
-                                .map(String::as_str)
-                                .or_else(|| payload.downcast_ref::<&str>().copied())
-                                .unwrap_or("unknown panic");
-                            tracing::error!(
-                                "download queue restore apply failed: {message}; preserving the saved queue"
-                            );
-                            manager.restore_pending.set(false);
-                            manager.restore_ready.send_replace(true);
+                        let plan = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            manager.apply_restored_queue(pending)
+                        }));
+                        let plan = match plan {
+                            Ok(plan) => plan,
+                            Err(payload) => {
+                                let message = payload
+                                    .downcast_ref::<String>()
+                                    .map(String::as_str)
+                                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                                    .unwrap_or("unknown panic");
+                                tracing::error!(
+                                    "download queue restore apply failed: {message}; preserving the saved queue"
+                                );
+                                manager.finish_restore(RestoreOutcome::Failed);
+                                completion.finished = true;
+                                return;
+                            }
+                        };
+                        // Destination directories may be network mounts. Keep
+                        // traversal/deletion off the GTK main context and do not
+                        // release the queue start gate until cleanup has finished.
+                        let swept = tokio_rt()
+                            .spawn_blocking(move || Self::run_restore_sweeps(plan))
+                            .await;
+                        let keep = match swept {
+                            Ok(keep) => keep,
+                            Err(e) => {
+                                tracing::error!(
+                                    "download queue restore cleanup failed: {e}; preserving the saved queue"
+                                );
+                                manager.finish_restore(RestoreOutcome::Failed);
+                                completion.finished = true;
+                                return;
+                            }
+                        };
+                        // Shutdown may have begun while the blocking sweeps ran.
+                        if manager.restore_should_abort() {
+                            manager.finish_restore(RestoreOutcome::Failed);
+                            completion.finished = true;
                             return;
                         }
-                        manager.restore_pending.set(false);
-                        manager.restore_complete.set(true);
-                        if manager.restore_dirty.replace(false) {
-                            manager.persist_queue();
-                        }
-                        manager.start_next();
+                        Self::schedule_session_orphan_sweep(keep);
+                        manager.finish_restore(RestoreOutcome::Succeeded);
                     }
                     Ok(None) => {
-                        manager.restore_pending.set(false);
-                        manager.restore_complete.set(true);
-                        if manager.restore_dirty.replace(false) {
-                            manager.persist_queue();
-                        }
-                        manager.start_next();
+                        manager.finish_restore(RestoreOutcome::Succeeded);
                     }
                     Err(e) => {
                         tracing::error!(
                             "download queue restore worker failed: {e}; preserving the saved queue"
                         );
-                        manager.restore_pending.set(false);
-                        manager.restore_ready.send_replace(true);
+                        manager.finish_restore(RestoreOutcome::Failed);
+                        completion.finished = true;
                         return;
                     }
                 }
-                manager.restore_ready.send_replace(true);
                 completion.finished = true;
             });
             self.restore_task.replace(Some(task));
@@ -3674,7 +3710,29 @@ impl DownloadManager {
     /// Restore failed after startup began; callers must not enqueue or persist
     /// over the last known-good queue until the user restarts or recovers it.
     pub fn restore_failed(&self) -> bool {
-        !self.restore_pending.get() && !self.restore_complete.get()
+        self.restore_state.get() == RestoreState::Failed
+    }
+
+    fn restore_should_abort(&self) -> bool {
+        self.shutdown_started.get() || self.draining.get() || self.shutdown_finished.get()
+    }
+
+    /// Shared restore finalization: all test and production paths release intake
+    /// waiters through the same state transition and keep failed restores gated.
+    fn finish_restore(self: &Rc<Self>, outcome: RestoreOutcome) {
+        match outcome {
+            RestoreOutcome::Succeeded => {
+                self.restore_state.set(RestoreState::Ready);
+                if self.restore_dirty.replace(false) {
+                    self.persist_queue();
+                }
+                self.start_next();
+            }
+            RestoreOutcome::Failed => {
+                self.restore_state.set(RestoreState::Failed);
+            }
+        }
+        self.restore_ready.send_replace(true);
     }
 
     /// File reading, size/version caps, JSON parsing, and pure stored-item
@@ -3736,8 +3794,12 @@ impl DownloadManager {
         )
     }
 
-    /// Apply validated records to GTK's model and then sweep crash leftovers.
-    fn apply_restored_queue(self: &Rc<Self>, pending: Vec<PendingRestore>) {
+    /// Apply validated rows to GTK's model and snapshot cleanup keep-sets.
+    /// Filesystem traversal/deletion happens later on a blocking worker.
+    fn apply_restored_queue(
+        self: &Rc<Self>,
+        pending: Vec<PendingRestore>,
+    ) -> RestoreSweepPlan {
         {
             let _batch = self.batch_guard();
             // JSON parsing and per-row validation completed off-thread.
@@ -3745,12 +3807,9 @@ impl DownloadManager {
             for p in pending {
                 match p.item.status {
                     DownloadStatus::Done => {
-                        // Gallery Done rows need their flags; insert_history
-                        // builds a plain row. restore_existing keeps Done.
                         if p.gallery_job.is_some() {
                             let mut restored_item = p.item.clone();
                             restored_item.segments = p.segments;
-                            // Carry the gallery job through.
                             match self.restore_existing_gallery(&restored_item, p.gallery_job) {
                                 Ok(_) => {}
                                 Err(e) => tracing::warn!("skipping queue entry: {e}"),
@@ -3768,7 +3827,9 @@ impl DownloadManager {
                         }
                     }
                     status => {
-                        // Re-stage the intake file selection BEFORE restore_existing: insert → start_next → spawn_torrent reads it synchronously, so staging after is too late.
+                        // Re-stage selected files before restore_existing: the row
+                        // stays gated until restore finalization, so it cannot start
+                        // between insertion and completion of this restore.
                         if let Some(sel) = p.item.selected_files.clone()
                             && let Ok(url) = normalize_url(&p.item.url)
                         {
@@ -3784,7 +3845,6 @@ impl DownloadManager {
                         };
                         match result {
                             Ok(restored) => {
-                                // Re-attach the recorded engine folder.
                                 if let Some(dir) = p.output_dir.clone() {
                                     restored.set_output_dir(dir);
                                 }
@@ -3794,43 +3854,44 @@ impl DownloadManager {
                     }
                 }
             }
-        } // Guard drops: persist once, refresh the UI, kick the scheduler.
-        // Drop archives and staged selections no row references anymore; sweep session orphans whose rows vanished in a crash.
-        let referenced: std::collections::HashSet<String> = self
+        } // BatchGuard performs the consolidated persist/UI refresh/start attempt.
+
+        // Build immutable keep-sets while ListStore/GObjects are available on GTK.
+        let referenced: HashSet<String> = self
             .items()
             .map(|it| it.url().to_string())
             .filter(|u| crate::torrent::is_torrent_url(u))
             .collect();
-        crate::torrent::sweep_archives(&referenced);
-        // Same for staged file selections (a future re-add stages fresh at intake).
-        crate::torrent::prune_selections(&referenced);
-        // Crash/kill leftovers: only restored rows reuse their staging ids, so a
-        // numeric staging dir with no live row can never resume. Reclaimed
-        // here, after restore and before any worker starts; completed
-        // `final.*` recordings are preserved (the user's only copy).
-        let live: std::collections::HashSet<u64> = self.items().map(|it| it.id()).collect();
-        // Legacy tmp root first, then every destination dir: `grab-<id>-*`
-        // files for items no longer live are reclaimed with the keep-set
-        // (ids are session-unique).
-        let mut dest_dirs = std::collections::HashSet::new();
-        for it in self.items() {
-            dest_dirs.insert(it.dest_dir());
-        }
-        for dest_dir in dest_dirs {
-            crate::video::sweep_dest_staging(std::path::Path::new(&dest_dir), &live);
-        }
-        // Stale cookie dumps from crashes: plaintext session cookies must
-        // not linger on disk.
-        crate::cookies::sweep_cookie_staging();
-        // No session yet: the sweep below would no-op, so skip the store walk.
-        if crate::torrent::session_handle().is_some() {
-            let keep: std::collections::HashSet<String> = self
-                .items()
+        let live: HashSet<u64> = self.items().map(|it| it.id()).collect();
+        let dest_dirs: HashSet<String> = self.items().map(|it| it.dest_dir()).collect();
+        let session_keep = crate::torrent::session_handle().is_some().then(|| {
+            self.items()
                 .filter(|it| {
                     it.status() != DownloadStatus::Done && crate::torrent::is_torrent(&it.url())
                 })
                 .filter_map(|it| crate::torrent::info_hash_for_url(&it.url()))
-                .collect();
+                .collect()
+        });
+        RestoreSweepPlan {
+            referenced,
+            live,
+            dest_dirs,
+            session_keep,
+        }
+    }
+
+    fn run_restore_sweeps(plan: RestoreSweepPlan) -> Option<HashSet<String>> {
+        crate::torrent::sweep_archives(&plan.referenced);
+        crate::torrent::prune_selections(&plan.referenced);
+        for dest_dir in plan.dest_dirs {
+            crate::video::sweep_dest_staging(std::path::Path::new(&dest_dir), &plan.live);
+        }
+        crate::cookies::sweep_cookie_staging();
+        plan.session_keep
+    }
+
+    fn schedule_session_orphan_sweep(keep: Option<HashSet<String>>) {
+        if let Some(keep) = keep {
             tokio_rt().spawn(async move {
                 crate::torrent::sweep_session_orphans(&keep).await;
             });

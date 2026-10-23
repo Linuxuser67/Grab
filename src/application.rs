@@ -27,7 +27,9 @@ struct State {
 /// Convert Cargo/SemVer prerelease separators to AppStream's release-version syntax.
 /// AppStream requires '~' for prereleases so they sort before the corresponding stable version.
 fn appstream_release_version(version: &str) -> String {
-    version.replace("-beta.", "~beta.").replace("-alpha.", "~alpha.")
+    version
+        .replace("-beta.", "~beta.")
+        .replace("-alpha.", "~alpha.")
 }
 
 /// True for an http(s) URL pointing at a .torrent file (case-insensitive).
@@ -983,8 +985,7 @@ fn register_actions(
                             // application version uses Cargo's '-'. Pass the AppStream
                             // spelling for release-note lookup to avoid a missing-release
                             // critical, then restore the user-facing package version.
-                            let appstream_version =
-                                appstream_release_version(env!("GRAB_VERSION"));
+                            let appstream_version = appstream_release_version(env!("GRAB_VERSION"));
                             let about =
                                 adw::AboutDialog::from_appdata(METAINFO, Some(&appstream_version));
                             about.set_version(env!("GRAB_VERSION"));
@@ -1564,14 +1565,8 @@ mod tests {
 
     #[test]
     fn appstream_release_version_uses_tilde_for_prereleases_only() {
-        assert_eq!(
-            appstream_release_version("6.3.0-beta.1"),
-            "6.3.0~beta.1"
-        );
-        assert_eq!(
-            appstream_release_version("6.3.0-alpha.2"),
-            "6.3.0~alpha.2"
-        );
+        assert_eq!(appstream_release_version("6.3.0-beta.1"), "6.3.0~beta.1");
+        assert_eq!(appstream_release_version("6.3.0-alpha.2"), "6.3.0~alpha.2");
         assert_eq!(appstream_release_version("6.2.2"), "6.2.2");
     }
 
@@ -1586,10 +1581,7 @@ mod tests {
             .expect("at least one release")
             .clone();
         // Use the same AppStream spelling as the About dialog's release-note lookup.
-        assert_eq!(
-            newest,
-            appstream_release_version(env!("CARGO_PKG_VERSION"))
-        );
+        assert_eq!(newest, appstream_release_version(env!("CARGO_PKG_VERSION")));
     }
 
     /// The newest entry must also be first: `from_appdata` reads the leading

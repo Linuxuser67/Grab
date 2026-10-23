@@ -3610,7 +3610,12 @@ impl DownloadManager {
                 .chain(done.into_iter().skip(skip))
                 .collect();
         }
-        Some(items.into_iter().filter_map(Self::validate_stored_item).collect())
+        Some(
+            items
+                .into_iter()
+                .filter_map(Self::validate_stored_item)
+                .collect(),
+        )
     }
 
     /// Apply validated records to GTK's model and then sweep crash leftovers.
@@ -3791,9 +3796,7 @@ impl DownloadManager {
             .unwrap_or(0);
         let due_items: Vec<_> = self
             .items()
-            .filter(|item| {
-                item.status() == DownloadStatus::Scheduled && item.scheduled_at() <= now
-            })
+            .filter(|item| item.status() == DownloadStatus::Scheduled && item.scheduled_at() <= now)
             .collect();
         if due_items.is_empty() {
             return;
@@ -3865,7 +3868,9 @@ impl DownloadManager {
         });
         let joined = joined_rx.await.unwrap_or(false);
         if !joined {
-            tracing::warn!("shutdown: async join deadline elapsed; persisting without truncating partial files");
+            tracing::warn!(
+                "shutdown: async join deadline elapsed; persisting without truncating partial files"
+            );
         } else {
             // Truncating a partially written segmented file is filesystem I/O;
             // keep it off GTK's main context just like the task joins above.
@@ -3927,8 +3932,12 @@ impl DownloadManager {
                 });
                 match done_rx.await {
                     Ok(true) => {}
-                    Ok(false) => tracing::warn!("shutdown: queue persistence failed or exceeded its deadline"),
-                    Err(_) => tracing::warn!("shutdown: queue persistence task ended without a result"),
+                    Ok(false) => tracing::warn!(
+                        "shutdown: queue persistence failed or exceeded its deadline"
+                    ),
+                    Err(_) => {
+                        tracing::warn!("shutdown: queue persistence task ended without a result")
+                    }
                 }
             }
         }

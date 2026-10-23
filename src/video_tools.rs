@@ -467,7 +467,10 @@ pub(crate) fn ytdlp_supports_impersonation(youtube_bin: &Path) -> bool {
         // Claim the key first, so concurrent first calls do not duplicate work.
         guard.insert(
             youtube_bin.to_path_buf(),
-            ImpersonateEntry { stamp, supported: false },
+            ImpersonateEntry {
+                stamp,
+                supported: false,
+            },
         );
     }
 
@@ -518,12 +521,7 @@ async fn probe_impersonate_support(youtube_bin: &Path) -> bool {
         return false;
     };
     let pid = child.id().unwrap_or_default();
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        child.wait_with_output(),
-    )
-    .await
-    {
+    match tokio::time::timeout(std::time::Duration::from_secs(15), child.wait_with_output()).await {
         Ok(Ok(output)) if output.status.success() => {
             let out = String::from_utf8_lossy(&output.stdout);
             out.lines().any(|line| {
@@ -580,9 +578,8 @@ struct FfmpegHlsSupportEntry {
 static FFMPEG_HLS_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, FfmpegHlsSupportEntry>>> =
     OnceLock::new();
 
-static FFMPEG_HLS_PROBE_LOCKS: OnceLock<
-    Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
-> = OnceLock::new();
+static FFMPEG_HLS_PROBE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
 
 /// Whether this FFmpeg supports the HLS demuxer's `extension_picky` option.
 /// Waiting is asynchronous and the result is reused until the executable stamp changes.
@@ -590,7 +587,9 @@ pub(crate) async fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bo
     let key = ffmpeg_bin.to_path_buf();
     let probe_lock = {
         let locks = FFMPEG_HLS_PROBE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut locks = locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut locks = locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         locks
             .entry(key.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
@@ -598,7 +597,10 @@ pub(crate) async fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bo
     };
     let _guard = probe_lock.lock().await;
     let stamp = impersonate_stamp(ffmpeg_bin);
-    if let Ok(mut cache) = FFMPEG_HLS_SUPPORT.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+    if let Ok(mut cache) = FFMPEG_HLS_SUPPORT
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
         if let Some(entry) = cache.get(&key) {
             if entry.stamp == stamp {
                 return entry.supported;
@@ -612,7 +614,10 @@ pub(crate) async fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bo
     };
     let after = impersonate_stamp(ffmpeg_bin);
     if stamp != (None, 0) && stamp == after {
-        if let Ok(mut cache) = FFMPEG_HLS_SUPPORT.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        if let Ok(mut cache) = FFMPEG_HLS_SUPPORT
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+        {
             cache.insert(key, FfmpegHlsSupportEntry { stamp, supported });
         }
     }
@@ -629,13 +634,10 @@ async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Option<bool> {
         .kill_on_drop(true);
     // This is a tiny help query, not a download. Keep a defensive upper bound
     // for broken executables while normal process waiting remains asynchronous.
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        command.output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), command.output())
+        .await
+        .ok()?
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1597,9 +1599,10 @@ pub(crate) async fn probe_first_line(binary: &Path, version_arg: &str) -> Option
     if tokio::runtime::Handle::try_current().is_ok() {
         cached_tool_first_line(binary, version_arg).await
     } else {
-        AbortOnDrop(crate::runtime::tokio_rt().spawn(async move {
-            cached_tool_first_line(binary, version_arg).await
-        }))
+        AbortOnDrop(
+            crate::runtime::tokio_rt()
+                .spawn(async move { cached_tool_first_line(binary, version_arg).await }),
+        )
         .await
         .ok()
         .flatten()
@@ -1610,7 +1613,9 @@ async fn cached_tool_first_line(binary: PathBuf, version_arg: String) -> Option<
     let key = (binary.clone(), version_arg.clone());
     let probe_lock = {
         let locks = TOOL_VERSION_PROBE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut locks = locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut locks = locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         locks
             .entry(key.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
@@ -1619,7 +1624,10 @@ async fn cached_tool_first_line(binary: PathBuf, version_arg: String) -> Option<
     let _guard = probe_lock.lock().await;
     let stamp = impersonate_stamp(&binary);
 
-    if let Ok(mut cache) = TOOL_VERSION_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+    if let Ok(mut cache) = TOOL_VERSION_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
         if let Some(entry) = cache.get(&key) {
             if entry.stamp == stamp {
                 return Some(entry.line.clone());
@@ -1633,8 +1641,17 @@ async fn cached_tool_first_line(binary: PathBuf, version_arg: String) -> Option<
     // or the path no longer has a verifiable file stamp.
     let after = impersonate_stamp(&binary);
     if stamp != (None, 0) && stamp == after {
-        if let Ok(mut cache) = TOOL_VERSION_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
-            cache.insert(key, ToolVersionEntry { stamp, line: line.clone() });
+        if let Ok(mut cache) = TOOL_VERSION_CACHE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+        {
+            cache.insert(
+                key,
+                ToolVersionEntry {
+                    stamp,
+                    line: line.clone(),
+                },
+            );
         }
     }
     Some(line)
@@ -1762,7 +1779,10 @@ mod tests {
         let counter = base.join("counter");
         write_test_script(
             &binary,
-            &format!("#!/bin/sh\nprintf x >> '{}'\nprintf 'cached-one\\n'\n", counter.display()),
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf 'cached-one\\n'\n",
+                counter.display()
+            ),
         );
 
         assert_eq!(
@@ -1777,7 +1797,10 @@ mod tests {
 
         write_test_script(
             &binary,
-            &format!("#!/bin/sh\nprintf x >> '{}'\nprintf 'cached-two-longer\\n'\n", counter.display()),
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf 'cached-two-longer\\n'\n",
+                counter.display()
+            ),
         );
         assert_eq!(
             probe_first_line(&binary, "--version").await.as_deref(),

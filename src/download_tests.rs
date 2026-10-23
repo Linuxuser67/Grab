@@ -6619,6 +6619,28 @@ fn scheduler_starts_and_stops() {
 }
 
 #[test]
+fn restore_task_guard_releases_waiters_without_claiming_success() {
+    let manager = DownloadManager::new(
+        gio::ListStore::new::<DownloadItem>(),
+        test_settings(),
+    );
+    manager.restore_pending.set(true);
+    manager.restore_complete.set(false);
+    let ready = manager.restore_ready.subscribe();
+    {
+        let _guard = RestoreTaskGuard {
+            manager: Rc::downgrade(&manager),
+            finished: false,
+        };
+        // Simulates an unexpected panic/abort before the restore task reports.
+    }
+    assert!(!manager.restore_pending.get());
+    assert!(!manager.restore_complete.get());
+    assert!(manager.restore_failed());
+    assert!(*ready.borrow(), "waiters must be released after task failure");
+}
+
+#[test]
 fn async_shutdown_preserves_queue_file_if_restore_never_completed() {
     let (_queue_lock, _main_loop_lock) = test_locks();
     let queue_file = test_queue_file("shutdown-restore-failed");

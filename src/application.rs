@@ -559,7 +559,7 @@ pub fn setup(app: &adw::Application) {
                 toasts: toasts.clone(),
                 window: win.0.clone(),
                 search_toggle: win.1,
-                add_card: win.2,
+                add_card: win.2.clone(),
             }));
             {
                 let manager = manager.clone();

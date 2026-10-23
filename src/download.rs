@@ -3158,6 +3158,10 @@ impl DownloadManager {
     }
 
     /// Remove stale `queue.json.tmp.*` files left by crashed writes.
+    fn sweep_stale_tmp() {
+        Self::sweep_stale_tmp_at(&Self::queue_file());
+    }
+
     fn sweep_stale_tmp_at(qf: &std::path::Path) {
         let Some(dir) = qf.parent() else { return };
         let Some(name) = qf.file_name().and_then(|n| n.to_str()) else {
@@ -3182,6 +3186,10 @@ impl DownloadManager {
     /// Move a broken queue file aside so the next persist starts fresh.
     /// Uses the first free `queue.json.bak`, `queue.json.bak.1`, ... slot —
     /// never clobbers a previous backup, never deletes.
+    fn quarantine_queue() {
+        Self::quarantine_queue_at(&Self::queue_file());
+    }
+
     fn quarantine_queue_at(queue_file: &std::path::Path) {
         let base = queue_file.with_extension("json.bak");
         let mut target = base.clone();
@@ -3764,19 +3772,22 @@ impl DownloadManager {
         let now = glib::DateTime::now_local()
             .map(|dt| dt.to_unix())
             .unwrap_or(0);
-        let mut due = false;
-        {
-            let _batch = self.batch_guard();
-            for item in self.items() {
-                if item.status() == DownloadStatus::Scheduled && item.scheduled_at() <= now {
-                    item.set_status(DownloadStatus::Queued);
-                    item.set_scheduled_at(0);
-                    due = true;
-                }
-            }
+        let due_items: Vec<_> = self
+            .items()
+            .filter(|item| {
+                item.status() == DownloadStatus::Scheduled && item.scheduled_at() <= now
+            })
+            .collect();
+        if due_items.is_empty() {
+            return;
         }
-        if due {
-            self.start_next();
+
+        // Batch the due rows so persistence, UI refresh, and scheduler re-arm
+        // happen once. Dropping BatchGuard also wakes the queue.
+        let _batch = self.batch_guard();
+        for item in due_items {
+            item.set_status(DownloadStatus::Queued);
+            item.set_scheduled_at(0);
         }
     }
 

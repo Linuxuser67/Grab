@@ -1080,17 +1080,12 @@ pub fn show(
                     // tool's upstream for a newer release: yt-dlp/yt-dlp,
                     // quickjs-ng/quickjs, gdl-org/builds.
                     let dirs = crate::video_tools::tool_search_dirs();
-                    let installed = crate::runtime::tokio_rt()
-                        .spawn(async move {
-                            let (yt, qjs, gdl) = tokio::join!(
-                                inspect_tool_version("yt-dlp", "--version", &dirs),
-                                inspect_tool_version("qjs", "--version", &dirs),
-                                inspect_tool_version("gallery-dl", "--version", &dirs),
-                            );
-                            (yt, qjs, gdl)
-                        })
-                        .await
-                        .ok();
+                    let (yt, qjs, gdl) = tokio::join!(
+                        inspect_tool_version("yt-dlp", "--version", &dirs),
+                        inspect_tool_version("qjs", "--version", &dirs),
+                        inspect_tool_version("gallery-dl", "--version", &dirs),
+                    );
+                    let installed = Some((yt, qjs, gdl));
                     // Upstream tags come from the update cache: a click reuses a
                     // check from the last 15 minutes. The lookups run on Grab's
                     // Tokio runtime inside update_cache, never on this GLib task.

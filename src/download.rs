@@ -227,6 +227,9 @@ pub struct DownloadManager {
     shutdown_finished: Cell<bool>,
     /// Prevent new queued rows from starting until saved active rows are restored.
     restore_pending: Cell<bool>,
+    /// False until queue restore and model application complete successfully.
+    /// When false after restore_pending clears, the original queue file must be preserved.
+    restore_complete: Cell<bool>,
     /// Queue mutations received while loading are persisted after restore completes.
     restore_dirty: Cell<bool>,
     /// Production queue loader; retained so orderly shutdown waits before persisting.
@@ -448,6 +451,7 @@ impl DownloadManager {
             shutdown_started: Cell::new(false),
             shutdown_finished: Cell::new(false),
             restore_pending: Cell::new(false),
+            restore_complete: Cell::new(cfg!(test)),
             restore_dirty: Cell::new(false),
             restore_task: RefCell::new(None),
             restore_ready,
@@ -1262,7 +1266,7 @@ impl DownloadManager {
         // Startup restore runs asynchronously in production. Don't start a newly
         // queued URL before persisted active rows have been inserted, or we can
         // briefly exceed the configured concurrency limit.
-        if self.restore_pending.get() || self.shutdown_started.get() {
+        if self.restore_pending.get() || !self.restore_complete.get() || self.shutdown_started.get() {
             return;
         }
         // Prune finished discard finalizers so the registry doesn't grow per removed row.
@@ -3221,7 +3225,7 @@ impl DownloadManager {
     fn persist_queue(&self) {
         // Avoid overwriting the saved queue with an incomplete in-memory model
         // while the asynchronous startup restore is still reading it.
-        if self.restore_pending.get() {
+        if self.restore_pending.get() || !self.restore_complete.get() {
             self.restore_dirty.set(true);
             return;
         }
@@ -3263,16 +3267,17 @@ impl DownloadManager {
     /// Tests write synchronously (no channel/task in test builds).
     fn persist_for_shutdown(&self) {
         #[cfg(test)]
-        if !self.restore_pending.get()
+        if self.restore_complete.get()
+            && !self.restore_pending.get()
             && let Some(text) = self.serialize_queue_inner(true)
         {
             Self::write_queue_file(&text);
         }
         #[cfg(not(test))]
         {
-            if self.restore_pending.get() {
+            if self.restore_pending.get() || !self.restore_complete.get() {
                 tracing::warn!(
-                    "shutdown: restore still pending; preserving saved queue rather than writing                      an incomplete snapshot"
+                    "shutdown: queue restore did not complete; preserving the saved queue file"
                 );
             } else if let (Some(text), Some(tx)) =
                 (self.serialize_queue_inner(true), &*self.persist_tx.borrow())
@@ -3542,12 +3547,15 @@ impl DownloadManager {
         {
             // Unit tests rely on restore being observable synchronously.
             let pending = Self::load_restore_queue(queue_file);
-            self.restore_pending.set(false);
             if let Some(pending) = pending {
                 self.apply_restored_queue(pending);
-            } else {
-                self.start_next();
             }
+            self.restore_pending.set(false);
+            self.restore_complete.set(true);
+            if self.restore_dirty.replace(false) {
+                self.persist_queue();
+            }
+            self.start_next();
             self.restore_ready.send_replace(true);
         }
         #[cfg(not(test))]
@@ -3560,30 +3568,54 @@ impl DownloadManager {
                 let Some(manager) = weak.upgrade() else {
                     return;
                 };
-                manager.restore_pending.set(false);
                 if manager.draining.get() {
+                    manager.restore_pending.set(false);
                     manager.restore_ready.send_replace(true);
                     return;
                 }
                 match loaded {
                     Ok(Some(pending)) => {
-                        // Applying any restored row batch persists the whole,
-                        // now-complete model, including additions made meanwhile.
+                        // Keep the start/persist gates closed until the entire
+                        // model apply and its staging sweeps have completed.
                         manager.restore_dirty.set(false);
-                        manager.apply_restored_queue(pending);
+                        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            manager.apply_restored_queue(pending)
+                        }));
+                        if let Err(payload) = applied {
+                            let message = payload
+                                .downcast_ref::<String>()
+                                .map(String::as_str)
+                                .or_else(|| payload.downcast_ref::<&str>().copied())
+                                .unwrap_or("unknown panic");
+                            tracing::error!(
+                                "download queue restore apply failed: {message}; preserving the saved queue"
+                            );
+                            manager.restore_pending.set(false);
+                            manager.restore_ready.send_replace(true);
+                            return;
+                        }
+                        manager.restore_pending.set(false);
+                        manager.restore_complete.set(true);
+                        if manager.restore_dirty.replace(false) {
+                            manager.persist_queue();
+                        }
+                        manager.start_next();
                     }
                     Ok(None) => {
+                        manager.restore_pending.set(false);
+                        manager.restore_complete.set(true);
                         if manager.restore_dirty.replace(false) {
                             manager.persist_queue();
                         }
                         manager.start_next();
                     }
                     Err(e) => {
-                        tracing::error!("download queue restore worker failed: {e}");
-                        if manager.restore_dirty.replace(false) {
-                            manager.persist_queue();
-                        }
-                        manager.start_next();
+                        tracing::error!(
+                            "download queue restore worker failed: {e}; preserving the saved queue"
+                        );
+                        manager.restore_pending.set(false);
+                        manager.restore_ready.send_replace(true);
+                        return;
                     }
                 }
                 manager.restore_ready.send_replace(true);
@@ -3609,6 +3641,12 @@ impl DownloadManager {
     /// Whether the manager has begun or completed shutdown.
     pub fn is_shutting_down(&self) -> bool {
         self.shutdown_started.get() || self.draining.get() || self.shutdown_finished.get()
+    }
+
+    /// Restore failed after startup began; callers must not enqueue or persist
+    /// over the last known-good queue until the user restarts or recovers it.
+    pub fn restore_failed(&self) -> bool {
+        !self.restore_pending.get() && !self.restore_complete.get()
     }
 
     /// File reading, size/version caps, JSON parsing, and pure stored-item
@@ -3972,10 +4010,16 @@ impl DownloadManager {
         }
         #[cfg(not(test))]
         {
-            if let (Some(text), Some(tx)) =
-                (self.serialize_queue_inner(true), &*self.persist_tx.borrow())
-            {
-                tx.send_replace(Some(text));
+            if self.restore_complete.get() && !self.restore_pending.get() {
+                if let (Some(text), Some(tx)) =
+                    (self.serialize_queue_inner(true), &*self.persist_tx.borrow())
+                {
+                    tx.send_replace(Some(text));
+                }
+            } else {
+                tracing::warn!(
+                    "shutdown: queue restore did not complete; preserving the saved queue file"
+                );
             }
             drop(self.persist_tx.borrow_mut().take());
             let persist_task = { self.persist_task.borrow_mut().take() };

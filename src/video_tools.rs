@@ -1952,7 +1952,7 @@ mod tests {
         write_test_script(
             &binary,
             &format!(
-                "#!/bin/sh\\nprintf x >> '{}'\\nsleep 0.1\\nexit 1\\n",
+                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.1\nexit 1\n",
                 counter.display()
             ),
         );

@@ -3798,10 +3798,7 @@ impl DownloadManager {
 
     /// Apply validated rows to GTK's model and snapshot cleanup keep-sets.
     /// Filesystem traversal/deletion happens later on a blocking worker.
-    fn apply_restored_queue(
-        self: &Rc<Self>,
-        pending: Vec<PendingRestore>,
-    ) -> RestoreSweepPlan {
+    fn apply_restored_queue(self: &Rc<Self>, pending: Vec<PendingRestore>) -> RestoreSweepPlan {
         let mut selections = Vec::new();
         {
             let _batch = self.batch_guard();

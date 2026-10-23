@@ -443,9 +443,8 @@ struct ImpersonateEntry {
 static IMPERSONATE_SUPPORT: OnceLock<Mutex<HashMap<PathBuf, ImpersonateEntry>>> = OnceLock::new();
 
 /// Serialize cold probes for the same executable without blocking Tokio workers.
-static IMPERSONATE_PROBE_LOCKS: OnceLock<
-    Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
-> = OnceLock::new();
+static IMPERSONATE_PROBE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
 
 /// Stat stamp for the support cache; a missing binary reports `(None, 0)`.
 fn impersonate_stamp(youtube_bin: &Path) -> (Option<std::time::SystemTime>, u64) {

@@ -591,6 +591,9 @@ async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ()> {
     let mut group = ProbeProcessGroup::new(pid);
     match tokio::time::timeout(std::time::Duration::from_secs(15), child.wait_with_output()).await {
         Ok(Ok(output)) => {
+            // The child has exited, regardless of its exit code. Do not let
+            // the drop guard signal a process group whose PID may be reused.
+            group.disarm();
             if !output.status.success() {
                 return Err(());
             }
@@ -599,7 +602,6 @@ async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ()> {
                 let line = line.to_ascii_lowercase();
                 line.contains("chrome") && !line.contains("unavailable")
             });
-            group.disarm();
             Ok(supported)
         }
         Err(_) | Ok(Err(_)) => Err(()),
@@ -710,7 +712,10 @@ async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Result<bool, ()>
         match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
             .await
         {
-            Ok(Ok(output)) => output,
+            Ok(Ok(output)) => {
+                group.disarm();
+                output
+            }
             Err(_) | Ok(Err(_)) => return Err(()),
         };
     if !output.status.success() {
@@ -721,9 +726,7 @@ async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Result<bool, ()>
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let supported = help.contains("extension_picky");
-    group.disarm();
-    Ok(supported)
+    Ok(help.contains("extension_picky"))
 }
 
 /// `--postprocessor-args` value moving the moov atom to the front of merged
@@ -1731,7 +1734,10 @@ async fn run_version_probe_uncached(
     let pid = child.id().unwrap_or_default();
     let mut group = ProbeProcessGroup::new(pid);
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
+        Ok(Ok(output)) => {
+            group.disarm();
+            output
+        }
         Ok(Err(_)) => return Err(ToolProbeError::FailedExit),
         Err(_) => return Err(ToolProbeError::Timeout),
     };
@@ -1747,7 +1753,6 @@ async fn run_version_probe_uncached(
     if first.is_empty() {
         return Err(ToolProbeError::EmptyOutput);
     }
-    group.disarm();
     Ok(first.to_owned())
 }
 

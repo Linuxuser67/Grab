@@ -665,7 +665,10 @@ pub fn show(
         name: &str,
         version_arg: &str,
         dirs: &[std::path::PathBuf],
-    ) -> Option<(std::path::PathBuf, Result<String, crate::video_tools::ToolProbeError>)> {
+    ) -> Option<(
+        std::path::PathBuf,
+        Result<String, crate::video_tools::ToolProbeError>,
+    )> {
         // PATH can contain slow mounts; keep executable checks off the GTK
         // context along with the asynchronous version subprocess.
         let name = name.to_owned();

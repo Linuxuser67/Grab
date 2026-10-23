@@ -10460,6 +10460,31 @@ fn fake_ytdlp_slow_impersonate(dir: &std::path::Path, delay_secs: u64) -> std::p
 }
 
 #[tokio::test]
+async fn concurrent_impersonation_probes_share_one_cold_process() {
+    let dir = impersonate_test_dir("deduplicated");
+    let bin = dir.join("fake-ytdlp-concurrent");
+    let counter = dir.join("counter");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--list-impersonate-targets\" ]; then\nprintf x >> '{}'\nsleep 0.1\nprintf 'Chrome  -  curl_cffi\\n'\nexit 0\nfi\nexit 1\n",
+        counter.display()
+    );
+    std::fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let (first, second) = tokio::join!(
+        ytdlp_supports_impersonation(&bin),
+        ytdlp_supports_impersonation(&bin)
+    );
+    assert!(first && second);
+    assert_eq!(std::fs::read(&counter).unwrap(), b"x");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn impersonation_probe_never_blocks_the_async_worker() {
     // A slow child must suspend this future, not park the Tokio worker.
     let dir = impersonate_test_dir("nonblocking");

@@ -717,7 +717,7 @@ async fn run_ytdlp_attempt(
     use tokio::io::AsyncBufReadExt as _;
     let mut guarded_argv = argv.to_vec();
     let guarded_proxy = crate::video_spawn::guard_untrusted_args(&mut guarded_argv)?;
-    let mut cmd = ytdlp_command(youtube_bin);
+    let mut cmd = ytdlp_command(youtube_bin).await;
     cmd.args(&guarded_argv);
     apply_proxy_env(&mut cmd, proxy);
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
@@ -1214,7 +1214,7 @@ pub(crate) async fn resolve_subtitle_lang(
             return Ok(None);
         }
     };
-    let mut cmd = ytdlp_command(youtube_bin);
+    let mut cmd = ytdlp_command(youtube_bin).await;
     cmd.args(&argv);
     // Only stdout is drained below; a piped-but-unread stderr would block
     // yt-dlp once its warnings fill the pipe buffer.
@@ -1652,7 +1652,7 @@ pub(crate) async fn run_live_ytdlp(
         );
         splice_before_terminator(&mut argv, live_info_json_args(live_info_path.as_deref()));
         let guarded_proxy = crate::video_spawn::guard_untrusted_args(&mut argv)?;
-        let mut cmd = ytdlp_command(youtube_bin);
+        let mut cmd = ytdlp_command(youtube_bin).await;
         cmd.args(&argv);
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
         crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
@@ -2049,7 +2049,7 @@ pub(crate) async fn run_hls_ytdlp(
     };
     let mut argv = hls_download_argv(&job, hls_format_id, ffmpeg_bin, &job.dest, playlist_index);
     let guarded_proxy = crate::video_spawn::guard_untrusted_args(&mut argv)?;
-    let mut cmd = ytdlp_command(youtube_bin);
+    let mut cmd = ytdlp_command(youtube_bin).await;
     cmd.args(&argv);
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());

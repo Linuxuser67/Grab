@@ -50,11 +50,16 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="6.3.0~beta.3" date="2026-10-23">
+    <release version="6.3.0" date="2026-10-23">
       <description>
         <ul>
           <li>YouTube extraction now provisions the latest stable Deno release.</li>
           <li>Gallery-dl installs and updates now use the official stable Codeberg release, verifying the Linux executable against its published SHA256SUMS file before installation.</li>
+          <li>Live HLS capture accepts generic HTTPS .m3u8 manifests as a fallback when the native HLS protocol is unavailable.</li>
+          <li>Media-tool probes share cached results and run asynchronously to reduce repeated subprocess launches and keep the GTK interface responsive.</li>
+          <li>Queue restoration, file reconciliation, and shutdown use explicit lifecycle guards and move blocking work off the GTK main thread; failed restores preserve the saved queue.</li>
+          <li>Live recordings that fail final MP4 remuxing due to timestamp or trailer errors retry with constrained stream mapping and timestamp recovery options.</li>
+          <li>Improved startup URL handoff, scheduler wakeups, process cleanup, browser-extension cookie staging permissions, and gallery-dl proxy handling.</li>
         </ul>
       </description>
     </release>

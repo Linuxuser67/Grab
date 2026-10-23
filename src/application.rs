@@ -607,7 +607,7 @@ pub fn setup(app: &adw::Application) {
                     let Some(manager) = manager_weak.upgrade() else {
                         return glib::Propagation::Proceed;
                     };
-                    if shutdown_requested.replace(true) {
+                    if shutdown_requested.replace(true) || !manager.begin_async_shutdown() {
                         return glib::Propagation::Stop;
                     }
                     window.set_sensitive(false);
@@ -615,7 +615,7 @@ pub fn setup(app: &adw::Application) {
                     let closing_done = closing.clone();
                     let ready = close_ready.clone();
                     glib::MainContext::default().spawn_local(async move {
-                        manager.shutdown_async().await;
+                        manager.finish_async_shutdown().await;
                         ready.set(true);
                         closing_done.set(false);
                         window.close();
@@ -1006,13 +1006,15 @@ fn register_actions(
                         // Claim shutdown synchronously, before yielding to the
                         // GLib context, so a concurrent close cannot start a
                         // second task that quits before persistence finishes.
-                        if shutdown_requested.replace(true) || s.manager.is_shutting_down() {
+                        if shutdown_requested.replace(true)
+                            || !s.manager.begin_async_shutdown()
+                        {
                             return;
                         }
                         let app = app.clone();
                         glib::MainContext::default().spawn_local(async move {
                             s.window.set_sensitive(false);
-                            s.manager.shutdown_async().await;
+                            s.manager.finish_async_shutdown().await;
                             app.quit();
                         });
                     } else {

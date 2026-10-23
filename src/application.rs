@@ -1059,6 +1059,7 @@ mod tests {
         is_remote_torrent_url, normalize_grab_uri, take_pending_open_files,
     };
     use gettextrs::gettext;
+    use gtk4::gio;
     use gtk4::prelude::*;
 
     #[test]

@@ -6738,6 +6738,9 @@ fn scheduler_fires_and_rearms_for_the_next_scheduled_row() {
     let second_due = now + 4;
     let first = schedule_test_item(&manager, first_due);
     let second = schedule_test_item(&manager, second_due);
+    // Allow scheduler transitions but prevent the resulting Queued rows from
+    // starting real network downloads inside this lifecycle test.
+    manager.shutdown_started.set(true);
     manager.start_scheduler();
     assert!(manager.scheduler_source.borrow().is_some());
 

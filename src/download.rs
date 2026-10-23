@@ -4031,14 +4031,17 @@ impl DownloadManager {
         if self.shutdown_finished.get() {
             return;
         }
-        // The queue reader and model applier must finish first. Otherwise a
-        // shutdown snapshot taken from an empty startup model could replace
-        // the still-valid queue file.
+        // Never wait indefinitely for startup restore during Quit. If it is
+        // still pending, cancel its main-context task and preserve the saved
+        // queue file below rather than snapshotting a partially applied model.
+        // The loader's blocking worker may finish later, but the cancelled
+        // future cannot apply its result after shutdown has been claimed.
         let restore_task = self.restore_task.borrow_mut().take();
-        if let Some(task) = restore_task
-            && let Err(error) = task.await
+        if self.restore_state.get() == RestoreState::Pending
+            && let Some(task) = restore_task
         {
-            tracing::warn!("shutdown: queue restore task failed: {error}");
+            tracing::warn!("shutdown: cancelling in-progress queue restore; preserving saved queue");
+            task.abort();
         }
         self.draining.set(true);
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();

@@ -591,15 +591,16 @@ async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ()> {
     let mut group = ProbeProcessGroup::new(pid);
     match tokio::time::timeout(std::time::Duration::from_secs(15), child.wait_with_output()).await {
         Ok(Ok(output)) => {
-            group.disarm();
             if !output.status.success() {
                 return Err(());
             }
             let out = String::from_utf8_lossy(&output.stdout);
-            Ok(out.lines().any(|line| {
+            let supported = out.lines().any(|line| {
                 let line = line.to_ascii_lowercase();
                 line.contains("chrome") && !line.contains("unavailable")
-            }))
+            });
+            group.disarm();
+            Ok(supported)
         }
         Err(_) | Ok(Err(_)) => Err(()),
     }
@@ -709,10 +710,7 @@ async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Result<bool, ()>
         match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
             .await
         {
-            Ok(Ok(output)) => {
-                group.disarm();
-                output
-            }
+            Ok(Ok(output)) => output,
             Err(_) | Ok(Err(_)) => return Err(()),
         };
     if !output.status.success() {
@@ -723,7 +721,9 @@ async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Result<bool, ()>
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    Ok(help.contains("extension_picky"))
+    let supported = help.contains("extension_picky");
+    group.disarm();
+    Ok(supported)
 }
 
 /// `--postprocessor-args` value moving the moov atom to the front of merged
@@ -1731,10 +1731,7 @@ async fn run_version_probe_uncached(
     let pid = child.id().unwrap_or_default();
     let mut group = ProbeProcessGroup::new(pid);
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => {
-            group.disarm();
-            output
-        }
+        Ok(Ok(output)) => output,
         Ok(Err(_)) => return Err(ToolProbeError::FailedExit),
         Err(_) => return Err(ToolProbeError::Timeout),
     };
@@ -1750,6 +1747,7 @@ async fn run_version_probe_uncached(
     if first.is_empty() {
         return Err(ToolProbeError::EmptyOutput);
     }
+    group.disarm();
     Ok(first.to_owned())
 }
 
@@ -1975,6 +1973,67 @@ mod tests {
             probe_first_line(&binary, "--version").await,
             Err(ToolProbeError::FailedExit)
         );
+        assert_eq!(std::fs::read(&counter).unwrap(), b"xx");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn impersonation_probe_caches_unsupported_but_retries_failures() {
+        let base = unique_dir("impersonation-failure-cache");
+        std::fs::create_dir_all(&base).unwrap();
+
+        let unsupported = base.join("yt-dlp-unsupported");
+        let unsupported_count = base.join("unsupported-count");
+        write_test_script(
+            &unsupported,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf 'Chrome (unavailable)\\n'\n",
+                unsupported_count.display()
+            ),
+        );
+        assert!(!ytdlp_supports_impersonation(&unsupported).await);
+        assert!(!ytdlp_supports_impersonation(&unsupported).await);
+        assert_eq!(std::fs::read(&unsupported_count).unwrap(), b"x");
+
+        let failed = base.join("yt-dlp-failed");
+        let failed_count = base.join("failed-count");
+        write_test_script(
+            &failed,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.1\nexit 1\n",
+                failed_count.display()
+            ),
+        );
+        assert!(!ytdlp_supports_impersonation(&failed).await);
+        assert!(!ytdlp_supports_impersonation(&failed).await);
+        assert_eq!(std::fs::read(&failed_count).unwrap(), b"x");
+
+        tokio::time::sleep(FAILED_PROBE_CACHE_TTL + std::time::Duration::from_millis(50)).await;
+        assert!(!ytdlp_supports_impersonation(&failed).await);
+        assert_eq!(std::fs::read(&failed_count).unwrap(), b"xx");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn failed_hls_probe_is_shared_briefly_then_retried() {
+        let base = unique_dir("hls-failure-cache");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("ffmpeg");
+        let counter = base.join("counter");
+        write_test_script(
+            &binary,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.1\nexit 1\n",
+                counter.display()
+            ),
+        );
+
+        assert!(!ffmpeg_supports_hls_extension_picky(&binary).await);
+        assert!(!ffmpeg_supports_hls_extension_picky(&binary).await);
+        assert_eq!(std::fs::read(&counter).unwrap(), b"x");
+
+        tokio::time::sleep(FAILED_PROBE_CACHE_TTL + std::time::Duration::from_millis(50)).await;
+        assert!(!ffmpeg_supports_hls_extension_picky(&binary).await);
         assert_eq!(std::fs::read(&counter).unwrap(), b"xx");
         std::fs::remove_dir_all(&base).ok();
     }

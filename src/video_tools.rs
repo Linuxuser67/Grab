@@ -680,17 +680,6 @@ pub(crate) async fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bo
 
 async fn ffmpeg_supports_hls_extension_picky_cached(key: PathBuf) -> bool {
     let binary = key.clone();
-    FFMPEG_HLS_CACHE
-        .get_or_init(ProbeCache::new)
-        .get_or_probe(key, &binary, FAILED_PROBE_CACHE_TTL, || async move {
-            probe_ffmpeg_hls_extension_picky(&binary).await
-        })
-        .await
-        .unwrap_or(false)
-}
-
-async fn ffmpeg_supports_hls_extension_picky_cached(key: PathBuf) -> bool {
-    let binary = key.clone();
     let probe_binary = binary.clone();
     FFMPEG_HLS_CACHE
         .get_or_init(ProbeCache::new)

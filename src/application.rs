@@ -1072,9 +1072,10 @@ fn register_actions(
 #[cfg(test)]
 mod tests {
     use super::{
-        Routed, TorrentFetchError, check_remote_torrent_uri, dispatch_open_files_or_defer,
-        enqueue_direct_handoff, fetch_remote_torrent_bytes, grab_handoff_needs_confirm,
-        handoff_should_confirm, is_remote_torrent_url, normalize_grab_uri, take_pending_open_files,
+        Routed, TorrentFetchError, appstream_release_version, check_remote_torrent_uri,
+        dispatch_open_files_or_defer, enqueue_direct_handoff, fetch_remote_torrent_bytes,
+        grab_handoff_needs_confirm, handoff_should_confirm, is_remote_torrent_url,
+        normalize_grab_uri, take_pending_open_files,
     };
     use crate::download::DownloadManager;
     use gettextrs::gettext;

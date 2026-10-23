@@ -136,7 +136,7 @@ fn main() -> glib::ExitCode {
     {
         let bin = libs.youtube;
         runtime::tokio_rt().spawn(async move {
-            video_tools::ytdlp_supports_impersonation(&bin);
+            video_tools::ytdlp_supports_impersonation(&bin).await;
         });
     }
     let app = adw::Application::builder()

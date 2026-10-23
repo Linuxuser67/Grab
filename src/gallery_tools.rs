@@ -17,6 +17,8 @@ const CODEBERG_RELEASES_BASE: &str = "https://codeberg.org/mikf/gallery-dl/relea
 /// Asset names used by stable Codeberg releases.
 const LINUX_ASSET: &str = "gallery-dl.bin";
 const CHECKSUMS_ASSET: &str = "SHA256SUMS";
+const RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
+const CHECKSUMS_MAX_BYTES: usize = 256 * 1024;
 
 /// Errors from gallery-dl tool provisioning.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -168,6 +170,30 @@ fn parse_sha256sums(body: &str, filename: &str) -> Option<String> {
     found
 }
 
+async fn bounded_response_text(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Option<String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return None;
+    }
+
+    use futures_util::StreamExt as _;
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).ok()
+}
+
 async fn latest_gallerydl_asset() -> Option<(String, Option<String>, String)> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let client = crate::download_net::tool_client_builder_proxied()
@@ -175,29 +201,25 @@ async fn latest_gallerydl_asset() -> Option<(String, Option<String>, String)> {
             .user_agent(concat!("Grab/", env!("CARGO_PKG_VERSION")))
             .build()
             .ok()?;
-        let release_body = client
+        let response = client
             .get(CODEBERG_RELEASE_API)
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
             .ok()?
             .error_for_status()
-            .ok()?
-            .text()
-            .await
             .ok()?;
+        let release_body = bounded_response_text(response, RELEASE_METADATA_MAX_BYTES).await?;
         let (tag, download_url, checksums_url) = parse_codeberg_release_metadata(&release_body)?;
 
-        let checksums = client
+        let response = client
             .get(&checksums_url)
             .send()
             .await
             .ok()?
             .error_for_status()
-            .ok()?
-            .text()
-            .await
             .ok()?;
+        let checksums = bounded_response_text(response, CHECKSUMS_MAX_BYTES).await?;
         let digest = parse_sha256sums(&checksums, LINUX_ASSET)?;
         Some((download_url, Some(digest), tag))
     });

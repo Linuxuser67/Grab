@@ -530,6 +530,33 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
     });
 }
 
+/// Route startup-open requests once the application state exists; retain them otherwise.
+/// Keeping this decision in one place makes early D-Bus/URI delivery testable.
+fn dispatch_open_files_or_defer(
+    state: Option<Rc<State>>,
+    pending: &RefCell<Vec<gio::File>>,
+    files: Vec<gio::File>,
+) {
+    if let Some(state) = state {
+        handle_open_files(state, files);
+    } else {
+        pending.borrow_mut().extend(files);
+    }
+}
+
+fn take_pending_open_files(pending: &RefCell<Vec<gio::File>>) -> Vec<gio::File> {
+    std::mem::take(&mut *pending.borrow_mut())
+}
+
+/// Atomically claim the one permitted orderly-shutdown attempt.
+/// Ordinary close and explicit Quit share this gate to avoid racing persistence.
+pub(crate) fn begin_shutdown_once(
+    manager: &DownloadManager,
+    shutdown_requested: &std::cell::Cell<bool>,
+) -> bool {
+    !shutdown_requested.replace(true) && manager.begin_async_shutdown()
+}
+
 pub fn setup(app: &adw::Application) {
     let state: Rc<RefCell<Option<Rc<State>>>> = Rc::new(RefCell::new(None));
     // GApplication can deliver open requests before startup has installed State.
@@ -580,7 +607,7 @@ pub fn setup(app: &adw::Application) {
                     }
                 });
             }
-            let pending = std::mem::take(&mut *pending_open_files.borrow_mut());
+            let pending = take_pending_open_files(&pending_open_files);
             if !pending.is_empty()
                 && let Some(s) = st.borrow().as_ref().cloned()
             {
@@ -607,7 +634,7 @@ pub fn setup(app: &adw::Application) {
                     let Some(manager) = manager_weak.upgrade() else {
                         return glib::Propagation::Proceed;
                     };
-                    if shutdown_requested.replace(true) || !manager.begin_async_shutdown() {
+                    if !begin_shutdown_once(&manager, shutdown_requested.as_ref()) {
                         return glib::Propagation::Stop;
                     }
                     window.set_sensitive(false);
@@ -689,12 +716,8 @@ pub fn setup(app: &adw::Application) {
         let st = Rc::clone(&state);
         let pending = Rc::clone(&pending_open_files);
         app.connect_open(move |_, files, _| {
-            let files = files.to_vec();
-            if let Some(s) = st.borrow().as_ref().cloned() {
-                handle_open_files(s, files);
-            } else {
-                pending.borrow_mut().extend(files);
-            }
+            let state_now = st.borrow().as_ref().cloned();
+            dispatch_open_files_or_defer(state_now, &pending, files.to_vec());
         });
     }
 
@@ -1006,7 +1029,7 @@ fn register_actions(
                         // Claim shutdown synchronously, before yielding to the
                         // GLib context, so a concurrent close cannot start a
                         // second task that quits before persistence finishes.
-                        if shutdown_requested.replace(true) || !s.manager.begin_async_shutdown() {
+                        if !begin_shutdown_once(&s.manager, shutdown_requested.as_ref()) {
                             return;
                         }
                         let app = app.clone();
@@ -1031,11 +1054,38 @@ fn register_actions(
 #[cfg(test)]
 mod tests {
     use super::{
-        TorrentFetchError, check_remote_torrent_uri, fetch_remote_torrent_bytes,
-        grab_handoff_needs_confirm, handoff_should_confirm, is_remote_torrent_url,
-        normalize_grab_uri,
+        TorrentFetchError, check_remote_torrent_uri, dispatch_open_files_or_defer,
+        fetch_remote_torrent_bytes, grab_handoff_needs_confirm, handoff_should_confirm,
+        is_remote_torrent_url, normalize_grab_uri, take_pending_open_files,
     };
     use gettextrs::gettext;
+    use gtk4::prelude::*;
+
+    #[test]
+    fn open_requests_before_state_installation_are_retained_and_drained() {
+        let pending = RefCell::new(Vec::new());
+        dispatch_open_files_or_defer(
+            None,
+            &pending,
+            vec![gio::File::for_uri("grab://example.com/first.zip")],
+        );
+        dispatch_open_files_or_defer(
+            None,
+            &pending,
+            vec![gio::File::for_uri("magnet:?xt=urn:btih:startup-intake")],
+        );
+
+        assert_eq!(pending.borrow().len(), 2);
+        let drained = take_pending_open_files(&pending);
+        assert_eq!(
+            drained.iter().map(gio::File::uri).collect::<Vec<_>>(),
+            vec![
+                "grab://example.com/first.zip".to_string(),
+                "magnet:?xt=urn:btih:startup-intake".to_string(),
+            ]
+        );
+        assert!(pending.borrow().is_empty());
+    }
 
     #[test]
     fn remote_torrent_url_detection() {

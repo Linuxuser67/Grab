@@ -439,11 +439,109 @@ impl From<Routed> for crate::extension_server::HandoffOutcome {
     }
 }
 
+/// Process files opened through GApplication after startup has installed
+/// the state and the queue manager has restored its saved rows.
+fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
+    glib::spawn_future_local(async move {
+        s.manager.wait_for_restore().await;
+        if s.manager.is_shutting_down() {
+            return;
+        }
+        if s.manager.restore_failed() {
+            s.toasts.add_toast(adw::Toast::new(&gettext(
+                "Could not process opened files because the saved queue could not be restored.",
+            )));
+            return;
+        }
+        for f in files {
+            // grab: links arrive here from the browser extension; restore
+            // the original URL so the normal routing below applies.
+            let via_grab = f
+                .uri()
+                .parse::<url::Url>()
+                .is_ok_and(|u| u.scheme() == "grab");
+            let uri_text = normalize_grab_uri(&f.uri());
+            // magnet: links arrive here when Grab is the system's magnet
+            // handler; enqueue validates them like pasted links.
+            if let Ok(uri) = uri_text.parse::<url::Url>()
+                && matches!(uri.scheme(), "http" | "https" | "magnet")
+            {
+                dispatch_handoff(&s, uri, via_grab, None);
+                continue;
+            }
+            if let Some(path) = f.path() {
+                // .torrent files go to the torrent intake.
+                if path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
+                {
+                    let (manager, toasts, add_card) =
+                        (s.manager.clone(), s.toasts.clone(), s.add_card.clone());
+                    let stem = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "download".to_string());
+                    let file_name = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| format!("{stem}.torrent"));
+                    glib::spawn_future_local(async move {
+                        let bytes = gio::spawn_blocking(move || {
+                            crate::torrent::read_torrent_bytes(&path)
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        let Some(bytes) = bytes else {
+                            toasts.add_toast(adw::Toast::new(&gettext(
+                                "Could not read that .torrent file",
+                            )));
+                            return;
+                        };
+                        // Multi-file torrents offer per-file switches in the
+                        // inline picker's right-sliding page.
+                        match crate::torrent::torrent_file_list(&bytes) {
+                            Ok((_, entries)) if entries.len() > 1 => {
+                                add_card.open_torrent_picker(file_name, bytes, entries);
+                            }
+                            Ok(_) => {
+                                if let Err(e) =
+                                    manager.enqueue_torrent_file(bytes, &stem, None, None)
+                                {
+                                    toasts.add_toast(adw::Toast::new(
+                                        &crate::ui_util::esc_markup(&e),
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                toasts.add_toast(adw::Toast::new(
+                                    &crate::ui_util::esc_markup(&e),
+                                ));
+                            }
+                        }
+                    });
+                    continue;
+                }
+                // Only .torrent files open as files now; anything else
+                // explains itself instead of queuing garbage rows.
+                s.toasts.add_toast(adw::Toast::new(&gettext(
+                    "Only .torrent files can be opened directly",
+                )));
+            }
+        }
+        s.window.present();
+    });
+}
+
 pub fn setup(app: &adw::Application) {
     let state: Rc<RefCell<Option<Rc<State>>>> = Rc::new(RefCell::new(None));
+    // GApplication can deliver open requests before startup has installed State.
+    // Retain them and dispatch once the main window and queue manager exist.
+    let pending_open_files: Rc<RefCell<Vec<gio::File>>> = Rc::new(RefCell::new(Vec::new()));
 
     {
         let st = Rc::clone(&state);
+        let pending_open_files = Rc::clone(&pending_open_files);
         app.connect_startup(move |app| {
             // Browser extension integration via HTTP (see extension_server):
             // the server forwards URLs here, and we enqueue them like
@@ -471,11 +569,32 @@ pub fn setup(app: &adw::Application) {
             st.borrow_mut().replace(Rc::new(State {
                 manager: manager.clone(),
                 settings,
-                toasts,
+                toasts: toasts.clone(),
                 window: win.0.clone(),
                 search_toggle: win.1,
                 add_card: win.2,
             }));
+            {
+                let manager = manager.clone();
+                let card = win.2.clone();
+                let toasts = toasts.clone();
+                glib::spawn_future_local(async move {
+                    manager.wait_for_restore().await;
+                    if manager.restore_failed() {
+                        toasts.add_toast(adw::Toast::new(&gettext(
+                            "Could not restore the saved queue. The original queue file was preserved; restart Grab to try again.",
+                        )));
+                    } else if !manager.is_shutting_down() {
+                        card.widget().set_sensitive(true);
+                    }
+                });
+            }
+            let pending = std::mem::take(&mut *pending_open_files.borrow_mut());
+            if !pending.is_empty()
+                && let Some(s) = st.borrow().as_ref().cloned()
+            {
+                handle_open_files(s, pending);
+            }
 
             // The normal close path must not block GTK while joining tasks or
             // flushing queue state. Stop the first close, wait asynchronously,
@@ -564,95 +683,14 @@ pub fn setup(app: &adw::Application) {
 
     {
         let st = Rc::clone(&state);
+        let pending = Rc::clone(&pending_open_files);
         app.connect_open(move |_, files, _| {
-            let s = match st.borrow().as_ref().cloned() {
-                Some(s) => s,
-                None => return,
-            };
             let files = files.to_vec();
-            glib::spawn_future_local(async move {
-                s.manager.wait_for_restore().await;
-                if s.manager.is_shutting_down() {
-                    return;
-                }
-                for f in files {
-                    // grab: links arrive here from the browser extension; restore
-                    // the original URL so the normal routing below applies.
-                    let via_grab = f
-                        .uri()
-                        .parse::<url::Url>()
-                        .is_ok_and(|u| u.scheme() == "grab");
-                    let uri_text = normalize_grab_uri(&f.uri());
-                    // magnet: links arrive here when Grab is the system's magnet
-                    // handler; enqueue validates them like pasted links.
-                    if let Ok(uri) = uri_text.parse::<url::Url>()
-                        && matches!(uri.scheme(), "http" | "https" | "magnet")
-                    {
-                        dispatch_handoff(&s, uri, via_grab, None);
-                        continue;
-                    }
-                    if let Some(path) = f.path() {
-                        // .torrent files go to the torrent intake.
-                        if path
-                            .extension()
-                            .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
-                        {
-                            let (manager, toasts, add_card) =
-                                (s.manager.clone(), s.toasts.clone(), s.add_card.clone());
-                            let stem = path
-                                .file_stem()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| "download".to_string());
-                            let file_name = path
-                                .file_name()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| format!("{stem}.torrent"));
-                            glib::spawn_future_local(async move {
-                                let bytes = gio::spawn_blocking(move || {
-                                    crate::torrent::read_torrent_bytes(&path)
-                                })
-                                .await
-                                .ok()
-                                .flatten();
-                                let Some(bytes) = bytes else {
-                                    toasts.add_toast(adw::Toast::new(&gettext(
-                                        "Could not read that .torrent file",
-                                    )));
-                                    return;
-                                };
-                                // Multi-file torrents offer per-file switches in the
-                                // inline picker's right-sliding page.
-                                match crate::torrent::torrent_file_list(&bytes) {
-                                    Ok((_, entries)) if entries.len() > 1 => {
-                                        add_card.open_torrent_picker(file_name, bytes, entries);
-                                    }
-                                    Ok(_) => {
-                                        if let Err(e) =
-                                            manager.enqueue_torrent_file(bytes, &stem, None, None)
-                                        {
-                                            toasts.add_toast(adw::Toast::new(
-                                                &crate::ui_util::esc_markup(&e),
-                                            ));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        toasts.add_toast(adw::Toast::new(
-                                            &crate::ui_util::esc_markup(&e),
-                                        ));
-                                    }
-                                }
-                            });
-                            continue;
-                        }
-                        // Only .torrent files open as files now; anything else
-                        // explains itself instead of queuing garbage rows.
-                        s.toasts.add_toast(adw::Toast::new(&gettext(
-                            "Only .torrent files can be opened directly",
-                        )));
-                    }
-                }
-                s.window.present();
-            });
+            if let Some(s) = st.borrow().as_ref().cloned() {
+                handle_open_files(s, files);
+            } else {
+                pending.borrow_mut().extend(files);
+            }
         });
     }
 

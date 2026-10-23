@@ -3890,8 +3890,10 @@ impl DownloadManager {
         // shutdown snapshot taken from an empty startup model could replace
         // the still-valid queue file.
         let restore_task = self.restore_task.borrow_mut().take();
-        if let Some(task) = restore_task {
-            task.await;
+        if let Some(task) = restore_task
+            && let Err(error) = task.await
+        {
+            tracing::warn!("shutdown: queue restore task failed: {error}");
         }
         self.draining.set(true);
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
@@ -3965,7 +3967,6 @@ impl DownloadManager {
         #[cfg(test)]
         {
             self.persist_for_shutdown();
-            return;
         }
         #[cfg(not(test))]
         {
@@ -3975,7 +3976,8 @@ impl DownloadManager {
                 tx.send_replace(Some(text));
             }
             drop(self.persist_tx.borrow_mut().take());
-            if let Some(task) = self.persist_task.borrow_mut().take() {
+            let persist_task = { self.persist_task.borrow_mut().take() };
+            if let Some(task) = persist_task {
                 let (done_tx, done_rx) = tokio::sync::oneshot::channel();
                 tokio_rt().spawn(async move {
                     let result =

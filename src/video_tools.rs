@@ -601,10 +601,10 @@ pub(crate) async fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bo
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
     {
-        if let Some(entry) = cache.get(&key) {
-            if entry.stamp == stamp {
-                return entry.supported;
-            }
+        if let Some(entry) = cache.get(&key)
+            && entry.stamp == stamp
+        {
+            return entry.supported;
         }
         cache.remove(&key);
     }
@@ -613,13 +613,13 @@ pub(crate) async fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bo
         return false;
     };
     let after = impersonate_stamp(ffmpeg_bin);
-    if stamp != (None, 0) && stamp == after {
-        if let Ok(mut cache) = FFMPEG_HLS_SUPPORT
+    if stamp != (None, 0)
+        && stamp == after
+        && let Ok(mut cache) = FFMPEG_HLS_SUPPORT
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
-        {
-            cache.insert(key, FfmpegHlsSupportEntry { stamp, supported });
-        }
+    {
+        cache.insert(key, FfmpegHlsSupportEntry { stamp, supported });
     }
     supported
 }
@@ -1634,10 +1634,10 @@ async fn cached_tool_first_line(binary: PathBuf, version_arg: String) -> Option<
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
     {
-        if let Some(entry) = cache.get(&key) {
-            if entry.stamp == stamp {
-                return Some(entry.line.clone());
-            }
+        if let Some(entry) = cache.get(&key)
+            && entry.stamp == stamp
+        {
+            return Some(entry.line.clone());
         }
         cache.remove(&key);
     }
@@ -1646,19 +1646,19 @@ async fn cached_tool_first_line(binary: PathBuf, version_arg: String) -> Option<
     // Don't cache a result if the executable was replaced while the child ran
     // or the path no longer has a verifiable file stamp.
     let after = impersonate_stamp(&binary);
-    if stamp != (None, 0) && stamp == after {
-        if let Ok(mut cache) = TOOL_VERSION_CACHE
+    if stamp != (None, 0)
+        && stamp == after
+        && let Ok(mut cache) = TOOL_VERSION_CACHE
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
-        {
-            cache.insert(
-                key,
-                ToolVersionEntry {
-                    stamp,
-                    line: line.clone(),
-                },
-            );
-        }
+    {
+        cache.insert(
+            key,
+            ToolVersionEntry {
+                stamp,
+                line: line.clone(),
+            },
+        );
     }
     Some(line)
 }

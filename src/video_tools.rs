@@ -1827,8 +1827,8 @@ mod tests {
         );
 
         assert_eq!(
-            probe_first_line(&binary, "--version").await.as_deref(),
-            Some("2026.10.21.233146")
+            probe_first_line(&binary, "--version").await.unwrap(),
+            "2026.10.21.233146"
         );
         std::fs::remove_dir_all(&base).ok();
     }
@@ -1848,12 +1848,12 @@ mod tests {
         );
 
         assert_eq!(
-            probe_first_line(&binary, "--version").await.as_deref(),
-            Some("cached-one")
+            probe_first_line(&binary, "--version").await.unwrap(),
+            "cached-one"
         );
         assert_eq!(
-            probe_first_line(&binary, "--version").await.as_deref(),
-            Some("cached-one")
+            probe_first_line(&binary, "--version").await.unwrap(),
+            "cached-one"
         );
         assert_eq!(std::fs::read(&counter).unwrap(), b"x");
 
@@ -1865,8 +1865,8 @@ mod tests {
             ),
         );
         assert_eq!(
-            probe_first_line(&binary, "--version").await.as_deref(),
-            Some("cached-two-longer")
+            probe_first_line(&binary, "--version").await.unwrap(),
+            "cached-two-longer"
         );
         assert_eq!(std::fs::read(&counter).unwrap(), b"xx");
         std::fs::remove_dir_all(&base).ok();
@@ -1882,7 +1882,57 @@ mod tests {
             "#!/bin/sh\nprintf '2026.10.21.233146\\n'\nexit 1\n",
         );
 
-        assert_eq!(probe_first_line(&binary, "--version").await, None);
+        assert_eq!(
+            probe_first_line(&binary, "--version").await,
+            Err(ToolProbeError::FailedExit)
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn async_version_probe_times_out_for_a_hung_tool() {
+        let base = unique_dir("version-probe-timeout");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("yt-dlp");
+        write_test_script(&binary, "#!/bin/sh\nsleep 5\nprintf 'never-reached\\n'\n");
+
+        let start = std::time::Instant::now();
+        let result = run_version_probe_uncached(
+            &binary,
+            "--version",
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(result, Err(ToolProbeError::Timeout));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "the probe did not enforce its deadline: {:?}",
+            start.elapsed()
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn concurrent_version_probes_share_one_cold_process() {
+        let base = unique_dir("version-probe-concurrent");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("yt-dlp");
+        let counter = base.join("counter");
+        write_test_script(
+            &binary,
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.1\nprintf 'shared\\n'\n",
+                counter.display()
+            ),
+        );
+
+        let (first, second) = tokio::join!(
+            probe_first_line(&binary, "--version"),
+            probe_first_line(&binary, "--version")
+        );
+        assert_eq!(first.unwrap(), "shared");
+        assert_eq!(second.unwrap(), "shared");
+        assert_eq!(std::fs::read(&counter).unwrap(), b"x");
         std::fs::remove_dir_all(&base).ok();
     }
 

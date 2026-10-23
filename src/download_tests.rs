@@ -6625,13 +6625,14 @@ fn restore_task_guard_releases_waiters_without_claiming_success() {
     manager.restore_complete.set(false);
     manager.restore_ready.send_replace(false);
     let ready = manager.restore_ready.subscribe();
-    {
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _guard = RestoreTaskGuard {
             manager: Rc::downgrade(&manager),
             finished: false,
         };
-        // Simulates an unexpected panic/abort before the restore task reports.
-    }
+        panic!("simulated restore-task panic");
+    }));
+    assert!(panicked.is_err());
     assert!(!manager.restore_pending.get());
     assert!(!manager.restore_complete.get());
     assert!(manager.restore_failed());

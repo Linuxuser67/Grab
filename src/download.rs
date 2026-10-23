@@ -227,6 +227,8 @@ pub struct DownloadManager {
     shutdown_finished: Cell<bool>,
     /// Prevent new queued rows from starting until saved active rows are restored.
     restore_pending: Cell<bool>,
+    /// Queue mutations received while loading are persisted after restore completes.
+    restore_dirty: Cell<bool>,
     /// Production queue loader; retained so orderly shutdown waits before persisting.
     restore_task: RefCell<Option<glib::JoinHandle<()>>>,
     /// Queue persist channel: `watch` keeps only the latest value, so rapid
@@ -443,6 +445,7 @@ impl DownloadManager {
             shutdown_started: Cell::new(false),
             shutdown_finished: Cell::new(false),
             restore_pending: Cell::new(false),
+            restore_dirty: Cell::new(false),
             restore_task: RefCell::new(None),
             persist_tx: RefCell::new(persist_tx),
             persist_task: RefCell::new(persist_task),
@@ -1255,7 +1258,7 @@ impl DownloadManager {
         // Startup restore runs asynchronously in production. Don't start a newly
         // queued URL before persisted active rows have been inserted, or we can
         // briefly exceed the configured concurrency limit.
-        if self.restore_pending.get() {
+        if self.restore_pending.get() || self.shutdown_started.get() {
             return;
         }
         // Prune finished discard finalizers so the registry doesn't grow per removed row.
@@ -3215,6 +3218,7 @@ impl DownloadManager {
         // Avoid overwriting the saved queue with an incomplete in-memory model
         // while the asynchronous startup restore is still reading it.
         if self.restore_pending.get() {
+            self.restore_dirty.set(true);
             return;
         }
         // `watch::send_replace` keeps only the latest value: rapid state changes
@@ -3255,12 +3259,18 @@ impl DownloadManager {
     /// Tests write synchronously (no channel/task in test builds).
     fn persist_for_shutdown(&self) {
         #[cfg(test)]
-        if let Some(text) = self.serialize_queue_inner(true) {
+        if !self.restore_pending.get()
+            && let Some(text) = self.serialize_queue_inner(true)
+        {
             Self::write_queue_file(&text);
         }
         #[cfg(not(test))]
         {
-            if let (Some(text), Some(tx)) =
+            if self.restore_pending.get() {
+                tracing::warn!(
+                    "shutdown: restore still pending; preserving saved queue rather than writing an incomplete snapshot"
+                );
+            } else if let (Some(text), Some(tx)) =
                 (self.serialize_queue_inner(true), &*self.persist_tx.borrow())
             {
                 tx.send_replace(Some(text));
@@ -3547,10 +3557,23 @@ impl DownloadManager {
                     return;
                 }
                 match loaded {
-                    Ok(Some(pending)) => manager.apply_restored_queue(pending),
-                    Ok(None) => manager.start_next(),
+                    Ok(Some(pending)) => {
+                        // Applying any restored row batch persists the whole,
+                        // now-complete model, including additions made meanwhile.
+                        manager.restore_dirty.set(false);
+                        manager.apply_restored_queue(pending);
+                    }
+                    Ok(None) => {
+                        if manager.restore_dirty.replace(false) {
+                            manager.persist_queue();
+                        }
+                        manager.start_next();
+                    }
                     Err(e) => {
                         tracing::error!("download queue restore worker failed: {e}");
+                        if manager.restore_dirty.replace(false) {
+                            manager.persist_queue();
+                        }
                         manager.start_next();
                     }
                 }

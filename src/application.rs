@@ -461,10 +461,42 @@ pub fn setup(app: &adw::Application) {
                 manager: manager.clone(),
                 settings,
                 toasts,
-                window: win.0,
+                window: win.0.clone(),
                 search_toggle: win.1,
                 add_card: win.2,
             }));
+
+            // The normal close path must not block GTK while joining tasks or
+            // flushing queue state. Stop the first close, wait asynchronously,
+            // then replay the close once shutdown is complete.
+            let manager_weak = Rc::downgrade(&manager);
+            let closing = Rc::new(std::cell::Cell::new(false));
+            let close_ready = Rc::new(std::cell::Cell::new(false));
+            win.0.connect_close_request({
+                let closing = closing.clone();
+                let close_ready = close_ready.clone();
+                move |window| {
+                    if close_ready.get() {
+                        return glib::Propagation::Proceed;
+                    }
+                    if closing.replace(true) {
+                        return glib::Propagation::Stop;
+                    }
+                    let Some(manager) = manager_weak.upgrade() else {
+                        return glib::Propagation::Proceed;
+                    };
+                    let window = window.clone();
+                    let closing_done = closing.clone();
+                    let ready = close_ready.clone();
+                    glib::MainContext::default().spawn_local(async move {
+                        manager.shutdown_async().await;
+                        ready.set(true);
+                        closing_done.set(false);
+                        window.close();
+                    });
+                    glib::Propagation::Stop
+                }
+            });
 
             // Extension HTTP server -> download queue bridge. Routes through
             // the same confirm dialog and route_open_uri as grab:// handoffs.
@@ -896,7 +928,15 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                 .build()
         },
         gio::ActionEntry::builder("quit")
-            .activate(|app: &adw::Application, _, _| app.quit())
+            .activate(|app: &adw::Application, _, _| {
+                // Regular Quit closes the window through its asynchronous
+                // shutdown path. Keep app.quit for the no-window fallback.
+                if let Some(window) = app.active_window().or_else(|| app.windows().into_iter().next()) {
+                    window.close();
+                } else {
+                    app.quit();
+                }
+            })
             .build(),
         gio::ActionEntry::builder("present")
             .activate(|app: &adw::Application, _, _| app.activate())

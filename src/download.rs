@@ -218,9 +218,13 @@ pub struct DownloadManager {
     /// a second extraction. Session-only; never persisted. Stale entries
     /// are harmless: yt-dlp re-extracts if a loaded format URL 403/404s.
     probe_json_cache: RefCell<HashMap<ProbeJsonKey, (std::time::Instant, serde_json::Value)>>,
-    /// The 30s schedule checker's source, if running. Kept so the
-    /// scheduling preference can stop the timer entirely.
+    /// The one-shot schedule timer, removed when no scheduled rows remain.
     scheduler_source: RefCell<Option<glib::SourceId>>,
+    /// Re-arms the timer when any queue row changes.
+    scheduler_refresh: RefCell<Option<Box<dyn Fn()>>>,
+    /// Guards normal async shutdown and the synchronous fallback.
+    shutdown_started: Cell<bool>,
+    shutdown_finished: Cell<bool>,
     /// Queue persist channel: `watch` keeps only the latest value, so rapid
     /// state changes coalesce to a single write. The tokio task (below) is the
     /// sole writer, which makes writes ordered by construction.
@@ -431,6 +435,9 @@ impl DownloadManager {
             sizing_inflight: Rc::new(Cell::new(0)),
             probe_json_cache: RefCell::new(HashMap::new()),
             scheduler_source: RefCell::new(None),
+            scheduler_refresh: RefCell::new(None),
+            shutdown_started: Cell::new(false),
+            shutdown_finished: Cell::new(false),
             persist_tx: RefCell::new(persist_tx),
             persist_task: RefCell::new(persist_task),
         });
@@ -526,6 +533,9 @@ impl DownloadManager {
                 .filter(|it| it.status() == DownloadStatus::Queued)
                 .count(),
         );
+        if let Some(refresh) = self.scheduler_refresh.borrow().as_ref() {
+            refresh();
+        }
         if let Some(cb) = self.on_change.borrow().as_ref() {
             cb();
         }
@@ -3144,13 +3154,11 @@ impl DownloadManager {
         }
         let mut dir = glib::user_data_dir();
         dir.push("grab");
-        let _ = std::fs::create_dir_all(&dir);
         dir.join("queue.json")
     }
 
     /// Remove stale `queue.json.tmp.*` files left by crashed writes.
-    fn sweep_stale_tmp() {
-        let qf = Self::queue_file();
+    fn sweep_stale_tmp_at(qf: &std::path::Path) {
         let Some(dir) = qf.parent() else { return };
         let Some(name) = qf.file_name().and_then(|n| n.to_str()) else {
             return;
@@ -3174,19 +3182,19 @@ impl DownloadManager {
     /// Move a broken queue file aside so the next persist starts fresh.
     /// Uses the first free `queue.json.bak`, `queue.json.bak.1`, ... slot —
     /// never clobbers a previous backup, never deletes.
-    fn quarantine_queue() {
-        let base = Self::queue_file().with_extension("json.bak");
+    fn quarantine_queue_at(queue_file: &std::path::Path) {
+        let base = queue_file.with_extension("json.bak");
         let mut target = base.clone();
         let mut n = 0;
         while target.exists() {
             n += 1;
-            target = Self::queue_file().with_extension(format!("json.bak.{n}"));
+            target = queue_file.with_extension(format!("json.bak.{n}"));
             if n > 99 {
                 tracing::error!("too many queue backups; keeping broken queue in place");
                 return;
             }
         }
-        if let Err(e) = std::fs::rename(Self::queue_file(), &target) {
+        if let Err(e) = std::fs::rename(queue_file, &target) {
             tracing::error!("could not quarantine download queue: {e}");
         }
     }
@@ -3347,10 +3355,19 @@ impl DownloadManager {
     /// construction. Runs via `spawn_blocking`, never on the async runtime or
     /// the UI thread.
     fn write_queue_file(text: &str) {
+        // Resolve and prepare the parent here: this function runs on the writer
+        // task (or synchronously in unit tests), not from the normal GTK path.
+        let queue_file = Self::queue_file();
+        if let Some(parent) = queue_file.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::error!("could not create download queue directory: {e}");
+            return;
+        }
         // Temp name is unique per write (PID + monotonic counter): a pre-existing
         // symlink at this path cannot be predicted, and `create_new` refuses to
         // follow symlinks or overwrite an existing file.
-        let tmp = Self::queue_file().with_extension(format!(
+        let tmp = queue_file.with_extension(format!(
             "json.tmp.{}.{}",
             std::process::id(),
             QUEUE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -3370,12 +3387,12 @@ impl DownloadManager {
         };
         match write_tmp() {
             Ok(()) => {
-                if let Err(e) = std::fs::rename(&tmp, Self::queue_file()) {
+                if let Err(e) = std::fs::rename(&tmp, &queue_file) {
                     tracing::error!("could not replace download queue: {e}");
                     let _ = std::fs::remove_file(&tmp);
                     return;
                 }
-                if let Some(parent) = Self::queue_file().parent()
+                if let Some(parent) = queue_file.parent()
                     && let Ok(dir) = std::fs::File::open(parent)
                 {
                     let _ = dir.sync_all();
@@ -3484,67 +3501,100 @@ impl DownloadManager {
         })
     }
 
-    /// Load the persisted queue (cap: 1000 items / 10 MB), then resume. Unusable files move to `queue.json.bak`, never deleted.
+    /// Read and validate the saved queue away from GTK's main context.
+    /// Only the later ListStore/model insertion is applied on the main context.
     pub fn restore_queue(self: &Rc<Self>) {
-        // Sweep stale tmp files from crashed writes: `write_queue_file` uses
-        // `queue.json.tmp.<pid>.<n>` and renames on success, so any leftover
-        // is from a crash between create_new and rename.
-        Self::sweep_stale_tmp();
-        // Staging files are `grab-<id>-*` in each destination dir; the
-        // `staging_occupied` check at row creation skips IDs with leftovers.
-        if Self::queue_file().exists() {
-            const MAX_QUEUE_BYTES: u64 = 10_000_000;
-            const MAX_QUEUE_ITEMS: usize = 1000;
-            if std::fs::metadata(Self::queue_file())
-                .map(|m| m.len() > MAX_QUEUE_BYTES)
-                .unwrap_or(true)
-            {
-                tracing::warn!("quarantining oversized download queue");
-                Self::quarantine_queue();
-                return;
-            };
-            let Ok(text) = std::fs::read_to_string(Self::queue_file()) else {
-                tracing::warn!("quarantining unreadable download queue");
-                Self::quarantine_queue();
-                return;
-            };
-            let Ok(queue) = serde_json::from_str::<StoredQueue>(&text) else {
-                tracing::warn!("quarantining unreadable download queue");
-                Self::quarantine_queue();
-                return;
-            };
-            if queue.version == 0 || queue.version > QUEUE_VERSION {
-                tracing::warn!("quarantining download queue version {}", queue.version);
-                Self::quarantine_queue();
-                return;
+        let queue_file = Self::queue_file();
+        #[cfg(test)]
+        {
+            // Unit tests rely on restore being observable synchronously.
+            if let Some(pending) = Self::load_restore_queue(queue_file) {
+                self.apply_restored_queue(pending);
             }
-            // Over-cap queues keep every resumable item first, then the newest history.
-            let mut items = queue.items;
-            if items.len() > MAX_QUEUE_ITEMS {
-                tracing::warn!(
-                    "truncating download queue ({} items, keeping active first)",
-                    items.len()
-                );
-                let (mut active, done): (Vec<StoredItem>, Vec<StoredItem>) = items
-                    .into_iter()
-                    .partition(|it| !matches!(it.status, DownloadStatus::Done));
-                active.truncate(MAX_QUEUE_ITEMS);
-                let skip = done.len().saturating_sub(MAX_QUEUE_ITEMS - active.len());
-                items = active
-                    .into_iter()
-                    .chain(done.into_iter().skip(skip))
-                    .collect();
-            }
-            {
-                let _batch = self.batch_guard();
-                // Two phases: collect all restore decisions first, then apply — a mid-loop failure can no longer leave half-spawned engines.
-                let mut pending = Vec::with_capacity(items.len());
-                for item in items {
-                    if let Some(p) = Self::validate_stored_item(item) {
-                        pending.push(p);
+        }
+        #[cfg(not(test))]
+        {
+            let weak = Rc::downgrade(self);
+            glib::spawn_future_local(async move {
+                let loaded = tokio_rt()
+                    .spawn_blocking(move || Self::load_restore_queue(queue_file))
+                    .await;
+                match loaded {
+                    Ok(Some(pending)) => {
+                        if let Some(manager) = weak.upgrade()
+                            && !manager.draining.get()
+                        {
+                            manager.apply_restored_queue(pending);
+                        }
                     }
+                    Ok(None) => {}
+                    Err(e) => tracing::error!("download queue restore worker failed: {e}"),
                 }
-                for p in pending {
+            });
+        }
+    }
+
+    /// File reading, size/version caps, JSON parsing, and pure stored-item
+    /// validation run on a blocking worker. No GTK/GObject values are created.
+    fn load_restore_queue(queue_file: std::path::PathBuf) -> Option<Vec<PendingRestore>> {
+        Self::sweep_stale_tmp_at(&queue_file);
+        if !queue_file.exists() {
+            return None;
+        }
+
+        const MAX_QUEUE_BYTES: u64 = 10_000_000;
+        const MAX_QUEUE_ITEMS: usize = 1000;
+        if std::fs::metadata(&queue_file)
+            .map(|m| m.len() > MAX_QUEUE_BYTES)
+            .unwrap_or(true)
+        {
+            tracing::warn!("quarantining oversized download queue");
+            Self::quarantine_queue_at(&queue_file);
+            return None;
+        }
+        let Ok(text) = std::fs::read_to_string(&queue_file) else {
+            tracing::warn!("quarantining unreadable download queue");
+            Self::quarantine_queue_at(&queue_file);
+            return None;
+        };
+        let Ok(queue) = serde_json::from_str::<StoredQueue>(&text) else {
+            tracing::warn!("quarantining unreadable download queue");
+            Self::quarantine_queue_at(&queue_file);
+            return None;
+        };
+        if queue.version == 0 || queue.version > QUEUE_VERSION {
+            tracing::warn!("quarantining download queue version {}", queue.version);
+            Self::quarantine_queue_at(&queue_file);
+            return None;
+        }
+
+        // Preserve the existing policy: resumable entries first, then newest history.
+        let mut items = queue.items;
+        if items.len() > MAX_QUEUE_ITEMS {
+            tracing::warn!(
+                "truncating download queue ({} items, keeping active first)",
+                items.len()
+            );
+            let (mut active, done): (Vec<StoredItem>, Vec<StoredItem>) = items
+                .into_iter()
+                .partition(|it| !matches!(it.status, DownloadStatus::Done));
+            active.truncate(MAX_QUEUE_ITEMS);
+            let skip = done.len().saturating_sub(MAX_QUEUE_ITEMS - active.len());
+            items = active
+                .into_iter()
+                .chain(done.into_iter().skip(skip))
+                .collect();
+        }
+        Some(items.into_iter().filter_map(Self::validate_stored_item).collect())
+    }
+
+    /// Apply validated records to GTK's model and then sweep crash leftovers.
+    fn apply_restored_queue(self: &Rc<Self>, pending: Vec<PendingRestore>) {
+        {
+            let _batch = self.batch_guard();
+            // JSON parsing and per-row validation completed off-thread.
+            // GObject construction and model mutation stay on this context.
+            for p in pending {
                     match p.item.status {
                         DownloadStatus::Done => {
                             // Gallery Done rows need their flags; insert_history
@@ -3637,36 +3687,67 @@ impl DownloadManager {
                     crate::torrent::sweep_session_orphans(&keep).await;
                 });
             }
-        }
     }
 
-    /// Start the schedule checker: every 30s, queue any scheduled downloads whose time has arrived.
-    /// Uses `timeout_add_seconds_local` (main thread, no worker needed — the check is a cheap store scan).
-    /// No-op when the scheduling preference is off or the checker is already running.
+    /// Arm a one-shot wake for the earliest scheduled row. A one-minute
+    /// fallback handles wall-clock changes; ordinary due items wake at their
+    /// own deadline instead of waiting for a fixed 30-second polling interval.
     pub fn start_scheduler(self: &Rc<Self>) {
-        if !self.settings.scheduled_downloads_enabled() || self.scheduler_source.borrow().is_some()
-        {
+        if !self.settings.scheduled_downloads_enabled() {
             return;
         }
-        // Weak ref: the timer must die with the manager (see `Drop`).
+        if self.scheduler_refresh.borrow().is_none() {
+            let weak = Rc::downgrade(self);
+            self.scheduler_refresh.replace(Some(Box::new(move || {
+                if let Some(manager) = weak.upgrade() {
+                    manager.arm_scheduler_timer();
+                }
+            })));
+        }
+        self.arm_scheduler_timer();
+    }
+
+    fn arm_scheduler_timer(self: &Rc<Self>) {
+        if let Some(id) = self.scheduler_source.take() {
+            id.remove();
+        }
+        if !self.settings.scheduled_downloads_enabled() {
+            return;
+        }
+        let Some(next_due) = self
+            .items()
+            .filter(|item| item.status() == DownloadStatus::Scheduled)
+            .map(|item| item.scheduled_at())
+            .min()
+        else {
+            return;
+        };
+
+        let now = glib::DateTime::now_local()
+            .map(|dt| dt.to_unix())
+            .unwrap_or(0);
+        const CLOCK_CHANGE_RECHECK_SECS: i64 = 60;
+        let delay = next_due
+            .saturating_sub(now)
+            .max(1)
+            .min(CLOCK_CHANGE_RECHECK_SECS) as u32;
         let weak = Rc::downgrade(self);
-        let id = glib::timeout_add_seconds_local(30, move || {
-            if let Some(m) = weak.upgrade() {
-                m.check_scheduled();
-                glib::ControlFlow::Continue
-            } else {
-                glib::ControlFlow::Break
+        let id = glib::timeout_add_seconds_local_once(delay, move || {
+            if let Some(manager) = weak.upgrade() {
+                manager.scheduler_source.borrow_mut().take();
+                manager.check_scheduled();
+                manager.arm_scheduler_timer();
             }
         });
         self.scheduler_source.replace(Some(id));
     }
 
-    /// Stop the schedule checker entirely: the source is removed, so no 30s
-    /// wakeups happen while the scheduling preference is off.
+    /// Stop the schedule checker entirely: remove its source and change hook.
     pub fn stop_scheduler(&self) {
         if let Some(id) = self.scheduler_source.take() {
             id.remove();
         }
+        self.scheduler_refresh.borrow_mut().take();
     }
 
     /// Start or stop the scheduler to match the scheduling preference.
@@ -3678,22 +3759,23 @@ impl DownloadManager {
         }
     }
 
-    /// Queue scheduled downloads whose time has arrived. Called by the scheduler timer.
+    /// Queue scheduled downloads whose time has arrived.
     pub(crate) fn check_scheduled(self: &Rc<Self>) {
         let now = glib::DateTime::now_local()
             .map(|dt| dt.to_unix())
             .unwrap_or(0);
         let mut due = false;
-        for item in self.items() {
-            if item.status() == DownloadStatus::Scheduled && item.scheduled_at() <= now {
-                item.set_status(DownloadStatus::Queued);
-                item.set_scheduled_at(0);
-                due = true;
+        {
+            let _batch = self.batch_guard();
+            for item in self.items() {
+                if item.status() == DownloadStatus::Scheduled && item.scheduled_at() <= now {
+                    item.set_status(DownloadStatus::Queued);
+                    item.set_scheduled_at(0);
+                    due = true;
+                }
             }
         }
         if due {
-            self.changed();
-            self.persist_queue();
             self.start_next();
         }
     }
@@ -3706,9 +3788,92 @@ impl DownloadManager {
     /// so the only thing a longer bound buys is a longer frozen quit.
     const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
 
-    /// Abort running tasks and persist the queue for the next launch.
+    /// Abort running tasks and persist the queue for the next launch. Normal
+    /// window close uses shutdown_async to avoid blocking the GTK context.
     pub fn shutdown(&self) {
+        if self.shutdown_finished.get() || self.shutdown_started.replace(true) {
+            return;
+        }
         self.shutdown_with_timeout(Self::SHUTDOWN_JOIN_TIMEOUT);
+        self.shutdown_finished.set(true);
+    }
+
+    /// Asynchronous lifecycle path for an orderly window close.
+    pub async fn shutdown_async(self: &Rc<Self>) {
+        if self.shutdown_finished.get() || self.shutdown_started.replace(true) {
+            return;
+        }
+        self.draining.set(true);
+        let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
+        let finals: Vec<PendingDiscard> =
+            self.discards.borrow_mut().drain().map(|(_, p)| p).collect();
+        for handle in &handles {
+            handle.abort();
+        }
+        for pending in &finals {
+            pending.worker_abort.abort();
+        }
+
+        let (joined_tx, joined_rx) = tokio::sync::oneshot::channel();
+        tokio_rt().spawn(async move {
+            let joined = tokio::time::timeout(Self::SHUTDOWN_JOIN_TIMEOUT, async {
+                for handle in handles {
+                    let _ = handle.await;
+                }
+                for pending in finals {
+                    let _ = pending.finalizer.await;
+                }
+            })
+            .await
+            .is_ok();
+            let _ = joined_tx.send(joined);
+        });
+        let joined = joined_rx.await.unwrap_or(false);
+        if !joined {
+            tracing::warn!("shutdown: async join deadline elapsed; persisting without truncating partial files");
+        } else {
+            let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
+            for id in ids {
+                if let Some(item) = self.find(id)
+                    && let Some(st) = self.segment_state.borrow_mut().get_mut(&id)
+                {
+                    truncate_to_prefix(&item.file_path(), st);
+                    st.forget_beyond_prefix();
+                }
+            }
+        }
+        self.persist_for_shutdown_async().await;
+        self.shutdown_finished.set(true);
+    }
+
+    async fn persist_for_shutdown_async(&self) {
+        #[cfg(test)]
+        {
+            self.persist_for_shutdown();
+            return;
+        }
+        #[cfg(not(test))]
+        {
+            if let (Some(text), Some(tx)) =
+                (self.serialize_queue_inner(true), &*self.persist_tx.borrow())
+            {
+                tx.send_replace(Some(text));
+            }
+            drop(self.persist_tx.borrow_mut().take());
+            if let Some(task) = self.persist_task.borrow_mut().take() {
+                let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                tokio_rt().spawn(async move {
+                    let result =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+                    let _ = done_tx.send(matches!(result, Ok(Ok(()))));
+                });
+                match done_rx.await {
+                    Ok(true) => {}
+                    Ok(false) => tracing::warn!("shutdown: queue persistence failed or exceeded its deadline"),
+                    Err(_) => tracing::warn!("shutdown: queue persistence task ended without a result"),
+                }
+            }
+        }
     }
 
     pub(crate) fn shutdown_with_timeout(&self, timeout: Duration) {

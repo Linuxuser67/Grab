@@ -10450,13 +10450,10 @@ async fn impersonation_probe_never_blocks_the_async_worker() {
     let dir = impersonate_test_dir("nonblocking");
     let bin = fake_ytdlp_slow_impersonate(&dir, 3);
     let start = std::time::Instant::now();
-    let (supported, heartbeat_elapsed) = tokio::join!(
-        ytdlp_supports_impersonation(&bin),
-        async {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            start.elapsed()
-        }
-    );
+    let (supported, heartbeat_elapsed) = tokio::join!(ytdlp_supports_impersonation(&bin), async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        start.elapsed()
+    });
     assert!(supported, "the delayed probe should report Chrome support");
     assert!(
         heartbeat_elapsed < std::time::Duration::from_secs(1),

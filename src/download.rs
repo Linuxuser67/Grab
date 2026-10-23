@@ -283,6 +283,26 @@ struct PendingRestore {
     gallery_job: Option<crate::gallery_argv::GalleryJob>,
 }
 
+/// Makes unexpected restore-task exits observable to every waiting intake path.
+/// A failed or panicked restore leaves restore_complete false, so persistence
+/// retains the original file rather than serializing a partial model.
+struct RestoreTaskGuard {
+    manager: std::rc::Weak<DownloadManager>,
+    finished: bool,
+}
+
+impl Drop for RestoreTaskGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Some(manager) = self.manager.upgrade() {
+            manager.restore_pending.set(false);
+            manager.restore_ready.send_replace(true);
+        }
+    }
+}
+
 impl Drop for DownloadManager {
     fn drop(&mut self) {
         // Abort any pump tasks: they're `spawn_future_local`, so a stale one
@@ -3564,6 +3584,10 @@ impl DownloadManager {
         {
             let weak = Rc::downgrade(self);
             let task = glib::spawn_future_local(async move {
+                let mut completion = RestoreTaskGuard {
+                    manager: weak.clone(),
+                    finished: false,
+                };
                 let loaded = tokio_rt()
                     .spawn_blocking(move || Self::load_restore_queue(queue_file))
                     .await;
@@ -3622,6 +3646,7 @@ impl DownloadManager {
                     }
                 }
                 manager.restore_ready.send_replace(true);
+                completion.finished = true;
             });
             self.restore_task.replace(Some(task));
         }

@@ -3801,7 +3801,7 @@ fn live_argv_pins_planner_id_in_mpegts() {
 
 #[test]
 fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
-    // Map everything, stream-copy, ADTS fixup, faststart.
+    // Map media streams only, stream-copy, ADTS fixup, faststart.
     // Dests are the `.part` remux targets production passes: ffmpeg can't guess a
     // container from that name, so `-f` must be pinned from the real extension.
     let argv = live_remux_argv(
@@ -3809,9 +3809,11 @@ fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
         std::path::Path::new("/tmp/st/final.mp4.part"),
         false,
         true,
+        false,
         "https://x.com/watch?v=abc123",
     );
-    assert!(argv.windows(2).any(|w| w == ["-map", "0"]));
+    assert!(argv.windows(2).any(|w| w == ["-map", "0:v?"]));
+    assert!(argv.windows(2).any(|w| w == ["-map", "0:a?"]));
     assert!(argv.windows(2).any(|w| w == ["-c", "copy"]));
     assert!(argv.windows(2).any(|w| w == ["-bsf:a", "aac_adtstoasc"]));
     assert!(argv.windows(2).any(|w| w == ["-f", "mp4"]));
@@ -3825,6 +3827,7 @@ fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
         std::path::Path::new("/tmp/st/final.mp4.part"),
         false,
         false,
+        false,
         "https://x.com/watch?v=abc123",
     );
     assert!(!argv.iter().any(|a| a == "-bsf:a"));
@@ -3833,6 +3836,7 @@ fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
         std::path::Path::new("/tmp/st/live.m4a.part"),
         std::path::Path::new("/tmp/st/final.m4a.part"),
         true,
+        false,
         false,
         "https://x.com/watch?v=abc123",
     );
@@ -3849,6 +3853,7 @@ fn live_remux_argv_stamps_the_source_url_so_the_id_survives() {
         std::path::Path::new("/tmp/st/final.mp4.part"),
         false,
         true,
+        false,
         "  https://x.com/watch?v=abc123  ",
     );
     let at = argv
@@ -3875,6 +3880,7 @@ fn live_remux_argv_stamps_the_source_url_so_the_id_survives() {
         std::path::Path::new("/tmp/st/final.mp4.part"),
         false,
         true,
+        false,
         "   ",
     );
     assert!(

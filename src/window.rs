@@ -575,7 +575,13 @@ pub fn build_window(
         });
     }
 
-    // hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
+    /// Hide on ordinary close while downloads transfer, but let an explicit
+/// asynchronous shutdown finish closing the window.
+pub(crate) fn should_hide_to_background(has_transferring: bool, shutting_down: bool) -> bool {
+    has_transferring && !shutting_down
+}
+
+// hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
     let ever_shown = Rc::new(Cell::new(false));
     {
         let m = Rc::clone(&manager);
@@ -583,7 +589,7 @@ pub fn build_window(
             // Only hide to background while bytes are actually moving; paused
             // items (or none) quit normally, since "continues in the
             // background" would be a lie with nothing transferring.
-            if m.has_transferring() && !m.is_shutting_down() {
+            if should_hide_to_background(m.has_transferring(), m.is_shutting_down()) {
                 win.set_visible(false);
                 request_background();
                 if m.background_notifications_enabled()

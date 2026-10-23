@@ -230,13 +230,21 @@ pub async fn fetch_video_infos(
     cancel: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
+        let lookup_started = std::time::Instant::now();
+        let tool_check_started = std::time::Instant::now();
         let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
+        let tool_check_ms = tool_check_started.elapsed().as_millis() as u64;
         tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
+
         // quickjs-ng is the JS runtime Grab pins for YouTube; make sure it's
         // installed before a YouTube spawn that may need to solve JS challenges.
+        let runtime_started = std::time::Instant::now();
         crate::video_tools::ensure_quickjs(&url, fetch_proxy.is_some()).await?;
+        let javascript_runtime_ms = runtime_started.elapsed().as_millis() as u64;
+
         let out = staging_root();
         ensure_staging_dir(&out)?;
+        let extraction_started = std::time::Instant::now();
         let mut value = match tokio::time::timeout(
             Duration::from_secs(FETCH_TIMEOUT_SECS),
             fetch_raw_dump_json(
@@ -251,21 +259,83 @@ pub async fn fetch_video_infos(
         .await
         {
             Ok(Ok(value)) => value,
-            Ok(Err(e)) => return Err(e),
+            Ok(Err(error)) => {
+                tracing::info!(
+                    host = %page_host(&url),
+                    tool_check_ms,
+                    javascript_runtime_ms,
+                    metadata_lookup_ms = extraction_started.elapsed().as_millis() as u64,
+                    total_ms = lookup_started.elapsed().as_millis() as u64,
+                    success = false,
+                    "yt-dlp lookup phase timings"
+                );
+                return Err(error);
+            }
             Err(_) => {
+                tracing::info!(
+                    host = %page_host(&url),
+                    tool_check_ms,
+                    javascript_runtime_ms,
+                    metadata_lookup_ms = extraction_started.elapsed().as_millis() as u64,
+                    total_ms = lookup_started.elapsed().as_millis() as u64,
+                    success = false,
+                    "yt-dlp lookup phase timings"
+                );
                 return Err(VideoError::fetch(gettext("the lookup timed out")));
             }
         };
+        let metadata_lookup_ms = extraction_started.elapsed().as_millis() as u64;
+        let parse_started = std::time::Instant::now();
+
         // Stub entries would choke the strict video model.
         if let Some(mut playlist) = parse_playlist_json(&value, &url) {
             retarget_story_items(&url, &mut playlist);
+            tracing::info!(
+                host = %page_host(&url),
+                yt_dlp = %yt_version,
+                tool_check_ms,
+                javascript_runtime_ms,
+                metadata_lookup_ms,
+                parse_ms = parse_started.elapsed().as_millis() as u64,
+                total_ms = lookup_started.elapsed().as_millis() as u64,
+                result = "playlist",
+                "yt-dlp lookup phase timings"
+            );
             return Ok::<_, VideoError>((ProbeResult::Playlist(playlist), None));
         }
         sanitize_video_json(&mut value);
-        // Clone for --load-info-json: the parse below consumes `value`.
+        // Clone for --load-info-json: the parse below consumes value.
         // The JSON is ~100KB; one clone per probe is acceptable.
         let raw_json = value.clone();
-        let video: Video = serde_json::from_value(value).map_err(VideoError::fetch)?;
+        let video: Video = match serde_json::from_value(value) {
+            Ok(video) => video,
+            Err(error) => {
+                tracing::info!(
+                    host = %page_host(&url),
+                    yt_dlp = %yt_version,
+                    tool_check_ms,
+                    javascript_runtime_ms,
+                    metadata_lookup_ms,
+                    parse_ms = parse_started.elapsed().as_millis() as u64,
+                    total_ms = lookup_started.elapsed().as_millis() as u64,
+                    result = "parse_error",
+                    "yt-dlp lookup phase timings"
+                );
+                return Err(VideoError::fetch(error));
+            }
+        };
+        let parse_ms = parse_started.elapsed().as_millis() as u64;
+        tracing::info!(
+            host = %page_host(&url),
+            yt_dlp = %yt_version,
+            tool_check_ms,
+            javascript_runtime_ms,
+            metadata_lookup_ms,
+            parse_ms,
+            total_ms = lookup_started.elapsed().as_millis() as u64,
+            result = "single",
+            "yt-dlp lookup phase timings"
+        );
         Ok::<_, VideoError>((
             ProbeResult::Single(VideoInfo::from(&video, &url, newest_first)),
             Some(raw_json),

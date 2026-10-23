@@ -1079,7 +1079,10 @@ mod tests {
         assert_eq!(pending.borrow().len(), 2);
         let drained = take_pending_open_files(&pending);
         assert_eq!(
-            drained.iter().map(|file| file.uri()).collect::<Vec<_>>(),
+            drained
+                .iter()
+                .map(|file| file.uri().to_string())
+                .collect::<Vec<_>>(),
             vec![
                 "grab://example.com/first.zip".to_string(),
                 "magnet:?xt=urn:btih:startup-intake".to_string(),

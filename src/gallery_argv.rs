@@ -565,6 +565,7 @@ mod tests {
             "https://example.com/",
             None,
             None,
+            None,
             GalleryFilter::All,
             Some(&proxy),
         );
@@ -573,6 +574,22 @@ mod tests {
             assert_eq!(argv[end - 2], "--proxy");
             assert_eq!(argv[end - 1], "http://127.0.0.1:8080");
         }
+    }
+
+    #[test]
+    fn cookie_source_prefers_handoff_jar_then_browser_profile() {
+        let jar = Path::new("/tmp/grab-handoff-cookies-test.txt");
+        assert_eq!(
+            cookie_source_args(Some(jar), Some("firefox")),
+            vec!["-C", "/tmp/grab-handoff-cookies-test.txt"],
+            "the paired extension jar takes precedence over browser access"
+        );
+        assert_eq!(
+            cookie_source_args(None, Some("firefox")),
+            vec!["--cookies-from-browser", "firefox"]
+        );
+        assert!(cookie_source_args(None, None).is_empty());
+        assert!(cookie_source_args(None, Some("none")).is_empty());
     }
 
     #[test]

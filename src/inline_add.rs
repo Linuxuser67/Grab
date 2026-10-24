@@ -2244,20 +2244,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     set_lookup_add(&lookup_add_b, true);
                     return;
                 }
-                // Fast local tools check first: missing tools show Install
-                // with no spinner round-trip.
-                let libs = match crate::video::resolve_libraries() {
-                    Ok(libs) => libs,
-                    Err(e) => {
-                        if probe_b.borrow().generation != my {
-                            return;
-                        }
-                        probe_b.borrow_mut().info.take();
-                        show_video_tools_missing(&step_b, &e.to_string());
-                        set_lookup_add(&lookup_add_b, true);
-                        return;
-                    }
-                };
+                // Metadata lookup runs with yt-dlp alone. FFmpeg/ffprobe are
+                // required only when a real download is queued, not for preview.
+                // Resolve local executable paths on Tokio's blocking pool rather
+                // than scanning PATH from GTK's main context.
                 show_video_loading(&step_b);
                 set_lookup_add(&lookup_add_b, false);
                 // Invalid manual proxy fails the lookup loudly, matching
@@ -2282,6 +2272,48 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // Skipped for direct media URLs (not gallery pages).
                 let browser = settings_b.cookies_browser();
                 let newest_first = settings_b.video_codec_newest();
+                let needs_gallery_tool = !crate::gallery_probe::url_is_direct_media(&url);
+                let local_tools = crate::runtime::tokio_rt()
+                    .spawn_blocking(move || {
+                        let youtube = crate::video_tools::resolve_ytdlp();
+                        let gallery = needs_gallery_tool
+                            .then(crate::gallery_argv::resolve_tool);
+                        (youtube, gallery)
+                    })
+                    .await;
+                let (youtube_result, gallery_result) = match local_tools {
+                    Ok(results) => results,
+                    Err(error) => {
+                        tracing::error!(error = %error, "lookup tool resolution task failed");
+                        if probe_b.borrow().generation != my {
+                            return;
+                        }
+                        let message = gettext("The lookup failed unexpectedly. Please try again.");
+                        show_video_error(&step_b, &message);
+                        set_lookup_add(&lookup_add_b, true);
+                        return;
+                    }
+                };
+                let youtube_bin = match youtube_result {
+                    Ok(path) => path,
+                    Err(error) => {
+                        if probe_b.borrow().generation != my {
+                            return;
+                        }
+                        probe_b.borrow_mut().info.take();
+                        show_video_tools_missing(&step_b, &error.to_string());
+                        set_lookup_add(&lookup_add_b, true);
+                        return;
+                    }
+                };
+                let gallery_tool = match gallery_result {
+                    Some(Ok(path)) => Some(path),
+                    Some(Err(error)) => {
+                        tracing::debug!(error = %error, "gallery-dl unavailable; continuing with yt-dlp lookup");
+                        None
+                    }
+                    None => None,
+                };
                 // Key the probe-JSON cache by the probe's conditions: the
                 // download reuses the JSON only under identical ones. The
                 // download side keys on the normalized page URL, so this key
@@ -2298,22 +2330,21 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // the Single arm below when route() says both are viable.
                 let mut toggle_items: Option<ToggleItems> = None;
                 let (ytdlp_result, gallery_error) =
-                    if !crate::gallery_probe::url_is_direct_media(&url)
-                        && let Ok(tool) = crate::gallery_argv::resolve_tool()
+                    if let Some(tool) = gallery_tool
                     {
                         // This lookup is polled by GLib, but gallery-dl and browser-cookie
                         // export use tokio::process and must run inside Tokio's runtime.
                         let probe_url = url.clone();
                         let probe_browser = browser.clone();
                         let probe_proxy = proxy.clone();
-                        let probe_libs = libs.clone();
+                        let probe_youtube_bin = youtube_bin.clone();
                         let probe_handle = crate::runtime::tokio_rt().spawn(async move {
                             crate::inline_gallery::dual_probe(crate::inline_gallery::DualProbeCtx {
                                 url: &probe_url,
                                 browser: probe_browser,
                                 newest_first,
                                 proxy: probe_proxy,
-                                libs: probe_libs,
+                                youtube_bin: probe_youtube_bin,
                                 tool,
                             })
                             .await
@@ -2423,7 +2454,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     } else {
                         (
                             crate::video::fetch_video_infos(
-                                libs,
+                                youtube_bin,
                                 url.clone(),
                                 browser,
                                 newest_first,

@@ -2374,18 +2374,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         return;
                     }
                     match probe_outcome {
-                        crate::inline_gallery::DualProbeOutcome::Complete {
-                            gallery,
-                            ytdlp,
-                        } => {
+                        crate::inline_gallery::DualProbeOutcome::Complete { gallery, ytdlp } => {
                             // Failure-path error precedence: a
                             // surfaced gallery error is preferred, but
                             // only when yt-dlp found nothing.
                             let ytdlp_video = crate::inline_gallery::ytdlp_found_video(&ytdlp);
-                            let gallery_error = crate::inline_gallery::preferred_probe_error(
-                                ytdlp_video,
-                                &gallery,
-                            );
+                            let gallery_error =
+                                crate::inline_gallery::preferred_probe_error(ytdlp_video, &gallery);
                             let ytdlp_playlist_entries = match &ytdlp {
                                 Ok((crate::video::ProbeResult::Playlist(pl), _)) => pl.total,
                                 _ => 0,
@@ -2417,10 +2412,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                         Some(crate::gallery_probe::StickyMode::Gallery),
                                         url.clone(),
                                     );
-                                    let title = crate::gallery_probe::collection_title(
-                                        &card.items,
-                                        &url,
-                                    );
+                                    let title =
+                                        crate::gallery_probe::collection_title(&card.items, &url);
                                     tracing::info!(
                                         files = card.file_count(),
                                         sticky = ?card.sticky_mode(),
@@ -2434,17 +2427,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     // so open the picker instead of
                                     // stopping on the inline row.
                                     if settings_b.auto_add_downloads() {
-                                        let opener =
-                                            step_b.gallery_select_opener.borrow().clone();
+                                        let opener = step_b.gallery_select_opener.borrow().clone();
                                         if let Some(open) = opener {
                                             open();
                                         }
                                     }
                                     return;
                                 }
-                                crate::gallery_probe::ProbeOutcome::None => {
-                                    (ytdlp, gallery_error)
-                                }
+                                crate::gallery_probe::ProbeOutcome::None => (ytdlp, gallery_error),
                             }
                         }
                     }

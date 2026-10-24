@@ -392,7 +392,10 @@ mod tests {
 
         sweep_legacy_cookie_dumps(&link, &|_| true);
 
-        assert!(stale_cookie.exists(), "a symlink target must not be scanned or modified");
+        assert!(
+            stale_cookie.exists(),
+            "a symlink target must not be scanned or modified"
+        );
         std::fs::remove_file(&link).unwrap();
         std::fs::remove_dir_all(&base).unwrap();
     }

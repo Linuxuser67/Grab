@@ -254,8 +254,8 @@ mod distro_package_tests {
 
     #[test]
     fn install_command_uses_id_like_fallback_with_deno() {
-        let packages = distro_packages("ID=custom\nID_LIKE=debian\n")
-            .expect("Debian-compatible distro");
+        let packages =
+            distro_packages("ID=custom\nID_LIKE=debian\n").expect("Debian-compatible distro");
         assert_eq!(packages.install_all, "sudo apt install yt-dlp ffmpeg deno");
     }
 }

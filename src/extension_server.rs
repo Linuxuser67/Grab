@@ -48,7 +48,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read as _;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpListener;
@@ -151,12 +151,22 @@ impl Pairing {
         }
     }
 
-    /// Load an existing private secret, or create one only when the path is missing.
-    /// Corruption and unsafe permissions are reported instead of silently breaking
-    /// every paired extension by replacing its shared secret.
+    /// Load the private secret, creating it when missing. If the existing file
+    /// is malformed, unreadable, or has unsafe permissions, replace it atomically
+    /// but report that existing extensions must be paired again.
     pub(crate) fn load_or_create(path: &Path) -> std::io::Result<Self> {
-        if let Some(secret) = read_pairing_secret(path)? {
-            return Ok(Self::from_secret(secret));
+        ensure_pairing_directory(path)?;
+        match read_pairing_secret(path) {
+            Ok(Some(secret)) => return Ok(Self::from_secret(secret)),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = ?path,
+                    error = %error,
+                    "pairing secret could not be trusted; generating a new code, so the browser extension must be paired again"
+                );
+                PAIRING_SECRET_RECOVERED.store(true, Ordering::Release);
+            }
         }
         let secret = random_secret()?;
         write_secret(path, &secret)?;
@@ -174,9 +184,11 @@ impl Pairing {
 
     /// Replace the secret: every extension must be paired again.
     pub(crate) fn regenerate(&self, path: &Path) -> std::io::Result<String> {
+        ensure_pairing_directory(path)?;
         let secret = random_secret()?;
         write_secret(path, &secret)?;
         *self.secret.write().unwrap_or_else(|e| e.into_inner()) = secret;
+        PAIRING_SECRET_RECOVERED.store(false, Ordering::Release);
         Ok(self.code())
     }
 
@@ -221,6 +233,33 @@ fn hex_decode(text: &str) -> Option<Vec<u8>> {
 
 fn decode_secret(text: &str) -> Option<[u8; SECRET_LEN]> {
     hex_decode(text)?.try_into().ok()
+}
+
+static PAIRING_SECRET_RECOVERED: AtomicBool = AtomicBool::new(false);
+
+/// Whether startup had to replace an unusable pairing file, so Preferences can
+/// explain why the extension needs a new code.
+pub(crate) fn pairing_secret_recovered() -> bool {
+    PAIRING_SECRET_RECOVERED.load(Ordering::Acquire)
+}
+
+/// Ensure the secret's parent is a real, current-user-owned directory that is
+/// not group/world writable before reading or replacing anything inside it.
+fn ensure_pairing_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
+    match std::fs::DirBuilder::new().recursive(true).mode(0o700).create(parent) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    if !crate::download_net::validate_secure_dir(parent) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "pairing secret directory must be a real directory owned by the current user and not group/world writable",
+        ));
+    }
+    Ok(())
 }
 
 fn random_secret() -> std::io::Result<[u8; SECRET_LEN]> {
@@ -1954,14 +1993,22 @@ mod tests {
         let fresh = first.regenerate(&path).unwrap();
         assert_ne!(fresh, code);
         assert_eq!(Pairing::load_or_create(&path).unwrap().code(), fresh);
-        // Corruption must not silently rotate the secret and orphan every
-        // paired extension. The failure is explicit for diagnosis/recovery.
+        // Unsafe permissions and malformed content trigger an explicit recovery
+        // warning and an atomically replaced 0600 secret, not a silent rotation.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let secured = Pairing::load_or_create(&path).unwrap();
+        assert_ne!(secured.code(), fresh);
+        assert!(pairing_secret_recovered());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "unsafe permission bits must not survive recovery"
+        );
+        let code = secured.code();
         std::fs::write(&path, "not hex").unwrap();
-        let error = match Pairing::load_or_create(&path) {
-            Ok(_) => panic!("corrupt pairing secret must not be silently replaced"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        let recovered = Pairing::load_or_create(&path).unwrap();
+        assert_ne!(recovered.code(), code);
+        assert!(pairing_secret_recovered());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

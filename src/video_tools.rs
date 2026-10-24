@@ -775,9 +775,8 @@ pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     let dest = dir.join("yt-dlp");
     let part = dir.join("yt-dlp.part");
     let dest_clone = dest.clone();
-    let handle = crate::runtime::tokio_rt().spawn(async move {
-        fetch_ytdlp_part(&url, &part, &dest_clone, &digest).await
-    });
+    let handle = crate::runtime::tokio_rt()
+        .spawn(async move { fetch_ytdlp_part(&url, &part, &dest_clone, &digest).await });
     match handle.await {
         Ok(Ok(())) => Ok(dest),
         Ok(Err(e)) => Err(e),
@@ -1343,8 +1342,7 @@ pub(crate) async fn ensure_deno(page_url: &str) -> Result<(), VideoError> {
     let page_url = page_url.to_string();
     // Provisioning continues on the process-lifetime runtime after a caller's
     // waiter is cancelled or times out; its lock remains held through file writes.
-    let task = crate::runtime::tokio_rt()
-        .spawn(async move { ensure_deno_inner(&page_url).await });
+    let task = crate::runtime::tokio_rt().spawn(async move { ensure_deno_inner(&page_url).await });
     match task.await {
         Ok(result) => result,
         Err(error) => Err(VideoError::runtime(&error)),
@@ -1400,7 +1398,6 @@ async fn ensure_deno_inner(page_url: &str) -> Result<(), VideoError> {
     remember_deno_path(&path);
     remove_legacy_qjs_from(&user_lib_dir()).await;
     Ok(())
-
 }
 
 /// Minimum accepted yt-dlp version by release date. Older binaries predate the
@@ -1791,10 +1788,7 @@ fn gallery_cookies_browser_spec_for_profile(
     browser: &str,
     profile: Option<&Path>,
 ) -> Option<String> {
-    if browser.is_empty()
-        || browser == "none"
-        || !GALLERY_DL_COOKIES_BROWSERS.contains(&browser)
-    {
+    if browser.is_empty() || browser == "none" || !GALLERY_DL_COOKIES_BROWSERS.contains(&browser) {
         return None;
     }
     // gallery-dl accepts BROWSER:PROFILE and supports Zen directly, unlike yt-dlp.
@@ -2646,7 +2640,10 @@ mod tests {
         assert!(!err.to_string().is_empty());
         server.await.unwrap();
         assert!(!part.exists(), "partial download must be removed");
-        assert!(!dest.exists(), "failed update must not replace the installed binary");
+        assert!(
+            !dest.exists(),
+            "failed update must not replace the installed binary"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

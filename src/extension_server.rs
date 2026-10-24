@@ -1704,15 +1704,13 @@ mod tests {
     fn handoff_cookie_fields_strip_all_control_characters() {
         let _g = exclusive();
         let url = "https://example.com/control-fields";
-        let path = write_handoff_cookies(
-            url,
-            &[cookie("na\u{000b}me", "va\u{0085}l\u{0000}ue")],
-        )
-        .expect("sanitized cookie");
+        let path = write_handoff_cookies(url, &[cookie("na\u{000b}me", "va\u{0085}l\u{0000}ue")])
+            .expect("sanitized cookie");
         let text = std::fs::read_to_string(&path).expect("cookie file");
         assert!(text.contains("example.com\tTRUE\t/\tFALSE\t0\tname\tvalue\n"));
         assert!(
-            text.chars().all(|c| !c.is_control() || matches!(c, '\n' | '\t')),
+            text.chars()
+                .all(|c| !c.is_control() || matches!(c, '\n' | '\t')),
             "only Netscape line and field delimiters may remain: {text:?}"
         );
         let _ = std::fs::remove_file(path);

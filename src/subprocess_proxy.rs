@@ -488,9 +488,7 @@ mod tests {
                 tokio::time::timeout(Duration::from_secs(2), async {
                     let mut client = TcpStream::connect(address).await?;
                     client
-                        .write_all(
-                            b"CONNECT 127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n",
-                        )
+                        .write_all(b"CONNECT 127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")
                         .await?;
                     let mut response = Vec::new();
                     client.read_to_end(&mut response).await?;

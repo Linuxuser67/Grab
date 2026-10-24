@@ -589,7 +589,7 @@ async fn lookup_filtered(host: &str, public_only: bool) -> Result<Vec<SocketAddr
     Ok(kept)
 }
 
-/// DNS resolver for the shared clients. Filtering the answer that the socket
+/// DNS resolver used by each client. Filtering the answer that the socket
 /// then connects to leaves no check/connect gap for DNS rebinding.
 struct GuardedResolver {
     public_dns_hosts: PublicDnsPolicy,
@@ -658,7 +658,7 @@ fn redirect_policy(public_dns_hosts: PublicDnsPolicy) -> reqwest::redirect::Poli
     })
 }
 
-/// Shared builder: bounded hops, no downgrades (see [`http_client`]).
+/// Shared builder: bounded hops, no downgrades.
 pub(crate) fn client_builder() -> reqwest::ClientBuilder {
     // Bounded hops; refuse https->http downgrades; no ambient proxy (explicit settings or nothing); no automatic Referer (leaks URLs/tokens).
     let (redirect, resolver) = guarded_network_policy();
@@ -913,16 +913,29 @@ mod tests {
         let first = public_dns_policy();
         for i in 0..PUBLIC_DNS_HOSTS_CAP {
             assert!(require_public_dns_filter(
-                &first, &format!("redirect-{i}.example")
+                &first,
+                &format!("redirect-{i}.example")
             ));
         }
-        assert!(!require_public_dns_filter(&first, "redirect-overflow.example"));
+        assert!(!require_public_dns_filter(
+            &first,
+            "redirect-overflow.example"
+        ));
         assert!(requires_public_dns_filter("redirect-0.example", &first));
 
         let next = public_dns_policy();
-        assert!(require_public_dns_filter(&next, "redirect-overflow.example"));
-        assert!(!requires_public_dns_filter("redirect-overflow.example", &first));
-        assert!(requires_public_dns_filter("redirect-overflow.example", &next));
+        assert!(require_public_dns_filter(
+            &next,
+            "redirect-overflow.example"
+        ));
+        assert!(!requires_public_dns_filter(
+            "redirect-overflow.example",
+            &first
+        ));
+        assert!(requires_public_dns_filter(
+            "redirect-overflow.example",
+            &next
+        ));
     }
 
     #[test]

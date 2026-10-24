@@ -7,8 +7,8 @@ use crate::download_fetch::{
 use crate::download_intake::{MAX_URL_LEN, normalize_url};
 use crate::download_net::{
     DownloadOptions, PROXY_MODE_DIRECT, PROXY_MODE_SYSTEM, http_client, normalize_no_proxy,
-    proxy_mode_index, proxy_mode_labels, proxy_mode_value, proxy_type_index,
-    proxy_type_labels, proxy_type_value,
+    proxy_mode_index, proxy_mode_labels, proxy_mode_value, proxy_type_index, proxy_type_labels,
+    proxy_type_value,
 };
 use crate::download_pieces::{BLOCK_CELLS, SegmentState, aggregate, plan_pieces, split_count};
 use crate::download_rate::{fmt_eta, format_amounts, live_rate_limit, parse_rate};

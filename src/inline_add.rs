@@ -280,13 +280,11 @@ async fn lookup_media(
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "lookup tool resolution task failed");
-            MediaLookupFailure::Failed(gettext(
-                "The lookup failed unexpectedly. Please try again.",
-            ))
+            MediaLookupFailure::Failed(gettext("The lookup failed unexpectedly. Please try again."))
         })?;
     let (youtube_result, gallery_result) = local_tools;
-    let youtube_bin = youtube_result
-        .map_err(|error| MediaLookupFailure::MissingTools(error.to_string()))?;
+    let youtube_bin =
+        youtube_result.map_err(|error| MediaLookupFailure::MissingTools(error.to_string()))?;
     let gallery_tool = match gallery_result {
         Some(Ok(path)) => Some(path),
         Some(Err(error)) => {
@@ -324,16 +322,13 @@ async fn lookup_media(
         let _abort_probe_on_drop = AbortTaskOnDrop(probe_handle.abort_handle());
         let outcome = probe_handle.await.map_err(|error| {
             tracing::error!(error = %error, "dual-backend probe task failed");
-            MediaLookupFailure::Failed(gettext(
-                "The lookup failed unexpectedly. Please try again.",
-            ))
+            MediaLookupFailure::Failed(gettext("The lookup failed unexpectedly. Please try again."))
         })?;
         let crate::inline_gallery::DualProbeOutcome::Complete { gallery, ytdlp } = outcome;
 
         let ytdlp_video = crate::inline_gallery::ytdlp_found_video(&ytdlp);
-        let gallery_error =
-            crate::inline_gallery::preferred_probe_error(ytdlp_video, &gallery)
-                .map(|error| error.to_string());
+        let gallery_error = crate::inline_gallery::preferred_probe_error(ytdlp_video, &gallery)
+            .map(|error| error.to_string());
         let playlist_entries = match &ytdlp {
             Ok((crate::video::ProbeResult::Playlist(playlist), _)) => playlist.total,
             _ => 0,
@@ -2436,7 +2431,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 if probe_b.borrow().generation != my {
                     return;
                 }
-                let (ytdlp_result, gallery_error, mut toggle_items, probe_json_key) = match outcome {
+                let (ytdlp_result, gallery_error, mut toggle_items, probe_json_key) = match outcome
+                {
                     MediaLookupOutcome::Gallery(items) => {
                         // Queue creation stays behind the full picker because
                         // the dual probe may cap the file list.

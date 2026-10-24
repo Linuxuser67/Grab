@@ -738,35 +738,15 @@ fn show_video_error_with_details(v: &VideoStep, summary: &str, details: &str) {
 
 fn show_preview_error_details(parent: &gtk4::Button, details: &str) {
     let display = crate::backend_debug::sanitize_diagnostic(details);
-    let dialog = adw::AlertDialog::new(
-        Some(&gettext("Preview Error Details")),
-        Some(&gettext(
+    crate::ui_util::copyable_details_dialog(
+        parent,
+        &gettext("Preview Error Details"),
+        &gettext(
             "Technical details from the media extractors. Sensitive URL paths and parameters are omitted.",
-        )),
+        ),
+        &display,
+        220,
     );
-    let text = gtk4::TextView::builder()
-        .editable(false)
-        .cursor_visible(false)
-        .monospace(true)
-        .wrap_mode(gtk4::WrapMode::WordChar)
-        .build();
-    text.buffer().set_text(&display);
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .min_content_height(220)
-        .child(&text)
-        .build();
-    dialog.set_extra_child(Some(&scrolled));
-    dialog.add_responses(&[("copy", &gettext("Copy")), ("close", &gettext("Close"))]);
-    dialog.set_response_appearance("copy", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("close"));
-    dialog.set_close_response("close");
-    let clipboard = parent.clipboard();
-    dialog.connect_response(None, move |_dialog, response| {
-        if response == "copy" {
-            clipboard.set_text(&display);
-        }
-    });
-    dialog.present(Some(parent));
 }
 
 /// Desensitize the form's Add button while a lookup is in flight (a dead

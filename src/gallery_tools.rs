@@ -8,8 +8,8 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use crate::video_tools::{
-    bounded_response_text, download_to_file, ensure_lib_dir, user_lib_dir,
-    valid_release_tag, valid_sha256_digest,
+    bounded_response_text, download_to_file, ensure_lib_dir, user_lib_dir, valid_release_tag,
+    valid_sha256_digest,
 };
 
 /// Maximum download size for the stable gallery-dl Linux executable (128 MiB).

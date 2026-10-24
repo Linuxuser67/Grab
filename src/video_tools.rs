@@ -998,9 +998,7 @@ fn find_deno_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-async fn first_supported_deno(
-    candidates: &[PathBuf],
-) -> Result<Option<PathBuf>, ToolProbeError> {
+async fn first_supported_deno(candidates: &[PathBuf]) -> Result<Option<PathBuf>, ToolProbeError> {
     let mut first_error = None;
     for path in candidates {
         match probe_first_line(path, "--version").await {

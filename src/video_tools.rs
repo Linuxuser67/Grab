@@ -809,6 +809,28 @@ const DENO_MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 const DENO_LATEST_RELEASE_API: &str = "https://api.github.com/repos/denoland/deno/releases/latest";
 const DENO_MIN_VERSION: [u32; 3] = [2, 3, 0];
 
+/// Candidate validated by ensure_deno, kept in sync with yt-dlp's runtime path.
+static SELECTED_DENO_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+fn selected_deno_path_slot() -> &'static Mutex<Option<PathBuf>> {
+    SELECTED_DENO_PATH.get_or_init(|| Mutex::new(None))
+}
+
+fn remember_deno_path(path: &Path) {
+    let mut selected = selected_deno_path_slot()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *selected = Some(path.to_path_buf());
+}
+
+fn selected_deno_path() -> Option<PathBuf> {
+    let path = selected_deno_path_slot()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()?;
+    is_executable(&path).then_some(path)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DenoRelease {
     tag: String,
@@ -845,7 +867,9 @@ pub(crate) fn is_youtube_url(page_url: &str) -> bool {
 
 /// Reject unexpected release tags before they can shape an asset URL.
 pub(crate) fn valid_release_tag(tag: &str) -> bool {
-    !tag.is_empty()
+    tag.as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_alphanumeric())
         && tag.bytes().all(|b| {
             matches!(
                 b,
@@ -925,15 +949,59 @@ pub async fn latest_deno_tag() -> Option<String> {
     latest_deno_release().await.map(|release| release.tag)
 }
 
-/// Locate Deno in managed-first search order.
+/// Locate the Deno selected by ensure_deno, or the first candidate before probing.
 pub(crate) fn find_deno() -> Option<PathBuf> {
-    find_in_dirs("deno", &tool_search_dirs())
+    selected_deno_path().or_else(|| find_in_dirs("deno", &tool_search_dirs()))
+}
+
+fn find_deno_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for dir in tool_search_dirs() {
+        if let Some(path) = find_in_dirs("deno", std::slice::from_ref(&dir))
+            && !candidates.contains(&path)
+        {
+            candidates.push(path);
+        }
+    }
+    candidates
+}
+
+async fn first_supported_deno(candidates: &[PathBuf]) -> Option<PathBuf> {
+    for path in candidates {
+        if let Ok(version) = probe_first_line(path, "--version").await
+            && parse_dotted_version(&version).is_some_and(|v| v >= DENO_MIN_VERSION)
+        {
+            return Some(path.clone());
+        }
+    }
+    None
+}
+
+async fn remove_legacy_qjs_from(dir: &Path) {
+    let qjs = dir.join("qjs");
+    match tokio::fs::symlink_metadata(&qjs).await {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            if let Err(error) = tokio::fs::remove_file(&qjs).await {
+                tracing::debug!(path = %qjs.display(), %error, "could not remove obsolete Grab-managed qjs binary");
+            }
+        }
+        // Never follow or remove symlinks/directories; only clean the private
+        // regular-file path used by older Grab-managed QuickJS installations.
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::debug!(path = %qjs.display(), %error, "could not inspect obsolete Grab-managed qjs binary");
+        }
+    }
 }
 
 /// Install or update the latest stable Deno release. Await off the GTK thread.
 pub async fn install_deno() -> Result<PathBuf, VideoError> {
     let _guard = deno_install_lock().lock().await;
-    install_deno_locked().await
+    let path = install_deno_locked().await?;
+    remember_deno_path(&path);
+    remove_legacy_qjs_from(&user_lib_dir()).await;
+    Ok(path)
 }
 
 fn deno_install_lock() -> &'static tokio::sync::Mutex<()> {
@@ -1205,18 +1273,24 @@ pub(crate) async fn ensure_deno(page_url: &str) -> Result<(), VideoError> {
     if !is_youtube_url(page_url) {
         return Ok(());
     }
-    if let Some(path) = find_deno() {
-        if let Ok(version) = probe_first_line(&path, "--version").await
-            && parse_dotted_version(&version).is_some_and(|v| v >= DENO_MIN_VERSION)
-        {
-            return Ok(());
-        }
+
+    // A stale managed copy must not hide a compatible bundled/system Deno.
+    let candidates = find_deno_candidates();
+    if let Some(path) = first_supported_deno(&candidates).await {
+        remember_deno_path(&path);
+        remove_legacy_qjs_from(&user_lib_dir()).await;
+        return Ok(());
+    }
+    if let Some(path) = candidates.first() {
         if !in_flatpak() {
             return Err(VideoError::runtime(
                 "Deno 2.3.0 or newer is required for YouTube extraction; update Deno, then retry",
             ));
         }
-        tracing::info!(path = %path.display(), "installed Deno is too old or could not be probed; updating to latest stable");
+        tracing::info!(
+            path = %path.display(),
+            "no usable Deno candidate found; updating managed Deno to latest stable"
+        );
     } else if !deno_arch_supported() {
         return Err(VideoError::runtime(
             "Deno is required for YouTube extraction on this architecture; install a supported Deno build and retry",
@@ -1230,13 +1304,16 @@ pub(crate) async fn ensure_deno(page_url: &str) -> Result<(), VideoError> {
     // The installer honors Grab's configured app proxy and accepts only the
     // official architecture-specific asset with its release API SHA-256.
     let _guard = deno_install_lock().lock().await;
-    if let Some(path) = find_deno()
-        && let Ok(version) = probe_first_line(&path, "--version").await
-        && parse_dotted_version(&version).is_some_and(|v| v >= DENO_MIN_VERSION)
-    {
+    let candidates = find_deno_candidates();
+    if let Some(path) = first_supported_deno(&candidates).await {
+        remember_deno_path(&path);
+        remove_legacy_qjs_from(&user_lib_dir()).await;
         return Ok(());
     }
-    install_deno_locked().await.map(|_| ())
+    let path = install_deno_locked().await?;
+    remember_deno_path(&path);
+    remove_legacy_qjs_from(&user_lib_dir()).await;
+    Ok(())
 }
 
 /// Minimum accepted yt-dlp version by release date. Older binaries predate the
@@ -2374,6 +2451,9 @@ mod tests {
         }
         for evil in [
             "",
+            ".",
+            "..",
+            ".hidden",
             "v0.17.0;touch pwned",
             "../../etc/passwd",
             "v0.17.0\n",
@@ -2488,6 +2568,49 @@ mod deno_release_tests {
         ))
     }
 
+    fn write_executable_test_script(path: &Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deno_candidate_selection_skips_a_stale_preferred_copy() {
+        let base = unique_dir("deno-candidates");
+        let managed_dir = base.join("managed");
+        let path_dir = base.join("path");
+        std::fs::create_dir_all(&managed_dir).unwrap();
+        std::fs::create_dir_all(&path_dir).unwrap();
+        let stale = managed_dir.join("deno");
+        let compatible = path_dir.join("deno");
+        write_executable_test_script(&stale, "#!/bin/sh\nprintf '2.2.9\\n'\n");
+        write_executable_test_script(&compatible, "#!/bin/sh\nprintf '2.3.0\\n'\n");
+
+        assert_eq!(
+            first_supported_deno(&[stale, compatible.clone()]).await,
+            Some(compatible)
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn legacy_qjs_cleanup_removes_only_regular_managed_file() {
+        let base = unique_dir("legacy-qjs");
+        std::fs::create_dir_all(&base).unwrap();
+        let qjs = base.join("qjs");
+        std::fs::write(&qjs, b"old managed QuickJS").unwrap();
+        remove_legacy_qjs_from(&base).await;
+        assert!(!qjs.exists());
+
+        let target = base.join("user-target");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, &qjs).unwrap();
+        remove_legacy_qjs_from(&base).await;
+        assert!(std::fs::symlink_metadata(&qjs).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn release_tag_and_asset_url_are_validated() {
         for good in ["v2.9.8", "v0.17.0", "2026.08.19", "v9.0.2-static", "a+b_c"] {
@@ -2495,6 +2618,9 @@ mod deno_release_tests {
         }
         for evil in [
             "",
+            ".",
+            "..",
+            ".hidden",
             "v2.9.8;touch pwned",
             "../../etc/passwd",
             "v2.9.8\n",

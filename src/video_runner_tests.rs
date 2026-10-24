@@ -6,6 +6,28 @@ use super::*;
 
 use crate::video_argv::VideoJob;
 
+#[test]
+fn live_remux_retry_policy_repairs_timestamps_before_dropping_aac_filter() {
+    assert_eq!(
+        next_live_remux_attempt(true, false, "non-monotonous DTS in output"),
+        Some((true, true))
+    );
+    assert_eq!(
+        next_live_remux_attempt(true, true, "non-monotonous DTS in output"),
+        Some((false, true))
+    );
+    assert_eq!(next_live_remux_attempt(false, true, "generic failure"), None);
+}
+
+#[test]
+fn live_remux_retry_policy_drops_aac_filter_once_for_other_errors() {
+    assert_eq!(
+        next_live_remux_attempt(true, false, "disk I/O error"),
+        Some((false, false))
+    );
+    assert_eq!(next_live_remux_attempt(false, false, "disk I/O error"), None);
+}
+
 /// `Exit::RenameFailed` keeps the user's only copy: nothing re-records, nothing is
 /// swept except `.ytdl` state. Also pins the non-recursive staging sweep, which is
 /// what keeps an earlier attempt's unplaceable remux durable.

@@ -2332,8 +2332,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let (ytdlp_result, gallery_error) =
                     if let Some(tool) = gallery_tool
                     {
-                        // This lookup is polled by GLib, but gallery-dl and browser-cookie
-                        // export use tokio::process and must run inside Tokio's runtime.
+                        // Run both extractor subprocesses inside Tokio so the parent
+                        // cancellation guard can abort their shared probe task.
                         let probe_url = url.clone();
                         let probe_browser = browser.clone();
                         let probe_proxy = proxy.clone();

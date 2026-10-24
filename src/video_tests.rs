@@ -2896,6 +2896,73 @@ fn lookup_resolves_yt_dlp_without_requiring_ffmpeg() {
 }
 
 #[test]
+fn fetch_video_infos_succeeds_with_yt_dlp_only_and_no_staging_root() {
+    // The metadata worker receives only yt-dlp. A fake executable supplies a
+    // version and dump JSON while PATH contains no FFmpeg/ffprobe tools.
+    let dir = std::env::temp_dir().join(format!(
+        "grab-lookup-only-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let xdg = dir.join("xdg");
+    let libs = xdg.join("grab").join("libs");
+    let path_only = dir.join("path");
+    std::fs::create_dir_all(&libs).unwrap();
+    std::fs::create_dir_all(&path_only).unwrap();
+
+    let youtube = libs.join("yt-dlp");
+    std::fs::write(
+        libs.join("info.json"),
+        serde_json::json!({
+            "id": "abc",
+            "title": "T",
+            "age_limit": 0,
+            "live_status": "not_live",
+            "playable_in_embed": true,
+            "extractor": "generic",
+            "extractor_key": "Generic",
+            "_version": {"version": "2026.08.19", "repository": "yt-dlp"},
+            "formats": [],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let script = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '2026.08.19\\n'; exit 0; fi\nexec /bin/cat \"" + libs.join("info.json").to_string_lossy().as_ref() + "\"\n";
+    std::fs::write(&youtube, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&youtube, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let _env = ScopedEnv::apply(
+        path_only.to_str().expect("UTF-8 temp path"),
+        &xdg,
+    );
+    assert!(crate::video_tools::resolve_libraries().is_err());
+    let result = crate::runtime::tokio_rt().block_on(crate::video::fetch_video_infos(
+        youtube,
+        "https://example.com/v".to_string(),
+        "none".to_string(),
+        false,
+        None,
+        None,
+    ));
+    let (probe, raw) = result.expect("yt-dlp metadata should not require FFmpeg or staging");
+    assert!(matches!(probe, crate::video::ProbeResult::Single(_)));
+    assert_eq!(
+        raw.as_ref().and_then(|value| value.get("title")).and_then(|v| v.as_str()),
+        Some("T")
+    );
+
+    drop(_env);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn toolchain_dir_prefers_complete_toolchain() {
     // A dir with only ffmpeg (an older user-lib install) must not shadow a
     // later dir shipping both: yt-dlp resolves ffprobe from --ffmpeg-location.

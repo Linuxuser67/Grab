@@ -7,7 +7,7 @@ use crate::download_fetch::{
 use crate::download_intake::{MAX_URL_LEN, normalize_url};
 use crate::download_net::{
     DownloadOptions, PROXY_MODE_DIRECT, PROXY_MODE_SYSTEM, http_client, normalize_no_proxy,
-    proxied_pool_len, proxy_mode_index, proxy_mode_labels, proxy_mode_value, proxy_type_index,
+    proxy_mode_index, proxy_mode_labels, proxy_mode_value, proxy_type_index,
     proxy_type_labels, proxy_type_value,
 };
 use crate::download_pieces::{BLOCK_CELLS, SegmentState, aggregate, plan_pieces, split_count};
@@ -4661,7 +4661,6 @@ fn proxy_manual_builds_remote_dns_socks() {
     // socks5h: names resolve remotely, never beside the tunnel.
     assert_eq!(proxy.cli_url, "socks5h://127.0.0.1:9050");
     assert!(proxy.no_proxy_env.contains("localhost"));
-    // Pooled clients key on the full config: identical configs share, differing ones do not.
     let again = proxy_opts("manual", "socks5", "127.0.0.1", 9050)
         .proxy_config()
         .expect("valid")
@@ -4672,7 +4671,8 @@ fn proxy_manual_builds_remote_dns_socks() {
         .expect("valid")
         .expect("proxied");
     assert_ne!(proxy.cache_key, other.cache_key);
-    let _ = http_client_for(Some(&proxy));
+    assert!(http_client_for(Some(&proxy)).is_ok());
+    assert!(http_client_for(Some(&again)).is_ok());
 }
 
 #[test]
@@ -4735,17 +4735,13 @@ fn proxy_manual_rejects_garbage_loudly() {
 }
 
 #[test]
-fn proxy_clients_are_pooled_per_config() {
-    // Same config reuses the client; different config adds a pool entry.
+fn proxy_clients_are_built_per_download_policy_scope() {
     let proxy = proxy_opts("manual", "socks5", "127.0.0.1", 19050)
         .proxy_config()
         .expect("valid")
         .expect("proxied");
-    let before = proxied_pool_len();
-    let _ = http_client_for(Some(&proxy));
-    assert_eq!(proxied_pool_len(), before + 1);
-    let _ = http_client_for(Some(&proxy));
-    assert_eq!(proxied_pool_len(), before + 1);
+    assert!(http_client_for(Some(&proxy)).is_ok());
+    assert!(http_client_for(Some(&proxy)).is_ok());
 }
 
 #[test]

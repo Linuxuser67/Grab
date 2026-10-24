@@ -96,10 +96,7 @@ fn unix_time_ms() -> Option<u64> {
 }
 
 /// Atomically reserve a single-use nonce for an authenticated body.
-fn reserve_handoff_nonce(
-    timestamp_ms: Option<u64>,
-    nonce: Option<&str>,
-) -> Result<(), StatusCode> {
+fn reserve_handoff_nonce(timestamp_ms: Option<u64>, nonce: Option<&str>) -> Result<(), StatusCode> {
     let (Some(timestamp_ms), Some(nonce)) = (timestamp_ms, nonce) else {
         return Err(StatusCode::FORBIDDEN);
     };
@@ -129,10 +126,9 @@ fn reserve_handoff_nonce(
     if cache.expires_at_ms.len() >= MAX_RECENT_HANDOFF_NONCES {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
-    cache.expires_at_ms.insert(
-        nonce,
-        timestamp_ms.saturating_add(HANDOFF_CLOCK_SKEW_MS),
-    );
+    cache
+        .expires_at_ms
+        .insert(nonce, timestamp_ms.saturating_add(HANDOFF_CLOCK_SKEW_MS));
     Ok(())
 }
 
@@ -1012,7 +1008,8 @@ async fn handle_add(
     // A partially present or malformed pair is never treated as legacy.
     let legacy_authenticated =
         token_authenticated && req.timestamp_ms.is_none() && req.nonce.is_none();
-    if token_authenticated && !legacy_authenticated
+    if token_authenticated
+        && !legacy_authenticated
         && let Err(status) = reserve_handoff_nonce(req.timestamp_ms, req.nonce.as_deref())
     {
         return status.into_response();

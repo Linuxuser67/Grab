@@ -280,16 +280,16 @@ async fn connect_public_with_timeout(host: &str, port: u16) -> io::Result<TcpStr
     connect_with_timeout(connect_public(host, port), CONNECT_TIMEOUT).await
 }
 
-async fn connect_with_timeout<F>(
-    future: F,
-    timeout: Duration,
-) -> io::Result<TcpStream>
+async fn connect_with_timeout<F>(future: F, timeout: Duration) -> io::Result<TcpStream>
 where
     F: std::future::Future<Output = io::Result<TcpStream>>,
 {
-    tokio::time::timeout(timeout, future)
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guarded proxy DNS/connect timed out"))?
+    tokio::time::timeout(timeout, future).await.map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "guarded proxy DNS/connect timed out",
+        )
+    })?
 }
 
 /// Resolve and connect to a public address. The socket connects to the exact

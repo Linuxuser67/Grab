@@ -7,8 +7,6 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
-const DENO_RELEASES_URL: &str = "https://github.com/denoland/deno/releases";
-
 /// Show the install-help dialog; `on_check` re-resolves tools and refreshes the caller.
 pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() + 'static) {
     let dialog = adw::AlertDialog::new(
@@ -28,9 +26,6 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
                 .title(pkgs.distro.clone())
                 .build();
             command_row(&group, &gettext("Install tools"), &pkgs.install_all);
-            // Keep the upstream page available for distros whose Deno
-            // package is missing or too old for YouTube extraction.
-            link_row(&group, "Deno", DENO_RELEASES_URL);
             content.append(&group);
         }
         None => {
@@ -46,7 +41,6 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
                 "https://github.com/yt-dlp/yt-dlp#installation",
             );
             link_row(&group, "ffmpeg", "https://ffmpeg.org/download.html");
-            link_row(&group, "Deno", DENO_RELEASES_URL);
             link_row(
                 &group,
                 "gallery-dl",
@@ -130,12 +124,4 @@ fn link_row(group: &adw::PreferencesGroup, tool: &str, url: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn official_deno_release_link_is_stable_upstream() {
-        assert_eq!(
-            DENO_RELEASES_URL,
-            "https://github.com/denoland/deno/releases"
-        );
-    }
 }

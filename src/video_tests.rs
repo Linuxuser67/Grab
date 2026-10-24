@@ -45,7 +45,7 @@ use crate::video_spawn::{
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
-    dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
+    dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir_in, is_grab_part,
     is_sparse_shell, is_ytdlp_fragment, manifest_path, read_manifest, release_remux_lease,
     reserve_remux_temp, resume_plan, sidecar_path_for, staging_root, stem_reserved_in,
     sweep_partial_remuxes, sweep_staging_preserving_recordings, unified_candidate,
@@ -496,7 +496,7 @@ fn clean_staging_removes_our_dir() {
 #[test]
 fn ensure_staging_dir_roundtrip_and_clean() {
     let dir = staging_root().join((u64::MAX - 8).to_string());
-    let canon = ensure_staging_dir(&dir).expect("fresh dir verifies");
+    let canon = ensure_staging_dir_in(&staging_root(), &dir).expect("fresh dir verifies");
     assert!(
         canon.starts_with(std::fs::canonicalize(staging_root()).unwrap()),
         "{canon:?}"
@@ -519,7 +519,8 @@ fn ensure_staging_dir_rejects_symlink_escape() {
     let link = staging_root().join((u64::MAX - 7).to_string());
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&outside, &link).unwrap();
-    let err = ensure_staging_dir(&link).expect_err("symlink escape must fail");
+    let err = ensure_staging_dir_in(&staging_root(), &link)
+        .expect_err("symlink escape must fail");
     assert!(err.to_string().contains("not a real directory"), "{err}");
     assert!(outside.read_dir().unwrap().next().is_none());
     let _ = std::fs::remove_file(&link);
@@ -540,7 +541,8 @@ fn ensure_staging_dir_refuses_dangling_link() {
     let link = staging_root().join((u64::MAX - 6).to_string());
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&target, &link).unwrap();
-    let err = ensure_staging_dir(&link).expect_err("dangling link must fail");
+    let err = ensure_staging_dir_in(&staging_root(), &link)
+        .expect_err("dangling link must fail");
     assert!(err.to_string().contains("not a real directory"), "{err}");
     assert!(
         !target.exists(),

@@ -222,7 +222,6 @@ pub fn is_instagram_url(url: &str) -> bool {
     host == "instagram.com" || host.ends_with(".instagram.com")
 }
 
-/// Build the gallery-dl count argv (`-g` lists direct URLs, one per line).
 /// Build cookie arguments for gallery-dl. A private handoff jar takes precedence
 /// over browser-profile access; otherwise gallery-dl reads the selected profile.
 pub(crate) fn cookie_source_args(
@@ -581,7 +580,10 @@ mod tests {
         let jar = Path::new("/tmp/grab-handoff-cookies-test.txt");
         assert_eq!(
             cookie_source_args(Some(jar), Some("firefox")),
-            vec!["-C", "/tmp/grab-handoff-cookies-test.txt"],
+            vec![
+                "-C".to_string(),
+                "/tmp/grab-handoff-cookies-test.txt".to_string(),
+            ],
             "the paired extension jar takes precedence over browser access"
         );
         assert_eq!(

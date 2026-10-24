@@ -79,11 +79,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ActivityStream<S> {
     }
 }
 
-async fn wait_for_tunnel_idle(last_activity_ms: Arc<AtomicU64>) {
+async fn wait_for_tunnel_idle(last_activity_ms: Arc<AtomicU64>, idle_timeout: Duration) {
+    let poll_interval = (idle_timeout / 4)
+        .min(Duration::from_secs(10))
+        .max(Duration::from_millis(1));
     loop {
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(poll_interval).await;
         let idle_ms = proxy_clock_ms().saturating_sub(last_activity_ms.load(Ordering::Relaxed));
-        if idle_ms >= TUNNEL_IDLE_TIMEOUT.as_millis() as u64 {
+        if idle_ms >= idle_timeout.as_millis() as u64 {
             return;
         }
     }
@@ -92,6 +95,7 @@ async fn wait_for_tunnel_idle(last_activity_ms: Arc<AtomicU64>) {
 async fn copy_bidirectional_with_idle_timeout(
     client: &mut TcpStream,
     upstream: &mut TcpStream,
+    idle_timeout: Duration,
 ) -> io::Result<u64> {
     let last_activity_ms = Arc::new(AtomicU64::new(proxy_clock_ms()));
     let mut client = ActivityStream {
@@ -104,7 +108,7 @@ async fn copy_bidirectional_with_idle_timeout(
     };
     tokio::select! {
         result = tokio::io::copy_bidirectional(&mut client, &mut upstream) => result,
-        _ = wait_for_tunnel_idle(last_activity_ms) => Err(io::Error::new(
+        _ = wait_for_tunnel_idle(last_activity_ms, idle_timeout) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "guarded proxy tunnel was idle for too long",
         )),
@@ -230,6 +234,19 @@ async fn read_header(stream: &mut TcpStream) -> std::io::Result<(Vec<u8>, Vec<u8
     ))
 }
 
+async fn read_header_with_timeout(
+    stream: &mut TcpStream,
+    timeout: Duration,
+) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    match tokio::time::timeout(timeout, read_header(stream)).await {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "proxy request headers timed out",
+        )),
+    }
+}
+
 fn parse_authority(value: &str, default_port: u16) -> Option<(String, u16)> {
     let value = value.trim();
     if let Some(rest) = value.strip_prefix('[') {
@@ -304,17 +321,15 @@ async fn reply_status(stream: &mut TcpStream, code: u16, reason: &str) {
 }
 
 async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
-    let (header, trailing) = match tokio::time::timeout(HEADER_TIMEOUT, read_header(&mut client)).await {
-        Ok(Ok(parts)) => parts,
-        Ok(Err(e)) => {
-            if e.kind() == io::ErrorKind::InvalidData {
+    let (header, trailing) = match read_header_with_timeout(&mut client, HEADER_TIMEOUT).await {
+        Ok(parts) => parts,
+        Err(error) => {
+            if error.kind() == io::ErrorKind::InvalidData {
                 reply_status(&mut client, 431, "Request Header Fields Too Large").await;
+            } else if error.kind() == io::ErrorKind::TimedOut {
+                reply_status(&mut client, 408, "Request Timeout").await;
             }
-            return Err(e);
-        }
-        Err(_) => {
-            reply_status(&mut client, 408, "Request Timeout").await;
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "proxy request headers timed out"));
+            return Err(error);
         }
     };
     let text = String::from_utf8_lossy(&header);
@@ -349,7 +364,7 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
         if !trailing.is_empty() {
             upstream.write_all(&trailing).await?;
         }
-        let _ = copy_bidirectional_with_idle_timeout(&mut client, &mut upstream).await;
+        let _ = copy_bidirectional_with_idle_timeout(&mut client, &mut upstream, TUNNEL_IDLE_TIMEOUT).await;
         return Ok(());
     }
 
@@ -398,13 +413,54 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
     if !trailing.is_empty() {
         upstream.write_all(&trailing).await?;
     }
-    let _ = copy_bidirectional_with_idle_timeout(&mut client, &mut upstream).await;
+    let _ = copy_bidirectional_with_idle_timeout(&mut client, &mut upstream, TUNNEL_IDLE_TIMEOUT).await;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_connection_semaphore_caps_active_clients() {
+        let semaphore = Arc::clone(&PROXY_CONNECTIONS);
+        let permit = semaphore
+            .clone()
+            .try_acquire_many_owned(MAX_PROXY_CONNECTIONS as u32)
+            .expect("all connection slots start available");
+        assert!(semaphore.try_acquire().is_err());
+        drop(permit);
+        assert!(semaphore.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn proxy_header_timeout_releases_a_client_that_sends_nothing() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_header_with_timeout(&mut stream, Duration::from_millis(30)).await
+        });
+        let _client = TcpStream::connect(addr).await.unwrap();
+        let error = server.await.unwrap().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn proxy_tunnel_idle_timeout_releases_quiet_sockets() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (mut upstream, _) = listener.accept().await.unwrap();
+        let error = copy_bidirectional_with_idle_timeout(
+            &mut client,
+            &mut upstream,
+            Duration::from_millis(40),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
 
     #[test]
     fn parses_ipv4_and_bracketed_ipv6_authorities() {

@@ -391,6 +391,48 @@ fn raw_path_collapses_distinct_invalid_utf8() {
     assert_eq!(entries[0].raw_path, entries[1].raw_path);
 }
 
+#[cfg(unix)]
+#[test]
+fn descriptor_torrent_cleanup_refuses_intermediate_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let base = std::env::temp_dir().join(format!("grab-torrent-delete-link-{}", std::process::id()));
+    let root = base.join("root");
+    let outside = base.join("outside");
+    let protected = outside.join("keep.txt");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(&protected, b"must survive").unwrap();
+    symlink(&outside, root.join("linked")).unwrap();
+
+    remove_file_and_prune_parents(&root.join("linked/keep.txt"), &root);
+
+    assert_eq!(std::fs::read(&protected).unwrap(), b"must survive");
+    assert!(root.join("linked").is_symlink());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn descriptor_torrent_cleanup_deletes_file_and_prunes_only_empty_parents() {
+    let base = std::env::temp_dir().join(format!("grab-torrent-delete-ok-{}", std::process::id()));
+    let root = base.join("root");
+    let nested = root.join("nested/deeper");
+    let file = nested.join("remove.me");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(&file, b"delete").unwrap();
+
+    remove_file_and_prune_parents(&file, &root);
+
+    assert!(!file.exists());
+    assert!(!nested.exists());
+    assert!(!root.join("nested").exists());
+    assert!(root.is_dir(), "the configured download root must never be pruned");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn deletion_target_uses_raw_path_not_display() {
     let folder = std::path::Path::new("/tmp/dl/Cosmos");

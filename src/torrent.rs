@@ -447,14 +447,11 @@ fn is_hostile_entry(path: &str) -> bool {
 
 /// Remove a file, then prune parents left empty (never removing `folder`).
 ///
-/// Every path component below the already-open root is traversed relative to a
-/// directory descriptor with `O_NOFOLLOW | O_DIRECTORY`. That avoids following
-/// an intermediate symlink swapped in after the earlier validation. The
-/// descriptor walk, rather than the pre-check, is the security boundary.
+/// Every path component below the opened root is traversed relative to a
+/// directory descriptor with `O_NOFOLLOW | O_DIRECTORY`. The descriptor walk,
+/// not a pathname pre-check, is the security boundary: swapping an intermediate
+/// component for a symlink after validation cannot redirect the unlink.
 fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Path) {
-    if path_has_symlink_component(path, folder) {
-        return;
-    }
     let Ok(relative) = path.strip_prefix(folder) else {
         return;
     };

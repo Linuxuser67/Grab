@@ -87,11 +87,11 @@ pub fn managed_gallerydl_sha() -> Option<Option<String>> {
     Some(sha256_file(&path).ok())
 }
 
-/// Whether Grab's own gallery-dl differs from the latest upstream build. It
-/// compares the installed file's SHA-256 with the upstream asset digest, the
-/// same value the installer verifies, so the answer follows the binary on
-/// disk. A binary Grab does not manage, or a missing upstream digest, never
-/// prompts.
+/// Whether Grab's own gallery-dl differs from the latest stable Codeberg build.
+/// The managed channel is intentionally stable even if a prior build installed a
+/// newer nightly: a hash mismatch offers the user an explicit stable-channel
+/// replacement from Preferences. A binary Grab does not manage, or a missing
+/// upstream digest, never prompts.
 pub fn gallerydl_needs_update(managed: Option<Option<&str>>, latest_digest: Option<&str>) -> bool {
     match (managed, latest_digest) {
         (Some(Some(installed)), Some(latest)) => !installed.eq_ignore_ascii_case(latest),
@@ -105,7 +105,9 @@ pub fn gallerydl_needs_update(managed: Option<Option<&str>>, latest_digest: Opti
 /// Any API failure, draft/prerelease, unexpected asset URL, or missing checksum
 /// makes the release unavailable rather than weakening verification.
 fn valid_release_tag(tag: &str) -> bool {
-    !tag.is_empty()
+    tag.as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_alphanumeric())
         && tag.bytes().all(|b| {
             matches!(
                 b,
@@ -357,6 +359,9 @@ mod tests {
             .is_none()
         );
         assert!(codeberg_asset_url("v1.32.17/../../evil", LINUX_ASSET).is_none());
+        assert!(codeberg_asset_url(".", LINUX_ASSET).is_none());
+        assert!(codeberg_asset_url("..", LINUX_ASSET).is_none());
+        assert!(codeberg_asset_url(".hidden", LINUX_ASSET).is_none());
     }
 
     #[test]

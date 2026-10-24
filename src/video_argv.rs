@@ -388,15 +388,18 @@ pub(crate) fn live_remux_argv(
     argv.extend(["-i".to_string(), ts_path.to_string_lossy().into_owned()]);
     if audio_only {
         argv.extend(["-map".to_string(), "0:a?".to_string()]);
-    } else {
-        // A live HLS capture may expose subtitle/data tracks that MP4 cannot
-        // mux. Only carry its actual media streams into the finished file.
+    } else if repair_timestamps {
+        // The repair pass narrows mapping to A/V streams in case subtitle/data
+        // tracks are part of the muxer failure.
         argv.extend([
             "-map".to_string(),
             "0:v?".to_string(),
             "-map".to_string(),
             "0:a?".to_string(),
         ]);
+    } else {
+        // Preserve the normal remux's full-stream behavior, including subtitles.
+        argv.extend(["-map".to_string(), "0".to_string()]);
     }
     argv.extend([
         "-dn".to_string(),
@@ -621,13 +624,31 @@ mod live_remux_argv_tests {
     use std::path::Path;
 
     #[test]
-    fn live_video_remux_maps_only_video_and_audio_streams() {
+    fn normal_live_video_remux_preserves_all_input_streams() {
         let args = live_remux_argv(
             Path::new("capture.mp4"),
             Path::new("finished.mp4.part"),
             false,
             true,
             false,
+            "https://example.com/live",
+        );
+        let maps: Vec<&str> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-map")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(maps, vec!["0"]);
+    }
+
+    #[test]
+    fn timestamp_repair_remux_narrows_mapping_to_audio_and_video() {
+        let args = live_remux_argv(
+            Path::new("capture.ts"),
+            Path::new("finished.mp4.part"),
+            false,
+            true,
+            true,
             "https://example.com/live",
         );
         let maps: Vec<&str> = args

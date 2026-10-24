@@ -30,6 +30,7 @@ fn appstream_release_version(version: &str) -> String {
     version
         .replace("-beta.", "~beta.")
         .replace("-alpha.", "~alpha.")
+        .replace("-rc.", "~rc.")
 }
 
 /// True for an http(s) URL pointing at a .torrent file (case-insensitive).
@@ -1573,6 +1574,7 @@ mod tests {
     fn appstream_release_version_uses_tilde_for_prereleases_only() {
         assert_eq!(appstream_release_version("6.3.0-beta.1"), "6.3.0~beta.1");
         assert_eq!(appstream_release_version("6.3.0-alpha.2"), "6.3.0~alpha.2");
+        assert_eq!(appstream_release_version("6.3.0-rc.3"), "6.3.0~rc.3");
         assert_eq!(appstream_release_version("6.2.2"), "6.2.2");
     }
 

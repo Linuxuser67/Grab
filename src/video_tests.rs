@@ -3798,7 +3798,7 @@ fn live_argv_pins_planner_id_in_mpegts() {
 
 #[test]
 fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
-    // Map media streams only, stream-copy, ADTS fixup, faststart.
+    // Preserve normal input stream mapping, stream-copy, ADTS fixup, faststart.
     // Dests are the `.part` remux targets production passes: ffmpeg can't guess a
     // container from that name, so `-f` must be pinned from the real extension.
     let argv = live_remux_argv(
@@ -3809,8 +3809,9 @@ fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
         false,
         "https://x.com/watch?v=abc123",
     );
-    assert!(argv.windows(2).any(|w| w == ["-map", "0:v?"]));
-    assert!(argv.windows(2).any(|w| w == ["-map", "0:a?"]));
+    assert!(argv.windows(2).any(|w| w == ["-map", "0"]));
+    assert!(!argv.windows(2).any(|w| w == ["-map", "0:v?"]));
+    assert!(!argv.windows(2).any(|w| w == ["-map", "0:a?"]));
     assert!(argv.windows(2).any(|w| w == ["-c", "copy"]));
     assert!(argv.windows(2).any(|w| w == ["-bsf:a", "aac_adtstoasc"]));
     assert!(argv.windows(2).any(|w| w == ["-f", "mp4"]));

@@ -935,6 +935,23 @@ fn needs_live_timestamp_repair(log: &str) -> bool {
     .any(|needle| log.contains(needle))
 }
 
+/// Return the next (AAC bitstream filter, timestamp repair) configuration.
+/// Timestamp repair gets one priority retry; otherwise the AAC filter is
+/// dropped once. Pure logic so retry ordering can be regression-tested.
+fn next_live_remux_attempt(
+    with_bsf: bool,
+    repair_timestamps: bool,
+    log_tail: &str,
+) -> Option<(bool, bool)> {
+    if !repair_timestamps && needs_live_timestamp_repair(log_tail) {
+        Some((true, true))
+    } else if with_bsf {
+        Some((false, repair_timestamps))
+    } else {
+        None
+    }
+}
+
 /// Remux a stopped live capture into place. ffmpeg writes `<dest>.part` and the result is renamed to `dest` only on success: a bare `final.<n>.<ext>` is always worth keeping, a `.part` never is.
 pub(crate) async fn remux_live_capture(
     ffmpeg_bin: &Path,
@@ -1016,29 +1033,28 @@ pub(crate) async fn remux_live_capture(
             };
         }
         let detail = last_log_line(&log_tail, "ffmpeg reported failure");
-        if !repair_timestamps && needs_live_timestamp_repair(&log_tail) {
+        let Some((next_with_bsf, next_repair_timestamps)) =
+            next_live_remux_attempt(with_bsf, repair_timestamps, &log_tail)
+        else {
+            let _ = tokio::fs::remove_file(&partial).await;
+            break Err(VideoError::combine(detail));
+        };
+        if !repair_timestamps && next_repair_timestamps {
             tracing::warn!(
                 error = %detail,
                 "live remux retrying with timestamp recovery"
             );
-            // FFmpeg failed on an input timestamp pattern that can be repaired.
-            // Start with the AAC fixup enabled; if that still fails, the loop
-            // will also test the repaired path without the bitstream filter.
-            let _ = tokio::fs::remove_file(&partial).await;
-            repair_timestamps = true;
-            with_bsf = true;
-            continue;
+            // Keep the AAC fixup for the first repair attempt; the helper drops
+            // it if the repaired attempt also fails.
+        } else {
+            tracing::debug!(error = %detail, "live remux retrying with adjusted flags");
         }
-        if with_bsf {
-            tracing::debug!(error = %detail, "live remux without bsf, retrying bare");
-            // The failed attempt may have left a partial output. The retry must
-            // start clean; the partial is ours because this loop reserved its slot.
-            let _ = tokio::fs::remove_file(&partial).await;
-            with_bsf = false;
-            continue;
-        }
+        // The failed attempt may have left a partial output. The retry must
+        // start clean; the partial is ours because this loop reserved its slot.
         let _ = tokio::fs::remove_file(&partial).await;
-        break Err(VideoError::combine(detail));
+        with_bsf = next_with_bsf;
+        repair_timestamps = next_repair_timestamps;
+        continue;
     }
 }
 

@@ -79,7 +79,11 @@ def metainfo_release_versions() -> list[str]:
 def version_key(version: str):
     # AppStream ordering: '~' sorts before everything, so 5.6.7~beta.3 < 5.6.7.
     # Normalize Cargo's '-' prerelease separator to AppStream's '~'.
-    version = version.replace("-beta.", "~beta.").replace("-alpha.", "~alpha.")
+    version = (
+        version.replace("-beta.", "~beta.")
+        .replace("-alpha.", "~alpha.")
+        .replace("-rc.", "~rc.")
+    )
     if "~" in version:
         core, pre = version.split("~", 1)
         core_tuple = tuple(int(p) if p.isdigit() else 0 for p in core.split("."))

@@ -98,7 +98,7 @@ async fn copy_bidirectional_with_idle_timeout(
     client: &mut TcpStream,
     upstream: &mut TcpStream,
     idle_timeout: Duration,
-) -> io::Result<u64> {
+) -> io::Result<(u64, u64)> {
     let last_activity_ms = Arc::new(AtomicU64::new(proxy_clock_ms()));
     let mut client = ActivityStream {
         inner: client,

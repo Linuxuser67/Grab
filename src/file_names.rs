@@ -114,23 +114,16 @@ fn fold_ascii_part(part: &str) -> String {
             // NFKD handles decomposable accents beyond the explicit table.
             // Drop combining marks and keep the existing safe ASCII policy.
             let source = c.to_string();
-            let normalized =
-                glib::normalize(&source, glib::NormalizeMode::All).unwrap_or_else(|| source.into());
+            let normalized = glib::normalize(&source, glib::NormalizeMode::All);
             let before = out.len();
             for folded in normalized.chars() {
-                if matches!(
-                    glib::unichar_type(folded),
-                    glib::UnicodeType::NonSpacingMark
-                        | glib::UnicodeType::SpacingMark
-                        | glib::UnicodeType::EnclosingMark
-                ) {
-                    continue;
-                }
                 if folded.is_ascii_alphanumeric() || matches!(folded, '-' | '_' | '.') {
                     out.push(folded);
-                } else if folded != '"' && !folded.is_control() {
+                } else if folded.is_ascii() && folded != '"' && !folded.is_control() {
                     out.push('_');
                 }
+                // Non-ASCII combining marks left after NFKD are discarded.
+                // Unmapped symbols still fall back to "_" below.
             }
             if out.len() == before {
                 out.push('_');
@@ -736,6 +729,12 @@ mod tests {
 
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn fold_ascii_part_uses_nfkd_for_unlisted_latin_accents() {
+        assert_eq!(fold_ascii_part("ḑ"), "d");
+        assert_eq!(fold_ascii_part("a\u{0301}"), "a");
     }
 
     #[test]

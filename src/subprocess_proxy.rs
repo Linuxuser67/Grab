@@ -50,7 +50,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for ActivityStream<S> {
         let before = buffer.filled().len();
         let result = Pin::new(&mut this.inner).poll_read(cx, buffer);
         if matches!(&result, Poll::Ready(Ok(()))) && buffer.filled().len() > before {
-            this.last_activity_ms.store(proxy_clock_ms(), Ordering::Relaxed);
+            this.last_activity_ms
+                .store(proxy_clock_ms(), Ordering::Relaxed);
         }
         result
     }
@@ -65,7 +66,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ActivityStream<S> {
         let this = self.get_mut();
         let result = Pin::new(&mut this.inner).poll_write(cx, buffer);
         if matches!(&result, Poll::Ready(Ok(count)) if *count > 0) {
-            this.last_activity_ms.store(proxy_clock_ms(), Ordering::Relaxed);
+            this.last_activity_ms
+                .store(proxy_clock_ms(), Ordering::Relaxed);
         }
         result
     }
@@ -364,12 +366,9 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
         if !trailing.is_empty() {
             upstream.write_all(&trailing).await?;
         }
-        let _ = copy_bidirectional_with_idle_timeout(
-            &mut client,
-            &mut upstream,
-            TUNNEL_IDLE_TIMEOUT,
-        )
-        .await;
+        let _ =
+            copy_bidirectional_with_idle_timeout(&mut client, &mut upstream, TUNNEL_IDLE_TIMEOUT)
+                .await;
         return Ok(());
     }
 
@@ -418,12 +417,8 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
     if !trailing.is_empty() {
         upstream.write_all(&trailing).await?;
     }
-    let _ = copy_bidirectional_with_idle_timeout(
-        &mut client,
-        &mut upstream,
-        TUNNEL_IDLE_TIMEOUT,
-    )
-    .await;
+    let _ =
+        copy_bidirectional_with_idle_timeout(&mut client, &mut upstream, TUNNEL_IDLE_TIMEOUT).await;
     Ok(())
 }
 

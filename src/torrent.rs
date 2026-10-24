@@ -462,9 +462,7 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
     let components: Option<Vec<std::ffi::CString>> = relative
         .components()
         .map(|component| match component {
-            std::path::Component::Normal(name) => {
-                std::ffi::CString::new(name.as_bytes()).ok()
-            }
+            std::path::Component::Normal(name) => std::ffi::CString::new(name.as_bytes()).ok(),
             _ => None,
         })
         .collect();
@@ -501,7 +499,11 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
         // require a directory and refuse a symlink in this component.
         let fd = unsafe {
             libc::openat(
-                stack.last().expect("root descriptor retained").fd.as_raw_fd(),
+                stack
+                    .last()
+                    .expect("root descriptor retained")
+                    .fd
+                    .as_raw_fd(),
                 component.as_ptr(),
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
@@ -524,7 +526,11 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
     // SAFETY: the descriptor is open and target_name is a NUL-free component.
     let result = unsafe {
         libc::unlinkat(
-            stack.last().expect("root descriptor retained").fd.as_raw_fd(),
+            stack
+                .last()
+                .expect("root descriptor retained")
+                .fd
+                .as_raw_fd(),
             target_name.as_ptr(),
             0,
         )
@@ -547,9 +553,7 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
             .expect("non-root descriptor has a parent name");
         let parent_fd = stack[child_index - 1].fd.as_raw_fd();
         // SAFETY: parent_fd is open and child_name is a NUL-free component.
-        let result = unsafe {
-            libc::unlinkat(parent_fd, child_name.as_ptr(), libc::AT_REMOVEDIR)
-        };
+        let result = unsafe { libc::unlinkat(parent_fd, child_name.as_ptr(), libc::AT_REMOVEDIR) };
         if result != 0 {
             break; // Non-empty, replaced, or otherwise not removable.
         }

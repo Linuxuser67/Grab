@@ -114,8 +114,8 @@ fn fold_ascii_part(part: &str) -> String {
             // NFKD handles decomposable accents beyond the explicit table.
             // Drop combining marks and keep the existing safe ASCII policy.
             let source = c.to_string();
-            let normalized = glib::normalize(&source, glib::NormalizeMode::All)
-                .unwrap_or_else(|| source.into());
+            let normalized =
+                glib::normalize(&source, glib::NormalizeMode::All).unwrap_or_else(|| source.into());
             let before = out.len();
             for folded in normalized.chars() {
                 if matches!(

@@ -3414,7 +3414,7 @@
     },
     {
         "type": "inline",
-        "contents": "{\"package\":\"158b8294dde3909df5a4ec68a35f8c39720151834b1f87050b87b37435150011\",\"files\":{}}",
+        "contents": "{\"package\": \"158b8294dde3909df5a4ec68a35f8c39720151834b1f87050b87b37435150011\", \"files\": {}}",
         "dest": "cargo/psl-2.1.228",
         "dest-filename": ".cargo-checksum.json"
     },

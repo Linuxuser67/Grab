@@ -2141,22 +2141,25 @@ mod tests {
     async fn authenticated_nonce_stays_reserved_after_queue_full() {
         let mut srv = start(1).await;
         let host = format!("127.0.0.1:{}", srv.port);
-        let fill_body = r#"{"url":"https://queue-fill.example/first"}"#;
-        let fill_task = tokio::spawn({
-            let host = host.clone();
-            async move {
-                request_to(
-                    srv.port,
-                    "POST",
-                    "/add",
-                    &[("Host", &host), JSON],
-                    fill_body,
-                )
-                .await
-            }
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!fill_task.is_finished(), "the first URL should hold the queue slot");
+
+        // Fill the single queue slot with a valid authenticated handoff. It
+        // responds immediately, so the assertion below doesn't depend on a
+        // sleep or a race with the server task.
+        let mut fill_nonce_bytes = [0u8; 16];
+        getrandom::fill(&mut fill_nonce_bytes).expect("operating-system random source");
+        let fill_nonce = hex_encode(&fill_nonce_bytes);
+        let fill_timestamp_ms = unix_time_ms().expect("system clock");
+        let fill_body = format!(
+            r#"{{"url":"https://queue-fill.example/first","timestamp_ms":{fill_timestamp_ms},"nonce":"{fill_nonce}","cookies":[]}}"#
+        );
+        let fill_token = token(&fill_body);
+        let fill_headers = [
+            ("Host", host.as_str()),
+            ("X-Grab-Token", fill_token.as_str()),
+            JSON,
+        ];
+        let accepted = request_to(srv.port, "POST", "/add", &fill_headers, &fill_body).await;
+        assert_eq!(status(&accepted), "200", "{accepted}");
 
         let mut nonce_bytes = [0u8; 16];
         getrandom::fill(&mut nonce_bytes).expect("operating-system random source");
@@ -2172,20 +2175,12 @@ mod tests {
             JSON,
         ];
 
-        let refused =
-            request_to(srv.port, "POST", "/add", &headers, &body).await;
+        let refused = request_to(srv.port, "POST", "/add", &headers, &body).await;
         assert_eq!(status(&refused), "429", "{refused}");
 
         // Free the queue after the signed request has been refused. Retrying
         // the exact captured body must remain a replay, not become a new job.
-        let first = srv.rx.recv().await.expect("queue-filling handoff");
-        first
-            .decision
-            .expect("unauthenticated request requires confirmation")
-            .send(HandoffOutcome::Queued)
-            .unwrap();
-        assert_eq!(status(&fill_task.await.unwrap()), "200");
-
+        let _first = srv.rx.recv().await.expect("queue-filling handoff");
         let replay = request_to(srv.port, "POST", "/add", &headers, &body).await;
         assert_eq!(status(&replay), "403", "{replay}");
         assert!(srv.rx.try_recv().is_err(), "a replay must not enqueue");

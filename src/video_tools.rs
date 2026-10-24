@@ -813,6 +813,7 @@ async fn fetch_ytdlp_inner(
 const DENO_MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 const DENO_MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 const DENO_LATEST_RELEASE_API: &str = "https://api.github.com/repos/denoland/deno/releases/latest";
+const DENO_RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
 const DENO_MIN_VERSION: [u32; 3] = [2, 3, 0];
 
 /// Candidate validated by ensure_deno, kept in sync with yt-dlp's runtime path.
@@ -894,8 +895,33 @@ pub(crate) fn deno_download_url_for_arch(tag: &str, arch: &str) -> Option<String
     ))
 }
 
-fn valid_sha256_digest(value: &str) -> bool {
+pub(crate) fn valid_sha256_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Read a text response without allowing untrusted metadata to grow without bound.
+pub(crate) async fn bounded_response_text(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Option<String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return None;
+    }
+
+    use futures_util::StreamExt as _;
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).ok()
 }
 
 fn parse_deno_release_metadata(body: &str, arch: &str) -> Option<DenoRelease> {
@@ -944,7 +970,7 @@ async fn latest_deno_release() -> Option<DenoRelease> {
             .ok()?
             .error_for_status()
             .ok()?;
-        let body = response.text().await.ok()?;
+        let body = bounded_response_text(response, DENO_RELEASE_METADATA_MAX_BYTES).await?;
         parse_deno_release_metadata(&body, std::env::consts::ARCH)
     });
     handle.await.ok().flatten()
@@ -972,15 +998,37 @@ fn find_deno_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-async fn first_supported_deno(candidates: &[PathBuf]) -> Option<PathBuf> {
+async fn first_supported_deno(
+    candidates: &[PathBuf],
+) -> Result<Option<PathBuf>, ToolProbeError> {
+    let mut first_error = None;
     for path in candidates {
-        if let Ok(version) = probe_first_line(path, "--version").await
-            && parse_dotted_version(&version).is_some_and(|v| v >= DENO_MIN_VERSION)
-        {
-            return Some(path.clone());
+        match probe_first_line(path, "--version").await {
+            Ok(version)
+                if parse_dotted_version(&version).is_some_and(|v| v >= DENO_MIN_VERSION) =>
+            {
+                return Ok(Some(path.clone()));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
         }
     }
-    None
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
+}
+
+fn deno_probe_failure(error: ToolProbeError) -> VideoError {
+    VideoError::runtime(
+        gettext(
+            "Couldn't check the installed Deno version: {detail}. The existing binary was not replaced; retry the operation.",
+        )
+        .replace("{detail}", &error.to_string()),
+    )
 }
 
 async fn remove_legacy_qjs_from(dir: &Path) {
@@ -1282,10 +1330,14 @@ pub(crate) async fn ensure_deno(page_url: &str) -> Result<(), VideoError> {
 
     // A stale managed copy must not hide a compatible bundled/system Deno.
     let candidates = find_deno_candidates();
-    if let Some(path) = first_supported_deno(&candidates).await {
-        remember_deno_path(&path);
-        remove_legacy_qjs_from(&user_lib_dir()).await;
-        return Ok(());
+    match first_supported_deno(&candidates).await {
+        Ok(Some(path)) => {
+            remember_deno_path(&path);
+            remove_legacy_qjs_from(&user_lib_dir()).await;
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(error) => return Err(deno_probe_failure(error)),
     }
     if let Some(path) = candidates.first() {
         if !in_flatpak() {
@@ -1311,10 +1363,14 @@ pub(crate) async fn ensure_deno(page_url: &str) -> Result<(), VideoError> {
     // official architecture-specific asset with its release API SHA-256.
     let _guard = deno_install_lock().lock().await;
     let candidates = find_deno_candidates();
-    if let Some(path) = first_supported_deno(&candidates).await {
-        remember_deno_path(&path);
-        remove_legacy_qjs_from(&user_lib_dir()).await;
-        return Ok(());
+    match first_supported_deno(&candidates).await {
+        Ok(Some(path)) => {
+            remember_deno_path(&path);
+            remove_legacy_qjs_from(&user_lib_dir()).await;
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(error) => return Err(deno_probe_failure(error)),
     }
     let path = install_deno_locked().await?;
     remember_deno_path(&path);
@@ -1899,13 +1955,19 @@ pub(crate) fn extractor_failure(log: &str) -> bool {
 }
 
 /// Why an installed tool's version probe did not return a version line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum ToolProbeError {
+    #[error("could not start the version-check process")]
     Spawn,
+    #[error("version-check process exited unsuccessfully")]
     FailedExit,
+    #[error("version-check process returned no output")]
     EmptyOutput,
+    #[error("version-check process returned invalid output")]
     InvalidOutput,
+    #[error("version check timed out")]
     Timeout,
+    #[error("background version check failed")]
     Runtime,
 }
 
@@ -2632,7 +2694,30 @@ mod deno_release_tests {
 
         assert_eq!(
             first_supported_deno(&[stale, compatible.clone()]).await,
-            Some(compatible)
+            Ok(Some(compatible))
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn deno_candidate_selection_preserves_probe_errors() {
+        let base = unique_dir("deno-probe-error");
+        std::fs::create_dir_all(&base).unwrap();
+        let failing = base.join("deno");
+        write_executable_test_script(&failing, "#!/bin/sh\\nexit 1\\n");
+
+        assert_eq!(
+            first_supported_deno(std::slice::from_ref(&failing)).await,
+            Err(ToolProbeError::FailedExit)
+        );
+
+        // An old candidate is not sufficient evidence to replace Deno when
+        // another candidate could not be checked.
+        let old = base.join("old-deno");
+        write_executable_test_script(&old, "#!/bin/sh\\nprintf '2.2.9\\n'\\n");
+        assert_eq!(
+            first_supported_deno(&[old, failing]).await,
+            Err(ToolProbeError::FailedExit)
         );
         std::fs::remove_dir_all(&base).ok();
     }

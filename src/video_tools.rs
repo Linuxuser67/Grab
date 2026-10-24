@@ -1339,7 +1339,6 @@ pub(crate) async fn ensure_deno(page_url: &str) -> Result<(), VideoError> {
     if !is_youtube_url(page_url) {
         return Ok(());
     }
-    let page_url = page_url.to_string();
     // Provisioning continues on the process-lifetime runtime after a caller's
     // waiter is cancelled or times out; its lock remains held through file writes.
     let task = crate::runtime::tokio_rt().spawn(async move { ensure_deno_inner().await });

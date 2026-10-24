@@ -1772,13 +1772,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 let auth = crate::inline_gallery::resolve_gallery_auth(
                                     &url_for_count,
                                     browser.as_str(),
-                                )
-                                .await;
+                                );
                                 if let Ok(tool) = crate::gallery_argv::resolve_tool() {
                                     crate::gallery_probe::count_gallery_files_with_proxy(
                                         &tool,
                                         &url_for_count,
                                         auth.cookies_path.as_deref(),
+                                        auth.cookies_browser.as_deref(),
                                         auth.user_agent.as_deref(),
                                         filter_c,
                                         proxy.as_ref(),
@@ -3277,11 +3277,12 @@ fn make_gallery_picker_opener(
                 // fallback (was handoff-only: auth-gated galleries could
                 // list nothing here but download fine).
                 let auth =
-                    crate::inline_gallery::resolve_gallery_auth(&url_c, browser3.as_str()).await;
+                    crate::inline_gallery::resolve_gallery_auth(&url_c, browser3.as_str());
                 let r = crate::gallery_probe::enumerate_gallery_files_streamed_with_proxy(
                     &tool,
                     &url_c,
                     auth.cookies_path.as_deref(),
+                    auth.cookies_browser.as_deref(),
                     auth.user_agent.as_deref(),
                     filter,
                     items_tx,

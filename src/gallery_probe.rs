@@ -329,13 +329,14 @@ pub async fn probe_gallery(
     cookies_file: Option<&Path>,
     user_agent: Option<&str>,
 ) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
-    probe_gallery_with_proxy(tool, url, cookies_file, user_agent, None).await
+    probe_gallery_with_proxy(tool, url, cookies_file, None, user_agent, None).await
 }
 
 pub async fn probe_gallery_with_proxy(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
+    cookies_browser: Option<&str>,
     user_agent: Option<&str>,
     proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
@@ -353,9 +354,7 @@ pub async fn probe_gallery_with_proxy(
         // Don't let gallery-dl write back to Grab's staged cookies file.
         .arg("-o")
         .arg("extractor.cookies-update=false");
-    if let Some(cookies) = cookies_file {
-        cmd.arg("-C").arg(cookies);
-    }
+    cmd.args(crate::gallery_argv::cookie_source_args(cookies_file, cookies_browser));
     if let Some(ua) = user_agent {
         cmd.arg("--user-agent").arg(ua);
     }
@@ -582,6 +581,7 @@ fn enumerate_command(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
+    cookies_browser: Option<&str>,
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
     jsonl: bool,
@@ -594,9 +594,7 @@ fn enumerate_command(
     for arg in enumerate_base_argv(jsonl) {
         cmd.arg(arg);
     }
-    if let Some(cookies) = cookies_file {
-        cmd.arg("-C").arg(cookies);
-    }
+    cmd.args(crate::gallery_argv::cookie_source_args(cookies_file, cookies_browser));
     if let Some(ua) = user_agent {
         cmd.arg("--user-agent").arg(ua);
     }
@@ -630,11 +628,12 @@ pub(crate) async fn enumerate_gallery_files_with_proxy(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
+    cookies_browser: Option<&str>,
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
     proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Result<Vec<GalleryItem>, GalleryError> {
-    let cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, false, proxy)?;
+    let cmd = enumerate_command(tool, url, cookies_file, cookies_browser, user_agent, filter, false, proxy)?;
     let output = run_to_completion(cmd, ENUMERATE_TIMEOUT, "gallery-dl enumerate").await?;
     if !output.status.success() {
         return Err(GalleryError::probe(exit_message(
@@ -671,6 +670,7 @@ pub(crate) async fn enumerate_gallery_files_streamed(
         tool,
         url,
         cookies_file,
+        None,
         user_agent,
         filter,
         items_tx,
@@ -683,13 +683,14 @@ pub(crate) async fn enumerate_gallery_files_streamed_with_proxy(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
+    cookies_browser: Option<&str>,
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
     items_tx: tokio::sync::mpsc::UnboundedSender<GalleryItem>,
     proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Result<usize, GalleryError> {
     // Same line-streaming shape as the yt-dlp runner (see video_runner.rs).
-    let mut cmd = enumerate_command(tool, url, cookies_file, user_agent, filter, true, proxy)?;
+    let mut cmd = enumerate_command(tool, url, cookies_file, cookies_browser, user_agent, filter, true, proxy)?;
     // stdout is the line stream; stderr is kept as a short tail for the
     // error text, drained concurrently so gallery-dl never blocks on a full pipe.
     cmd.stdout(std::process::Stdio::piped())
@@ -789,8 +790,15 @@ pub(crate) async fn enumerate_gallery_files_streamed_with_proxy(
     // in document mode, the only form where that error reaches us, and
     // forward whatever it found. Cost: empty galleries walk twice.
     if count == 0 && !items_tx.is_closed() {
-        let batched =
-            enumerate_gallery_files_with_proxy(tool, url, cookies_file, user_agent, filter, proxy);
+        let batched = enumerate_gallery_files_with_proxy(
+            tool,
+            url,
+            cookies_file,
+            cookies_browser,
+            user_agent,
+            filter,
+            proxy,
+        );
         for item in batched.await? {
             if items_tx.send(item).is_err() {
                 break;
@@ -1106,13 +1114,14 @@ pub async fn count_gallery_files(
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
 ) -> Option<u32> {
-    count_gallery_files_with_proxy(tool, url, cookies_file, user_agent, filter, None).await
+    count_gallery_files_with_proxy(tool, url, cookies_file, None, user_agent, filter, None).await
 }
 
 pub async fn count_gallery_files_with_proxy(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
+    cookies_browser: Option<&str>,
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
     proxy: Option<&crate::net_types::ResolvedProxy>,
@@ -1130,6 +1139,7 @@ pub async fn count_gallery_files_with_proxy(
         tool,
         url,
         cookies_file,
+        cookies_browser,
         user_agent,
         filter,
         proxy,

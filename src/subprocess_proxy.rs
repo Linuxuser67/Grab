@@ -364,7 +364,12 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
         if !trailing.is_empty() {
             upstream.write_all(&trailing).await?;
         }
-        let _ = copy_bidirectional_with_idle_timeout(&mut client, &mut upstream, TUNNEL_IDLE_TIMEOUT).await;
+        let _ = copy_bidirectional_with_idle_timeout(
+            &mut client,
+            &mut upstream,
+            TUNNEL_IDLE_TIMEOUT,
+        )
+        .await;
         return Ok(());
     }
 
@@ -413,7 +418,12 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
     if !trailing.is_empty() {
         upstream.write_all(&trailing).await?;
     }
-    let _ = copy_bidirectional_with_idle_timeout(&mut client, &mut upstream, TUNNEL_IDLE_TIMEOUT).await;
+    let _ = copy_bidirectional_with_idle_timeout(
+            &mut client,
+            &mut upstream,
+            TUNNEL_IDLE_TIMEOUT,
+        )
+        .await;
     Ok(())
 }
 

@@ -120,4 +120,3 @@ fn link_row(group: &adw::PreferencesGroup, tool: &str, url: &'static str) {
     });
     group.add(&row);
 }
-

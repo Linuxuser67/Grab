@@ -410,9 +410,15 @@ fn valid_cookie_domain(domain: &str) -> bool {
         })
 }
 
-/// A cookie may only be sent for the URL's own host or one of its parents.
+/// A cookie may only be sent for the URL's own host or one of its parents,
+/// never for a public suffix itself (such as `com` or `co.uk`). Use the
+/// maintained Mozilla Public Suffix List rather than a short hand-written TLD
+/// table, including private and wildcard rules.
 fn domain_covers_host(domain: &str, host: &str) -> bool {
     let (domain, host) = (domain.to_ascii_lowercase(), host.to_ascii_lowercase());
+    if psl::suffix_str(&domain).is_some_and(|suffix| suffix.eq_ignore_ascii_case(&domain)) {
+        return false;
+    }
     host == domain || host.ends_with(&format!(".{domain}"))
 }
 
@@ -1434,6 +1440,15 @@ mod tests {
             [".example.com\tTRUE\t/\tFALSE\t0\tprefs\tdark"],
             "{text}"
         );
+    }
+
+    #[test]
+    fn cookie_domain_must_not_be_a_public_suffix() {
+        assert!(!domain_covers_host("com", "example.com"));
+        assert!(!domain_covers_host("co.uk", "example.co.uk"));
+        assert!(!domain_covers_host("github.io", "user.github.io"));
+        assert!(domain_covers_host("example.co.uk", "www.example.co.uk"));
+        assert!(domain_covers_host("example.com", "example.com"));
     }
 
     #[test]

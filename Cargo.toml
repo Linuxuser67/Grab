@@ -44,6 +44,8 @@ gettext-rs = "0.8"
 # (metadata is refetched, CDN URLs expire in ~6h anyway).
 yt-dlp = { version = "2.8.3", default-features = false, features = ["rustls"] }
 libc = "0.2"
+# Mozilla Public Suffix List for validating browser cookie domains.
+psl = "=2.1.228"
 # Safe wrappers for Linux no-replace renameat2 operations.
 rustix = { version = "1.1.5", features = ["fs"] }
 thiserror = "2"

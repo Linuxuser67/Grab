@@ -21,6 +21,9 @@ use tokio::sync::Semaphore;
 static PROXY_ADDR: OnceLock<SocketAddr> = OnceLock::new();
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound DNS resolution and sequential public-address connection attempts too:
+/// each accepted socket holds one of the fixed proxy permits until connect ends.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PROXY_CONNECTIONS: usize = 64;
 static PROXY_CONNECTIONS: LazyLock<Arc<Semaphore>> =
@@ -272,8 +275,26 @@ fn parse_authority(value: &str, default_port: u16) -> Option<(String, u16)> {
     (!value.is_empty() && default_port != 0).then_some((value.to_string(), default_port))
 }
 
+/// Resolve and connect to a public address under a total DNS/connect deadline.
+async fn connect_public_with_timeout(host: &str, port: u16) -> io::Result<TcpStream> {
+    connect_with_timeout(connect_public(host, port), CONNECT_TIMEOUT).await
+}
+
+async fn connect_with_timeout<F>(
+    future: F,
+    timeout: Duration,
+) -> io::Result<TcpStream>
+where
+    F: std::future::Future<Output = io::Result<TcpStream>>,
+{
+    tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guarded proxy DNS/connect timed out"))?
+}
+
 /// Resolve and connect to a public address. The socket connects to the exact
-/// IP selected here, never re-resolving the untrusted hostname.
+/// IP selected here, never re-resolving the untrusted hostname. The caller
+/// bounds the overall DNS/connect attempt.
 async fn connect_public(host: &str, port: u16) -> std::io::Result<TcpStream> {
     use std::io::{Error, ErrorKind};
 
@@ -352,11 +373,15 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
             reply_status(&mut client, 400, "Bad CONNECT Authority").await;
             return Ok(());
         };
-        let mut upstream = match connect_public(&host, port).await {
+        let mut upstream = match connect_public_with_timeout(&host, port).await {
             Ok(stream) => stream,
             Err(e) => {
-                tracing::debug!(host, port, error = %e, "guarded proxy refused CONNECT destination");
-                reply_status(&mut client, 403, "Destination Refused").await;
+                tracing::debug!(host, port, error = %e, "guarded proxy refused or timed out connecting to CONNECT destination");
+                if e.kind() == io::ErrorKind::TimedOut {
+                    reply_status(&mut client, 504, "Gateway Timeout").await;
+                } else {
+                    reply_status(&mut client, 403, "Destination Refused").await;
+                }
                 return Ok(());
             }
         };
@@ -381,11 +406,15 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
     };
     let host = parsed.host_str().unwrap_or_default().to_string();
     let port = parsed.port_or_known_default().unwrap_or(80);
-    let mut upstream = match connect_public(&host, port).await {
+    let mut upstream = match connect_public_with_timeout(&host, port).await {
         Ok(stream) => stream,
         Err(e) => {
-            tracing::debug!(host, port, error = %e, "guarded proxy refused HTTP destination");
-            reply_status(&mut client, 403, "Destination Refused").await;
+            tracing::debug!(host, port, error = %e, "guarded proxy refused or timed out connecting to HTTP destination");
+            if e.kind() == io::ErrorKind::TimedOut {
+                reply_status(&mut client, 504, "Gateway Timeout").await;
+            } else {
+                reply_status(&mut client, 403, "Destination Refused").await;
+            }
             return Ok(());
         }
     };
@@ -436,6 +465,17 @@ mod tests {
         assert!(semaphore.try_acquire().is_err());
         drop(permit);
         assert!(semaphore.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn proxy_dns_and_connect_attempt_timeout_is_enforced() {
+        let error = connect_with_timeout(
+            std::future::pending::<io::Result<TcpStream>>(),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 
     #[tokio::test]

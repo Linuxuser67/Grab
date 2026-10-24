@@ -2305,7 +2305,10 @@ mod tests {
         assert_eq!(void.install_all, "sudo xbps-install -S yt-dlp ffmpeg deno");
         let derivative =
             distro_packages("ID=neon\nID_LIKE=\"ubuntu debian\"\nNAME=\"KDE neon\"\n").unwrap();
-        assert_eq!(derivative.install_all, "sudo apt install yt-dlp ffmpeg deno");
+        assert_eq!(
+            derivative.install_all,
+            "sudo apt install yt-dlp ffmpeg deno"
+        );
     }
 
     #[test]

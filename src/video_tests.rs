@@ -2869,6 +2869,33 @@ fn user_ytdlp_wins_and_legacy_user_ffmpeg_is_ignored() {
 }
 
 #[test]
+fn lookup_resolves_yt_dlp_without_requiring_ffmpeg() {
+    // Previewing metadata must work on yt-dlp-only installations even though
+    // queueing a video download still needs a complete FFmpeg/ffprobe pair.
+    let dir = std::env::temp_dir().join(format!("grab-lookup-tools-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let xdg = dir.join("xdg");
+    let libs = xdg.join("grab").join("libs");
+    let path_only = dir.join("path");
+    std::fs::create_dir_all(&libs).unwrap();
+    std::fs::create_dir_all(&path_only).unwrap();
+    let youtube = fake_executable(&libs, "yt-dlp");
+    let _env = ScopedEnv::apply(
+        path_only.to_str().expect("UTF-8 temp path"),
+        &xdg,
+    );
+
+    assert_eq!(crate::video_tools::resolve_ytdlp().unwrap(), youtube);
+    assert!(
+        crate::video_tools::resolve_libraries().is_err(),
+        "full download setup should still require FFmpeg and ffprobe"
+    );
+
+    drop(_env);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn toolchain_dir_prefers_complete_toolchain() {
     // A dir with only ffmpeg (an older user-lib install) must not shadow a
     // later dir shipping both: yt-dlp resolves ffprobe from --ffmpeg-location.

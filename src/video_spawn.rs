@@ -12,7 +12,6 @@ use crate::video_types::{FetchedVideo, ProbeResult, VideoInfo};
 use gettextrs::gettext;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use yt_dlp::client::deps::Libraries;
 use yt_dlp::model::Video;
 
 /// Prepend Grab-managed tools to PATH without hiding system tools. gallery-dl may
@@ -221,7 +220,7 @@ impl Drop for AbortOnDrop {
 /// (used for `--load-info-json` at download time to skip re-extraction).
 /// Playlists return `None` (their entries are re-probed individually).
 pub async fn fetch_video_infos(
-    libs: Libraries,
+    youtube_bin: PathBuf,
     url: String,
     cookies_browser: String,
     newest_first: bool,
@@ -229,7 +228,7 @@ pub async fn fetch_video_infos(
     cancel: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
-        let yt_version = ensure_ytdlp_version(&libs.youtube).await?;
+        let yt_version = ensure_ytdlp_version(&youtube_bin).await?;
         tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
         // Deno is Grab's JavaScript runtime for YouTube; make sure it's
         // installed before a YouTube spawn that may need to solve JS challenges.
@@ -237,7 +236,7 @@ pub async fn fetch_video_infos(
         let mut value = match tokio::time::timeout(
             Duration::from_secs(FETCH_TIMEOUT_SECS),
             fetch_raw_dump_json(
-                &libs.youtube,
+                &youtube_bin,
                 &url,
                 &cookies_browser,
                 Duration::from_secs(300),
@@ -715,12 +714,9 @@ mod tests {
         // report Cancelled (not run the pipeline, not a generic error).
         let (tx, rx) = tokio::sync::oneshot::channel();
         tx.send(()).expect("receiver alive");
-        let libs = Libraries {
-            youtube: std::path::PathBuf::from("/nonexistent/yt-dlp"),
-            ffmpeg: std::path::PathBuf::from("/nonexistent/ffmpeg"),
-        };
+        let youtube_bin = std::path::PathBuf::from("/nonexistent/yt-dlp");
         let r = crate::runtime::tokio_rt().block_on(fetch_video_infos(
-            libs,
+            youtube_bin,
             "https://example.com/video".to_string(),
             String::new(),
             false,

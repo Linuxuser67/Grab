@@ -442,10 +442,16 @@ pub(crate) fn managed_core_tools_installed() -> bool {
     }
 }
 
-/// Locate yt-dlp and a complete FFmpeg/ffprobe pair, or say why they are missing.
+/// Resolve only the tool needed to inspect a media page. Metadata extraction
+/// does not invoke FFmpeg, so lookup must remain available on yt-dlp-only
+/// installations. The full download resolver below adds the FFmpeg pair.
+pub(crate) fn resolve_ytdlp() -> Result<PathBuf, VideoError> {
+    find_in_dirs("yt-dlp", &tool_search_dirs()).ok_or_else(VideoError::missing_tools)
+}
+
+/// Locate yt-dlp and a complete FFmpeg/ffprobe pair for actual media downloads.
 pub fn resolve_libraries() -> Result<Libraries, VideoError> {
-    let youtube =
-        find_in_dirs("yt-dlp", &tool_search_dirs()).ok_or_else(VideoError::missing_tools)?;
+    let youtube = resolve_ytdlp()?;
     // Resolve FFmpeg as a pair from one directory. A lone app-bundled ffmpeg
     // must not shadow the runtime's complete ffmpeg/ffprobe toolchain.
     let ffmpeg_dir =

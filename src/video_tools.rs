@@ -2704,7 +2704,7 @@ mod deno_release_tests {
         let base = unique_dir("deno-probe-error");
         std::fs::create_dir_all(&base).unwrap();
         let failing = base.join("deno");
-        write_executable_test_script(&failing, "#!/bin/sh\\nexit 1\\n");
+        write_executable_test_script(&failing, "#!/bin/sh\nexit 1\n");
 
         assert_eq!(
             first_supported_deno(std::slice::from_ref(&failing)).await,
@@ -2714,7 +2714,7 @@ mod deno_release_tests {
         // An old candidate is not sufficient evidence to replace Deno when
         // another candidate could not be checked.
         let old = base.join("old-deno");
-        write_executable_test_script(&old, "#!/bin/sh\\nprintf '2.2.9\\n'\\n");
+        write_executable_test_script(&old, "#!/bin/sh\nprintf '2.2.9\n'\n");
         assert_eq!(
             first_supported_deno(&[old, failing]).await,
             Err(ToolProbeError::FailedExit)

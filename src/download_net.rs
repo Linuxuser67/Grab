@@ -510,8 +510,7 @@ fn require_public_dns_filter(cache: &PublicDnsPolicy, host: &str) -> bool {
 
 fn requires_public_dns_filter(host: &str, cache: &PublicDnsPolicy) -> bool {
     let key = host_key(host);
-    is_untrusted_handoff_host(&key)
-        || lock_recover(cache.as_ref()).hosts.contains(&key)
+    is_untrusted_handoff_host(&key) || lock_recover(cache.as_ref()).hosts.contains(&key)
 }
 
 /// Extend an untrusted collection's public-only policy to a selected or

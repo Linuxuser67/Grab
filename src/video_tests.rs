@@ -519,8 +519,7 @@ fn ensure_staging_dir_rejects_symlink_escape() {
     let link = staging_root().join((u64::MAX - 7).to_string());
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&outside, &link).unwrap();
-    let err = ensure_staging_dir_in(&staging_root(), &link)
-        .expect_err("symlink escape must fail");
+    let err = ensure_staging_dir_in(&staging_root(), &link).expect_err("symlink escape must fail");
     assert!(err.to_string().contains("not a real directory"), "{err}");
     assert!(outside.read_dir().unwrap().next().is_none());
     let _ = std::fs::remove_file(&link);
@@ -541,8 +540,7 @@ fn ensure_staging_dir_refuses_dangling_link() {
     let link = staging_root().join((u64::MAX - 6).to_string());
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&target, &link).unwrap();
-    let err = ensure_staging_dir_in(&staging_root(), &link)
-        .expect_err("dangling link must fail");
+    let err = ensure_staging_dir_in(&staging_root(), &link).expect_err("dangling link must fail");
     assert!(err.to_string().contains("not a real directory"), "{err}");
     assert!(
         !target.exists(),

@@ -176,8 +176,7 @@ pub(crate) fn in_flatpak() -> bool {
 pub(crate) struct DistroPackages {
     /// Pretty distro name for the dialog title, e.g. "Fedora".
     pub distro: String,
-    /// One-line distro command for yt-dlp and ffmpeg. Deno is provisioned
-    /// separately from its verified upstream stable release.
+    /// One-line distro command for yt-dlp, ffmpeg, and Deno.
     pub install_all: String,
 }
 
@@ -222,8 +221,43 @@ pub(crate) fn distro_packages(os_release: &str) -> Option<DistroPackages> {
         package_manager(id).or_else(|| id_like.split_whitespace().find_map(package_manager))?;
     Some(DistroPackages {
         distro: name.unwrap_or(id).to_string(),
-        install_all: format!("{pm} yt-dlp ffmpeg"),
+        install_all: format!("{pm} yt-dlp ffmpeg deno"),
     })
+}
+
+#[cfg(test)]
+mod distro_package_tests {
+    use super::distro_packages;
+
+    #[test]
+    fn install_command_includes_deno_for_supported_package_managers() {
+        let cases = [
+            (
+                "ID=fedora\nNAME=Fedora\n",
+                "sudo dnf install yt-dlp ffmpeg deno",
+            ),
+            (
+                "ID=debian\nNAME=Debian GNU/Linux\n",
+                "sudo apt install yt-dlp ffmpeg deno",
+            ),
+            (
+                "ID=arch\nNAME=Arch Linux\n",
+                "sudo pacman -S yt-dlp ffmpeg deno",
+            ),
+        ];
+
+        for (os_release, expected) in cases {
+            let packages = distro_packages(os_release).expect("supported distro");
+            assert_eq!(packages.install_all, expected);
+        }
+    }
+
+    #[test]
+    fn install_command_uses_id_like_fallback_with_deno() {
+        let packages = distro_packages("ID=custom\nID_LIKE=debian\n")
+            .expect("Debian-compatible distro");
+        assert_eq!(packages.install_all, "sudo apt install yt-dlp ffmpeg deno");
+    }
 }
 
 /// Where on-demand tool installs keep the yt-dlp/ffmpeg binaries:

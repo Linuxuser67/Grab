@@ -147,10 +147,24 @@ pub(crate) fn sweep_cookie_staging() {
             }
         }
     }
-    // Clean legacy dumps from older builds in /tmp/grab-video.
-    // These are stale plaintext cookie files; remove only our own (uid-checked).
+    // One-release migration cleanup for plaintext cookie dumps left by old
+    // builds. Unlike the current private staging directory, /tmp is shared:
+    // never scan the legacy path unless it is a real directory owned by us.
     let legacy_dir = crate::video::staging_root();
-    if let Ok(entries) = std::fs::read_dir(&legacy_dir) {
+    sweep_legacy_cookie_dumps(&legacy_dir, &owned_by_me);
+}
+
+/// Remove stale legacy cookie dumps from a validated directory. Kept separate
+/// so the symlink-root refusal is directly regression-tested.
+fn sweep_legacy_cookie_dumps(
+    dir: &std::path::Path,
+    owned_by_me: &impl Fn(&std::path::Path) -> bool,
+) {
+    if !crate::download_net::validate_secure_dir(dir) {
+        tracing::debug!(path = %dir.display(), "refusing unsafe legacy cookie staging directory");
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name();
             let name = name.to_str().unwrap_or("");
@@ -354,6 +368,34 @@ pub(crate) fn cookie_header_for(
 #[cfg(test)]
 mod tests {
     use super::{StagedCookies, parse_netscape_line};
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_cookie_sweep_refuses_symlinked_root() {
+        use std::os::unix::fs::symlink;
+
+        let unique = format!(
+            "grab-cookie-sweep-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let target = base.join("target");
+        let link = base.join("legacy-root");
+        std::fs::create_dir_all(&target).unwrap();
+        let stale_cookie = target.join("grab-cookies-old.txt");
+        std::fs::write(&stale_cookie, "secret cookie data").unwrap();
+        symlink(&target, &link).unwrap();
+
+        sweep_legacy_cookie_dumps(&link, &|_| true);
+
+        assert!(stale_cookie.exists(), "a symlink target must not be scanned or modified");
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn staged_cookies_drop_deletes_file() {

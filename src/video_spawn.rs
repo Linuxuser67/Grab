@@ -7,7 +7,7 @@ use crate::video_probe::{
     playlist_resolve_error, retarget_story_items, sanitize_video_json,
 };
 use crate::video_progress::{last_log_line, trace_format_lines};
-use crate::video_tools::{VideoError, ensure_tool_versions};
+use crate::video_tools::{VideoError, ensure_ytdlp_version};
 use crate::video_types::{FetchedVideo, ProbeResult, VideoInfo};
 use gettextrs::gettext;
 use std::path::{Path, PathBuf};
@@ -229,7 +229,7 @@ pub async fn fetch_video_infos(
     cancel: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
-        let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
+        let yt_version = ensure_ytdlp_version(&libs.youtube).await?;
         tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
         // Deno is Grab's JavaScript runtime for YouTube; make sure it's
         // installed before a YouTube spawn that may need to solve JS challenges.

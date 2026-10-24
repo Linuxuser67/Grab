@@ -2046,6 +2046,24 @@ pub(crate) async fn tool_display_version(
     Some(line)
 }
 
+/// Validate only yt-dlp for metadata lookup. FFmpeg is not involved in the
+/// lookup process, so don't spawn its version probe until an actual download
+/// attempt needs the full toolchain.
+pub(crate) async fn ensure_ytdlp_version(youtube_bin: &Path) -> Result<String, VideoError> {
+    let line = probe_first_line(youtube_bin, "--version")
+        .await
+        .map_err(VideoError::tool_probe_failure)?;
+    validate_ytdlp_version(line)
+}
+
+fn validate_ytdlp_version(line: String) -> Result<String, VideoError> {
+    let fresh = parse_dotted_version(&line).is_some_and(|v| v >= MIN_YTDLP_VERSION);
+    if !fresh {
+        return Err(VideoError::outdated());
+    }
+    Ok(line)
+}
+
 /// Refuse stale or unverifiable toolchains before any network happens; returns
 /// the raw version lines for attempt logging.
 pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, String), VideoError> {
@@ -2054,11 +2072,7 @@ pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, St
         probe_first_line(&libs.youtube, "--version"),
         probe_first_line(&libs.ffmpeg, "-version")
     );
-    let yt = yt.map_err(VideoError::tool_probe_failure)?;
-    let fresh = parse_dotted_version(&yt).is_some_and(|v| v >= MIN_YTDLP_VERSION);
-    if !fresh {
-        return Err(VideoError::outdated());
-    }
+    let yt = validate_ytdlp_version(yt.map_err(VideoError::tool_probe_failure)?)?;
     let ff = ff.map_err(VideoError::tool_probe_failure)?;
     // ffmpeg version line looks like "ffmpeg version 7.1.2 ...": take the token
     // right after "version". A find_map over all tokens would match "2000-2025"

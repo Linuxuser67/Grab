@@ -34,6 +34,17 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+/// Tokio detaches a task when its JoinHandle is dropped. Own the abort handle
+/// as well, so aborting the enclosing GLib lookup doesn't leave dual probes
+/// running (and holding child processes) for a URL the user has already changed.
+struct AbortTaskOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Where a submit came from: Enter, the Add button or tick icon, or auto-add.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SubmitSource {
@@ -2307,6 +2318,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             })
                             .await
                         });
+                        // If the parent GLib lookup is superseded, this future is
+                        // dropped. A bare JoinHandle would detach the Tokio task;
+                        // abort it so both yt-dlp and gallery-dl probe children wind down.
+                        let _abort_probe_on_drop = AbortTaskOnDrop(probe_handle.abort_handle());
                         let probe_outcome = match probe_handle.await {
                             Ok(outcome) => outcome,
                             Err(e) => {

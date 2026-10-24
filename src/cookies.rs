@@ -111,7 +111,7 @@ pub(crate) fn sweep_cookie_staging() {
     // Only delete files owned by our uid: /tmp is shared, and another
     // user's grab-cookies-*.txt is not ours to remove.
     #[cfg(unix)]
-    let my_uid = unsafe { libc::getuid() };
+    let my_uid = crate::download_net::current_uid();
     let owned_by_me = |path: &std::path::Path| -> bool {
         #[cfg(unix)]
         {

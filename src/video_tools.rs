@@ -1372,22 +1372,46 @@ pub(crate) fn ffmpeg_version_token(first_line: &str) -> Option<&str> {
 /// exactly the remapped sandbox dir this function exists to bypass.
 #[cfg(unix)]
 pub(crate) fn real_home_dir() -> Option<PathBuf> {
-    // SAFETY: getpwuid returns static storage (or null); only pw_dir up to its NUL is read.
-    unsafe {
-        let pw = libc::getpwuid(libc::getuid());
-        if pw.is_null() {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    // NSS may need more than the POSIX minimum. Retry ERANGE but bound growth
+    // so a broken NSS module cannot make this allocate indefinitely.
+    const MAX_PASSWD_BUFFER: usize = 1024 * 1024;
+    let suggested = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let initial = if suggested > 0 {
+        (suggested as usize).clamp(1024, MAX_PASSWD_BUFFER)
+    } else {
+        16 * 1024
+    };
+    let mut buffer = vec![0u8; initial];
+    loop {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: entry and buffer are writable for the call; result is an out pointer.
+        let status = unsafe {
+            libc::getpwuid_r(
+                crate::download_net::current_uid(),
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE && buffer.len() < MAX_PASSWD_BUFFER {
+            buffer.resize((buffer.len() * 2).min(MAX_PASSWD_BUFFER), 0);
+            continue;
+        }
+        if status != 0 || result.is_null() {
             return None;
         }
-        let dir = (*pw).pw_dir;
-        if dir.is_null() {
+        // SAFETY: getpwuid_r returned the initialized `entry` record.
+        let entry = unsafe { entry.assume_init() };
+        if entry.pw_dir.is_null() {
             return None;
         }
-        let len = libc::strlen(dir);
-        if len == 0 {
-            return None;
-        }
-        let bytes = std::slice::from_raw_parts(dir as *const u8, len);
-        std::str::from_utf8(bytes).ok().map(PathBuf::from)
+        let bytes = unsafe { CStr::from_ptr(entry.pw_dir) }.to_bytes();
+        return (!bytes.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(bytes)));
     }
 }
 

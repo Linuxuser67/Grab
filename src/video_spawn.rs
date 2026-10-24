@@ -7,7 +7,6 @@ use crate::video_probe::{
     playlist_resolve_error, retarget_story_items, sanitize_video_json,
 };
 use crate::video_progress::{last_log_line, trace_format_lines};
-use crate::video_staging::{ensure_staging_dir, staging_root};
 use crate::video_tools::{VideoError, ensure_tool_versions};
 use crate::video_types::{FetchedVideo, ProbeResult, VideoInfo};
 use gettextrs::gettext;
@@ -235,8 +234,6 @@ pub async fn fetch_video_infos(
         // Deno is Grab's JavaScript runtime for YouTube; make sure it's
         // installed before a YouTube spawn that may need to solve JS challenges.
         crate::video_tools::ensure_deno(&url).await?;
-        let out = staging_root();
-        ensure_staging_dir(&out)?;
         let mut value = match tokio::time::timeout(
             Duration::from_secs(FETCH_TIMEOUT_SECS),
             fetch_raw_dump_json(

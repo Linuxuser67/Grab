@@ -678,6 +678,19 @@ pub(crate) fn client_builder() -> reqwest::ClientBuilder {
         .dns_resolver(std::sync::Arc::new(GuardedResolver))
 }
 
+/// Current Unix UID. libc marks getuid unsafe despite its async-signal-safe semantics;
+/// centralize that FFI boundary for filesystem ownership checks.
+#[cfg(unix)]
+pub(crate) fn current_uid() -> libc::uid_t {
+    // SAFETY: getuid has no pointer arguments and is async-signal-safe.
+    unsafe { libc::getuid() }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn current_uid() -> u32 {
+    0
+}
+
 /// Validate a directory is safe for sensitive use: not a symlink, owned by us,
 /// not group/world-writable. Shared by cookie staging and tool exec dirs.
 #[cfg(unix)]
@@ -690,8 +703,7 @@ pub(crate) fn validate_secure_dir(dir: &std::path::Path) -> bool {
         tracing::warn!("secure dir is a symlink; refusing");
         return false;
     }
-    // SAFETY: getuid() is async-signal-safe; the unsafe marker is a libc-crate artifact.
-    let uid = unsafe { libc::getuid() };
+    let uid = current_uid();
     if md.uid() != uid {
         tracing::warn!("secure dir owned by another user; refusing");
         return false;

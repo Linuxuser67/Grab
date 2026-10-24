@@ -201,31 +201,29 @@ pub(crate) async fn export_cookies_to_file(
     page_url: &str,
     timeout: Duration,
 ) -> Option<StagedCookies> {
-    let path = stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await?;
-    Some(StagedCookies(path))
+    stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await
 }
 
-/// Dump one profile's cookies through yt-dlp to a temp file; caller deletes it.
+/// Dump one profile's cookies through yt-dlp to a temp file. Its RAII owner
+/// unlinks it on every return path, including cancellation during the wait.
 async fn export_cookies(
     youtube_bin: &Path,
     cookies_browser: &str,
     page_url: &str,
     timeout: Duration,
 ) -> Option<String> {
-    let path = stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await?;
-    let text = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    text
+    let staged = stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await?;
+    std::fs::read_to_string(staged.path()).ok()
 }
 
-/// Stage cookies to a secure temp file; returns the path. Caller deletes it.
-/// Shared by `export_cookies` (reads+deletes) and `export_cookies_to_file` (keeps).
+/// Stage cookies to a secure temp file. The RAII owner is created immediately
+/// after atomic creation, before any later await can cancel this future.
 async fn stage_cookie_file(
     youtube_bin: &Path,
     cookies_browser: &str,
     page_url: &str,
     timeout: Duration,
-) -> Option<PathBuf> {
+) -> Option<StagedCookies> {
     // Every YouTube yt-dlp invocation pins Deno, including this cookie-export
     // probe. Prepare it first so a fresh install doesn't silently lose browser
     // cookies while the metadata lookup provisions the runtime concurrently.
@@ -237,7 +235,7 @@ async fn stage_cookie_file(
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = crate::download_net::cookie_staging_dir()?;
     // Unique per attempt, created atomically owner-only: a planted symlink fails instead of diverting the dump.
-    let path: PathBuf = loop {
+    let staged: StagedCookies = loop {
         let candidate: PathBuf = dir.join(format!(
             "grab-cookies-{}-{}.txt",
             std::process::id(),
@@ -251,7 +249,10 @@ async fn stage_cookie_file(
             opts.mode(0o600);
         }
         match opts.open(&candidate) {
-            Ok(_) => break candidate,
+            Ok(file) => {
+                drop(file);
+                break StagedCookies(candidate);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
                 tracing::debug!(error = %e, "cookie export temp file failed");
@@ -263,7 +264,7 @@ async fn stage_cookie_file(
     cmd.arg("--ignore-config")
         .arg("--no-progress")
         .arg("--cookies")
-        .arg(&path)
+        .arg(staged.path())
         .arg("--skip-download");
     // Same identity argv as every other yt-dlp spawn (player-client
     // workaround, cookies, `--` URL guard): one helper so flags can't drift.
@@ -276,7 +277,6 @@ async fn stage_cookie_file(
         Ok(guarded) => guarded,
         Err(e) => {
             tracing::debug!(error = %e, "refusing cookie export without guarded extractor networking");
-            let _ = std::fs::remove_file(&path);
             return None;
         }
     };
@@ -289,7 +289,13 @@ async fn stage_cookie_file(
     {
         cmd.process_group(0);
     }
-    let mut child = cmd.spawn().ok()?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::debug!(error = %error, "cookie export process could not start");
+            return None;
+        }
+    };
     let mut group = crate::video_spawn::ProcessGroupGuard::new(&child);
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         // Clean exit: leader reaped, so disarm before post-wait work.
@@ -298,18 +304,16 @@ async fn stage_cookie_file(
             status
         }
         _ => {
-            // Timeout/wait failure: SIGKILL the group off the cookie DB lock, reap, remove temp file, fall back.
+            // Timeout/wait failure kills/reaps the child group; staged drops on return.
             crate::video_spawn::reap_child(&mut child, &mut group).await;
-            let _ = std::fs::remove_file(&path);
             return None;
         }
     };
     if !status.success() {
         tracing::debug!("cookie export failed, continuing without cookies");
-        let _ = std::fs::remove_file(&path);
         return None;
     }
-    Some(path)
+    Some(staged)
 }
 
 /// Cookie jar for one browser spec, cached briefly; `None` means plain requests.
@@ -419,6 +423,28 @@ mod tests {
             // guard drops here
         }
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn cancelling_cookie_export_drops_staged_plaintext_file() {
+        let path = std::env::temp_dir().join(format!(
+            "grab-cancelled-cookie-export-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "secret cookie data").unwrap();
+        let staged = StagedCookies(path.clone());
+        let task = tokio::spawn(async move {
+            let _staged = staged;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+        assert!(!path.exists(), "cancelling an export must unlink its staged file");
     }
 
     #[test]

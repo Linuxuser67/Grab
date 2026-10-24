@@ -99,7 +99,7 @@ fn unix_time_ms() -> Option<u64> {
 fn reserve_handoff_nonce(
     timestamp_ms: Option<u64>,
     nonce: Option<&str>,
-) -> Result<String, StatusCode> {
+) -> Result<(), StatusCode> {
     let (Some(timestamp_ms), Some(nonce)) = (timestamp_ms, nonce) else {
         return Err(StatusCode::FORBIDDEN);
     };
@@ -126,24 +126,10 @@ fn reserve_handoff_nonce(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     cache.expires_at_ms.insert(
-        nonce.clone(),
+        nonce,
         timestamp_ms.saturating_add(HANDOFF_CLOCK_SKEW_MS),
     );
-    Ok(nonce)
-}
-
-fn release_handoff_nonce(nonce: &str) {
-    match HANDOFF_REPLAY_CACHE.lock() {
-        Ok(mut cache) => {
-            cache.expires_at_ms.remove(nonce);
-        }
-        Err(poisoned) => {
-            tracing::error!(
-                "handoff replay cache mutex poisoned while releasing a rejected request"
-            );
-            poisoned.into_inner().expires_at_ms.remove(nonce);
-        }
-    }
+    Ok(())
 }
 
 /// The shared secret between Grab and a paired extension.
@@ -1019,14 +1005,11 @@ async fn handle_add(
     // A partially present or malformed pair is never treated as legacy.
     let legacy_authenticated =
         token_authenticated && req.timestamp_ms.is_none() && req.nonce.is_none();
-    let replay_nonce = if token_authenticated && !legacy_authenticated {
-        match reserve_handoff_nonce(req.timestamp_ms, req.nonce.as_deref()) {
-            Ok(nonce) => Some(nonce),
-            Err(status) => return status.into_response(),
-        }
-    } else {
-        None
-    };
+    if token_authenticated && !legacy_authenticated
+        && let Err(status) = reserve_handoff_nonce(req.timestamp_ms, req.nonce.as_deref())
+    {
+        return status.into_response();
+    }
     let authenticated = token_authenticated && !legacy_authenticated;
     if legacy_authenticated {
         tracing::debug!("legacy paired extension handoff requires confirmation and drops cookies");
@@ -1071,18 +1054,16 @@ async fn handle_add(
             if staged {
                 discard_handoff_cookies(&req.url);
             }
-            if let Some(nonce) = &replay_nonce {
-                release_handoff_nonce(nonce);
-            }
+            // Keep the nonce reserved. The extension creates a fresh nonce on
+            // each 429 retry; releasing this one would let a captured rejected
+            // POST become valid later when the queue has space again.
             return StatusCode::TOO_MANY_REQUESTS.into_response();
         }
         Err(TrySendError::Closed(_)) => {
             if staged {
                 discard_handoff_cookies(&req.url);
             }
-            if let Some(nonce) = &replay_nonce {
-                release_handoff_nonce(nonce);
-            }
+            // Do not reopen a consumed nonce after an internal queue failure.
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
@@ -2147,6 +2128,60 @@ mod tests {
             srv.rx.try_recv().is_err(),
             "a replay must not enqueue another handoff"
         );
+    }
+
+    #[tokio::test]
+    async fn authenticated_nonce_stays_reserved_after_queue_full() {
+        let mut srv = start(1).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let fill_body = r#"{"url":"https://queue-fill.example/first"}"#;
+        let fill_task = tokio::spawn({
+            let host = host.clone();
+            async move {
+                request_to(
+                    srv.port,
+                    "POST",
+                    "/add",
+                    &[("Host", &host), JSON],
+                    fill_body,
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!fill_task.is_finished(), "the first URL should hold the queue slot");
+
+        let mut nonce_bytes = [0u8; 16];
+        getrandom::fill(&mut nonce_bytes).expect("operating-system random source");
+        let nonce = hex_encode(&nonce_bytes);
+        let timestamp_ms = unix_time_ms().expect("system clock");
+        let body = format!(
+            r#"{{"url":"https://queue-retry.example/file.zip","timestamp_ms":{timestamp_ms},"nonce":"{nonce}","cookies":[]}}"#
+        );
+        let signed = token(&body);
+        let headers = [
+            ("Host", host.as_str()),
+            ("X-Grab-Token", signed.as_str()),
+            JSON,
+        ];
+
+        let refused =
+            request_to(srv.port, "POST", "/add", &headers, &body).await;
+        assert_eq!(status(&refused), "429", "{refused}");
+
+        // Free the queue after the signed request has been refused. Retrying
+        // the exact captured body must remain a replay, not become a new job.
+        let first = srv.rx.recv().await.expect("queue-filling handoff");
+        first
+            .decision
+            .expect("unauthenticated request requires confirmation")
+            .send(HandoffOutcome::Queued)
+            .unwrap();
+        assert_eq!(status(&fill_task.await.unwrap()), "200");
+
+        let replay = request_to(srv.port, "POST", "/add", &headers, &body).await;
+        assert_eq!(status(&replay), "403", "{replay}");
+        assert!(srv.rx.try_recv().is_err(), "a replay must not enqueue");
     }
 
     // --- cookie file hardening --------------------------------------------

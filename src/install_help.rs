@@ -28,8 +28,8 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
                 .title(pkgs.distro.clone())
                 .build();
             command_row(&group, &gettext("Install tools"), &pkgs.install_all);
-            // Deno is installed from the verified upstream release, not a
-            // distro package; always show its official release page.
+            // Keep the upstream page available for distros whose Deno
+            // package is missing or too old for YouTube extraction.
             link_row(&group, "Deno", DENO_RELEASES_URL);
             content.append(&group);
         }

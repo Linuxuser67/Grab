@@ -45,7 +45,7 @@ impl GalleryError {
         Self::Runtime(e.to_string())
     }
     pub(crate) fn probe(e: impl std::fmt::Display) -> Self {
-        Self::Probe(e.to_string())
+        Self::Probe(crate::backend_debug::sanitize_diagnostic(&e.to_string()))
     }
 }
 
@@ -408,6 +408,19 @@ mod tests {
 
     /// Regression: gallerydl_display_version must work from a thread
     /// without a Tokio runtime.
+    #[test]
+    fn probe_error_redacts_private_url_paths_and_tokens() {
+        let error = GalleryError::probe(
+            "gallery-dl: NotFoundError: https://user:password@www.instagram.com/stories/private-user/?token=secret#story",
+        );
+        let display = error.to_string();
+        assert!(display.contains("NotFoundError"));
+        assert!(display.contains("www.instagram.com"));
+        assert!(!display.contains("password"));
+        assert!(!display.contains("private-user"));
+        assert!(!display.contains("secret"));
+    }
+
     #[test]
     fn gallerydl_display_version_works_without_tokio_runtime() {
         let result = std::thread::spawn(|| {

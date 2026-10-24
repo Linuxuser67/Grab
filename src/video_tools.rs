@@ -2714,7 +2714,7 @@ mod deno_release_tests {
         // An old candidate is not sufficient evidence to replace Deno when
         // another candidate could not be checked.
         let old = base.join("old-deno");
-        write_executable_test_script(&old, "#!/bin/sh\nprintf '2.2.9\n'\n");
+        write_executable_test_script(&old, "#!/bin/sh\nprintf '2.2.9'\n");
         assert_eq!(
             first_supported_deno(&[old, failing]).await,
             Err(ToolProbeError::FailedExit)

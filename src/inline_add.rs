@@ -3525,6 +3525,15 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn abort_task_on_drop_aborts_nested_tokio_task() {
+        let child = tokio::spawn(std::future::pending::<()>());
+        let guard = AbortTaskOnDrop(child.abort_handle());
+        drop(guard);
+        let error = child.await.expect_err("guard must abort the child task");
+        assert!(error.is_cancelled());
+    }
+
     #[test]
     fn inflight_guard_clears_only_for_current_generation() {
         let probe = Rc::new(RefCell::new(ProbeState::default()));

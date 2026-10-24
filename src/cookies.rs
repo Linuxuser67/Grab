@@ -367,7 +367,7 @@ pub(crate) fn cookie_header_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{StagedCookies, parse_netscape_line};
+    use super::{StagedCookies, parse_netscape_line, sweep_legacy_cookie_dumps};
 
     #[cfg(unix)]
     #[test]

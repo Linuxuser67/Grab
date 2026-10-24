@@ -119,10 +119,46 @@ fn redact_diagnostic_token(token: &str) -> String {
         if authority_end < rest.len() {
             safe.push_str("/(...)");
         }
-        safe
-    } else {
-        token.to_string()
+        return safe;
     }
+
+    if let Some((key, value)) = token.split_once('=') {
+        let key_normalized = key.trim_start_matches('-').to_ascii_lowercase();
+        let sensitive = matches!(
+            key_normalized.as_str(),
+            "token"
+                | "password"
+                | "passwd"
+                | "secret"
+                | "cookie"
+                | "cookies"
+                | "session"
+                | "sessionid"
+                | "authorization"
+                | "proxy-authorization"
+                | "auth"
+                | "signature"
+                | "sig"
+                | "csrf"
+        ) || key_normalized.ends_with("_token")
+            || key_normalized.ends_with("_secret")
+            || key_normalized.ends_with("_password")
+            || key_normalized.ends_with("_cookie")
+            || key_normalized.ends_with("_session")
+            || key_normalized.ends_with("_authorization");
+        if sensitive {
+            // Keep common trailing delimiters while replacing the whole value.
+            let suffix_len = value
+                .chars()
+                .rev()
+                .take_while(|ch| matches!(ch, ',' | ';' | ':'))
+                .count();
+            let suffix: String = value.chars().rev().take(suffix_len).collect::<String>()
+                .chars().rev().collect();
+            return format!("{key}=(redacted){suffix}");
+        }
+    }
+    token.to_string()
 }
 
 /// Sanitize a diagnostic before showing or copying it in the UI.
@@ -227,6 +263,21 @@ mod tests {
     fn diagnostic_sanitization_removes_controls_and_caps_length() {
         assert_eq!(sanitize_diagnostic("first\u{0007} second"), "first second");
         assert!(sanitize_diagnostic(&"x".repeat(3000)).ends_with("… [truncated]"));
+    }
+
+    #[test]
+    fn diagnostic_sanitization_redacts_standalone_secret_fields() {
+        let safe = sanitize_diagnostic(
+            "--access_token=abc password=def SESSIONID=ghi Authorization=Bearer,",
+        );
+        assert!(safe.contains("--access_token=(redacted)"));
+        assert!(safe.contains("password=(redacted)"));
+        assert!(safe.contains("SESSIONID=(redacted)"));
+        assert!(safe.contains("Authorization=(redacted),"));
+        assert!(!safe.contains("abc"));
+        assert!(!safe.contains("def"));
+        assert!(!safe.contains("ghi"));
+        assert!(!safe.contains("Bearer"));
     }
 
     #[test]

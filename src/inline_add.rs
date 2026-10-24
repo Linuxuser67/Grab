@@ -2276,8 +2276,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let local_tools = crate::runtime::tokio_rt()
                     .spawn_blocking(move || {
                         let youtube = crate::video_tools::resolve_ytdlp();
-                        let gallery = needs_gallery_tool
-                            .then(crate::gallery_argv::resolve_tool);
+                        let gallery = needs_gallery_tool.then(crate::gallery_argv::resolve_tool);
                         (youtube, gallery)
                     })
                     .await;
@@ -2329,9 +2328,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // Gallery items for the Video ⇄ Gallery switcher, armed in
                 // the Single arm below when route() says both are viable.
                 let mut toggle_items: Option<ToggleItems> = None;
-                let (ytdlp_result, gallery_error) =
-                    if let Some(tool) = gallery_tool
-                    {
+                let (ytdlp_result, gallery_error) = if let Some(tool) = gallery_tool {
                         // Run both extractor subprocesses inside Tokio so the parent
                         // cancellation guard can abort their shared probe task.
                         let probe_url = url.clone();
@@ -3307,17 +3304,19 @@ fn make_gallery_picker_opener(
                 // Unified auth: handoff jar first, browser export as
                 // fallback (was handoff-only: auth-gated galleries could
                 // list nothing here but download fine).
-                let auth =
-                    crate::inline_gallery::resolve_gallery_auth(&url_c, browser3.as_str());
+                let auth = crate::inline_gallery::resolve_gallery_auth(&url_c, browser3.as_str());
+                let options = crate::gallery_probe::GalleryEnumerationOptions {
+                    cookies_file: auth.cookies_path.as_deref(),
+                    cookies_browser: auth.cookies_browser.as_deref(),
+                    user_agent: auth.user_agent.as_deref(),
+                    filter,
+                    proxy: proxy3.as_ref(),
+                };
                 let r = crate::gallery_probe::enumerate_gallery_files_streamed_with_proxy(
                     &tool,
                     &url_c,
-                    auth.cookies_path.as_deref(),
-                    auth.cookies_browser.as_deref(),
-                    auth.user_agent.as_deref(),
-                    filter,
+                    options,
                     items_tx,
-                    proxy3.as_ref(),
                 )
                 .await;
                 drop(auth);

@@ -354,7 +354,10 @@ pub async fn probe_gallery_with_proxy(
         // Don't let gallery-dl write back to Grab's staged cookies file.
         .arg("-o")
         .arg("extractor.cookies-update=false");
-    cmd.args(crate::gallery_argv::cookie_source_args(cookies_file, cookies_browser));
+    cmd.args(crate::gallery_argv::cookie_source_args(
+        cookies_file,
+        cookies_browser,
+    ));
     if let Some(ua) = user_agent {
         cmd.arg("--user-agent").arg(ua);
     }
@@ -575,17 +578,23 @@ fn enumerate_base_argv(jsonl: bool) -> Vec<String> {
     argv
 }
 
+/// Options shared by gallery enumeration, including the cookie source and proxy.
+#[derive(Clone, Copy)]
+pub(crate) struct GalleryEnumerationOptions<'a> {
+    pub(crate) cookies_file: Option<&'a Path>,
+    pub(crate) cookies_browser: Option<&'a str>,
+    pub(crate) user_agent: Option<&'a str>,
+    pub(crate) filter: crate::gallery_argv::GalleryFilter,
+    pub(crate) proxy: Option<&'a crate::net_types::ResolvedProxy>,
+}
+
 /// The enumeration command: base argv, auth, filter, throttle. `jsonl` picks
 /// line-framed streaming output over the document form.
 fn enumerate_command(
     tool: &Path,
     url: &str,
-    cookies_file: Option<&Path>,
-    cookies_browser: Option<&str>,
-    user_agent: Option<&str>,
-    filter: crate::gallery_argv::GalleryFilter,
+    options: GalleryEnumerationOptions<'_>,
     jsonl: bool,
-    proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Result<tokio::process::Command, GalleryError> {
     let mut cmd = tokio::process::Command::new(tool);
     crate::video_spawn::prepend_user_lib_to_path(&mut cmd);
@@ -594,24 +603,27 @@ fn enumerate_command(
     for arg in enumerate_base_argv(jsonl) {
         cmd.arg(arg);
     }
-    cmd.args(crate::gallery_argv::cookie_source_args(cookies_file, cookies_browser));
-    if let Some(ua) = user_agent {
+    cmd.args(crate::gallery_argv::cookie_source_args(
+        options.cookies_file,
+        options.cookies_browser,
+    ));
+    if let Some(ua) = options.user_agent {
         cmd.arg("--user-agent").arg(ua);
     }
     // Mirror the download's filter so --range indices match.
     let mut filter_argv = Vec::new();
-    crate::gallery_argv::push_filter(&mut filter_argv, filter);
+    crate::gallery_argv::push_filter(&mut filter_argv, options.filter);
     for arg in filter_argv {
         cmd.arg(arg);
     }
     for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
         cmd.arg(arg);
     }
-    if let Some(proxy) = proxy {
+    if let Some(proxy) = options.proxy {
         cmd.arg("--proxy").arg(&proxy.cli_url);
         crate::video_spawn::apply_configured_proxy_env(&mut cmd, Some(proxy));
     }
-    apply_guarded_proxy(&mut cmd, url, proxy.is_some())?;
+    apply_guarded_proxy(&mut cmd, url, options.proxy.is_some())?;
     cmd.arg("--").arg(url);
     Ok(cmd)
 }
@@ -627,13 +639,9 @@ const ENUMERATE_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) async fn enumerate_gallery_files_with_proxy(
     tool: &Path,
     url: &str,
-    cookies_file: Option<&Path>,
-    cookies_browser: Option<&str>,
-    user_agent: Option<&str>,
-    filter: crate::gallery_argv::GalleryFilter,
-    proxy: Option<&crate::net_types::ResolvedProxy>,
+    options: GalleryEnumerationOptions<'_>,
 ) -> Result<Vec<GalleryItem>, GalleryError> {
-    let cmd = enumerate_command(tool, url, cookies_file, cookies_browser, user_agent, filter, false, proxy)?;
+    let cmd = enumerate_command(tool, url, options, false)?;
     let output = run_to_completion(cmd, ENUMERATE_TIMEOUT, "gallery-dl enumerate").await?;
     if !output.status.success() {
         return Err(GalleryError::probe(exit_message(
@@ -669,12 +677,14 @@ pub(crate) async fn enumerate_gallery_files_streamed(
     enumerate_gallery_files_streamed_with_proxy(
         tool,
         url,
-        cookies_file,
-        None,
-        user_agent,
-        filter,
+        GalleryEnumerationOptions {
+            cookies_file,
+            cookies_browser: None,
+            user_agent,
+            filter,
+            proxy: None,
+        },
         items_tx,
-        None,
     )
     .await
 }
@@ -682,15 +692,11 @@ pub(crate) async fn enumerate_gallery_files_streamed(
 pub(crate) async fn enumerate_gallery_files_streamed_with_proxy(
     tool: &Path,
     url: &str,
-    cookies_file: Option<&Path>,
-    cookies_browser: Option<&str>,
-    user_agent: Option<&str>,
-    filter: crate::gallery_argv::GalleryFilter,
+    options: GalleryEnumerationOptions<'_>,
     items_tx: tokio::sync::mpsc::UnboundedSender<GalleryItem>,
-    proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Result<usize, GalleryError> {
     // Same line-streaming shape as the yt-dlp runner (see video_runner.rs).
-    let mut cmd = enumerate_command(tool, url, cookies_file, cookies_browser, user_agent, filter, true, proxy)?;
+    let mut cmd = enumerate_command(tool, url, options, true)?;
     // stdout is the line stream; stderr is kept as a short tail for the
     // error text, drained concurrently so gallery-dl never blocks on a full pipe.
     cmd.stdout(std::process::Stdio::piped())
@@ -790,15 +796,7 @@ pub(crate) async fn enumerate_gallery_files_streamed_with_proxy(
     // in document mode, the only form where that error reaches us, and
     // forward whatever it found. Cost: empty galleries walk twice.
     if count == 0 && !items_tx.is_closed() {
-        let batched = enumerate_gallery_files_with_proxy(
-            tool,
-            url,
-            cookies_file,
-            cookies_browser,
-            user_agent,
-            filter,
-            proxy,
-        );
+        let batched = enumerate_gallery_files_with_proxy(tool, url, options);
         for item in batched.await? {
             if items_tx.send(item).is_err() {
                 break;

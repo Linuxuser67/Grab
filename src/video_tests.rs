@@ -2880,10 +2880,7 @@ fn lookup_resolves_yt_dlp_without_requiring_ffmpeg() {
     std::fs::create_dir_all(&libs).unwrap();
     std::fs::create_dir_all(&path_only).unwrap();
     let youtube = fake_executable(&libs, "yt-dlp");
-    let _env = ScopedEnv::apply(
-        path_only.to_str().expect("UTF-8 temp path"),
-        &xdg,
-    );
+    let _env = ScopedEnv::apply(path_only.to_str().expect("UTF-8 temp path"), &xdg);
 
     assert_eq!(crate::video_tools::resolve_ytdlp().unwrap(), youtube);
     assert!(
@@ -2930,7 +2927,10 @@ fn fetch_video_infos_succeeds_with_yt_dlp_only_and_no_staging_root() {
         .to_string(),
     )
     .unwrap();
-    let script = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '2026.08.19\\n'; exit 0; fi\nexec /bin/cat \"" + libs.join("info.json").to_string_lossy().as_ref() + "\"\n";
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '2026.08.19\\n'; exit 0; fi\nexec /bin/cat \"{}\"\n",
+        libs.join("info.json").display()
+    );
     std::fs::write(&youtube, script).unwrap();
     #[cfg(unix)]
     {
@@ -2938,10 +2938,7 @@ fn fetch_video_infos_succeeds_with_yt_dlp_only_and_no_staging_root() {
         std::fs::set_permissions(&youtube, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    let _env = ScopedEnv::apply(
-        path_only.to_str().expect("UTF-8 temp path"),
-        &xdg,
-    );
+    let _env = ScopedEnv::apply(path_only.to_str().expect("UTF-8 temp path"), &xdg);
     assert!(crate::video_tools::resolve_libraries().is_err());
     let result = crate::runtime::tokio_rt().block_on(crate::video::fetch_video_infos(
         youtube,
@@ -2954,7 +2951,9 @@ fn fetch_video_infos_succeeds_with_yt_dlp_only_and_no_staging_root() {
     let (probe, raw) = result.expect("yt-dlp metadata should not require FFmpeg or staging");
     assert!(matches!(probe, crate::video::ProbeResult::Single(_)));
     assert_eq!(
-        raw.as_ref().and_then(|value| value.get("title")).and_then(|v| v.as_str()),
+        raw.as_ref()
+            .and_then(|value| value.get("title"))
+            .and_then(|v| v.as_str()),
         Some("T")
     );
 

@@ -50,6 +50,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.3.1" date="2026-10-24">
+      <description>
+        <ul>
+          <li>Hardened media network handling by scoping redirect DNS policy and keeping proxy configuration alive for the full request lifecycle.</li>
+          <li>Bound browser-cookie staging and aligned browser profile selection, while hardening cookie serialization and redacting sensitive details.</li>
+          <li>Improved CI reproducibility by pinning media tools used by tests.</li>
+          <li>Refactored asynchronous media lookup to keep network and extraction work separated from GTK card state.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.3.0" date="2026-10-23">
       <description>
         <ul>

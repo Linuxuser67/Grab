@@ -446,53 +446,120 @@ fn is_hostile_entry(path: &str) -> bool {
 }
 
 /// Remove a file, then prune parents left empty (never removing `folder`).
-/// Refuses if any intermediate component under `folder` is a symlink, which
-/// would otherwise divert the deletion outside the torrent folder. The file
-/// itself goes through `unlinkat` with `O_NOFOLLOW` on the parent fd, closing
-/// the swap-in window for the final component.
+///
+/// Every path component below the already-open root is traversed relative to a
+/// directory descriptor with `O_NOFOLLOW | O_DIRECTORY`. That avoids following
+/// an intermediate symlink swapped in after the earlier validation. The
+/// descriptor walk, rather than the pre-check, is the security boundary.
 fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Path) {
-    // Bail if any intermediate component is a symlink or escapes `folder`.
     if path_has_symlink_component(path, folder) {
         return;
     }
-    // Use unlinkat with O_NOFOLLOW on the parent: the filename is resolved
-    // relative to the opened fd, so a symlink swapped in for the parent
-    // after our check cannot divert the unlink. The File closes on drop —
-    // no manual close needed.
-    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::os::unix::io::AsRawFd;
-        let name_c = std::ffi::CString::new(name.as_bytes()).ok();
-        let dir_fd = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
-            .open(parent)
-            .ok();
-        if let (Some(dir_fd), Some(name_c)) = (dir_fd, name_c) {
-            // SAFETY: dir_fd is a valid open directory fd, name_c is a valid C string.
-            unsafe {
-                libc::unlinkat(dir_fd.as_raw_fd(), name_c.as_ptr(), 0);
+    let Ok(relative) = path.strip_prefix(folder) else {
+        return;
+    };
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let components: Option<Vec<std::ffi::CString>> = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => {
+                std::ffi::CString::new(name.as_bytes()).ok()
             }
-        } else {
-            // Parent vanished or became a symlink; skip.
+            _ => None,
+        })
+        .collect();
+    let Some(components) = components else {
+        return;
+    };
+    let Some(target_name) = components.last() else {
+        return;
+    };
+
+    // Open the root without following a symlink in its final component.
+    let root = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(folder)
+    {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::debug!(path = %folder.display(), error = %error, "torrent cleanup could not open root directory");
+            return;
+        }
+    };
+
+    struct OpenDir {
+        fd: std::fs::File,
+        name_in_parent: Option<std::ffi::CString>,
+    }
+    let mut stack = vec![OpenDir {
+        fd: root,
+        name_in_parent: None,
+    }];
+    for component in &components[..components.len() - 1] {
+        // SAFETY: the previous descriptor is open; component is NUL-free; flags
+        // require a directory and refuse a symlink in this component.
+        let fd = unsafe {
+            libc::openat(
+                stack.last().expect("root descriptor retained").fd.as_raw_fd(),
+                component.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            tracing::debug!(error = %error, "torrent cleanup refused an unsafe or missing parent component");
+            return;
+        }
+        // SAFETY: openat returned a new owned file descriptor.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        stack.push(OpenDir {
+            fd: file,
+            name_in_parent: Some(component.clone()),
+        });
+    }
+
+    // unlinkat operates on one filename in the final, safely traversed parent.
+    // Failure is not silently treated as deletion success.
+    // SAFETY: the descriptor is open and target_name is a NUL-free component.
+    let result = unsafe {
+        libc::unlinkat(
+            stack.last().expect("root descriptor retained").fd.as_raw_fd(),
+            target_name.as_ptr(),
+            0,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::debug!(path = %path.display(), error = %error, "torrent file cleanup failed");
             return;
         }
     }
-    let mut parent = path.parent();
-    while let Some(dir) = parent {
-        if dir == folder {
-            break;
+
+    // Prune only through already-open parent descriptors, bottom-up. A concurrent
+    // directory replacement cannot redirect these removals to another tree.
+    while stack.len() > 1 {
+        let child_index = stack.len() - 1;
+        let child_name = stack[child_index]
+            .name_in_parent
+            .as_ref()
+            .expect("non-root descriptor has a parent name");
+        let parent_fd = stack[child_index - 1].fd.as_raw_fd();
+        // SAFETY: parent_fd is open and child_name is a NUL-free component.
+        let result = unsafe {
+            libc::unlinkat(parent_fd, child_name.as_ptr(), libc::AT_REMOVEDIR)
+        };
+        if result != 0 {
+            break; // Non-empty, replaced, or otherwise not removable.
         }
-        match std::fs::remove_dir(dir) {
-            Ok(()) => parent = dir.parent(),
-            Err(_) => break,
-        }
+        stack.pop();
     }
 }
 
-/// Trash all files listed in the torrent metadata (not the whole folder).
-/// Skips hostile entries and U+FFFD paths. Returns true if the folder is empty afterwards.
 /// Whether `path` is unsafe to trash: the root must be a real directory,
 /// the target must remain underneath it, and no intermediate component
 /// may be a symlink. Lookup errors are treated as unsafe (fail closed).
@@ -542,6 +609,8 @@ fn path_has_symlink_component(path: &std::path::Path, folder: &std::path::Path) 
     false
 }
 
+/// Trash all files listed in the torrent metadata (not the whole folder).
+/// Skips hostile entries and U+FFFD paths. Returns true if the folder is empty afterwards.
 pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> Result<bool, String> {
     let Some(bytes) = read_archive_bytes(url) else {
         return Err("no torrent archive".to_string());

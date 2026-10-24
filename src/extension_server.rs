@@ -115,7 +115,11 @@ fn reserve_handoff_nonce(
         Ok(cache) => cache,
         Err(poisoned) => {
             tracing::error!("handoff replay cache mutex poisoned; recovering fail-closed state");
-            poisoned.into_inner()
+            let cache = poisoned.into_inner();
+            // The map has no cross-index invariant: after retaining only
+            // timestamp-expiring entries it is safe to resume normal locking.
+            HANDOFF_REPLAY_CACHE.clear_poison();
+            cache
         }
     };
     cache.expires_at_ms.retain(|_, expiry| *expiry >= now_ms);
@@ -427,6 +431,9 @@ fn lock_handoff_cookies() -> MutexGuard<'static, HandoffStore> {
                     store.order.push_back(key);
                 }
             }
+            // The map/FIFO invariant is repaired while this guard is held.
+            // Clear poison now, so future calls do not repeat O(n) repair/logging.
+            HANDOFF_COOKIES.clear_poison();
             store
         }
     }

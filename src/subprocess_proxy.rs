@@ -148,30 +148,37 @@ pub(crate) fn validate_proxy_compatibility() -> Result<(), String> {
 /// Start the proxy once and return its HTTP proxy URL.
 pub(crate) fn ensure_started() -> Result<String, String> {
     validate_proxy_compatibility()?;
-
     if let Some(addr) = PROXY_ADDR.get() {
         return Ok(format!("http://{addr}"));
     }
-
     let listener = StdTcpListener::bind(("127.0.0.1", 0))
         .map_err(|e| format!("couldn't start the guarded extractor proxy: {e}"))?;
+    start_proxy_listener(listener, &PROXY_ADDR)
+}
+
+/// Register and serve a listener under Grab's process-lifetime runtime. The
+/// state parameter lets tests exercise isolated initialization state too.
+fn start_proxy_listener(
+    listener: StdTcpListener,
+    state: &OnceLock<SocketAddr>,
+) -> Result<String, String> {
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("couldn't configure the guarded extractor proxy: {e}"))?;
     let addr = listener
         .local_addr()
         .map_err(|e| format!("couldn't read guarded proxy address: {e}"))?;
-    let listener = TcpListener::from_std(listener)
-        .map_err(|e| format!("couldn't start the guarded extractor proxy: {e}"))?;
+    let runtime = crate::runtime::tokio_rt();
+    let listener = {
+        let _entered = runtime.enter();
+        TcpListener::from_std(listener)
+            .map_err(|e| format!("couldn't start the guarded extractor proxy: {e}"))?
+    };
 
-    match PROXY_ADDR.set(addr) {
+    match state.set(addr) {
         Ok(()) => {
-            // Spawn on the runtime currently creating the listener, so its I/O
-            // driver and accept task have the same lifetime/context.
-            tokio::spawn(async move {
+            runtime.spawn(async move {
                 loop {
-                    // Reserve capacity before accepting so clients cannot create
-                    // an unbounded backlog of tasks waiting for a semaphore.
                     let permit = match Arc::clone(&PROXY_CONNECTIONS).acquire_owned().await {
                         Ok(permit) => permit,
                         Err(_) => return,
@@ -195,14 +202,10 @@ pub(crate) fn ensure_started() -> Result<String, String> {
             });
             Ok(format!("http://{addr}"))
         }
-        Err(_) => {
-            // A concurrent caller won initialization. Its listener is active;
-            // this one's listener is dropped without being spawned.
-            Ok(format!(
-                "http://{}",
-                PROXY_ADDR.get().expect("proxy address initialized")
-            ))
-        }
+        Err(_) => Ok(format!(
+            "http://{}",
+            state.get().expect("proxy address initialized")
+        )),
     }
 }
 
@@ -454,6 +457,54 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_started_from_short_lived_runtime_survives_runtime_drop() {
+        // Local state makes the test independent of other tests that might
+        // initialize the process-wide proxy before this test runs.
+        let proxy_url = std::thread::spawn(|| {
+            let caller_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("short-lived caller runtime");
+            let state = OnceLock::new();
+            caller_runtime
+                .block_on(async {
+                    let listener = StdTcpListener::bind(("127.0.0.1", 0)).unwrap();
+                    start_proxy_listener(listener, &state)
+                })
+                .expect("start guarded proxy")
+        })
+        .join()
+        .expect("caller thread");
+        let address: SocketAddr = proxy_url
+            .strip_prefix("http://")
+            .expect("proxy URL scheme")
+            .parse()
+            .expect("proxy address");
+
+        let response = crate::runtime::tokio_rt()
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    let mut client = TcpStream::connect(address).await?;
+                    client
+                        .write_all(b"CONNECT 127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")
+                        .await?;
+                    let mut response = Vec::new();
+                    client.read_to_end(&mut response).await?;
+                    Ok::<_, io::Error>(response)
+                })
+                .await
+                .expect("proxy must process a request after caller runtime exits")
+            })
+            .expect("proxy connection and request");
+
+        assert!(
+            String::from_utf8_lossy(&response).starts_with("HTTP/1.1 403"),
+            "proxy should survive caller runtime shutdown: {}",
+            String::from_utf8_lossy(&response)
+        );
+    }
 
     #[test]
     fn proxy_connection_semaphore_caps_active_clients() {

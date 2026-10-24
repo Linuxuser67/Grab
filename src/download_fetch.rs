@@ -120,8 +120,27 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
             .map(|libs| libs.youtube)
             .ok();
         if let Some(bin) = youtube_bin {
-            ctx.cookies =
-                crate::cookies::jar_for_browser(&ctx.opts.cookies_browser, &bin, &ctx.url).await;
+            let browser = ctx.opts.cookies_browser.clone();
+            let page_url = ctx.url.clone();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            match tokio::time::timeout_at(deadline, async {
+                crate::video_tools::ensure_deno(&page_url).await?;
+                Ok::<_, crate::video_tools::VideoError>(
+                    crate::cookies::jar_for_browser(&browser, &bin, &page_url).await,
+                )
+            })
+            .await
+            {
+                Ok(Ok(jar)) => ctx.cookies = jar,
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "browser-cookie export skipped after runtime setup failure");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "browser-cookie export exceeded its 120-second end-to-end deadline"
+                    );
+                }
+            }
         }
     }
     // With a jar, swap in a provider-backed client: reqwest re-applies

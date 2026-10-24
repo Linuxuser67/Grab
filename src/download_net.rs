@@ -1,4 +1,4 @@
-//! Network options + proxy/client plumbing: `DownloadOptions`, proxy resolution, pooled reqwest clients.
+//! Network options + proxy/client plumbing: `DownloadOptions`, proxy resolution, per-attempt reqwest clients.
 
 use crate::net_types::ResolvedProxy;
 use crate::runtime::lock_recover;
@@ -7,7 +7,7 @@ use gtk4::gio;
 use gtk4::gio::prelude::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Default)]
 pub struct DownloadOptions {
@@ -162,7 +162,6 @@ fn system_proxy() -> Option<ResolvedProxy> {
         let proxy = reqwest::Proxy::all(url.clone()).ok()?.no_proxy(no_proxy);
         return Some(ResolvedProxy {
             proxies: vec![proxy],
-            cache_key: format!("{url}|{no_proxy_env}"),
             cli_url: url,
             no_proxy_env,
         });
@@ -174,7 +173,6 @@ fn system_proxy() -> Option<ResolvedProxy> {
         let proxies = http_proxies(&url, &no_proxy_env).ok()?;
         return Some(ResolvedProxy {
             proxies,
-            cache_key: format!("{url}|{no_proxy_env}"),
             cli_url: url,
             no_proxy_env,
         });
@@ -205,7 +203,6 @@ fn system_proxy() -> Option<ResolvedProxy> {
     };
     Some(ResolvedProxy {
         proxies,
-        cache_key: format!("{cli_url}|{no_proxy_env}"),
         cli_url,
         no_proxy_env,
     })
@@ -253,7 +250,6 @@ fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
     };
     Ok(Some(ResolvedProxy {
         proxies,
-        cache_key: format!("{cli_url}|{no_proxy_env}"),
         cli_url,
         no_proxy_env,
     }))
@@ -284,32 +280,21 @@ impl DownloadOptions {
     }
 }
 
-pub(crate) fn http_client() -> Result<&'static reqwest::Client, String> {
-    // Cached for the process lifetime, including failure: backend init
-    // (TLS roots) does not heal mid-process, and retrying would re-log the same error.
-    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| client_builder().build().map_err(|e| e.to_string()))
-        .as_ref()
-        .map_err(Clone::clone)
+#[cfg(test)]
+pub(crate) fn http_client() -> Result<reqwest::Client, String> {
+    client_builder().build().map_err(|e| e.to_string())
 }
 
-/// Client honoring this attempt's proxy; proxied configs share one pooled client per config.
+/// Build one client per download attempt. Connection pooling stays shared within
+/// its requests and range workers, but DNS policy does not leak to other rows.
 pub(crate) fn http_client_for(proxy: Option<&ResolvedProxy>) -> Result<reqwest::Client, String> {
-    let Some(proxy) = proxy else {
-        return http_client().cloned();
-    };
-    let cache = PROXIED.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    if let Some(client) = lock_recover(cache).get(&proxy.cache_key) {
-        return Ok(client.clone());
-    }
     let mut builder = client_builder();
-    for p in &proxy.proxies {
-        builder = builder.proxy(p.clone());
+    if let Some(proxy) = proxy {
+        for p in &proxy.proxies {
+            builder = builder.proxy(p.clone());
+        }
     }
-    let client = builder.build().map_err(|e| e.to_string())?;
-    lock_recover(cache).insert(proxy.cache_key.clone(), client.clone());
-    Ok(client)
+    builder.build().map_err(|e| e.to_string())
 }
 
 /// Read-only view of a cookie jar for reqwest's cookie provider: staged
@@ -331,15 +316,6 @@ pub(crate) fn http_client_with_jar(
         }
     }
     b.build().map_err(|e| e.to_string())
-}
-
-static PROXIED: OnceLock<Mutex<std::collections::HashMap<String, reqwest::Client>>> =
-    OnceLock::new();
-
-/// Test hook: how many unauthenticated proxied clients are pooled.
-#[cfg(test)]
-pub(crate) fn proxied_pool_len() -> usize {
-    lock_recover(PROXIED.get_or_init(|| Mutex::new(std::collections::HashMap::new()))).len()
 }
 
 fn private_v4(a: Ipv4Addr) -> bool {
@@ -494,19 +470,20 @@ pub(crate) fn is_untrusted_handoff_host(host: &str) -> bool {
     )
 }
 
-/// Cross-host redirects need a DNS-rebinding guard for reqwest connections,
-/// but must not mark an unrelated, user-added queue row as an untrusted
-/// browser handoff. Keep these resolver-only hosts in a separate bounded FIFO.
+/// Resolver-only decisions for cross-host redirects live on one reqwest client.
 #[derive(Default)]
 struct PublicDnsHosts {
     hosts: std::collections::HashSet<String>,
-    insertion_order: std::collections::VecDeque<String>,
 }
 
-static PUBLIC_DNS_HOSTS: OnceLock<Mutex<PublicDnsHosts>> = OnceLock::new();
+type PublicDnsPolicy = Arc<Mutex<PublicDnsHosts>>;
 const PUBLIC_DNS_HOSTS_CAP: usize = 4096;
 
-fn require_public_dns_filter(host: &str) -> bool {
+fn public_dns_policy() -> PublicDnsPolicy {
+    Arc::new(Mutex::new(PublicDnsHosts::default()))
+}
+
+fn require_public_dns_filter(cache: &PublicDnsPolicy, host: &str) -> bool {
     let key = host_key(host);
     if key.is_empty() {
         return false;
@@ -516,28 +493,24 @@ fn require_public_dns_filter(host: &str) -> bool {
         Err(_) if is_local_or_private_host(&key) => return false,
         Err(_) => {}
     }
-    let mut cache = lock_recover(PUBLIC_DNS_HOSTS.get_or_init(Default::default));
+    let mut cache = lock_recover(cache.as_ref());
     if cache.hosts.contains(&key) {
         return true;
     }
-    // A cached redirect host must stay marked for every later resolution.
-    // Evicting it at capacity could remove the filtering decision between
-    // redirect approval and DNS lookup, so reject new targets instead.
+    // Preserve accepted decisions for this client so filtering cannot be lost
+    // between redirect approval and DNS lookup. Clients are per-download,
+    // making cap exhaustion local rather than poisoning later downloads.
     if cache.hosts.len() >= PUBLIC_DNS_HOSTS_CAP {
-        tracing::warn!(host = %key, "refusing redirect host: DNS policy cache is full");
+        tracing::warn!(host = %key, "refusing redirect host: per-client DNS policy is full");
         return false;
     }
-    cache.hosts.insert(key.clone());
-    cache.insertion_order.push_back(key);
+    cache.hosts.insert(key);
     true
 }
 
-fn requires_public_dns_filter(host: &str) -> bool {
+fn requires_public_dns_filter(host: &str, cache: &PublicDnsPolicy) -> bool {
     let key = host_key(host);
-    is_untrusted_handoff_host(&key)
-        || lock_recover(PUBLIC_DNS_HOSTS.get_or_init(Default::default))
-            .hosts
-            .contains(&key)
+    is_untrusted_handoff_host(&key) || lock_recover(cache.as_ref()).hosts.contains(&key)
 }
 
 /// Extend an untrusted collection's public-only policy to a selected or
@@ -611,25 +584,37 @@ async fn lookup_filtered(host: &str, public_only: bool) -> Result<Vec<SocketAddr
     Ok(kept)
 }
 
-/// DNS resolver for the shared clients. Filtering the answer that the socket
+/// DNS resolver used by each client. Filtering the answer that the socket
 /// then connects to leaves no check/connect gap for DNS rebinding.
-struct GuardedResolver;
+struct GuardedResolver {
+    public_dns_hosts: PublicDnsPolicy,
+}
 
 impl reqwest::dns::Resolve for GuardedResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let host = name.as_str().to_owned();
+        let public_dns_hosts = Arc::clone(&self.public_dns_hosts);
         Box::pin(async move {
-            let addrs = lookup_filtered(&host, requires_public_dns_filter(&host)).await?;
+            let public_only = requires_public_dns_filter(&host, &public_dns_hosts);
+            let addrs = lookup_filtered(&host, public_only).await?;
             Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
         })
     }
 }
 
+fn guarded_network_policy() -> (reqwest::redirect::Policy, GuardedResolver) {
+    let public_dns_hosts = public_dns_policy();
+    (
+        redirect_policy(Arc::clone(&public_dns_hosts)),
+        GuardedResolver { public_dns_hosts },
+    )
+}
+
 /// Shared redirect policy: bounded hops, no https->http downgrades.
 /// `previous` includes the initial URL, so `> 5` follows exactly 5 redirects
 /// (matches reqwest's `Policy::limited(5)` semantics).
-fn redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
+fn redirect_policy(public_dns_hosts: PublicDnsPolicy) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
         let downgrade = attempt
             .previous()
             .last()
@@ -655,11 +640,11 @@ fn redirect_policy() -> reqwest::redirect::Policy {
             if let Some(target) = attempt.url().host_str()
                 && attempt.previous().last().and_then(|u| u.host_str()) != Some(target)
                 && !to_private
-                && !require_public_dns_filter(target)
+                && !require_public_dns_filter(&public_dns_hosts, target)
             {
                 // A changed public-host redirect is untrusted. Stop rather
-                // than exceeding the bounded host-policy set; private-to-private
-                // LAN redirects remain permitted after an explicit local start.
+                // than exceeding this client's bounded policy set; private-to-
+                // private LAN redirects remain permitted after an explicit start.
                 attempt.stop()
             } else {
                 attempt.follow()
@@ -668,14 +653,15 @@ fn redirect_policy() -> reqwest::redirect::Policy {
     })
 }
 
-/// Shared builder: bounded hops, no downgrades (see [`http_client`]).
+/// Shared builder: bounded hops, no downgrades.
 pub(crate) fn client_builder() -> reqwest::ClientBuilder {
     // Bounded hops; refuse https->http downgrades; no ambient proxy (explicit settings or nothing); no automatic Referer (leaks URLs/tokens).
+    let (redirect, resolver) = guarded_network_policy();
     reqwest::Client::builder()
         .no_proxy()
         .referer(false)
-        .redirect(redirect_policy())
-        .dns_resolver(std::sync::Arc::new(GuardedResolver))
+        .redirect(redirect)
+        .dns_resolver(Arc::new(resolver))
 }
 
 /// Current Unix UID. libc marks getuid unsafe despite its async-signal-safe semantics;
@@ -771,10 +757,11 @@ pub(crate) fn cookie_staging_dir() -> Option<PathBuf> {
 /// proxies via reqwest's default. See `tool_client_builder_proxied` for the
 /// variant that also honors Grab's app proxy (Preferences → Network).
 pub(crate) fn tool_client_builder() -> reqwest::ClientBuilder {
+    let (redirect, resolver) = guarded_network_policy();
     reqwest::Client::builder()
         .referer(false)
-        .redirect(redirect_policy())
-        .dns_resolver(std::sync::Arc::new(GuardedResolver))
+        .redirect(redirect)
+        .dns_resolver(Arc::new(resolver))
         // A stalled server must not hang the install indefinitely.
         .connect_timeout(std::time::Duration::from_secs(15))
         .read_timeout(std::time::Duration::from_secs(60))
@@ -800,11 +787,6 @@ pub(crate) fn tool_client_builder_proxied() -> Result<reqwest::ClientBuilder, St
 #[cfg(test)]
 pub(crate) fn clear_public_resolution_for_tests() {
     lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default)).clear();
-    {
-        let mut cache = lock_recover(PUBLIC_DNS_HOSTS.get_or_init(Default::default));
-        cache.hosts.clear();
-        cache.insertion_order.clear();
-    }
 }
 
 #[cfg(test)]
@@ -856,8 +838,9 @@ mod tests {
 
     #[test]
     fn redirect_dns_policy_does_not_mark_user_queue_rows_as_untrusted() {
-        assert!(require_public_dns_filter("redirect-only.example"));
-        assert!(requires_public_dns_filter("redirect-only.example"));
+        let policy = public_dns_policy();
+        assert!(require_public_dns_filter(&policy, "redirect-only.example"));
+        assert!(requires_public_dns_filter("redirect-only.example", &policy));
         assert!(!is_untrusted_handoff_host("redirect-only.example"));
     }
 
@@ -921,32 +904,33 @@ mod tests {
     }
 
     #[test]
-    fn redirect_dns_policy_cap_fails_closed_without_erasing_existing_policy() {
-        let handoffs = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
-        let redirects = PUBLIC_DNS_HOSTS.get_or_init(Default::default);
-        let previous_handoffs = {
-            let mut set = lock_recover(handoffs);
-            std::mem::take(&mut *set)
-        };
-        let previous_redirects = {
-            let mut set = lock_recover(redirects);
-            std::mem::take(&mut *set)
-        };
-        assert!(require_public_resolution("handoff.example"));
+    fn redirect_dns_policy_cap_is_scoped_to_one_client() {
+        let first = public_dns_policy();
         for i in 0..PUBLIC_DNS_HOSTS_CAP {
-            assert!(require_public_dns_filter(&format!("redirect-{i}.example")));
+            assert!(require_public_dns_filter(
+                &first,
+                &format!("redirect-{i}.example")
+            ));
         }
-        assert!(!require_public_dns_filter("redirect-overflow.example"));
-        assert!(is_untrusted_handoff_host("handoff.example"));
-        {
-            let cache = lock_recover(redirects);
-            assert!(cache.hosts.contains("redirect-0.example"));
-            assert!(!cache.hosts.contains("redirect-overflow.example"));
-            assert_eq!(cache.hosts.len(), PUBLIC_DNS_HOSTS_CAP);
-            assert_eq!(cache.insertion_order.len(), PUBLIC_DNS_HOSTS_CAP);
-        }
-        *lock_recover(handoffs) = previous_handoffs;
-        *lock_recover(redirects) = previous_redirects;
+        assert!(!require_public_dns_filter(
+            &first,
+            "redirect-overflow.example"
+        ));
+        assert!(requires_public_dns_filter("redirect-0.example", &first));
+
+        let next = public_dns_policy();
+        assert!(require_public_dns_filter(
+            &next,
+            "redirect-overflow.example"
+        ));
+        assert!(!requires_public_dns_filter(
+            "redirect-overflow.example",
+            &first
+        ));
+        assert!(requires_public_dns_filter(
+            "redirect-overflow.example",
+            &next
+        ));
     }
 
     #[test]

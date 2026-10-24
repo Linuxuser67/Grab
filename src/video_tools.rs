@@ -775,18 +775,26 @@ pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     let dest = dir.join("yt-dlp");
     let part = dir.join("yt-dlp.part");
     let dest_clone = dest.clone();
-    let handle = crate::runtime::tokio_rt().spawn(async move {
-        let result = fetch_ytdlp_inner(&url, &part, &dest_clone, &digest).await;
-        if result.is_err() {
-            std::fs::remove_file(&part).ok();
-        }
-        result
-    });
+    let handle = crate::runtime::tokio_rt()
+        .spawn(async move { fetch_ytdlp_part(&url, &part, &dest_clone, &digest).await });
     match handle.await {
         Ok(Ok(())) => Ok(dest),
         Ok(Err(e)) => Err(e),
         Err(e) => Err(VideoError::runtime(&e)),
     }
+}
+
+async fn fetch_ytdlp_part(
+    url: &str,
+    part: &Path,
+    dest: &Path,
+    digest: &str,
+) -> Result<(), VideoError> {
+    let result = fetch_ytdlp_inner(url, part, dest, digest).await;
+    if result.is_err() {
+        std::fs::remove_file(part).ok();
+    }
+    result
 }
 
 async fn fetch_ytdlp_inner(
@@ -1049,11 +1057,17 @@ async fn remove_legacy_qjs_from(dir: &Path) {
 
 /// Install or update the latest stable Deno release. Await off the GTK thread.
 pub async fn install_deno() -> Result<PathBuf, VideoError> {
-    let _guard = deno_install_lock().lock().await;
-    let path = install_deno_locked().await?;
-    remember_deno_path(&path);
-    remove_legacy_qjs_from(&user_lib_dir()).await;
-    Ok(path)
+    let task = crate::runtime::tokio_rt().spawn(async move {
+        let _guard = deno_install_lock().lock().await;
+        let path = install_deno_locked().await?;
+        remember_deno_path(&path);
+        remove_legacy_qjs_from(&user_lib_dir()).await;
+        Ok(path)
+    });
+    match task.await {
+        Ok(result) => result,
+        Err(error) => Err(VideoError::runtime(&error)),
+    }
 }
 
 fn deno_install_lock() -> &'static tokio::sync::Mutex<()> {
@@ -1325,7 +1339,16 @@ pub(crate) async fn ensure_deno(page_url: &str) -> Result<(), VideoError> {
     if !is_youtube_url(page_url) {
         return Ok(());
     }
+    // Provisioning continues on the process-lifetime runtime after a caller's
+    // waiter is cancelled or times out; its lock remains held through file writes.
+    let task = crate::runtime::tokio_rt().spawn(async move { ensure_deno_inner().await });
+    match task.await {
+        Ok(result) => result,
+        Err(error) => Err(VideoError::runtime(&error)),
+    }
+}
 
+async fn ensure_deno_inner() -> Result<(), VideoError> {
     // A stale managed copy must not hide a compatible bundled/system Deno.
     let candidates = find_deno_candidates();
     match first_supported_deno(&candidates).await {
@@ -1754,6 +1777,34 @@ pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
     Some(ytdlp_browser.to_string())
 }
 
+/// Browser identifiers supported by gallery-dl. This list is separate from
+/// yt-dlp's selector set (yt-dlp accepts "whale", which gallery-dl does not).
+const GALLERY_DL_COOKIES_BROWSERS: &[&str] = &[
+    "brave", "chrome", "chromium", "edge", "firefox", "opera", "vivaldi", "zen",
+];
+
+fn gallery_cookies_browser_spec_for_profile(
+    browser: &str,
+    profile: Option<&Path>,
+) -> Option<String> {
+    if browser.is_empty() || browser == "none" || !GALLERY_DL_COOKIES_BROWSERS.contains(&browser) {
+        return None;
+    }
+    // gallery-dl accepts BROWSER:PROFILE and supports Zen directly, unlike yt-dlp.
+    Some(match profile {
+        Some(path) => format!("{browser}:{}", path.display()),
+        None => browser.to_string(),
+    })
+}
+
+pub(crate) fn gallery_cookies_browser_spec(browser: &str) -> Option<String> {
+    if !GALLERY_DL_COOKIES_BROWSERS.contains(&browser) {
+        return None;
+    }
+    let profile = browser_profile_dir(browser);
+    gallery_cookies_browser_spec_for_profile(browser, profile.as_deref())
+}
+
 /// Validate one extractor-specific KEY:ARGS entry. It is never shell-expanded,
 /// but control characters, malformed keys and oversized values are rejected.
 pub(crate) fn validated_ytdlp_extractor_args(value: &str) -> Option<String> {
@@ -1849,7 +1900,10 @@ pub(crate) fn ytdlp_identity_args(
 
 #[cfg(test)]
 mod extractor_args_compat_tests {
-    use super::{validated_ytdlp_extractor_args, ytdlp_runtime_args};
+    use super::{
+        gallery_cookies_browser_spec_for_profile, validated_ytdlp_extractor_args,
+        ytdlp_runtime_args,
+    };
     use std::path::Path;
 
     #[test]
@@ -1867,6 +1921,26 @@ mod extractor_args_compat_tests {
         assert!(validated_ytdlp_extractor_args("--bad:flag").is_none());
         assert!(validated_ytdlp_extractor_args("youtube:\nplayer_client=android").is_none());
         assert!(validated_ytdlp_extractor_args(&"x".repeat(4097)).is_none());
+    }
+
+    #[test]
+    fn gallery_cookie_selector_uses_shared_profile_and_tool_specific_browser_name() {
+        let zen_profile = Path::new("/home/user/.zen/profile.default");
+        assert_eq!(
+            gallery_cookies_browser_spec_for_profile("zen", Some(zen_profile)).as_deref(),
+            Some("zen:/home/user/.zen/profile.default")
+        );
+        let firefox_profile = Path::new("/home/user/.mozilla/firefox/profile.default");
+        assert_eq!(
+            gallery_cookies_browser_spec_for_profile("firefox", Some(firefox_profile)).as_deref(),
+            Some("firefox:/home/user/.mozilla/firefox/profile.default")
+        );
+        assert_eq!(
+            gallery_cookies_browser_spec_for_profile("firefox", None).as_deref(),
+            Some("firefox")
+        );
+        assert!(gallery_cookies_browser_spec_for_profile("whale", None).is_none());
+        assert!(gallery_cookies_browser_spec_for_profile("none", None).is_none());
     }
 
     #[test]
@@ -2528,6 +2602,48 @@ mod tests {
 
         clear_dest_refusing_symlink(&dir.join("deno.part")).unwrap();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn fetch_ytdlp_removes_partial_file_after_truncated_response() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let dir = unique_dir("ytdlp-truncated");
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = dir.join("yt-dlp.part");
+        let dest = dir.join("yt-dlp");
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\npartial",
+                )
+                .await
+                .unwrap();
+        });
+
+        let err = fetch_ytdlp_part(
+            &format!("http://{address}/yt-dlp"),
+            &part,
+            &dest,
+            &"0".repeat(64),
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.to_string().is_empty());
+        server.await.unwrap();
+        assert!(!part.exists(), "partial download must be removed");
+        assert!(
+            !dest.exists(),
+            "failed update must not replace the installed binary"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

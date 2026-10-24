@@ -546,7 +546,6 @@ mod tests {
             proxies: vec![reqwest::Proxy::all("http://127.0.0.1:8080").unwrap()],
             cli_url: "http://127.0.0.1:8080".into(),
             no_proxy_env: "localhost,127.0.0.1,::1".into(),
-            cache_key: "test".into(),
         };
         let a = download_argv_with_proxy(
             &tool(),

@@ -2284,16 +2284,38 @@ impl DownloadManager {
             } else if let Some(ytdlp) =
                 crate::video_tools::find_in_dirs("yt-dlp", &crate::video_tools::tool_search_dirs())
             {
-                // Async now: no spawn_blocking needed.
+                // One deadline covers first-run Deno provisioning plus the
+                // cookie-export subprocess.
                 let browser = job.cookies_browser.clone();
                 let page_url = job.page_url.clone();
-                crate::cookies::export_cookies_to_file(
-                    &ytdlp,
-                    &browser,
-                    &page_url,
-                    std::time::Duration::from_secs(30),
-                )
+                let deadline = tokio::time::Instant::now()
+                    + std::time::Duration::from_secs(30);
+                match tokio::time::timeout_at(deadline, async {
+                    crate::video_tools::ensure_deno(&page_url).await?;
+                    let remaining =
+                        deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Ok::<_, crate::video_tools::VideoError>(None);
+                    }
+                    Ok(crate::cookies::export_cookies_to_file(
+                        &ytdlp, &browser, &page_url, remaining,
+                    )
+                    .await)
+                })
                 .await
+                {
+                    Ok(Ok(cookies)) => cookies,
+                    Ok(Err(error)) => {
+                        tracing::warn!(error = %error, "gallery browser-cookie export skipped after runtime setup failure");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "gallery browser-cookie export exceeded its 30-second end-to-end deadline"
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };

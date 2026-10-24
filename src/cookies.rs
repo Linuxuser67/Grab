@@ -444,7 +444,10 @@ mod tests {
         tokio::task::yield_now().await;
         task.abort();
         let _ = task.await;
-        assert!(!path.exists(), "cancelling an export must unlink its staged file");
+        assert!(
+            !path.exists(),
+            "cancelling an export must unlink its staged file"
+        );
     }
 
     #[test]

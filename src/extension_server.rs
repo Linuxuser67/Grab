@@ -22,10 +22,15 @@
 //!   (`HMAC(secret, "grab-server\0" || nonce)`), so the extension can refuse to
 //!   talk to an impostor before sending anything sensitive;
 //! - `POST /add` carries `X-Grab-Token = HMAC(secret, "grab-client\0" || body)`.
+//! - Current paired clients sign a millisecond timestamp and 128-bit nonce in
+//!   that body. The timestamp has a two-minute clock-skew window and each nonce
+//!   may be used only once, preventing a captured POST from being replayed.
 //!
-//! Cookies are accepted only on a request with a valid token. An unpaired
-//! request still hands off its URL (the confirm dialog protects it), but its
-//! cookies are dropped. A wrong token is refused outright.
+//! Cookies are accepted only with valid authentication and replay metadata.
+//! Legacy paired clients that omit the metadata still hand off URLs, but are
+//! forced through confirmation and remain URL-only until the extension updates.
+//! Unpaired requests are also confirmation-only and never forward cookies; a
+//! wrong token is refused outright.
 //!
 //! Confirmation: `POST /add?confirm=1` holds the response until the user has
 //! answered Grab's dialog (`200` approved, `409` declined, `408` no answer
@@ -979,7 +984,7 @@ async fn handle_add(
     }
     // A token, when sent, must verify: a stale pairing is an error the
     // extension should see, not something to quietly downgrade.
-    let authenticated = match headers.get("x-grab-token") {
+    let token_authenticated = match headers.get("x-grab-token") {
         None => false,
         Some(token) => {
             let valid = st
@@ -1008,7 +1013,13 @@ async fn handle_add(
     if req.cookies.len() > 100 {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let replay_nonce = if authenticated {
+    // During a rolling upgrade, old paired extensions do not include the
+    // timestamp/nonce pair. Preserve their URL handoff, but downgrade them to
+    // the same confirmation-only, no-cookie behavior as unpaired callers.
+    // A partially present or malformed pair is never treated as legacy.
+    let legacy_authenticated =
+        token_authenticated && req.timestamp_ms.is_none() && req.nonce.is_none();
+    let replay_nonce = if token_authenticated && !legacy_authenticated {
         match reserve_handoff_nonce(req.timestamp_ms, req.nonce.as_deref()) {
             Ok(nonce) => Some(nonce),
             Err(status) => return status.into_response(),
@@ -1016,6 +1027,10 @@ async fn handle_add(
     } else {
         None
     };
+    let authenticated = token_authenticated && !legacy_authenticated;
+    if legacy_authenticated {
+        tracing::debug!("legacy paired extension handoff requires confirmation and drops cookies");
+    }
     // Unauthenticated callers always wait for the user's answer: any local
     // process can POST without a token, so silent queuing would let
     // arbitrary software start downloads. The confirm dialog is the
@@ -1167,25 +1182,24 @@ mod tests {
         if let Some((_, supplied_token)) = headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("x-grab-token"))
+            && *supplied_token == token(body)
         {
-            if *supplied_token == token(body) {
-                let mut json: serde_json::Value = serde_json::from_str(body).expect("test JSON");
-                let object = json.as_object_mut().expect("JSON object");
-                object
-                    .entry("timestamp_ms")
-                    .or_insert_with(|| serde_json::json!(unix_time_ms().expect("system clock")));
-                object.entry("nonce").or_insert_with(|| {
-                    serde_json::json!(format!(
-                        "{:032x}",
-                        TEST_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
-                    ))
-                });
-                body_owned = serde_json::to_string(&json).expect("serialize v2 request");
-                let fresh_token = token(&body_owned);
-                for (name, value) in &mut headers_owned {
-                    if name.eq_ignore_ascii_case("x-grab-token") {
-                        *value = fresh_token.clone();
-                    }
+            let mut json: serde_json::Value = serde_json::from_str(body).expect("test JSON");
+            let object = json.as_object_mut().expect("JSON object");
+            object
+                .entry("timestamp_ms")
+                .or_insert_with(|| serde_json::json!(unix_time_ms().expect("system clock")));
+            object.entry("nonce").or_insert_with(|| {
+                serde_json::json!(format!(
+                    "{:032x}",
+                    TEST_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+                ))
+            });
+            body_owned = serde_json::to_string(&json).expect("serialize v2 request");
+            let fresh_token = token(&body_owned);
+            for (name, value) in &mut headers_owned {
+                if name.eq_ignore_ascii_case("x-grab-token") {
+                    *value = fresh_token.clone();
                 }
             }
         }
@@ -1195,7 +1209,6 @@ mod tests {
             .collect();
         request_to(port, "POST", "/add", &header_refs, &body_owned).await
     }
-
     fn status(resp: &str) -> &str {
         resp.split_whitespace().nth(1).unwrap_or("")
     }
@@ -2036,10 +2049,8 @@ mod tests {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt as _;
 
-        let dir = std::env::temp_dir().join(format!(
-            "grab-pairing-fifo-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("grab-pairing-fifo-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("extension-pairing");
@@ -2051,6 +2062,40 @@ mod tests {
         assert_eq!(pairing.code().len(), SECRET_LEN * 2);
         assert!(std::fs::metadata(&path).unwrap().is_file());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn legacy_authenticated_handoff_is_confirmed_and_drops_cookies() {
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let url = "https://legacy-client.example.test/file.zip";
+        let body = r#"{"url":"https://legacy-client.example.test/file.zip","cookies":[{"name":"session","value":"secret"}]}"#;
+        let signed = token(body);
+        let task = tokio::spawn(async move {
+            request_to(
+                srv.port,
+                "POST",
+                "/add",
+                &[("Host", &host), ("X-Grab-Token", &signed), JSON],
+                body,
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !task.is_finished(),
+            "legacy authenticated requests must still require confirmation"
+        );
+        let handoff = srv.rx.recv().await.expect("legacy URL should reach the queue");
+        assert!(handoff.decision.is_some(), "legacy calls must remain confirmation-only");
+        assert!(handoff_cookie_args(url).is_empty(), "legacy cookies must not be staged");
+        handoff
+            .decision
+            .expect("legacy request carries a decision")
+            .send(HandoffOutcome::Queued)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "200");
     }
 
     #[tokio::test]

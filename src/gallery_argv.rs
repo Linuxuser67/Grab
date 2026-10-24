@@ -222,7 +222,21 @@ pub fn is_instagram_url(url: &str) -> bool {
     host == "instagram.com" || host.ends_with(".instagram.com")
 }
 
-/// Build the gallery-dl count argv (`-g` lists direct URLs, one per line).
+/// Build cookie arguments for gallery-dl. A private handoff jar takes precedence
+/// over browser-profile access; otherwise gallery-dl reads the selected profile.
+pub(crate) fn cookie_source_args(
+    cookies_file: Option<&Path>,
+    cookies_browser: Option<&str>,
+) -> Vec<String> {
+    if let Some(cookies) = cookies_file {
+        return vec!["-C".into(), cookies.to_string_lossy().into_owned()];
+    }
+    match cookies_browser.filter(|browser| !browser.is_empty() && *browser != "none") {
+        Some(browser) => vec!["--cookies-from-browser".into(), browser.to_string()],
+        None => Vec::new(),
+    }
+}
+
 /// Build argv for counting files in a gallery (probe).
 /// Used by the gallery card UI to show "N files" before download.
 #[cfg(test)]
@@ -233,13 +247,14 @@ pub fn count_argv(
     user_agent: Option<&str>,
     filter: GalleryFilter,
 ) -> Vec<String> {
-    count_argv_with_proxy(tool, url, cookies_file, user_agent, filter, None)
+    count_argv_with_proxy(tool, url, cookies_file, None, user_agent, filter, None)
 }
 
 pub fn count_argv_with_proxy(
     tool: &Path,
     url: &str,
     cookies_file: Option<&Path>,
+    cookies_browser: Option<&str>,
     user_agent: Option<&str>,
     filter: GalleryFilter,
     proxy: Option<&crate::net_types::ResolvedProxy>,
@@ -254,10 +269,7 @@ pub fn count_argv_with_proxy(
         "-o".to_string(),
         "extractor.cookies-update=false".to_string(),
     ];
-    if let Some(cookies) = cookies_file {
-        argv.push("-C".to_string());
-        argv.push(cookies.to_string_lossy().to_string());
-    }
+    argv.extend(cookie_source_args(cookies_file, cookies_browser));
     if let Some(ua) = user_agent {
         argv.push("--user-agent".to_string());
         argv.push(ua.to_string());
@@ -552,6 +564,7 @@ mod tests {
             "https://example.com/",
             None,
             None,
+            None,
             GalleryFilter::All,
             Some(&proxy),
         );
@@ -560,6 +573,25 @@ mod tests {
             assert_eq!(argv[end - 2], "--proxy");
             assert_eq!(argv[end - 1], "http://127.0.0.1:8080");
         }
+    }
+
+    #[test]
+    fn cookie_source_prefers_handoff_jar_then_browser_profile() {
+        let jar = Path::new("/tmp/grab-handoff-cookies-test.txt");
+        assert_eq!(
+            cookie_source_args(Some(jar), Some("firefox")),
+            vec![
+                "-C".to_string(),
+                "/tmp/grab-handoff-cookies-test.txt".to_string(),
+            ],
+            "the paired extension jar takes precedence over browser access"
+        );
+        assert_eq!(
+            cookie_source_args(None, Some("firefox")),
+            vec!["--cookies-from-browser", "firefox"]
+        );
+        assert!(cookie_source_args(None, None).is_empty());
+        assert!(cookie_source_args(None, Some("none")).is_empty());
     }
 
     #[test]

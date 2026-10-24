@@ -111,7 +111,23 @@ fn fold_ascii_part(part: &str) -> String {
         } else if c == '"' || c.is_control() {
             continue;
         } else {
-            out.push('_');
+            // NFKD handles decomposable accents beyond the explicit table.
+            // Drop combining marks and keep the existing safe ASCII policy.
+            let source = c.to_string();
+            let normalized = glib::normalize(&source, glib::NormalizeMode::All);
+            let before = out.len();
+            for folded in normalized.chars() {
+                if folded.is_ascii_alphanumeric() || matches!(folded, '-' | '_' | '.') {
+                    out.push(folded);
+                } else if folded.is_ascii() && folded != '"' && !folded.is_control() {
+                    out.push('_');
+                }
+                // Non-ASCII combining marks left after NFKD are discarded.
+                // Unmapped symbols still fall back to "_" below.
+            }
+            if out.len() == before {
+                out.push('_');
+            }
         }
     }
     collapse_underscores(&out).trim_matches('_').to_string()
@@ -524,35 +540,18 @@ fn copy_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Resu
     Ok(())
 }
 
-/// `renameat2` via libc: no hand-declared FFI, no glibc version dependency.
+/// Safe Rustix wrapper for Linux renameat2(RENAME_NOREPLACE).
 #[cfg(target_os = "linux")]
 fn rename_noreplace_sys(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt as _;
-    const RENAME_NOREPLACE: std::os::raw::c_ulong = 1; // renameat2(2)
-    // Names never contain NUL; fail visibly instead of truncating if one slips through.
-    let cvt = |p: &std::path::Path| {
-        std::ffi::CString::new(p.as_os_str().as_bytes())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-    };
-    let (old, new) = (cvt(old)?, cvt(new)?);
-    // SAFETY: NUL-terminated buffers outlive the call; the rest are integers.
-    let r = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            old.as_ptr(),
-            libc::AT_FDCWD,
-            new.as_ptr(),
-            RENAME_NOREPLACE,
-        )
-    };
-    if r == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        old,
+        rustix::fs::CWD,
+        new,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(std::io::Error::from)
 }
-
 /// Whether a row name is the URL-derived intake name (modulo ` (N)` suffixes). Pure for tests.
 pub(crate) fn is_url_derived_name(current: &str, page_url: &str) -> bool {
     let derived = filename_from_url(page_url);
@@ -730,6 +729,12 @@ mod tests {
 
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn fold_ascii_part_uses_nfkd_for_unlisted_latin_accents() {
+        assert_eq!(fold_ascii_part("ḑ"), "d");
+        assert_eq!(fold_ascii_part("a\u{0301}"), "a");
     }
 
     #[test]

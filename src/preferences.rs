@@ -419,11 +419,18 @@ pub fn show(
         crate::extension_server::pairing(),
         crate::extension_server::pairing_path(),
     ) {
+        let pairing_description = if crate::extension_server::pairing_secret_recovered() {
+            gettext(
+                "The previous pairing code could not be read safely, so Grab generated a new one. Enter this code in the extension's settings to restore cookie forwarding.",
+            )
+        } else {
+            gettext(
+                "Enter this code in the extension's settings. Without it the extension sends links only, never cookies.",
+            )
+        };
         let ext_group = adw::PreferencesGroup::builder()
             .title(gettext("Browser extension"))
-            .description(gettext(
-                "Enter this code in the extension's settings. Without it the extension sends links only, never cookies.",
-            ))
+            .description(pairing_description)
             .build();
         let code_row = adw::ActionRow::builder()
             .title(gettext("Pairing code"))

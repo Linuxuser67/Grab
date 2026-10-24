@@ -111,7 +111,7 @@ pub(crate) fn sweep_cookie_staging() {
     // Only delete files owned by our uid: /tmp is shared, and another
     // user's grab-cookies-*.txt is not ours to remove.
     #[cfg(unix)]
-    let my_uid = unsafe { libc::getuid() };
+    let my_uid = crate::download_net::current_uid();
     let owned_by_me = |path: &std::path::Path| -> bool {
         #[cfg(unix)]
         {
@@ -147,10 +147,24 @@ pub(crate) fn sweep_cookie_staging() {
             }
         }
     }
-    // Clean legacy dumps from older builds in /tmp/grab-video.
-    // These are stale plaintext cookie files; remove only our own (uid-checked).
+    // One-release migration cleanup for plaintext cookie dumps left by old
+    // builds. Unlike the current private staging directory, /tmp is shared:
+    // never scan the legacy path unless it is a real directory owned by us.
     let legacy_dir = crate::video::staging_root();
-    if let Ok(entries) = std::fs::read_dir(&legacy_dir) {
+    sweep_legacy_cookie_dumps(&legacy_dir, &owned_by_me);
+}
+
+/// Remove stale legacy cookie dumps from a validated directory. Kept separate
+/// so the symlink-root refusal is directly regression-tested.
+fn sweep_legacy_cookie_dumps(
+    dir: &std::path::Path,
+    owned_by_me: &impl Fn(&std::path::Path) -> bool,
+) {
+    if !crate::download_net::validate_secure_dir(dir) {
+        tracing::debug!(path = %dir.display(), "refusing unsafe legacy cookie staging directory");
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name();
             let name = name.to_str().unwrap_or("");
@@ -173,6 +187,36 @@ impl StagedCookies {
     pub(crate) fn path(&self) -> &Path {
         &self.0
     }
+
+    /// Atomically create an owner-only staging file and immediately return
+    /// its RAII owner. Production and cancellation tests share this path so
+    /// no await can occur between successful creation and ownership.
+    fn create_in(dir: &Path) -> std::io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let candidate = dir.join(format!(
+                "grab-cookies-{}-{}.txt",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            match options.open(&candidate) {
+                Ok(file) => {
+                    drop(file);
+                    return Ok(Self(candidate));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
 }
 
 impl Drop for StagedCookies {
@@ -187,31 +231,29 @@ pub(crate) async fn export_cookies_to_file(
     page_url: &str,
     timeout: Duration,
 ) -> Option<StagedCookies> {
-    let path = stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await?;
-    Some(StagedCookies(path))
+    stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await
 }
 
-/// Dump one profile's cookies through yt-dlp to a temp file; caller deletes it.
+/// Dump one profile's cookies through yt-dlp to a temp file. Its RAII owner
+/// unlinks it on every return path, including cancellation during the wait.
 async fn export_cookies(
     youtube_bin: &Path,
     cookies_browser: &str,
     page_url: &str,
     timeout: Duration,
 ) -> Option<String> {
-    let path = stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await?;
-    let text = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    text
+    let staged = stage_cookie_file(youtube_bin, cookies_browser, page_url, timeout).await?;
+    std::fs::read_to_string(staged.path()).ok()
 }
 
-/// Stage cookies to a secure temp file; returns the path. Caller deletes it.
-/// Shared by `export_cookies` (reads+deletes) and `export_cookies_to_file` (keeps).
+/// Stage cookies to a secure temp file. The RAII owner is created immediately
+/// after atomic creation, before any later await can cancel this future.
 async fn stage_cookie_file(
     youtube_bin: &Path,
     cookies_browser: &str,
     page_url: &str,
     timeout: Duration,
-) -> Option<PathBuf> {
+) -> Option<StagedCookies> {
     // Every YouTube yt-dlp invocation pins Deno, including this cookie-export
     // probe. Prepare it first so a fresh install doesn't silently lose browser
     // cookies while the metadata lookup provisions the runtime concurrently.
@@ -219,37 +261,21 @@ async fn stage_cookie_file(
         tracing::debug!(error = %error, "Deno unavailable for YouTube cookie export");
         return None;
     }
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = crate::download_net::cookie_staging_dir()?;
-    // Unique per attempt, created atomically owner-only: a planted symlink fails instead of diverting the dump.
-    let path: PathBuf = loop {
-        let candidate: PathBuf = dir.join(format!(
-            "grab-cookies-{}-{}.txt",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
-        }
-        match opts.open(&candidate) {
-            Ok(_) => break candidate,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => {
-                tracing::debug!(error = %e, "cookie export temp file failed");
-                return None;
-            }
+    // The helper returns the owner in the same synchronous call that creates
+    // the file, so cancellation cannot land in an unguarded gap.
+    let staged = match StagedCookies::create_in(&dir) {
+        Ok(staged) => staged,
+        Err(error) => {
+            tracing::debug!(error = %error, "cookie export temp file failed");
+            return None;
         }
     };
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.arg("--ignore-config")
         .arg("--no-progress")
         .arg("--cookies")
-        .arg(&path)
+        .arg(staged.path())
         .arg("--skip-download");
     // Same identity argv as every other yt-dlp spawn (player-client
     // workaround, cookies, `--` URL guard): one helper so flags can't drift.
@@ -262,7 +288,6 @@ async fn stage_cookie_file(
         Ok(guarded) => guarded,
         Err(e) => {
             tracing::debug!(error = %e, "refusing cookie export without guarded extractor networking");
-            let _ = std::fs::remove_file(&path);
             return None;
         }
     };
@@ -275,7 +300,13 @@ async fn stage_cookie_file(
     {
         cmd.process_group(0);
     }
-    let mut child = cmd.spawn().ok()?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::debug!(error = %error, "cookie export process could not start");
+            return None;
+        }
+    };
     let mut group = crate::video_spawn::ProcessGroupGuard::new(&child);
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         // Clean exit: leader reaped, so disarm before post-wait work.
@@ -284,18 +315,16 @@ async fn stage_cookie_file(
             status
         }
         _ => {
-            // Timeout/wait failure: SIGKILL the group off the cookie DB lock, reap, remove temp file, fall back.
+            // Timeout/wait failure kills/reaps the child group; staged drops on return.
             crate::video_spawn::reap_child(&mut child, &mut group).await;
-            let _ = std::fs::remove_file(&path);
             return None;
         }
     };
     if !status.success() {
         tracing::debug!("cookie export failed, continuing without cookies");
-        let _ = std::fs::remove_file(&path);
         return None;
     }
-    Some(path)
+    Some(staged)
 }
 
 /// Cookie jar for one browser spec, cached briefly; `None` means plain requests.
@@ -353,7 +382,38 @@ pub(crate) fn cookie_header_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{StagedCookies, parse_netscape_line};
+    use super::{StagedCookies, parse_netscape_line, sweep_legacy_cookie_dumps};
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_cookie_sweep_refuses_symlinked_root() {
+        use std::os::unix::fs::symlink;
+
+        let unique = format!(
+            "grab-cookie-sweep-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let target = base.join("target");
+        let link = base.join("legacy-root");
+        std::fs::create_dir_all(&target).unwrap();
+        let stale_cookie = target.join("grab-cookies-old.txt");
+        std::fs::write(&stale_cookie, "secret cookie data").unwrap();
+        symlink(&target, &link).unwrap();
+
+        sweep_legacy_cookie_dumps(&link, &|_| true);
+
+        assert!(
+            stale_cookie.exists(),
+            "a symlink target must not be scanned or modified"
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn staged_cookies_drop_deletes_file() {
@@ -374,6 +434,42 @@ mod tests {
             // guard drops here
         }
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn cancelling_cookie_export_drops_staged_plaintext_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "grab-cancelled-cookie-export-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let staged = StagedCookies::create_in(&dir).unwrap();
+        let path = staged.path().to_path_buf();
+        assert!(path.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let task = tokio::spawn(async move {
+            let _staged = staged;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+        assert!(
+            !path.exists(),
+            "cancelling an export must unlink its staged file"
+        );
+        std::fs::remove_dir(&dir).unwrap();
     }
 
     #[test]

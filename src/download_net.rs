@@ -520,12 +520,12 @@ fn require_public_dns_filter(host: &str) -> bool {
     if cache.hosts.contains(&key) {
         return true;
     }
-    // Redirect targets are checked immediately before their DNS lookup. When
-    // the cache is full, evict the oldest older entry and keep this new target.
-    if cache.hosts.len() >= PUBLIC_DNS_HOSTS_CAP
-        && let Some(oldest) = cache.insertion_order.pop_front()
-    {
-        cache.hosts.remove(&oldest);
+    // A cached redirect host must stay marked for every later resolution.
+    // Evicting it at capacity could remove the filtering decision between
+    // redirect approval and DNS lookup, so reject new targets instead.
+    if cache.hosts.len() >= PUBLIC_DNS_HOSTS_CAP {
+        tracing::warn!(host = %key, "refusing redirect host: DNS policy cache is full");
+        return false;
     }
     cache.hosts.insert(key.clone());
     cache.insertion_order.push_back(key);
@@ -678,6 +678,19 @@ pub(crate) fn client_builder() -> reqwest::ClientBuilder {
         .dns_resolver(std::sync::Arc::new(GuardedResolver))
 }
 
+/// Current Unix UID. libc marks getuid unsafe despite its async-signal-safe semantics;
+/// centralize that FFI boundary for filesystem ownership checks.
+#[cfg(unix)]
+pub(crate) fn current_uid() -> libc::uid_t {
+    // SAFETY: getuid has no pointer arguments and is async-signal-safe.
+    unsafe { libc::getuid() }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn current_uid() -> u32 {
+    0
+}
+
 /// Validate a directory is safe for sensitive use: not a symlink, owned by us,
 /// not group/world-writable. Shared by cookie staging and tool exec dirs.
 #[cfg(unix)]
@@ -690,8 +703,7 @@ pub(crate) fn validate_secure_dir(dir: &std::path::Path) -> bool {
         tracing::warn!("secure dir is a symlink; refusing");
         return false;
     }
-    // SAFETY: getuid() is async-signal-safe; the unsafe marker is a libc-crate artifact.
-    let uid = unsafe { libc::getuid() };
+    let uid = current_uid();
     if md.uid() != uid {
         tracing::warn!("secure dir owned by another user; refusing");
         return false;
@@ -909,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn redirect_dns_policy_cap_evicts_oldest_without_erasing_handoff_policy() {
+    fn redirect_dns_policy_cap_fails_closed_without_erasing_existing_policy() {
         let handoffs = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let redirects = PUBLIC_DNS_HOSTS.get_or_init(Default::default);
         let previous_handoffs = {
@@ -924,12 +936,12 @@ mod tests {
         for i in 0..PUBLIC_DNS_HOSTS_CAP {
             assert!(require_public_dns_filter(&format!("redirect-{i}.example")));
         }
-        assert!(require_public_dns_filter("redirect-overflow.example"));
+        assert!(!require_public_dns_filter("redirect-overflow.example"));
         assert!(is_untrusted_handoff_host("handoff.example"));
         {
             let cache = lock_recover(redirects);
-            assert!(!cache.hosts.contains("redirect-0.example"));
-            assert!(cache.hosts.contains("redirect-overflow.example"));
+            assert!(cache.hosts.contains("redirect-0.example"));
+            assert!(!cache.hosts.contains("redirect-overflow.example"));
             assert_eq!(cache.hosts.len(), PUBLIC_DNS_HOSTS_CAP);
             assert_eq!(cache.insertion_order.len(), PUBLIC_DNS_HOSTS_CAP);
         }

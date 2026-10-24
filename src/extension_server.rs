@@ -22,10 +22,15 @@
 //!   (`HMAC(secret, "grab-server\0" || nonce)`), so the extension can refuse to
 //!   talk to an impostor before sending anything sensitive;
 //! - `POST /add` carries `X-Grab-Token = HMAC(secret, "grab-client\0" || body)`.
+//! - Current paired clients sign a millisecond timestamp and 128-bit nonce in
+//!   that body. The timestamp has a two-minute clock-skew window and each nonce
+//!   may be used only once, preventing a captured POST from being replayed.
 //!
-//! Cookies are accepted only on a request with a valid token. An unpaired
-//! request still hands off its URL (the confirm dialog protects it), but its
-//! cookies are dropped. A wrong token is refused outright.
+//! Cookies are accepted only with valid authentication and replay metadata.
+//! Legacy paired clients that omit the metadata still hand off URLs, but are
+//! forced through confirmation and remain URL-only until the extension updates.
+//! Unpaired requests are also confirmation-only and never forward cookies; a
+//! wrong token is refused outright.
 //!
 //! Confirmation: `POST /add?confirm=1` holds the response until the user has
 //! answered Grab's dialog (`200` approved, `409` declined, `408` no answer
@@ -44,12 +49,12 @@ use axum::{
 use hmac::{Hmac, KeyInit as _, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read as _;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -69,7 +74,63 @@ pub(crate) const CONFIRM_WAIT: Duration = Duration::from_secs(120);
 const SECRET_LEN: usize = 32;
 const SERVER_CONTEXT: &[u8] = b"grab-server\0";
 const CLIENT_CONTEXT: &[u8] = b"grab-client\0";
+const HANDOFF_CLOCK_SKEW_MS: u64 = 120_000;
+const MAX_RECENT_HANDOFF_NONCES: usize = 4096;
 type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Default)]
+struct HandoffReplayCache {
+    /// Nonces remain reserved until their signed request timestamp cannot pass
+    /// the freshness check. Never evict an unexpired nonce to make room.
+    expires_at_ms: HashMap<String, u64>,
+}
+
+static HANDOFF_REPLAY_CACHE: LazyLock<Mutex<HandoffReplayCache>> =
+    LazyLock::new(|| Mutex::new(HandoffReplayCache::default()));
+
+fn unix_time_ms() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| duration.as_millis().try_into().ok())
+}
+
+/// Atomically reserve a single-use nonce for an authenticated body.
+fn reserve_handoff_nonce(timestamp_ms: Option<u64>, nonce: Option<&str>) -> Result<(), StatusCode> {
+    let (Some(timestamp_ms), Some(nonce)) = (timestamp_ms, nonce) else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if nonce.len() != 32 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let now_ms = unix_time_ms().ok_or(StatusCode::FORBIDDEN)?;
+    if now_ms.abs_diff(timestamp_ms) > HANDOFF_CLOCK_SKEW_MS {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let nonce = nonce.to_ascii_lowercase();
+    let mut cache = match HANDOFF_REPLAY_CACHE.lock() {
+        Ok(cache) => cache,
+        Err(poisoned) => {
+            tracing::error!("handoff replay cache mutex poisoned; recovering fail-closed state");
+            let cache = poisoned.into_inner();
+            // The map has no cross-index invariant: after retaining only
+            // timestamp-expiring entries it is safe to resume normal locking.
+            HANDOFF_REPLAY_CACHE.clear_poison();
+            cache
+        }
+    };
+    cache.expires_at_ms.retain(|_, expiry| *expiry >= now_ms);
+    if cache.expires_at_ms.contains_key(&nonce) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if cache.expires_at_ms.len() >= MAX_RECENT_HANDOFF_NONCES {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    cache
+        .expires_at_ms
+        .insert(nonce, timestamp_ms.saturating_add(HANDOFF_CLOCK_SKEW_MS));
+    Ok(())
+}
 
 /// The shared secret between Grab and a paired extension.
 pub(crate) struct Pairing {
@@ -83,13 +144,22 @@ impl Pairing {
         }
     }
 
-    /// Load the secret at `path`, creating it (0600) when missing or unreadable.
+    /// Load the private secret, creating it when missing. If the existing file
+    /// is malformed, unreadable, or has unsafe permissions, replace it atomically
+    /// but report that existing extensions must be paired again.
     pub(crate) fn load_or_create(path: &Path) -> std::io::Result<Self> {
-        if let Some(secret) = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| decode_secret(t.trim()))
-        {
-            return Ok(Self::from_secret(secret));
+        ensure_pairing_directory(path)?;
+        match read_pairing_secret(path) {
+            Ok(Some(secret)) => return Ok(Self::from_secret(secret)),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = ?path,
+                    error = %error,
+                    "pairing secret could not be trusted; generating a new code, so the browser extension must be paired again"
+                );
+                PAIRING_SECRET_RECOVERED.store(true, Ordering::Release);
+            }
         }
         let secret = random_secret()?;
         write_secret(path, &secret)?;
@@ -107,9 +177,11 @@ impl Pairing {
 
     /// Replace the secret: every extension must be paired again.
     pub(crate) fn regenerate(&self, path: &Path) -> std::io::Result<String> {
+        ensure_pairing_directory(path)?;
         let secret = random_secret()?;
         write_secret(path, &secret)?;
         *self.secret.write().unwrap_or_else(|e| e.into_inner()) = secret;
+        PAIRING_SECRET_RECOVERED.store(false, Ordering::Release);
         Ok(self.code())
     }
 
@@ -156,10 +228,99 @@ fn decode_secret(text: &str) -> Option<[u8; SECRET_LEN]> {
     hex_decode(text)?.try_into().ok()
 }
 
+static PAIRING_SECRET_RECOVERED: AtomicBool = AtomicBool::new(false);
+
+/// Whether startup had to replace an unusable pairing file, so Preferences can
+/// explain why the extension needs a new code.
+pub(crate) fn pairing_secret_recovered() -> bool {
+    PAIRING_SECRET_RECOVERED.load(Ordering::Acquire)
+}
+
+/// Ensure the secret's parent is a real, current-user-owned directory that is
+/// not group/world writable before reading or replacing anything inside it.
+fn ensure_pairing_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
+    match std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
+    {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    if !crate::download_net::validate_secure_dir(parent) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "pairing secret directory must be a real directory owned by the current user and not group/world writable",
+        ));
+    }
+    Ok(())
+}
+
 fn random_secret() -> std::io::Result<[u8; SECRET_LEN]> {
     let mut secret = [0u8; SECRET_LEN];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut secret)?;
+    getrandom::fill(&mut secret).map_err(|error| {
+        std::io::Error::other(format!("system randomness unavailable: {error}"))
+    })?;
     Ok(secret)
+}
+
+/// Read through an already-open file descriptor so validation and reading refer
+/// to the same inode. Refuse symlinks and any file not private to this user.
+fn read_pairing_secret(path: &Path) -> std::io::Result<Option<[u8; SECRET_LEN]>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "pairing secret is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let mode = metadata.permissions().mode();
+        if metadata.uid() != crate::download_net::current_uid()
+            || mode & 0o077 != 0
+            || mode & 0o400 == 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "pairing secret must be owned by the current user and mode 0600 or stricter",
+            ));
+        }
+    }
+    // A pairing secret is only 64 hex bytes; bound reads even if another
+    // local process replaces the file after the metadata check. O_NONBLOCK
+    // above also avoids hanging if the path is raced to a FIFO.
+    let mut text = String::new();
+    file.take(129).read_to_string(&mut text)?;
+    if text.len() > 128 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "pairing secret is unexpectedly large",
+        ));
+    }
+    let secret = decode_secret(text.trim()).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "pairing secret is malformed",
+        )
+    })?;
+    Ok(Some(secret))
 }
 
 /// Write the secret 0600 via a temp file and rename, so a crash never leaves a
@@ -248,6 +409,31 @@ struct HandoffCookies {
 /// opened but never added, a direct file that never probes) can't pile up.
 static HANDOFF_COOKIES: LazyLock<Mutex<HandoffStore>> =
     LazyLock::new(|| Mutex::new(HandoffStore::default()));
+
+/// Recover a poisoned handoff store while restoring its bounded FIFO invariant.
+fn lock_handoff_cookies() -> MutexGuard<'static, HandoffStore> {
+    match HANDOFF_COOKIES.lock() {
+        Ok(store) => store,
+        Err(poisoned) => {
+            tracing::error!("handoff cookie store mutex poisoned; repairing its FIFO index");
+            let mut store = poisoned.into_inner();
+            let keys: HashSet<String> = store.by_key.keys().cloned().collect();
+            let mut seen = HashSet::new();
+            store
+                .order
+                .retain(|key| keys.contains(key) && seen.insert(key.clone()));
+            for key in keys {
+                if seen.insert(key.clone()) {
+                    store.order.push_back(key);
+                }
+            }
+            // The map/FIFO invariant is repaired while this guard is held.
+            // Clear poison now, so future calls do not repeat O(n) repair/logging.
+            HANDOFF_COOKIES.clear_poison();
+            store
+        }
+    }
+}
 /// Cap on staged handoff entries; past it the oldest entry is evicted with
 /// its file. Matches the handoff queue depth: at most that many handoffs can
 /// be in flight ahead of the GTK thread.
@@ -277,9 +463,15 @@ fn valid_cookie_domain(domain: &str) -> bool {
         })
 }
 
-/// A cookie may only be sent for the URL's own host or one of its parents.
+/// A cookie may only be sent for the URL's own host or one of its parents,
+/// never for a public suffix itself (such as `com` or `co.uk`). Use the
+/// maintained Mozilla Public Suffix List rather than a short hand-written TLD
+/// table, including private and wildcard rules.
 fn domain_covers_host(domain: &str, host: &str) -> bool {
     let (domain, host) = (domain.to_ascii_lowercase(), host.to_ascii_lowercase());
+    if psl::suffix_str(&domain).is_some_and(|suffix| suffix.eq_ignore_ascii_case(&domain)) {
+        return false;
+    }
     host == domain || host.ends_with(&format!(".{domain}"))
 }
 
@@ -390,10 +582,7 @@ pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option
         let _ = std::fs::remove_file(path);
         return;
     };
-    let Ok(mut store) = HANDOFF_COOKIES.lock() else {
-        let _ = std::fs::remove_file(path);
-        return;
-    };
+    let mut store = lock_handoff_cookies();
     // Sanitize the UA: it goes into a header and an argv; trim whitespace,
     // drop it if empty, cap length (browsers send < 512 chars).
     let user_agent = user_agent
@@ -430,20 +619,19 @@ pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option
 /// to a wrong scope.
 fn handoff_entry(url: &str) -> Option<HandoffCookies> {
     let key = handoff_key(url)?;
-    HANDOFF_COOKIES.lock().ok().and_then(|store| {
-        store.by_key.get(&key).cloned().or_else(|| {
-            let host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
-            // Newest-first through insertion order: deterministic, and the
-            // most recent handoff on the host is the best guess for the parent
-            // collection (a HashMap walk would be arbitrary).
-            store.order.iter().rev().find_map(|k| {
-                let khost = url::Url::parse(k).ok()?.host_str()?.to_ascii_lowercase();
-                if khost == host {
-                    store.by_key.get(k).cloned()
-                } else {
-                    None
-                }
-            })
+    let store = lock_handoff_cookies();
+    store.by_key.get(&key).cloned().or_else(|| {
+        let host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
+        // Newest-first through insertion order: deterministic, and the
+        // most recent handoff on the host is the best guess for the parent
+        // collection (a HashMap walk would be arbitrary).
+        store.order.iter().rev().find_map(|k| {
+            let khost = url::Url::parse(k).ok()?.host_str()?.to_ascii_lowercase();
+            if khost == host {
+                store.by_key.get(k).cloned()
+            } else {
+                None
+            }
         })
     })
 }
@@ -548,10 +736,9 @@ fn live_handoff_cookie_path_at(url: &str, browser: &str, now: SystemTime) -> Opt
 /// or resume still passes the challenge.
 pub(crate) fn discard_handoff_cookies(url: &str) {
     let path = handoff_key(url).and_then(|key| {
-        HANDOFF_COOKIES.lock().ok().and_then(|mut store| {
-            store.order.retain(|k| k != &key);
-            store.by_key.remove(&key).map(|e| e.path)
-        })
+        let mut store = lock_handoff_cookies();
+        store.order.retain(|k| k != &key);
+        store.by_key.remove(&key).map(|e| e.path)
     });
     if let Some(p) = path {
         let _ = std::fs::remove_file(p);
@@ -562,13 +749,11 @@ pub(crate) fn discard_handoff_cookies(url: &str) {
 /// in memory, so files left behind would never be cleaned until the next
 /// startup sweep.
 pub(crate) fn purge_handoff_cookies() {
-    let paths: Vec<PathBuf> = HANDOFF_COOKIES
-        .lock()
-        .map(|mut store| {
-            store.order.clear();
-            store.by_key.drain().map(|(_, e)| e.path).collect()
-        })
-        .unwrap_or_default();
+    let paths: Vec<PathBuf> = {
+        let mut store = lock_handoff_cookies();
+        store.order.clear();
+        store.by_key.drain().map(|(_, e)| e.path).collect()
+    };
     for p in paths {
         let _ = std::fs::remove_file(p);
     }
@@ -577,6 +762,13 @@ pub(crate) fn purge_handoff_cookies() {
 #[derive(Deserialize)]
 struct AddRequest {
     url: String,
+    /// Millisecond timestamp and unique nonce are included in the signed JSON body.
+    /// Optional only for legacy unauthenticated URL-only requests; authenticated
+    /// requests missing either field are rejected.
+    #[serde(default)]
+    timestamp_ms: Option<u64>,
+    #[serde(default)]
+    nonce: Option<String>,
     #[serde(default)]
     cookies: Vec<Cookie>,
     /// Browser UA; `cf_clearance` is UA-bound, so it travels with the cookies.
@@ -781,7 +973,7 @@ async fn handle_add(
     }
     // A token, when sent, must verify: a stale pairing is an error the
     // extension should see, not something to quietly downgrade.
-    let authenticated = match headers.get("x-grab-token") {
+    let token_authenticated = match headers.get("x-grab-token") {
         None => false,
         Some(token) => {
             let valid = st
@@ -809,6 +1001,22 @@ async fn handle_add(
     // Bound cookie count: each is a small name/value pair.
     if req.cookies.len() > 100 {
         return StatusCode::BAD_REQUEST.into_response();
+    }
+    // During a rolling upgrade, old paired extensions do not include the
+    // timestamp/nonce pair. Preserve their URL handoff, but downgrade them to
+    // the same confirmation-only, no-cookie behavior as unpaired callers.
+    // A partially present or malformed pair is never treated as legacy.
+    let legacy_authenticated =
+        token_authenticated && req.timestamp_ms.is_none() && req.nonce.is_none();
+    if token_authenticated
+        && !legacy_authenticated
+        && let Err(status) = reserve_handoff_nonce(req.timestamp_ms, req.nonce.as_deref())
+    {
+        return status.into_response();
+    }
+    let authenticated = token_authenticated && !legacy_authenticated;
+    if legacy_authenticated {
+        tracing::debug!("legacy paired extension handoff requires confirmation and drops cookies");
     }
     // Unauthenticated callers always wait for the user's answer: any local
     // process can POST without a token, so silent queuing would let
@@ -850,12 +1058,16 @@ async fn handle_add(
             if staged {
                 discard_handoff_cookies(&req.url);
             }
+            // Keep the nonce reserved. The extension creates a fresh nonce on
+            // each 429 retry; releasing this one would let a captured rejected
+            // POST become valid later when the queue has space again.
             return StatusCode::TOO_MANY_REQUESTS.into_response();
         }
         Err(TrySendError::Closed(_)) => {
             if staged {
                 discard_handoff_cookies(&req.url);
             }
+            // Do not reopen a consumed nonce after an internal queue failure.
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
@@ -943,9 +1155,54 @@ mod tests {
         String::from_utf8_lossy(&out).into_owned()
     }
 
-    /// `POST /add` on a fresh connection.
+    /// POST /add or a confirmation URL on a fresh connection. When a valid
+    /// test MAC is supplied, upgrade the fixture to timestamp/nonce metadata
+    /// and re-sign it before sending.
+    async fn request_with_target(
+        port: u16,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> String {
+        static TEST_NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
+        let mut body_owned = body.to_string();
+        let mut headers_owned: Vec<(String, String)> = headers
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect();
+        if let Some((_, supplied_token)) = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("x-grab-token"))
+            && *supplied_token == token(body)
+        {
+            let mut json: serde_json::Value = serde_json::from_str(body).expect("test JSON");
+            let object = json.as_object_mut().expect("JSON object");
+            object
+                .entry("timestamp_ms")
+                .or_insert_with(|| serde_json::json!(unix_time_ms().expect("system clock")));
+            object.entry("nonce").or_insert_with(|| {
+                serde_json::json!(format!(
+                    "{:032x}",
+                    TEST_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+                ))
+            });
+            body_owned = serde_json::to_string(&json).expect("serialize v2 request");
+            let fresh_token = token(&body_owned);
+            for (name, value) in &mut headers_owned {
+                if name.eq_ignore_ascii_case("x-grab-token") {
+                    *value = fresh_token.clone();
+                }
+            }
+        }
+        let header_refs: Vec<(&str, &str)> = headers_owned
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        request_to(port, "POST", target, &header_refs, &body_owned).await
+    }
+
     async fn request(port: u16, headers: &[(&str, &str)], body: &str) -> String {
-        request_to(port, "POST", "/add", headers, body).await
+        request_with_target(port, "/add", headers, body).await
     }
 
     fn status(resp: &str) -> &str {
@@ -1251,6 +1508,15 @@ mod tests {
             [".example.com\tTRUE\t/\tFALSE\t0\tprefs\tdark"],
             "{text}"
         );
+    }
+
+    #[test]
+    fn cookie_domain_must_not_be_a_public_suffix() {
+        assert!(!domain_covers_host("com", "example.com"));
+        assert!(!domain_covers_host("co.uk", "example.co.uk"));
+        assert!(!domain_covers_host("github.io", "user.github.io"));
+        assert!(domain_covers_host("example.co.uk", "www.example.co.uk"));
+        assert!(domain_covers_host("example.com", "example.com"));
     }
 
     #[test]
@@ -1755,13 +2021,166 @@ mod tests {
         let fresh = first.regenerate(&path).unwrap();
         assert_ne!(fresh, code);
         assert_eq!(Pairing::load_or_create(&path).unwrap().code(), fresh);
-        // A corrupt file is replaced rather than trusted.
-        std::fs::write(&path, "not hex").unwrap();
+        // Unsafe permissions and malformed content trigger an explicit recovery
+        // warning and an atomically replaced 0600 secret, not a silent rotation.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let secured = Pairing::load_or_create(&path).unwrap();
+        assert_ne!(secured.code(), fresh);
+        assert!(pairing_secret_recovered());
         assert_eq!(
-            Pairing::load_or_create(&path).unwrap().code().len(),
-            SECRET_LEN * 2
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "unsafe permission bits must not survive recovery"
         );
+        let code = secured.code();
+        std::fs::write(&path, "not hex").unwrap();
+        let recovered = Pairing::load_or_create(&path).unwrap();
+        assert_ne!(recovered.code(), code);
+        assert!(pairing_secret_recovered());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pairing_fifo_is_recovered_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir =
+            std::env::temp_dir().join(format!("grab-pairing-fifo-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("extension-pairing");
+        let raw_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: raw_path is a NUL-terminated path that stays alive for mkfifo.
+        assert_eq!(unsafe { libc::mkfifo(raw_path.as_ptr(), 0o600) }, 0);
+
+        let pairing = Pairing::load_or_create(&path).unwrap();
+        assert_eq!(pairing.code().len(), SECRET_LEN * 2);
+        assert!(std::fs::metadata(&path).unwrap().is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn legacy_authenticated_handoff_is_confirmed_and_drops_cookies() {
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let url = "https://legacy-client.example.test/file.zip";
+        let body = r#"{"url":"https://legacy-client.example.test/file.zip","cookies":[{"name":"session","value":"secret"}]}"#;
+        let signed = token(body);
+        let task = tokio::spawn(async move {
+            request_to(
+                srv.port,
+                "POST",
+                "/add",
+                &[("Host", &host), ("X-Grab-Token", &signed), JSON],
+                body,
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !task.is_finished(),
+            "legacy authenticated requests must still require confirmation"
+        );
+        let handoff = srv
+            .rx
+            .recv()
+            .await
+            .expect("legacy URL should reach the queue");
+        assert!(
+            handoff.decision.is_some(),
+            "legacy calls must remain confirmation-only"
+        );
+        assert!(
+            handoff_cookie_args(url).is_empty(),
+            "legacy cookies must not be staged"
+        );
+        handoff
+            .decision
+            .expect("legacy request carries a decision")
+            .send(HandoffOutcome::Queued)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "200");
+    }
+
+    #[tokio::test]
+    async fn authenticated_handoff_rejects_replayed_body_nonce() {
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let mut nonce_bytes = [0u8; 16];
+        getrandom::fill(&mut nonce_bytes).expect("operating-system random source");
+        let nonce = hex_encode(&nonce_bytes);
+        let timestamp_ms = unix_time_ms().expect("system clock");
+        let body = format!(
+            r#"{{"url":"https://replay.example/file.zip","timestamp_ms":{timestamp_ms},"nonce":"{nonce}","cookies":[]}}"#
+        );
+        let signed = token(&body);
+        let headers = [
+            ("Host", host.as_str()),
+            ("X-Grab-Token", signed.as_str()),
+            JSON,
+        ];
+
+        let first = request_to(srv.port, "POST", "/add", &headers, &body).await;
+        assert_eq!(status(&first), "200", "{first}");
+        let _ = srv.rx.recv().await.expect("first handoff should be queued");
+
+        let replay = request_to(srv.port, "POST", "/add", &headers, &body).await;
+        assert_eq!(status(&replay), "403", "{replay}");
+        assert!(
+            srv.rx.try_recv().is_err(),
+            "a replay must not enqueue another handoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticated_nonce_stays_reserved_after_queue_full() {
+        let mut srv = start(1).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+
+        // Fill the single queue slot with a valid authenticated handoff. It
+        // responds immediately, so the assertion below doesn't depend on a
+        // sleep or a race with the server task.
+        let mut fill_nonce_bytes = [0u8; 16];
+        getrandom::fill(&mut fill_nonce_bytes).expect("operating-system random source");
+        let fill_nonce = hex_encode(&fill_nonce_bytes);
+        let fill_timestamp_ms = unix_time_ms().expect("system clock");
+        let fill_body = format!(
+            r#"{{"url":"https://queue-fill.example/first","timestamp_ms":{fill_timestamp_ms},"nonce":"{fill_nonce}","cookies":[]}}"#
+        );
+        let fill_token = token(&fill_body);
+        let fill_headers = [
+            ("Host", host.as_str()),
+            ("X-Grab-Token", fill_token.as_str()),
+            JSON,
+        ];
+        let accepted = request_to(srv.port, "POST", "/add", &fill_headers, &fill_body).await;
+        assert_eq!(status(&accepted), "200", "{accepted}");
+
+        let mut nonce_bytes = [0u8; 16];
+        getrandom::fill(&mut nonce_bytes).expect("operating-system random source");
+        let nonce = hex_encode(&nonce_bytes);
+        let timestamp_ms = unix_time_ms().expect("system clock");
+        let body = format!(
+            r#"{{"url":"https://queue-retry.example/file.zip","timestamp_ms":{timestamp_ms},"nonce":"{nonce}","cookies":[]}}"#
+        );
+        let signed = token(&body);
+        let headers = [
+            ("Host", host.as_str()),
+            ("X-Grab-Token", signed.as_str()),
+            JSON,
+        ];
+
+        let refused = request_to(srv.port, "POST", "/add", &headers, &body).await;
+        assert_eq!(status(&refused), "429", "{refused}");
+
+        // Free the queue after the signed request has been refused. Retrying
+        // the exact captured body must remain a replay, not become a new job.
+        let _first = srv.rx.recv().await.expect("queue-filling handoff");
+        let replay = request_to(srv.port, "POST", "/add", &headers, &body).await;
+        assert_eq!(status(&replay), "403", "{replay}");
+        assert!(srv.rx.try_recv().is_err(), "a replay must not enqueue");
     }
 
     // --- cookie file hardening --------------------------------------------
@@ -1878,9 +2297,8 @@ mod tests {
         let tok = token(body);
         let (port, h2) = (srv.port, host.clone());
         let task = tokio::spawn(async move {
-            request_to(
+            request_with_target(
                 port,
-                "POST",
                 "/add?confirm=1",
                 &[("Host", &h2), ("X-Grab-Token", &tok), JSON],
                 body,
@@ -1910,9 +2328,8 @@ mod tests {
         let tok = token(body);
         let (port, h2) = (srv.port, host.clone());
         let task = tokio::spawn(async move {
-            request_to(
+            request_with_target(
                 port,
-                "POST",
                 "/add?confirm=1",
                 &[("Host", &h2), ("X-Grab-Token", &tok), JSON],
                 body,
@@ -1981,9 +2398,8 @@ mod tests {
         let tok = token(body);
         let (port, h2) = (srv.port, host.clone());
         let task = tokio::spawn(async move {
-            request_to(
+            request_with_target(
                 port,
-                "POST",
                 "/add?confirm=1",
                 &[("Host", &h2), ("X-Grab-Token", &tok), JSON],
                 body,

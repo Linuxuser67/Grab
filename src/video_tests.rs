@@ -45,7 +45,7 @@ use crate::video_spawn::{
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
-    dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
+    dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir_in, is_grab_part,
     is_sparse_shell, is_ytdlp_fragment, manifest_path, read_manifest, release_remux_lease,
     reserve_remux_temp, resume_plan, sidecar_path_for, staging_root, stem_reserved_in,
     sweep_partial_remuxes, sweep_staging_preserving_recordings, unified_candidate,
@@ -496,7 +496,7 @@ fn clean_staging_removes_our_dir() {
 #[test]
 fn ensure_staging_dir_roundtrip_and_clean() {
     let dir = staging_root().join((u64::MAX - 8).to_string());
-    let canon = ensure_staging_dir(&dir).expect("fresh dir verifies");
+    let canon = ensure_staging_dir_in(&staging_root(), &dir).expect("fresh dir verifies");
     assert!(
         canon.starts_with(std::fs::canonicalize(staging_root()).unwrap()),
         "{canon:?}"
@@ -519,7 +519,7 @@ fn ensure_staging_dir_rejects_symlink_escape() {
     let link = staging_root().join((u64::MAX - 7).to_string());
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&outside, &link).unwrap();
-    let err = ensure_staging_dir(&link).expect_err("symlink escape must fail");
+    let err = ensure_staging_dir_in(&staging_root(), &link).expect_err("symlink escape must fail");
     assert!(err.to_string().contains("not a real directory"), "{err}");
     assert!(outside.read_dir().unwrap().next().is_none());
     let _ = std::fs::remove_file(&link);
@@ -540,7 +540,7 @@ fn ensure_staging_dir_refuses_dangling_link() {
     let link = staging_root().join((u64::MAX - 6).to_string());
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&target, &link).unwrap();
-    let err = ensure_staging_dir(&link).expect_err("dangling link must fail");
+    let err = ensure_staging_dir_in(&staging_root(), &link).expect_err("dangling link must fail");
     assert!(err.to_string().contains("not a real directory"), "{err}");
     assert!(
         !target.exists(),
@@ -2864,6 +2864,99 @@ fn user_ytdlp_wins_and_legacy_user_ffmpeg_is_ignored() {
     let found = resolve_libraries().expect("user yt-dlp and system FFmpeg resolve");
     assert_eq!(found.youtube, libs.join("yt-dlp"));
     assert_eq!(found.ffmpeg, system_ffmpeg);
+    drop(_env);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lookup_resolves_yt_dlp_without_requiring_ffmpeg() {
+    // Previewing metadata must work on yt-dlp-only installations even though
+    // queueing a video download still needs a complete FFmpeg/ffprobe pair.
+    let dir = std::env::temp_dir().join(format!("grab-lookup-tools-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let xdg = dir.join("xdg");
+    let libs = xdg.join("grab").join("libs");
+    let path_only = dir.join("path");
+    std::fs::create_dir_all(&libs).unwrap();
+    std::fs::create_dir_all(&path_only).unwrap();
+    let youtube = fake_executable(&libs, "yt-dlp");
+    let _env = ScopedEnv::apply(path_only.to_str().expect("UTF-8 temp path"), &xdg);
+
+    assert_eq!(crate::video_tools::resolve_ytdlp().unwrap(), youtube);
+    assert!(
+        crate::video_tools::resolve_libraries().is_err(),
+        "full download setup should still require FFmpeg and ffprobe"
+    );
+
+    drop(_env);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn fetch_video_infos_succeeds_with_yt_dlp_only_and_no_staging_root() {
+    // The metadata worker receives only yt-dlp. A fake executable supplies a
+    // version and dump JSON while PATH contains no FFmpeg/ffprobe tools.
+    let dir = std::env::temp_dir().join(format!(
+        "grab-lookup-only-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let xdg = dir.join("xdg");
+    let libs = xdg.join("grab").join("libs");
+    let path_only = dir.join("path");
+    std::fs::create_dir_all(&libs).unwrap();
+    std::fs::create_dir_all(&path_only).unwrap();
+
+    let youtube = libs.join("yt-dlp");
+    std::fs::write(
+        libs.join("info.json"),
+        serde_json::json!({
+            "id": "abc",
+            "title": "T",
+            "age_limit": 0,
+            "live_status": "not_live",
+            "playable_in_embed": true,
+            "extractor": "generic",
+            "extractor_key": "Generic",
+            "_version": {"version": "2026.08.19", "repository": "yt-dlp"},
+            "formats": [],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '2026.08.19\\n'; exit 0; fi\nexec /bin/cat \"{}\"\n",
+        libs.join("info.json").display()
+    );
+    std::fs::write(&youtube, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&youtube, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let _env = ScopedEnv::apply(path_only.to_str().expect("UTF-8 temp path"), &xdg);
+    assert!(crate::video_tools::resolve_libraries().is_err());
+    let result = crate::runtime::tokio_rt().block_on(crate::video::fetch_video_infos(
+        youtube,
+        "https://example.com/v".to_string(),
+        "none".to_string(),
+        false,
+        None,
+        None,
+    ));
+    let (probe, raw) = result.expect("yt-dlp metadata should not require FFmpeg or staging");
+    assert!(matches!(probe, crate::video::ProbeResult::Single(_)));
+    assert_eq!(
+        raw.as_ref()
+            .and_then(|value| value.get("title"))
+            .and_then(|v| v.as_str()),
+        Some("T")
+    );
+
     drop(_env);
     let _ = std::fs::remove_dir_all(&dir);
 }

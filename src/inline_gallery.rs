@@ -42,7 +42,7 @@ pub(crate) struct DualProbeCtx<'a> {
     pub browser: String,
     pub newest_first: bool,
     pub proxy: Option<crate::net_types::ResolvedProxy>,
-    pub libs: yt_dlp::client::deps::Libraries,
+    pub youtube_bin: std::path::PathBuf,
     pub tool: std::path::PathBuf,
 }
 
@@ -83,45 +83,34 @@ pub(crate) fn preferred_probe_error(
     }
 }
 
-/// Auth for a gallery-dl spawn: cookie jar path + user agent. The handoff
-/// jar (from the browser extension) is preferred; otherwise cookies are
-/// exported from the configured browser (up to 30s). `_staged` keeps an
-/// exported jar alive as long as the auth is held.
+/// Authentication source for gallery-dl. The browser-extension handoff jar
+/// wins (and preserves its paired user-agent); otherwise gallery-dl reads the
+/// selected browser profile directly, avoiding a second yt-dlp export process.
 pub(crate) struct GalleryAuth {
     pub cookies_path: Option<std::path::PathBuf>,
+    pub cookies_browser: Option<String>,
     pub user_agent: Option<String>,
-    _staged: Option<crate::cookies::StagedCookies>,
 }
 
-/// Resolve gallery-dl auth for a URL: handoff jar first, browser export as
-/// fallback. Runs on the worker (not GTK main); the export can take 30s.
-pub(crate) async fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAuth {
-    let handoff_path = crate::extension_server::live_handoff_cookie_path(url, browser);
-    let handoff_ua = crate::extension_server::handoff_user_agent(url, browser);
-    let staged = if handoff_path.is_none() {
-        if browser.is_empty() || browser == "none" {
-            None
-        } else if let Some(ytdlp) =
-            crate::video_tools::find_in_dirs("yt-dlp", &crate::video_tools::tool_search_dirs())
-        {
-            crate::cookies::export_cookies_to_file(
-                &ytdlp,
-                browser,
-                url,
-                std::time::Duration::from_secs(30),
-            )
-            .await
-        } else {
-            None
-        }
+/// Resolve auth without spawning a subprocess or staging cookies.
+pub(crate) fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAuth {
+    // The jar and browser user-agent are one identity. Resolve them under one
+    // store lookup and one freshness decision so an eviction or freshness
+    // boundary cannot pair cookies with a UA from a different handoff.
+    let (cookies_path, user_agent) =
+        match crate::extension_server::live_handoff_identity(url, browser) {
+            Some((path, user_agent)) => (Some(path), user_agent),
+            None => (None, None),
+        };
+    let cookies_browser = if cookies_path.is_none() && !browser.is_empty() && browser != "none" {
+        Some(browser.to_string())
     } else {
         None
     };
-    let cookies_path = handoff_path.or_else(|| staged.as_ref().map(|c| c.path().to_path_buf()));
     GalleryAuth {
         cookies_path,
-        user_agent: handoff_ua,
-        _staged: staged,
+        cookies_browser,
+        user_agent,
     }
 }
 
@@ -139,26 +128,27 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
     // yt-dlp starts immediately: it uses the handoff jar or
     // --cookies-from-browser, not the exported file below.
     let ytdlp_fut = crate::video::fetch_video_infos(
-        ctx.libs,
+        ctx.youtube_bin,
         url.clone(),
         ctx.browser.clone(),
         ctx.newest_first,
         ctx.proxy.clone(),
         None,
     );
-    // gallery-dl needs its auth first (handoff jar preferred); the export
-    // runs while yt-dlp is already probing.
+    // Resolve a handoff jar or browser selector without spawning an export
+    // process, so gallery-dl and yt-dlp can probe concurrently.
     let gallery_fut = async {
-        let auth = resolve_gallery_auth(&url, &ctx.browser).await;
+        let auth = resolve_gallery_auth(&url, &ctx.browser);
         let r = crate::gallery_probe::probe_gallery_with_proxy(
             &ctx.tool,
             &url,
             auth.cookies_path.as_deref(),
+            auth.cookies_browser.as_deref(),
             auth.user_agent.as_deref(),
             ctx.proxy.as_ref(),
         )
         .await;
-        // The auth (and its staged jar) must outlive the probe.
+        // Keep the chosen cookie source alive until the probe finishes.
         drop(auth);
         r
     };

@@ -140,11 +140,6 @@ pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
         .unwrap_or(false)
 }
 
-/// Create a staging dir, verifying it stays under the staging root (a pre-planted symlink must not redirect parts).
-pub fn ensure_staging_dir(dir: &Path) -> Result<PathBuf, VideoError> {
-    ensure_staging_dir_in(&staging_root(), dir)
-}
-
 /// Create a staging dir under an explicit root, verifying it stays there (a
 /// pre-planted symlink must not redirect parts).
 pub fn ensure_staging_dir_in(root: &Path, dir: &Path) -> Result<PathBuf, VideoError> {

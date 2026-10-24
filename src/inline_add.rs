@@ -34,6 +34,17 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+/// Tokio detaches a task when its JoinHandle is dropped. Own the abort handle
+/// as well, so aborting the enclosing GLib lookup doesn't leave dual probes
+/// running (and holding child processes) for a URL the user has already changed.
+struct AbortTaskOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Where a submit came from: Enter, the Add button or tick icon, or auto-add.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SubmitSource {
@@ -1761,13 +1772,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 let auth = crate::inline_gallery::resolve_gallery_auth(
                                     &url_for_count,
                                     browser.as_str(),
-                                )
-                                .await;
+                                );
                                 if let Ok(tool) = crate::gallery_argv::resolve_tool() {
                                     crate::gallery_probe::count_gallery_files_with_proxy(
                                         &tool,
                                         &url_for_count,
                                         auth.cookies_path.as_deref(),
+                                        auth.cookies_browser.as_deref(),
                                         auth.user_agent.as_deref(),
                                         filter_c,
                                         proxy.as_ref(),
@@ -2233,20 +2244,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     set_lookup_add(&lookup_add_b, true);
                     return;
                 }
-                // Fast local tools check first: missing tools show Install
-                // with no spinner round-trip.
-                let libs = match crate::video::resolve_libraries() {
-                    Ok(libs) => libs,
-                    Err(e) => {
-                        if probe_b.borrow().generation != my {
-                            return;
-                        }
-                        probe_b.borrow_mut().info.take();
-                        show_video_tools_missing(&step_b, &e.to_string());
-                        set_lookup_add(&lookup_add_b, true);
-                        return;
-                    }
-                };
+                // Metadata lookup runs with yt-dlp alone. FFmpeg/ffprobe are
+                // required only when a real download is queued, not for preview.
+                // Resolve local executable paths on Tokio's blocking pool rather
+                // than scanning PATH from GTK's main context.
                 show_video_loading(&step_b);
                 set_lookup_add(&lookup_add_b, false);
                 // Invalid manual proxy fails the lookup loudly, matching
@@ -2271,6 +2272,47 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // Skipped for direct media URLs (not gallery pages).
                 let browser = settings_b.cookies_browser();
                 let newest_first = settings_b.video_codec_newest();
+                let needs_gallery_tool = !crate::gallery_probe::url_is_direct_media(&url);
+                let local_tools = crate::runtime::tokio_rt()
+                    .spawn_blocking(move || {
+                        let youtube = crate::video_tools::resolve_ytdlp();
+                        let gallery = needs_gallery_tool.then(crate::gallery_argv::resolve_tool);
+                        (youtube, gallery)
+                    })
+                    .await;
+                let (youtube_result, gallery_result) = match local_tools {
+                    Ok(results) => results,
+                    Err(error) => {
+                        tracing::error!(error = %error, "lookup tool resolution task failed");
+                        if probe_b.borrow().generation != my {
+                            return;
+                        }
+                        let message = gettext("The lookup failed unexpectedly. Please try again.");
+                        show_video_error(&step_b, &message);
+                        set_lookup_add(&lookup_add_b, true);
+                        return;
+                    }
+                };
+                let youtube_bin = match youtube_result {
+                    Ok(path) => path,
+                    Err(error) => {
+                        if probe_b.borrow().generation != my {
+                            return;
+                        }
+                        probe_b.borrow_mut().info.take();
+                        show_video_tools_missing(&step_b, &error.to_string());
+                        set_lookup_add(&lookup_add_b, true);
+                        return;
+                    }
+                };
+                let gallery_tool = match gallery_result {
+                    Some(Ok(path)) => Some(path),
+                    Some(Err(error)) => {
+                        tracing::debug!(error = %error, "gallery-dl unavailable; continuing with yt-dlp lookup");
+                        None
+                    }
+                    None => None,
+                };
                 // Key the probe-JSON cache by the probe's conditions: the
                 // download reuses the JSON only under identical ones. The
                 // download side keys on the normalized page URL, so this key
@@ -2286,139 +2328,130 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // Gallery items for the Video ⇄ Gallery switcher, armed in
                 // the Single arm below when route() says both are viable.
                 let mut toggle_items: Option<ToggleItems> = None;
-                let (ytdlp_result, gallery_error) =
-                    if !crate::gallery_probe::url_is_direct_media(&url)
-                        && let Ok(tool) = crate::gallery_argv::resolve_tool()
-                    {
-                        // This lookup is polled by GLib, but gallery-dl and browser-cookie
-                        // export use tokio::process and must run inside Tokio's runtime.
-                        let probe_url = url.clone();
-                        let probe_browser = browser.clone();
-                        let probe_proxy = proxy.clone();
-                        let probe_libs = libs.clone();
-                        let probe_handle = crate::runtime::tokio_rt().spawn(async move {
-                            crate::inline_gallery::dual_probe(crate::inline_gallery::DualProbeCtx {
-                                url: &probe_url,
-                                browser: probe_browser,
-                                newest_first,
-                                proxy: probe_proxy,
-                                libs: probe_libs,
-                                tool,
-                            })
-                            .await
-                        });
-                        let probe_outcome = match probe_handle.await {
-                            Ok(outcome) => outcome,
-                            Err(e) => {
-                                tracing::error!(
-                                    error = %e,
-                                    "dual-backend probe task failed"
-                                );
-                                // Don't overwrite the UI if this lookup is stale.
-                                if probe_b.borrow().generation() != my {
-                                    return;
-                                }
-                                let message =
-                                    gettext("The lookup failed unexpectedly. Please try again.");
-                                show_video_error(&step_b, &message);
-                                set_lookup_add(&lookup_add_b, true);
+                let (ytdlp_result, gallery_error) = if let Some(tool) = gallery_tool {
+                    // Run both extractor subprocesses inside Tokio so the parent
+                    // cancellation guard can abort their shared probe task.
+                    let probe_url = url.clone();
+                    let probe_browser = browser.clone();
+                    let probe_proxy = proxy.clone();
+                    let probe_youtube_bin = youtube_bin.clone();
+                    let probe_handle = crate::runtime::tokio_rt().spawn(async move {
+                        crate::inline_gallery::dual_probe(crate::inline_gallery::DualProbeCtx {
+                            url: &probe_url,
+                            browser: probe_browser,
+                            newest_first,
+                            proxy: probe_proxy,
+                            youtube_bin: probe_youtube_bin,
+                            tool,
+                        })
+                        .await
+                    });
+                    // If the parent GLib lookup is superseded, this future is
+                    // dropped. A bare JoinHandle would detach the Tokio task;
+                    // abort it so both yt-dlp and gallery-dl probe children wind down.
+                    let _abort_probe_on_drop = AbortTaskOnDrop(probe_handle.abort_handle());
+                    let probe_outcome = match probe_handle.await {
+                        Ok(outcome) => outcome,
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "dual-backend probe task failed"
+                            );
+                            // Don't overwrite the UI if this lookup is stale.
+                            if probe_b.borrow().generation() != my {
                                 return;
                             }
-                        };
-                        // Discard stale results: the user may have pasted a new URL
-                        // meanwhile.
-                        if probe_b.borrow().generation() != my {
+                            let message =
+                                gettext("The lookup failed unexpectedly. Please try again.");
+                            show_video_error(&step_b, &message);
+                            set_lookup_add(&lookup_add_b, true);
                             return;
                         }
-                        match probe_outcome {
-                            crate::inline_gallery::DualProbeOutcome::Complete {
-                                gallery,
-                                ytdlp,
-                            } => {
-                                // Failure-path error precedence: a
-                                // surfaced gallery error is preferred, but
-                                // only when yt-dlp found nothing.
-                                let ytdlp_video = crate::inline_gallery::ytdlp_found_video(&ytdlp);
-                                let gallery_error = crate::inline_gallery::preferred_probe_error(
-                                    ytdlp_video,
-                                    &gallery,
-                                );
-                                let ytdlp_playlist_entries = match &ytdlp {
-                                    Ok((crate::video::ProbeResult::Playlist(pl), _)) => pl.total,
-                                    _ => 0,
-                                };
-                                let routed = crate::gallery_probe::route_for_collection(
-                                    ytdlp_video,
-                                    ytdlp_playlist_entries,
-                                    gallery.as_ref().ok().and_then(|items| items.as_deref()),
-                                    None,
-                                );
-                                match routed {
-                                    crate::gallery_probe::ProbeOutcome::VideoYtDlp {
-                                        gallery_toggle,
-                                    } => {
-                                        if gallery_toggle {
-                                            let items = gallery.ok().flatten();
-                                            toggle_items = items.map(|i| (i, url.clone()));
-                                        }
-                                        (ytdlp, gallery_error)
+                    };
+                    // Discard stale results: the user may have pasted a new URL
+                    // meanwhile.
+                    if probe_b.borrow().generation() != my {
+                        return;
+                    }
+                    match probe_outcome {
+                        crate::inline_gallery::DualProbeOutcome::Complete { gallery, ytdlp } => {
+                            // Failure-path error precedence: a
+                            // surfaced gallery error is preferred, but
+                            // only when yt-dlp found nothing.
+                            let ytdlp_video = crate::inline_gallery::ytdlp_found_video(&ytdlp);
+                            let gallery_error =
+                                crate::inline_gallery::preferred_probe_error(ytdlp_video, &gallery);
+                            let ytdlp_playlist_entries = match &ytdlp {
+                                Ok((crate::video::ProbeResult::Playlist(pl), _)) => pl.total,
+                                _ => 0,
+                            };
+                            let routed = crate::gallery_probe::route_for_collection(
+                                ytdlp_video,
+                                ytdlp_playlist_entries,
+                                gallery.as_ref().ok().and_then(|items| items.as_deref()),
+                                None,
+                            );
+                            match routed {
+                                crate::gallery_probe::ProbeOutcome::VideoYtDlp {
+                                    gallery_toggle,
+                                } => {
+                                    if gallery_toggle {
+                                        let items = gallery.ok().flatten();
+                                        toggle_items = items.map(|i| (i, url.clone()));
                                     }
-                                    crate::gallery_probe::ProbeOutcome::VideoGalleryDl
-                                    | crate::gallery_probe::ProbeOutcome::Gallery => {
-                                        // Both outcomes contain gallery-dl entries.
-                                        // Keep queue creation behind the full file picker:
-                                        // the probe is only a preview and may be capped.
-                                        let items = gallery.ok().flatten().unwrap_or_default();
-                                        let card = crate::gallery_card::GalleryCard::new(
-                                            items,
-                                            Some(crate::gallery_probe::StickyMode::Gallery),
-                                            url.clone(),
-                                        );
-                                        let title = crate::gallery_probe::collection_title(
-                                            &card.items,
-                                            &url,
-                                        );
-                                        tracing::info!(
-                                            files = card.file_count(),
-                                            sticky = ?card.sticky_mode(),
-                                            "gallery-dl items await user selection"
-                                        );
-                                        show_gallery_ready(&step_b, card, &title);
-                                        // Every terminal state re-enables Add.
-                                        set_lookup_add(&lookup_add_b, true);
-                                        // With auto-add this lookup *is* the
-                                        // submit: a gallery needs a selection,
-                                        // so open the picker instead of
-                                        // stopping on the inline row.
-                                        if settings_b.auto_add_downloads() {
-                                            let opener =
-                                                step_b.gallery_select_opener.borrow().clone();
-                                            if let Some(open) = opener {
-                                                open();
-                                            }
-                                        }
-                                        return;
-                                    }
-                                    crate::gallery_probe::ProbeOutcome::None => {
-                                        (ytdlp, gallery_error)
-                                    }
+                                    (ytdlp, gallery_error)
                                 }
+                                crate::gallery_probe::ProbeOutcome::VideoGalleryDl
+                                | crate::gallery_probe::ProbeOutcome::Gallery => {
+                                    // Both outcomes contain gallery-dl entries.
+                                    // Keep queue creation behind the full file picker:
+                                    // the probe is only a preview and may be capped.
+                                    let items = gallery.ok().flatten().unwrap_or_default();
+                                    let card = crate::gallery_card::GalleryCard::new(
+                                        items,
+                                        Some(crate::gallery_probe::StickyMode::Gallery),
+                                        url.clone(),
+                                    );
+                                    let title =
+                                        crate::gallery_probe::collection_title(&card.items, &url);
+                                    tracing::info!(
+                                        files = card.file_count(),
+                                        sticky = ?card.sticky_mode(),
+                                        "gallery-dl items await user selection"
+                                    );
+                                    show_gallery_ready(&step_b, card, &title);
+                                    // Every terminal state re-enables Add.
+                                    set_lookup_add(&lookup_add_b, true);
+                                    // With auto-add this lookup *is* the
+                                    // submit: a gallery needs a selection,
+                                    // so open the picker instead of
+                                    // stopping on the inline row.
+                                    if settings_b.auto_add_downloads() {
+                                        let opener = step_b.gallery_select_opener.borrow().clone();
+                                        if let Some(open) = opener {
+                                            open();
+                                        }
+                                    }
+                                    return;
+                                }
+                                crate::gallery_probe::ProbeOutcome::None => (ytdlp, gallery_error),
                             }
                         }
-                    } else {
-                        (
-                            crate::video::fetch_video_infos(
-                                libs,
-                                url.clone(),
-                                browser,
-                                newest_first,
-                                proxy,
-                                None,
-                            )
-                            .await,
+                    }
+                } else {
+                    (
+                        crate::video::fetch_video_infos(
+                            youtube_bin,
+                            url.clone(),
+                            browser,
+                            newest_first,
+                            proxy,
                             None,
                         )
-                    };
+                        .await,
+                        None,
+                    )
+                };
                 match ytdlp_result {
                     Err(e) => {
                         if probe_b.borrow().generation != my {
@@ -3261,16 +3294,16 @@ fn make_gallery_picker_opener(
                 // Unified auth: handoff jar first, browser export as
                 // fallback (was handoff-only: auth-gated galleries could
                 // list nothing here but download fine).
-                let auth =
-                    crate::inline_gallery::resolve_gallery_auth(&url_c, browser3.as_str()).await;
-                let r = crate::gallery_probe::enumerate_gallery_files_streamed_with_proxy(
-                    &tool,
-                    &url_c,
-                    auth.cookies_path.as_deref(),
-                    auth.user_agent.as_deref(),
+                let auth = crate::inline_gallery::resolve_gallery_auth(&url_c, browser3.as_str());
+                let options = crate::gallery_probe::GalleryEnumerationOptions {
+                    cookies_file: auth.cookies_path.as_deref(),
+                    cookies_browser: auth.cookies_browser.as_deref(),
+                    user_agent: auth.user_agent.as_deref(),
                     filter,
-                    items_tx,
-                    proxy3.as_ref(),
+                    proxy: proxy3.as_ref(),
+                };
+                let r = crate::gallery_probe::enumerate_gallery_files_streamed_with_proxy(
+                    &tool, &url_c, options, items_tx,
                 )
                 .await;
                 drop(auth);
@@ -3508,6 +3541,15 @@ mod tests {
             is_live: false,
             fetchable: true,
         })
+    }
+
+    #[tokio::test]
+    async fn abort_task_on_drop_aborts_nested_tokio_task() {
+        let child = tokio::spawn(std::future::pending::<()>());
+        let guard = AbortTaskOnDrop(child.abort_handle());
+        drop(guard);
+        let error = child.await.expect_err("guard must abort the child task");
+        assert!(error.is_cancelled());
     }
 
     #[test]

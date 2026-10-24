@@ -3408,6 +3408,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/psl/psl-2.1.228.crate",
+        "sha256": "158b8294dde3909df5a4ec68a35f8c39720151834b1f87050b87b37435150011",
+        "dest": "cargo/psl-2.1.228"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"158b8294dde3909df5a4ec68a35f8c39720151834b1f87050b87b37435150011\", \"files\": {}}",
+        "dest": "cargo/psl-2.1.228",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/psl-types/psl-types-2.0.11.crate",
         "sha256": "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac",
         "dest": "cargo/psl-types-2.0.11"

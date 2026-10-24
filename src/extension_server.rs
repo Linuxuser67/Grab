@@ -2012,6 +2012,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn authenticated_handoff_rejects_replayed_body_nonce() {
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let mut nonce_bytes = [0u8; 16];
+        getrandom::fill(&mut nonce_bytes).expect("operating-system random source");
+        let nonce = hex_encode(&nonce_bytes);
+        let timestamp_ms = unix_time_ms().expect("system clock");
+        let body = format!(
+            r#"{{"url":"https://replay.example/file.zip","timestamp_ms":{timestamp_ms},"nonce":"{nonce}","cookies":[]}}"#
+        );
+        let signed = token(&body);
+        let headers = [
+            ("Host", host.as_str()),
+            ("X-Grab-Token", signed.as_str()),
+            JSON,
+        ];
+
+        let first = request_to(srv.port, "POST", "/add", &headers, &body).await;
+        assert_eq!(status(&first), "200", "{first}");
+        let _ = srv.rx.recv().await.expect("first handoff should be queued");
+
+        let replay = request_to(srv.port, "POST", "/add", &headers, &body).await;
+        assert_eq!(status(&replay), "403", "{replay}");
+        assert!(srv.rx.try_recv().is_err(), "a replay must not enqueue another handoff");
+    }
+
     // --- cookie file hardening --------------------------------------------
 
     fn scoped(name: &str, domain: &str, path: &str) -> Cookie {

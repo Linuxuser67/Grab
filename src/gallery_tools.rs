@@ -7,7 +7,10 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
-use crate::video_tools::{download_to_file, ensure_lib_dir, user_lib_dir};
+use crate::video_tools::{
+    bounded_response_text, download_to_file, ensure_lib_dir, user_lib_dir, valid_release_tag,
+    valid_sha256_digest,
+};
 
 /// Maximum download size for the stable gallery-dl Linux executable (128 MiB).
 const GALLERYDL_MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
@@ -104,22 +107,6 @@ pub fn gallerydl_needs_update(managed: Option<Option<&str>>, latest_digest: Opti
 /// Latest stable asset: `(download_url, sha256_digest, tag)`.
 /// Any API failure, draft/prerelease, unexpected asset URL, or missing checksum
 /// makes the release unavailable rather than weakening verification.
-fn valid_release_tag(tag: &str) -> bool {
-    tag.as_bytes()
-        .first()
-        .is_some_and(|b| b.is_ascii_alphanumeric())
-        && tag.bytes().all(|b| {
-            matches!(
-                b,
-                b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'.' | b'-' | b'+' | b'_'
-            )
-        })
-}
-
-fn valid_sha256_digest(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
 fn codeberg_asset_url(tag: &str, asset_name: &str) -> Option<String> {
     valid_release_tag(tag).then(|| format!("{CODEBERG_RELEASES_BASE}/{tag}/{asset_name}"))
 }
@@ -170,27 +157,6 @@ fn parse_sha256sums(body: &str, filename: &str) -> Option<String> {
         found = Some(digest.to_ascii_lowercase());
     }
     found
-}
-
-async fn bounded_response_text(response: reqwest::Response, max_bytes: usize) -> Option<String> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        return None;
-    }
-
-    use futures_util::StreamExt as _;
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.ok()?;
-        if body.len().saturating_add(chunk.len()) > max_bytes {
-            return None;
-        }
-        body.extend_from_slice(&chunk);
-    }
-    String::from_utf8(body).ok()
 }
 
 async fn latest_gallerydl_asset() -> Option<(String, Option<String>, String)> {

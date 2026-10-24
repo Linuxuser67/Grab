@@ -133,7 +133,9 @@ fn release_handoff_nonce(nonce: &str) {
             cache.expires_at_ms.remove(nonce);
         }
         Err(poisoned) => {
-            tracing::error!("handoff replay cache mutex poisoned while releasing a rejected request");
+            tracing::error!(
+                "handoff replay cache mutex poisoned while releasing a rejected request"
+            );
             poisoned.into_inner().expires_at_ms.remove(nonce);
         }
     }
@@ -248,7 +250,11 @@ pub(crate) fn pairing_secret_recovered() -> bool {
 fn ensure_pairing_directory(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
     let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
-    match std::fs::DirBuilder::new().recursive(true).mode(0o700).create(parent) {
+    match std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
+    {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
@@ -264,8 +270,9 @@ fn ensure_pairing_directory(path: &Path) -> std::io::Result<()> {
 
 fn random_secret() -> std::io::Result<[u8; SECRET_LEN]> {
     let mut secret = [0u8; SECRET_LEN];
-    getrandom::fill(&mut secret)
-        .map_err(|error| std::io::Error::other(format!("system randomness unavailable: {error}")))?;
+    getrandom::fill(&mut secret).map_err(|error| {
+        std::io::Error::other(format!("system randomness unavailable: {error}"))
+    })?;
     Ok(secret)
 }
 
@@ -308,7 +315,10 @@ fn read_pairing_secret(path: &Path) -> std::io::Result<Option<[u8; SECRET_LEN]>>
     let mut text = String::new();
     file.read_to_string(&mut text)?;
     let secret = decode_secret(text.trim()).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "pairing secret is malformed")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "pairing secret is malformed",
+        )
     })?;
     Ok(Some(secret))
 }
@@ -1152,9 +1162,9 @@ mod tests {
             if *supplied_token == token(body) {
                 let mut json: serde_json::Value = serde_json::from_str(body).expect("test JSON");
                 let object = json.as_object_mut().expect("JSON object");
-                object.entry("timestamp_ms").or_insert_with(|| {
-                    serde_json::json!(unix_time_ms().expect("system clock"))
-                });
+                object
+                    .entry("timestamp_ms")
+                    .or_insert_with(|| serde_json::json!(unix_time_ms().expect("system clock")));
                 object.entry("nonce").or_insert_with(|| {
                     serde_json::json!(format!(
                         "{:032x}",
@@ -2036,7 +2046,10 @@ mod tests {
 
         let replay = request_to(srv.port, "POST", "/add", &headers, &body).await;
         assert_eq!(status(&replay), "403", "{replay}");
-        assert!(srv.rx.try_recv().is_err(), "a replay must not enqueue another handoff");
+        assert!(
+            srv.rx.try_recv().is_err(),
+            "a replay must not enqueue another handoff"
+        );
     }
 
     // --- cookie file hardening --------------------------------------------

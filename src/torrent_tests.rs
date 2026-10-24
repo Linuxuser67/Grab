@@ -396,7 +396,8 @@ fn raw_path_collapses_distinct_invalid_utf8() {
 fn descriptor_torrent_cleanup_refuses_intermediate_symlinks() {
     use std::os::unix::fs::symlink;
 
-    let base = std::env::temp_dir().join(format!("grab-torrent-delete-link-{}", std::process::id()));
+    let base =
+        std::env::temp_dir().join(format!("grab-torrent-delete-link-{}", std::process::id()));
     let root = base.join("root");
     let outside = base.join("outside");
     let protected = outside.join("keep.txt");

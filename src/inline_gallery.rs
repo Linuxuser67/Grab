@@ -563,11 +563,7 @@ mod tests {
     fn long_primary_error_does_not_hide_gallery_dl_details() {
         let ytdlp = format!("Y{}", "y".repeat(1400));
         let gallery = format!("G{}", "g".repeat(1400));
-        let details = preview_failure_details(
-            "https://example.com/video",
-            &ytdlp,
-            Some(&gallery),
-        );
+        let details = preview_failure_details("https://example.com/video", &ytdlp, Some(&gallery));
         assert!(details.contains("yt-dlp:\nY"));
         assert!(details.contains("Gallery-dl:\nG"));
         assert!(details.contains("… [truncated]"));

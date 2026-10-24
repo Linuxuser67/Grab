@@ -1170,9 +1170,15 @@ mod tests {
         String::from_utf8_lossy(&out).into_owned()
     }
 
-    /// POST /add on a fresh connection. When a valid test MAC is supplied,
-    /// upgrade the fixture to timestamp/nonce metadata and re-sign it.
-    async fn request(port: u16, headers: &[(&str, &str)], body: &str) -> String {
+    /// POST /add or a confirmation URL on a fresh connection. When a valid
+    /// test MAC is supplied, upgrade the fixture to timestamp/nonce metadata
+    /// and re-sign it before sending.
+    async fn request_with_target(
+        port: u16,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> String {
         static TEST_NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
         let mut body_owned = body.to_string();
         let mut headers_owned: Vec<(String, String)> = headers
@@ -1207,8 +1213,13 @@ mod tests {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
-        request_to(port, "POST", "/add", &header_refs, &body_owned).await
+        request_to(port, "POST", target, &header_refs, &body_owned).await
     }
+
+    async fn request(port: u16, headers: &[(&str, &str)], body: &str) -> String {
+        request_with_target(port, "/add", headers, body).await
+    }
+
     fn status(resp: &str) -> &str {
         resp.split_whitespace().nth(1).unwrap_or("")
     }
@@ -2252,9 +2263,8 @@ mod tests {
         let tok = token(body);
         let (port, h2) = (srv.port, host.clone());
         let task = tokio::spawn(async move {
-            request_to(
+            request_with_target(
                 port,
-                "POST",
                 "/add?confirm=1",
                 &[("Host", &h2), ("X-Grab-Token", &tok), JSON],
                 body,
@@ -2284,9 +2294,8 @@ mod tests {
         let tok = token(body);
         let (port, h2) = (srv.port, host.clone());
         let task = tokio::spawn(async move {
-            request_to(
+            request_with_target(
                 port,
-                "POST",
                 "/add?confirm=1",
                 &[("Host", &h2), ("X-Grab-Token", &tok), JSON],
                 body,
@@ -2355,9 +2364,8 @@ mod tests {
         let tok = token(body);
         let (port, h2) = (srv.port, host.clone());
         let task = tokio::spawn(async move {
-            request_to(
+            request_with_target(
                 port,
-                "POST",
                 "/add?confirm=1",
                 &[("Host", &h2), ("X-Grab-Token", &tok), JSON],
                 body,

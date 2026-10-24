@@ -342,7 +342,9 @@ fn write_secret(path: &Path, secret: &[u8; SECRET_LEN]) -> std::io::Result<()> {
         .open(&tmp)?;
     file.write_all(hex_encode(secret).as_bytes())?;
     file.sync_all()?;
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path)?;
+    // Sync the rename's directory entry as well as the file contents.
+    std::fs::File::open(dir)?.sync_all()
 }
 
 /// Where the secret lives: `$XDG_CONFIG_HOME/grab/extension-pairing`.
@@ -501,9 +503,10 @@ fn write_handoff_cookies_with_count(url: &str, cookies: &[Cookie]) -> Option<(Pa
     let fallback_domain = url::Url::parse(url).ok()?.host_str()?.to_string();
     let mut written = 0;
     for cookie in cookies {
-        // Sanitize: no tabs/newlines in Netscape format.
-        let n = cookie.name.replace(['\t', '\n', '\r'], "");
-        let v = cookie.value.replace(['\t', '\n', '\r'], "");
+        // Netscape fields are tab-delimited; strip all Unicode control chars,
+        // not only ASCII tabs/newlines, before serializing.
+        let n: String = cookie.name.chars().filter(|c| !c.is_control()).collect();
+        let v: String = cookie.value.chars().filter(|c| !c.is_control()).collect();
         if n.is_empty() {
             continue;
         }
@@ -1695,6 +1698,24 @@ mod tests {
         let newest = format!("https://example.com/evict-{}", paths.len() - 1);
         assert_eq!(handoff_cookie_args(&newest).len(), 2);
         clear_handoff_cookies();
+    }
+
+    #[test]
+    fn handoff_cookie_fields_strip_all_control_characters() {
+        let _g = exclusive();
+        let url = "https://example.com/control-fields";
+        let path = write_handoff_cookies(
+            url,
+            &[cookie("na\u{000b}me", "va\u{0085}l\u{0000}ue")],
+        )
+        .expect("sanitized cookie");
+        let text = std::fs::read_to_string(&path).expect("cookie file");
+        assert!(text.contains("example.com\tTRUE\t/\tFALSE\t0\tname\tvalue\n"));
+        assert!(
+            text.chars().all(|c| !c.is_control() || matches!(c, '\n' | '\t')),
+            "only Netscape line and field delimiters may remain: {text:?}"
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

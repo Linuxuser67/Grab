@@ -120,12 +120,6 @@ pub(crate) fn preview_failure_summary(
             })
         })
         .unwrap_or(false);
-    if instagram && story_or_highlight && technical {
-        return gettext(
-            "Instagram couldn't load this story or highlight. It may have expired or access may be restricted. Check that it opens in your browser, then try again.",
-        );
-    }
-
     if lower.contains("429")
         || lower.contains("too many requests")
         || lower.contains("rate limit")
@@ -133,6 +127,12 @@ pub(crate) fn preview_failure_summary(
     {
         return gettext(
             "The site is temporarily limiting requests. Wait a little before trying again.",
+        );
+    }
+
+    if instagram && story_or_highlight && technical {
+        return gettext(
+            "Instagram couldn't load this story or highlight. It may have expired, or your current session may not have access. Check that it opens in your browser, then try again.",
         );
     }
     if lower.contains("authenticationerror")
@@ -173,6 +173,19 @@ pub(crate) fn preview_failure_summary(
     primary_error.to_string()
 }
 
+/// Bound one backend's detail before combining it with the other backend.
+/// This keeps a long traceback from consuming the entire copyable report.
+fn bounded_diagnostic(text: &str, max_chars: usize) -> String {
+    let safe = crate::backend_debug::sanitize_diagnostic(text);
+    let mut chars = safe.chars();
+    let mut bounded: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        bounded = bounded.chars().take(max_chars.saturating_sub(14)).collect();
+        bounded.push_str("… [truncated]");
+    }
+    bounded
+}
+
 /// Technical details for the copyable dialog. Include the host and both backend
 /// failures, but never persist a full page URL or signed URL in the report.
 pub(crate) fn preview_failure_details(
@@ -186,13 +199,14 @@ pub(crate) fn preview_failure_details(
     } else {
         &host
     };
+    const ERROR_SECTION_CHARS: usize = 900;
     let mut details = format!(
         "Source host: {host}\n\nyt-dlp:\n{}",
-        crate::backend_debug::sanitize_diagnostic(ytdlp_error)
+        bounded_diagnostic(ytdlp_error, ERROR_SECTION_CHARS)
     );
     if let Some(error) = gallery_error {
         details.push_str("\n\nGallery-dl:\n");
-        details.push_str(&crate::backend_debug::sanitize_diagnostic(error));
+        details.push_str(&bounded_diagnostic(error, ERROR_SECTION_CHARS));
     }
     crate::backend_debug::sanitize_diagnostic(&details)
 }
@@ -533,6 +547,30 @@ mod tests {
         assert!(details.contains("www.instagram.com"));
         assert!(!details.contains("private-user"));
         assert!(!details.contains("secret"));
+    }
+
+    #[test]
+    fn instagram_story_rate_limit_summary_is_not_misreported_as_expired() {
+        let summary = preview_failure_summary(
+            "https://www.instagram.com/stories/private-user/",
+            "ERROR: HTTP 429 Too Many Requests",
+            Some("gallery-dl: NotFoundError: story endpoint returned no data"),
+        );
+        assert!(summary.contains("temporarily limiting requests"));
+    }
+
+    #[test]
+    fn long_primary_error_does_not_hide_gallery_dl_details() {
+        let ytdlp = format!("Y{}", "y".repeat(1400));
+        let gallery = format!("G{}", "g".repeat(1400));
+        let details = preview_failure_details(
+            "https://example.com/video",
+            &ytdlp,
+            Some(&gallery),
+        );
+        assert!(details.contains("yt-dlp:\nY"));
+        assert!(details.contains("Gallery-dl:\nG"));
+        assert!(details.contains("… [truncated]"));
     }
 
     #[test]

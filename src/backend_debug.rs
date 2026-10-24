@@ -55,7 +55,7 @@ pub fn log_command(cmd: &tokio::process::Command) {
         } else if let Some(value) = text.strip_prefix("--extractor-args=") {
             args.push(format!("--extractor-args={}", redact_extractor_args(value)));
         } else {
-            args.push(redact_query_tokens(&text));
+            args.push(sanitize_diagnostic(&text));
         }
     }
     eprintln!("[grab-backend] spawn: {program} {}", args.join(" "));

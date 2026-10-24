@@ -225,7 +225,8 @@ fn decode_secret(text: &str) -> Option<[u8; SECRET_LEN]> {
 
 fn random_secret() -> std::io::Result<[u8; SECRET_LEN]> {
     let mut secret = [0u8; SECRET_LEN];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut secret)?;
+    getrandom::fill(&mut secret)
+        .map_err(|error| std::io::Error::other(format!("system randomness unavailable: {error}")))?;
     Ok(secret)
 }
 

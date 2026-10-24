@@ -1320,6 +1320,7 @@ version = "6.3.0"
 dependencies = [
  "axum",
  "futures-util",
+ "getrandom 0.4.3",
  "gettext-rs",
  "gio",
  "glib",

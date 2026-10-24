@@ -1,4 +1,4 @@
-//! Proxy identity shared by every engine: resolved proxy for HTTP, yt-dlp spawns and torrent session.
+//! Resolved proxy shared by HTTP, yt-dlp spawns, and torrent sessions.
 
 /// Proxy for one attempt: reqwest interceptors plus CLI form for yt-dlp spawns.
 #[derive(Clone, Debug)]
@@ -8,7 +8,6 @@ pub(crate) struct ResolvedProxy {
     pub cli_url: String,
     /// Comma list for NO_PROXY env on yt-dlp spawns.
     pub no_proxy_env: String,
-    pub(crate) cache_key: String,
 }
 
 impl ResolvedProxy {

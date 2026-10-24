@@ -1342,14 +1342,14 @@ pub(crate) async fn ensure_deno(page_url: &str) -> Result<(), VideoError> {
     let page_url = page_url.to_string();
     // Provisioning continues on the process-lifetime runtime after a caller's
     // waiter is cancelled or times out; its lock remains held through file writes.
-    let task = crate::runtime::tokio_rt().spawn(async move { ensure_deno_inner(&page_url).await });
+    let task = crate::runtime::tokio_rt().spawn(async move { ensure_deno_inner().await });
     match task.await {
         Ok(result) => result,
         Err(error) => Err(VideoError::runtime(&error)),
     }
 }
 
-async fn ensure_deno_inner(page_url: &str) -> Result<(), VideoError> {
+async fn ensure_deno_inner() -> Result<(), VideoError> {
     // A stale managed copy must not hide a compatible bundled/system Deno.
     let candidates = find_deno_candidates();
     match first_supported_deno(&candidates).await {

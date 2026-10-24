@@ -130,11 +130,6 @@ pub(crate) struct ProbeState {
 }
 
 impl ProbeState {
-    /// Current generation: a probe started under an older generation is stale.
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation
-    }
-
     /// Start a resolve for `url`: returns the new generation, or `None`
     /// when a probe is already in flight (the user must wait for the
     /// current lookup to finish before starting a new one).
@@ -253,7 +248,7 @@ struct VideoLookupResult {
 
 enum MediaLookupOutcome {
     Gallery(Vec<crate::gallery_probe::GalleryItem>),
-    Video(VideoLookupResult),
+    Video(Box<VideoLookupResult>),
 }
 
 enum MediaLookupFailure {
@@ -369,12 +364,12 @@ async fn lookup_media(
         )
     };
 
-    Ok(MediaLookupOutcome::Video(VideoLookupResult {
+    Ok(MediaLookupOutcome::Video(Box::new(VideoLookupResult {
         probe_json_key,
         ytdlp_result,
         gallery_error,
         toggle_items,
-    }))
+    })))
 }
 
 /// The video preview block inside the form: exactly one state shows at a
@@ -2457,12 +2452,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         }
                         return;
                     }
-                    MediaLookupOutcome::Video(result) => (
-                        result.ytdlp_result,
-                        result.gallery_error,
-                        result.toggle_items,
-                        result.probe_json_key,
-                    ),
+                    MediaLookupOutcome::Video(result) => {
+                        let VideoLookupResult {
+                            probe_json_key,
+                            ytdlp_result,
+                            gallery_error,
+                            toggle_items,
+                        } = *result;
+                        (ytdlp_result, gallery_error, toggle_items, probe_json_key)
+                    }
                 };
                 match ytdlp_result {
                     Err(e) => {

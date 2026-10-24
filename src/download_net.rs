@@ -162,7 +162,6 @@ fn system_proxy() -> Option<ResolvedProxy> {
         let proxy = reqwest::Proxy::all(url.clone()).ok()?.no_proxy(no_proxy);
         return Some(ResolvedProxy {
             proxies: vec![proxy],
-            cache_key: format!("{url}|{no_proxy_env}"),
             cli_url: url,
             no_proxy_env,
         });
@@ -174,7 +173,6 @@ fn system_proxy() -> Option<ResolvedProxy> {
         let proxies = http_proxies(&url, &no_proxy_env).ok()?;
         return Some(ResolvedProxy {
             proxies,
-            cache_key: format!("{url}|{no_proxy_env}"),
             cli_url: url,
             no_proxy_env,
         });
@@ -205,7 +203,6 @@ fn system_proxy() -> Option<ResolvedProxy> {
     };
     Some(ResolvedProxy {
         proxies,
-        cache_key: format!("{cli_url}|{no_proxy_env}"),
         cli_url,
         no_proxy_env,
     })
@@ -253,7 +250,6 @@ fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
     };
     Ok(Some(ResolvedProxy {
         proxies,
-        cache_key: format!("{cli_url}|{no_proxy_env}"),
         cli_url,
         no_proxy_env,
     }))

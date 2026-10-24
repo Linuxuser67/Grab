@@ -4665,12 +4665,12 @@ fn proxy_manual_builds_remote_dns_socks() {
         .proxy_config()
         .expect("valid")
         .expect("proxied");
-    assert_eq!(proxy.cache_key, again.cache_key);
+    assert_eq!(proxy.cli_url, again.cli_url);
     let other = proxy_opts("manual", "socks5", "127.0.0.1", 9051)
         .proxy_config()
         .expect("valid")
         .expect("proxied");
-    assert_ne!(proxy.cache_key, other.cache_key);
+    assert_ne!(proxy.cli_url, other.cli_url);
     assert!(http_client_for(Some(&proxy)).is_ok());
     assert!(http_client_for(Some(&again)).is_ok());
 }

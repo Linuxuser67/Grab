@@ -2087,9 +2087,19 @@ mod tests {
             !task.is_finished(),
             "legacy authenticated requests must still require confirmation"
         );
-        let handoff = srv.rx.recv().await.expect("legacy URL should reach the queue");
-        assert!(handoff.decision.is_some(), "legacy calls must remain confirmation-only");
-        assert!(handoff_cookie_args(url).is_empty(), "legacy cookies must not be staged");
+        let handoff = srv
+            .rx
+            .recv()
+            .await
+            .expect("legacy URL should reach the queue");
+        assert!(
+            handoff.decision.is_some(),
+            "legacy calls must remain confirmation-only"
+        );
+        assert!(
+            handoff_cookie_args(url).is_empty(),
+            "legacy cookies must not be staged"
+        );
         handoff
             .decision
             .expect("legacy request carries a decision")

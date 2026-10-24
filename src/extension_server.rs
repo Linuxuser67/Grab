@@ -284,9 +284,9 @@ fn read_pairing_secret(path: &Path) -> std::io::Result<Option<[u8; SECRET_LEN]>>
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
     }
-    let mut file = match options.open(path) {
+    let file = match options.open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -312,8 +312,17 @@ fn read_pairing_secret(path: &Path) -> std::io::Result<Option<[u8; SECRET_LEN]>>
             ));
         }
     }
+    // A pairing secret is only 64 hex bytes; bound reads even if another
+    // local process replaces the file after the metadata check. O_NONBLOCK
+    // above also avoids hanging if the path is raced to a FIFO.
     let mut text = String::new();
-    file.read_to_string(&mut text)?;
+    file.take(129).read_to_string(&mut text)?;
+    if text.len() > 128 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "pairing secret is unexpectedly large",
+        ));
+    }
     let secret = decode_secret(text.trim()).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -2019,6 +2028,28 @@ mod tests {
         let recovered = Pairing::load_or_create(&path).unwrap();
         assert_ne!(recovered.code(), code);
         assert!(pairing_secret_recovered());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pairing_fifo_is_recovered_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = std::env::temp_dir().join(format!(
+            "grab-pairing-fifo-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("extension-pairing");
+        let raw_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: raw_path is a NUL-terminated path that stays alive for mkfifo.
+        assert_eq!(unsafe { libc::mkfifo(raw_path.as_ptr(), 0o600) }, 0);
+
+        let pairing = Pairing::load_or_create(&path).unwrap();
+        assert_eq!(pairing.code().len(), SECRET_LEN * 2);
+        assert!(std::fs::metadata(&path).unwrap().is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

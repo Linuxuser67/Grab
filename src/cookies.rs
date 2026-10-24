@@ -187,6 +187,36 @@ impl StagedCookies {
     pub(crate) fn path(&self) -> &Path {
         &self.0
     }
+
+    /// Atomically create an owner-only staging file and immediately return
+    /// its RAII owner. Production and cancellation tests share this path so
+    /// no await can occur between successful creation and ownership.
+    fn create_in(dir: &Path) -> std::io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let candidate = dir.join(format!(
+                "grab-cookies-{}-{}.txt",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            match options.open(&candidate) {
+                Ok(file) => {
+                    drop(file);
+                    return Ok(Self(candidate));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
 }
 
 impl Drop for StagedCookies {
@@ -231,33 +261,14 @@ async fn stage_cookie_file(
         tracing::debug!(error = %error, "Deno unavailable for YouTube cookie export");
         return None;
     }
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = crate::download_net::cookie_staging_dir()?;
-    // Unique per attempt, created atomically owner-only: a planted symlink fails instead of diverting the dump.
-    let staged: StagedCookies = loop {
-        let candidate: PathBuf = dir.join(format!(
-            "grab-cookies-{}-{}.txt",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
-        }
-        match opts.open(&candidate) {
-            Ok(file) => {
-                drop(file);
-                break StagedCookies(candidate);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => {
-                tracing::debug!(error = %e, "cookie export temp file failed");
-                return None;
-            }
+    // The helper returns the owner in the same synchronous call that creates
+    // the file, so cancellation cannot land in an unguarded gap.
+    let staged = match StagedCookies::create_in(&dir) {
+        Ok(staged) => staged,
+        Err(error) => {
+            tracing::debug!(error = %error, "cookie export temp file failed");
+            return None;
         }
     };
     let mut cmd = tokio::process::Command::new(youtube_bin);
@@ -427,16 +438,26 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_cookie_export_drops_staged_plaintext_file() {
-        let path = std::env::temp_dir().join(format!(
-            "grab-cancelled-cookie-export-{}-{}.txt",
+        let dir = std::env::temp_dir().join(format!(
+            "grab-cancelled-cookie-export-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::write(&path, "secret cookie data").unwrap();
-        let staged = StagedCookies(path.clone());
+        std::fs::create_dir(&dir).unwrap();
+        let staged = StagedCookies::create_in(&dir).unwrap();
+        let path = staged.path().to_path_buf();
+        assert!(path.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         let task = tokio::spawn(async move {
             let _staged = staged;
             std::future::pending::<()>().await;
@@ -448,6 +469,7 @@ mod tests {
             !path.exists(),
             "cancelling an export must unlink its staged file"
         );
+        std::fs::remove_dir(&dir).unwrap();
     }
 
     #[test]

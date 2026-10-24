@@ -7,13 +7,109 @@
 //! HTTP proxy requests. It is only enabled for browser-handoff hosts whose
 //! public-resolution policy is active.
 
+use std::io;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
-use std::sync::OnceLock;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, OnceLock};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 
 static PROXY_ADDR: OnceLock<SocketAddr> = OnceLock::new();
 const MAX_HEADER_BYTES: usize = 64 * 1024;
+const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+const TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_PROXY_CONNECTIONS: usize = 64;
+static PROXY_CONNECTIONS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_PROXY_CONNECTIONS)));
+static PROXY_CLOCK_ORIGIN: OnceLock<Instant> = OnceLock::new();
+
+fn proxy_clock_ms() -> u64 {
+    PROXY_CLOCK_ORIGIN
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+struct ActivityStream<S> {
+    inner: S,
+    last_activity_ms: Arc<AtomicU64>,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for ActivityStream<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = buffer.filled().len();
+        let result = Pin::new(&mut this.inner).poll_read(cx, buffer);
+        if matches!(&result, Poll::Ready(Ok(()))) && buffer.filled().len() > before {
+            this.last_activity_ms.store(proxy_clock_ms(), Ordering::Relaxed);
+        }
+        result
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ActivityStream<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_write(cx, buffer);
+        if matches!(&result, Poll::Ready(Ok(count)) if *count > 0) {
+            this.last_activity_ms.store(proxy_clock_ms(), Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+async fn wait_for_tunnel_idle(last_activity_ms: Arc<AtomicU64>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let idle_ms = proxy_clock_ms().saturating_sub(last_activity_ms.load(Ordering::Relaxed));
+        if idle_ms >= TUNNEL_IDLE_TIMEOUT.as_millis() as u64 {
+            return;
+        }
+    }
+}
+
+async fn copy_bidirectional_with_idle_timeout(
+    client: &mut TcpStream,
+    upstream: &mut TcpStream,
+) -> io::Result<u64> {
+    let last_activity_ms = Arc::new(AtomicU64::new(proxy_clock_ms()));
+    let mut client = ActivityStream {
+        inner: client,
+        last_activity_ms: Arc::clone(&last_activity_ms),
+    };
+    let mut upstream = ActivityStream {
+        inner: upstream,
+        last_activity_ms: Arc::clone(&last_activity_ms),
+    };
+    tokio::select! {
+        result = tokio::io::copy_bidirectional(&mut client, &mut upstream) => result,
+        _ = wait_for_tunnel_idle(last_activity_ms) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "guarded proxy tunnel was idle for too long",
+        )),
+    }
+}
 
 /// Validate proxy compatibility before accepting an untrusted handoff. We
 /// fail closed rather than silently bypassing a configured proxy or delegating
@@ -65,17 +161,25 @@ pub(crate) fn ensure_started() -> Result<String, String> {
             // driver and accept task have the same lifetime/context.
             tokio::spawn(async move {
                 loop {
+                    // Reserve capacity before accepting so clients cannot create
+                    // an unbounded backlog of tasks waiting for a semaphore.
+                    let permit = match Arc::clone(&PROXY_CONNECTIONS).acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => return,
+                    };
                     match listener.accept().await {
                         Ok((stream, _peer)) => {
                             tokio::spawn(async move {
+                                let _permit = permit;
                                 if let Err(e) = serve_connection(stream).await {
                                     tracing::debug!(error = %e, "guarded extractor proxy request failed");
                                 }
                             });
                         }
                         Err(e) => {
+                            drop(permit);
                             tracing::warn!(error = %e, "guarded extractor proxy accept failed");
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
                 }
@@ -200,13 +304,17 @@ async fn reply_status(stream: &mut TcpStream, code: u16, reason: &str) {
 }
 
 async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
-    let (header, trailing) = match read_header(&mut client).await {
-        Ok(parts) => parts,
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::InvalidData {
+    let (header, trailing) = match tokio::time::timeout(HEADER_TIMEOUT, read_header(&mut client)).await {
+        Ok(Ok(parts)) => parts,
+        Ok(Err(e)) => {
+            if e.kind() == io::ErrorKind::InvalidData {
                 reply_status(&mut client, 431, "Request Header Fields Too Large").await;
             }
             return Err(e);
+        }
+        Err(_) => {
+            reply_status(&mut client, 408, "Request Timeout").await;
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "proxy request headers timed out"));
         }
     };
     let text = String::from_utf8_lossy(&header);
@@ -241,7 +349,7 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
         if !trailing.is_empty() {
             upstream.write_all(&trailing).await?;
         }
-        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        let _ = copy_bidirectional_with_idle_timeout(&mut client, &mut upstream).await;
         return Ok(());
     }
 
@@ -290,7 +398,7 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
     if !trailing.is_empty() {
         upstream.write_all(&trailing).await?;
     }
-    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+    let _ = copy_bidirectional_with_idle_timeout(&mut client, &mut upstream).await;
     Ok(())
 }
 

@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "zip::read::ZipArchive::extract", reason = "Avoid vulnerable archive path/permission handling; read selected entries and write them to controlled destinations instead." },
+]

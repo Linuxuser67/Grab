@@ -2302,40 +2302,39 @@ fn distro_packages_known_ids() {
         distro_packages(fedora).map(|d| (d.distro, d.install_all)),
         Some((
             "Fedora".to_string(),
-            "sudo dnf install yt-dlp ffmpeg".to_string(),
+            "sudo dnf install yt-dlp ffmpeg deno".to_string(),
         ))
     );
     let ubuntu = "ID=ubuntu\nID_LIKE=debian\nNAME=Ubuntu\n";
     assert_eq!(
         distro_packages(ubuntu).map(|d| d.install_all),
-        Some("sudo apt install yt-dlp ffmpeg".to_string())
+        Some("sudo apt install yt-dlp ffmpeg deno".to_string())
     );
     let arch = "ID=arch\nNAME=Arch\n";
     assert_eq!(
         distro_packages(arch).map(|d| d.install_all),
-        Some("sudo pacman -S yt-dlp ffmpeg".to_string())
+        Some("sudo pacman -S yt-dlp ffmpeg deno".to_string())
     );
 }
 
 #[test]
-fn distro_packages_do_not_include_a_javascript_runtime() {
-    // Deno is provisioned from its verified official release, not the OS package list.
+fn distro_packages_include_deno_for_supported_distros() {
+    // Supported distro commands include Deno alongside yt-dlp and ffmpeg.
     let neon = "ID=neon\nID_LIKE=\"ubuntu debian\"\nNAME=KDE neon\n";
     assert_eq!(
         distro_packages(neon).map(|d| d.install_all),
-        Some("sudo apt install yt-dlp ffmpeg".to_string())
+        Some("sudo apt install yt-dlp ffmpeg deno".to_string())
     );
-    // No known distro package (openSUSE, Void, Solus): left out rather than
-    // showing a command that would fail.
+    // Supported package managers include Deno in their install command.
     let void = "ID=void\nNAME=Void\n";
     assert_eq!(
         distro_packages(void).map(|d| d.install_all),
-        Some("sudo xbps-install -S yt-dlp ffmpeg".to_string())
+        Some("sudo xbps-install -S yt-dlp ffmpeg deno".to_string())
     );
     let tumbleweed = "ID=opensuse-tumbleweed\nNAME=openSUSE Tumbleweed\n";
     assert_eq!(
         distro_packages(tumbleweed).map(|d| d.install_all),
-        Some("sudo zypper install yt-dlp ffmpeg".to_string())
+        Some("sudo zypper install yt-dlp ffmpeg deno".to_string())
     );
 }
 
@@ -2346,7 +2345,7 @@ fn distro_packages_id_like_fallback() {
     let neon = "ID=neon\nID_LIKE=\"ubuntu debian\"\nNAME=KDE neon\n";
     let found = distro_packages(neon).expect("ID_LIKE fallback");
     assert_eq!(found.distro, "KDE neon");
-    assert_eq!(found.install_all, "sudo apt install yt-dlp ffmpeg");
+    assert_eq!(found.install_all, "sudo apt install yt-dlp ffmpeg deno");
 }
 
 #[test]

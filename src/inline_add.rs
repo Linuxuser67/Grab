@@ -710,7 +710,11 @@ pub(crate) fn show_video_error(v: &VideoStep, message: &str) {
     let host = crate::video_probe::page_host(&url);
     let details = format!(
         "Source host: {}\n\n{}",
-        if host.is_empty() { "unknown host" } else { &host },
+        if host.is_empty() {
+            "unknown host"
+        } else {
+            &host
+        },
         crate::backend_debug::sanitize_diagnostic(message)
     );
     show_video_error_with_details(v, &summary, &details);
@@ -724,7 +728,8 @@ fn show_video_error_with_details(v: &VideoStep, summary: &str, details: &str) {
     v.error_details
         .borrow_mut()
         .clone_from(&crate::backend_debug::sanitize_diagnostic(details));
-    v.error.set_subtitle(&crate::backend_debug::sanitize_diagnostic(summary));
+    v.error
+        .set_subtitle(&crate::backend_debug::sanitize_diagnostic(summary));
     v.error.set_visible(true);
     v.group_revealer.set_visible(true);
     v.group_revealer.set_reveal_child(true);
@@ -735,7 +740,9 @@ fn show_preview_error_details(parent: &gtk4::Button, details: &str) {
     let display = crate::backend_debug::sanitize_diagnostic(details);
     let dialog = adw::AlertDialog::new(
         Some(&gettext("Preview Error Details")),
-        Some(&gettext("Technical details from the media extractors. Sensitive URL paths and parameters are omitted.")),
+        Some(&gettext(
+            "Technical details from the media extractors. Sensitive URL paths and parameters are omitted.",
+        )),
     );
     let text = gtk4::TextView::builder()
         .editable(false)

@@ -606,7 +606,11 @@ fn structured_error_detail(stdout: &[u8]) -> Option<String> {
 /// sanitize it before it can enter the journal or a copied error report.
 fn stderr_detail(stderr: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stderr);
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
     if lines.is_empty() {
         return None;
     }

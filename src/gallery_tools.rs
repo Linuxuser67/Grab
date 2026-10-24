@@ -406,8 +406,6 @@ mod tests {
         }
     }
 
-    /// Regression: gallerydl_display_version must work from a thread
-    /// without a Tokio runtime.
     #[test]
     fn probe_error_redacts_private_url_paths_and_tokens() {
         let error = GalleryError::probe(
@@ -421,6 +419,8 @@ mod tests {
         assert!(!display.contains("secret"));
     }
 
+    /// Regression: gallerydl_display_version must work from a thread
+    /// without a Tokio runtime.
     #[test]
     fn gallerydl_display_version_works_without_tokio_runtime() {
         let result = std::thread::spawn(|| {

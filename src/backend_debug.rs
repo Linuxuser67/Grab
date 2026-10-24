@@ -153,8 +153,14 @@ fn redact_diagnostic_token(token: &str) -> String {
                 .rev()
                 .take_while(|ch| matches!(ch, ',' | ';' | ':'))
                 .count();
-            let suffix: String = value.chars().rev().take(suffix_len).collect::<String>()
-                .chars().rev().collect();
+            let suffix: String = value
+                .chars()
+                .rev()
+                .take(suffix_len)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
             return format!("{key}=(redacted){suffix}");
         }
     }
@@ -167,9 +173,8 @@ fn redact_diagnostic_token(token: &str) -> String {
 /// fragments can contain signed media URLs. Control characters are removed and
 /// the result is capped to keep dialogs small.
 pub fn sanitize_diagnostic(input: &str) -> String {
-    let is_special = |ch: char| {
-        ch.is_whitespace() || matches!(ch, '"' | '\'' | '(' | ')' | '[' | ']')
-    };
+    let is_special =
+        |ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | '(' | ')' | '[' | ']');
     let mut redacted = String::with_capacity(input.len());
     let mut token = String::new();
     for ch in input.chars() {
@@ -254,7 +259,9 @@ mod tests {
     #[test]
     fn diagnostic_sanitization_redacts_private_urls_and_credentials() {
         assert_eq!(
-            sanitize_diagnostic("NotFoundError https://user:secret@www.instagram.com/stories/private-user/?token=secret#story"),
+            sanitize_diagnostic(
+                "NotFoundError https://user:secret@www.instagram.com/stories/private-user/?token=secret#story"
+            ),
             "NotFoundError https://www.instagram.com/(...)"
         );
     }

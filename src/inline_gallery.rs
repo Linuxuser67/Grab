@@ -114,7 +114,9 @@ pub(crate) fn preview_failure_summary(
         .ok()
         .and_then(|parsed| {
             parsed.path_segments().map(|segments| {
-                segments.into_iter().any(|part| part == "stories" || part == "highlights")
+                segments
+                    .into_iter()
+                    .any(|part| part == "stories" || part == "highlights")
             })
         })
         .unwrap_or(false);
@@ -129,7 +131,9 @@ pub(crate) fn preview_failure_summary(
         || lower.contains("rate limit")
         || lower.contains("ratelimit")
     {
-        return gettext("The site is temporarily limiting requests. Wait a little before trying again.");
+        return gettext(
+            "The site is temporarily limiting requests. Wait a little before trying again.",
+        );
     }
     if lower.contains("authenticationerror")
         || lower.contains("authorizationerror")
@@ -139,10 +143,14 @@ pub(crate) fn preview_failure_summary(
         || lower.contains("sign in")
         || lower.contains("cookies")
     {
-        return gettext("This site requires you to sign in. Check the selected browser profile and try again.");
+        return gettext(
+            "This site requires you to sign in. Check the selected browser profile and try again.",
+        );
     }
     if lower.contains("403") || lower.contains("forbidden") || lower.contains("access denied") {
-        return gettext("The site denied access to this media. Check that the link is available to your account, then try again.");
+        return gettext(
+            "The site denied access to this media. Check that the link is available to your account, then try again.",
+        );
     }
     if lower.contains("404") || lower.contains("notfounderror") || lower.contains("not found") {
         return gettext("This media may have been removed or the link may have expired.");
@@ -153,10 +161,14 @@ pub(crate) fn preview_failure_summary(
         || lower.contains("connection reset")
         || lower.contains("network is unreachable")
     {
-        return gettext("The site could not be reached. Check your connection or proxy, then try again.");
+        return gettext(
+            "The site could not be reached. Check your connection or proxy, then try again.",
+        );
     }
     if technical || joined.chars().count() > 220 {
-        return gettext("Grab couldn't preview this link. Open Details to inspect the error, then retry.");
+        return gettext(
+            "Grab couldn't preview this link. Open Details to inspect the error, then retry.",
+        );
     }
     primary_error.to_string()
 }
@@ -169,7 +181,11 @@ pub(crate) fn preview_failure_details(
     gallery_error: Option<&str>,
 ) -> String {
     let host = crate::video_probe::page_host(url);
-    let host = if host.is_empty() { "unknown host" } else { &host };
+    let host = if host.is_empty() {
+        "unknown host"
+    } else {
+        &host
+    };
     let mut details = format!(
         "Source host: {host}\n\nyt-dlp:\n{}",
         crate::backend_debug::sanitize_diagnostic(ytdlp_error)
@@ -508,7 +524,9 @@ mod tests {
         let details = preview_failure_details(
             "https://www.instagram.com/stories/private-user/?token=secret",
             "ERROR: fetch failed at https://www.instagram.com/stories/private-user/?token=secret",
-            Some("gallery-dl: NotFoundError: https://www.instagram.com/stories/private-user/?token=secret"),
+            Some(
+                "gallery-dl: NotFoundError: https://www.instagram.com/stories/private-user/?token=secret",
+            ),
         );
         assert!(details.contains("yt-dlp:"));
         assert!(details.contains("Gallery-dl:"));

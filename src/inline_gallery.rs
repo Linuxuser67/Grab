@@ -130,11 +130,6 @@ pub(crate) fn preview_failure_summary(
         );
     }
 
-    if instagram && story_or_highlight && technical {
-        return gettext(
-            "Instagram couldn't load this story or highlight. It may have expired, or your current session may not have access. Check that it opens in your browser, then try again.",
-        );
-    }
     if lower.contains("authenticationerror")
         || lower.contains("authorizationerror")
         || lower.contains("authrequired")
@@ -163,6 +158,11 @@ pub(crate) fn preview_failure_summary(
     {
         return gettext(
             "The site could not be reached. Check your connection or proxy, then try again.",
+        );
+    }
+    if instagram && story_or_highlight && technical {
+        return gettext(
+            "Instagram couldn't load this story or highlight. It may have expired, or your current session may not have access. Check that it opens in your browser, then try again.",
         );
     }
     if technical || joined.chars().count() > 220 {
@@ -501,13 +501,23 @@ mod tests {
     fn instagram_story_failures_get_a_concise_actionable_summary() {
         let summary = preview_failure_summary(
             "https://www.instagram.com/stories/private-user/",
-            "Couldn't read the video page: ERROR: [instagram:story] You need to log in to access this content",
-            Some("gallery-dl: NotFoundError: request failed"),
+            "Couldn't read the video page: ERROR: [instagram:story] extractor response failed",
+            Some("gallery-dl: ExtractorError: request failed"),
         );
         assert!(summary.contains("Instagram"));
         assert!(summary.contains("story or highlight"));
         assert!(!summary.contains("ERROR:"));
         assert!(!summary.contains("NotFoundError"));
+    }
+
+    #[test]
+    fn login_required_takes_precedence_over_story_fallback() {
+        let summary = preview_failure_summary(
+            "https://www.instagram.com/stories/private-user/",
+            "ERROR: You need to log in to access this content",
+            Some("gallery-dl: AuthenticationError: login required"),
+        );
+        assert!(summary.contains("selected browser profile"));
     }
 
     #[test]

@@ -2606,7 +2606,12 @@ mod deno_release_tests {
         std::fs::write(&target, b"keep").unwrap();
         std::os::unix::fs::symlink(&target, &qjs).unwrap();
         remove_legacy_qjs_from(&base).await;
-        assert!(std::fs::symlink_metadata(&qjs).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&qjs)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read(&target).unwrap(), b"keep");
         std::fs::remove_dir_all(&base).ok();
     }

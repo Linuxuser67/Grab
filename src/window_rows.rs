@@ -672,44 +672,16 @@ fn show_failure_dialog(
     parent: &gtk4::Widget,
     item: &crate::download::DownloadItem,
 ) -> adw::AlertDialog {
-    let dialog = adw::AlertDialog::new(
-        Some(&gettext("Download Failed")),
-        Some(&crate::ui_util::esc_markup(&item.filename())),
-    );
-
-    let text = gtk4::TextView::builder()
-        .editable(false)
-        .cursor_visible(false)
-        .monospace(true)
-        .wrap_mode(gtk4::WrapMode::WordChar)
-        .build();
     // Show the full error log if available, otherwise the detail summary.
     let log = item.error_log();
     let display = if log.is_empty() { item.detail() } else { log };
-    text.buffer().set_text(&display);
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .min_content_height(240)
-        .child(&text)
-        .build();
-    dialog.set_extra_child(Some(&scrolled));
-
-    dialog.add_responses(&[("copy", &gettext("Copy")), ("close", &gettext("Close"))]);
-    dialog.set_response_appearance("copy", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("close"));
-    dialog.set_close_response("close");
-
-    {
-        let clipboard = parent.clipboard();
-        dialog.connect_response(None, move |_dialog, response| {
-            if response == "copy" {
-                // Copy what is displayed, not the summary.
-                clipboard.set_text(&display);
-            }
-        });
-    }
-
-    dialog.present(Some(parent));
-    dialog
+    crate::ui_util::copyable_details_dialog(
+        parent,
+        &gettext("Download Failed"),
+        &item.filename(),
+        &display,
+        240,
+    )
 }
 
 pub(crate) fn build_row(

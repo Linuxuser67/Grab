@@ -102,8 +102,15 @@ pub(crate) fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAuth {
             Some((path, user_agent)) => (Some(path), user_agent),
             None => (None, None),
         };
-    let cookies_browser = if cookies_path.is_none() && !browser.is_empty() && browser != "none" {
-        Some(browser.to_string())
+    let cookies_browser = if cookies_path.is_none() {
+        let spec = crate::video_tools::gallery_cookies_browser_spec(browser);
+        if spec.is_none() && !browser.is_empty() && browser != "none" {
+            tracing::warn!(
+                browser,
+                "gallery-dl cannot read this browser profile directly; browser cookies will be unavailable for this probe"
+            );
+        }
+        spec
     } else {
         None
     };

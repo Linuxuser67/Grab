@@ -254,20 +254,15 @@ async fn stage_cookie_file(
     page_url: &str,
     timeout: Duration,
 ) -> Option<StagedCookies> {
-    // Every YouTube yt-dlp invocation pins Deno, including this cookie-export
-    // probe. Prepare it first so a fresh install doesn't silently lose browser
-    // cookies while the metadata lookup provisions the runtime concurrently.
-    if let Err(error) = crate::video_tools::ensure_deno(page_url).await {
-        tracing::debug!(error = %error, "Deno unavailable for YouTube cookie export");
-        return None;
-    }
+    // Runtime readiness is managed by the caller so its deadline can cover
+    // Deno provisioning plus this export subprocess.
     let dir = crate::download_net::cookie_staging_dir()?;
     // The helper returns the owner in the same synchronous call that creates
     // the file, so cancellation cannot land in an unguarded gap.
     let staged = match StagedCookies::create_in(&dir) {
         Ok(staged) => staged,
         Err(error) => {
-            tracing::debug!(error = %error, "cookie export temp file failed");
+            tracing::warn!(error = %error, "cookie export temp file failed");
             return None;
         }
     };
@@ -287,7 +282,7 @@ async fn stage_cookie_file(
     let guarded_proxy = match crate::video_spawn::guard_untrusted_args(&mut identity_args) {
         Ok(guarded) => guarded,
         Err(e) => {
-            tracing::debug!(error = %e, "refusing cookie export without guarded extractor networking");
+            tracing::warn!(error = %e, "refusing cookie export without guarded extractor networking");
             return None;
         }
     };
@@ -303,7 +298,7 @@ async fn stage_cookie_file(
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
-            tracing::debug!(error = %error, "cookie export process could not start");
+            tracing::warn!(error = %error, "cookie export process could not start");
             return None;
         }
     };
@@ -321,7 +316,7 @@ async fn stage_cookie_file(
         }
     };
     if !status.success() {
-        tracing::debug!("cookie export failed, continuing without cookies");
+        tracing::warn!("cookie export failed; continuing without browser cookies");
         return None;
     }
     Some(staged)

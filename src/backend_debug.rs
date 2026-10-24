@@ -108,6 +108,59 @@ fn redact_query_tokens(text: &str) -> String {
     out
 }
 
+fn redact_diagnostic_token(token: &str) -> String {
+    if let Some((scheme, rest)) = token.split_once("://") {
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+        // User info is not useful for diagnosing an extractor and may contain
+        // credentials; retain only the host and whether a path was present.
+        let host = authority.rsplit('@').next().unwrap_or(authority);
+        let mut safe = format!("{scheme}://{host}");
+        if authority_end < rest.len() {
+            safe.push_str("/(...)");
+        }
+        safe
+    } else {
+        token.to_string()
+    }
+}
+
+/// Sanitize a diagnostic before showing or copying it in the UI.
+///
+/// URL paths can contain private account/story IDs, while query strings and
+/// fragments can contain signed media URLs. Control characters are removed and
+/// the result is capped to keep dialogs small.
+pub fn sanitize_diagnostic(input: &str) -> String {
+    let is_special = |ch: char| {
+        ch.is_whitespace() || matches!(ch, '"' | '\'' | '(' | ')' | '[' | ']')
+    };
+    let mut redacted = String::with_capacity(input.len());
+    let mut token = String::new();
+    for ch in input.chars() {
+        if is_special(ch) {
+            redacted.push_str(&redact_diagnostic_token(&token));
+            token.clear();
+            redacted.push(ch);
+        } else {
+            token.push(ch);
+        }
+    }
+    redacted.push_str(&redact_diagnostic_token(&token));
+
+    let mut clean = String::with_capacity(redacted.len());
+    for ch in redacted.chars() {
+        if !ch.is_control() || ch == '\n' || ch == '\t' {
+            clean.push(ch);
+        }
+    }
+    const MAX_DIAGNOSTIC_CHARS: usize = 2400;
+    if clean.chars().count() > MAX_DIAGNOSTIC_CHARS {
+        clean = clean.chars().take(MAX_DIAGNOSTIC_CHARS - 16).collect();
+        clean.push_str("… [truncated]");
+    }
+    clean
+}
+
 /// Echo one already-split backend stderr line to the terminal. Cheap no-op
 /// when disabled. Call from line-based drain loops; the line is still
 /// captured for parsing and the failure tail.
@@ -115,7 +168,7 @@ pub fn echo_line(line: &str) {
     if enabled() {
         eprintln!(
             "[grab-backend] gallery-dl stderr: {}",
-            redact_query_tokens(line)
+            sanitize_diagnostic(line)
         );
     }
 }
@@ -127,7 +180,7 @@ pub fn echo_stderr(chunk: &[u8]) {
     if enabled() {
         use std::io::Write as _;
         let raw = String::from_utf8_lossy(chunk);
-        let redacted = redact_query_tokens(&raw);
+        let redacted = sanitize_diagnostic(&raw);
         let _ = std::io::stderr().write_all(redacted.as_bytes());
     }
 }
@@ -160,6 +213,20 @@ mod tests {
             redact_query_tokens("https://media.example/file plain"),
             "https://media.example/file plain"
         );
+    }
+
+    #[test]
+    fn diagnostic_sanitization_redacts_private_urls_and_credentials() {
+        assert_eq!(
+            sanitize_diagnostic("NotFoundError https://user:secret@www.instagram.com/stories/private-user/?token=secret#story"),
+            "NotFoundError https://www.instagram.com/(...)"
+        );
+    }
+
+    #[test]
+    fn diagnostic_sanitization_removes_controls_and_caps_length() {
+        assert_eq!(sanitize_diagnostic("first\u{0007} second"), "first second");
+        assert!(sanitize_diagnostic(&"x".repeat(3000)).ends_with("… [truncated]"));
     }
 
     #[test]

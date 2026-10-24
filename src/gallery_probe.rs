@@ -215,6 +215,10 @@ pub fn should_surface(e: &GalleryError) -> bool {
                 || msg.contains("AuthRequired")
                 || msg.contains("ChallengeError")
                 || msg.contains("HttpError")
+                || msg.contains("NotFoundError")
+                || msg.contains("ExtractorError")
+                || msg.contains("KeyError")
+                || msg.contains("TooManyRequests")
         }
         // Install/runtime errors (spawn failures, timeouts) fall through.
         _ => false,
@@ -373,16 +377,33 @@ pub async fn probe_gallery_with_proxy(
     // `--` last: guards against URLs starting with `-` being parsed as options.
     cmd.arg("--").arg(url);
     let output = run_to_completion(cmd, PROBE_TIMEOUT, "gallery-dl probe").await?;
+    crate::backend_debug::echo_stderr(&output.stderr);
 
-    // Exit 32 (v1.30.0+) / 64 (older) = NoExtractorError: unsupported URL,
-    // not a failure. v1.30.0 folded NoExtractorError (64) into InputError (32).
+    // Exit 32 (v1.30.0+) / 64 (older) commonly means no extractor matched,
+    // but newer gallery-dl versions also use 32 for input/extractor failures.
+    // Treat it as unsupported only when the available detail confirms that.
     if matches!(output.status.code(), Some(32) | Some(64)) {
-        return Ok(None);
-    }
-    if !output.status.success() {
-        return Err(GalleryError::probe(exit_message(
+        let detail =
+            structured_error_detail(&output.stdout).or_else(|| stderr_detail(&output.stderr));
+        if detail.as_deref().is_none_or(|message| {
+            let message = message.to_ascii_lowercase();
+            message.contains("noextractorerror") || message.contains("unsupported url")
+        }) {
+            return Ok(None);
+        }
+        return Err(GalleryError::probe(exit_failure_message(
             "gallery-dl probe",
             &output.status,
+            &output.stdout,
+            &output.stderr,
+        )));
+    }
+    if !output.status.success() {
+        return Err(GalleryError::probe(exit_failure_message(
+            "gallery-dl probe",
+            &output.status,
+            &output.stdout,
+            &output.stderr,
         )));
     }
     let items = parse_document(&output.stdout)?;
@@ -556,6 +577,84 @@ fn exit_message(what: &str, status: &std::process::ExitStatus) -> String {
     format!("{what} failed (exit {})", status.code().unwrap_or(-1))
 }
 
+/// Prefer gallery-dl's structured error message from stdout when present.
+fn structured_error_detail(stdout: &[u8]) -> Option<String> {
+    let messages: Vec<serde_json::Value> = serde_json::from_slice(stdout).ok()?;
+    messages.iter().rev().find_map(|message| {
+        if message.get(0).and_then(|value| value.as_i64()) != Some(msg_type::ERROR) {
+            return None;
+        }
+        let error = message
+            .get(1)
+            .and_then(|value| value.get("error"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let detail = message
+            .get(1)
+            .and_then(|value| value.get("message"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        Some(if detail.trim().is_empty() {
+            error.to_string()
+        } else {
+            format!("{error}: {detail}")
+        })
+    })
+}
+
+/// Extract a short, relevant stderr tail. Ignore progress noise where possible;
+/// sanitize it before it can enter the journal or a copied error report.
+fn stderr_detail(stderr: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let relevant: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| {
+            let line = line.to_ascii_lowercase();
+            [
+                "error",
+                "exception",
+                "traceback",
+                "failed",
+                "forbidden",
+                "not found",
+                "login",
+            ]
+            .iter()
+            .any(|needle| line.contains(needle))
+        })
+        .collect();
+    let selected = if relevant.is_empty() {
+        lines.iter().rev().take(2).copied().collect::<Vec<_>>()
+    } else {
+        relevant.iter().rev().take(4).copied().collect::<Vec<_>>()
+    };
+    let detail = selected.into_iter().rev().collect::<Vec<_>>().join(" | ");
+    let detail = crate::backend_debug::sanitize_diagnostic(&detail);
+    (!detail.trim().is_empty()).then_some(detail)
+}
+
+/// A failed extractor may write its explanation to stdout as a JSON error
+/// record, stderr, or both. Prefer the structured message, then stderr, then
+/// the exit status alone. Callers use this in the non-zero exit path.
+fn exit_failure_message(
+    what: &str,
+    status: &std::process::ExitStatus,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> String {
+    let detail = structured_error_detail(stdout).or_else(|| stderr_detail(stderr));
+    let base = exit_message(what, status);
+    match detail {
+        Some(detail) => crate::backend_debug::sanitize_diagnostic(&format!("{base}: {detail}")),
+        None => base,
+    }
+}
+
 /// Base argv for the file enumeration (before auth, filter, and URL).
 /// `jsonl` selects line-framed streaming output; document mode (jsonl off)
 /// is the fallback that keeps fatal errors visible.
@@ -643,10 +742,13 @@ pub(crate) async fn enumerate_gallery_files_with_proxy(
 ) -> Result<Vec<GalleryItem>, GalleryError> {
     let cmd = enumerate_command(tool, url, options, false)?;
     let output = run_to_completion(cmd, ENUMERATE_TIMEOUT, "gallery-dl enumerate").await?;
+    crate::backend_debug::echo_stderr(&output.stderr);
     if !output.status.success() {
-        return Err(GalleryError::probe(exit_message(
+        return Err(GalleryError::probe(exit_failure_message(
             "gallery-dl enumerate",
             &output.status,
+            &output.stdout,
+            &output.stderr,
         )));
     }
     parse_document(&output.stdout)
@@ -917,7 +1019,12 @@ fn stderr_summary(tail: &StderrTail) -> String {
     if t.is_empty() {
         return String::new();
     }
-    format!(": {}", t.iter().cloned().collect::<Vec<_>>().join(" | "))
+    format!(
+        ": {}",
+        crate::backend_debug::sanitize_diagnostic(
+            &t.iter().cloned().collect::<Vec<_>>().join(" | ")
+        )
+    )
 }
 
 /// Parse `gallery-dl -o output.jsonl=true` output: one JSON message array
@@ -1607,6 +1714,29 @@ mod tests {
     }
 
     #[test]
+    fn structured_error_detail_extracts_gallery_dl_failure() {
+        let stdout = br#"[[2, {"category":"instagram"}], [-1, {"error":"NotFoundError", "message":"request failed at https://www.instagram.com/stories/private-user/?token=secret"}]]"#;
+        let detail = crate::backend_debug::sanitize_diagnostic(
+            &structured_error_detail(stdout).expect("structured error"),
+        );
+        assert!(detail.contains("NotFoundError"));
+        assert!(detail.contains("request failed"));
+        assert!(!detail.contains("secret"));
+        assert!(!detail.contains("private-user"));
+    }
+
+    #[test]
+    fn stderr_detail_prefers_error_lines_and_redacts_private_urls() {
+        let detail = stderr_detail(
+            b"[gallery-dl][info] extracting\n[gallery-dl][error] NotFoundError: https://www.instagram.com/stories/private-user/?token=secret\n",
+        )
+        .expect("stderr detail");
+        assert!(detail.contains("NotFoundError"));
+        assert!(!detail.contains("private-user"));
+        assert!(!detail.contains("secret"));
+    }
+
+    #[test]
     fn should_surface_auth_errors() {
         assert!(should_surface(&GalleryError::probe(
             "gallery-dl: AuthenticationError: login required"
@@ -1622,6 +1752,16 @@ mod tests {
         )));
         assert!(should_surface(&GalleryError::probe(
             "gallery-dl: HttpError: 404"
+        )));
+    }
+
+    #[test]
+    fn should_surface_extractor_api_errors() {
+        assert!(should_surface(&GalleryError::probe(
+            "gallery-dl: NotFoundError: story endpoint returned no data"
+        )));
+        assert!(should_surface(&GalleryError::probe(
+            "gallery-dl: ExtractorError: unexpected API response"
         )));
     }
 

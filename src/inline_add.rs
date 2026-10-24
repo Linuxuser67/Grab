@@ -323,7 +323,14 @@ async fn lookup_media(
 
         let ytdlp_video = crate::inline_gallery::ytdlp_found_video(&ytdlp);
         let gallery_error = crate::inline_gallery::preferred_probe_error(ytdlp_video, &gallery)
-            .map(|error| error.to_string());
+            .map(|error| error.to_string())
+            .or_else(|| {
+                if ytdlp_video {
+                    None
+                } else {
+                    gallery.as_ref().err().map(|error| error.to_string())
+                }
+            });
         let playlist_entries = match &ytdlp {
             Ok((crate::video::ProbeResult::Playlist(playlist), _)) => playlist.total,
             _ => 0,
@@ -406,6 +413,8 @@ pub(crate) struct VideoStep {
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
     pub(crate) tools: adw::ActionRow,
     pub(crate) error: adw::ActionRow,
+    /// Sanitized extractor diagnostics shown in the copyable Details dialog.
+    pub(crate) error_details: Rc<RefCell<String>>,
     /// Gallery info row: shown when the probe finds an image gallery.
     /// Title is "Gallery", subtitle is "N files • preview...".
     pub(crate) gallery_info: adw::ActionRow,
@@ -609,6 +618,7 @@ fn reset_video_step(step: &VideoStep) {
     step.name.set_text("");
     step.tools.set_subtitle("");
     step.error.set_subtitle("");
+    step.error_details.borrow_mut().clear();
     hide_video_step(step);
     // The media-type choice does not survive a close either.
     arm_mode_toggle(step, None);
@@ -695,19 +705,61 @@ fn show_video_tools_missing(v: &VideoStep, message: &str) {
 }
 
 pub(crate) fn show_video_error(v: &VideoStep, message: &str) {
+    let url = v.url_entry.text().to_string();
+    let summary = crate::inline_gallery::preview_failure_summary(&url, message, None);
+    let host = crate::video_probe::page_host(&url);
+    let details = format!(
+        "Source host: {}\n\n{}",
+        if host.is_empty() { "unknown host" } else { &host },
+        crate::backend_debug::sanitize_diagnostic(message)
+    );
+    show_video_error_with_details(v, &summary, &details);
+}
+
+fn show_video_error_with_details(v: &VideoStep, summary: &str, details: &str) {
     hide_video_step(v);
     set_looking_up(v, false);
-    // Lookup failed: nothing to add. Slide the Add button out (the
-    // child-revealed handler hides it once the animation finishes); the
-    // entry carries no icon — Retry in the error row owns recovery.
+    // Lookup failed: nothing to add. Slide the Add button out; Retry owns recovery.
     v.action_revealer.set_reveal_child(false);
-    v.error.set_subtitle(message);
+    v.error_details
+        .borrow_mut()
+        .clone_from(&crate::backend_debug::sanitize_diagnostic(details));
+    v.error.set_subtitle(&crate::backend_debug::sanitize_diagnostic(summary));
     v.error.set_visible(true);
-    // Reveal after the row is shown: set_visible(true) first so the
-    // SlideDown has a mapped widget to animate (see slide_down_revealer).
     v.group_revealer.set_visible(true);
     v.group_revealer.set_reveal_child(true);
     sync_entry_icon(v);
+}
+
+fn show_preview_error_details(parent: &gtk4::Button, details: &str) {
+    let display = crate::backend_debug::sanitize_diagnostic(details);
+    let dialog = adw::AlertDialog::new(
+        Some(&gettext("Preview Error Details")),
+        Some(&gettext("Technical details from the media extractors. Sensitive URL paths and parameters are omitted.")),
+    );
+    let text = gtk4::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .monospace(true)
+        .wrap_mode(gtk4::WrapMode::WordChar)
+        .build();
+    text.buffer().set_text(&display);
+    let scrolled = gtk4::ScrolledWindow::builder()
+        .min_content_height(220)
+        .child(&text)
+        .build();
+    dialog.set_extra_child(Some(&scrolled));
+    dialog.add_responses(&[("copy", &gettext("Copy")), ("close", &gettext("Close"))]);
+    dialog.set_response_appearance("copy", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("close"));
+    dialog.set_close_response("close");
+    let clipboard = parent.clipboard();
+    dialog.connect_response(None, move |_dialog, response| {
+        if response == "copy" {
+            clipboard.set_text(&display);
+        }
+    });
+    dialog.present(Some(parent));
 }
 
 /// Desensitize the form's Add button while a lookup is in flight (a dead
@@ -1743,17 +1795,23 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     video_tools.set_activatable_widget(Some(&video_install_btn));
     video_tools.add_suffix(&video_install_btn);
     video_group.add(&video_tools);
-    // Probe-error state: an ActionRow in the group (4.4.4 pattern) — the
-    // message goes in the subtitle, Retry is a suffix.
-    // Subtitles carry raw tool errors: never parse them as Pango markup.
+    // Keep the inline failure summary short. The full sanitized diagnostics
+    // live behind Details, so raw extractor output never overruns the form row.
     let video_error = adw::ActionRow::builder()
         .title(gettext("Couldn't load the media preview"))
         .use_markup(false)
+        .build();
+    let video_error_details_btn = gtk4::Button::builder()
+        .label(gettext("Details"))
+        .tooltip_text(gettext("Show technical error details"))
+        .css_classes(["flat"])
+        .valign(gtk4::Align::Center)
         .build();
     let video_retry_btn = gtk4::Button::builder()
         .label(gettext("Retry"))
         .valign(gtk4::Align::Center)
         .build();
+    video_error.add_suffix(&video_error_details_btn);
     video_error.add_suffix(&video_retry_btn);
     video_error.set_visible(false);
     video_group.add(&video_error);
@@ -1817,6 +1875,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
         error: video_error,
+        error_details: Rc::new(RefCell::new(String::new())),
         gallery_info,
         gallery_filter,
         gallery_filter_wrap: filter_wrap,
@@ -2525,18 +2584,23 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             }
                         }
                         probe_b.borrow_mut().info.take();
-                        // Prefer a surfaced gallery-dl error (e.g. login
-                        // required): it's more actionable than yt-dlp's.
-                        let msg = gallery_error
-                            .as_ref()
-                            .map(|ge| ge.to_string())
-                            .unwrap_or_else(|| e.to_string());
+                        let ytdlp_error = e.to_string();
+                        let summary = crate::inline_gallery::preview_failure_summary(
+                            &url,
+                            &ytdlp_error,
+                            gallery_error.as_deref(),
+                        );
+                        let details = crate::inline_gallery::preview_failure_details(
+                            &url,
+                            &ytdlp_error,
+                            gallery_error.as_deref(),
+                        );
                         tracing::warn!(
                             host = %crate::video_probe::page_host(&url),
-                            error = %msg,
+                            error = %crate::backend_debug::sanitize_diagnostic(&details),
                             "video preview failed"
                         );
-                        show_video_error(&step_b, &msg);
+                        show_video_error_with_details(&step_b, &summary, &details);
                         set_lookup_add(&lookup_add_b, true);
                     }
                     Ok((probe, raw_json)) => {
@@ -3031,6 +3095,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 },
                 None, // Fresh install: show all tools.
             );
+        });
+    }
+    {
+        let details = Rc::clone(&step.error_details);
+        video_error_details_btn.connect_clicked(move |button| {
+            let details = details.borrow().clone();
+            show_preview_error_details(button, &details);
         });
     }
     {

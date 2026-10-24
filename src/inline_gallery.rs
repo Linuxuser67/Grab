@@ -83,6 +83,104 @@ pub(crate) fn preferred_probe_error(
     }
 }
 
+/// Build a concise, actionable summary for the inline preview error row.
+/// Raw extractor output belongs in the Details dialog, not in a long subtitle.
+pub(crate) fn preview_failure_summary(
+    url: &str,
+    primary_error: &str,
+    gallery_error: Option<&str>,
+) -> String {
+    let joined = gallery_error
+        .map(|error| format!("{primary_error}\n{error}"))
+        .unwrap_or_else(|| primary_error.to_string());
+    let lower = joined.to_ascii_lowercase();
+    let technical = [
+        "error:",
+        "gallery-dl",
+        "yt-dlp",
+        "traceback",
+        "exception",
+        "notfounderror",
+        "authenticationerror",
+        "httperror",
+        "couldn't read the video page",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+
+    let host = crate::video_probe::page_host(url);
+    let instagram = host == "instagram.com" || host.ends_with(".instagram.com");
+    let story_or_highlight = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed.path_segments().map(|segments| {
+                segments.into_iter().any(|part| part == "stories" || part == "highlights")
+            })
+        })
+        .unwrap_or(false);
+    if instagram && story_or_highlight && technical {
+        return gettext(
+            "Instagram couldn't load this story or highlight. It may have expired or access may be restricted. Check that it opens in your browser, then try again.",
+        );
+    }
+
+    if lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("rate limit")
+        || lower.contains("ratelimit")
+    {
+        return gettext("The site is temporarily limiting requests. Wait a little before trying again.");
+    }
+    if lower.contains("authenticationerror")
+        || lower.contains("authorizationerror")
+        || lower.contains("authrequired")
+        || lower.contains("you need to log in")
+        || lower.contains("login required")
+        || lower.contains("sign in")
+        || lower.contains("cookies")
+    {
+        return gettext("This site requires you to sign in. Check the selected browser profile and try again.");
+    }
+    if lower.contains("403") || lower.contains("forbidden") || lower.contains("access denied") {
+        return gettext("The site denied access to this media. Check that the link is available to your account, then try again.");
+    }
+    if lower.contains("404") || lower.contains("notfounderror") || lower.contains("not found") {
+        return gettext("This media may have been removed or the link may have expired.");
+    }
+    if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("network is unreachable")
+    {
+        return gettext("The site could not be reached. Check your connection or proxy, then try again.");
+    }
+    if technical || joined.chars().count() > 220 {
+        return gettext("Grab couldn't preview this link. Open Details to inspect the error, then retry.");
+    }
+    primary_error.to_string()
+}
+
+/// Technical details for the copyable dialog. Include the host and both backend
+/// failures, but never persist a full page URL or signed URL in the report.
+pub(crate) fn preview_failure_details(
+    url: &str,
+    ytdlp_error: &str,
+    gallery_error: Option<&str>,
+) -> String {
+    let host = crate::video_probe::page_host(url);
+    let host = if host.is_empty() { "unknown host" } else { &host };
+    let mut details = format!(
+        "Source host: {host}\n\nyt-dlp:\n{}",
+        crate::backend_debug::sanitize_diagnostic(ytdlp_error)
+    );
+    if let Some(error) = gallery_error {
+        details.push_str("\n\nGallery-dl:\n");
+        details.push_str(&crate::backend_debug::sanitize_diagnostic(error));
+    }
+    crate::backend_debug::sanitize_diagnostic(&details)
+}
+
 /// Authentication source for gallery-dl. The browser-extension handoff jar
 /// wins (and preserves its paired user-agent); otherwise gallery-dl reads the
 /// selected browser profile directly, avoiding a second yt-dlp export process.
@@ -368,6 +466,56 @@ pub(crate) fn push_gallery_picker_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instagram_story_failures_get_a_concise_actionable_summary() {
+        let summary = preview_failure_summary(
+            "https://www.instagram.com/stories/private-user/",
+            "Couldn't read the video page: ERROR: [instagram:story] You need to log in to access this content",
+            Some("gallery-dl: NotFoundError: request failed"),
+        );
+        assert!(summary.contains("Instagram"));
+        assert!(summary.contains("story or highlight"));
+        assert!(!summary.contains("ERROR:"));
+        assert!(!summary.contains("NotFoundError"));
+    }
+
+    #[test]
+    fn authentication_failure_has_browser_profile_guidance() {
+        let summary = preview_failure_summary(
+            "https://example.com/video",
+            "AuthenticationError: login required",
+            None,
+        );
+        assert!(summary.contains("selected browser profile"));
+    }
+
+    #[test]
+    fn user_facing_errors_are_not_replaced_by_generic_text() {
+        let summary = preview_failure_summary(
+            "https://example.com/video",
+            "The resolved media page could not be verified as a public destination.",
+            None,
+        );
+        assert_eq!(
+            summary,
+            "The resolved media page could not be verified as a public destination."
+        );
+    }
+
+    #[test]
+    fn combined_error_details_keep_both_extractors_and_redact_page_urls() {
+        let details = preview_failure_details(
+            "https://www.instagram.com/stories/private-user/?token=secret",
+            "ERROR: fetch failed at https://www.instagram.com/stories/private-user/?token=secret",
+            Some("gallery-dl: NotFoundError: https://www.instagram.com/stories/private-user/?token=secret"),
+        );
+        assert!(details.contains("yt-dlp:"));
+        assert!(details.contains("Gallery-dl:"));
+        assert!(details.contains("www.instagram.com"));
+        assert!(!details.contains("private-user"));
+        assert!(!details.contains("secret"));
+    }
 
     #[test]
     fn ytdlp_found_video_cases() {

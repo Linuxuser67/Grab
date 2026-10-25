@@ -7237,22 +7237,24 @@ fn persist_task_loop_delivers_final_value_before_close() {
     use std::sync::{Arc, Mutex};
     let writes = Arc::new(Mutex::new(Vec::new()));
     let writes_clone = writes.clone();
-    let (tx, rx) = tokio::sync::watch::channel(None::<String>);
+    let (tx, rx) = tokio::sync::watch::channel(None::<StoredQueue>);
     let task = crate::runtime::tokio_rt().spawn(async move {
         crate::download::DownloadManager::persist_task_loop(rx, move |text| {
             writes_clone.lock().unwrap().push(text);
         })
         .await;
     });
-    tx.send_replace(Some("A".to_string()));
-    tx.send_replace(Some("B".to_string()));
+    tx.send_replace(Some(StoredQueue { version: 1, items: Vec::new() }));
+    tx.send_replace(Some(StoredQueue { version: 2, items: Vec::new() }));
     drop(tx);
     crate::runtime::tokio_rt().block_on(task).unwrap();
     let writes = writes.lock().unwrap();
     assert_eq!(
-        writes.last().unwrap(),
-        "B",
-        "final value must be last write"
+        serde_json::from_str::<StoredQueue>(writes.last().unwrap())
+            .unwrap()
+            .version,
+        2,
+        "final value must be the last queue snapshot"
     );
 }
 

@@ -569,7 +569,7 @@ impl DownloadManager {
         // so the last persist completes before shutdown awaits the task.
         #[cfg(not(test))]
         let (persist_tx, persist_task) = {
-            let (tx, rx) = tokio::sync::watch::channel(None::<String>);
+            let (tx, rx) = tokio::sync::watch::channel(None::<StoredQueue>);
             let task = tokio_rt().spawn(Self::persist_task_loop(rx, |text: String| {
                 Self::write_queue_file(&text)
             }));
@@ -3391,12 +3391,14 @@ impl DownloadManager {
         // Tests need determinism: they persist then immediately restore in a
         // new manager, so write synchronously in test builds.
         #[cfg(test)]
-        if let Some(text) = self.serialize_queue() {
-            Self::write_queue_file(&text);
+        if let Some(queue) = self.serialize_queue() {
+            if let Some(text) = Self::queue_to_json(&queue) {
+                Self::write_queue_file(&text);
+            }
         }
         #[cfg(not(test))]
-        if let (Some(text), Some(tx)) = (self.serialize_queue(), &*self.persist_tx.borrow()) {
-            tx.send_replace(Some(text));
+        if let (Some(queue), Some(tx)) = (self.serialize_queue(), &*self.persist_tx.borrow()) {
+            tx.send_replace(Some(queue));
         }
     }
 
@@ -3405,16 +3407,32 @@ impl DownloadManager {
     /// the closed-channel Err, so dropping the sender after a final send guarantees
     /// the last write lands.
     pub(crate) async fn persist_task_loop(
-        mut rx: tokio::sync::watch::Receiver<Option<String>>,
+        mut rx: tokio::sync::watch::Receiver<Option<StoredQueue>>,
         write: impl Fn(String) + Clone + Send + 'static,
     ) {
         while rx.changed().await.is_ok() {
-            let Some(text) = rx.borrow_and_update().clone() else {
+            let Some(queue) = rx.borrow_and_update().clone() else {
                 continue;
             };
-            // File I/O must not block the async runtime.
+            // Both the O(queue) JSON serialization and atomic file write happen
+            // on the blocking pool, never in GTK's main context or a Tokio worker.
             let write = write.clone();
-            let _ = tokio::task::spawn_blocking(move || write(text)).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Some(text) = Self::queue_to_json(&queue) {
+                    write(text);
+                }
+            })
+            .await;
+        }
+    }
+
+    fn queue_to_json(queue: &StoredQueue) -> Option<String> {
+        match serde_json::to_string(queue) {
+            Ok(text) => Some(text),
+            Err(e) => {
+                tracing::error!("could not serialize download queue: {e}");
+                None
+            }
         }
     }
 
@@ -3425,7 +3443,8 @@ impl DownloadManager {
     fn persist_for_shutdown(&self) {
         #[cfg(test)]
         if self.restore_state.get() == RestoreState::Ready
-            && let Some(text) = self.serialize_queue_inner(true)
+            && let Some(queue) = self.serialize_queue_inner(true)
+            && let Some(text) = Self::queue_to_json(&queue)
         {
             Self::write_queue_file(&text);
         }
@@ -3435,10 +3454,10 @@ impl DownloadManager {
                 tracing::warn!(
                     "shutdown: queue restore did not complete; preserving the saved queue file"
                 );
-            } else if let (Some(text), Some(tx)) =
+            } else if let (Some(queue), Some(tx)) =
                 (self.serialize_queue_inner(true), &*self.persist_tx.borrow())
             {
-                tx.send_replace(Some(text));
+                tx.send_replace(Some(queue));
             }
             drop(self.persist_tx.borrow_mut().take());
             if let Some(task) = self.persist_task.borrow_mut().take() {
@@ -3450,14 +3469,15 @@ impl DownloadManager {
         }
     }
 
-    /// Serialize the queue to JSON. Returns None if batching or on serialize error.
-    fn serialize_queue(&self) -> Option<String> {
+    /// Snapshot the queue model for persistence. JSON serialization is deferred to
+    /// the blocking persistence worker in production.
+    fn serialize_queue(&self) -> Option<StoredQueue> {
         self.serialize_queue_inner(false)
     }
 
-    /// Serialize the queue to JSON, bypassing the batch gate when `force` is true.
+    /// Snapshot queue state, bypassing the batch gate when `force` is true.
     /// Shutdown uses `force=true`: quitting mid-batch must persist the final state.
-    fn serialize_queue_inner(&self, force: bool) -> Option<String> {
+    fn serialize_queue_inner(&self, force: bool) -> Option<StoredQueue> {
         if !force && self.batch.get() > 0 {
             return None;
         }
@@ -3530,16 +3550,7 @@ impl DownloadManager {
             version: QUEUE_VERSION,
             items,
         };
-        // Compact output cuts queue size ~3x but does not enforce the 10 MB
-        // restore cap; a very large paused set can still be quarantined.
-        let text = match serde_json::to_string(&data) {
-            Ok(text) => text,
-            Err(e) => {
-                tracing::error!("could not serialize download queue: {e}");
-                return None;
-            }
-        };
-        Some(text)
+        Some(data)
     }
 
     /// Write the serialized queue atomically: temp file + sync_all + rename +

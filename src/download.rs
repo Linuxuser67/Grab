@@ -1917,6 +1917,36 @@ impl DownloadManager {
         self.pump(item, item_id, generation, rx);
     }
 
+    /// Atomically adopt a finished filename. The directory listing can go stale between
+    /// deduplication and rename, so remember each candidate that lost EEXIST rather
+    /// than retrying the same name from the stale snapshot.
+    fn adopt_final_name(
+        old_path: &std::path::Path,
+        dir: &std::path::Path,
+        wanted: &str,
+        is_taken: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        let lost_claims = RefCell::new(Vec::<String>::new());
+        let taken = |name: &str| {
+            lost_claims.borrow().iter().any(|lost| lost == name) || is_taken(name)
+        };
+        for _ in 0..8 {
+            let candidate = dedupe_filename(wanted, taken);
+            let target = dir.join(&candidate);
+            if old_path == target {
+                return Some(candidate);
+            }
+            match rename_noreplace(old_path, &target) {
+                Ok(()) => return Some(candidate),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    lost_claims.borrow_mut().push(candidate);
+                }
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
     /// Whether a finished-name candidate is taken (file on disk, reserved stem, or live row holding it). Used by the Finished claim loop.
     fn is_name_taken(&self, dir: &str, existing: &[String], n: &str) -> bool {
         existing.iter().any(|entry| entry == n)
@@ -2078,37 +2108,27 @@ impl DownloadManager {
                                     done = true;
                                     break;
                                 }
-                                // A listing is only a snapshot: remember every candidate that
-                                // lost an atomic rename race so the next attempt cannot repeat it.
-                                let lost_claims = RefCell::new(Vec::<String>::new());
-                                let taken = |n: &str| {
-                                    lost_claims.borrow().iter().any(|lost| lost == n)
-                                        || this.is_name_taken(&dir, &existing, n)
-                                };
                                 // Claim-then-move so a file appearing between dedupe and rename is never clobbered.
                                 let old_path = item.file_path();
-                                let mut final_name = dedupe_filename(&name, taken);
-                                let mut moved = !existing.iter().any(|entry| entry == &current);
-                                for _ in 0..8 {
-                                    if moved
-                                        || old_path == std::path::Path::new(&dir).join(&final_name)
-                                    {
-                                        break;
-                                    }
-                                    match rename_noreplace(
-                                        &old_path,
-                                        &std::path::Path::new(&dir).join(&final_name),
-                                    ) {
-                                        Ok(()) => {
-                                            moved = true;
+                                let (final_name, moved) =
+                                    if !existing.iter().any(|entry| entry == &current) {
+                                        (
+                                            dedupe_filename(&name, |n| {
+                                                this.is_name_taken(&dir, &existing, n)
+                                            }),
+                                            true,
+                                        )
+                                    } else {
+                                        match Self::adopt_final_name(
+                                            &old_path,
+                                            std::path::Path::new(&dir),
+                                            &name,
+                                            |n| this.is_name_taken(&dir, &existing, n),
+                                        ) {
+                                            Some(name) => (name, true),
+                                            None => (current.clone(), false),
                                         }
-                                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                                            lost_claims.borrow_mut().push(final_name);
-                                            final_name = dedupe_filename(&name, taken);
-                                        }
-                                        Err(_) => break,
-                                    }
-                                }
+                                    };
                                 if moved && final_name != current {
                                     item.set_filename(final_name);
                                 }

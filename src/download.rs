@@ -1651,27 +1651,25 @@ impl DownloadManager {
                     }
                 }
 
-                let mut torrent_dest = None;
-                let mut torrent_output_dir = None;
                 if is_torrent {
                     let dir = std::path::PathBuf::from(&worker_dir);
                     let recorded_path = std::path::PathBuf::from(&worker_recorded);
-                    let output = if worker_recorded.is_empty() {
-                        dir.clone()
+                    let (output, output_dir) = if worker_recorded.is_empty() {
+                        (dir.clone(), None)
                     } else {
                         // Re-guard the recorded folder at spawn time; a symlink may have
                         // been planted after intake. Never follow it outside the destination.
                         let guarded =
                             crate::torrent::guard_output_folder(&dir, recorded_path.clone());
-                        if guarded != recorded_path {
-                            torrent_output_dir = Some(guarded.to_string_lossy().into_owned());
-                        } else if guarded.parent() != Some(dir.as_path()) {
+                        let output_dir = (guarded != recorded_path)
+                            .then(|| guarded.to_string_lossy().into_owned());
+                        if output_dir.is_none() && guarded.parent() != Some(dir.as_path()) {
                             std::fs::create_dir_all(&guarded).map_err(|error| {
                                 gettext("Could not create the download folder: {error}")
                                     .replace("{error}", &error.to_string())
                             })?;
                         }
-                        guarded
+                        (guarded, output_dir)
                     };
                     if worker_recorded.is_empty() {
                         std::fs::create_dir_all(&dir).map_err(|error| {
@@ -1679,40 +1677,39 @@ impl DownloadManager {
                                 .replace("{error}", &error.to_string())
                         })?;
                     }
-                    torrent_dest = Some(output);
+                    return Ok(PreparedSpawn::Torrent { dest: output, output_dir });
+                }
+                if is_video {
+                    return Ok(PreparedSpawn::Video);
                 }
 
                 let mut drop_segments = false;
-                let mode = if is_torrent || is_video {
-                    None
-                } else {
-                    Some(match worker_segments {
-                        Some(state) => {
-                            // Drop an invalid bitmap and stale partial together. Do both on
-                            // the worker so resume validation does not block GTK.
-                            let len = std::fs::metadata(&worker_dest)
-                                .map(|metadata| metadata.len())
-                                .unwrap_or(0);
-                            if len < state.prefix_len() || len > state.total {
-                                let _ = std::fs::remove_file(&worker_dest);
-                                drop_segments = true;
-                                StartMode::Fresh
-                            } else {
-                                StartMode::Resume(state)
-                            }
+                let mode = match worker_segments {
+                    Some(state) => {
+                        // Drop an invalid bitmap and stale partial together. Do both on
+                        // the worker so resume validation does not block GTK.
+                        let len = std::fs::metadata(&worker_dest)
+                            .map(|metadata| metadata.len())
+                            .unwrap_or(0);
+                        if len < state.prefix_len() || len > state.total {
+                            let _ = std::fs::remove_file(&worker_dest);
+                            drop_segments = true;
+                            StartMode::Fresh
+                        } else {
+                            StartMode::Resume(state)
                         }
-                        // Existing destination is refused for a fresh row; never overwrite a
-                        // file that may belong to the user or another application.
-                        None => match std::fs::metadata(&worker_dest) {
-                            Err(_) => StartMode::Fresh,
-                            Ok(_) if !started => {
-                                return Err(DEST_EXISTS.to_string());
-                            }
-                            Ok(_) => StartMode::Single,
-                        },
-                    })
+                    }
+                    // Existing destination is refused for a fresh row; never overwrite a
+                    // file that may belong to the user or another application.
+                    None => match std::fs::metadata(&worker_dest) {
+                        Err(_) => StartMode::Fresh,
+                        Ok(_) if !started => {
+                            return Err(DEST_EXISTS.to_string());
+                        }
+                        Ok(_) => StartMode::Single,
+                    },
                 };
-                Ok((mode, drop_segments, torrent_dest, torrent_output_dir))
+                Ok(PreparedSpawn::Plain { mode, drop_segments })
             })
             .await;
 
@@ -2640,6 +2637,20 @@ impl DownloadManager {
         self.changed();
         self.pump(item, id, generation, rx);
     }
+}
+
+/// Validated worker preparation. The enum makes impossible combinations (such as a
+/// torrent without an output directory or a plain row without a start mode) unrepresentable.
+enum PreparedSpawn {
+    Torrent {
+        dest: std::path::PathBuf,
+        output_dir: Option<String>,
+    },
+    Video,
+    Plain {
+        mode: StartMode,
+        drop_segments: bool,
+    },
 }
 
 /// Video-page spawn inputs, bundled so the field list doesn't trip clippy's too-many-arguments lint.

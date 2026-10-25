@@ -396,11 +396,7 @@ pub(crate) fn single_file_path(dest: &std::path::Path, url: &str) -> Option<std:
 }
 
 /// Delete untoggled files after a filtered torrent finishes (librqbit pre-creates every file, so unselected ones must be removed here).
-pub(crate) fn cleanup_unselected(
-    folder: &std::path::Path,
-    url: &str,
-    selected: &[usize],
-) {
+pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str, selected: &[usize]) {
     if selected.is_empty() {
         return;
     }

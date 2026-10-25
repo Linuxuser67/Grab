@@ -1164,7 +1164,10 @@ impl DownloadManager {
         let Some(current) = self.find(id) else {
             return (0, pl.total, 0);
         };
-        if current.status() != DownloadStatus::Downloading {
+        if matches!(
+            current.status(),
+            DownloadStatus::Cancelled | DownloadStatus::Paused
+        ) {
             return (0, pl.total, 0);
         }
 

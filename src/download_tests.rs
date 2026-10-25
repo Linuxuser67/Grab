@@ -88,6 +88,9 @@ fn drain_engine(manager: &DownloadManager, id: u64) {
     // per completion, and it outlives the engine that triggered it.
     while (manager.running.borrow().contains_key(&id)
         || manager.pump_handles.borrow().contains_key(&id)
+        || manager
+            .find(id)
+            .is_some_and(|item| manager.dest_reserved(&item.file_path()))
         || manager.sizing_inflight.get() > 0)
         && std::time::Instant::now() < deadline
     {

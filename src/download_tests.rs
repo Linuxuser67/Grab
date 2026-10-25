@@ -8240,3 +8240,33 @@ fn start_next_counts_preparing_rows_against_the_cap() {
     assert!(manager.preparing.borrow().is_empty(), "preparation workers must drain");
     quiesce(&context);
 }
+
+
+#[test]
+fn finished_name_adoption_retries_after_stale_listing_collision() {
+    let dir = std::env::temp_dir().join(format!(
+        "grab-finished-name-race-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("tmp.bin");
+    let occupied = dir.join("a.mp4");
+    std::fs::write(&source, b"downloaded").unwrap();
+    std::fs::write(&occupied, b"foreign").unwrap();
+
+    // Simulate a stale listing that says every name is free. The atomic rename
+    // must reject a.mp4 and retry with a distinct name, never overwrite it.
+    let adopted = DownloadManager::adopt_final_name(
+        &source,
+        &dir,
+        "a.mp4",
+        |_| false,
+    )
+    .expect("a later collision-free candidate should be adopted");
+    assert_ne!(adopted, "a.mp4");
+    assert!(dir.join(&adopted).exists());
+    assert_eq!(std::fs::read(&occupied).unwrap(), b"foreign");
+    assert_eq!(std::fs::read(dir.join(adopted)).unwrap(), b"downloaded");
+    let _ = std::fs::remove_dir_all(&dir);
+}

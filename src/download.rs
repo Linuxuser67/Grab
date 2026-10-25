@@ -3562,12 +3562,11 @@ impl DownloadManager {
                 tx.send_replace(Some(queue));
             }
             drop(self.persist_tx.borrow_mut().take());
-            if let Some(task) = self.persist_task.borrow_mut().take() {
-                // Bound the shutdown wait: a stalled disk must not hang quit.
-                let _ = tokio_rt().block_on(async {
-                    tokio::time::timeout(std::time::Duration::from_secs(5), task).await
-                });
-            }
+            // This is the synchronous fallback reached only when the normal
+            // close/Quit path could not run its async shutdown. Detach the writer
+            // instead of blocking GTK; the ordinary path awaits it in
+            // persist_for_shutdown_async before the application quits.
+            drop(self.persist_task.borrow_mut().take());
         }
     }
 
@@ -4360,10 +4359,10 @@ impl DownloadManager {
         #[cfg(not(test))]
         {
             if self.restore_state.get() == RestoreState::Ready {
-                if let (Some(text), Some(tx)) =
-                    (self.serialize_queue_inner(true), &*self.persist_tx.borrow())
+                if let (Some(queue), Some(tx)) =
+                    (self.snapshot_queue_inner(true), &*self.persist_tx.borrow())
                 {
-                    tx.send_replace(Some(text));
+                    tx.send_replace(Some(queue));
                 }
             } else {
                 tracing::warn!(
@@ -4392,50 +4391,22 @@ impl DownloadManager {
         }
     }
 
-    pub(crate) fn shutdown_with_timeout(&self, timeout: Duration) {
+    pub(crate) fn shutdown_with_timeout(&self, _timeout: Duration) {
         self.stop_scheduler();
         self.draining.set(true);
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
-        // Discard workers first through their retained abort handles: aborting a finalizer would detach its worker instead of stopping it. Finalizers are awaited (not aborted) so cleanup still runs.
         let finals: Vec<PendingDiscard> =
             self.discards.borrow_mut().drain().map(|(_, p)| p).collect();
-        for handle in handles.iter() {
+        for handle in &handles {
             handle.abort();
         }
         for pending in &finals {
             pending.worker_abort.abort();
         }
-        // Bound the join: on timeout the remaining handles are dropped
-        // (detached) and partial files are left alone — the next launch
-        // reconciles them via the length-vs-prefix check in spawn().
-        let joined = tokio_rt()
-            .block_on(async {
-                tokio::time::timeout(timeout, async {
-                    for handle in handles {
-                        let _ = handle.await;
-                    }
-                    for pending in finals {
-                        let _ = pending.finalizer.await;
-                    }
-                })
-                .await
-            })
-            .is_ok();
-        if !joined {
-            tracing::warn!("shutdown: join timed out; persisting without truncating partial files");
-            self.persist_for_shutdown();
-            return;
-        }
-        let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
-        for id in ids {
-            if let Some(item) = self.find(id)
-                && let Some(st) = self.segment_state.borrow_mut().get_mut(&id)
-            {
-                truncate_to_prefix(&item.file_path(), st);
-                st.forget_beyond_prefix();
-            }
-        }
-        // Persist BEFORE returning: pump tails exit silently once draining is set, so this is the only persist that matters.
+        // This synchronous fallback is only for shutdown paths that bypass the
+        // normal GLib async close flow. Do not block GTK joining workers or
+        // truncating files. Preserve the bitmap as-is; the next launch can
+        // reconcile stale partial lengths without risking a false bitmap.
         self.persist_for_shutdown();
     }
 }

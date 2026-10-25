@@ -50,13 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="6.3.2~beta.1" date="2026-10-25">
+    <release version="6.3.2" date="2026-10-25">
       <description>
         <ul>
           <li>Skip unnecessary gallery-dl tool resolution and probing for YouTube and direct media URLs while retaining dual probing for supported gallery hosts.</li>
           <li>Add phase timings for tool resolution, yt-dlp version checks, Deno readiness, metadata extraction and parsing, gallery extraction, and total lookup latency.</li>
           <li>Use yt-dlp's default YouTube player-client selection unless the user configures an explicit extractor argument.</li>
           <li>Reuse browser-profile discovery briefly and warm existing tool-version probes in the background without installing tools at startup.</li>
+          <li>Make Add queue all gallery, playlist, and multi-file torrent items by default, while keeping explicit gallery file selection available.</li>
         </ul>
       </description>
     </release>

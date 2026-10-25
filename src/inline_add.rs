@@ -3541,9 +3541,12 @@ mod tests {
     fn youtube_and_direct_media_skip_the_gallery_probe() {
         assert!(!needs_gallery_probe("https://www.youtube.com/watch?v=abc123"));
         assert!(!needs_gallery_probe("https://music.youtube.com/watch?v=abc123"));
+        assert!(!needs_gallery_probe("https://www.youtube-nocookie.com/embed/abc123"));
         assert!(!needs_gallery_probe("https://youtu.be/abc123"));
         assert!(!needs_gallery_probe("https://cdn.example.org/video.mp4?download=1"));
         assert!(needs_gallery_probe("https://www.instagram.com/p/example/"));
+        // Lookalike hosts must not inherit YouTube's skip rule.
+        assert!(needs_gallery_probe("https://youtube.com.example.org/watch?v=abc123"));
     }
 
     #[test]

@@ -1171,6 +1171,7 @@ impl DownloadManager {
     async fn expand_playlist_rows_async(
         weak: std::rc::Weak<Self>,
         id: u64,
+        generation: u64,
         item: &DownloadItem,
         pl: &crate::media_types::PlaylistInfo,
     ) -> (usize, usize, usize) {
@@ -1220,6 +1221,9 @@ impl DownloadManager {
         // enqueue stale children after pause/cancel/remove.
         // Collection metadata is untrusted. Re-check the carrier after yielding so
         // removed/cancelled rows cannot create children from stale resolver output.
+        if !this.is_current(id, generation) {
+            return (0, pl.total, 0);
+        }
         let Some(current) = this.find(id) else {
             return (0, pl.total, 0);
         };
@@ -2224,7 +2228,14 @@ impl DownloadManager {
                         let weak = Rc::downgrade(&this);
                         drop(this);
                         let (added, total, skipped_by_host_limit) =
-                            Self::expand_playlist_rows_async(weak.clone(), id, &item, &pl).await;
+                            Self::expand_playlist_rows_async(
+                                weak.clone(),
+                                id,
+                                generation,
+                                &item,
+                                &pl,
+                            )
+                            .await;
                         let Some(this) = weak.upgrade() else {
                             done = true;
                             break;

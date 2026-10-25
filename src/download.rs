@@ -1014,6 +1014,7 @@ impl DownloadManager {
     /// # Errors
     /// Returns a display-ready message when the URL or filename is invalid.
     /// Enqueue a video page after preparing its directory listing off GTK.
+    #[cfg(test)]
     pub async fn enqueue_video_async(
         self: &Rc<Self>,
         page_url: &str,
@@ -1051,6 +1052,7 @@ impl DownloadManager {
     /// Creates a DownloadItem with gallery flags set; the actual download
     /// is driven by the gallery runner (phase 12).
     /// Enqueue a gallery after listing its destination off GTK.
+    #[cfg(test)]
     pub async fn enqueue_gallery_async(
         self: &Rc<Self>,
         job: &crate::gallery_argv::GalleryJob,
@@ -1945,7 +1947,7 @@ impl DownloadManager {
         let taken =
             |name: &str| lost_claims.borrow().iter().any(|lost| lost == name) || is_taken(name);
         for _ in 0..8 {
-            let candidate = dedupe_filename(wanted, &taken);
+            let candidate = dedupe_filename(wanted, taken);
             let target = dir.join(&candidate);
             if old_path == target {
                 return Some(candidate);

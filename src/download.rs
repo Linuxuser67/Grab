@@ -1832,7 +1832,7 @@ impl DownloadManager {
         let timeout = Duration::from_secs(30);
         // Restore the visible fraction from the saved bitmap before starting the
         // resumed engine; preparation runs off-thread but UI state remains main-thread-owned.
-        if let Some(StartMode::Resume(state)) = mode.as_ref() {
+        if let StartMode::Resume(state) = &mode {
             let fraction = (state.completed_bytes() as f64 / state.total.max(1) as f64)
                 .clamp(0.0, 1.0);
             item.set_progress(fraction);

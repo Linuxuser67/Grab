@@ -3112,6 +3112,7 @@ impl DownloadManager {
             }
         }
         partial_to_remove
+    }
 
     /// Re-queue a failed or cancelled download.
     pub fn retry(self: &Rc<Self>, id: u64) {

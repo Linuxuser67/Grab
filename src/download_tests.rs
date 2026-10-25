@@ -50,6 +50,17 @@ fn test_locks() -> (
     (lock_queue_file(), lock_main_loop())
 }
 
+/// Run a GLib future on a context owned by this test thread. A private
+/// context prevents GLib task-source finalizers from being dispatched by a
+/// different test thread when the global default context is reused.
+fn block_on_test_context<F: std::future::Future>(future: F) -> F::Output {
+    let context = glib::MainContext::new();
+    context
+        .with_thread_default(|| context.block_on(future))
+        .expect("test thread should be able to own its private GLib context")
+}
+
+
 /// Wait for the asynchronous spawn preparation to hand a queued row to its engine.
 fn wait_for_started(manager: &DownloadManager, id: u64, timeout: Duration) -> bool {
     let ctx = glib::MainContext::default();
@@ -1917,8 +1928,7 @@ fn delete_download_trashes_torrent_files() {
 
     // Explicit delete trashes real files and drops the row; no session entry offline.
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(7))
+        block_on_test_context(manager.delete_download_async(7))
             .is_ok()
     );
     assert!(!file.exists());
@@ -2058,8 +2068,7 @@ fn delete_download_removes_file_and_row() {
     store.append(&item);
 
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(7))
+        block_on_test_context(manager.delete_download_async(7))
             .is_ok()
     );
     assert!(!file.exists());
@@ -2077,8 +2086,7 @@ fn delete_download_removes_file_and_row() {
     item2.set_status(DownloadStatus::Done);
     store.append(&item2);
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(8))
+        block_on_test_context(manager.delete_download_async(8))
             .is_ok()
     );
     assert_eq!(store.n_items(), 0);
@@ -2122,8 +2130,7 @@ fn magnet_delete_trashes_recorded_subfolder() {
     item.set_filename("real-name.bin");
     item.set_status(DownloadStatus::Done);
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(item.id()))
+        block_on_test_context(manager.delete_download_async(item.id()))
             .is_ok()
     );
     // Metadata-less magnet: output directory ownership is unknown.
@@ -2184,8 +2191,7 @@ fn delete_download_trashes_torrent_subfolder() {
     store.append(&item);
 
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(9))
+        block_on_test_context(manager.delete_download_async(9))
             .is_ok()
     );
     // Owned file trashed, unrelated file survives, folder left in place.
@@ -2226,8 +2232,7 @@ fn delete_download_magnet_leaves_preexisting_folder() {
     store.append(&item);
 
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(10))
+        block_on_test_context(manager.delete_download_async(10))
             .is_ok()
     );
     // Folder and unrelated file must survive.
@@ -2271,8 +2276,7 @@ fn torrent_delete_refuses_symlinked_subdirectory() {
     store.append(&item);
 
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(11))
+        block_on_test_context(manager.delete_download_async(11))
             .is_ok()
     );
     // Precious file and symlink must survive.
@@ -5500,13 +5504,11 @@ fn delete_download_trashes_video_sidecars() {
         std::fs::write(dir.join(n), b"x").unwrap();
     }
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(11))
+        block_on_test_context(manager.delete_download_async(11))
             .is_ok()
     );
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(12))
+        block_on_test_context(manager.delete_download_async(12))
             .is_ok()
     );
     // Video + its sidecars trashed; plain row's same-named srt stays.
@@ -8024,8 +8026,7 @@ fn delete_download_legacy_gallery_row_keeps_unrelated_folder() {
         .insert(7, test_gallery_job(dir.clone()));
 
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(7))
+        block_on_test_context(manager.delete_download_async(7))
             .is_ok()
     );
     assert_eq!(store.n_items(), 0);
@@ -8051,8 +8052,7 @@ fn delete_download_gallery_row_without_job_keeps_folder() {
     // No job record at all: nothing is provably ours.
 
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(7))
+        block_on_test_context(manager.delete_download_async(7))
             .is_ok()
     );
     assert_eq!(store.n_items(), 0);
@@ -8080,8 +8080,7 @@ fn delete_download_new_gallery_row_trashes_subfolder() {
         .insert(7, test_gallery_job(sub.clone()));
 
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(7))
+        block_on_test_context(manager.delete_download_async(7))
             .is_ok()
     );
     assert_eq!(store.n_items(), 0);
@@ -8116,8 +8115,7 @@ fn delete_download_after_gallery_rename_trashes_renamed_folder() {
     assert!(manager.rename_download(7, "renamed").is_ok());
     assert!(dir.join("renamed").is_dir());
     assert!(
-        glib::MainContext::default()
-            .block_on(manager.delete_download_async(7))
+        block_on_test_context(manager.delete_download_async(7))
             .is_ok()
     );
     assert_eq!(store.n_items(), 0);

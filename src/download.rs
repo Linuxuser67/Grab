@@ -2288,11 +2288,20 @@ impl DownloadManager {
                             let path = item.file_path();
                             this.reserve_dest(&path);
                             let worker_path = path.clone();
+                            drop(this);
                             let _ = gio::spawn_blocking(move || {
                                 truncate_to_prefix(&worker_path, &state)
                             })
                             .await;
+                            let Some(this) = weak.upgrade() else {
+                                done = true;
+                                break;
+                            };
                             this.release_dest(&path);
+                            if !this.is_current(id, generation) {
+                                done = true;
+                                break;
+                            }
                             this.start_next();
                         }
                     }
@@ -2304,14 +2313,31 @@ impl DownloadManager {
                             let path = item.file_path();
                             this.reserve_dest(&path);
                             let worker_path = path.clone();
-                            let _ = gio::spawn_blocking(move || {
+                            drop(this);
+                            let truncated = gio::spawn_blocking(move || {
                                 truncate_to_prefix(&worker_path, &state)
                             })
-                            .await;
+                            .await
+                            .is_ok_and(Result::is_ok);
+                            let Some(this) = weak.upgrade() else {
+                                done = true;
+                                break;
+                            };
                             this.release_dest(&path);
-                            this.segment_state.borrow_mut().remove(&id);
-                            this.persist_queue();
-                            this.start_next();
+                            if !this.is_current(id, generation) {
+                                done = true;
+                                break;
+                            }
+                            if truncated {
+                                this.segment_state.borrow_mut().remove(&id);
+                                this.persist_queue();
+                                this.start_next();
+                            } else {
+                                tracing::warn!(path = %path.display(), "could not truncate segmented file before single-stream fallback");
+                                // Dropping ack tells the engine that fallback cannot safely proceed.
+                                done = true;
+                                break;
+                            }
                         } else {
                             this.segment_state.borrow_mut().remove(&id);
                             this.persist_queue();

@@ -353,15 +353,15 @@ pub(crate) fn push_gallery_picker_page(
             let error_caption = error_caption.clone();
             let add_btn_guard = add_btn_guard.clone();
             gtk4::glib::spawn_future_local(async move {
-                let _guard = manager.batch_guard();
                 let mut job = base_job;
                 job.dest_dir = std::path::PathBuf::from(dest_dir.borrow().clone());
-                match manager.enqueue_gallery_async(&job).await {
-                    Ok(item) => {
+                match manager.enqueue_gallery_async_batched(&job).await {
+                    Ok((item, guard)) => {
                         apply_scheduled_at(&item, scheduled_at);
                         // Defer picker teardown until the clicked signal unwinds.
                         let close = close_card.clone();
                         gtk4::glib::idle_add_local_once(move || close());
+                        drop(guard);
                     }
                     Err(e) => {
                         error_caption.set_text(&e);

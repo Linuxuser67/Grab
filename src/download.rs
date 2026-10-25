@@ -1787,6 +1787,7 @@ impl DownloadManager {
             item.set_detail(gettext("Invalid speed limit: {limit}").replace("{limit}", limit));
             item.set_status(DownloadStatus::Failed);
             self.changed();
+            self.start_next();
             return;
         }
         publish_rate_limit(&self.settings);
@@ -1861,6 +1862,7 @@ impl DownloadManager {
                 item.set_detail(e);
                 item.set_status(DownloadStatus::Failed);
                 self.changed();
+                self.start_next();
                 return;
             }
         };
@@ -1870,6 +1872,7 @@ impl DownloadManager {
                 item.set_detail(e);
                 item.set_status(DownloadStatus::Failed);
                 self.changed();
+                self.start_next();
                 return;
             }
         };

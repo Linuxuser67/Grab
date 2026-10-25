@@ -2222,8 +2222,17 @@ impl DownloadManager {
                         this.persist_queue();
                         this.reserve_dest(&invalid_path);
                         let worker_path = invalid_path.clone();
+                        drop(this);
                         let _ =
                             gio::spawn_blocking(move || std::fs::remove_file(worker_path)).await;
+                        let Some(this) = weak.upgrade() else {
+                            done = true;
+                            break;
+                        };
+                        if !this.is_current(id, generation) {
+                            done = true;
+                            break;
+                        }
                         this.release_dest(&invalid_path);
                         this.start_next();
                         if item.status() != DownloadStatus::Cancelled

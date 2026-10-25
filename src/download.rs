@@ -1916,6 +1916,7 @@ impl DownloadManager {
             timeout,
             tx,
         };
+        let resuming = matches!(&mode, StartMode::Resume(_));
         let handle = tokio_rt().spawn(run_download(ctx, connections, mode));
         self.running.borrow_mut().insert(item.id(), handle);
         // The engine owns the destination from here: later spawns resume it rather than refusing as foreign.
@@ -1923,13 +1924,18 @@ impl DownloadManager {
         self.started.borrow_mut().insert(item.id());
         self.persist_queue();
         item.set_status(DownloadStatus::Downloading);
-        // Attempts start indeterminate: clear any stale fraction so the row pulses through the connecting phase.
-        item.set_progress(0.0);
+        // Fresh attempts pulse while connecting; a segmented resume keeps its
+        // restored completed-byte fraction visible instead of flashing back to zero.
+        if !resuming {
+            item.set_progress(0.0);
+        }
         let host = url::Url::parse(&item.url())
             .ok()
             .and_then(|u| u.host_str().map(|h| h.to_string()))
             .unwrap_or_default();
-        item.set_detail(if host.is_empty() {
+        item.set_detail(if resuming {
+            gettext("Resuming download…")
+        } else if host.is_empty() {
             gettext("Starting…")
         } else {
             gettext("Connecting to {host}…").replace("{host}", &host)

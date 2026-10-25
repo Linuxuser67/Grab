@@ -7402,19 +7402,13 @@ fn download_builders_use_machine_progress_and_ignore_config() {
             .position(|a| a == "--progress-template")
             .expect("template flag");
         assert_eq!(argv[t + 1], YTDLP_PROGRESS_TEMPLATE, "{argv:?}");
-        // The `web` player-client exclusion rides on every spawn: SABR
-        // URL-less formats break the whole run otherwise (yt-dlp#12482).
-        let e = argv
-            .iter()
-            .position(|a| a == "--extractor-args")
-            .expect("extractor-args flag");
-        assert_eq!(
-            argv[e + 1],
-            "youtube:player_client=default,-web",
+        // Never inject the experimental player-client override.
+        assert!(
+            !argv.iter().any(|a| a == "youtube:player_client=default,-web"),
             "{argv:?}"
         );
         let sep = argv.iter().position(|a| a == "--").expect("separator");
-        assert!(sep > e + 1, "{argv:?}");
+        assert!(sep > 0, "{argv:?}");
     }
 }
 // ── subtitle sidecars ────────────────────────────────────────────────

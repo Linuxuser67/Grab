@@ -1741,7 +1741,7 @@ impl DownloadManager {
                 return;
             }
 
-            let (mode, drop_segments, torrent_dest, torrent_output_dir) = match preparation {
+            let prepared = match preparation {
                 Ok(Ok(prepared)) => prepared,
                 Ok(Err(detail)) => {
                     current.set_detail(detail.clone());
@@ -1762,21 +1762,21 @@ impl DownloadManager {
                     return;
                 }
             };
-            if drop_segments {
+            if matches!(
+                prepared,
+                PreparedSpawn::Plain {
+                    drop_segments: true,
+                    ..
+                }
+            ) {
                 manager.segment_state.borrow_mut().remove(&id);
                 manager.persist_queue();
             }
-            manager.spawn_prepared(current, mode, torrent_dest, torrent_output_dir);
+            manager.spawn_prepared(current, prepared);
         });
     }
 
-    fn spawn_prepared(
-        self: &Rc<Self>,
-        item: DownloadItem,
-        mode: Option<StartMode>,
-        torrent_dest: Option<std::path::PathBuf>,
-        torrent_output_dir: Option<String>,
-    ) {
+    fn spawn_prepared(self: &Rc<Self>, item: DownloadItem, prepared: PreparedSpawn) {
         let opts = DownloadOptions::from_settings(&self.settings);
         // Re-stash per attempt: a stale Last-Modified must never apply when the new run's server sends none.
         self.server_mtime.borrow_mut().remove(&item.id());
@@ -1791,38 +1791,43 @@ impl DownloadManager {
         }
         publish_rate_limit(&self.settings);
         let url = item.url().to_string();
-        if crate::torrent::is_torrent(&url) {
-            let Some(dest) = torrent_dest else {
-                item.set_detail(gettext("Could not prepare the torrent output folder"));
-                item.set_status(DownloadStatus::Failed);
-                self.changed();
-                return;
-            };
-            if let Some(output_dir) = torrent_output_dir {
-                item.set_output_dir(output_dir);
+        let mode = match prepared {
+            PreparedSpawn::Torrent { dest, output_dir } => {
+                if let Some(output_dir) = output_dir {
+                    item.set_output_dir(output_dir);
+                }
+                return self.spawn_torrent(item, url, dest);
             }
-            return self.spawn_torrent(item, url, dest);
-        }
-        if let Some(crate::media_types::VideoSource::Page {
-            page_url,
-            quality,
-            audio_only,
-            is_live,
-            video_format_id,
-            playlist_item_id,
-            ..
-        }) = self.video_source(item.id())
-        {
-            return self.spawn_video(SpawnVideoParams {
-                item,
-                page_url,
-                quality,
-                audio_only,
-                video_format_id,
-                is_live,
-                playlist_item_id,
-            });
-        }
+            PreparedSpawn::Video => {
+                let Some(crate::media_types::VideoSource::Page {
+                    page_url,
+                    quality,
+                    audio_only,
+                    is_live,
+                    video_format_id,
+                    playlist_item_id,
+                    ..
+                }) = self.video_source(item.id())
+                else {
+                    let detail = gettext("Could not prepare video source");
+                    item.set_detail(detail);
+                    item.set_status(DownloadStatus::Failed);
+                    self.changed();
+                    self.start_next();
+                    return;
+                };
+                return self.spawn_video(SpawnVideoParams {
+                    item,
+                    page_url,
+                    quality,
+                    audio_only,
+                    video_format_id,
+                    is_live,
+                    playlist_item_id,
+                });
+            }
+            PreparedSpawn::Plain { mode, .. } => mode,
+        };
         let connections = (opts.connections.max(1) as usize).min(16);
         let timeout = Duration::from_secs(30);
         // Restore the visible fraction from the saved bitmap before starting the

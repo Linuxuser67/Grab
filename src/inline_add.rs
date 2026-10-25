@@ -1590,8 +1590,10 @@ fn wire_torrent_picker(
     scheduled_at: Rc<Cell<Option<i64>>>,
 ) {
     let nav = nav.clone();
+    let torrent_btn = torrent_btn.clone();
     let scheduled_at_c = Rc::clone(&scheduled_at);
     torrent_btn.connect_clicked(move |_| {
+        let torrent_btn = torrent_btn.clone();
         let m = manager.clone();
         let dd = dest_dir.clone();
         let close_card = close_card.clone();

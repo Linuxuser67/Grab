@@ -2453,6 +2453,8 @@ impl DownloadManager {
                                 this.segment_state.borrow_mut().remove(&id);
                                 this.persist_queue();
                                 this.start_next();
+                                drop(this);
+                                ack.send(()).await.ok();
                             } else {
                                 tracing::warn!(path = %path.display(), "could not truncate segmented file before single-stream fallback");
                                 // Dropping ack tells the engine that fallback cannot safely proceed.
@@ -2462,9 +2464,9 @@ impl DownloadManager {
                         } else {
                             this.segment_state.borrow_mut().remove(&id);
                             this.persist_queue();
+                            drop(this);
+                            ack.send(()).await.ok();
                         }
-                        drop(this);
-                        ack.send(()).await.ok();
                     }
                     EngineMsg::SuggestName(name) => {
                         // Stash the server-advertised name for adoption at Finished:

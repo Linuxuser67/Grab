@@ -2430,7 +2430,8 @@ impl DownloadManager {
                         // Keep the bitmap persisted until the sparse/segmented file is
                         // actually truncated. A crash during the worker must still restore
                         // with the bitmap rather than append to a file with holes.
-                        if let Some(state) = this.segment_state.borrow().get(&id).cloned() {
+                        let segment_state = { this.segment_state.borrow().get(&id).cloned() };
+                        if let Some(state) = segment_state {
                             let path = item.file_path();
                             this.reserve_dest(&path);
                             let worker_path = path.clone();

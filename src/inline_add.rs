@@ -1237,7 +1237,7 @@ fn push_playlist_items_page(
         let picker_page_weak = picker_page_weak.clone();
         let fallback_to_picker = fallback_to_picker.clone();
         let add_btn_click = add_btn.clone();
-        add_btn_click.connect_clicked(move |_| {
+        add_btn_click.clone().connect_clicked(move |_| {
             // Guard against re-entry: Enter emits clicked directly, bypassing
             // the sensitivity check, so a second press while the import is in
             // flight would enqueue duplicates.
@@ -1594,7 +1594,7 @@ fn wire_torrent_picker(
     let nav = nav.clone();
     let torrent_btn = torrent_btn.clone();
     let scheduled_at_c = Rc::clone(&scheduled_at);
-    torrent_btn.connect_clicked(move |_| {
+    torrent_btn.clone().connect_clicked(move |_| {
         let torrent_btn = torrent_btn.clone();
         let m = manager.clone();
         let dd = dest_dir.clone();

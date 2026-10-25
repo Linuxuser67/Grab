@@ -2695,7 +2695,7 @@ fn expand_playlist_rows_use_titled_subfolder() {
         .into_boxed_slice(),
     };
     let (added, total, skipped_by_host_limit) = glib::MainContext::default().block_on(
-        download::DownloadManager::expand_playlist_rows_async(
+        crate::download::DownloadManager::expand_playlist_rows_async(
             Rc::downgrade(&manager),
             parent.id(),
             0,

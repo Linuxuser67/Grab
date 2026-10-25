@@ -2695,7 +2695,13 @@ fn expand_playlist_rows_use_titled_subfolder() {
         .into_boxed_slice(),
     };
     let (added, total, skipped_by_host_limit) = glib::MainContext::default()
-        .block_on(manager.expand_playlist_rows_async(parent.id(), &parent, &pl));
+        .block_on(download::DownloadManager::expand_playlist_rows_async(
+            Rc::downgrade(&manager),
+            parent.id(),
+            0,
+            &parent,
+            &pl,
+        ));
     assert_eq!((added, total, skipped_by_host_limit), (2, 2, 0));
     let sub = dest.join("My Mix: Vol. 1");
     assert!(sub.is_dir());

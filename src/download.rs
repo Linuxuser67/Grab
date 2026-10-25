@@ -280,6 +280,8 @@ pub struct DownloadManager {
     running: RefCell<HashMap<u64, tokio::task::JoinHandle<()>>>,
     /// Rows whose filesystem preparation is in flight; these consume scheduler slots too.
     preparing: RefCell<HashSet<u64>>,
+    /// Filesystem-preparation task handles; abort them on manager drop so thread-bound GLib futures cannot leak into another test's context.
+    preparation_handles: RefCell<HashMap<u64, glib::JoinHandle<()>>>,
     /// Pump task handles by download ID, so tests can wait for pump completion (a `spawn_future_local` task reaped on another thread trips glib's thread guard).
     pub(crate) pump_handles: RefCell<HashMap<u64, glib::JoinHandle<()>>>,
     next_id: Cell<u64>,
@@ -445,10 +447,12 @@ impl Drop for RestoreTaskGuard {
 
 impl Drop for DownloadManager {
     fn drop(&mut self) {
-        // Abort any pump tasks: they're `spawn_future_local`, so a stale one
-        // reaped on another thread trips glib's thread guard. Tests wait for
-        // pump completion via `drain_engine` (which checks `pump_handles`),
-        // so in practice none are pending here; this is a backstop.
+        // Abort thread-bound local tasks on their owning thread. Tests and app
+        // shutdown normally drain them; this backstop prevents an unfinished
+        // preparation/pump from being reaped by another test's context thread.
+        for (_, handle) in self.preparation_handles.borrow_mut().drain() {
+            handle.abort();
+        }
         for (_, handle) in self.pump_handles.borrow_mut().drain() {
             handle.abort();
         }
@@ -588,6 +592,7 @@ impl DownloadManager {
             settings,
             running: RefCell::new(HashMap::new()),
             preparing: RefCell::new(HashSet::new()),
+            preparation_handles: RefCell::new(HashMap::new()),
             pump_handles: RefCell::new(HashMap::new()),
             next_id: Cell::new(1),
             on_change: RefCell::new(None),
@@ -1635,7 +1640,9 @@ impl DownloadManager {
         self.reserve_dest(&dest);
         self.preparing.borrow_mut().insert(id);
         let weak = Rc::downgrade(self);
-        glib::spawn_future_local(async move {
+        let task_weak = weak.clone();
+        let handle = glib::spawn_future_local(async move {
+            async move {
             let worker_dest = dest.clone();
             let worker_dir = dest_dir.clone();
             let worker_recorded = item.output_dir().to_string();
@@ -1785,7 +1792,16 @@ impl DownloadManager {
                 manager.persist_queue();
             }
             manager.spawn_prepared(current, prepared);
+            }
+            .await;
+            if let Some(manager) = task_weak.upgrade() {
+                manager.preparation_handles.borrow_mut().remove(&id);
+            }
         });
+        // Insert after creating the task, before the main context can poll it.
+        if let Some(old) = self.preparation_handles.borrow_mut().insert(id, handle) {
+            old.abort();
+        }
     }
 
     fn spawn_prepared(self: &Rc<Self>, item: DownloadItem, prepared: PreparedSpawn) {

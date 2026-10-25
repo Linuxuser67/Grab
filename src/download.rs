@@ -814,6 +814,34 @@ impl DownloadManager {
         }
     }
 
+    /// Delete a segmented partial away from GTK. Reserve its exact path until
+    /// unlink completes so an immediate retry cannot recreate it mid-cleanup.
+    fn schedule_partial_cleanup(self: &Rc<Self>, path: std::path::PathBuf) {
+        self.reserve_dest(&path);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let worker_path = path.clone();
+            match gio::spawn_blocking(move || std::fs::remove_file(worker_path)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(Err(e)) => tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "could not remove cancelled segmented partial"
+                ),
+                Err(e) => tracing::warn!(
+                    path = %path.display(),
+                    error = ?e,
+                    "partial cleanup worker failed"
+                ),
+            }
+            if let Some(manager) = weak.upgrade() {
+                manager.release_dest(&path);
+                manager.start_next();
+            }
+        });
+    }
+
     /// Whether the row is currently capturing a live stream (stop-and-keep applies).
     pub fn is_live_video(&self, id: u64) -> bool {
         self.live_rows.borrow().contains(&id)
@@ -2776,7 +2804,9 @@ impl DownloadManager {
 
     /// Cancel a download; retry with [`DownloadManager::retry`].
     pub fn cancel(self: &Rc<Self>, id: u64) {
-        self.cancel_inner(id, false, Stop::Preserve);
+        if let Some(path) = self.cancel_inner(id, false, Stop::Preserve) {
+            self.schedule_partial_cleanup(path);
+        }
         self.persist_queue();
         self.changed();
         self.start_next();
@@ -2833,7 +2863,7 @@ impl DownloadManager {
         }
     }
 
-    fn cancel_inner(&self, id: u64, keep_partial: bool, stop: Stop) {
+    fn cancel_inner(&self, id: u64, keep_partial: bool, stop: Stop) -> Option<std::path::PathBuf> {
         // Live rows keep what's recorded (Stop, not Cancel): signal the worker and skip the abort plus the Cancelled preset, so its Finished still lands. Removal is the one caller that discards.
         let live = self.live_rows.borrow().contains(&id);
         // Only a *video* worker can be told to discard: plain rows have no `video_abort` sender, so a Discard-only path would leak the engine and its slot.
@@ -2852,10 +2882,12 @@ impl DownloadManager {
         self.pending_names.borrow_mut().remove(&id);
         let had_segments = self.segment_state.borrow_mut().remove(&id).is_some();
         self.torrent_pieces.borrow_mut().remove(&id);
+        let mut partial_to_remove = None;
         if let Some(item) = self.find(id) {
             // Segmented partials have holes: without the bitmap cancel drops the file — unless the row may come back via Undo.
+            // Return the path so callers can reserve it and unlink off the GTK thread.
             if had_segments && !keep_partial {
-                let _ = std::fs::remove_file(item.file_path());
+                partial_to_remove = Some(item.file_path());
             }
             // Unfinished torrent rows drop their session entry but keep partial files, so cancel/retry and remove/Undo resume.
             if crate::torrent::is_torrent(&item.url()) && item.status() != DownloadStatus::Done {
@@ -2869,7 +2901,7 @@ impl DownloadManager {
                 item.set_detail(item.status().label());
             }
         }
-    }
+        partial_to_remove
 
     /// Re-queue a failed or cancelled download.
     pub fn retry(self: &Rc<Self>, id: u64) {
@@ -2900,7 +2932,7 @@ impl DownloadManager {
 
     /// Cancel and drop a row; restore with [`DownloadManager::unremove`]. The partial file is kept so Undo can resume.
     pub fn remove(self: &Rc<Self>, id: u64) {
-        self.cancel_inner(id, true, Stop::Discard);
+        let _ = self.cancel_inner(id, true, Stop::Discard);
         self.epoch.borrow_mut().remove(&id);
         self.started.borrow_mut().remove(&id);
         // Video rows defer the sweep to `finish_discard`, which waits for the worker: a finalize path still inside its rename would otherwise deliver a file for a row that no longer exists.
@@ -3148,6 +3180,7 @@ impl DownloadManager {
     /// Cancel every queued, downloading or paused item.
     pub fn cancel_all(self: &Rc<Self>) {
         // One persist at the end and no per-row start_next: cancel() would briefly spawn the next queued row only to cancel it right after.
+        let mut partials_to_remove = Vec::new();
         self.for_matching(
             |s| {
                 matches!(
@@ -3155,8 +3188,15 @@ impl DownloadManager {
                     DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
                 )
             },
-            |m, id| m.cancel_inner(id, false, Stop::Preserve),
+            |m, id| {
+                if let Some(path) = m.cancel_inner(id, false, Stop::Preserve) {
+                    partials_to_remove.push(path);
+                }
+            },
         );
+        for path in partials_to_remove {
+            self.schedule_partial_cleanup(path);
+        }
         self.persist_queue();
         self.changed();
         self.start_next();

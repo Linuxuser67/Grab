@@ -2229,11 +2229,11 @@ impl DownloadManager {
                             done = true;
                             break;
                         };
+                        this.release_dest(&invalid_path);
                         if !this.is_current(id, generation) {
                             done = true;
                             break;
                         }
-                        this.release_dest(&invalid_path);
                         this.start_next();
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused

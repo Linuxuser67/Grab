@@ -3145,21 +3145,6 @@ impl DownloadManager {
         Ok(())
     }
 
-    /// Synchronous wrapper retained only for unit tests. Production UI code
-    /// must use delete_download_async.
-    #[cfg(test)]
-    pub fn delete_download(self: &Rc<Self>, id: u64) -> Result<(), String> {
-        let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
-        let operation = self.prepare_delete_operation(id, &item);
-        let is_torrent = matches!(&operation, DeleteOperation::Torrent { .. });
-        execute_delete_operation(operation)?;
-        if is_torrent {
-            crate::torrent::forget_download(id);
-        }
-        self.remove(id);
-        Ok(())
-    }
-
     /// Cancel every queued, downloading or paused item.
     pub fn cancel_all(self: &Rc<Self>) {
         // One persist at the end and no per-row start_next: cancel() would briefly spawn the next queued row only to cancel it right after.

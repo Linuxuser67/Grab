@@ -1948,7 +1948,7 @@ impl DownloadManager {
             lost_claims.borrow().iter().any(|lost| lost == name) || is_taken(name)
         };
         for _ in 0..8 {
-            let candidate = dedupe_filename(wanted, taken);
+            let candidate = dedupe_filename(wanted, &taken);
             let target = dir.join(&candidate);
             if old_path == target {
                 return Some(candidate);

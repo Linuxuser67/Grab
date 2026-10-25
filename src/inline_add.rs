@@ -1534,7 +1534,8 @@ fn push_torrent_picker_page(
         let grid = grid.clone();
         let fallback_to_picker = fallback_to_picker.clone();
         let add_btn_click = add_btn.clone();
-        add_btn_click.connect_clicked(move |_| {
+        let add_btn_signal = add_btn_click.clone();
+        add_btn_signal.connect_clicked(move |_| {
             let selected: Vec<usize> = grid.selected_indices();
             if selected.is_empty() {
                 fallback_to_picker();

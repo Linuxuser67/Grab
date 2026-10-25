@@ -1643,93 +1643,93 @@ impl DownloadManager {
         let task_weak = weak.clone();
         let handle = glib::spawn_future_local(async move {
             async move {
-            let worker_dest = dest.clone();
-            let worker_dir = dest_dir.clone();
-            let worker_recorded = item.output_dir().to_string();
-            let worker_segments = segments.clone();
-            let preparation = gio::spawn_blocking(move || {
-                let parent = worker_dest.parent();
-                if let Some(parent) = parent {
-                    // Re-check containment on the worker immediately before touching the
-                    // path: a symlink planted after intake must not redirect the write.
-                    match ensure_contained_parent(parent, &worker_dir) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            return Err(gettext("Download path escapes the download folder"));
-                        }
-                        Err(error) => {
-                            return Err(gettext("Could not create the download folder: {error}")
-                                .replace("{error}", &error.to_string()));
+                let worker_dest = dest.clone();
+                let worker_dir = dest_dir.clone();
+                let worker_recorded = item.output_dir().to_string();
+                let worker_segments = segments.clone();
+                let preparation = gio::spawn_blocking(move || {
+                    let parent = worker_dest.parent();
+                    if let Some(parent) = parent {
+                        // Re-check containment on the worker immediately before touching the
+                        // path: a symlink planted after intake must not redirect the write.
+                        match ensure_contained_parent(parent, &worker_dir) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return Err(gettext("Download path escapes the download folder"));
+                            }
+                            Err(error) => {
+                                return Err(gettext("Could not create the download folder: {error}")
+                                    .replace("{error}", &error.to_string()));
+                            }
                         }
                     }
-                }
 
-                if is_torrent {
-                    let dir = std::path::PathBuf::from(&worker_dir);
-                    let recorded_path = std::path::PathBuf::from(&worker_recorded);
-                    let (output, output_dir) = if worker_recorded.is_empty() {
-                        (dir.clone(), None)
-                    } else {
-                        // Re-guard the recorded folder at spawn time; a symlink may have
-                        // been planted after intake. Never follow it outside the destination.
-                        let guarded =
-                            crate::torrent::guard_output_folder(&dir, recorded_path.clone());
-                        let output_dir = (guarded != recorded_path)
-                            .then(|| guarded.to_string_lossy().into_owned());
-                        if output_dir.is_none() && guarded.parent() != Some(dir.as_path()) {
-                            std::fs::create_dir_all(&guarded).map_err(|error| {
+                    if is_torrent {
+                        let dir = std::path::PathBuf::from(&worker_dir);
+                        let recorded_path = std::path::PathBuf::from(&worker_recorded);
+                        let (output, output_dir) = if worker_recorded.is_empty() {
+                            (dir.clone(), None)
+                        } else {
+                            // Re-guard the recorded folder at spawn time; a symlink may have
+                            // been planted after intake. Never follow it outside the destination.
+                            let guarded =
+                                crate::torrent::guard_output_folder(&dir, recorded_path.clone());
+                            let output_dir = (guarded != recorded_path)
+                                .then(|| guarded.to_string_lossy().into_owned());
+                            if output_dir.is_none() && guarded.parent() != Some(dir.as_path()) {
+                                std::fs::create_dir_all(&guarded).map_err(|error| {
+                                    gettext("Could not create the download folder: {error}")
+                                        .replace("{error}", &error.to_string())
+                                })?;
+                            }
+                            (guarded, output_dir)
+                        };
+                        if worker_recorded.is_empty() {
+                            std::fs::create_dir_all(&dir).map_err(|error| {
                                 gettext("Could not create the download folder: {error}")
                                     .replace("{error}", &error.to_string())
                             })?;
                         }
-                        (guarded, output_dir)
-                    };
-                    if worker_recorded.is_empty() {
-                        std::fs::create_dir_all(&dir).map_err(|error| {
-                            gettext("Could not create the download folder: {error}")
-                                .replace("{error}", &error.to_string())
-                        })?;
+                        return Ok(PreparedSpawn::Torrent {
+                            dest: output,
+                            output_dir,
+                        });
                     }
-                    return Ok(PreparedSpawn::Torrent {
-                        dest: output,
-                        output_dir,
-                    });
-                }
-                if is_video {
-                    return Ok(PreparedSpawn::Video);
-                }
+                    if is_video {
+                        return Ok(PreparedSpawn::Video);
+                    }
 
-                let mut drop_segments = false;
-                let mode = match worker_segments {
-                    Some(state) => {
-                        // Drop an invalid bitmap and stale partial together. Do both on
-                        // the worker so resume validation does not block GTK.
-                        let len = std::fs::metadata(&worker_dest)
-                            .map(|metadata| metadata.len())
-                            .unwrap_or(0);
-                        if len < state.prefix_len() || len > state.total {
-                            let _ = std::fs::remove_file(&worker_dest);
-                            drop_segments = true;
-                            StartMode::Fresh
-                        } else {
-                            StartMode::Resume(state)
+                    let mut drop_segments = false;
+                    let mode = match worker_segments {
+                        Some(state) => {
+                            // Drop an invalid bitmap and stale partial together. Do both on
+                            // the worker so resume validation does not block GTK.
+                            let len = std::fs::metadata(&worker_dest)
+                                .map(|metadata| metadata.len())
+                                .unwrap_or(0);
+                            if len < state.prefix_len() || len > state.total {
+                                let _ = std::fs::remove_file(&worker_dest);
+                                drop_segments = true;
+                                StartMode::Fresh
+                            } else {
+                                StartMode::Resume(state)
+                            }
                         }
-                    }
-                    // Existing destination is refused for a fresh row; never overwrite a
-                    // file that may belong to the user or another application.
-                    None => match std::fs::metadata(&worker_dest) {
-                        Err(_) => StartMode::Fresh,
-                        Ok(_) if !started => {
-                            return Err(DEST_EXISTS.to_string());
-                        }
-                        Ok(_) => StartMode::Single,
-                    },
-                };
-                Ok(PreparedSpawn::Plain {
-                    mode,
-                    drop_segments,
+                        // Existing destination is refused for a fresh row; never overwrite a
+                        // file that may belong to the user or another application.
+                        None => match std::fs::metadata(&worker_dest) {
+                            Err(_) => StartMode::Fresh,
+                            Ok(_) if !started => {
+                                return Err(DEST_EXISTS.to_string());
+                            }
+                            Ok(_) => StartMode::Single,
+                        },
+                    };
+                    Ok(PreparedSpawn::Plain {
+                        mode,
+                        drop_segments,
+                    })
                 })
-            })
             .await;
 
             let Some(manager) = weak.upgrade() else {

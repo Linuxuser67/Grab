@@ -347,25 +347,29 @@ pub(crate) fn push_gallery_picker_page(
                 speed_limit: crate::gallery_runner::gallery_speed_limit(settings),
                 range: Some(range),
             };
-            // Batch guard defers start_next until the Scheduled status is set.
-            let _guard = manager.batch_guard();
-            let mut job = base_job.clone();
-            job.dest_dir = std::path::PathBuf::from(dest_dir.borrow().clone());
-            match manager.enqueue_gallery(&job) {
-                Ok(item) => {
-                    apply_scheduled_at(&item, scheduled_at);
-                    // Don't destroy the currently emitting button/page in its
-                    // own clicked callback. close_card already pops back to form;
-                    // defer that teardown until the signal has unwound.
-                    let close = close_card.clone();
-                    gtk4::glib::idle_add_local_once(move || close());
+            let manager = Rc::clone(&manager);
+            let dest_dir = Rc::clone(&dest_dir);
+            let close_card = Rc::clone(&close_card);
+            let error_caption = error_caption.clone();
+            let add_btn_guard = add_btn_guard.clone();
+            gtk4::glib::spawn_future_local(async move {
+                let _guard = manager.batch_guard();
+                let mut job = base_job;
+                job.dest_dir = std::path::PathBuf::from(dest_dir.borrow().clone());
+                match manager.enqueue_gallery_async(&job).await {
+                    Ok(item) => {
+                        apply_scheduled_at(&item, scheduled_at);
+                        // Defer picker teardown until the clicked signal unwinds.
+                        let close = close_card.clone();
+                        gtk4::glib::idle_add_local_once(move || close());
+                    }
+                    Err(e) => {
+                        error_caption.set_text(&e);
+                        error_caption.set_visible(true);
+                        add_btn_guard.set_sensitive(true);
+                    }
                 }
-                Err(e) => {
-                    error_caption.set_text(&e);
-                    error_caption.set_visible(true);
-                    add_btn_guard.set_sensitive(true);
-                }
-            }
+            });
         });
     }
 

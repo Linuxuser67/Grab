@@ -60,7 +60,6 @@ fn block_on_test_context<F: std::future::Future>(future: F) -> F::Output {
         .expect("test thread should be able to own its private GLib context")
 }
 
-
 /// Wait for the asynchronous spawn preparation to hand a queued row to its engine.
 fn wait_for_started(manager: &DownloadManager, id: u64, timeout: Duration) -> bool {
     let ctx = glib::MainContext::default();

@@ -2092,14 +2092,15 @@ impl DownloadManager {
                         {
                             // A pause keeps its pending name: resumed single-stream attempts never re-suggest.
                             let pending = this.pending_names.borrow_mut().remove(&id);
-                            if let Some(name) = pending {
-                                // Re-apply the final name policy: adoption is the last gate before dedupe/rename. Idempotent on finalized names.
+                            // Drop the strong manager reference across the blocking directory
+                            // listing. Re-upgrade into the arm's continuing binding afterward.
+                            let (this, pending, existing) = if let Some(name) = pending {
+                                // Re-apply the final name policy before yielding; idempotent on finalized names.
                                 let name = this.finalize_filename(&name);
                                 let current = item.filename().to_string();
                                 let dir = item.dest_dir().to_string();
                                 let listing_dir = dir.clone();
-                                // The listing yields the main context; validate the generation
-                                // after the await before applying the result.
+                                drop(this);
                                 let existing = match gio::spawn_blocking(move || {
                                     crate::video_staging::dir_file_names(std::path::Path::new(
                                         &listing_dir,
@@ -2113,10 +2114,20 @@ impl DownloadManager {
                                         Vec::new()
                                     }
                                 };
+                                let Some(this) = weak.upgrade() else {
+                                    done = true;
+                                    break;
+                                };
                                 if !this.is_current(id, generation) {
                                     done = true;
                                     break;
                                 }
+                                (this, Some((name, current, dir)), Some(existing))
+                            } else {
+                                (this, None, None)
+                            };
+                            if let Some((name, current, dir)) = pending {
+                                let existing = existing.unwrap_or_default();
                                 // The main context was yielded while the directory was read. Do not finalize a row that was
                                 // paused/cancelled, removed, or replaced while the worker ran.
                                 if item.status() == DownloadStatus::Cancelled

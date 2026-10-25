@@ -1738,11 +1738,10 @@ pub(crate) fn browser_profile_dir(browser: &str) -> Option<PathBuf> {
     if let Some((at, found)) = cache.get(&key)
         && at.elapsed() < BROWSER_PROFILE_CACHE_TTL
     {
-        tracing::debug!(
+        tracing::info!(
             browser,
             cache_hit = true,
             profile_lookup_ms = started.elapsed().as_millis() as u64,
-            found = ?found,
             "browser profile lookup"
         );
         return found.clone();
@@ -1755,11 +1754,10 @@ pub(crate) fn browser_profile_dir(browser: &str) -> Option<PathBuf> {
     // the result instead of doing the same filesystem work in parallel.
     let found = browser_profile_dir_in(&config, &home, browser);
     cache.insert(key, (std::time::Instant::now(), found.clone()));
-    tracing::debug!(
+    tracing::info!(
         browser,
         cache_hit = false,
         profile_lookup_ms = started.elapsed().as_millis() as u64,
-        found = ?found,
         "browser profile lookup"
     );
     found
@@ -1939,6 +1937,7 @@ pub(crate) fn ytdlp_identity_args(
     args.push(page_url.to_string());
     args
 }
+
 #[cfg(test)]
 mod extractor_args_compat_tests {
     use super::{

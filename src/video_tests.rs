@@ -3600,42 +3600,43 @@ fn fetch_video_page_parses_dump_json() {
 
 #[test]
 fn identity_args_order_and_trim() {
-    // Player-client workaround, cookies, trimmed UA, then `--` + page, identical every spawn.
+    // No forced extractor override; trim user-agent and keep `--` + page last.
     let argv = ytdlp_identity_args("none", Some("  Grab/1  "), "https://x.com/u/status/1");
     assert_eq!(
         argv,
         vec![
-            "--extractor-args".to_string(),
-            "youtube:player_client=default,-web".to_string(),
             "--user-agent".to_string(),
             "Grab/1".to_string(),
             "--".to_string(),
             "https://x.com/u/status/1".to_string(),
         ]
     );
-    // Blank UA is omitted, never sent empty.
     let argv = ytdlp_identity_args("none", None, "https://x.com/u/status/1");
     assert_eq!(
         argv,
-        vec![
-            "--extractor-args".to_string(),
-            "youtube:player_client=default,-web".to_string(),
-            "--".to_string(),
-            "https://x.com/u/status/1".to_string(),
-        ]
+        vec!["--".to_string(), "https://x.com/u/status/1".to_string()]
     );
 }
 
 #[test]
-fn identity_args_excludes_web_player_client() {
-    // SABR workaround survives every spawn: extractor-arg pair always precedes `--`.
-    let argv = ytdlp_identity_args("firefox", None, "https://youtu.be/abc");
-    let pos = argv
+fn identity_args_do_not_force_a_youtube_player_client() {
+    // Keep yt-dlp's evolving defaults unless the user configures an override.
+    let argv = ytdlp_identity_args("none", None, "https://youtu.be/abc");
+    assert!(
+        !argv
+            .iter()
+            .any(|arg| arg == "youtube:player_client=default,-web")
+    );
+    let sep = argv
         .iter()
-        .position(|a| a == "--extractor-args")
-        .expect("extractor-args flag present");
-    assert_eq!(argv[pos + 1], "youtube:player_client=default,-web");
-    assert!(argv.iter().position(|a| a == "--").unwrap() > pos + 1);
+        .position(|arg| arg == "--")
+        .expect("URL separator");
+    assert_eq!(argv[sep + 1], "https://youtu.be/abc");
+    let runtime = argv
+        .iter()
+        .position(|arg| arg == "--js-runtimes")
+        .expect("Deno runtime");
+    assert!(argv[runtime + 1].starts_with("deno"));
 }
 
 // ── best-overall muxed vs HLS ────────────────────────────────────────
@@ -7414,19 +7415,15 @@ fn download_builders_use_machine_progress_and_ignore_config() {
             .position(|a| a == "--progress-template")
             .expect("template flag");
         assert_eq!(argv[t + 1], YTDLP_PROGRESS_TEMPLATE, "{argv:?}");
-        // The `web` player-client exclusion rides on every spawn: SABR
-        // URL-less formats break the whole run otherwise (yt-dlp#12482).
-        let e = argv
-            .iter()
-            .position(|a| a == "--extractor-args")
-            .expect("extractor-args flag");
-        assert_eq!(
-            argv[e + 1],
-            "youtube:player_client=default,-web",
+        // Never inject the experimental player-client override.
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a == "youtube:player_client=default,-web"),
             "{argv:?}"
         );
         let sep = argv.iter().position(|a| a == "--").expect("separator");
-        assert!(sep > e + 1, "{argv:?}");
+        assert!(sep > 0, "{argv:?}");
     }
 }
 // ── subtitle sidecars ────────────────────────────────────────────────

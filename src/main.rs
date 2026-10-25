@@ -139,6 +139,22 @@ fn main() -> glib::ExitCode {
             video_tools::ytdlp_supports_impersonation(&bin).await;
         });
     }
+
+    // Warm cached version checks off the GTK thread. Deno prewarming only
+    // checks existing candidates; unlike ensure_deno(), it never installs or
+    // downloads a runtime as a side effect of application startup.
+    runtime::tokio_rt().spawn(async {
+        if let Ok(Ok(bin)) = runtime::tokio_rt()
+            .spawn_blocking(video_tools::resolve_ytdlp)
+            .await
+        {
+            let _ = video_tools::ensure_ytdlp_version(&bin).await;
+        }
+    });
+    runtime::tokio_rt().spawn(async {
+        video_tools::prewarm_deno_probe().await;
+    });
+
     let app = adw::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)

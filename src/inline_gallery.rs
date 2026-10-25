@@ -131,7 +131,9 @@ pub(crate) fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAuth {
 /// export step, so it starts immediately; gallery-dl resolves its auth first
 /// (`resolve_gallery_auth`).
 pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
+    let total_started = std::time::Instant::now();
     let url = ctx.url.to_string();
+    let host = crate::video_probe::page_host(&url);
     // yt-dlp starts immediately: it uses the handoff jar or
     // --cookies-from-browser, not the exported file below.
     let ytdlp_fut = crate::video::fetch_video_infos(
@@ -145,6 +147,7 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
     // Resolve a handoff jar or browser selector without spawning an export
     // process, so gallery-dl and yt-dlp can probe concurrently.
     let gallery_fut = async {
+        let gallery_started = std::time::Instant::now();
         let auth = resolve_gallery_auth(&url, &ctx.browser);
         let r = crate::gallery_probe::probe_gallery_with_proxy(
             &ctx.tool,
@@ -157,10 +160,23 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
         .await;
         // Keep the chosen cookie source alive until the probe finishes.
         drop(auth);
+        tracing::info!(
+            url_host = %host,
+            gallery_ms = gallery_started.elapsed().as_millis() as u64,
+            result = if r.is_ok() { "ok" } else { "error" },
+            "gallery-dl lookup timing"
+        );
         r
     };
 
     let (ytdlp, gallery) = tokio::join!(ytdlp_fut, gallery_fut);
+    tracing::info!(
+        url_host = %host,
+        dual_probe_total_ms = total_started.elapsed().as_millis() as u64,
+        gallery_result = if gallery.is_ok() { "ok" } else { "error" },
+        ytdlp_result = if ytdlp.is_ok() { "ok" } else { "error" },
+        "dual media probe timing"
+    );
     DualProbeOutcome::Complete { gallery, ytdlp }
 }
 

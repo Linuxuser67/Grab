@@ -71,6 +71,117 @@ struct PendingDiscard {
     finalizer: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Debug)]
+enum DeleteOperation {
+    Gallery {
+        target: Option<std::path::PathBuf>,
+        filename: String,
+    },
+    Torrent {
+        url: String,
+        dest_dir: std::path::PathBuf,
+        output_dir: String,
+        filename: String,
+    },
+    File {
+        path: std::path::PathBuf,
+        sidecars: Vec<std::path::PathBuf>,
+        filename: String,
+    },
+}
+
+/// Trash one path. Missing files are harmless: a completed row may have been
+/// deleted externally since it was last refreshed.
+fn trash_path(path: &std::path::Path, display_name: &str) -> Result<(), String> {
+    match gio::File::for_path(path).trash(gio::Cancellable::NONE) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => Ok(()),
+        Err(e) => Err(format!("Could not move {display_name} to Trash: {e}")),
+    }
+}
+
+/// Execute a prepared delete without touching any GTK object. This job may
+/// include directory enumeration, torrent metadata reads, and cross-volume
+/// trash moves, all of which must stay off the GTK main thread.
+fn execute_delete_operation(operation: DeleteOperation) -> Result<(), String> {
+    match operation {
+        DeleteOperation::Gallery { target, filename } => {
+            if let Some(path) = target
+                && path.is_dir()
+            {
+                trash_path(&path, &filename)?;
+            }
+        }
+        DeleteOperation::Torrent {
+            url,
+            dest_dir,
+            output_dir,
+            filename,
+        } => {
+            let has_archive = crate::torrent::has_archive(&url);
+            // Resolve the real output while archive metadata still exists.
+            let single_path = if has_archive {
+                crate::torrent::single_file_path(&dest_dir, &url)
+            } else {
+                None
+            };
+            let folder = if single_path.is_none() {
+                Some(DownloadManager::torrent_folder_from_parts(
+                    &dest_dir.to_string_lossy(),
+                    &url,
+                    &output_dir,
+                    &filename,
+                ))
+            } else {
+                None
+            };
+
+            if let Some(path) = single_path {
+                // Archived single-file torrents use their metadata name.
+                trash_path(&path, &filename)?;
+            } else if let Some(path) = folder {
+                if path.is_file() {
+                    trash_path(&path, &filename)?;
+                } else if has_archive {
+                    // Preserve unrelated files in the folder; only trash
+                    // paths owned by the torrent metadata.
+                    if crate::torrent::trash_torrent_contents(&path, &url)? {
+                        trash_path(&path, &filename)?;
+                    }
+                } else {
+                    // A magnet without an archive cannot prove folder ownership.
+                    tracing::info!(
+                        "magnet delete: leaving folder in place (no archive to enumerate): {}",
+                        path.display()
+                    );
+                }
+            }
+            // Archive deletion can touch disk too, so it belongs to this job.
+            crate::torrent::delete_archive_for_url(&url);
+        }
+        DeleteOperation::File {
+            path,
+            sidecars,
+            filename,
+        } => {
+            trash_path(&path, &filename)?;
+            // Subtitle sidecars are best-effort: failure to trash a secondary
+            // file must not turn a successful primary delete into a failure.
+            for sidecar in sidecars {
+                let display_name = sidecar.display().to_string();
+                if let Err(e) = trash_path(&sidecar, &display_name) {
+                    tracing::warn!(
+                        sidecar = %sidecar.display(),
+                        error = %e,
+                        "subtitle sidecar left behind"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Destinations with a discard in flight. Stem-wide: the finalizer sweeps
 /// `<stem>.<kind>.*`, so reservations key on parent dir + file stem too.
 /// Counts, not a set: stacked remove/Undo cycles need one release per teardown.
@@ -2888,14 +2999,25 @@ impl DownloadManager {
     /// symlink planted after the download finished can't divert the
     /// delete/trash onto its target.
     fn torrent_folder(item: &DownloadItem) -> std::path::PathBuf {
-        let recorded = item.output_dir().to_string();
+        let dest_dir = item.dest_dir().to_string();
+        let url = item.url().to_string();
+        let output_dir = item.output_dir().to_string();
+        let filename = item.filename().to_string();
+        Self::torrent_folder_from_parts(&dest_dir, &url, &output_dir, &filename)
+    }
+
+    /// Resolve a torrent output folder from plain path metadata so the same
+    /// guard can run on a blocking worker without moving a GTK object.
+    fn torrent_folder_from_parts(
+        dest_dir: &str,
+        url: &str,
+        recorded: &str,
+        filename: &str,
+    ) -> std::path::PathBuf {
         if !recorded.is_empty() {
             let path = std::path::PathBuf::from(recorded);
             // Refuse a recorded folder that is itself a symlink: swapped in
-            // after the finish, `cleanup_unselected`'s `is_dir` check follows
-            // the link and the deletes run through it onto the target.
-            // `symlink_metadata` sees the link itself (even when dangling);
-            // fall through to the guarded recompute instead of trusting it.
+            // after the finish, cleanup could otherwise run through it.
             let is_link = std::fs::symlink_metadata(&path)
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(false);
@@ -2903,10 +3025,10 @@ impl DownloadManager {
                 return path;
             }
         }
-        let dest = std::path::PathBuf::from(item.dest_dir().to_string());
-        crate::torrent::torrent_output_dir(&dest, &item.url())
+        let dest = std::path::PathBuf::from(dest_dir);
+        crate::torrent::torrent_output_dir(&dest, url)
             .map(|folder| crate::torrent::guard_output_folder(&dest, folder))
-            .unwrap_or_else(|| item.file_path())
+            .unwrap_or_else(|| dest.join(filename))
     }
 
     /// Per-piece completion for the block map: segmented bitmap, torrent haves, or a prefix fill from byte progress. Empty when nothing is known.
@@ -2957,133 +3079,85 @@ impl DownloadManager {
         Some(job.dest_dir.clone())
     }
 
-    /// Move the downloaded file to Trash, then remove the row.
-    ///
-    /// # Errors
-    /// Returns a display-ready message when trashing fails.
-    pub fn delete_download(self: &Rc<Self>, id: u64) -> Result<(), String> {
-        let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
-        // Gallery rows: trash the gallery subfolder — but only when the
-        // stored job proves it's ours (see `gallery_trash_target`). Legacy
-        // rows and missing records trash nothing; the row is still removed.
+    /// Prepare immutable inputs for deletion while the model is on GTK.
+    /// Directory checks and torrent archive parsing are deferred to the worker.
+    fn prepare_delete_operation(
+        &self,
+        id: u64,
+        item: &DownloadItem,
+    ) -> DeleteOperation {
+        let filename = item.filename().to_string();
         if item.is_gallery() {
             let target = self
                 .gallery_jobs
                 .borrow()
                 .get(&id)
-                .and_then(|job| Self::gallery_trash_target(&item, job))
-                .filter(|dir| dir.is_dir());
-            if let Some(gallery_dir) = target {
-                match gio::File::for_path(&gallery_dir).trash(gio::Cancellable::NONE) {
-                    Ok(()) => {}
-                    Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
-                    Err(e) => {
-                        return Err(format!("Could not move {} to Trash: {e}", item.filename()));
-                    }
-                }
-            }
-            // remove() discards handoff cookies and drops the job record.
-            self.remove(id);
-            return Ok(());
+                .and_then(|job| Self::gallery_trash_target(item, job));
+            // Legacy gallery rows without an ownership proof still remove
+            // only their queue row; they never trash the shared parent.
+            return DeleteOperation::Gallery { target, filename };
         }
-        // Torrent rows: drop the session entry and archive, drop the row, then Trash the real files (they live in the recorded/recomputed folder, never the stub path).
-        if crate::torrent::is_torrent(&item.url()) {
-            let url = item.url();
-            let has_archive = crate::torrent::has_archive(&url);
 
-            // Resolve all paths while the archive still exists. Both
-            // single_file_path() and torrent_folder() need the metadata.
-            let single_path = if has_archive {
-                crate::torrent::single_file_path(
-                    std::path::Path::new(&item.dest_dir().to_string()),
-                    &url,
-                )
-            } else {
-                None
+        let url = item.url().to_string();
+        if crate::torrent::is_torrent(&url) {
+            return DeleteOperation::Torrent {
+                url,
+                dest_dir: std::path::PathBuf::from(item.dest_dir().to_string()),
+                output_dir: item.output_dir().to_string(),
+                filename,
             };
-            let folder = if single_path.is_none() {
-                Some(Self::torrent_folder(&item))
-            } else {
-                None
-            };
+        }
 
-            // Trash the actual owned files while metadata is still available.
-            if let Some(path) = single_path {
-                // Archived single-file: metadata name (e.g. "foo"), not the item name.
-                match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
-                    Ok(()) => {}
-                    Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
-                    Err(e) => {
-                        return Err(format!("Could not move {} to Trash: {e}", item.filename()));
-                    }
-                }
-            } else if let Some(path) = folder {
-                if path.is_file() {
-                    // Single file (not a directory): trash it directly.
-                    match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
-                        Ok(()) => {}
-                        Err(e)
-                            if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {
-                        }
-                        Err(e) => {
-                            return Err(format!(
-                                "Could not move {} to Trash: {e}",
-                                item.filename()
-                            ));
-                        }
-                    }
-                } else if has_archive {
-                    // Archived multi-file: trash only metadata files, folder if empty.
-                    let folder_empty = crate::torrent::trash_torrent_contents(&path, &url)?;
-                    if folder_empty {
-                        match gio::File::for_path(&path).trash(gio::Cancellable::NONE) {
-                            Ok(()) => {}
-                            Err(e)
-                                if e.kind::<gio::IOErrorEnum>()
-                                    == Some(gio::IOErrorEnum::NotFound) => {}
-                            Err(e) => {
-                                return Err(format!(
-                                    "Could not move {} to Trash: {e}",
-                                    item.filename()
-                                ));
-                            }
-                        }
-                    }
-                    // Folder not empty: contains unrelated files, leave it.
-                } else {
-                    // Magnet without archive: ownership unknown, leave in place.
-                    tracing::info!(
-                        "magnet delete: leaving folder in place (no archive to enumerate): {}",
-                        path.display()
-                    );
-                }
-            }
+        let path = item.file_path();
+        let sidecars = if self.video_sources.borrow().contains_key(&id) {
+            crate::video_prefs::subtitle_content_languages()
+                .into_iter()
+                .map(|lang| crate::video_staging::sidecar_path_for(&path, lang))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        DeleteOperation::File {
+            path,
+            sidecars,
+            filename,
+        }
+    }
 
-            // Only remove metadata after the filesystem operation succeeded.
+    /// Move downloaded files to Trash on a blocking worker, then update the
+    /// queue model on GTK. Errors are display-ready.
+    pub async fn delete_download_async(self: &Rc<Self>, id: u64) -> Result<(), String> {
+        let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
+        let operation = self.prepare_delete_operation(id, &item);
+        let torrent_url = match &operation {
+            DeleteOperation::Torrent { url, .. } => Some(url.clone()),
+            _ => None,
+        };
+        let filename = item.filename().to_string();
+
+        gio::spawn_blocking(move || execute_delete_operation(operation))
+            .await
+            .map_err(|e| format!("Could not move {filename} to Trash: {e}"))??;
+
+        // This only schedules teardown on Tokio; retain the original ordering
+        // and do it only after trash/archive operations have succeeded.
+        if torrent_url.is_some() {
             crate::torrent::forget_download(id);
-            crate::torrent::delete_archive_for_url(&url);
-            self.remove(id);
-            return Ok(());
         }
-        match gio::File::for_path(item.file_path()).trash(gio::Cancellable::NONE) {
-            Ok(()) => {}
-            Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
-            Err(e) => return Err(format!("Could not move {} to Trash: {e}", item.filename())),
-        }
-        // Collected subtitle sidecars travel with the video: trash every `<stem>.<lang>.srt`. Plain rows never wrote sidecars — gate on the staged source like remove().
-        if self.video_sources.borrow().contains_key(&id) {
-            for lang in crate::video_prefs::subtitle_content_languages() {
-                let sidecar = crate::video_staging::sidecar_path_for(&item.file_path(), lang);
-                match gio::File::for_path(&sidecar).trash(gio::Cancellable::NONE) {
-                    Ok(()) => {}
-                    Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
-                    Err(e) => tracing::warn!(
-                        sidecar = %sidecar.display(),
-                        error = %e,
-                        "subtitle sidecar left behind"
-                    ),
-                }
-            }
+        self.remove(id);
+        Ok(())
+    }
+
+    /// Synchronous wrapper retained only for unit tests. Production UI code
+    /// must use delete_download_async.
+    #[cfg(test)]
+    pub fn delete_download(self: &Rc<Self>, id: u64) -> Result<(), String> {
+        let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
+        let operation = self.prepare_delete_operation(id, &item);
+        let is_torrent = matches!(&operation, DeleteOperation::Torrent { .. });
+        execute_delete_operation(operation)?;
+        if is_torrent {
+            crate::torrent::forget_download(id);
         }
         self.remove(id);
         Ok(())

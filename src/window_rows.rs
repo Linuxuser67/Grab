@@ -1136,12 +1136,22 @@ pub(crate) fn build_row(
     {
         let m = Rc::clone(manager);
         let t = Rc::clone(toasts);
-        delete_btn.connect_clicked(move |_| {
-            if let Err(e) = m.delete_download(id) {
-                t.add_toast(adw::Toast::new(&e));
-            } else {
-                t.add_toast(adw::Toast::new(&gettext("Moved to Trash")));
-            }
+        delete_btn.connect_clicked(move |button| {
+            // Trash can involve directory walks or a cross-volume copy. Keep
+            // the row responsive and prevent duplicate submissions while the
+            // blocking operation is in flight.
+            button.set_sensitive(false);
+            let button = button.clone();
+            let m = Rc::clone(&m);
+            let t = Rc::clone(&t);
+            glib::spawn_future_local(async move {
+                let result = m.delete_download_async(id).await;
+                button.set_sensitive(true);
+                match result {
+                    Err(e) => t.add_toast(adw::Toast::new(&e)),
+                    Ok(()) => t.add_toast(adw::Toast::new(&gettext("Moved to Trash"))),
+                }
+            });
         });
     }
     {

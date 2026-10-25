@@ -879,7 +879,7 @@ fn submit_probed_single(
         scheduled_at,
         move |d| async move {
             enqueue_manager
-                .enqueue_video_async(
+                .enqueue_video_async_batched(
                     &page_url,
                     d.as_deref(),
                     name.as_deref(),
@@ -1017,7 +1017,7 @@ fn submit_gallery_all(
         move |d| async move {
             let mut job = job;
             job.dest_dir = std::path::PathBuf::from(d.unwrap_or_else(|| ".".to_string()));
-            enqueue_manager.enqueue_gallery_async(&job).await
+            enqueue_manager.enqueue_gallery_async_batched(&job).await
         },
         move |e| {
             show_video_error(&error_step, e);
@@ -1079,22 +1079,23 @@ pub(crate) fn enqueue_and_close_async<F>(
     scheduled_at: Option<i64>,
     enqueue: impl FnOnce(Option<String>) -> F + 'static,
     on_err: impl FnOnce(&str) + 'static,
-) where
-    F: std::future::Future<Output = Result<DownloadItem, String>> + 'static,
+ ) where
+    F: std::future::Future<Output = Result<(DownloadItem, crate::download::BatchGuard), String>> + 'static,
 {
-    let manager = Rc::clone(manager);
     let dest = Rc::clone(dest);
     let close_card = Rc::clone(close_card);
     glib::spawn_future_local(async move {
         // Own the destination value before awaiting; close_card re-borrows the
         // destination when it resets the form after a successful enqueue.
         let destination = Some(dest.borrow().clone());
-        // Keep the new row parked until its scheduled timestamp is installed.
-        let _guard = manager.batch_guard();
+        // Preparation runs without a batch open. The intake API opens one only
+        // for its synchronous commit and returns the guard so scheduling is set
+        // before the queue is allowed to start the row.
         match enqueue(destination).await {
-            Ok(item) => {
+            Ok((item, guard)) => {
                 apply_scheduled_at(&item, scheduled_at);
                 close_card();
+                drop(guard);
             }
             Err(error) => on_err(&error),
         }
@@ -1557,7 +1558,7 @@ fn push_torrent_picker_page(
                 scheduled_at.get(),
                 move |d| async move {
                     enqueue_manager
-                        .enqueue_torrent_file_async(
+                        .enqueue_torrent_file_async_batched(
                             enqueue_bytes,
                             &enqueue_name,
                             d.as_deref(),

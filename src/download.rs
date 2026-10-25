@@ -1730,7 +1730,7 @@ impl DownloadManager {
                         drop_segments,
                     })
                 })
-            .await;
+                .await;
 
                 let Some(manager) = weak.upgrade() else {
                     return;
@@ -1793,7 +1793,7 @@ impl DownloadManager {
                 }
                 manager.spawn_prepared(current, prepared);
             }
-                .await;
+            .await;
             if let Some(manager) = task_weak.upgrade() {
                 manager.preparation_handles.borrow_mut().remove(&id);
             }

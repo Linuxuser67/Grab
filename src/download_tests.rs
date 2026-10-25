@@ -3101,7 +3101,7 @@ fn raising_max_concurrent_starts_queued() {
 
 #[test]
 fn defer_yields_slot_and_goes_last() {
-    let _lock = lock_queue_file();
+    let (_lock, _loop) = test_locks();
     let _qf = test_queue_file("defer");
     let settings = test_settings();
     settings.set_int("max-concurrent", 1).unwrap();
@@ -3132,6 +3132,9 @@ fn defer_yields_slot_and_goes_last() {
     // Cancel first so no queued row remains for the backend restore to spawn.
     manager.cancel_all();
     assert!(!manager.running.borrow().contains_key(&72));
+    // cancel_all schedules partial-file cleanup on the GLib context. Drain
+    // those local futures before this test's context is owned by another thread.
+    quiesce(&glib::MainContext::default());
     settings.set_int("max-concurrent", 3).unwrap();
 }
 

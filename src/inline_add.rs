@@ -1545,6 +1545,8 @@ fn push_torrent_picker_page(
             let only = (selected.len() < grid.len()).then_some(selected);
             let show_picker_on_error = fallback_to_picker.clone();
             let error_caption_on_error = error_caption.clone();
+            add_btn_click.set_sensitive(false);
+            let add_btn_on_error = add_btn_click.clone();
             let enqueue_manager = Rc::clone(&manager);
             let enqueue_bytes = bytes.clone();
             let enqueue_name = file_name.clone();
@@ -1564,6 +1566,7 @@ fn push_torrent_picker_page(
                         .await
                 },
                 move |e| {
+                    add_btn_on_error.set_sensitive(true);
                     show_picker_on_error();
                     error_caption_on_error.set_text(e);
                     error_caption_on_error.set_visible(true);
@@ -1634,7 +1637,9 @@ fn wire_torrent_picker(
                 }
             };
             if entries.len() <= 1 {
+                torrent_btn.set_sensitive(false);
                 let enqueue_manager = Rc::clone(&m);
+                let torrent_btn_on_error = torrent_btn.clone();
                 enqueue_and_close_async(
                     &m,
                     &dd,
@@ -1646,6 +1651,7 @@ fn wire_torrent_picker(
                             .await
                     },
                     move |e| {
+                        torrent_btn_on_error.set_sensitive(true);
                         set_field_error(&torrent_row, e);
                     },
                 );

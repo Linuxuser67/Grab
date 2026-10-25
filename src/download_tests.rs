@@ -108,6 +108,8 @@ fn drain_engine(manager: &DownloadManager, id: u64) {
     // Also wait for finished-row sizings: `set_finished_detail` spawns one
     // per completion, and it outlives the engine that triggered it.
     while (manager.running.borrow().contains_key(&id)
+        || manager.preparing.borrow().contains(&id)
+        || manager.preparation_handles.borrow().contains_key(&id)
         || manager.pump_handles.borrow().contains_key(&id)
         || manager
             .find(id)

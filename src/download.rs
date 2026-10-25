@@ -278,6 +278,8 @@ pub struct DownloadManager {
     store: gio::ListStore,
     settings: crate::settings::AppSettings,
     running: RefCell<HashMap<u64, tokio::task::JoinHandle<()>>>,
+    /// Rows whose filesystem preparation is in flight; these consume scheduler slots too.
+    preparing: RefCell<HashSet<u64>>,
     /// Pump task handles by download ID, so tests can wait for pump completion (a `spawn_future_local` task reaped on another thread trips glib's thread guard).
     pub(crate) pump_handles: RefCell<HashMap<u64, glib::JoinHandle<()>>>,
     next_id: Cell<u64>,
@@ -585,6 +587,7 @@ impl DownloadManager {
             store,
             settings,
             running: RefCell::new(HashMap::new()),
+            preparing: RefCell::new(HashSet::new()),
             pump_handles: RefCell::new(HashMap::new()),
             next_id: Cell::new(1),
             on_change: RefCell::new(None),
@@ -1521,7 +1524,7 @@ impl DownloadManager {
         self.discards
             .borrow_mut()
             .retain(|_, pending| !pending.finalizer.is_finished());
-        while self.running.borrow().len() < self.max_concurrent() {
+        while self.running.borrow().len() + self.preparing.borrow().len() < self.max_concurrent() {
             let next = self
                 .items()
                 // A discard still tearing down owns its destination: the row stays Queued until the reservation clears.
@@ -1553,9 +1556,11 @@ impl DownloadManager {
         );
         let segments = self.segment_state.borrow().get(&id).cloned();
         let started = self.started.borrow().contains(&id);
-        // Reserve the target while filesystem validation is in flight. This
-        // keeps another queued row or a rapid retry from claiming the same path.
+        // Reserve the target and a scheduler slot while filesystem validation is in flight.
+        // This keeps another queued row or a rapid retry from claiming the same path,
+        // and prevents async preparation from bypassing max_concurrent.
         self.reserve_dest(&dest);
+        self.preparing.borrow_mut().insert(id);
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let worker_dest = dest.clone();
@@ -1641,6 +1646,7 @@ impl DownloadManager {
             let Some(manager) = weak.upgrade() else {
                 return;
             };
+            manager.preparing.borrow_mut().remove(&id);
             manager.release_dest(&dest);
             let Some(current) = manager.find(id) else {
                 manager.start_next();

@@ -287,7 +287,8 @@ async fn lookup_media(
     result
 }
 
-async fn lookup_media_inner(    url: String,
+async fn lookup_media_inner(
+    url: String,
     browser: String,
     newest_first: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
@@ -301,18 +302,35 @@ async fn lookup_media_inner(    url: String,
             (youtube, gallery)
         })
         .await;
+    let local_tools = match local_tools_result {
+        Ok(tools) => tools,
+        Err(error) => {
+            tracing::info!(
+                url_host = %crate::video_probe::page_host(&url),
+                gallery_probe = needs_gallery_tool,
+                tool_resolution_ms = tool_started.elapsed().as_millis() as u64,
+                result = "error",
+                "lookup tool resolution timing"
+            );
+            tracing::error!(error = %error, "lookup tool resolution task failed");
+            return Err(MediaLookupFailure::Failed(gettext(
+                "The lookup failed unexpectedly. Please try again.",
+            )));
+        }
+    };
+    let (youtube_result, gallery_result) = local_tools;
     tracing::info!(
         url_host = %crate::video_probe::page_host(&url),
         gallery_probe = needs_gallery_tool,
         tool_resolution_ms = tool_started.elapsed().as_millis() as u64,
-        result = if local_tools_result.is_ok() { "ok" } else { "error" },
+        ytdlp_result = if youtube_result.is_ok() { "ok" } else { "unavailable" },
+        gallery_result = match &gallery_result {
+            None => "skipped",
+            Some(Ok(_)) => "ok",
+            Some(Err(_)) => "unavailable",
+        },
         "lookup tool resolution timing"
     );
-    let local_tools = local_tools_result
-        .map_err(|error| {
-            tracing::error!(error = %error, "lookup tool resolution task failed");
-            MediaLookupFailure::Failed(gettext("The lookup failed unexpectedly. Please try again."))
-        })?;    let (youtube_result, gallery_result) = local_tools;
     let youtube_bin =
         youtube_result.map_err(|error| MediaLookupFailure::MissingTools(error.to_string()))?;
     let gallery_tool = match gallery_result {

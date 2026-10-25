@@ -1013,6 +1013,7 @@ pub(crate) async fn prewarm_deno_probe() {
         remember_deno_path(&path);
     }
 }
+
 fn find_deno_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     for dir in tool_search_dirs() {
@@ -1763,6 +1764,7 @@ pub(crate) fn browser_profile_dir(browser: &str) -> Option<PathBuf> {
     );
     found
 }
+
 /// Browsers offered for `--cookies-from-browser`, in combo order (yt-dlp names).
 pub const COOKIES_BROWSERS: &[&str] = &[
     "none", "brave", "chrome", "chromium", "edge", "firefox", "opera", "vivaldi", "whale", "zen",

@@ -134,6 +134,8 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
     let total_started = std::time::Instant::now();
     let url = ctx.url.to_string();
     let host = crate::video_probe::page_host(&url);
+    // yt-dlp starts immediately: it uses the handoff jar or
+    // --cookies-from-browser, not the exported file below.
     let ytdlp_fut = crate::video::fetch_video_infos(
         ctx.youtube_bin,
         url.clone(),
@@ -142,6 +144,8 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
         ctx.proxy.clone(),
         None,
     );
+    // Resolve a handoff jar or browser selector without spawning an export
+    // process, so gallery-dl and yt-dlp can probe concurrently.
     let gallery_fut = async {
         let gallery_started = std::time::Instant::now();
         let auth = resolve_gallery_auth(&url, &ctx.browser);

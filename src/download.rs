@@ -1024,6 +1024,9 @@ impl DownloadManager {
         job: &crate::gallery_argv::GalleryJob,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(&job.page_url)?;
+        // Resolve the destination before recording it: empty/relative paths must never
+        // become dependent on the launcher CWD. The sanitized title is used as a
+        // restore-safe folder component, not as an arbitrary path from metadata.
         let dir = self.resolve_dir(Some(&job.dest_dir.to_string_lossy()));
         let title = crate::file_names::sanitize_folder_name(&job.title);
         let listing_dir = dir.clone();
@@ -1033,6 +1036,8 @@ impl DownloadManager {
         .await
         .map_err(|error| format!("Could not inspect gallery destination: {error:?}"))?;
 
+        // Only claim a folder that this row can prove is new. A pre-existing user
+        // directory or another queued gallery must never become a trash target.
         let mut unique_title = title.clone();
         let mut counter = 1;
         while existing.iter().any(|entry| entry == &unique_title)
@@ -1161,6 +1166,8 @@ impl DownloadManager {
 
         // The main context yielded while the folder was prepared. Do not
         // enqueue stale children after pause/cancel/remove.
+        // Collection metadata is untrusted. Re-check the carrier after yielding so
+        // removed/cancelled rows cannot create children from stale resolver output.
         let Some(current) = self.find(id) else {
             return (0, pl.total, 0);
         };
@@ -1570,6 +1577,8 @@ impl DownloadManager {
             let preparation = gio::spawn_blocking(move || {
                 let parent = worker_dest.parent();
                 if let Some(parent) = parent {
+                    // Re-check containment on the worker immediately before touching the
+                    // path: a symlink planted after intake must not redirect the write.
                     match ensure_contained_parent(parent, &worker_dir) {
                         Ok(true) => {}
                         Ok(false) => {
@@ -1590,6 +1599,8 @@ impl DownloadManager {
                     let output = if worker_recorded.is_empty() {
                         dir.clone()
                     } else {
+                        // Re-guard the recorded folder at spawn time; a symlink may have
+                        // been planted after intake. Never follow it outside the destination.
                         let guarded =
                             crate::torrent::guard_output_folder(&dir, recorded_path.clone());
                         if guarded != recorded_path {
@@ -1630,6 +1641,8 @@ impl DownloadManager {
                                 StartMode::Resume(state)
                             }
                         }
+                        // Existing destination is refused for a fresh row; never overwrite a
+                        // file that may belong to the user or another application.
                         None => match std::fs::metadata(&worker_dest) {
                             Err(_) => StartMode::Fresh,
                             Ok(_) if !started => {

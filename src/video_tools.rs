@@ -1712,8 +1712,8 @@ const BROWSER_PROFILE_CACHE_TTL: std::time::Duration = std::time::Duration::from
 type BrowserProfileCacheKey = (PathBuf, PathBuf, String);
 type BrowserProfileCacheValue = (std::time::Instant, Option<PathBuf>);
 
-fn browser_profile_cache(
-) -> &'static Mutex<HashMap<BrowserProfileCacheKey, BrowserProfileCacheValue>> {
+fn browser_profile_cache()
+-> &'static Mutex<HashMap<BrowserProfileCacheKey, BrowserProfileCacheValue>> {
     static CACHE: OnceLock<Mutex<HashMap<BrowserProfileCacheKey, BrowserProfileCacheValue>>> =
         OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))

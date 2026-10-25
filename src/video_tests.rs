@@ -3612,17 +3612,30 @@ fn identity_args_order_and_trim() {
         ]
     );
     let argv = ytdlp_identity_args("none", None, "https://x.com/u/status/1");
-    assert_eq!(argv, vec!["--".to_string(), "https://x.com/u/status/1".to_string()]);
+    assert_eq!(
+        argv,
+        vec!["--".to_string(), "https://x.com/u/status/1".to_string()]
+    );
 }
 
 #[test]
 fn identity_args_do_not_force_a_youtube_player_client() {
     // Keep yt-dlp's evolving defaults unless the user configures an override.
     let argv = ytdlp_identity_args("none", None, "https://youtu.be/abc");
-    assert!(!argv.iter().any(|arg| arg == "youtube:player_client=default,-web"));
-    let sep = argv.iter().position(|arg| arg == "--").expect("URL separator");
+    assert!(
+        !argv
+            .iter()
+            .any(|arg| arg == "youtube:player_client=default,-web")
+    );
+    let sep = argv
+        .iter()
+        .position(|arg| arg == "--")
+        .expect("URL separator");
     assert_eq!(argv[sep + 1], "https://youtu.be/abc");
-    let runtime = argv.iter().position(|arg| arg == "--js-runtimes").expect("Deno runtime");
+    let runtime = argv
+        .iter()
+        .position(|arg| arg == "--js-runtimes")
+        .expect("Deno runtime");
     assert!(argv[runtime + 1].starts_with("deno"));
 }
 
@@ -7404,7 +7417,9 @@ fn download_builders_use_machine_progress_and_ignore_config() {
         assert_eq!(argv[t + 1], YTDLP_PROGRESS_TEMPLATE, "{argv:?}");
         // Never inject the experimental player-client override.
         assert!(
-            !argv.iter().any(|a| a == "youtube:player_client=default,-web"),
+            !argv
+                .iter()
+                .any(|a| a == "youtube:player_client=default,-web"),
             "{argv:?}"
         );
         let sep = argv.iter().position(|a| a == "--").expect("separator");

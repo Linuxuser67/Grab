@@ -1658,8 +1658,10 @@ impl DownloadManager {
                                 return Err(gettext("Download path escapes the download folder"));
                             }
                             Err(error) => {
-                                return Err(gettext("Could not create the download folder: {error}")
-                                    .replace("{error}", &error.to_string()));
+                                return Err(gettext(
+                                    "Could not create the download folder: {error}",
+                                )
+                                .replace("{error}", &error.to_string()));
                             }
                         }
                     }

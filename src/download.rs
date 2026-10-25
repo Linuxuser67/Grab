@@ -2442,7 +2442,7 @@ impl DownloadManager {
                                 truncate_to_prefix(&worker_path, &state)
                             })
                             .await
-                            .is_ok_and(Result::is_ok);
+                            .is_ok_and(|result| result.is_ok());
                             let Some(this) = weak.upgrade() else {
                                 done = true;
                                 break;

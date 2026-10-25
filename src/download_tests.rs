@@ -2174,6 +2174,9 @@ fn finish_cleans_untoggled_placeholders() {
     std::fs::write(folder.join("a.txt"), b"kept").unwrap();
     std::fs::write(folder.join("sub").join("b.txt"), b"").unwrap();
     let selected = crate::torrent::get_selection(&pseudo).unwrap();
+    // Finished drops the URL-scoped selection before its deferred worker runs.
+    // Passing the snapshot must still remove untoggled placeholders.
+    crate::torrent::drop_selection(&pseudo);
     crate::torrent::cleanup_unselected(&folder, &pseudo, &selected);
     assert!(folder.join("a.txt").exists());
     assert!(!folder.join("sub").exists());

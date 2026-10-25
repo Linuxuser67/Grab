@@ -36,8 +36,12 @@ fn test_locks() -> (
     std::sync::MutexGuard<'static, ()>,
 ) {
     // Recover from poison: a panicking test shouldn't cascade into 28 identical failures.
-    let q = QUEUE_FILE_LOCK.lock().unwrap();
-    let l = MAIN_LOOP_LOCK.lock().unwrap();
+    let q = QUEUE_FILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let l = MAIN_LOOP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     (q, l)
 }
 
@@ -5618,11 +5622,23 @@ fn a_video_attempt_gets_a_gate_and_a_plain_row_does_not() {
         backend: None,
     });
     let item = manager.restore_existing(&row).expect("video row");
+    // Destination validation is asynchronous now. Wait until the attempt has
+    // passed preparation and installed its delivery gate before asserting the
+    // fail-fast proxy path; don't assume GTK setup runs in the enqueue call.
+    let context = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while manager.gate_for(item.id()).is_none()
+        && item.status() == DownloadStatus::Queued
+        && std::time::Instant::now() < deadline
+    {
+        context.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     assert!(
         manager.gate_for(item.id()).is_some(),
-        "a video row with no gate cannot arbitrate delivery, so a removal \
-         could not stop it placing a file"
+        "a video attempt must install its delivery gate before engine validation"
     );
+    quiesce(&context);
 
     manager
         .settings()

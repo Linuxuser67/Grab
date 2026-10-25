@@ -932,6 +932,20 @@ impl DownloadManager {
         dest_dir: Option<&str>,
         only_files: Option<Vec<usize>>,
     ) -> Result<DownloadItem, String> {
+        let (item, guard) = self
+            .enqueue_torrent_file_async_batched(bytes, file_name, dest_dir, only_files)
+            .await?;
+        drop(guard);
+        Ok(item)
+    }
+
+    pub(crate) async fn enqueue_torrent_file_async_batched(
+        self: &Rc<Self>,
+        bytes: Vec<u8>,
+        file_name: &str,
+        dest_dir: Option<&str>,
+        only_files: Option<Vec<usize>>,
+    ) -> Result<(DownloadItem, BatchGuard), String> {
         let file_name = file_name.to_string();
         let dir = self.resolve_dir(dest_dir);
         let worker_file_name = file_name.clone();
@@ -946,6 +960,8 @@ impl DownloadManager {
         .await
         .map_err(|error| format!("Could not prepare torrent file: {error:?}"))??;
 
+        // Hold the queue only during the synchronous commit, not during disk I/O.
+        let guard = self.batch_guard();
         if let Some(selection) = only_files {
             crate::torrent::stage_selection(&pseudo, selection);
         }
@@ -976,7 +992,7 @@ impl DownloadManager {
                 );
             }
         }
-        Ok(item)
+        Ok((item, guard))
     }
 
     /// Final filename policy, shared by intake naming and late server/container suggestions: shorten, then the opt-in ASCII fold. Dedupe stays at the call sites.
@@ -1005,6 +1021,20 @@ impl DownloadManager {
         filename: Option<&str>,
         choices: crate::media_types::VideoChoices,
     ) -> Result<DownloadItem, String> {
+        let (item, guard) = self
+            .enqueue_video_async_batched(page_url, dest_dir, filename, choices)
+            .await?;
+        drop(guard);
+        Ok(item)
+    }
+
+    pub(crate) async fn enqueue_video_async_batched(
+        self: &Rc<Self>,
+        page_url: &str,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+        choices: crate::media_types::VideoChoices,
+    ) -> Result<(DownloadItem, BatchGuard), String> {
         let dir = self.resolve_dir(dest_dir);
         let listing_dir = dir.clone();
         let existing = gio::spawn_blocking(move || {
@@ -1012,7 +1042,9 @@ impl DownloadManager {
         })
         .await
         .map_err(|error| format!("Could not inspect download folder: {error:?}"))?;
-        self.enqueue_video_staged(page_url, &dir, filename, choices, &existing)
+        let guard = self.batch_guard();
+        let item = self.enqueue_video_staged(page_url, &dir, filename, choices, &existing)?;
+        Ok((item, guard))
     }
 
     /// Enqueue a gallery download (image gallery via gallery-dl).
@@ -1023,6 +1055,15 @@ impl DownloadManager {
         self: &Rc<Self>,
         job: &crate::gallery_argv::GalleryJob,
     ) -> Result<DownloadItem, String> {
+        let (item, guard) = self.enqueue_gallery_async_batched(job).await?;
+        drop(guard);
+        Ok(item)
+    }
+
+    pub(crate) async fn enqueue_gallery_async_batched(
+        self: &Rc<Self>,
+        job: &crate::gallery_argv::GalleryJob,
+    ) -> Result<(DownloadItem, BatchGuard), String> {
         let url = normalize_url(&job.page_url)?;
         // Resolve the destination before recording it: empty/relative paths must never
         // become dependent on the launcher CWD. The sanitized title is used as a
@@ -1036,6 +1077,8 @@ impl DownloadManager {
         .await
         .map_err(|error| format!("Could not inspect gallery destination: {error:?}"))?;
 
+        // Only hold the queue during the synchronous commit, never across listing I/O.
+        let guard = self.batch_guard();
         // Only claim a folder that this row can prove is new. A pre-existing user
         // directory or another queued gallery must never become a trash target.
         let mut unique_title = title.clone();
@@ -1065,7 +1108,7 @@ impl DownloadManager {
         stored_job.dest_dir = gallery_dir;
         stored_job.item_id = item.id();
         self.gallery_jobs.borrow_mut().insert(item.id(), stored_job);
-        Ok(self.insert(item))
+        Ok((self.insert(item), guard))
     }
 
     /// [`DownloadManager::enqueue_video`] with a precomputed directory listing,

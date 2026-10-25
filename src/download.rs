@@ -2051,10 +2051,8 @@ impl DownloadManager {
                                 let current = item.filename().to_string();
                                 let dir = item.dest_dir().to_string();
                                 let listing_dir = dir.clone();
-                                // Do not keep a strong manager Rc inside this thread-bound local
-                                // task while filesystem work is pending; re-upgrade and validate
-                                // the generation before applying the result.
-                                drop(this);
+                                // The listing yields the main context; validate the generation
+                                // after the await before applying the result.
                                 let existing = match gio::spawn_blocking(move || {
                                     crate::video_staging::dir_file_names(std::path::Path::new(
                                         &listing_dir,
@@ -2067,10 +2065,6 @@ impl DownloadManager {
                                         tracing::warn!(error = ?error, dir = %dir, "finished-name directory listing failed");
                                         Vec::new()
                                     }
-                                };
-                                let Some(this) = weak.upgrade() else {
-                                    done = true;
-                                    break;
                                 };
                                 if !this.is_current(id, generation) {
                                     done = true;

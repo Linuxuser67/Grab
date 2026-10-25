@@ -1504,33 +1504,162 @@ impl DownloadManager {
     }
 
     fn spawn(self: &Rc<Self>, item: DownloadItem) {
-        let opts = DownloadOptions::from_settings(&self.settings);
-        // Re-stash per attempt: a stale Last-Modified must never apply when the new run's server sends none.
-        self.server_mtime.borrow_mut().remove(&item.id());
+        let id = item.id();
         let dest = item.file_path();
-        if let Some(parent) = dest.parent() {
-            // A planted symlink in any parent component would divert the
-            // download outside the destination: refuse instead of following
-            // it. (Filenames can't contain separators, so the parent is the
-            // destination itself today; this pins the invariant.)
-            // A mkdir failure is reported distinctly: it is not a containment
-            // refusal, so "escapes the download folder" would mislead.
-            let blocked = match ensure_contained_parent(parent, &item.dest_dir()) {
-                Ok(true) => None,
-                Ok(false) => Some(gettext("Download path escapes the download folder")),
-                Err(e) => Some(
-                    gettext("Could not create the download folder: {error}")
-                        .replace("{error}", &e.to_string()),
-                ),
+        let dest_dir = item.dest_dir().to_string();
+        let url = item.url().to_string();
+        let is_torrent = crate::torrent::is_torrent(&url);
+        let is_video = matches!(
+            self.video_source(id),
+            Some(crate::media_types::VideoSource::Page { .. })
+        );
+        let segments = self.segment_state.borrow().get(&id).cloned();
+        let started = self.started.borrow().contains(&id);
+        // Reserve the target while filesystem validation is in flight. This
+        // keeps another queued row or a rapid retry from claiming the same path.
+        self.reserve_dest(&dest);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let worker_dest = dest.clone();
+            let worker_dir = dest_dir.clone();
+            let worker_url = url.clone();
+            let worker_recorded = item.output_dir().to_string();
+            let worker_filename = item.filename().to_string();
+            let worker_segments = segments.clone();
+            let preparation = gio::spawn_blocking(move || {
+                let parent = worker_dest.parent();
+                if let Some(parent) = parent {
+                    match ensure_contained_parent(parent, &worker_dir) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return Err(gettext("Download path escapes the download folder"));
+                        }
+                        Err(error) => {
+                            return Err(
+                                gettext("Could not create the download folder: {error}")
+                                    .replace("{error}", &error.to_string()),
+                            );
+                        }
+                    }
+                }
+
+                let mut torrent_dest = None;
+                let mut torrent_output_dir = None;
+                if is_torrent {
+                    let dir = std::path::PathBuf::from(&worker_dir);
+                    let recorded_path = std::path::PathBuf::from(&worker_recorded);
+                    let output = if worker_recorded.is_empty() {
+                        dir.clone()
+                    } else {
+                        let guarded =
+                            crate::torrent::guard_output_folder(&dir, recorded_path.clone());
+                        if guarded != recorded_path {
+                            torrent_output_dir = Some(guarded.to_string_lossy().into_owned());
+                        } else if guarded.parent() != Some(dir.as_path()) {
+                            std::fs::create_dir_all(&guarded).map_err(|error| {
+                                gettext("Could not create the download folder: {error}")
+                                    .replace("{error}", &error.to_string())
+                            })?;
+                        }
+                        guarded
+                    };
+                    if worker_recorded.is_empty() {
+                        std::fs::create_dir_all(&dir).map_err(|error| {
+                            gettext("Could not create the download folder: {error}")
+                                .replace("{error}", &error.to_string())
+                        })?;
+                    }
+                    torrent_dest = Some(output);
+                }
+
+                let mut drop_segments = false;
+                let mode = if is_torrent || is_video {
+                    None
+                } else {
+                    Some(match worker_segments {
+                        Some(state) => {
+                            // Drop an invalid bitmap and stale partial together. Do both on
+                            // the worker so resume validation does not block GTK.
+                            let len = std::fs::metadata(&worker_dest)
+                                .map(|metadata| metadata.len())
+                                .unwrap_or(0);
+                            if len < state.prefix_len() || len > state.total {
+                                let _ = std::fs::remove_file(&worker_dest);
+                                drop_segments = true;
+                                StartMode::Fresh
+                            } else {
+                                StartMode::Resume(state)
+                            }
+                        }
+                        None => match std::fs::metadata(&worker_dest) {
+                            Err(_) => StartMode::Fresh,
+                            Ok(_) if !started => {
+                                return Err(DEST_EXISTS.to_string());
+                            }
+                            Ok(_) => StartMode::Single,
+                        },
+                    })
+                };
+                Ok((mode, drop_segments, torrent_dest, torrent_output_dir))
+            })
+            .await;
+
+            let Some(manager) = weak.upgrade() else {
+                return;
             };
-            if let Some(detail) = blocked {
-                item.set_detail(detail.clone());
-                item.set_status(DownloadStatus::Failed);
-                self.changed();
-                self.notify_finished(&item, Err(detail));
+            manager.release_dest(&dest);
+            let Some(current) = manager.find(id) else {
+                manager.start_next();
+                return;
+            };
+            if current.status() != DownloadStatus::Queued || current.file_path() != dest {
+                manager.start_next();
                 return;
             }
-        }
+            // A cancel/retry can happen while the blocking task runs. If any input
+            // changed, discard its answer and let the scheduler take a fresh snapshot.
+            let current_segments = manager.segment_state.borrow().get(&id).cloned();
+            let same_segments = match (&segments, &current_segments) {
+                (None, None) => true,
+                (Some(before), Some(after)) => {
+                    before.total == after.total && before.done == after.done
+                }
+                _ => false,
+            };
+            if !same_segments || manager.started.borrow().contains(&id) != started {
+                manager.start_next();
+                return;
+            }
+
+            let (mode, drop_segments, torrent_dest, torrent_output_dir) = match preparation {
+                Ok(Ok(prepared)) => prepared,
+                Ok(Err(detail)) => {
+                    current.set_detail(detail.clone());
+                    current.set_status(DownloadStatus::Failed);
+                    manager.changed();
+                    manager.notify_finished(&current, Err(detail));
+                    manager.start_next();
+                    return;
+                }
+                Err(error) => {
+                    let detail = gettext("Could not prepare download destination: {error}")
+                        .replace("{error}", &format!("{error:?}"));
+                    current.set_detail(detail.clone());
+                    current.set_status(DownloadStatus::Failed);
+                    manager.changed();
+                    manager.notify_finished(&current, Err(detail));
+                    manager.start_next();
+                    return;
+                }
+            };
+            if drop_segments {
+                manager.segment_state.borrow_mut().remove(&id);
+                manager.persist_queue();
+            }
+            manager.spawn_prepared(current, mode, torrent_dest, torrent_output_dir);
+        });
+    }
+
         // Fail fast on junk; later edits apply without re-queueing.
         let limit = opts.limit_rate.trim();
         if !limit.is_empty() && limit != "0" && parse_rate(limit).is_none() {
@@ -1542,7 +1671,16 @@ impl DownloadManager {
         publish_rate_limit(&self.settings);
         let url = item.url().to_string();
         if crate::torrent::is_torrent(&url) {
-            return self.spawn_torrent(item, url);
+            let Some(dest) = torrent_dest else {
+                item.set_detail(gettext("Could not prepare the torrent output folder"));
+                item.set_status(DownloadStatus::Failed);
+                self.changed();
+                return;
+            };
+            if let Some(output_dir) = torrent_output_dir {
+                item.set_output_dir(output_dir);
+            }
+            return self.spawn_torrent(item, url, dest);
         }
         if let Some(crate::media_types::VideoSource::Page {
             page_url,
@@ -1567,43 +1705,7 @@ impl DownloadManager {
         let connections = (opts.connections.max(1) as usize).min(16);
         let timeout = Duration::from_secs(30);
         // A saved bitmap means non-contiguous pieces: only a segmented resume is correct.
-        let mode = match self.segment_state.borrow().get(&item.id()).cloned() {
-            Some(st) => {
-                // Drop the bitmap if the file no longer holds the completed prefix (deleted/truncated/replaced while paused).
-                let len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-                if len < st.prefix_len() || len > st.total {
-                    self.segment_state.borrow_mut().remove(&item.id());
-                    let _ = std::fs::remove_file(&dest);
-                    StartMode::Fresh
-                } else {
-                    let frac =
-                        (st.completed_bytes() as f64 / st.total.max(1) as f64).clamp(0.0, 1.0);
-                    item.set_progress(frac);
-                    StartMode::Resume(st)
-                }
-            }
-            None => match std::fs::metadata(&dest) {
-                // A missing destination is a fresh download. An existing
-                // destination — even zero bytes — is refused: it may not be
-                // ours, and silently deleting it could destroy foreign data.
-                Err(_) => StartMode::Fresh,
-                Ok(_) => {
-                    // Parabolic-style dedup: refuse an existing destination
-                    // instead of truncating or renaming it. Restored/retried
-                    // rows carry `started` and resume their own partials
-                    // below (progress alone can't tell: a crash before the
-                    // first tick restores at 0.0 with bytes on disk).
-                    if !self.started.borrow().contains(&item.id()) {
-                        item.set_detail(DEST_EXISTS.to_string());
-                        item.set_status(DownloadStatus::Failed);
-                        self.changed();
-                        self.notify_finished(&item, Err(DEST_EXISTS.to_string()));
-                        return;
-                    }
-                    StartMode::Single
-                }
-            },
-        };
+        let mode = mode.unwrap_or(StartMode::Fresh);
         let generation = self.epoch.borrow().get(&item.id()).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(item.id(), generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2200,29 +2302,12 @@ impl DownloadManager {
     }
 
     /// Spawn the torrent engine for a magnet row. Mirrors `spawn`'s contract so pause/cancel/retry and the stale-pump guard keep working.
-    fn spawn_torrent(self: &Rc<Self>, item: DownloadItem, magnet: String) {
-        let dir = std::path::PathBuf::from(item.dest_dir().to_string());
-        // Magnets recorded their subfolder at enqueue; archived torrents recompute theirs from metadata.
-        let recorded = item.output_dir().to_string();
-        let dest = if recorded.is_empty() {
-            let _ = std::fs::create_dir_all(&dir);
-            dir.clone()
-        } else {
-            // Re-guard the recorded subfolder at spawn: a symlink planted
-            // after intake (a wide window for queued torrents) would
-            // otherwise divert the engine's writes. A squatted name dedupes
-            // to a fresh folder, like collection subfolders.
-            let recorded_path = std::path::PathBuf::from(&recorded);
-            let guarded = crate::torrent::guard_output_folder(&dir, recorded_path.clone());
-            if guarded != recorded_path {
-                item.set_output_dir(guarded.to_string_lossy().into_owned());
-            } else if guarded.parent() != Some(dir.as_path()) {
-                // Not under the dest dir (shouldn't happen: every recorded
-                // path is dir-joined): keep the old ensure-exists behavior.
-                let _ = std::fs::create_dir_all(&guarded);
-            }
-            guarded
-        };
+    fn spawn_torrent(
+        self: &Rc<Self>,
+        item: DownloadItem,
+        magnet: String,
+        dest: std::path::PathBuf,
+    ) {
         let settings = &self.settings;
         let seed_finished = settings.torrent_seed_finished();
         let peer_limit: Option<usize> = None; // rqbit default

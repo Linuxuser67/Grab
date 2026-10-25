@@ -893,8 +893,9 @@ fn submit_probed_single(
     );
 }
 
-/// Dispatch a fresh preview to its submit path: singles queue with their pinned
-/// format, collections open the item picker. The caller's freshness gate stays.
+/// Dispatch a fresh preview to its submit path: singles keep their chosen
+/// format, while collections queue their resolved entries. The caller's
+/// freshness gate stays.
 #[allow(clippy::too_many_arguments)]
 fn submit_probe(
     manager: &Rc<DownloadManager>,
@@ -945,6 +946,71 @@ fn submit_probe(
             );
         }
     }
+}
+
+/// Queue a gallery as a whole from the form's Add action. The separate
+/// "Select files…" button continues to provide explicit per-file selection.
+fn submit_gallery_all(
+    manager: &Rc<DownloadManager>,
+    dest: &Rc<RefCell<String>>,
+    close_card: &Rc<dyn Fn()>,
+    step: &Rc<VideoStep>,
+    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
+    scheduled_at: Option<i64>,
+) {
+    let (page_url, title, filter, file_count) = match step.gallery_card.borrow().as_ref() {
+        Some(card) => {
+            let filter = *card.filter.borrow();
+            (
+                card.url().to_string(),
+                step.gallery_info.title().to_string(),
+                filter,
+                card.total(filter),
+            )
+        }
+        None => {
+            show_video_error(step, &gettext("The gallery preview is no longer available."));
+            set_lookup_add(lookup_add, true);
+            return;
+        }
+    };
+    let submitted_url = step.url_entry.text().trim().to_string();
+    if !crate::download_net::inherit_public_resolution(&submitted_url, &page_url) {
+        show_video_error(
+            step,
+            &gettext("The gallery could not be verified as a public destination."),
+        );
+        set_lookup_add(lookup_add, true);
+        return;
+    }
+
+    let settings = manager.settings();
+    let job = crate::gallery_argv::GalleryJob {
+        item_id: 0,
+        page_url,
+        title,
+        file_count,
+        dest_dir: std::path::PathBuf::from("."),
+        filter,
+        cookies_browser: settings.cookies_browser().to_string(),
+        speed_limit: crate::gallery_runner::gallery_speed_limit(settings),
+        range: None,
+    };
+    enqueue_and_close(
+        manager,
+        dest,
+        close_card,
+        scheduled_at,
+        |d| {
+            let mut job = job;
+            job.dest_dir = std::path::PathBuf::from(d.unwrap_or("."));
+            manager.enqueue_gallery(&job)
+        },
+        |e| {
+            show_video_error(step, e);
+            set_lookup_add(lookup_add, true);
+        },
+    );
 }
 
 /// Report a failed plain-queue fallback on the form: drop the stale probe, log, show the error, re-enable Add.
@@ -1026,6 +1092,7 @@ fn push_playlist_items_page(
     }
 
     let count = playlist.items.len();
+    let truncated = crate::video_probe::playlist_truncated(&playlist);
     // Titles; the truncation notice sits under the header as a dimmed
     // caption.
     let titles = playlist
@@ -1045,7 +1112,7 @@ fn push_playlist_items_page(
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
-    if crate::video_probe::playlist_truncated(&playlist) {
+    if truncated {
         let notice = gtk4::Label::builder()
             .label(
                 gettext("Showing the first {n} of {total}")
@@ -1093,6 +1160,27 @@ fn push_playlist_items_page(
         ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
     });
 
+    // Ordinary Add submits all listed entries without presenting a picker.
+    // Keep the selection page alive only as an error/truncation fallback.
+    let picker_page_weak: glib::WeakRef<adw::NavigationPage> = glib::WeakRef::new();
+    picker_page_weak.set(Some(&picker_page));
+    let picker_page_pushed = Rc::new(Cell::new(false));
+    let fallback_to_picker: Rc<dyn Fn()> = {
+        let nav = nav.clone();
+        let page = picker_page_weak.clone();
+        let pushed = Rc::clone(&picker_page_pushed);
+        Rc::new(move || {
+            if pushed.get() {
+                return;
+            }
+            if let Some(page) = page.upgrade() {
+                pushed.set(true);
+                nav.push(&page);
+            }
+        })
+    };
+    let auto_submit_btn = add_btn.clone();
+
     // Preserve this collection's accepted hosts across partial picker imports.
     // Otherwise repeatedly clicking Queue could reset the cap and eventually
     // register every host from a hostile playlist.
@@ -1102,6 +1190,8 @@ fn push_playlist_items_page(
         let guarded_child_hosts = guarded_child_hosts.clone();
         let close_card = close_card.clone();
         let grid = grid.clone();
+        let picker_page_weak = picker_page_weak.clone();
+        let fallback_to_picker = fallback_to_picker.clone();
         let add_btn_click = add_btn.clone();
         add_btn_click.connect_clicked(move |_| {
             // Guard against re-entry: Enter emits clicked directly, bypassing
@@ -1121,6 +1211,7 @@ fn push_playlist_items_page(
                 .map(|(i, item)| (i, item.clone()))
                 .collect();
             if chosen.is_empty() {
+                fallback_to_picker();
                 error_caption.set_text(&gettext("Select at least one item"));
                 error_caption.set_visible(true);
                 return;
@@ -1146,7 +1237,12 @@ fn push_playlist_items_page(
             // The GTK clicked handler is an `Fn` and may run repeatedly;
             // clone the shared collection-host state for each import future.
             let guarded_child_hosts = guarded_child_hosts.clone();
+            let show_picker_on_error = fallback_to_picker.clone();
+            let picker_page_hold = picker_page_weak.upgrade();
             glib::spawn_future_local(async move {
+                // The unattached page is retained while this submit is in flight,
+                // but the button's signal handler holds only a weak reference.
+                let _picker_page_hold = picker_page_hold;
                 // One blocking call for subdir creation + readdir.
                 let (dir, existing) = match gio::spawn_blocking(move || {
                     let dir = if multi {
@@ -1162,6 +1258,7 @@ fn push_playlist_items_page(
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!("playlist import dir setup failed: {e:?}");
+                        show_picker_on_error();
                         error_caption.set_text(&gettext("Could not prepare the download folder"));
                         error_caption.set_visible(true);
                         add_btn.set_sensitive(true);
@@ -1237,6 +1334,7 @@ fn push_playlist_items_page(
                     grid.unselect(*i);
                 }
                 if let Some(e) = failed {
+                    show_picker_on_error();
                     let message = if skipped_by_host_limit > 0 {
                         format!(
                             "{e} {}",
@@ -1261,6 +1359,7 @@ fn push_playlist_items_page(
                     return;
                 }
                 if skipped_by_host_limit > 0 {
+                    show_picker_on_error();
                     error_caption.set_text(
                         &ngettext(
                             "Skipped {n} selected item because the collection exceeded the limit of {limit} distinct hosts.",
@@ -1285,12 +1384,18 @@ fn push_playlist_items_page(
         });
     }
 
-    nav.push(&picker_page);
+    // A capped playlist can't be fully expanded from the probe result, so
+    // retain its notice and picker instead of silently dropping the tail.
+    if truncated {
+        picker_page_pushed.set(true);
+        nav.push(&picker_page);
+    } else {
+        auto_submit_btn.emit_clicked();
+    }
 }
 
-/// Multi-file .torrent intake as a right-sliding card page: one switch per
-/// file, all on by default. The selection feeds rqbit's `only_files` at add
-/// time (no live setter), so it must be chosen here.
+/// Multi-file .torrent intake normally queues every file without displaying
+/// the selection page; the page remains available if enqueueing fails.
 #[allow(clippy::too_many_arguments)]
 fn push_torrent_picker_page(
     nav: &adw::NavigationView,
@@ -1354,6 +1459,27 @@ fn push_torrent_picker_page(
         .build();
     picker_enter_confirms(&picker_page, &add_btn);
 
+    // Do not show the multi-file selection page on a successful Add.
+    // It is pushed only if the normal all-files enqueue fails.
+    let picker_page_weak: glib::WeakRef<adw::NavigationPage> = glib::WeakRef::new();
+    picker_page_weak.set(Some(&picker_page));
+    let picker_page_pushed = Rc::new(Cell::new(false));
+    let fallback_to_picker: Rc<dyn Fn()> = {
+        let nav = nav.clone();
+        let page = picker_page_weak.clone();
+        let pushed = Rc::clone(&picker_page_pushed);
+        Rc::new(move || {
+            if pushed.get() {
+                return;
+            }
+            if let Some(page) = page.upgrade() {
+                pushed.set(true);
+                nav.push(&page);
+            }
+        })
+    };
+    let auto_submit_btn = add_btn.clone();
+
     // Same as the playlist picker: the action counts the live selection.
     grid.wire_selection_bar(&select_all_btn, &select_none_btn, &add_btn, |n| {
         ngettext("_Add {} file", "_Add {} files", n as u32).replace("{}", &n.to_string())
@@ -1362,30 +1488,39 @@ fn push_torrent_picker_page(
     {
         let close_card = close_card.clone();
         let grid = grid.clone();
-        add_btn.connect_clicked(move |_| {
+        let fallback_to_picker = fallback_to_picker.clone();
+        let add_btn_click = add_btn.clone();
+        add_btn_click.connect_clicked(move |_| {
             let selected: Vec<usize> = grid.selected_indices();
             if selected.is_empty() {
+                fallback_to_picker();
                 error_caption.set_text(&gettext("Select at least one file"));
                 error_caption.set_visible(true);
                 return;
             }
-            // All on means no filter: pass None, not every index.
+            // All files are selected by default, so None queues the whole
+            // torrent without applying an only-files filter.
             let only = (selected.len() < grid.len()).then_some(selected);
+            let show_picker_on_error = fallback_to_picker.clone();
+            let error_caption_on_error = error_caption.clone();
             enqueue_and_close(
                 &manager,
                 &dest_dir,
                 &close_card,
                 scheduled_at.get(),
                 |d| manager.enqueue_torrent_file(bytes.clone(), &file_name, d, only),
-                |e| {
-                    error_caption.set_text(e);
-                    error_caption.set_visible(true);
+                move |e| {
+                    show_picker_on_error();
+                    error_caption_on_error.set_text(e);
+                    error_caption_on_error.set_visible(true);
                 },
             );
         });
     }
 
-    nav.push(&picker_page);
+    // Every file is selected by default; reuse the validated enqueue action
+    // without presenting the selection page.
+    auto_submit_btn.emit_clicked();
 }
 
 fn wire_torrent_picker(
@@ -2740,13 +2875,17 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // entry itself, not in a caption underneath it.
                 set_field_error(&url_entry, message);
             };
-            // A gallery opens the file picker on every submit, auto-add included,
-            // so nothing is queued unseen.
+            // Add queues the whole gallery. The separate "Select files…"
+            // button is the only path that opens per-file selection.
             if step2.is_gallery.get() {
-                let open = step2.gallery_select_opener.borrow().clone();
-                if let Some(open) = open {
-                    open();
-                }
+                submit_gallery_all(
+                    &m,
+                    &dd,
+                    &close_card,
+                    &step2,
+                    &lookup_add_submit,
+                    scheduled_at.get(),
+                );
                 return;
             }
             let url = url_entry.text().trim().to_string();

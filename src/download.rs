@@ -1679,7 +1679,7 @@ impl DownloadManager {
 
     /// Whether a finished-name candidate is taken (file on disk, reserved stem, or live row holding it). Used by the Finished claim loop.
     fn is_name_taken(&self, dir: &str, existing: &[String], n: &str) -> bool {
-        std::path::Path::new(dir).join(n).exists()
+        existing.iter().any(|entry| entry == n)
             || crate::video_staging::stem_reserved_in(existing, name_stem(n))
             // A discard still tearing down owns this destination and its
             // stem: the finalizer's sweep (and the orphan removal when the
@@ -1810,14 +1810,31 @@ impl DownloadManager {
                                 let name = this.finalize_filename(&name);
                                 let current = item.filename().to_string();
                                 let dir = item.dest_dir().to_string();
-                                let existing = crate::video_staging::dir_file_names(
-                                    std::path::Path::new(&dir),
-                                );
+                                let listing_dir = dir.clone();
+                                let existing = match gio::spawn_blocking(move || {
+                                    crate::video_staging::dir_file_names(std::path::Path::new(&listing_dir))
+                                })
+                                .await
+                                {
+                                    Ok(names) => names,
+                                    Err(error) => {
+                                        tracing::warn!(error = ?error, dir = %dir, "finished-name directory listing failed");
+                                        Vec::new()
+                                    }
+                                };
+                                // The main context was yielded while the directory was read. Do not finalize a row that was
+                                // paused/cancelled, removed, or replaced while the worker ran.
+                                if item.status() == DownloadStatus::Cancelled
+                                    || item.status() == DownloadStatus::Paused
+                                {
+                                    done = true;
+                                    break;
+                                }
                                 let taken = |n: &str| this.is_name_taken(&dir, &existing, n);
                                 // Claim-then-move so a file appearing between dedupe and rename is never clobbered.
                                 let old_path = item.file_path();
                                 let mut final_name = dedupe_filename(&name, taken);
-                                let mut moved = !old_path.exists();
+                                let mut moved = !existing.iter().any(|entry| entry == &current);
                                 for _ in 0..8 {
                                     if moved
                                         || old_path == std::path::Path::new(&dir).join(&final_name)
@@ -1846,32 +1863,54 @@ impl DownloadManager {
                             // pre-rename one. Paints the engine's size now,
                             // refines with the measured size when it lands.
                             this.set_finished_detail(&item, size);
-                            // Server file date, when asked: best-effort, never fails the row.
+                            // Server-date stamping and torrent directory cleanup can perform filesystem
+                            // metadata reads and recursive walks; snapshot plain inputs and defer them.
                             let mtime = this.server_mtime.borrow_mut().remove(&id);
-                            if this.settings.keep_server_date()
-                                && let Some(t) = mtime
-                                && let Ok(f) = std::fs::File::open(item.file_path())
-                            {
-                                let _ = f.set_modified(t);
-                            }
+                            let keep_server_date = this.settings.keep_server_date();
+                            let cleanup_torrent = crate::torrent::is_torrent(&url)
+                                && !this.settings.torrent_seed_finished();
+                            let finished_path = item.file_path();
+                            let torrent_dest_dir = item.dest_dir().to_string();
+                            let torrent_output_dir = item.output_dir().to_string();
+                            let torrent_filename = item.filename().to_string();
                             item.set_progress(1.0);
                             item.set_status(DownloadStatus::Done);
                             // One finished record per URL (Parabolic parity): re-downloads replace instead of stacking.
                             this.drop_finished_duplicates(&url, id);
                             this.segment_state.borrow_mut().remove(&id);
                             this.torrent_pieces.borrow_mut().remove(&id);
-                            // Filtered torrents: drop untoggled files now that every selected byte is on disk. Skipped while seeding (serving still reads those spans).
-                            if crate::torrent::is_torrent(&url)
-                                && !this.settings.torrent_seed_finished()
-                            {
-                                let folder = Self::torrent_folder(&item);
-                                if folder.is_dir() {
-                                    crate::torrent::cleanup_unselected(&folder, &url);
-                                }
+                            if cleanup_torrent {
                                 // The intake filter is spent: keeping it would pin the index list for a done row.
                                 crate::torrent::drop_selection(&url);
                             }
-                            this.notify_finished(&item, Ok(()));
+                            if this.find(id).is_some() {
+                                this.notify_finished(&item, Ok(()));
+                            }
+                            if (keep_server_date && mtime.is_some()) || cleanup_torrent {
+                                let worker_url = url.clone();
+                                glib::spawn_future_local(async move {
+                                    let _ = gio::spawn_blocking(move || {
+                                        if keep_server_date
+                                            && let Some(time) = mtime
+                                            && let Ok(file) = std::fs::File::open(&finished_path)
+                                        {
+                                            let _ = file.set_modified(time);
+                                        }
+                                        if cleanup_torrent {
+                                            let folder = DownloadManager::torrent_folder_from_parts(
+                                                &torrent_dest_dir,
+                                                &worker_url,
+                                                &torrent_output_dir,
+                                                &torrent_filename,
+                                            );
+                                            if folder.is_dir() {
+                                                crate::torrent::cleanup_unselected(&folder, &worker_url);
+                                            }
+                                        }
+                                    })
+                                    .await;
+                                });
+                            }
                         }
                         done = true;
                         break;
@@ -1969,11 +2008,17 @@ impl DownloadManager {
                         // get 200 on every piece, and fail again permanently.
                         // Explicitly delete the partial file: its bytes belong to the dead version and must not survive
                         // into a retry (previously this was only emergent via 416/hole handling).
-                        let _ = std::fs::remove_file(item.file_path());
+                        let invalid_path = item.file_path();
                         this.segment_state.borrow_mut().remove(&id);
                         this.pending_names.borrow_mut().remove(&id);
                         item.set_etag(String::new());
                         item.set_last_modified(String::new());
+                        this.persist_queue();
+                        this.reserve_dest(&invalid_path);
+                        let worker_path = invalid_path.clone();
+                        let _ = gio::spawn_blocking(move || std::fs::remove_file(worker_path)).await;
+                        this.release_dest(&invalid_path);
+                        this.start_next();
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
@@ -2013,18 +2058,44 @@ impl DownloadManager {
                         }
                     }
                     EngineMsg::TruncatePrefix => {
-                        if let Some(st) = this.segment_state.borrow_mut().get_mut(&id) {
-                            truncate_to_prefix(&item.file_path(), st);
-                            // The file lost everything past the prefix; the bitmap must forget it too or a later resume skips missing pieces.
-                            st.forget_beyond_prefix();
+                        // Commit the matching bitmap first: Undo/retry during the worker must never see a
+                        // prefix-truncated file paired with bits beyond the first gap.
+                        let state = {
+                            let mut states = this.segment_state.borrow_mut();
+                            states.get_mut(&id).map(|st| {
+                                st.forget_beyond_prefix();
+                                st.clone()
+                            })
+                        };
+                        if let Some(state) = state {
+                            this.persist_queue();
+                            let path = item.file_path();
+                            this.reserve_dest(&path);
+                            let worker_path = path.clone();
+                            let _ = gio::spawn_blocking(move || {
+                                truncate_to_prefix(&worker_path, &state)
+                            })
+                            .await;
+                            this.release_dest(&path);
+                            this.start_next();
                         }
                     }
                     EngineMsg::FallbackSingle { ack } => {
-                        // Server throttled parallel connections: shrink to the completed prefix and forget the bitmap on the main thread. The engine waits for this ack before appending at EOF.
-                        if let Some(st) = this.segment_state.borrow().get(&id) {
-                            truncate_to_prefix(&item.file_path(), st);
+                        // Drop and persist the bitmap before yielding. The worker owns only the
+                        // file mutation; a retry/Undo waits on the path reservation until it completes.
+                        let state = this.segment_state.borrow_mut().remove(&id);
+                        this.persist_queue();
+                        if let Some(state) = state {
+                            let path = item.file_path();
+                            this.reserve_dest(&path);
+                            let worker_path = path.clone();
+                            let _ = gio::spawn_blocking(move || {
+                                truncate_to_prefix(&worker_path, &state)
+                            })
+                            .await;
+                            this.release_dest(&path);
+                            this.start_next();
                         }
-                        this.segment_state.borrow_mut().remove(&id);
                         ack.send(()).await.ok();
                     }
                     EngineMsg::SuggestName(name) => {

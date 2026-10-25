@@ -1079,8 +1079,9 @@ pub(crate) fn enqueue_and_close_async<F>(
     scheduled_at: Option<i64>,
     enqueue: impl FnOnce(Option<String>) -> F + 'static,
     on_err: impl FnOnce(&str) + 'static,
- ) where
-    F: std::future::Future<Output = Result<(DownloadItem, crate::download::BatchGuard), String>> + 'static,
+) where
+    F: std::future::Future<Output = Result<(DownloadItem, crate::download::BatchGuard), String>>
+        + 'static,
 {
     let dest = Rc::clone(dest);
     let close_card = Rc::clone(close_card);

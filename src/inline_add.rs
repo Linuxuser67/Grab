@@ -969,7 +969,10 @@ fn submit_gallery_all(
             )
         }
         None => {
-            show_video_error(step, &gettext("The gallery preview is no longer available."));
+            show_video_error(
+                step,
+                &gettext("The gallery preview is no longer available."),
+            );
             set_lookup_add(lookup_add, true);
             return;
         }

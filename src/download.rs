@@ -3133,7 +3133,7 @@ impl DownloadManager {
 
         gio::spawn_blocking(move || execute_delete_operation(operation))
             .await
-            .map_err(|e| format!("Could not move {filename} to Trash: {e}"))??;
+            .map_err(|_| format!("Could not move {filename} to Trash: background task panicked"))??;
 
         // This only schedules teardown on Tokio; retain the original ordering
         // and do it only after trash/archive operations have succeeded.

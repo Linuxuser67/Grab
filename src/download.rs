@@ -2027,6 +2027,11 @@ impl DownloadManager {
                             let keep_server_date = this.settings.keep_server_date();
                             let cleanup_torrent = crate::torrent::is_torrent(&url)
                                 && !this.settings.torrent_seed_finished();
+                            // Snapshot the filter before dropping its row-scoped state; the
+                            // filesystem cleanup runs later on a blocking worker.
+                            let cleanup_selection = cleanup_torrent
+                                .then(|| crate::torrent::get_selection(&url))
+                                .flatten();
                             let finished_path = item.file_path();
                             let torrent_dest_dir = item.dest_dir().to_string();
                             let torrent_output_dir = item.output_dir().to_string();
@@ -2054,7 +2059,7 @@ impl DownloadManager {
                                         {
                                             let _ = file.set_modified(time);
                                         }
-                                        if cleanup_torrent {
+                                        if let Some(selected) = cleanup_selection {
                                             let folder = DownloadManager::torrent_folder_from_parts(
                                                 &torrent_dest_dir,
                                                 &worker_url,
@@ -2065,6 +2070,7 @@ impl DownloadManager {
                                                 crate::torrent::cleanup_unselected(
                                                     &folder,
                                                     &worker_url,
+                                                    &selected,
                                                 );
                                             }
                                         }

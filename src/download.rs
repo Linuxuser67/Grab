@@ -350,7 +350,7 @@ pub struct DownloadManager {
     /// sole writer, which makes writes ordered by construction.
     /// Tests write synchronously and never use the channel.
     #[cfg_attr(test, allow(dead_code))]
-    persist_tx: RefCell<Option<tokio::sync::watch::Sender<Option<String>>>>,
+    persist_tx: RefCell<Option<tokio::sync::watch::Sender<Option<StoredQueue>>>>,
     /// Handle for the queue persist task; awaited on shutdown after the final
     /// state is sent. Tests never spawn it.
     #[cfg_attr(test, allow(dead_code))]

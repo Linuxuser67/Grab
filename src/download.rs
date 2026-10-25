@@ -1522,9 +1522,7 @@ impl DownloadManager {
         glib::spawn_future_local(async move {
             let worker_dest = dest.clone();
             let worker_dir = dest_dir.clone();
-            let worker_url = url.clone();
             let worker_recorded = item.output_dir().to_string();
-            let worker_filename = item.filename().to_string();
             let worker_segments = segments.clone();
             let preparation = gio::spawn_blocking(move || {
                 let parent = worker_dest.parent();
@@ -1660,6 +1658,17 @@ impl DownloadManager {
         });
     }
 
+    fn spawn_prepared(
+        self: &Rc<Self>,
+        item: DownloadItem,
+        mode: Option<StartMode>,
+        torrent_dest: Option<std::path::PathBuf>,
+        torrent_output_dir: Option<String>,
+    ) {
+        let opts = DownloadOptions::from_settings(&self.settings);
+        // Re-stash per attempt: a stale Last-Modified must never apply when the new run's server sends none.
+        self.server_mtime.borrow_mut().remove(&item.id());
+        let dest = item.file_path();
         // Fail fast on junk; later edits apply without re-queueing.
         let limit = opts.limit_rate.trim();
         if !limit.is_empty() && limit != "0" && parse_rate(limit).is_none() {
@@ -2308,6 +2317,7 @@ impl DownloadManager {
         magnet: String,
         dest: std::path::PathBuf,
     ) {
+        let recorded = item.output_dir().to_string();
         let settings = &self.settings;
         let seed_finished = settings.torrent_seed_finished();
         let peer_limit: Option<usize> = None; // rqbit default

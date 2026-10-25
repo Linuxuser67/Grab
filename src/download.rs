@@ -3107,7 +3107,6 @@ impl DownloadManager {
         let path = item.file_path();
         let sidecars = if self.video_sources.borrow().contains_key(&id) {
             crate::video_prefs::subtitle_content_languages()
-                .into_iter()
                 .map(|lang| crate::video_staging::sidecar_path_for(&path, lang))
                 .collect()
         } else {

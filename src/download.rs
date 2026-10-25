@@ -1755,6 +1755,13 @@ impl DownloadManager {
         }
         let connections = (opts.connections.max(1) as usize).min(16);
         let timeout = Duration::from_secs(30);
+        // Restore the visible fraction from the saved bitmap before starting the
+        // resumed engine; preparation runs off-thread but UI state remains main-thread-owned.
+        if let Some(StartMode::Resume(state)) = mode.as_ref() {
+            let fraction = (state.completed_bytes() as f64 / state.total.max(1) as f64)
+                .clamp(0.0, 1.0);
+            item.set_progress(fraction);
+        }
         // A saved bitmap means non-contiguous pieces: only a segmented resume is correct.
         let mode = mode.unwrap_or(StartMode::Fresh);
         let generation = self.epoch.borrow().get(&item.id()).cloned().unwrap_or(0) + 1;
@@ -2249,11 +2256,10 @@ impl DownloadManager {
                         }
                     }
                     EngineMsg::FallbackSingle { ack } => {
-                        // Drop and persist the bitmap before yielding. The worker owns only the
-                        // file mutation; a retry/Undo waits on the path reservation until it completes.
-                        let state = this.segment_state.borrow_mut().remove(&id);
-                        this.persist_queue();
-                        if let Some(state) = state {
+                        // Keep the bitmap persisted until the sparse/segmented file is
+                        // actually truncated. A crash during the worker must still restore
+                        // with the bitmap rather than append to a file with holes.
+                        if let Some(state) = this.segment_state.borrow().get(&id).cloned() {
                             let path = item.file_path();
                             this.reserve_dest(&path);
                             let worker_path = path.clone();
@@ -2262,7 +2268,12 @@ impl DownloadManager {
                             })
                             .await;
                             this.release_dest(&path);
+                            this.segment_state.borrow_mut().remove(&id);
+                            this.persist_queue();
                             this.start_next();
+                        } else {
+                            this.segment_state.borrow_mut().remove(&id);
+                            this.persist_queue();
                         }
                         ack.send(()).await.ok();
                     }
@@ -3710,11 +3721,13 @@ impl DownloadManager {
                 tx.send_replace(Some(queue));
             }
             drop(self.persist_tx.borrow_mut().take());
-            // This is the synchronous fallback reached only when the normal
-            // close/Quit path could not run its async shutdown. Detach the writer
-            // instead of blocking GTK; the ordinary path awaits it in
-            // persist_for_shutdown_async before the application quits.
-            drop(self.persist_task.borrow_mut().take());
+            // This fallback runs after the main loop has exited, when blocking
+            // cannot freeze GTK. Bound the wait so a stalled disk cannot hang exit.
+            if let Some(task) = self.persist_task.borrow_mut().take() {
+                let _ = tokio_rt().block_on(async {
+                    tokio::time::timeout(Duration::from_secs(5), task).await
+                });
+            }
         }
     }
 

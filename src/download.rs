@@ -814,6 +814,30 @@ impl DownloadManager {
         }
     }
 
+    /// Delete a segmented partial without blocking GTK. Keep the destination
+    /// reserved until the worker finishes so retry cannot race the unlink.
+    fn remove_partial_file_nonblocking(&self, path: std::path::PathBuf) {
+        #[cfg(test)]
+        {
+            // Tests assert the post-cancel filesystem state synchronously.
+            let _ = std::fs::remove_file(path);
+        }
+        #[cfg(not(test))]
+        {
+            self.reserve_dest(&path);
+            let reservations = std::sync::Arc::clone(&self.reservations);
+            let _ = tokio_rt().spawn(async move {
+                let worker_path = path.clone();
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(worker_path))
+                    .await;
+                if let Ok(mut r) = reservations.lock() {
+                    r.remove(&path);
+                }
+                wake_queue();
+            });
+        }
+    }
+
     /// Whether the row is currently capturing a live stream (stop-and-keep applies).
     pub fn is_live_video(&self, id: u64) -> bool {
         self.live_rows.borrow().contains(&id)
@@ -2855,7 +2879,7 @@ impl DownloadManager {
         if let Some(item) = self.find(id) {
             // Segmented partials have holes: without the bitmap cancel drops the file — unless the row may come back via Undo.
             if had_segments && !keep_partial {
-                let _ = std::fs::remove_file(item.file_path());
+                self.remove_partial_file_nonblocking(item.file_path());
             }
             // Unfinished torrent rows drop their session entry but keep partial files, so cancel/retry and remove/Undo resume.
             if crate::torrent::is_torrent(&item.url()) && item.status() != DownloadStatus::Done {

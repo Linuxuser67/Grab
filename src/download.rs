@@ -1681,7 +1681,10 @@ impl DownloadManager {
                                 .replace("{error}", &error.to_string())
                         })?;
                     }
-                    return Ok(PreparedSpawn::Torrent { dest: output, output_dir });
+                    return Ok(PreparedSpawn::Torrent {
+                        dest: output,
+                        output_dir,
+                    });
                 }
                 if is_video {
                     return Ok(PreparedSpawn::Video);
@@ -1713,7 +1716,10 @@ impl DownloadManager {
                         Ok(_) => StartMode::Single,
                     },
                 };
-                Ok(PreparedSpawn::Plain { mode, drop_segments })
+                Ok(PreparedSpawn::Plain {
+                    mode,
+                    drop_segments,
+                })
             })
             .await;
 
@@ -1838,8 +1844,8 @@ impl DownloadManager {
         // Restore the visible fraction from the saved bitmap before starting the
         // resumed engine; preparation runs off-thread but UI state remains main-thread-owned.
         if let StartMode::Resume(state) = &mode {
-            let fraction = (state.completed_bytes() as f64 / state.total.max(1) as f64)
-                .clamp(0.0, 1.0);
+            let fraction =
+                (state.completed_bytes() as f64 / state.total.max(1) as f64).clamp(0.0, 1.0);
             item.set_progress(fraction);
         }
         // Torrent and video rows returned above. A plain row must always carry
@@ -1944,9 +1950,8 @@ impl DownloadManager {
         is_taken: impl Fn(&str) -> bool,
     ) -> Option<String> {
         let lost_claims = RefCell::new(Vec::<String>::new());
-        let taken = |name: &str| {
-            lost_claims.borrow().iter().any(|lost| lost == name) || is_taken(name)
-        };
+        let taken =
+            |name: &str| lost_claims.borrow().iter().any(|lost| lost == name) || is_taken(name);
         for _ in 0..8 {
             let candidate = dedupe_filename(wanted, &taken);
             let target = dir.join(&candidate);
@@ -3930,9 +3935,8 @@ impl DownloadManager {
             // This fallback runs after the main loop has exited, when blocking
             // cannot freeze GTK. Bound the wait so a stalled disk cannot hang exit.
             if let Some(task) = self.persist_task.borrow_mut().take() {
-                let _ = tokio_rt().block_on(async {
-                    tokio::time::timeout(Duration::from_secs(5), task).await
-                });
+                let _ = tokio_rt()
+                    .block_on(async { tokio::time::timeout(Duration::from_secs(5), task).await });
             }
         }
     }

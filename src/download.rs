@@ -1169,12 +1169,15 @@ impl DownloadManager {
     /// Queue one row per playlist entry for collection-shaped resolves with no picked entry. Returns (added, reported total). One persist for the whole import.
     /// Queue collection children after creating/listing their destination off GTK.
     async fn expand_playlist_rows_async(
-        self: &Rc<Self>,
+        weak: std::rc::Weak<Self>,
         id: u64,
         item: &DownloadItem,
         pl: &crate::media_types::PlaylistInfo,
     ) -> (usize, usize, usize) {
-        let (quality, audio_only) = match self.video_source(id) {
+        let Some(this) = weak.upgrade() else {
+            return (0, pl.total, 0);
+        };
+        let (quality, audio_only) = match this.video_source(id) {
             Some(crate::media_types::VideoSource::Page {
                 quality,
                 audio_only,
@@ -1182,9 +1185,12 @@ impl DownloadManager {
             }) => (quality, audio_only),
             _ => return (0, pl.total, 0),
         };
-        let base_dir = self.resolve_dir(Some(&item.dest_dir()));
+        let base_dir = this.resolve_dir(Some(&item.dest_dir()));
         let multi = pl.total > 1;
         let title = pl.title.clone();
+        // The local task must not keep a strong manager Rc pinned while the
+        // directory worker is pending; upgrade again before touching queue state.
+        drop(this);
         let prepared = gio::spawn_blocking(move || {
             let dest_dir = if multi {
                 crate::file_names::collection_subdir(&base_dir, &title)
@@ -1207,11 +1213,14 @@ impl DownloadManager {
             }
         };
 
+        let Some(this) = weak.upgrade() else {
+            return (0, pl.total, 0);
+        };
         // The main context yielded while the folder was prepared. Do not
         // enqueue stale children after pause/cancel/remove.
         // Collection metadata is untrusted. Re-check the carrier after yielding so
         // removed/cancelled rows cannot create children from stale resolver output.
-        let Some(current) = self.find(id) else {
+        let Some(current) = this.find(id) else {
             return (0, pl.total, 0);
         };
         if matches!(
@@ -1221,7 +1230,7 @@ impl DownloadManager {
             return (0, pl.total, 0);
         }
 
-        let _batch = self.batch_guard();
+        let _batch = this.batch_guard();
         let mut guarded_child_hosts = HashSet::new();
         let mut skipped_by_host_limit = 0usize;
         let mut added = 0usize;
@@ -1243,10 +1252,10 @@ impl DownloadManager {
                 }
                 Err(crate::download_net::CollectionHostError::UnsafeDestination) => continue,
             }
-            let remux = crate::video_prefs::remux_video_active(&self.settings.remux_video());
+            let remux = crate::video_prefs::remux_video_active(&this.settings.remux_video());
             let name =
                 crate::video::default_video_filename(&entry.title, audio_only, remux.as_deref());
-            if self
+            if this
                 .enqueue_video_staged(
                     &url,
                     &dest_dir,
@@ -2173,8 +2182,18 @@ impl DownloadManager {
                             break;
                         }
                         // Playlist expansion runs on the main thread where queueing is legal; the new rows are the feedback.
+                        let weak = Rc::downgrade(&this);
+                        drop(this);
                         let (added, total, skipped_by_host_limit) =
-                            this.expand_playlist_rows_async(id, &item, &pl).await;
+                            Self::expand_playlist_rows_async(weak.clone(), id, &item, &pl).await;
+                        let Some(this) = weak.upgrade() else {
+                            done = true;
+                            break;
+                        };
+                        if !this.is_current(id, generation) {
+                            done = true;
+                            break;
+                        }
                         let skipped_detail = || {
                             ngettext(
                                 "{skipped} item skipped because the collection exceeded the limit of {limit} distinct hosts",

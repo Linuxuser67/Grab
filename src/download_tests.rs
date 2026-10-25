@@ -8199,3 +8199,41 @@ fn restoring_public_only_row_reinstates_its_host_policy() {
 
     let _ = std::fs::remove_file(queue_file);
 }
+
+
+#[test]
+fn start_next_counts_preparing_rows_against_the_cap() {
+    let (_lock, _loop) = test_locks();
+    let _qf = test_queue_file("preparing-cap");
+    let settings = test_settings();
+    settings.set_int("max-concurrent", 2).unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+
+    for i in 0..5 {
+        manager
+            .enqueue(
+                &format!("http://127.0.0.1:9/f{i}"),
+                Some("/tmp"),
+                None,
+            )
+            .unwrap();
+    }
+
+    assert!(
+        manager.preparing.borrow().len() + manager.running.borrow().len() <= 2,
+        "filesystem preparation must consume a scheduler slot"
+    );
+    assert_eq!(manager.preparing.borrow().len(), 2);
+    manager.cancel_all();
+
+    let context = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !manager.preparing.borrow().is_empty()
+        && std::time::Instant::now() < deadline
+    {
+        context.iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(manager.preparing.borrow().is_empty(), "preparation workers must drain");
+    quiesce(&context);
+}

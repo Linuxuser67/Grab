@@ -89,7 +89,7 @@ pub(crate) struct StoredItem {
     pub(crate) gallery: Option<serde_json::Value>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StoredQueue {
     pub(crate) version: u32,
     pub(crate) items: Vec<StoredItem>,

@@ -1921,6 +1921,7 @@ fn delete_download_trashes_torrent_files() {
             .block_on(manager.delete_download_async(7))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert!(!file.exists());
     assert_eq!(store.n_items(), 0);
     assert!(crate::torrent::archive_path_for_url(&pseudo).is_none());
@@ -2062,6 +2063,7 @@ fn delete_download_removes_file_and_row() {
             .block_on(manager.delete_download_async(7))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert!(!file.exists());
     assert_eq!(store.n_items(), 0);
     // Undo the test's own Trash litter.
@@ -2081,6 +2083,7 @@ fn delete_download_removes_file_and_row() {
             .block_on(manager.delete_download_async(8))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert_eq!(store.n_items(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2188,6 +2191,7 @@ fn delete_download_trashes_torrent_subfolder() {
             .block_on(manager.delete_download_async(9))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     // Owned file trashed, unrelated file survives, folder left in place.
     assert!(!folder.join("a.txt").exists());
     assert!(folder.join("unrelated.txt").exists());
@@ -2230,6 +2234,7 @@ fn delete_download_magnet_leaves_preexisting_folder() {
             .block_on(manager.delete_download_async(10))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     // Folder and unrelated file must survive.
     assert!(folder.exists());
     assert_eq!(
@@ -2275,6 +2280,7 @@ fn torrent_delete_refuses_symlinked_subdirectory() {
             .block_on(manager.delete_download_async(11))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     // Precious file and symlink must survive.
     assert_eq!(std::fs::read(outside.join("b.txt")).unwrap(), b"precious");
     assert!(folder.join("sub").is_symlink());
@@ -5504,11 +5510,13 @@ fn delete_download_trashes_video_sidecars() {
             .block_on(manager.delete_download_async(11))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert!(
         glib::MainContext::default()
             .block_on(manager.delete_download_async(12))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     // Video + its sidecars trashed; plain row's same-named srt stays.
     for n in ["Clip.mp4", "Clip.en.srt", "Clip.fr.srt", "Other.mp4"] {
         assert!(!dir.join(n).exists(), "{n} must be trashed");
@@ -8028,6 +8036,7 @@ fn delete_download_legacy_gallery_row_keeps_unrelated_folder() {
             .block_on(manager.delete_download_async(7))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert_eq!(store.n_items(), 0);
     // The unrelated folder and its content survive.
     assert!(decoy.join("keep.txt").exists());
@@ -8055,6 +8064,7 @@ fn delete_download_gallery_row_without_job_keeps_folder() {
             .block_on(manager.delete_download_async(7))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert_eq!(store.n_items(), 0);
     assert!(folder.join("keep.txt").exists());
     let _ = std::fs::remove_dir_all(&dir);
@@ -8084,6 +8094,7 @@ fn delete_download_new_gallery_row_trashes_subfolder() {
             .block_on(manager.delete_download_async(7))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert_eq!(store.n_items(), 0);
     assert!(!sub.exists());
     // Undo the test's own Trash litter.
@@ -8120,6 +8131,7 @@ fn delete_download_after_gallery_rename_trashes_renamed_folder() {
             .block_on(manager.delete_download_async(7))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert_eq!(store.n_items(), 0);
     // The renamed folder — the one Grab owns — must be trashed.
     assert!(!dir.join("renamed").exists());

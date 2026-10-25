@@ -30,7 +30,6 @@ static QUEUE_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// wrong thread. Take AFTER QUEUE_FILE_LOCK, always that order.
 static MAIN_LOOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Both locks in the safe order (queue, then loop); reversed order deadlocks the suite.
 fn lock_queue_file() -> std::sync::MutexGuard<'static, ()> {
     QUEUE_FILE_LOCK
         .lock()
@@ -66,7 +65,6 @@ fn wait_for_started(manager: &DownloadManager, id: u64, timeout: Duration) -> bo
     }
     manager.started.borrow().contains(&id)
 }
-
 
 /// Minimal persisted row for `restore_existing` fixtures (no id => pre-v3 allocate path).
 fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus) -> StoredItem {

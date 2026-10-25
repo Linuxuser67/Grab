@@ -1073,7 +1073,7 @@ pub(crate) fn enqueue_and_close(
 }
 
 pub(crate) fn enqueue_and_close_async<F>(
-    manager: &Rc<DownloadManager>,
+    _manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
     scheduled_at: Option<i64>,
@@ -1650,7 +1650,7 @@ fn wire_torrent_picker(
                     scheduled_at.get(),
                     move |d| async move {
                         enqueue_manager
-                            .enqueue_torrent_file_async(bytes, &name, d.as_deref(), None)
+                            .enqueue_torrent_file_async_batched(bytes, &name, d.as_deref(), None)
                             .await
                     },
                     move |e| {

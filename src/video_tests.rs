@@ -3600,42 +3600,30 @@ fn fetch_video_page_parses_dump_json() {
 
 #[test]
 fn identity_args_order_and_trim() {
-    // Player-client workaround, cookies, trimmed UA, then `--` + page, identical every spawn.
+    // No forced extractor override; trim user-agent and keep `--` + page last.
     let argv = ytdlp_identity_args("none", Some("  Grab/1  "), "https://x.com/u/status/1");
     assert_eq!(
         argv,
         vec![
-            "--extractor-args".to_string(),
-            "youtube:player_client=default,-web".to_string(),
             "--user-agent".to_string(),
             "Grab/1".to_string(),
             "--".to_string(),
             "https://x.com/u/status/1".to_string(),
         ]
     );
-    // Blank UA is omitted, never sent empty.
     let argv = ytdlp_identity_args("none", None, "https://x.com/u/status/1");
-    assert_eq!(
-        argv,
-        vec![
-            "--extractor-args".to_string(),
-            "youtube:player_client=default,-web".to_string(),
-            "--".to_string(),
-            "https://x.com/u/status/1".to_string(),
-        ]
-    );
+    assert_eq!(argv, vec!["--".to_string(), "https://x.com/u/status/1".to_string()]);
 }
 
 #[test]
-fn identity_args_excludes_web_player_client() {
-    // SABR workaround survives every spawn: extractor-arg pair always precedes `--`.
-    let argv = ytdlp_identity_args("firefox", None, "https://youtu.be/abc");
-    let pos = argv
-        .iter()
-        .position(|a| a == "--extractor-args")
-        .expect("extractor-args flag present");
-    assert_eq!(argv[pos + 1], "youtube:player_client=default,-web");
-    assert!(argv.iter().position(|a| a == "--").unwrap() > pos + 1);
+fn identity_args_do_not_force_a_youtube_player_client() {
+    // Keep yt-dlp's evolving defaults unless the user configures an override.
+    let argv = ytdlp_identity_args("none", None, "https://youtu.be/abc");
+    assert!(!argv.iter().any(|arg| arg == "youtube:player_client=default,-web"));
+    let sep = argv.iter().position(|arg| arg == "--").expect("URL separator");
+    assert_eq!(argv[sep + 1], "https://youtu.be/abc");
+    let runtime = argv.iter().position(|arg| arg == "--js-runtimes").expect("Deno runtime");
+    assert!(argv[runtime + 1].starts_with("deno"));
 }
 
 // ── best-overall muxed vs HLS ────────────────────────────────────────

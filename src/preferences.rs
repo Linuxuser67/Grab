@@ -831,7 +831,7 @@ pub fn show(
         .title(gettext("Additional yt-dlp extractor arguments"))
         .build();
     extractor_args.set_tooltip_text(Some(&gettext(
-        "Example: youtube:player_client=android. Passed as one yt-dlp argument, not executed by a shell; leave empty for Grab's defaults.",
+        "Example: youtube:player_client=android. Passed as one yt-dlp argument, not executed by a shell; leave empty for yt-dlp's defaults.",
     )));
     extractor_args.set_input_purpose(gtk4::InputPurpose::FreeForm);
     settings

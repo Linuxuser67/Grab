@@ -1004,6 +1004,15 @@ pub(crate) fn find_deno() -> Option<PathBuf> {
     selected_deno_path().or_else(|| find_in_dirs("deno", &tool_search_dirs()))
 }
 
+/// Warm the Deno version-probe cache without provisioning a runtime. This is
+/// safe during startup: it only inspects existing candidates and never accesses
+/// the network or installs a managed binary.
+pub(crate) async fn prewarm_deno_probe() {
+    let candidates = find_deno_candidates();
+    if let Ok(Some(path)) = first_supported_deno(&candidates).await {
+        remember_deno_path(&path);
+    }
+}
 fn find_deno_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     for dir in tool_search_dirs() {
@@ -1694,6 +1703,21 @@ pub(crate) fn browser_profile_dir_in(
     freshest_chromium_profile(config_home, browser)
 }
 
+/// Browser profile discovery is shared by yt-dlp and gallery-dl during a dual
+/// probe. Cache hits and misses briefly so concurrent probes do not repeat
+/// profiles.ini parsing or stat every Chromium Cookies file. The short TTL
+/// allows profile/channel changes to become visible without a restart.
+const BROWSER_PROFILE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+type BrowserProfileCacheKey = (PathBuf, PathBuf, String);
+type BrowserProfileCacheValue = (std::time::Instant, Option<PathBuf>);
+
+fn browser_profile_cache(
+) -> &'static Mutex<HashMap<BrowserProfileCacheKey, BrowserProfileCacheValue>> {
+    static CACHE: OnceLock<Mutex<HashMap<BrowserProfileCacheKey, BrowserProfileCacheValue>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// [`browser_profile_dir_in`] against the real host dirs: when
 /// `HOST_XDG_CONFIG_HOME` is set, home is its parent (`<home>/.config`).
 pub(crate) fn browser_profile_dir(browser: &str) -> Option<PathBuf> {
@@ -1705,11 +1729,40 @@ pub(crate) fn browser_profile_dir(browser: &str) -> Option<PathBuf> {
         .or_else(real_home_dir)
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/"));
+    let key = (config.clone(), home.clone(), browser.to_string());
+    let started = std::time::Instant::now();
+    let mut cache = browser_profile_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((at, found)) = cache.get(&key)
+        && at.elapsed() < BROWSER_PROFILE_CACHE_TTL
+    {
+        tracing::debug!(
+            browser,
+            cache_hit = true,
+            profile_lookup_ms = started.elapsed().as_millis() as u64,
+            found = ?found,
+            "browser profile lookup"
+        );
+        return found.clone();
+    }
+    cache.retain(|_, (at, _)| at.elapsed() < BROWSER_PROFILE_CACHE_TTL);
+    if cache.len() >= 32 {
+        cache.clear();
+    }
+    // Keep the lock through this short local scan so concurrent probes share
+    // the result instead of doing the same filesystem work in parallel.
     let found = browser_profile_dir_in(&config, &home, browser);
-    tracing::debug!(browser, config = %config.display(), found = ?found, "browser profile lookup");
+    cache.insert(key, (std::time::Instant::now(), found.clone()));
+    tracing::debug!(
+        browser,
+        cache_hit = false,
+        profile_lookup_ms = started.elapsed().as_millis() as u64,
+        found = ?found,
+        "browser profile lookup"
+    );
     found
 }
-
 /// Browsers offered for `--cookies-from-browser`, in combo order (yt-dlp names).
 pub const COOKIES_BROWSERS: &[&str] = &[
     "none", "brave", "chrome", "chromium", "edge", "firefox", "opera", "vivaldi", "whale", "zen",
@@ -1851,47 +1904,24 @@ fn ytdlp_runtime_args(page_url: &str, deno_path: Option<&Path>) -> Vec<String> {
     ]
 }
 
-/// Shared trailing argv for every yt-dlp spawn: built-in/custom extractor args,
+/// Shared trailing argv for every yt-dlp spawn: user-configured extractor args,
 /// JS runtime pin for YouTube, cookies, UA, then the page URL behind `--`.
+///
+/// Do not force a player-client set here. yt-dlp's defaults evolve with site
+/// behavior, and forcing a multi-client rotation adds requests to ordinary
+/// lookups. Users can still explicitly configure `youtube:player_client=…` in
+/// Preferences when they need a particular client for format coverage.
 pub(crate) fn ytdlp_identity_args(
     cookies_browser: &str,
     user_agent: Option<&str>,
     page_url: &str,
 ) -> Vec<String> {
     let mut args = Vec::new();
-    // YouTube force-enables SABR-only streaming for the `web` player client
-    // (yt-dlp#12482): its URL-less formats fail the whole extraction. `web`
-    // only enters yt-dlp's default rotation when a JS runtime is available
-    // (e.g. Deno on PATH), so exclude it everywhere. Scoped to the
-    // youtube extractor: a no-op for other sites.
-    let extra_args =
-        validated_ytdlp_extractor_args(&crate::settings::AppSettings::new().ytdlp_extractor_args());
-    match extra_args {
-        Some(extra_args) => {
-            let (extractor, settings) = extra_args.split_once(':').expect("validated KEY:ARGS");
-            if extractor == "youtube" {
-                let overrides_player_client = settings
-                    .split(';')
-                    .filter_map(|entry| entry.split_once('='))
-                    .any(|(key, _)| key.trim() == "player_client");
-                let merged = if overrides_player_client {
-                    extra_args
-                } else {
-                    format!("youtube:player_client=default,-web;{settings}")
-                };
-                args.push("--extractor-args".to_string());
-                args.push(merged);
-            } else {
-                args.push("--extractor-args".to_string());
-                args.push("youtube:player_client=default,-web".to_string());
-                args.push("--extractor-args".to_string());
-                args.push(extra_args);
-            }
-        }
-        None => {
-            args.push("--extractor-args".to_string());
-            args.push("youtube:player_client=default,-web".to_string());
-        }
+    if let Some(extra_args) =
+        validated_ytdlp_extractor_args(&crate::settings::AppSettings::new().ytdlp_extractor_args())
+    {
+        args.push("--extractor-args".to_string());
+        args.push(extra_args);
     }
     args.extend(ytdlp_runtime_args(page_url, find_deno().as_deref()));
     if let Some(spec) = cookies_browser_spec(cookies_browser) {
@@ -1907,7 +1937,6 @@ pub(crate) fn ytdlp_identity_args(
     args.push(page_url.to_string());
     args
 }
-
 #[cfg(test)]
 mod extractor_args_compat_tests {
     use super::{

@@ -228,44 +228,73 @@ pub async fn fetch_video_infos(
     cancel: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
-        let yt_version = ensure_ytdlp_version(&youtube_bin).await?;
-        tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
-        // Deno is Grab's JavaScript runtime for YouTube; make sure it's
-        // installed before a YouTube spawn that may need to solve JS challenges.
-        crate::video_tools::ensure_deno(&url).await?;
-        let mut value = match tokio::time::timeout(
-            Duration::from_secs(FETCH_TIMEOUT_SECS),
-            fetch_raw_dump_json(
-                &youtube_bin,
-                &url,
-                &cookies_browser,
-                Duration::from_secs(300),
-                fetch_proxy.as_ref(),
-                true,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(value)) => value,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                return Err(VideoError::fetch(gettext("the lookup timed out")));
+        let total_started = std::time::Instant::now();
+        let mut version_ms = 0u64;
+        let mut deno_ms = 0u64;
+        let mut metadata_lookup_ms = 0u64;
+        let mut parse_ms = 0u64;
+        let result: Result<(ProbeResult, Option<serde_json::Value>), VideoError> = async {
+            let phase_started = std::time::Instant::now();
+            let version_result = ensure_ytdlp_version(&youtube_bin).await;
+            version_ms = phase_started.elapsed().as_millis() as u64;
+            let yt_version = version_result?;
+            tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
+            // Deno is Grab's JavaScript runtime for YouTube; make sure it's
+            // installed before a YouTube spawn that may need to solve JS challenges.
+            let phase_started = std::time::Instant::now();
+            let deno_result = crate::video_tools::ensure_deno(&url).await;
+            deno_ms = phase_started.elapsed().as_millis() as u64;
+            deno_result?;
+            let phase_started = std::time::Instant::now();
+            let fetch_result = tokio::time::timeout(
+                Duration::from_secs(FETCH_TIMEOUT_SECS),
+                fetch_raw_dump_json(
+                    &youtube_bin,
+                    &url,
+                    &cookies_browser,
+                    Duration::from_secs(300),
+                    fetch_proxy.as_ref(),
+                    true,
+                ),
+            )
+            .await;
+            metadata_lookup_ms = phase_started.elapsed().as_millis() as u64;
+            let mut value = match fetch_result {
+                Ok(Ok(value)) => value,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err(VideoError::fetch(gettext("the lookup timed out"))),
+            };
+            let phase_started = std::time::Instant::now();
+            if let Some(mut playlist) = parse_playlist_json(&value, &url) {
+                retarget_story_items(&url, &mut playlist);
+                parse_ms = phase_started.elapsed().as_millis() as u64;
+                return Ok((ProbeResult::Playlist(playlist), None));
             }
-        };
-        // Stub entries would choke the strict video model.
-        if let Some(mut playlist) = parse_playlist_json(&value, &url) {
-            retarget_story_items(&url, &mut playlist);
-            return Ok::<_, VideoError>((ProbeResult::Playlist(playlist), None));
+            sanitize_video_json(&mut value);
+            // Clone for --load-info-json: the parse below consumes `value`.
+            // The JSON is ~100KB; one clone per probe is acceptable.
+            let raw_json = value.clone();
+            let parsed_video: Result<Video, VideoError> =
+                serde_json::from_value(value).map_err(VideoError::fetch);
+            parse_ms = phase_started.elapsed().as_millis() as u64;
+            let video = parsed_video?;
+            Ok((
+                ProbeResult::Single(VideoInfo::from(&video, &url, newest_first)),
+                Some(raw_json),
+            ))
         }
-        sanitize_video_json(&mut value);
-        // Clone for --load-info-json: the parse below consumes `value`.
-        // The JSON is ~100KB; one clone per probe is acceptable.
-        let raw_json = value.clone();
-        let video: Video = serde_json::from_value(value).map_err(VideoError::fetch)?;
-        Ok::<_, VideoError>((
-            ProbeResult::Single(VideoInfo::from(&video, &url, newest_first)),
-            Some(raw_json),
-        ))
+        .await;
+        tracing::info!(
+            url_host = %page_host(&url),
+            version_ms,
+            deno_ms,
+            metadata_lookup_ms,
+            parse_ms,
+            total_ms = total_started.elapsed().as_millis() as u64,
+            result = if result.is_ok() { "ok" } else { "error" },
+            "yt-dlp lookup timing"
+        );
+        result
     });
     // Dropping the caller's future aborts the worker: the yt-dlp child dies
     // with it (kill_on_drop) instead of probing on detached.

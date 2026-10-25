@@ -256,6 +256,12 @@ enum MediaLookupFailure {
     Failed(String),
 }
 
+/// Direct media URLs and YouTube URLs do not need gallery-dl for routing.
+/// Other pages retain dual probing so gallery collections stay discoverable.
+fn needs_gallery_probe(url: &str) -> bool {
+    !crate::gallery_probe::url_is_direct_media(url) && !crate::video_tools::is_youtube_url(url)
+}
+
 /// Resolve tool paths and run the appropriate extractor probe(s). Cancellation
 /// drops this future; a dual probe has an abort-on-drop guard so its subprocesses
 /// do not outlive the lookup that owns them.
@@ -265,19 +271,48 @@ async fn lookup_media(
     newest_first: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
-    let needs_gallery_tool = !crate::gallery_probe::url_is_direct_media(&url);
-    let local_tools = crate::runtime::tokio_rt()
+    let started = std::time::Instant::now();
+    let host = crate::video_probe::page_host(&url);
+    let result = lookup_media_inner(url, browser, newest_first, proxy).await;
+    tracing::info!(
+        url_host = %host,
+        total_ms = started.elapsed().as_millis() as u64,
+        result = match &result {
+            Ok(MediaLookupOutcome::Gallery(_)) => "gallery",
+            Ok(MediaLookupOutcome::Video(_)) => "video",
+            Err(_) => "error",
+        },
+        "media lookup timing"
+    );
+    result
+}
+
+async fn lookup_media_inner(    url: String,
+    browser: String,
+    newest_first: bool,
+    proxy: Option<crate::net_types::ResolvedProxy>,
+) -> Result<MediaLookupOutcome, MediaLookupFailure> {
+    let needs_gallery_tool = needs_gallery_probe(&url);
+    let tool_started = std::time::Instant::now();
+    let local_tools_result = crate::runtime::tokio_rt()
         .spawn_blocking(move || {
             let youtube = crate::video_tools::resolve_ytdlp();
             let gallery = needs_gallery_tool.then(crate::gallery_argv::resolve_tool);
             (youtube, gallery)
         })
-        .await
+        .await;
+    tracing::info!(
+        url_host = %crate::video_probe::page_host(&url),
+        gallery_probe = needs_gallery_tool,
+        tool_resolution_ms = tool_started.elapsed().as_millis() as u64,
+        result = if local_tools_result.is_ok() { "ok" } else { "error" },
+        "lookup tool resolution timing"
+    );
+    let local_tools = local_tools_result
         .map_err(|error| {
             tracing::error!(error = %error, "lookup tool resolution task failed");
             MediaLookupFailure::Failed(gettext("The lookup failed unexpectedly. Please try again."))
-        })?;
-    let (youtube_result, gallery_result) = local_tools;
+        })?;    let (youtube_result, gallery_result) = local_tools;
     let youtube_bin =
         youtube_result.map_err(|error| MediaLookupFailure::MissingTools(error.to_string()))?;
     let gallery_tool = match gallery_result {
@@ -2889,6 +2924,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 }
                 let s = submit_auto.clone();
                 let debounce_c = Rc::clone(&debounce);
+                let host = crate::video_probe::page_host(&text);
+                let debounce_started = std::time::Instant::now();
                 let id =
                     glib::timeout_add_local(std::time::Duration::from_millis(800), move || {
                         // Clear the stored ID first: after Break the source is
@@ -2896,6 +2933,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         // set_text) must not remove this dead ID — that was a
                         // hard abort ("Source ID was not found").
                         *debounce_c.borrow_mut() = None;
+                        tracing::info!(
+                            url_host = %host,
+                            debounce_ms = debounce_started.elapsed().as_millis() as u64,
+                            "auto-add debounce elapsed"
+                        );
                         s(SubmitSource::Auto);
                         glib::ControlFlow::Break
                     });
@@ -3476,6 +3518,15 @@ fn refresh_gallery_info(v: &VideoStep, title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn youtube_and_direct_media_skip_the_gallery_probe() {
+        assert!(!needs_gallery_probe("https://www.youtube.com/watch?v=abc123"));
+        assert!(!needs_gallery_probe("https://music.youtube.com/watch?v=abc123"));
+        assert!(!needs_gallery_probe("https://youtu.be/abc123"));
+        assert!(!needs_gallery_probe("https://cdn.example.org/video.mp4?download=1"));
+        assert!(needs_gallery_probe("https://www.instagram.com/p/example/"));
+    }
 
     #[test]
     fn repeated_text_is_ignored() {

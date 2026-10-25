@@ -24,6 +24,9 @@ const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bound DNS resolution and sequential public-address connection attempts too:
 /// each accepted socket holds one of the fixed proxy permits until connect ends.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// A hostname can resolve to many addresses; one blackholed address must not
+/// consume the whole budget before trying the next.
+const ADDRESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PROXY_CONNECTIONS: usize = 64;
 static PROXY_CONNECTIONS: LazyLock<Arc<Semaphore>> =
@@ -314,7 +317,7 @@ async fn connect_public(host: &str, port: u16) -> std::io::Result<TcpStream> {
                 "private address refused",
             ))
         } else {
-            TcpStream::connect(SocketAddr::new(ip, port)).await
+            connect_address(SocketAddr::new(ip, port)).await
         };
     }
 
@@ -326,7 +329,7 @@ async fn connect_public(host: &str, port: u16) -> std::io::Result<TcpStream> {
             continue;
         }
         saw_public = true;
-        match TcpStream::connect(addr).await {
+        match connect_address(addr).await {
             Ok(stream) => return Ok(stream),
             Err(e) => last_error = Some(e),
         }
@@ -338,6 +341,17 @@ async fn connect_public(host: &str, port: u16) -> std::io::Result<TcpStream> {
         ));
     }
     Err(last_error.unwrap_or_else(|| Error::new(ErrorKind::AddrNotAvailable, "no usable address")))
+}
+
+async fn connect_address(addr: SocketAddr) -> std::io::Result<TcpStream> {
+    tokio::time::timeout(ADDRESS_CONNECT_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "per-address connect timed out",
+            )
+        })?
 }
 
 async fn reply_status(stream: &mut TcpStream, code: u16, reason: &str) {

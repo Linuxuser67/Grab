@@ -571,9 +571,8 @@ impl DownloadManager {
         let (persist_tx, persist_task) = {
             let (tx, rx) = tokio::sync::watch::channel(None::<StoredQueue>);
             let task = tokio_rt().spawn(Self::persist_task_loop(rx, |queue: StoredQueue| {
-                match serde_json::to_string(&queue) {
-                    Ok(text) => Self::write_queue_file(&text),
-                    Err(error) => tracing::error!("could not serialize download queue: {error}"),
+                if let Some(text) = Self::serialize_snapshot(queue) {
+                    Self::write_queue_file(&text);
                 }
             }));
             (Some(tx), Some(task))
@@ -3243,6 +3242,7 @@ impl DownloadManager {
     /// recorded branch refuses a path that is itself a symlink. Either way, a
     /// symlink planted after the download finished can't divert the
     /// delete/trash onto its target.
+    #[cfg(test)]
     fn torrent_folder(item: &DownloadItem) -> std::path::PathBuf {
         let dest_dir = item.dest_dir().to_string();
         let url = item.url().to_string();

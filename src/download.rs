@@ -1848,20 +1848,6 @@ impl DownloadManager {
                 (state.completed_bytes() as f64 / state.total.max(1) as f64).clamp(0.0, 1.0);
             item.set_progress(fraction);
         }
-        // Torrent and video rows returned above. A plain row must always carry
-        // a prepared mode; never silently turn an invariant violation into Fresh,
-        // which could overwrite or corrupt an existing partial.
-        let mode = match mode {
-            Some(mode) => mode,
-            None => {
-                let detail = gettext("Could not prepare download mode");
-                item.set_detail(detail);
-                item.set_status(DownloadStatus::Failed);
-                self.changed();
-                self.start_next();
-                return;
-            }
-        };
         let generation = self.epoch.borrow().get(&item.id()).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(item.id(), generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

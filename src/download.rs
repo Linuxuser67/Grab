@@ -2358,6 +2358,7 @@ impl DownloadManager {
                         // no bitmap, and a 416 would pass it off as complete on
                         // filesystems that zero-fill instead of leaving holes.
                         this.persist_queue();
+                        drop(this);
                         ack.send(()).await.ok();
                     }
                     EngineMsg::PieceDone(idx) => {
@@ -2443,6 +2444,7 @@ impl DownloadManager {
                             this.segment_state.borrow_mut().remove(&id);
                             this.persist_queue();
                         }
+                        drop(this);
                         ack.send(()).await.ok();
                     }
                     EngineMsg::SuggestName(name) => {

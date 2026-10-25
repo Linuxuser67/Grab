@@ -2173,7 +2173,8 @@ fn finish_cleans_untoggled_placeholders() {
     std::fs::create_dir_all(folder.join("sub")).unwrap();
     std::fs::write(folder.join("a.txt"), b"kept").unwrap();
     std::fs::write(folder.join("sub").join("b.txt"), b"").unwrap();
-    crate::torrent::cleanup_unselected(&folder, &pseudo);
+    let selected = crate::torrent::get_selection(&pseudo).unwrap();
+    crate::torrent::cleanup_unselected(&folder, &pseudo, &selected);
     assert!(folder.join("a.txt").exists());
     assert!(!folder.join("sub").exists());
     assert!(folder.exists());

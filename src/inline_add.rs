@@ -1079,8 +1079,7 @@ pub(crate) fn enqueue_and_close_async<F>(
     scheduled_at: Option<i64>,
     enqueue: impl FnOnce(Option<String>) -> F + 'static,
     on_err: impl FnOnce(&str) + 'static,
-)
-where
+) where
     F: std::future::Future<Output = Result<DownloadItem, String>> + 'static,
 {
     let manager = Rc::clone(manager);

@@ -1058,7 +1058,8 @@ fn enqueue_video_spawns_and_fails_without_tools() {
         .join("grab-video-enqueue")
         .to_string_lossy()
         .into_owned();
-    let item = glib::MainContext::default().block_on(manager.enqueue_video_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest),
             Some("My Video.mp4"),
@@ -1104,7 +1105,8 @@ fn enqueue_video_restrict_filenames_folds_name() {
     let dest = std::env::temp_dir().join("grab-video-restrict");
     std::fs::create_dir_all(&dest).unwrap();
     let dest = dest.to_string_lossy().into_owned();
-    let item = glib::MainContext::default().block_on(manager.enqueue_video_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest),
             Some("Café & Croissants.mp4"),
@@ -1297,7 +1299,8 @@ fn video_source_survives_restore_and_retry() {
     let id = {
         let settings = test_settings();
         let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-        let item = glib::MainContext::default().block_on(manager.enqueue_video_async(
+        let item = glib::MainContext::default()
+            .block_on(manager.enqueue_video_async(
                 "https://vimeo.com/123456",
                 Some(&dest),
                 Some("Clip.mp4"),
@@ -1458,7 +1461,8 @@ fn unremove_restores_video_source() {
         .join("grab-video-unremove")
         .to_string_lossy()
         .into_owned();
-    let item = glib::MainContext::default().block_on(manager.enqueue_video_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://vimeo.com/123456",
             Some(&dest),
             Some("Clip.mp4"),
@@ -1515,7 +1519,8 @@ fn queue_file_never_carries_cookies() {
     let settings = test_settings();
     settings.set_string("cookies-browser", "firefox").unwrap();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    let item = glib::MainContext::default().block_on(manager.enqueue_video_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://vimeo.com/123456",
             Some("/tmp/dl"),
             Some("Clip.mp4"),
@@ -1808,7 +1813,8 @@ fn torrent_file_enqueue_uses_stem_stub() {
     });
     manager.running.borrow_mut().insert(99, holder);
     let stem = format!("grab-enqueue-{}", std::process::id());
-    let item = glib::MainContext::default().block_on(manager.enqueue_torrent_file_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_torrent_file_async(
             single_torrent_bytes(),
             &format!("{stem}.torrent"),
             None,
@@ -1839,7 +1845,8 @@ fn staged_selection_reaches_spawn_take() {
     });
     manager.running.borrow_mut().insert(99, holder);
     let stem = format!("grab-take-{}", std::process::id());
-    let item = glib::MainContext::default().block_on(manager.enqueue_torrent_file_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_torrent_file_async(
             single_torrent_bytes(),
             &format!("{stem}.torrent"),
             None,
@@ -1909,7 +1916,8 @@ fn remove_keeps_torrent_archive_for_undo() {
     });
     manager.running.borrow_mut().insert(99, holder);
     let stem = format!("grab-undo-{}", std::process::id());
-    let item = glib::MainContext::default().block_on(manager.enqueue_torrent_file_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_torrent_file_async(
             single_torrent_bytes(),
             &format!("{stem}.torrent"),
             None,
@@ -2415,7 +2423,8 @@ fn enqueue_video_keeps_name_when_file_exists() {
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("clip.mp4"), b"someone else").unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
-    let item = glib::MainContext::default().block_on(manager.enqueue_video_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("clip.mp4"),
@@ -2580,7 +2589,8 @@ fn expand_playlist_rows_use_titled_subfolder() {
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
-    let parent = glib::MainContext::default().block_on(manager.enqueue_video_async(
+    let parent = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/playlist?list=PLx",
             Some(&dest_s),
             Some("parent.mp4"),
@@ -2627,8 +2637,8 @@ fn expand_playlist_rows_use_titled_subfolder() {
         ]
         .into_boxed_slice(),
     };
-    let (added, total, skipped_by_host_limit) =
-        glib::MainContext::default().block_on(manager.expand_playlist_rows_async(parent.id(), &parent, &pl));
+    let (added, total, skipped_by_host_limit) = glib::MainContext::default()
+        .block_on(manager.expand_playlist_rows_async(parent.id(), &parent, &pl));
     assert_eq!((added, total, skipped_by_host_limit), (2, 2, 0));
     let sub = dest.join("My Mix: Vol. 1");
     assert!(sub.is_dir());
@@ -5388,7 +5398,8 @@ fn enqueue_video_reserves_part_namespaced_stems() {
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("Clip.video.mp4"), b"foreign").unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
-    let item = glib::MainContext::default().block_on(manager.enqueue_video_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.mp4"),
@@ -5506,7 +5517,8 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("Clip.en.srt"), b"foreign").unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
-    let item = glib::MainContext::default().block_on(manager.enqueue_video_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.mp4"),
@@ -5541,7 +5553,8 @@ fn enqueue_video_accepts_unlisted_url() {
         is_live: false,
         playlist_item_id: None,
     };
-    let item = glib::MainContext::default().block_on(manager.enqueue_video_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://example.com/f.iso",
             Some("/tmp/dl"),
             None,
@@ -5550,7 +5563,8 @@ fn enqueue_video_accepts_unlisted_url() {
         .expect("probed intake");
     assert_eq!(item.filename(), "f.iso");
     assert!(
-        glib::MainContext::default().block_on(manager.enqueue_video_async("not a url", Some("/tmp/dl"), None, choices))
+        glib::MainContext::default()
+            .block_on(manager.enqueue_video_async("not a url", Some("/tmp/dl"), None, choices))
             .is_err()
     );
     // Drain the spawned worker (fails fast without tools) so no woken
@@ -5852,7 +5866,8 @@ fn a_reserved_destination_forces_video_intake_to_dedupe() {
     std::fs::create_dir_all(&dest).unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
     manager.reserve_dest(&dest.join("Clip.mp4"));
-    let item = glib::MainContext::default().block_on(manager.enqueue_video_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.mp4"),
@@ -5917,7 +5932,8 @@ fn a_reserved_stem_forces_video_intake_to_dedupe() {
     std::fs::create_dir_all(&dest).unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
     manager.reserve_dest(&dest.join("Clip.mp4"));
-    let item = glib::MainContext::default().block_on(manager.enqueue_video_async(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.m4a"),
@@ -7562,7 +7578,9 @@ fn enqueue_gallery_resolves_dest_and_id() {
         let mut job = gallery_job_fixture();
         job.dest_dir = std::path::PathBuf::from(dest);
         job.item_id = 0; // placeholder
-        let item = glib::MainContext::default().block_on(m.enqueue_gallery_async(&job)).expect("enqueue");
+        let item = glib::MainContext::default()
+            .block_on(m.enqueue_gallery_async(&job))
+            .expect("enqueue");
         // Destination resolved to an absolute path.
         assert!(std::path::Path::new(&item.dest_dir()).is_absolute());
         assert!(!item.dest_dir().is_empty());
@@ -7641,7 +7659,9 @@ fn gallery_remove_discards_handoff_cookies() {
     crate::extension_server::store_handoff_cookies(&job.page_url, path, None);
     assert!(crate::extension_server::live_handoff_cookie_path(&job.page_url, "none").is_some());
     // Enqueue the gallery, then remove it.
-    let item = glib::MainContext::default().block_on(m.enqueue_gallery_async(&job)).expect("enqueue");
+    let item = glib::MainContext::default()
+        .block_on(m.enqueue_gallery_async(&job))
+        .expect("enqueue");
     let id = item.id();
     // Drain the spawned task to avoid tripping the glib thread guard.
     drain_engine(&m, id);
@@ -7764,7 +7784,9 @@ fn gallery_enqueue_uses_unique_dir_when_title_collides() {
     let mut job = gallery_job_fixture();
     job.dest_dir = tmp.clone();
     job.title = "Test Gallery".to_string();
-    let item = glib::MainContext::default().block_on(m.enqueue_gallery_async(&job)).expect("enqueue");
+    let item = glib::MainContext::default()
+        .block_on(m.enqueue_gallery_async(&job))
+        .expect("enqueue");
     // Must NOT use the pre-existing directory.
     assert_ne!(item.filename(), "Test Gallery");
     assert!(item.filename().starts_with("Test Gallery-"));
@@ -7777,7 +7799,9 @@ fn gallery_enqueue_uses_unique_dir_when_title_collides() {
     assert!(preexisting.join("unrelated.txt").exists());
     // A second gallery with the same title (neither downloaded yet, so no
     // dir on disk) must get a *different* unique name — in-memory collision.
-    let item2 = glib::MainContext::default().block_on(m.enqueue_gallery_async(&job)).expect("enqueue second");
+    let item2 = glib::MainContext::default()
+        .block_on(m.enqueue_gallery_async(&job))
+        .expect("enqueue second");
     assert_ne!(item2.filename(), item.filename());
     assert_ne!(item2.filename(), "Test Gallery");
     // Drain both spawned engines so no woken tail trips a later test's

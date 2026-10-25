@@ -938,8 +938,7 @@ impl DownloadManager {
             // Parse metadata before archiving so invalid input never leaves an archive behind.
             let base = crate::torrent::intake_plan(&bytes).map(|(base, _multi)| base);
             let pseudo = crate::torrent::archive_torrent_file(&worker_file_name, &bytes)?;
-            let existing =
-                crate::video_staging::dir_file_names(std::path::Path::new(&worker_dir));
+            let existing = crate::video_staging::dir_file_names(std::path::Path::new(&worker_dir));
             Ok::<_, String>((pseudo, base, existing))
         })
         .await
@@ -1142,8 +1141,7 @@ impl DownloadManager {
             } else {
                 base_dir
             };
-            let existing =
-                crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
+            let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
             (dest_dir, existing)
         })
         .await;
@@ -1574,10 +1572,8 @@ impl DownloadManager {
                             return Err(gettext("Download path escapes the download folder"));
                         }
                         Err(error) => {
-                            return Err(
-                                gettext("Could not create the download folder: {error}")
-                                    .replace("{error}", &error.to_string()),
-                            );
+                            return Err(gettext("Could not create the download folder: {error}")
+                                .replace("{error}", &error.to_string()));
                         }
                     }
                 }
@@ -1967,7 +1963,9 @@ impl DownloadManager {
                                 let dir = item.dest_dir().to_string();
                                 let listing_dir = dir.clone();
                                 let existing = match gio::spawn_blocking(move || {
-                                    crate::video_staging::dir_file_names(std::path::Path::new(&listing_dir))
+                                    crate::video_staging::dir_file_names(std::path::Path::new(
+                                        &listing_dir,
+                                    ))
                                 })
                                 .await
                                 {
@@ -2059,7 +2057,10 @@ impl DownloadManager {
                                                 &torrent_filename,
                                             );
                                             if folder.is_dir() {
-                                                crate::torrent::cleanup_unselected(&folder, &worker_url);
+                                                crate::torrent::cleanup_unselected(
+                                                    &folder,
+                                                    &worker_url,
+                                                );
                                             }
                                         }
                                     })
@@ -2171,7 +2172,8 @@ impl DownloadManager {
                         this.persist_queue();
                         this.reserve_dest(&invalid_path);
                         let worker_path = invalid_path.clone();
-                        let _ = gio::spawn_blocking(move || std::fs::remove_file(worker_path)).await;
+                        let _ =
+                            gio::spawn_blocking(move || std::fs::remove_file(worker_path)).await;
                         this.release_dest(&invalid_path);
                         this.start_next();
                         if item.status() != DownloadStatus::Cancelled
@@ -3646,10 +3648,9 @@ impl DownloadManager {
             Self::write_queue_file(&text);
         }
         #[cfg(not(test))]
-        if let (Some(queue), Some(tx)) = (
-            self.snapshot_queue_inner(false),
-            &*self.persist_tx.borrow(),
-        ) {
+        if let (Some(queue), Some(tx)) =
+            (self.snapshot_queue_inner(false), &*self.persist_tx.borrow())
+        {
             tx.send_replace(Some(queue));
         }
     }
@@ -3661,8 +3662,7 @@ impl DownloadManager {
     pub(crate) async fn persist_task_loop<T>(
         mut rx: tokio::sync::watch::Receiver<Option<T>>,
         write: impl Fn(T) + Clone + Send + 'static,
-    )
-    where
+    ) where
         T: Clone + Send + 'static,
     {
         while rx.changed().await.is_ok() {
@@ -3692,10 +3692,9 @@ impl DownloadManager {
                 tracing::warn!(
                     "shutdown: queue restore did not complete; preserving the saved queue file"
                 );
-            } else if let (Some(queue), Some(tx)) = (
-                self.snapshot_queue_inner(true),
-                &*self.persist_tx.borrow(),
-            ) {
+            } else if let (Some(queue), Some(tx)) =
+                (self.snapshot_queue_inner(true), &*self.persist_tx.borrow())
+            {
                 tx.send_replace(Some(queue));
             }
             drop(self.persist_tx.borrow_mut().take());
@@ -3806,7 +3805,6 @@ impl DownloadManager {
             }
         }
     }
-
 
     /// Write the serialized queue atomically: temp file + sync_all + rename +
     /// dir sync. The persist task is the sole writer, so writes are ordered by

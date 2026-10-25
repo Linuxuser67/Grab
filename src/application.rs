@@ -157,7 +157,10 @@ async fn intake_remote_torrent(
             Routed::OpenedCard
         }
         Ok(_) => {
-            if let Err(e) = manager.enqueue_torrent_file_async(bytes, &stem, None, None).await {
+            if let Err(e) = manager
+                .enqueue_torrent_file_async(bytes, &stem, None, None)
+                .await
+            {
                 fail(e);
                 return Routed::Failed;
             }

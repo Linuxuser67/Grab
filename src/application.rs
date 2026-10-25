@@ -222,23 +222,36 @@ fn handoff_goes_to_card(uri: &url::Url) -> bool {
             || crate::video::is_stream_manifest_url(uri.as_str()))
 }
 
-/// True for `grab:` handoffs that would enqueue on their own: plain files,
-/// magnets, and remote `.torrent` fetches. The card is its own confirmation
-/// (its Add button) — handoffs landing there skip the dialog.
+/// True for handoffs that would enqueue on their own: plain files, magnets,
+/// and remote `.torrent` fetches. The card is its own confirmation (its Add
+/// button) — handoffs landing there skip the dialog.
 fn grab_handoff_needs_confirm(uri: &url::Url) -> bool {
     !handoff_goes_to_card(uri)
 }
 
-/// Whether a `grab:` handoff shows the "Add this download?" dialog: for
-/// handoffs that would enqueue on their own when auto-add is off (the toggle
-/// opts out of the explicit-OK protection) — and always for links to this
-/// computer or a private network, since any web page can fire a `grab:` link
-/// at the LAN.
-fn handoff_should_confirm(via_grab: bool, uri: &url::Url, auto_add: bool) -> bool {
+/// Whether an outside handoff shows the "Add this download?" dialog.
+///
+/// `grab:` links use the auto-add preference (and always confirm private
+/// targets). Extension handoffs additionally confirm when the caller could
+/// not prove it is the paired extension: unpaired and legacy clients have no
+/// authenticated identity, so auto-add must not silently queue their direct
+/// files, magnets, or remote torrents. Card URLs still rely on the card's Add
+/// button in that case.
+fn handoff_should_confirm(
+    via_grab: bool,
+    extension_authenticated: Option<bool>,
+    uri: &url::Url,
+    auto_add: bool,
+) -> bool {
+    if !via_grab {
+        return false;
+    }
     let private = uri
         .host_str()
         .is_some_and(crate::download_net::is_local_or_private_host);
-    via_grab && (private || (grab_handoff_needs_confirm(uri) && !auto_add))
+    let untrusted_extension =
+        extension_authenticated == Some(false) && grab_handoff_needs_confirm(uri);
+    private || untrusted_extension || (grab_handoff_needs_confirm(uri) && !auto_add)
 }
 
 /// `grab:` handoffs bypass the intake's URL normalization, so re-apply its
@@ -333,21 +346,28 @@ async fn route_open_uri(
 /// pages the user does not control; system-handler opens do not.
 ///
 /// - Handoffs that would enqueue on their own show the confirm dialog first,
-///   unless the auto-add toggle opted out of that protection.
+///   unless the auto-add toggle opted out of that protection. Unpaired and
+///   legacy extension callers always confirm direct files; auto-add cannot
+///   turn an unauthenticated request into a silent download.
 /// - A handoff that skips the dialog has no explicit user approval behind it,
 ///   so its host must resolve to public addresses only: a name pointing at
-///   127.0.0.1 or the LAN is refused at connect time.
+///   127.0.0.1 or the LAN is refused at connect time. A handoff the user
+///   confirmed is explicit consent to that URL (including its redirects), so
+///   it is not forced through the public-only resolver.
 ///
 /// `decision` is set for extension handoffs that asked to be told the outcome
 /// (`/add?confirm=1`): it is answered `true` once Grab has taken the URL over
 /// and `false` when the user declines, so the extension cancels the browser's
 /// own download only after Grab really has it. Dropping it unanswered counts
-/// as declined.
+/// as declined. `expires_at` is the server's confirmation deadline, used to
+/// close the dialog before the waiting request expires.
 fn dispatch_handoff(
     s: &State,
     uri: url::Url,
     via_grab: bool,
+    extension_authenticated: Option<bool>,
     decision: Option<tokio::sync::oneshot::Sender<crate::extension_server::HandoffOutcome>>,
+    expires_at: Option<std::time::Instant>,
 ) {
     let (manager, toasts, add_card, settings) = (
         s.manager.clone(),
@@ -355,8 +375,12 @@ fn dispatch_handoff(
         s.add_card.clone(),
         s.settings.clone(),
     );
-    let requires_confirmation =
-        handoff_should_confirm(via_grab, &uri, settings.auto_add_downloads());
+    let requires_confirmation = handoff_should_confirm(
+        via_grab,
+        extension_authenticated,
+        &uri,
+        settings.auto_add_downloads(),
+    );
     // Only a browser handoff that skips confirmation is untrusted. Confirmed
     // handoffs and user-entered URLs retain the normal proxy/resolver behavior.
     if via_grab
@@ -409,7 +433,23 @@ fn dispatch_handoff(
     confirm_download(
         &s.window,
         &shown,
+        expires_at,
         move || {
+            // A timeout may have closed the request just before this click.
+            // Do not enqueue when nobody is waiting for the outcome: the
+            // extension already fell back to its own download.
+            let expired = handoff_approval_expired(expires_at);
+            let sender_closed = decision
+                .borrow()
+                .as_ref()
+                .is_some_and(|sender| sender.is_closed());
+            if expired || sender_closed {
+                toasts.add_toast(adw::Toast::new(&gettext(
+                    "This browser handoff expired before it was approved.",
+                )));
+                let _ = decision.borrow_mut().take();
+                return;
+            }
             // Route first, then answer: the extension deletes the browser
             // copy only if Grab really queued it.
             let manager_c = manager.clone();
@@ -482,7 +522,7 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
             if let Ok(uri) = uri_text.parse::<url::Url>()
                 && matches!(uri.scheme(), "http" | "https" | "magnet")
             {
-                dispatch_handoff(&s, uri, via_grab, None);
+                dispatch_handoff(&s, uri, via_grab, None, None, None);
                 continue;
             }
             if let Some(path) = f.path() {
@@ -681,7 +721,8 @@ pub fn setup(app: &adw::Application) {
             glib::spawn_future_local(async move {
                 while let Some(handoff) = ext_rx.recv().await {
                     // Early `continue`s below drop `decision`: a decline.
-                    let (url_text, decision) = (handoff.url, handoff.decision);
+                    let (url_text, decision, authenticated, expires_at) =
+                        (handoff.url, handoff.decision, handoff.authenticated, handoff.expires_at);
                     let s = match bridge_state.borrow().as_ref().cloned() {
                         Some(s) => s,
                         None => continue,
@@ -709,7 +750,14 @@ pub fn setup(app: &adw::Application) {
                     if !matches!(uri.scheme(), "http" | "https" | "magnet") {
                         continue;
                     }
-                    dispatch_handoff(&s, uri, true, decision);
+                    dispatch_handoff(
+                        &s,
+                        uri,
+                        true,
+                        Some(authenticated),
+                        decision,
+                        expires_at,
+                    );
                 }
             });
 
@@ -785,9 +833,16 @@ fn destructive_confirm(
 /// the body shows the URL so the user sees what they are approving. Video
 /// pages and stream manifests skip this: the New Download card's Add button
 /// is already the confirmation.
+/// Whether a browser handoff's confirmation deadline has passed. Kept pure so
+/// the click-time guard is testable without a GTK dialog.
+fn handoff_approval_expired(expires_at: Option<std::time::Instant>) -> bool {
+    expires_at.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+}
+
 fn confirm_download(
     parent: &impl gtk4::glib::object::IsA<gtk4::Widget>,
     uri: &url::Url,
+    expires_at: Option<std::time::Instant>,
     on_confirm: impl Fn() + 'static,
     on_cancel: impl Fn() + 'static,
 ) {
@@ -800,11 +855,43 @@ fn confirm_download(
     dialog.set_response_appearance("download", adw::ResponseAppearance::Suggested);
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");
+    let resolved = Rc::new(std::cell::Cell::new(false));
+    let timer = Rc::new(RefCell::new(None::<glib::SourceId>));
+    let on_confirm = Rc::new(on_confirm);
+    let on_cancel = Rc::new(on_cancel);
+    if let Some(deadline) = expires_at {
+        let dialog_for_timeout = dialog.clone();
+        let resolved_for_timeout = Rc::clone(&resolved);
+        let cancel_for_timeout = Rc::clone(&on_cancel);
+        let timer_for_timeout = Rc::clone(&timer);
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let source = glib::timeout_add_local_once(remaining, move || {
+            timer_for_timeout.borrow_mut().take();
+            if resolved_for_timeout.replace(true) {
+                return;
+            }
+            // close() may itself emit the close response; the resolved flag
+            // makes the cancellation callback run exactly once.
+            dialog_for_timeout.close();
+            cancel_for_timeout();
+        });
+        *timer.borrow_mut() = Some(source);
+    }
+    let resolved_for_response = Rc::clone(&resolved);
+    let timer_for_response = Rc::clone(&timer);
+    let confirm_for_response = Rc::clone(&on_confirm);
+    let cancel_for_response = Rc::clone(&on_cancel);
     dialog.connect_response(None, move |_, response| {
+        if resolved_for_response.replace(true) {
+            return;
+        }
+        if let Some(source) = timer_for_response.borrow_mut().take() {
+            source.remove();
+        }
         if response == "download" {
-            on_confirm();
+            confirm_for_response();
         } else {
-            on_cancel();
+            cancel_for_response();
         }
     });
     dialog.present(Some(parent));
@@ -1126,7 +1213,7 @@ mod tests {
             // starting a real network transfer.
             let batch = manager.batch_guard();
             assert!(
-                !handoff_should_confirm(true, &uri, settings.auto_add_downloads()),
+                !handoff_should_confirm(true, Some(true), &uri, settings.auto_add_downloads()),
                 "a public direct-file handoff skips confirmation when auto-add is enabled"
             );
             enqueue_direct_handoff(&manager, &uri).expect("direct handoff should enqueue");
@@ -1164,7 +1251,7 @@ mod tests {
         {
             let batch = manager.batch_guard();
             assert!(
-                handoff_should_confirm(true, &uri, settings.auto_add_downloads()),
+                handoff_should_confirm(true, Some(true), &uri, settings.auto_add_downloads()),
                 "without auto-add, the direct-file handoff must take the confirmation path"
             );
             assert_eq!(
@@ -1199,7 +1286,7 @@ mod tests {
 
         assert!(settings.auto_add_downloads());
         assert!(
-            handoff_should_confirm(true, &uri, settings.auto_add_downloads()),
+            handoff_should_confirm(true, Some(true), &uri, settings.auto_add_downloads()),
             "auto-add must not bypass confirmation for a private-network target"
         );
         assert_eq!(
@@ -1622,15 +1709,46 @@ mod tests {
     fn handoff_should_confirm_respects_auto_add() {
         // Direct file via grab: needs confirm by default...
         let direct = "https://example.com/file.zip".parse::<url::Url>().unwrap();
-        assert!(handoff_should_confirm(true, &direct, false));
+        assert!(handoff_should_confirm(true, None, &direct, false));
         // ...but auto-add skips the dialog.
         // Mutation: drop the `!auto_add` → this assertion fails.
-        assert!(!handoff_should_confirm(true, &direct, true));
+        assert!(!handoff_should_confirm(true, None, &direct, true));
         // Non-grab handoffs never confirm (not extension-driven).
-        assert!(!handoff_should_confirm(false, &direct, false));
+        assert!(!handoff_should_confirm(false, None, &direct, false));
         // Video pages go to the card (its Add button is the confirmation).
         let video = "https://example.com/watch?v=1".parse::<url::Url>().unwrap();
-        assert!(!handoff_should_confirm(true, &video, false));
+        assert!(!handoff_should_confirm(true, None, &video, false));
+    }
+
+    #[test]
+    fn handoff_approval_expires_at_the_deadline() {
+        let now = std::time::Instant::now();
+        assert!(!super::handoff_approval_expired(None));
+        assert!(!super::handoff_approval_expired(Some(
+            now + std::time::Duration::from_secs(1)
+        )));
+        assert!(super::handoff_approval_expired(Some(now)));
+        assert!(super::handoff_approval_expired(Some(
+            now - std::time::Duration::from_secs(1)
+        )));
+    }
+
+    #[test]
+    fn unpaired_extension_direct_handoff_always_confirms() {
+        // Auto-add cannot silently queue an unauthenticated extension POST.
+        let direct = "https://example.com/file.zip".parse::<url::Url>().unwrap();
+        assert!(handoff_should_confirm(true, Some(false), &direct, true));
+        assert!(handoff_should_confirm(true, Some(false), &direct, false));
+        // A paired extension keeps the auto-add shortcut.
+        assert!(!handoff_should_confirm(true, Some(true), &direct, true));
+        // Card URLs already require the card's own Add button.
+        let video = "https://example.com/watch?v=1".parse::<url::Url>().unwrap();
+        assert!(!handoff_should_confirm(true, Some(false), &video, true));
+        // A magnet has no card, so an unpaired caller must confirm it too.
+        let magnet = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709"
+            .parse::<url::Url>()
+            .unwrap();
+        assert!(handoff_should_confirm(true, Some(false), &magnet, true));
     }
 
     #[test]
@@ -1646,16 +1764,19 @@ mod tests {
             "http://[::1]/file.zip",
         ] {
             let uri = raw.parse::<url::Url>().unwrap();
-            assert!(handoff_should_confirm(true, &uri, true), "input: {raw}");
+            assert!(
+                handoff_should_confirm(true, None, &uri, true),
+                "input: {raw}"
+            );
         }
         // Public hosts keep the old behavior: auto-add skips the dialog.
         let public = "https://example.com/file.zip".parse::<url::Url>().unwrap();
-        assert!(!handoff_should_confirm(true, &public, true));
+        assert!(!handoff_should_confirm(true, None, &public, true));
         // Magnets have no host: unchanged.
         let magnet = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709"
             .parse::<url::Url>()
             .unwrap();
-        assert!(handoff_should_confirm(true, &magnet, false));
-        assert!(!handoff_should_confirm(true, &magnet, true));
+        assert!(handoff_should_confirm(true, None, &magnet, false));
+        assert!(!handoff_should_confirm(true, None, &magnet, true));
     }
 }

@@ -271,6 +271,8 @@ pub(crate) struct RemovedSnapshot {
     /// the row's own bytes, so the spawn gate must resume it instead of
     /// refusing it Parabolic-style as a foreign file at the destination.
     pub started: bool,
+    /// Preserve the untrusted-handoff policy reference when Undo restores a row.
+    pub public_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1186,14 +1188,32 @@ impl DownloadManager {
         Ok(self.insert(item))
     }
 
-    fn insert(self: &Rc<Self>, item: DownloadItem) -> DownloadItem {
+    /// Claim one reference on a host's public-only policy for this row.
+    fn claim_public_policy(item: &DownloadItem) {
         if let Some(host) = url::Url::parse(&item.url())
             .ok()
             .and_then(|url| url.host_str().map(str::to_string))
-            && crate::download_net::is_untrusted_handoff_host(&host)
+            && (item.public_only() || crate::download_net::is_untrusted_handoff_host(&host))
         {
             item.set_public_only(true);
+            crate::download_net::retain_public_resolution(&host);
         }
+    }
+
+    /// Drop the row's policy reference. The host stays registered so an open
+    /// card or another row on the same host keeps its protection.
+    fn release_public_policy(item: &DownloadItem) {
+        if item.public_only()
+            && let Some(host) = url::Url::parse(&item.url())
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_string))
+        {
+            crate::download_net::release_public_resolution(&host);
+        }
+    }
+
+    fn insert(self: &Rc<Self>, item: DownloadItem) -> DownloadItem {
+        Self::claim_public_policy(&item);
         self.store.append(&item);
         self.persist_queue();
         self.changed();
@@ -2795,8 +2815,12 @@ impl DownloadManager {
             crate::extension_server::discard_handoff_cookies(&job.page_url);
         }
         self.gallery_jobs.borrow_mut().remove(&id);
+        let released = self.find(id).filter(|item| item.public_only());
         if let Some(pos) = self.position_of(id) {
             self.store.remove(pos);
+        }
+        if let Some(item) = released {
+            Self::release_public_policy(&item);
         }
         self.persist_queue();
         self.changed();
@@ -2829,6 +2853,7 @@ impl DownloadManager {
             s => s,
         });
         item.set_output_dir(snap.output_dir);
+        item.set_public_only(snap.public_only);
         if let Some(st) = snap.segments {
             self.segment_state.borrow_mut().insert(item.id(), st);
         }
@@ -2847,6 +2872,7 @@ impl DownloadManager {
         // starts the row once the destination is free.
         if item.status() == DownloadStatus::Queued && self.dest_reserved(&item.file_path()) {
             item.set_status(DownloadStatus::Queued);
+            Self::claim_public_policy(&item);
             self.store.append(&item);
             self.persist_queue();
             self.changed();
@@ -3139,6 +3165,7 @@ impl DownloadManager {
                 segments: self.segments_of(it.id()),
                 video_source: self.video_source(it.id()),
                 started: self.has_started(it.id()),
+                public_only: it.public_only(),
             })
             .collect()
     }
@@ -3172,8 +3199,12 @@ impl DownloadManager {
         self.video_sources.borrow_mut().remove(&id);
         self.gallery_jobs.borrow_mut().remove(&id);
         self.epoch.borrow_mut().remove(&id);
+        let released = self.find(id).filter(|item| item.public_only());
         if let Some(pos) = self.position_of(id) {
             self.store.remove(pos);
+        }
+        if let Some(item) = released {
+            Self::release_public_policy(&item);
         }
     }
 

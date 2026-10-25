@@ -1489,6 +1489,7 @@ fn unremove_restores_video_source() {
         segments: None,
         video_source: manager.video_source(id),
         started: false,
+        public_only: item.public_only(),
     };
     manager.remove(id);
     assert_eq!(manager.video_source(id), None);
@@ -2523,6 +2524,7 @@ fn unremove_restores_started_for_single_connection_partial() {
         segments: manager.segments_of(id),
         video_source: manager.video_source(id),
         started: manager.has_started(id),
+        public_only: item.public_only(),
     };
     manager.remove(id);
     assert!(
@@ -6032,6 +6034,7 @@ fn released_reservation_wakes_parked_unremoved_row() {
             backend: None,
         }),
         started: false,
+        public_only: false,
     };
     let revived = manager.unremove(snap);
     let id = revived.id();
@@ -6111,6 +6114,7 @@ fn an_unremove_of_a_settled_row_stays_settled_while_reserved() {
             backend: None,
         }),
         started: false,
+        public_only: false,
     };
     let revived = manager.unremove(snap);
     assert_eq!(
@@ -8054,6 +8058,17 @@ fn restoring_public_only_row_reinstates_its_host_policy() {
         .expect("restore guarded row");
     assert!(item.public_only());
     assert!(crate::download_net::is_untrusted_handoff_host(host));
+    assert_eq!(
+        crate::download_net::public_resolution_refs(host),
+        Some(1),
+        "the restored row must hold one policy reference"
+    );
+    manager.remove(item.id());
+    assert_eq!(
+        crate::download_net::public_resolution_refs(host),
+        Some(0),
+        "removing the row must release its reference"
+    );
 
     let _ = std::fs::remove_file(queue_file);
 }

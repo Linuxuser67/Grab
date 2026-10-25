@@ -11,6 +11,11 @@ import urllib.request
 from pathlib import Path
 
 PINNED_VERSION = "v1.32.17"
+# The release's SHA256SUMS is fetched only as a cross-check; the installed
+# binary must match this committed digest, not whatever the host serves today.
+PINNED_BIN_SHA256 = (
+    "ccf4d304408a0d57ef78d4ad9221aaad964e36b57466109b48595a52377dcdcc"
+)
 API = (
     "https://codeberg.org/api/v1/repos/mikf/gallery-dl/"
     f"releases/tags/{PINNED_VERSION}"
@@ -81,6 +86,10 @@ for line in checksums.splitlines():
         digest = fields[0].lower()
 if digest is None:
     raise RuntimeError("SHA256SUMS has no unique gallery-dl.bin digest")
+if digest != PINNED_BIN_SHA256:
+    raise RuntimeError(
+        f"gallery-dl.bin digest {digest} does not match the pinned digest"
+    )
 
 target = Path("/usr/local/bin/gallery-dl")
 fd, temporary = tempfile.mkstemp(prefix="gallery-dl.", dir="/usr/local/bin")
@@ -102,7 +111,7 @@ try:
                 raise RuntimeError("gallery-dl.bin exceeds the 128 MiB ceiling")
             actual.update(chunk)
             output.write(chunk)
-    if actual.hexdigest() != digest:
+    if actual.hexdigest() != PINNED_BIN_SHA256:
         raise RuntimeError("gallery-dl.bin SHA-256 mismatch")
     os.chmod(temporary, 0o755)
     os.replace(temporary, target)

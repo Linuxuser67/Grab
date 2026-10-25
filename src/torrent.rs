@@ -452,6 +452,16 @@ fn is_hostile_entry(path: &str) -> bool {
 /// not a pathname pre-check, is the security boundary: swapping an intermediate
 /// component for a symlink after validation cannot redirect the unlink.
 fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Path) {
+    remove_beneath(path, folder, true);
+}
+
+/// Remove only parents that the trashed file leaves empty. Like the file
+/// removal, this walks descriptors rather than trusting a path lookup.
+fn prune_empty_parents_beneath(path: &std::path::Path, folder: &std::path::Path) {
+    remove_beneath(path, folder, false);
+}
+
+fn remove_beneath(path: &std::path::Path, folder: &std::path::Path, remove_final: bool) {
     let Ok(relative) = path.strip_prefix(folder) else {
         return;
     };
@@ -523,23 +533,25 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
 
     // unlinkat operates on one filename in the final, safely traversed parent.
     // Failure is not silently treated as deletion success.
-    // SAFETY: the descriptor is open and target_name is a NUL-free component.
-    let result = unsafe {
-        libc::unlinkat(
-            stack
-                .last()
-                .expect("root descriptor retained")
-                .fd
-                .as_raw_fd(),
-            target_name.as_ptr(),
-            0,
-        )
-    };
-    if result != 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::debug!(path = %path.display(), error = %error, "torrent file cleanup failed");
-            return;
+    if remove_final {
+        // SAFETY: the descriptor is open and target_name is a NUL-free component.
+        let result = unsafe {
+            libc::unlinkat(
+                stack
+                    .last()
+                    .expect("root descriptor retained")
+                    .fd
+                    .as_raw_fd(),
+                target_name.as_ptr(),
+                0,
+            )
+        };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(path = %path.display(), error = %error, "torrent file cleanup failed");
+                return;
+            }
         }
     }
 
@@ -564,6 +576,13 @@ fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Pat
 /// Whether `path` is unsafe to trash: the root must be a real directory,
 /// the target must remain underneath it, and no intermediate component
 /// may be a symlink. Lookup errors are treated as unsafe (fail closed).
+///
+/// GIO's trash API has no descriptor-relative form, and using
+/// `/proc/self/fd/N/name` would make the `.trashinfo` Restore path point at
+/// procfs. This check is therefore the available preflight; an attacker able
+/// to swap a component needs write access to the download directory, and
+/// hostile torrent names are rejected by `deletion_target` before reaching
+/// here.
 fn path_has_symlink_component(path: &std::path::Path, folder: &std::path::Path) -> bool {
     let Some(parent) = path.parent() else {
         return true;
@@ -637,6 +656,7 @@ pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> Res
             Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
             Err(e) => return Err(format!("could not move {} to Trash: {e}", target.display())),
         }
+        prune_empty_parents_beneath(&target, folder);
         return Ok(std::fs::read_dir(folder)
             .map(|mut entries| entries.next().is_none())
             .unwrap_or(true));
@@ -657,17 +677,11 @@ pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> Res
                 Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
                 Err(e) => return Err(format!("could not move {} to Trash: {e}", target.display())),
             }
-            // Prune parents left empty by the trash (they're empty, safe to remove).
-            let mut parent = target.parent();
-            while let Some(dir) = parent {
-                if dir == folder {
-                    break;
-                }
-                match std::fs::remove_dir(dir) {
-                    Ok(()) => parent = dir.parent(),
-                    Err(_) => break,
-                }
-            }
+            // GIO exposes no descriptor-relative trash API: the trash
+            // metadata must carry the real path so Restore works. Validate
+            // with path_has_symlink_component immediately above, and prune
+            // through descriptors so an empty-parent race cannot redirect it.
+            prune_empty_parents_beneath(&target, folder);
         }
     }
     // Check if folder is empty.

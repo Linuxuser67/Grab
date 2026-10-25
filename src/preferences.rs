@@ -383,7 +383,7 @@ pub fn show(
         ))
         .build();
     auto_add.set_tooltip_text(Some(&gettext(
-        "Links opened from other apps also start without asking, except links to local or private addresses",
+        "Paired browser handoffs and links opened from other apps start without asking; unpaired browser handoffs and links to local or private addresses always ask first",
     )));
     settings
         .bind(

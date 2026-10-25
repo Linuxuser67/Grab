@@ -55,8 +55,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, RwLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tokio::sync::oneshot;
 
@@ -68,6 +69,10 @@ pub(crate) const QUEUE_DEPTH: usize = 16;
 /// How long `/add?confirm=1` waits for the user to answer the dialog. The
 /// extension's own timeout must be longer.
 pub(crate) const CONFIRM_WAIT: Duration = Duration::from_secs(120);
+/// Upper bound on confirmation requests in flight. The handoff queue depth
+/// alone does not bound dialogs: the GTK thread drains it into one dialog per
+/// request. Kept well below the queue so a flood cannot bury the user.
+const MAX_PENDING_CONFIRMATIONS: usize = 8;
 
 // --- Pairing ---------------------------------------------------------------
 
@@ -392,6 +397,12 @@ struct HandoffStore {
     /// Insertion order, so a full store evicts the oldest handoff instead of
     /// an arbitrary one (which could belong to a download still running).
     order: VecDeque<String>,
+    /// Hosts whose older staged jars must not be reused. A cookieless
+    /// handoff leaves no exact entry, so the same-host fallback would
+    /// otherwise select a jar from an earlier handoff.
+    suppressed_hosts: HashMap<String, SuppressedHost>,
+    /// FIFO bound for `suppressed_hosts`; a local flood must not grow it.
+    suppressed_order: VecDeque<String>,
 }
 
 /// Staged cookies plus the browser UA for one handoff. The UA travels with
@@ -402,6 +413,17 @@ struct HandoffCookies {
     path: PathBuf,
     user_agent: Option<String>,
     staged_at: SystemTime,
+    /// Monotonic staging marker for tombstone ordering; wall-clock steps must
+    /// not make an old jar look newer than a later cookieless handoff.
+    staged_instant: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct SuppressedHost {
+    at: Instant,
+    /// Number of in-flight cookieless handoffs that rely on this tombstone.
+    /// The entry disappears only when the last one is refused/declined.
+    pending: usize,
 }
 
 /// Cookie files handed off from the extension, keyed by canonical URL. Every
@@ -429,6 +451,16 @@ fn lock_handoff_cookies() -> MutexGuard<'static, HandoffStore> {
                     store.order.push_back(key);
                 }
             }
+            let hosts: HashSet<String> = store.suppressed_hosts.keys().cloned().collect();
+            let mut seen_hosts = HashSet::new();
+            store
+                .suppressed_order
+                .retain(|host| hosts.contains(host) && seen_hosts.insert(host.clone()));
+            for host in hosts {
+                if seen_hosts.insert(host.clone()) {
+                    store.suppressed_order.push_back(host);
+                }
+            }
             // The map/FIFO invariant is repaired while this guard is held.
             // Clear poison now, so future calls do not repeat O(n) repair/logging.
             HANDOFF_COOKIES.clear_poison();
@@ -440,6 +472,9 @@ fn lock_handoff_cookies() -> MutexGuard<'static, HandoffStore> {
 /// its file. Matches the handoff queue depth: at most that many handoffs can
 /// be in flight ahead of the GTK thread.
 const MAX_HANDOFF_ENTRIES: usize = QUEUE_DEPTH;
+/// Keep stale-host tombstones bounded. Only hosts with a staged jar are
+/// recorded, but bound the map for fail-safe behaviour under unexpected input.
+const MAX_SUPPRESSED_HOSTS: usize = MAX_HANDOFF_ENTRIES * 4;
 /// A staged jar at or past this age is a snapshot when a live browser source
 /// is configured: yt-dlp merges `--cookies` after the browser jar, so its old
 /// values would override the browser's rotated cookies. Probe and auto-add
@@ -596,6 +631,7 @@ pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option
         path,
         user_agent,
         staged_at: SystemTime::now(),
+        staged_instant: Instant::now(),
     };
     if let Some(old) = store.by_key.insert(key.clone(), entry) {
         let _ = std::fs::remove_file(old.path);
@@ -623,20 +659,142 @@ pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option
 fn handoff_entry(url: &str) -> Option<HandoffCookies> {
     let key = handoff_key(url)?;
     let store = lock_handoff_cookies();
-    store.by_key.get(&key).cloned().or_else(|| {
-        let host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
-        // Newest-first through insertion order: deterministic, and the
-        // most recent handoff on the host is the best guess for the parent
-        // collection (a HashMap walk would be arbitrary).
-        store.order.iter().rev().find_map(|k| {
-            let khost = url::Url::parse(k).ok()?.host_str()?.to_ascii_lowercase();
-            if khost == host {
-                store.by_key.get(k).cloned()
-            } else {
-                None
-            }
+    let host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
+    let current = |entry: &HandoffCookies| {
+        store
+            .suppressed_hosts
+            .get(&host)
+            .is_none_or(|suppressed| entry.staged_instant >= suppressed.at)
+    };
+    store
+        .by_key
+        .get(&key)
+        .filter(|entry| current(entry))
+        .cloned()
+        .or_else(|| {
+            // Newest-first through insertion order: deterministic, and the
+            // most recent handoff on the host is the best guess for the parent
+            // collection (a HashMap walk would be arbitrary).
+            store.order.iter().rev().find_map(|k| {
+                let khost = url::Url::parse(k).ok()?.host_str()?.to_ascii_lowercase();
+                if khost == host {
+                    store.by_key.get(k).filter(|entry| current(entry)).cloned()
+                } else {
+                    None
+                }
+            })
         })
+}
+
+/// A suppression owned by one cookieless handoff. Dropping it (decline,
+/// timeout, queue refusal, or handler cancellation) releases exactly this
+/// request's reference; approving the handoff calls [`Self::keep`].
+struct Suppression {
+    host: String,
+    keep: bool,
+    /// The handoff reached the GTK queue. If this handler is cancelled while
+    /// waiting for the answer, GTK may still show the dialog and route the
+    /// handoff, so cancellation must keep the tombstone (fail closed).
+    sent: bool,
+}
+
+impl Suppression {
+    fn mark_sent(&mut self) {
+        self.sent = true;
+    }
+
+    /// Release explicitly after a decline/failure/timeout.
+    fn release(&mut self) {
+        if !self.keep {
+            unsuppress_handoff_host(&self.host);
+            self.keep = true;
+        }
+    }
+
+    fn keep(mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for Suppression {
+    fn drop(&mut self) {
+        if !self.keep && !self.sent {
+            unsuppress_handoff_host(&self.host);
+        }
+    }
+}
+
+/// Suppress older staged jars for `url`'s host until this request is
+/// approved. Each in-flight request holds one reference so declining one
+/// cannot re-expose a jar another still needs hidden.
+fn suppress_handoff_host(url: &str) -> Option<Suppression> {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))?;
+    let mut store = lock_handoff_cookies();
+    // Without an older jar there is nothing to suppress. This also keeps a
+    // cookieless flood from growing the tombstone map: only hosts that had a
+    // staged entry can need one.
+    let has_staged = store.by_key.keys().any(|key| {
+        url::Url::parse(key)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+            .is_some_and(|key_host| key_host == host)
+    });
+    if !has_staged {
+        return None;
+    }
+    // Moving `at` forward is more restrictive for older jars, never less.
+    store
+        .suppressed_hosts
+        .entry(host.clone())
+        .and_modify(|suppressed| {
+            suppressed.at = Instant::now();
+            suppressed.pending += 1;
+        })
+        .or_insert(SuppressedHost {
+            at: Instant::now(),
+            pending: 1,
+        });
+    store.suppressed_order.retain(|h| h != &host);
+    store.suppressed_order.push_back(host.clone());
+    while store.suppressed_hosts.len() > MAX_SUPPRESSED_HOSTS {
+        // Never evict a tombstone an in-flight handoff still relies on; skip
+        // pending entries and only drop an idle one.
+        let idle = store.suppressed_order.iter().position(|host| {
+            store
+                .suppressed_hosts
+                .get(host)
+                .is_some_and(|suppressed| suppressed.pending == 0)
+        });
+        let Some(index) = idle else {
+            break;
+        };
+        let Some(oldest) = store.suppressed_order.remove(index) else {
+            break;
+        };
+        store.suppressed_hosts.remove(&oldest);
+    }
+    Some(Suppression {
+        host,
+        keep: false,
+        sent: false,
     })
+}
+
+fn unsuppress_handoff_host(host: &str) {
+    let mut store = lock_handoff_cookies();
+    let release = store
+        .suppressed_hosts
+        .get_mut(host)
+        .is_some_and(|suppressed| {
+            suppressed.pending = suppressed.pending.saturating_sub(1);
+            suppressed.pending == 0
+        });
+    if release {
+        store.suppressed_hosts.remove(host);
+        store.suppressed_order.retain(|h| h != host);
+    }
 }
 
 /// Browser UA staged with a handoff's cookies, if any. Same lookup as the
@@ -755,6 +913,8 @@ pub(crate) fn purge_handoff_cookies() {
     let paths: Vec<PathBuf> = {
         let mut store = lock_handoff_cookies();
         store.order.clear();
+        store.suppressed_hosts.clear();
+        store.suppressed_order.clear();
         store.by_key.drain().map(|(_, e)| e.path).collect()
     };
     for p in paths {
@@ -814,6 +974,13 @@ pub(crate) struct Handoff {
     /// Set for `/add?confirm=1`: the GTK side answers with the outcome.
     /// Dropping it unanswered counts as declined.
     pub decision: Option<oneshot::Sender<HandoffOutcome>>,
+    /// Whether the extension proved possession of the pairing secret with
+    /// current replay metadata. Unpaired and legacy callers are forced to
+    /// confirm even when the user enabled auto-add.
+    pub authenticated: bool,
+    /// GTK closes the dialog at this instant, so it cannot outlive the
+    /// server's confirmation window.
+    pub expires_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -821,6 +988,7 @@ struct AppState {
     tx: Sender<Handoff>,
     pairing: Option<Arc<Pairing>>,
     confirm_wait: Duration,
+    confirm_slots: Arc<Semaphore>,
 }
 
 /// Start the extension integration server. `tx` carries handoffs to the GTK
@@ -855,6 +1023,23 @@ async fn serve_listener(
     pairing: Option<Arc<Pairing>>,
     confirm_wait: Duration,
 ) {
+    serve_listener_with_cap(
+        listener,
+        tx,
+        pairing,
+        confirm_wait,
+        MAX_PENDING_CONFIRMATIONS,
+    )
+    .await;
+}
+
+async fn serve_listener_with_cap(
+    listener: TcpListener,
+    tx: Sender<Handoff>,
+    pairing: Option<Arc<Pairing>>,
+    confirm_wait: Duration,
+    confirm_cap: usize,
+) {
     let port = match listener.local_addr() {
         Ok(a) => a.port(),
         Err(e) => {
@@ -866,6 +1051,7 @@ async fn serve_listener(
         tx,
         pairing,
         confirm_wait,
+        confirm_slots: Arc::new(Semaphore::new(confirm_cap)),
     };
     if let Err(e) = axum::serve(listener, router(state, port)).await {
         tracing::warn!("Extension HTTP server error: {e}");
@@ -1026,6 +1212,22 @@ async fn handle_add(
     // arbitrary software start downloads. The confirm dialog is the
     // authorization for callers without a pairing.
     let wait = q.get("confirm").is_some_and(|v| v == "1") || !authenticated;
+    // The GTK thread drains the handoff queue into dialogs, so the queue
+    // depth alone does not bound how many can be open. Refuse excess
+    // confirmations instead of letting them pile up on the user.
+    let _confirm_slot = if wait {
+        match Arc::clone(&st.confirm_slots).try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => return StatusCode::TOO_MANY_REQUESTS.into_response(),
+        }
+    } else {
+        None
+    };
+    // Also reject before staging when the queue is already full: staging
+    // first could evict an in-flight handoff's jar only to refuse this one.
+    if st.tx.capacity() == 0 {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
     let (decision, answer) = if wait {
         let (tx, rx) = oneshot::channel();
         (Some(tx), Some(rx))
@@ -1035,12 +1237,14 @@ async fn handle_add(
     let handoff = Handoff {
         url: req.url.clone(),
         decision,
+        authenticated,
+        expires_at: wait.then(|| Instant::now() + st.confirm_wait),
     };
     // Stage before queuing: the GTK side may start a probe the moment the
     // handoff is received, and every probe leg looks the cookies up by URL.
     // An authenticated handoff with no usable cookies discards the stale
-    // entry: the new download must not reuse the old jar. Unauthenticated
-    // callers never discard, so a local probe can't wipe entries.
+    // exact entry, and every cookieless handoff suppresses older same-host
+    // jars so the fallback cannot resurrect an earlier browser session.
     let (staged, accepted_cookie_count) = if authenticated {
         match write_handoff_cookies_with_count(&req.url, &req.cookies) {
             Some((path, accepted)) => {
@@ -1055,8 +1259,17 @@ async fn handle_add(
     } else {
         (false, 0)
     };
+    let mut suppression = if !staged {
+        suppress_handoff_host(&req.url)
+    } else {
+        None
+    };
     match st.tx.try_send(handoff) {
-        Ok(()) => {}
+        Ok(()) => {
+            if let Some(suppression) = suppression.as_mut() {
+                suppression.mark_sent();
+            }
+        }
         Err(TrySendError::Full(_)) => {
             if staged {
                 discard_handoff_cookies(&req.url);
@@ -1075,18 +1288,37 @@ async fn handle_add(
         }
     }
     let Some(answer) = answer else {
+        // The handoff was accepted for immediate routing; keep suppression
+        // active for the download it may start.
+        if let Some(suppression) = suppression {
+            suppression.keep();
+        }
         return cookie_report_response(accepted_cookie_count, StatusCode::OK);
     };
     match tokio::time::timeout(st.confirm_wait, answer).await {
         Ok(Ok(outcome)) => {
             let (status, discard) = handoff_outcome_response(&outcome);
-            if discard && staged {
-                discard_handoff_cookies(&req.url);
+            if discard {
+                if let Some(suppression) = suppression.as_mut() {
+                    suppression.release();
+                }
+                if staged {
+                    discard_handoff_cookies(&req.url);
+                }
+                // The explicit release above prevents the Drop guard from
+                // decrementing a second time.
+            } else if let Some(suppression) = suppression {
+                suppression.keep();
             }
             cookie_report_response(if discard { 0 } else { accepted_cookie_count }, status)
         }
         outcome => {
-            // Dropped unanswered or timed out.
+            // Dropped unanswered or timed out: this request will not start a
+            // download, so release its suppression before returning.
+            if let Some(suppression) = suppression.as_mut() {
+                suppression.release();
+            }
+            drop(suppression);
             if staged {
                 discard_handoff_cookies(&req.url);
             }
@@ -1123,10 +1355,25 @@ mod tests {
     }
 
     async fn start_with(depth: usize, pairing: Option<Arc<Pairing>>, wait: Duration) -> Server {
+        start_with_cap(depth, pairing, wait, MAX_PENDING_CONFIRMATIONS).await
+    }
+
+    async fn start_with_cap(
+        depth: usize,
+        pairing: Option<Arc<Pairing>>,
+        wait: Duration,
+        confirm_cap: usize,
+    ) -> Server {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = channel(depth);
-        tokio::spawn(serve_listener(listener, tx, pairing, wait));
+        tokio::spawn(serve_listener_with_cap(
+            listener,
+            tx,
+            pairing,
+            wait,
+            confirm_cap,
+        ));
         Server { port, rx }
     }
 
@@ -1225,6 +1472,8 @@ mod tests {
         });
         let handoff = srv.rx.recv().await.expect("handoff");
         assert_eq!(handoff.url, "https://example.com/file.zip");
+        assert!(!handoff.authenticated);
+        assert!(handoff.expires_at.is_some());
         handoff
             .decision
             .expect("decision")
@@ -1550,6 +1799,7 @@ mod tests {
             path: PathBuf::from("/tmp/jar"),
             user_agent: None,
             staged_at: SystemTime::now(),
+            staged_instant: Instant::now(),
         };
         assert!(handoff_jar_usable_at(&entry, true, entry.staged_at));
         assert!(!handoff_jar_usable_at(
@@ -1840,6 +2090,147 @@ mod tests {
         assert!(
             handoff_cookie_args("https://example.com/").is_empty(),
             "rejected handoff must stage nothing"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[tokio::test]
+    async fn cookieless_handoff_blocks_same_host_fallback_until_new_jar() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let old_url = "https://same-host.example/old";
+        let body =
+            r#"{"url":"https://same-host.example/old","cookies":[{"name":"c","value":"old"}]}"#;
+        let tok = token(body);
+        let r = request(
+            srv.port,
+            &[("Host", &host), ("X-Grab-Token", &tok), JSON],
+            body,
+        )
+        .await;
+        assert_eq!(status(&r), "200", "{r}");
+        let _ = srv.rx.recv().await.expect("handoff");
+        let old_args = handoff_cookie_args(old_url);
+        assert_eq!(old_args.len(), 2, "old jar must be staged");
+        let old_path = PathBuf::from(&old_args[1]);
+
+        // A new authenticated handoff for a sibling URL without cookies must
+        // not fall back to the earlier browser session.
+        let sibling = "https://same-host.example/new";
+        let body = r#"{"url":"https://same-host.example/new","cookies":[]}"#;
+        let tok = token(body);
+        let r = request(
+            srv.port,
+            &[("Host", &host), ("X-Grab-Token", &tok), JSON],
+            body,
+        )
+        .await;
+        assert_eq!(status(&r), "200", "{r}");
+        let _ = srv.rx.recv().await.expect("handoff");
+        assert!(
+            handoff_cookie_args(sibling).is_empty(),
+            "the same-host fallback must not revive an older jar"
+        );
+        assert!(
+            old_path.exists(),
+            "suppression must not delete the old file"
+        );
+
+        // A later handoff that does stage cookies clears the tombstone's
+        // effect by being newer than it.
+        let body =
+            r#"{"url":"https://same-host.example/fresh","cookies":[{"name":"c","value":"new"}]}"#;
+        let tok = token(body);
+        let r = request(
+            srv.port,
+            &[("Host", &host), ("X-Grab-Token", &tok), JSON],
+            body,
+        )
+        .await;
+        assert_eq!(status(&r), "200", "{r}");
+        let _ = srv.rx.recv().await.expect("handoff");
+        let fresh_args = handoff_cookie_args(sibling);
+        assert_eq!(fresh_args.len(), 2, "newer handoff should be usable");
+        assert_ne!(fresh_args[1], old_args[1], "new jar, not the old one");
+        clear_handoff_cookies();
+    }
+
+    #[tokio::test]
+    async fn pending_confirmation_cap_rejects_a_dialog_flood() {
+        let mut srv = start_with_cap(4, test_pairing(), Duration::from_secs(5), 1).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let task = tokio::spawn({
+            let host = host.clone();
+            async move { request_to(srv.port, "POST", "/add", &[("Host", &host), JSON], BODY).await }
+        });
+        let handoff = srv.rx.recv().await.expect("handoff");
+        // One confirmation is in flight; a second must be refused instead of
+        // opening another dialog, even though the handoff queue has room.
+        let r = request(srv.port, &[("Host", &host), JSON], BODY).await;
+        assert_eq!(status(&r), "429", "{r}");
+        handoff
+            .decision
+            .expect("unauthenticated handoff carries a decision")
+            .send(HandoffOutcome::Queued)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "200");
+    }
+
+    #[test]
+    fn accepted_suppression_survives_cancellation_drop() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+        let url = "https://cancelled.example/file";
+        let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
+        store_handoff_cookies(url, path, None);
+        let mut suppression = suppress_handoff_host(url).expect("suppression");
+        suppression.mark_sent();
+        drop(suppression);
+        assert!(
+            handoff_cookie_args(url).is_empty(),
+            "a queued handoff may still be shown by GTK after its client disconnects"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn overlapping_suppressions_keep_the_tombstone_until_all_release() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+        let url = "https://overlap.example/file";
+        let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
+        store_handoff_cookies(url, path, None);
+        let first = suppress_handoff_host(url).expect("first suppression");
+        let second = suppress_handoff_host(url).expect("second suppression");
+        drop(first);
+        assert!(
+            handoff_cookie_args(url).is_empty(),
+            "one pending handoff must keep the jar hidden"
+        );
+        second.keep();
+        assert!(
+            handoff_cookie_args(url).is_empty(),
+            "an approved handoff keeps suppressing the older jar"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn cookieless_suppression_ignores_hosts_without_a_staged_jar() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+        assert!(
+            suppress_handoff_host("https://no-jar.example/file").is_none(),
+            "there is nothing to suppress, and a flood must not grow the map"
+        );
+        let url = "https://no-jar.example/file";
+        let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
+        store_handoff_cookies(url, path, None);
+        assert_eq!(
+            handoff_cookie_args(url).len(),
+            2,
+            "a later legitimate jar must still be usable"
         );
         clear_handoff_cookies();
     }
@@ -2383,6 +2774,8 @@ mod tests {
             "unauthenticated handoff must wait for the dialog"
         );
         let handoff = srv.rx.recv().await.expect("handoff");
+        assert!(!handoff.authenticated);
+        assert!(handoff.expires_at.is_some());
         handoff
             .decision
             .expect("unauthenticated handoff carries a decision")
@@ -2439,7 +2832,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unauthenticated_decline_does_not_wipe_staged_entry() {
+    async fn unauthenticated_decline_preserves_staged_entry_but_approval_hides_it() {
         let _g = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
@@ -2455,9 +2848,13 @@ mod tests {
         .await;
         assert_eq!(status(&r), "200", "{r}");
         let _ = srv.rx.recv().await.expect("handoff");
-        assert_eq!(handoff_cookie_args(url).len(), 2, "entry must be staged");
-        // Unauthenticated confirm=1 for the same URL, declined: the staged
-        // entry belongs to the earlier handoff and must survive.
+        let args = handoff_cookie_args(url);
+        assert_eq!(args.len(), 2, "entry must be staged");
+        let staged = PathBuf::from(&args[1]);
+
+        // Unauthenticated confirm=1 for the same URL, declined. The request
+        // must not inherit the earlier paired jar, but declining must leave
+        // that jar available to unrelated work.
         let body2 = r#"{"url":"https://example.com/keep"}"#;
         let (port, h2) = (srv.port, host.clone());
         let task = tokio::spawn(async move {
@@ -2480,8 +2877,38 @@ mod tests {
         assert_eq!(
             handoff_cookie_args(url).len(),
             2,
-            "declining an unauthenticated handoff must not wipe the staged entry"
+            "a declined request must not hide the staged jar from other work"
         );
+        assert!(
+            staged.exists(),
+            "declining an unauthenticated handoff must not delete the staged file"
+        );
+
+        // Approving the same unpaired handoff does hide the older paired jar
+        // from the request it authorized; the file itself is still kept.
+        let (port, h2) = (srv.port, host.clone());
+        let task = tokio::spawn(async move {
+            request_to(
+                port,
+                "POST",
+                "/add?confirm=1",
+                &[("Host", &h2), JSON],
+                r#"{"url":"https://example.com/keep"}"#,
+            )
+            .await
+        });
+        let handoff = srv.rx.recv().await.expect("handoff");
+        handoff
+            .decision
+            .expect("unauthenticated handoff carries a decision")
+            .send(HandoffOutcome::Queued)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "200");
+        assert!(
+            handoff_cookie_args(url).is_empty(),
+            "an approved unpaired handoff must not reuse a paired jar"
+        );
+        assert!(staged.exists(), "suppression must not delete the old file");
         clear_handoff_cookies();
     }
 
@@ -2502,6 +2929,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn confirm_timeout_releases_the_pending_slot() {
+        let mut srv = start_with_cap(4, test_pairing(), Duration::from_millis(50), 1).await;
+        let first = add_confirming(srv.port);
+        let _pending = srv.rx.recv().await.expect("handoff");
+        assert_eq!(status(&first.await.unwrap()), "408");
+        // The timed-out request's permit must be gone, not leaked.
+        let second = add_confirming(srv.port);
+        let handoff = srv.rx.recv().await.expect("second handoff");
+        handoff
+            .decision
+            .expect("handoff carries a decision")
+            .send(HandoffOutcome::Queued)
+            .unwrap();
+        assert_eq!(status(&second.await.unwrap()), "200");
+    }
+
+    #[tokio::test]
     async fn without_confirm_the_answer_is_immediate() {
         // The fast path still exists, but only for authenticated (paired)
         // callers. Unauthenticated callers always wait (see
@@ -2516,7 +2960,13 @@ mod tests {
         )
         .await;
         assert_eq!(status(&r), "200", "{r}");
-        assert!(srv.rx.recv().await.expect("handoff").decision.is_none());
+        let handoff = srv.rx.recv().await.expect("handoff");
+        assert!(handoff.authenticated);
+        assert!(handoff.decision.is_none());
+        assert!(
+            handoff.expires_at.is_none(),
+            "an immediate handoff has no dialog to expire"
+        );
     }
 
     #[test]

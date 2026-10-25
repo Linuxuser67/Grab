@@ -416,6 +416,30 @@ fn descriptor_torrent_cleanup_refuses_intermediate_symlinks() {
 
 #[cfg(unix)]
 #[test]
+fn prune_empty_parents_stops_at_a_nonempty_directory() {
+    let base = std::env::temp_dir().join(format!("grab-torrent-prune-{}", std::process::id()));
+    let root = base.join("root");
+    let nested = root.join("a/b");
+    let file = nested.join("trashed.me");
+    let keep = root.join("a/keep.txt");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(&file, b"trash me").unwrap();
+    std::fs::write(&keep, b"keep me").unwrap();
+
+    // GIO already moved `file` to Trash; pruning must remove `b` but leave the
+    // non-empty `a` (and the configured root) alone.
+    std::fs::remove_file(&file).unwrap();
+    prune_empty_parents_beneath(&file, &root);
+
+    assert!(!nested.exists());
+    assert_eq!(std::fs::read(&keep).unwrap(), b"keep me");
+    assert!(root.is_dir());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
 fn descriptor_torrent_cleanup_deletes_file_and_prunes_only_empty_parents() {
     let base = std::env::temp_dir().join(format!("grab-torrent-delete-ok-{}", std::process::id()));
     let root = base.join("root");

@@ -757,6 +757,16 @@ pub(crate) const MERGER_FASTSTART_ARGS: &str = "Merger+ffmpeg:-movflags +faststa
 const YTDLP_MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
+    let _guard = ytdlp_install_lock().lock().await;
+    install_ytdlp_locked().await
+}
+
+fn ytdlp_install_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn install_ytdlp_locked() -> Result<PathBuf, VideoError> {
     let (url, digest) = latest_ytdlp_asset()
         .await
         .ok_or_else(|| VideoError::install("couldn't determine the latest yt-dlp release"))?;

@@ -3081,11 +3081,7 @@ impl DownloadManager {
 
     /// Prepare immutable inputs for deletion while the model is on GTK.
     /// Directory checks and torrent archive parsing are deferred to the worker.
-    fn prepare_delete_operation(
-        &self,
-        id: u64,
-        item: &DownloadItem,
-    ) -> DeleteOperation {
+    fn prepare_delete_operation(&self, id: u64, item: &DownloadItem) -> DeleteOperation {
         let filename = item.filename().to_string();
         if item.is_gallery() {
             let target = self

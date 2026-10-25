@@ -121,6 +121,25 @@ fn drain_engine(manager: &DownloadManager, id: u64) {
     quiesce(&ctx);
 }
 
+/// Wait for cancel_all's path reservations to clear, proving its blocking
+/// cleanup workers and their main-context continuations have completed.
+fn drain_cancel_cleanups(manager: &DownloadManager) {
+    let ctx = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while manager
+        .items()
+        .any(|item| manager.dest_reserved(&item.file_path()))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out draining cancellation cleanup workers"
+        );
+        ctx.iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    quiesce(&ctx);
+}
+
 /// Pump until quiet (50 idle rounds) so no woken tail trips another test's loop.
 fn quiesce(ctx: &glib::MainContext) {
     let mut idle_rounds = 0;
@@ -3133,8 +3152,8 @@ fn defer_yields_slot_and_goes_last() {
     manager.cancel_all();
     assert!(!manager.running.borrow().contains_key(&72));
     // cancel_all schedules partial-file cleanup on the GLib context. Drain
-    // those local futures before this test's context is owned by another thread.
-    quiesce(&glib::MainContext::default());
+    // the workers and their continuations before another test owns the context.
+    drain_cancel_cleanups(&manager);
     settings.set_int("max-concurrent", 3).unwrap();
 }
 

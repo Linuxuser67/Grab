@@ -1231,6 +1231,9 @@ impl DownloadManager {
         }
 
         let _batch = this.batch_guard();
+        // Collection results are untrusted input. Keep policy inheritance and the
+        // distinct-host cap in the shared helper so automatic expansion and the picker
+        // enforce the same destination/network rules.
         let mut guarded_child_hosts = HashSet::new();
         let mut skipped_by_host_limit = 0usize;
         let mut added = 0usize;
@@ -1252,9 +1255,12 @@ impl DownloadManager {
                 }
                 Err(crate::download_net::CollectionHostError::UnsafeDestination) => continue,
             }
+            // Match the interactive picker by carrying each entry title into its filename.
             let remux = crate::video_prefs::remux_video_active(&this.settings.remux_video());
             let name =
                 crate::video::default_video_filename(&entry.title, audio_only, remux.as_deref());
+            // Live streams discovered inside a collection use the VOD path; each child
+            // resolves its own page rather than inheriting the carrier's live-capture state.
             if this
                 .enqueue_video_staged(
                     &url,
@@ -1274,6 +1280,8 @@ impl DownloadManager {
                 added += 1;
             }
         }
+        // Report the collection's stated total, not merely attempted entries, so the
+        // carrier can accurately show "added of total" alongside host-cap omissions.
         (added, pl.total, skipped_by_host_limit)
     }
 

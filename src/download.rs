@@ -922,29 +922,50 @@ impl DownloadManager {
     ///
     /// # Errors
     /// Returns a display-ready message when the bytes are not a valid torrent.
-    pub fn enqueue_torrent_file(
+    /// Archive and enqueue a .torrent without performing disk I/O on GTK.
+    pub async fn enqueue_torrent_file_async(
         self: &Rc<Self>,
         bytes: Vec<u8>,
         file_name: &str,
         dest_dir: Option<&str>,
         only_files: Option<Vec<usize>>,
     ) -> Result<DownloadItem, String> {
-        let pseudo = crate::torrent::archive_torrent_file(file_name, &bytes)?;
-        if let Some(sel) = only_files {
-            crate::torrent::stage_selection(&pseudo, sel);
+        let file_name = file_name.to_string();
+        let dir = self.resolve_dir(dest_dir);
+        let worker_file_name = file_name.clone();
+        let worker_dir = dir.clone();
+        let (pseudo, base, existing) = gio::spawn_blocking(move || {
+            // Parse metadata before archiving so invalid input never leaves an archive behind.
+            let base = crate::torrent::intake_plan(&bytes).map(|(base, _multi)| base);
+            let pseudo = crate::torrent::archive_torrent_file(&worker_file_name, &bytes)?;
+            let existing =
+                crate::video_staging::dir_file_names(std::path::Path::new(&worker_dir));
+            Ok::<_, String>((pseudo, base, existing))
+        })
+        .await
+        .map_err(|error| format!("Could not prepare torrent file: {error:?}"))??;
+
+        if let Some(selection) = only_files {
+            crate::torrent::stage_selection(&pseudo, selection);
         }
-        let stub = crate::torrent::stub_name_for_file(file_name);
+        let stub = crate::torrent::stub_name_for_file(&file_name);
         let item = self.enqueue(&pseudo, dest_dir, Some(&stub))?;
-        // The engine writes with overwrite:true, so record a deduped subfolder the engine then uses as-is.
-        if let Some((base, _)) = crate::torrent::intake_plan(&bytes) {
-            let dir = self.resolve_dir(dest_dir);
-            if std::path::Path::new(&dir).join(&base).exists() {
-                let name = dedupe_filename(&base, |n| {
-                    let p = std::path::Path::new(&dir).join(n);
-                    p.exists()
-                        // Only video-row finished names reserve stems (see plain `enqueue`).
-                        || self.items()
-                            .any(|it| it.output_dir() == p.to_string_lossy())
+
+        // The engine writes with overwrite:true, so reserve a collision-free
+        // output folder from the listing snapshot before it can be spawned.
+        if let Some(base) = base {
+            let candidate = std::path::Path::new(&dir).join(&base);
+            let candidate_s = candidate.to_string_lossy().into_owned();
+            let disk_taken = existing.iter().any(|entry| entry == &base);
+            let row_taken = self.items().any(|row| row.output_dir() == candidate_s);
+            if disk_taken || row_taken || self.dest_reserved(&candidate) {
+                let name = dedupe_filename(&base, |name| {
+                    let path = std::path::Path::new(&dir).join(name);
+                    existing.iter().any(|entry| entry == name)
+                        || self.dest_reserved(&path)
+                        || self
+                            .items()
+                            .any(|row| row.output_dir() == path.to_string_lossy())
                 });
                 item.set_output_dir(
                     std::path::Path::new(&dir)
@@ -975,45 +996,49 @@ impl DownloadManager {
     ///
     /// # Errors
     /// Returns a display-ready message when the URL or filename is invalid.
-    pub fn enqueue_video(
+    /// Enqueue a video page after preparing its directory listing off GTK.
+    pub async fn enqueue_video_async(
         self: &Rc<Self>,
         page_url: &str,
         dest_dir: Option<&str>,
         filename: Option<&str>,
         choices: crate::media_types::VideoChoices,
     ) -> Result<DownloadItem, String> {
-        // One readdir per intake.
         let dir = self.resolve_dir(dest_dir);
-        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
+        let listing_dir = dir.clone();
+        let existing = gio::spawn_blocking(move || {
+            crate::video_staging::dir_file_names(std::path::Path::new(&listing_dir))
+        })
+        .await
+        .map_err(|error| format!("Could not inspect download folder: {error:?}"))?;
         self.enqueue_video_staged(page_url, &dir, filename, choices, &existing)
     }
 
     /// Enqueue a gallery download (image gallery via gallery-dl).
     /// Creates a DownloadItem with gallery flags set; the actual download
     /// is driven by the gallery runner (phase 12).
-    pub fn enqueue_gallery(
+    /// Enqueue a gallery after listing its destination off GTK.
+    pub async fn enqueue_gallery_async(
         self: &Rc<Self>,
         job: &crate::gallery_argv::GalleryJob,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(&job.page_url)?;
-        // Resolve the destination: empty/"." fall back to the download dir;
-        // relative paths are rejected (would resolve against the launcher CWD).
         let dir = self.resolve_dir(Some(&job.dest_dir.to_string_lossy()));
-        // Gallery title is the folder name; sanitize it (probe falls back to
-        // the URL, which contains `/` and would fail restore validation).
         let title = crate::file_names::sanitize_folder_name(&job.title);
-        // Ensure the gallery directory is unique and provably ours: if a
-        // directory with the sanitized title already exists on disk
-        // (pre-existing user folder), or another gallery row already claims
-        // that name (same title enqueued twice, neither downloaded yet),
-        // append -2, -3, etc. until a free name is found. This prevents the
-        // delete path from trashing unrelated files.
+        let listing_dir = dir.clone();
+        let existing = gio::spawn_blocking(move || {
+            crate::video_staging::dir_file_names(std::path::Path::new(&listing_dir))
+        })
+        .await
+        .map_err(|error| format!("Could not inspect gallery destination: {error:?}"))?;
+
         let mut unique_title = title.clone();
         let mut counter = 1;
-        while std::path::Path::new(&dir).join(&unique_title).exists()
+        while existing.iter().any(|entry| entry == &unique_title)
             || self
                 .items()
                 .any(|it| it.dest_dir() == dir && it.filename() == unique_title)
+            || self.dest_reserved(&std::path::Path::new(&dir).join(&unique_title))
         {
             counter += 1;
             unique_title = format!("{title}-{counter}");
@@ -1029,10 +1054,7 @@ impl DownloadManager {
         item.set_gallery_files_done(0);
         item.set_gallery_url(url.clone());
         item.set_detail(format!("Gallery • {} files", job.file_count.unwrap_or(0)));
-        // Gallery files go into a subfolder named after the (unique) title.
         let gallery_dir = std::path::Path::new(&dir).join(&unique_title);
-        // Store a resolved copy: absolute dest_dir (the gallery subfolder)
-        // and the real row ID. (The caller's job keeps its placeholder ID.)
         let mut stored_job = job.clone();
         stored_job.dest_dir = gallery_dir;
         stored_job.item_id = item.id();
@@ -1096,7 +1118,8 @@ impl DownloadManager {
     }
 
     /// Queue one row per playlist entry for collection-shaped resolves with no picked entry. Returns (added, reported total). One persist for the whole import.
-    fn expand_playlist_rows(
+    /// Queue collection children after creating/listing their destination off GTK.
+    async fn expand_playlist_rows_async(
         self: &Rc<Self>,
         id: u64,
         item: &DownloadItem,
@@ -1110,31 +1133,51 @@ impl DownloadManager {
             }) => (quality, audio_only),
             _ => return (0, pl.total, 0),
         };
-        let dest_dir = self.resolve_dir(Some(&item.dest_dir()));
-        let _batch = self.batch_guard();
-        // Multi-item collections land in a titled subfolder, torrent-style; a
-        // lone item keeps the flat behavior.
-        let dest_dir = if pl.total > 1 {
-            crate::file_names::collection_subdir(&dest_dir, &pl.title)
-        } else {
-            dest_dir
+        let base_dir = self.resolve_dir(Some(&item.dest_dir()));
+        let multi = pl.total > 1;
+        let title = pl.title.clone();
+        let prepared = gio::spawn_blocking(move || {
+            let dest_dir = if multi {
+                crate::file_names::collection_subdir(&base_dir, &title)
+            } else {
+                base_dir
+            };
+            let existing =
+                crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
+            (dest_dir, existing)
+        })
+        .await;
+        let (dest_dir, existing) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    parent_id = id,
+                    "playlist import directory preparation failed"
+                );
+                return (0, pl.total, 0);
+            }
         };
-        // The shared network-policy helper enforces a collection-local host
-        // cap for untrusted browser handoffs and remembers accepted hosts.
+
+        // The main context yielded while the folder was prepared. Do not
+        // enqueue stale children after pause/cancel/remove.
+        let Some(current) = self.find(id) else {
+            return (0, pl.total, 0);
+        };
+        if current.status() != DownloadStatus::Downloading {
+            return (0, pl.total, 0);
+        }
+
+        let _batch = self.batch_guard();
         let mut guarded_child_hosts = HashSet::new();
         let mut skipped_by_host_limit = 0usize;
-        // One readdir for the whole expansion instead of one per entry.
-        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
-        let mut added = 0;
+        let mut added = 0usize;
         for entry in &pl.items {
             let Some(url) =
                 crate::video_probe::expand_child_target(&item.url(), &pl.page_url, entry)
             else {
                 continue;
             };
-            // Collection results are untrusted input. Keep the shared helper
-            // responsible for both policy inheritance and the distinct-host
-            // limit, so picker and automatic expansion behave identically.
             match crate::download_net::inherit_public_resolution_for_collection(
                 &item.url(),
                 &url,
@@ -1147,12 +1190,9 @@ impl DownloadManager {
                 }
                 Err(crate::download_net::CollectionHostError::UnsafeDestination) => continue,
             }
-            // Match the interactive picker: carry each entry's title into its
-            // output filename, falling back to an entry URL slug when needed.
             let remux = crate::video_prefs::remux_video_active(&self.settings.remux_video());
             let name =
                 crate::video::default_video_filename(&entry.title, audio_only, remux.as_deref());
-            // Live streams queued from a playlist take the VOD path; each child re-resolves its own page.
             if self
                 .enqueue_video_staged(
                     &url,
@@ -1172,8 +1212,6 @@ impl DownloadManager {
                 added += 1;
             }
         }
-        // Reported total, not attempted ("500 of 600"). Include a separate
-        // count for the security cap so the carrier row can explain omissions.
         (added, pl.total, skipped_by_host_limit)
     }
 
@@ -2039,7 +2077,7 @@ impl DownloadManager {
                         }
                         // Playlist expansion runs on the main thread where queueing is legal; the new rows are the feedback.
                         let (added, total, skipped_by_host_limit) =
-                            this.expand_playlist_rows(id, &item, &pl);
+                            this.expand_playlist_rows_async(id, &item, &pl).await;
                         let skipped_detail = || {
                             ngettext(
                                 "{skipped} item skipped because the collection exceeded the limit of {limit} distinct hosts",

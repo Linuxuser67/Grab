@@ -1995,7 +1995,13 @@ impl DownloadManager {
                                     done = true;
                                     break;
                                 }
-                                let taken = |n: &str| this.is_name_taken(&dir, &existing, n);
+                                // A listing is only a snapshot: remember every candidate that
+                                // lost an atomic rename race so the next attempt cannot repeat it.
+                                let lost_claims = RefCell::new(Vec::<String>::new());
+                                let taken = |n: &str| {
+                                    lost_claims.borrow().iter().any(|lost| lost == n)
+                                        || this.is_name_taken(&dir, &existing, n)
+                                };
                                 // Claim-then-move so a file appearing between dedupe and rename is never clobbered.
                                 let old_path = item.file_path();
                                 let mut final_name = dedupe_filename(&name, taken);
@@ -2014,6 +2020,7 @@ impl DownloadManager {
                                             moved = true;
                                         }
                                         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                                            lost_claims.borrow_mut().push(final_name);
                                             final_name = dedupe_filename(&name, taken);
                                         }
                                         Err(_) => break,

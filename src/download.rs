@@ -1763,7 +1763,7 @@ impl DownloadManager {
                 }
             };
             if matches!(
-                prepared,
+                &prepared,
                 PreparedSpawn::Plain {
                     drop_segments: true,
                     ..

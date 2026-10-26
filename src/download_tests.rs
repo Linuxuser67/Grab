@@ -2475,7 +2475,11 @@ fn enqueue_keeps_name_when_file_exists() {
         .expect("enqueue");
     assert_eq!(item.filename(), "dup.bin");
     // Destination validation now runs asynchronously off the main context.
-    assert!(wait_for_preparation(&manager, item.id(), Duration::from_secs(15)));
+    assert!(wait_for_preparation(
+        &manager,
+        item.id(),
+        Duration::from_secs(15)
+    ));
     assert_eq!(item.status(), DownloadStatus::Failed);
     assert_eq!(item.detail(), crate::engine_msg::DEST_EXISTS);
     assert_eq!(
@@ -2714,7 +2718,12 @@ fn expand_playlist_rows_use_titled_subfolder() {
         ]
         .into_boxed_slice(),
     };
-    let generation = manager.epoch.borrow().get(&parent.id()).copied().unwrap_or(0);
+    let generation = manager
+        .epoch
+        .borrow()
+        .get(&parent.id())
+        .copied()
+        .unwrap_or(0);
     let (added, total, skipped_by_host_limit) = glib::MainContext::default().block_on(
         crate::download::DownloadManager::expand_playlist_rows_async(
             Rc::downgrade(&manager),

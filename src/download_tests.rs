@@ -66,6 +66,22 @@ fn wait_for_started(manager: &DownloadManager, id: u64, timeout: Duration) -> bo
     manager.started.borrow().contains(&id)
 }
 
+/// Wait for async destination preparation to settle, including its local-task cleanup.
+fn wait_for_preparation(manager: &DownloadManager, id: u64, timeout: Duration) -> bool {
+    let ctx = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + timeout;
+    while (manager.preparing.borrow().contains(&id)
+        || manager.preparation_handles.borrow().contains_key(&id))
+        && std::time::Instant::now() < deadline
+    {
+        ctx.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    quiesce(&ctx);
+    !manager.preparing.borrow().contains(&id)
+        && !manager.preparation_handles.borrow().contains_key(&id)
+}
+
 /// Minimal persisted row for `restore_existing` fixtures (no id => pre-v3 allocate path).
 fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus) -> StoredItem {
     StoredItem {
@@ -2458,7 +2474,8 @@ fn enqueue_keeps_name_when_file_exists() {
         )
         .expect("enqueue");
     assert_eq!(item.filename(), "dup.bin");
-    // insert -> start_next -> spawn run synchronously: the fresh row refuses the foreign file.
+    // Destination validation now runs asynchronously off the main context.
+    assert!(wait_for_preparation(&manager, item.id(), Duration::from_secs(15)));
     assert_eq!(item.status(), DownloadStatus::Failed);
     assert_eq!(item.detail(), crate::engine_msg::DEST_EXISTS);
     assert_eq!(
@@ -2528,6 +2545,7 @@ fn restored_unstarted_row_refuses_existing_dest() {
     // Explicit never-started (new queue file): the bytes are foreign.
     stored.started = Some(false);
     let item = manager.restore_existing(&stored).expect("restore");
+    assert!(wait_for_preparation(&manager, item.id(), Duration::from_secs(15)));
     assert_eq!(item.status(), DownloadStatus::Failed);
     assert_eq!(item.detail(), crate::engine_msg::DEST_EXISTS);
     assert_eq!(
@@ -2696,11 +2714,12 @@ fn expand_playlist_rows_use_titled_subfolder() {
         ]
         .into_boxed_slice(),
     };
+    let generation = manager.epoch.borrow().get(&parent.id()).copied().unwrap_or(0);
     let (added, total, skipped_by_host_limit) = glib::MainContext::default().block_on(
         crate::download::DownloadManager::expand_playlist_rows_async(
             Rc::downgrade(&manager),
             parent.id(),
-            0,
+            generation,
             &parent,
             &pl,
         ),
@@ -3651,6 +3670,10 @@ fn stale_pump_future_ignores_respawned_row() {
         .enqueue(&url, Some(&dest), Some("h.bin"))
         .unwrap_or_else(|e| abort(&server, &e));
     let id = item.id();
+    assert!(
+        wait_for_started(&manager, id, Duration::from_secs(15)),
+        "download preparation did not start the engine"
+    );
     assert_eq!(item.status(), DownloadStatus::Downloading);
     // Let the first engine get going, then defer: park aborts it and a
     // second engine takes over the same row.
@@ -3679,7 +3702,11 @@ fn stale_pump_future_ignores_respawned_row() {
     }
     manager.cancel(id);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while manager.running.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
+    while (manager.running.borrow().contains_key(&id)
+        || manager.preparing.borrow().contains(&id)
+        || manager.preparation_handles.borrow().contains_key(&id))
+        && std::time::Instant::now() < deadline
+    {
         ctx.iteration(false);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
@@ -3821,13 +3848,15 @@ fn segmented_pause_resume_keeps_bytes() {
             .enqueue(&url, Some(&dest), Some("big.bin"))
             .unwrap_or_else(|e| abort(&server, &e));
         let id = item.id();
-        // Wait for one 1 MB piece (5%), then pause. Status check is in the loop condition
-        // so it cannot slip to Done before pause() with no await in between.
+        // Wait for asynchronous preparation to start the engine, then reach one
+        // 1 MB piece (5%) before pausing. A queued row is not evidence of completion.
         let mut waited = 0;
-        while item.status() == DownloadStatus::Downloading
-            && item.progress() < 0.05
-            && waited < 2000
+        while item.status() == DownloadStatus::Queued
+            || (item.status() == DownloadStatus::Downloading && item.progress() < 0.05)
         {
+            if waited >= 2000 {
+                break;
+            }
             glib::timeout_future(std::time::Duration::from_millis(5)).await;
             waited += 1;
         }
@@ -4031,10 +4060,12 @@ fn shutdown_restart_resumes_segmented() {
             .unwrap_or_else(|e| abort(&server, &e));
         let id = item.id();
         let mut waited = 0;
-        while item.status() == DownloadStatus::Downloading
-            && item.progress() < 0.05
-            && waited < 2000
+        while item.status() == DownloadStatus::Queued
+            || (item.status() == DownloadStatus::Downloading && item.progress() < 0.05)
         {
+            if waited >= 2000 {
+                break;
+            }
             glib::timeout_future(std::time::Duration::from_millis(5)).await;
             waited += 1;
         }

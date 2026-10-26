@@ -29,7 +29,7 @@ axum = { version = "0.8", features = ["json"] }
 sha2 = "0.11"
 # HMAC-SHA256 for the browser-extension pairing handshake (extension_server).
 hmac = "0.13"
-tokio = { version = "~1.53.3", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "fs", "io-util", "macros", "net", "process"] }
+tokio = { version = "~1.54.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "fs", "io-util", "macros", "net", "process"] }
 futures-util = "0.3.34"
 getrandom = "=0.4.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "socks", "cookies", "gzip", "brotli", "deflate"] }
@@ -43,7 +43,7 @@ gettext-rs = "0.8"
 # Video-page extraction (YouTube etc). Wrapper around the yt-dlp + ffmpeg
 # binaries: rustls keeps the rustls-only posture; no cache backend in v1
 # (metadata is refetched, CDN URLs expire in ~6h anyway).
-yt-dlp = { version = "2.8.3", default-features = false, features = ["rustls"] }
+yt-dlp = { version = "2.9.0", default-features = false, features = ["rustls"] }
 libc = "0.2"
 # Mozilla Public Suffix List for validating browser cookie domains.
 psl = "=2.1.228"

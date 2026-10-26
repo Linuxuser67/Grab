@@ -3708,8 +3708,7 @@ fn stale_pump_future_ignores_respawned_row() {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(
-        manager.running.borrow().contains_key(&id)
-            && item.status() == DownloadStatus::Downloading,
+        manager.running.borrow().contains_key(&id) && item.status() == DownloadStatus::Downloading,
         "replacement engine did not start after defer"
     );
     // Let the aborted engine die and the hanging one settle, then pump:

@@ -873,7 +873,7 @@ fn submit_probed_single(
     let error_step = Rc::clone(step);
     let error_lookup_add = Rc::clone(lookup_add);
     enqueue_and_close_async(
-                dest,
+        dest,
         close_card,
         scheduled_at,
         move |d| async move {
@@ -1009,7 +1009,7 @@ fn submit_gallery_all(
     let error_step = Rc::clone(step);
     let error_lookup_add = Rc::clone(lookup_add);
     enqueue_and_close_async(
-                dest,
+        dest,
         close_card,
         scheduled_at,
         move |d| async move {
@@ -1563,7 +1563,7 @@ fn push_torrent_picker_page(
             let enqueue_bytes = bytes.clone();
             let enqueue_name = file_name.clone();
             enqueue_and_close_async(
-                                &dest_dir,
+                &dest_dir,
                 &close_card,
                 scheduled_at.get(),
                 move |d| async move {
@@ -1654,7 +1654,7 @@ fn wire_torrent_picker(
                 let enqueue_manager = Rc::clone(&m);
                 let torrent_btn_on_error = torrent_btn.clone();
                 enqueue_and_close_async(
-                                        &dd,
+                    &dd,
                     &close_card,
                     scheduled_at.get(),
                     move |d| async move {
@@ -3070,7 +3070,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             let enqueue_url = url.clone();
             let error_entry = url_entry.clone();
             enqueue_and_close_async(
-                                &dd,
+                &dd,
                 &close_card,
                 scheduled_at.get(),
                 move |d| async move {

@@ -1593,11 +1593,7 @@ impl DownloadManager {
         });
     }
 
-    fn insert_history(
-        self: &Rc<Self>,
-        stored: StoredItem,
-        output_dir: Option<String>,
-    ) {
+    fn insert_history(self: &Rc<Self>, stored: StoredItem, output_dir: Option<String>) {
         let StoredItem {
             id: stored_id,
             url: raw_url,

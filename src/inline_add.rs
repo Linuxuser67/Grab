@@ -844,9 +844,9 @@ fn submit_probed_single(
         .is_empty()
         .then(|| default_name_for(settings, &v.title, audio_only));
     let name = if typed.is_empty() {
-        auto.as_deref()
+        auto
     } else {
-        Some(typed.as_str())
+        Some(typed.clone())
     };
     // Exact picks pin the format with its height as fallback, so a dropped pin still
     // degrades to the chosen height; audio-only rows drop the pin, and Automatic (no
@@ -867,28 +867,35 @@ fn submit_probed_single(
             .unwrap_or_else(|| manager.settings().video_quality()),
         None => manager.settings().video_quality(),
     };
-    enqueue_and_close(
+    let page_url = v.page_url.clone();
+    let is_live = v.is_live;
+    let enqueue_manager = Rc::clone(manager);
+    let error_step = Rc::clone(step);
+    let error_lookup_add = Rc::clone(lookup_add);
+    enqueue_and_close_async(
         manager,
         dest,
         close_card,
         scheduled_at,
-        |d| {
-            manager.enqueue_video(
-                &v.page_url,
-                d,
-                name,
-                crate::media_types::VideoChoices {
-                    quality,
-                    audio_only,
-                    video_format_id: format_id,
-                    is_live: v.is_live,
-                    playlist_item_id: None,
-                },
-            )
+        move |d| async move {
+            enqueue_manager
+                .enqueue_video_async_batched(
+                    &page_url,
+                    d.as_deref(),
+                    name.as_deref(),
+                    crate::media_types::VideoChoices {
+                        quality,
+                        audio_only,
+                        video_format_id: format_id,
+                        is_live,
+                        playlist_item_id: None,
+                    },
+                )
+                .await
         },
-        |e| {
-            show_video_error(step, e);
-            set_lookup_add(lookup_add, true);
+        move |e| {
+            show_video_error(&error_step, e);
+            set_lookup_add(&error_lookup_add, true);
         },
     );
 }
@@ -999,19 +1006,22 @@ fn submit_gallery_all(
         speed_limit: crate::gallery_runner::gallery_speed_limit(settings),
         range: None,
     };
-    enqueue_and_close(
+    let enqueue_manager = Rc::clone(manager);
+    let error_step = Rc::clone(step);
+    let error_lookup_add = Rc::clone(lookup_add);
+    enqueue_and_close_async(
         manager,
         dest,
         close_card,
         scheduled_at,
-        |d| {
+        move |d| async move {
             let mut job = job;
-            job.dest_dir = std::path::PathBuf::from(d.unwrap_or("."));
-            manager.enqueue_gallery(&job)
+            job.dest_dir = std::path::PathBuf::from(d.unwrap_or_else(|| ".".to_string()));
+            enqueue_manager.enqueue_gallery_async_batched(&job).await
         },
-        |e| {
-            show_video_error(step, e);
-            set_lookup_add(lookup_add, true);
+        move |e| {
+            show_video_error(&error_step, e);
+            set_lookup_add(&error_lookup_add, true);
         },
     );
 }
@@ -1060,6 +1070,37 @@ pub(crate) fn enqueue_and_close(
         }
         Err(e) => on_err(&e),
     }
+}
+
+pub(crate) fn enqueue_and_close_async<F>(
+    _manager: &Rc<DownloadManager>,
+    dest: &Rc<RefCell<String>>,
+    close_card: &Rc<dyn Fn()>,
+    scheduled_at: Option<i64>,
+    enqueue: impl FnOnce(Option<String>) -> F + 'static,
+    on_err: impl FnOnce(&str) + 'static,
+) where
+    F: std::future::Future<Output = Result<(DownloadItem, crate::download::BatchGuard), String>>
+        + 'static,
+{
+    let dest = Rc::clone(dest);
+    let close_card = Rc::clone(close_card);
+    glib::spawn_future_local(async move {
+        // Own the destination value before awaiting; close_card re-borrows the
+        // destination when it resets the form after a successful enqueue.
+        let destination = Some(dest.borrow().clone());
+        // Preparation runs without a batch open. The intake API opens one only
+        // for its synchronous commit and returns the guard so scheduling is set
+        // before the queue is allowed to start the row.
+        match enqueue(destination).await {
+            Ok((item, guard)) => {
+                apply_scheduled_at(&item, scheduled_at);
+                close_card();
+                drop(guard);
+            }
+            Err(error) => on_err(&error),
+        }
+    });
 }
 
 /// Queue a probed link as a plain file and collapse the card: the fallback when
@@ -1196,7 +1237,7 @@ fn push_playlist_items_page(
         let picker_page_weak = picker_page_weak.clone();
         let fallback_to_picker = fallback_to_picker.clone();
         let add_btn_click = add_btn.clone();
-        add_btn_click.connect_clicked(move |_| {
+        add_btn_click.clone().connect_clicked(move |_| {
             // Guard against re-entry: Enter emits clicked directly, bypassing
             // the sensitivity check, so a second press while the import is in
             // flight would enqueue duplicates.
@@ -1493,7 +1534,8 @@ fn push_torrent_picker_page(
         let grid = grid.clone();
         let fallback_to_picker = fallback_to_picker.clone();
         let add_btn_click = add_btn.clone();
-        add_btn_click.connect_clicked(move |_| {
+        let add_btn_signal = add_btn_click.clone();
+        add_btn_signal.connect_clicked(move |_| {
             let selected: Vec<usize> = grid.selected_indices();
             if selected.is_empty() {
                 fallback_to_picker();
@@ -1506,13 +1548,28 @@ fn push_torrent_picker_page(
             let only = (selected.len() < grid.len()).then_some(selected);
             let show_picker_on_error = fallback_to_picker.clone();
             let error_caption_on_error = error_caption.clone();
-            enqueue_and_close(
+            add_btn_click.set_sensitive(false);
+            let add_btn_on_error = add_btn_click.clone();
+            let enqueue_manager = Rc::clone(&manager);
+            let enqueue_bytes = bytes.clone();
+            let enqueue_name = file_name.clone();
+            enqueue_and_close_async(
                 &manager,
                 &dest_dir,
                 &close_card,
                 scheduled_at.get(),
-                |d| manager.enqueue_torrent_file(bytes.clone(), &file_name, d, only),
+                move |d| async move {
+                    enqueue_manager
+                        .enqueue_torrent_file_async_batched(
+                            enqueue_bytes,
+                            &enqueue_name,
+                            d.as_deref(),
+                            only,
+                        )
+                        .await
+                },
                 move |e| {
+                    add_btn_on_error.set_sensitive(true);
                     show_picker_on_error();
                     error_caption_on_error.set_text(e);
                     error_caption_on_error.set_visible(true);
@@ -1536,8 +1593,10 @@ fn wire_torrent_picker(
     scheduled_at: Rc<Cell<Option<i64>>>,
 ) {
     let nav = nav.clone();
+    let torrent_btn = torrent_btn.clone();
     let scheduled_at_c = Rc::clone(&scheduled_at);
-    torrent_btn.connect_clicked(move |_| {
+    torrent_btn.clone().connect_clicked(move |_| {
+        let torrent_btn = torrent_btn.clone();
         let m = manager.clone();
         let dd = dest_dir.clone();
         let close_card = close_card.clone();
@@ -1583,13 +1642,21 @@ fn wire_torrent_picker(
                 }
             };
             if entries.len() <= 1 {
-                enqueue_and_close(
+                torrent_btn.set_sensitive(false);
+                let enqueue_manager = Rc::clone(&m);
+                let torrent_btn_on_error = torrent_btn.clone();
+                enqueue_and_close_async(
                     &m,
                     &dd,
                     &close_card,
                     scheduled_at.get(),
-                    |d| m.enqueue_torrent_file(bytes, &name, d, None),
-                    |e| {
+                    move |d| async move {
+                        enqueue_manager
+                            .enqueue_torrent_file_async_batched(bytes, &name, d.as_deref(), None)
+                            .await
+                    },
+                    move |e| {
+                        torrent_btn_on_error.set_sensitive(true);
                         set_field_error(&torrent_row, e);
                     },
                 );

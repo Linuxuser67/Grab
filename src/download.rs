@@ -278,6 +278,10 @@ pub struct DownloadManager {
     store: gio::ListStore,
     settings: crate::settings::AppSettings,
     running: RefCell<HashMap<u64, tokio::task::JoinHandle<()>>>,
+    /// Rows whose filesystem preparation is in flight; these consume scheduler slots too.
+    preparing: RefCell<HashSet<u64>>,
+    /// Filesystem-preparation task handles; abort them on manager drop so thread-bound GLib futures cannot leak into another test's context.
+    preparation_handles: RefCell<HashMap<u64, glib::JoinHandle<()>>>,
     /// Pump task handles by download ID, so tests can wait for pump completion (a `spawn_future_local` task reaped on another thread trips glib's thread guard).
     pub(crate) pump_handles: RefCell<HashMap<u64, glib::JoinHandle<()>>>,
     next_id: Cell<u64>,
@@ -350,7 +354,7 @@ pub struct DownloadManager {
     /// sole writer, which makes writes ordered by construction.
     /// Tests write synchronously and never use the channel.
     #[cfg_attr(test, allow(dead_code))]
-    persist_tx: RefCell<Option<tokio::sync::watch::Sender<Option<String>>>>,
+    persist_tx: RefCell<Option<tokio::sync::watch::Sender<Option<StoredQueue>>>>,
     /// Handle for the queue persist task; awaited on shutdown after the final
     /// state is sent. Tests never spawn it.
     #[cfg_attr(test, allow(dead_code))]
@@ -443,10 +447,12 @@ impl Drop for RestoreTaskGuard {
 
 impl Drop for DownloadManager {
     fn drop(&mut self) {
-        // Abort any pump tasks: they're `spawn_future_local`, so a stale one
-        // reaped on another thread trips glib's thread guard. Tests wait for
-        // pump completion via `drain_engine` (which checks `pump_handles`),
-        // so in practice none are pending here; this is a backstop.
+        // Abort thread-bound local tasks on their owning thread. Tests and app
+        // shutdown normally drain them; this backstop prevents an unfinished
+        // preparation/pump from being reaped by another test's context thread.
+        for (_, handle) in self.preparation_handles.borrow_mut().drain() {
+            handle.abort();
+        }
         for (_, handle) in self.pump_handles.borrow_mut().drain() {
             handle.abort();
         }
@@ -569,9 +575,11 @@ impl DownloadManager {
         // so the last persist completes before shutdown awaits the task.
         #[cfg(not(test))]
         let (persist_tx, persist_task) = {
-            let (tx, rx) = tokio::sync::watch::channel(None::<String>);
-            let task = tokio_rt().spawn(Self::persist_task_loop(rx, |text: String| {
-                Self::write_queue_file(&text)
+            let (tx, rx) = tokio::sync::watch::channel(None::<StoredQueue>);
+            let task = tokio_rt().spawn(Self::persist_task_loop(rx, |queue: StoredQueue| {
+                if let Some(text) = Self::serialize_snapshot(queue) {
+                    Self::write_queue_file(&text);
+                }
             }));
             (Some(tx), Some(task))
         };
@@ -583,6 +591,8 @@ impl DownloadManager {
             store,
             settings,
             running: RefCell::new(HashMap::new()),
+            preparing: RefCell::new(HashSet::new()),
+            preparation_handles: RefCell::new(HashMap::new()),
             pump_handles: RefCell::new(HashMap::new()),
             next_id: Cell::new(1),
             on_change: RefCell::new(None),
@@ -814,6 +824,34 @@ impl DownloadManager {
         }
     }
 
+    /// Delete a segmented partial away from GTK. Reserve its exact path until
+    /// unlink completes so an immediate retry cannot recreate it mid-cleanup.
+    fn schedule_partial_cleanup(self: &Rc<Self>, path: std::path::PathBuf) {
+        self.reserve_dest(&path);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let worker_path = path.clone();
+            match gio::spawn_blocking(move || std::fs::remove_file(worker_path)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(Err(e)) => tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "could not remove cancelled segmented partial"
+                ),
+                Err(e) => tracing::warn!(
+                    path = %path.display(),
+                    error = ?e,
+                    "partial cleanup worker failed"
+                ),
+            }
+            if let Some(manager) = weak.upgrade() {
+                manager.release_dest(&path);
+                manager.start_next();
+            }
+        });
+    }
+
     /// Whether the row is currently capturing a live stream (stop-and-keep applies).
     pub fn is_live_video(&self, id: u64) -> bool {
         self.live_rows.borrow().contains(&id)
@@ -891,29 +929,65 @@ impl DownloadManager {
     ///
     /// # Errors
     /// Returns a display-ready message when the bytes are not a valid torrent.
-    pub fn enqueue_torrent_file(
+    /// Archive and enqueue a .torrent without performing disk I/O on GTK.
+    pub async fn enqueue_torrent_file_async(
         self: &Rc<Self>,
         bytes: Vec<u8>,
         file_name: &str,
         dest_dir: Option<&str>,
         only_files: Option<Vec<usize>>,
     ) -> Result<DownloadItem, String> {
-        let pseudo = crate::torrent::archive_torrent_file(file_name, &bytes)?;
-        if let Some(sel) = only_files {
-            crate::torrent::stage_selection(&pseudo, sel);
+        let (item, guard) = self
+            .enqueue_torrent_file_async_batched(bytes, file_name, dest_dir, only_files)
+            .await?;
+        drop(guard);
+        Ok(item)
+    }
+
+    pub(crate) async fn enqueue_torrent_file_async_batched(
+        self: &Rc<Self>,
+        bytes: Vec<u8>,
+        file_name: &str,
+        dest_dir: Option<&str>,
+        only_files: Option<Vec<usize>>,
+    ) -> Result<(DownloadItem, BatchGuard), String> {
+        let file_name = file_name.to_string();
+        let dir = self.resolve_dir(dest_dir);
+        let worker_file_name = file_name.clone();
+        let worker_dir = dir.clone();
+        let (pseudo, base, existing) = gio::spawn_blocking(move || {
+            // Parse metadata before archiving so invalid input never leaves an archive behind.
+            let base = crate::torrent::intake_plan(&bytes).map(|(base, _multi)| base);
+            let pseudo = crate::torrent::archive_torrent_file(&worker_file_name, &bytes)?;
+            let existing = crate::video_staging::dir_file_names(std::path::Path::new(&worker_dir));
+            Ok::<_, String>((pseudo, base, existing))
+        })
+        .await
+        .map_err(|error| format!("Could not prepare torrent file: {error:?}"))??;
+
+        // Hold the queue only during the synchronous commit, not during disk I/O.
+        let guard = self.batch_guard();
+        if let Some(selection) = only_files {
+            crate::torrent::stage_selection(&pseudo, selection);
         }
-        let stub = crate::torrent::stub_name_for_file(file_name);
+        let stub = crate::torrent::stub_name_for_file(&file_name);
         let item = self.enqueue(&pseudo, dest_dir, Some(&stub))?;
-        // The engine writes with overwrite:true, so record a deduped subfolder the engine then uses as-is.
-        if let Some((base, _)) = crate::torrent::intake_plan(&bytes) {
-            let dir = self.resolve_dir(dest_dir);
-            if std::path::Path::new(&dir).join(&base).exists() {
-                let name = dedupe_filename(&base, |n| {
-                    let p = std::path::Path::new(&dir).join(n);
-                    p.exists()
-                        // Only video-row finished names reserve stems (see plain `enqueue`).
-                        || self.items()
-                            .any(|it| it.output_dir() == p.to_string_lossy())
+
+        // The engine writes with overwrite:true, so reserve a collision-free
+        // output folder from the listing snapshot before it can be spawned.
+        if let Some(base) = base {
+            let candidate = std::path::Path::new(&dir).join(&base);
+            let candidate_s = candidate.to_string_lossy().into_owned();
+            let disk_taken = existing.iter().any(|entry| entry == &base);
+            let row_taken = self.items().any(|row| row.output_dir() == candidate_s);
+            if disk_taken || row_taken || self.dest_reserved(&candidate) {
+                let name = dedupe_filename(&base, |name| {
+                    let path = std::path::Path::new(&dir).join(name);
+                    existing.iter().any(|entry| entry == name)
+                        || self.dest_reserved(&path)
+                        || self
+                            .items()
+                            .any(|row| row.output_dir() == path.to_string_lossy())
                 });
                 item.set_output_dir(
                     std::path::Path::new(&dir)
@@ -923,7 +997,7 @@ impl DownloadManager {
                 );
             }
         }
-        Ok(item)
+        Ok((item, guard))
     }
 
     /// Final filename policy, shared by intake naming and late server/container suggestions: shorten, then the opt-in ASCII fold. Dedupe stays at the call sites.
@@ -944,45 +1018,83 @@ impl DownloadManager {
     ///
     /// # Errors
     /// Returns a display-ready message when the URL or filename is invalid.
-    pub fn enqueue_video(
+    /// Enqueue a video page after preparing its directory listing off GTK.
+    #[cfg(test)]
+    pub async fn enqueue_video_async(
         self: &Rc<Self>,
         page_url: &str,
         dest_dir: Option<&str>,
         filename: Option<&str>,
         choices: crate::media_types::VideoChoices,
     ) -> Result<DownloadItem, String> {
-        // One readdir per intake.
+        let (item, guard) = self
+            .enqueue_video_async_batched(page_url, dest_dir, filename, choices)
+            .await?;
+        drop(guard);
+        Ok(item)
+    }
+
+    pub(crate) async fn enqueue_video_async_batched(
+        self: &Rc<Self>,
+        page_url: &str,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+        choices: crate::media_types::VideoChoices,
+    ) -> Result<(DownloadItem, BatchGuard), String> {
         let dir = self.resolve_dir(dest_dir);
-        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
-        self.enqueue_video_staged(page_url, &dir, filename, choices, &existing)
+        let listing_dir = dir.clone();
+        let existing = gio::spawn_blocking(move || {
+            crate::video_staging::dir_file_names(std::path::Path::new(&listing_dir))
+        })
+        .await
+        .map_err(|error| format!("Could not inspect download folder: {error:?}"))?;
+        let guard = self.batch_guard();
+        let item = self.enqueue_video_staged(page_url, &dir, filename, choices, &existing)?;
+        Ok((item, guard))
     }
 
     /// Enqueue a gallery download (image gallery via gallery-dl).
     /// Creates a DownloadItem with gallery flags set; the actual download
     /// is driven by the gallery runner (phase 12).
-    pub fn enqueue_gallery(
+    /// Enqueue a gallery after listing its destination off GTK.
+    #[cfg(test)]
+    pub async fn enqueue_gallery_async(
         self: &Rc<Self>,
         job: &crate::gallery_argv::GalleryJob,
     ) -> Result<DownloadItem, String> {
+        let (item, guard) = self.enqueue_gallery_async_batched(job).await?;
+        drop(guard);
+        Ok(item)
+    }
+
+    pub(crate) async fn enqueue_gallery_async_batched(
+        self: &Rc<Self>,
+        job: &crate::gallery_argv::GalleryJob,
+    ) -> Result<(DownloadItem, BatchGuard), String> {
         let url = normalize_url(&job.page_url)?;
-        // Resolve the destination: empty/"." fall back to the download dir;
-        // relative paths are rejected (would resolve against the launcher CWD).
+        // Resolve the destination before recording it: empty/relative paths must never
+        // become dependent on the launcher CWD. The sanitized title is used as a
+        // restore-safe folder component, not as an arbitrary path from metadata.
         let dir = self.resolve_dir(Some(&job.dest_dir.to_string_lossy()));
-        // Gallery title is the folder name; sanitize it (probe falls back to
-        // the URL, which contains `/` and would fail restore validation).
         let title = crate::file_names::sanitize_folder_name(&job.title);
-        // Ensure the gallery directory is unique and provably ours: if a
-        // directory with the sanitized title already exists on disk
-        // (pre-existing user folder), or another gallery row already claims
-        // that name (same title enqueued twice, neither downloaded yet),
-        // append -2, -3, etc. until a free name is found. This prevents the
-        // delete path from trashing unrelated files.
+        let listing_dir = dir.clone();
+        let existing = gio::spawn_blocking(move || {
+            crate::video_staging::dir_file_names(std::path::Path::new(&listing_dir))
+        })
+        .await
+        .map_err(|error| format!("Could not inspect gallery destination: {error:?}"))?;
+
+        // Only hold the queue during the synchronous commit, never across listing I/O.
+        let guard = self.batch_guard();
+        // Only claim a folder that this row can prove is new. A pre-existing user
+        // directory or another queued gallery must never become a trash target.
         let mut unique_title = title.clone();
         let mut counter = 1;
-        while std::path::Path::new(&dir).join(&unique_title).exists()
+        while existing.iter().any(|entry| entry == &unique_title)
             || self
                 .items()
                 .any(|it| it.dest_dir() == dir && it.filename() == unique_title)
+            || self.dest_reserved(&std::path::Path::new(&dir).join(&unique_title))
         {
             counter += 1;
             unique_title = format!("{title}-{counter}");
@@ -998,15 +1110,12 @@ impl DownloadManager {
         item.set_gallery_files_done(0);
         item.set_gallery_url(url.clone());
         item.set_detail(format!("Gallery • {} files", job.file_count.unwrap_or(0)));
-        // Gallery files go into a subfolder named after the (unique) title.
         let gallery_dir = std::path::Path::new(&dir).join(&unique_title);
-        // Store a resolved copy: absolute dest_dir (the gallery subfolder)
-        // and the real row ID. (The caller's job keeps its placeholder ID.)
         let mut stored_job = job.clone();
         stored_job.dest_dir = gallery_dir;
         stored_job.item_id = item.id();
         self.gallery_jobs.borrow_mut().insert(item.id(), stored_job);
-        Ok(self.insert(item))
+        Ok((self.insert(item), guard))
     }
 
     /// [`DownloadManager::enqueue_video`] with a precomputed directory listing,
@@ -1065,13 +1174,18 @@ impl DownloadManager {
     }
 
     /// Queue one row per playlist entry for collection-shaped resolves with no picked entry. Returns (added, reported total). One persist for the whole import.
-    fn expand_playlist_rows(
-        self: &Rc<Self>,
+    /// Queue collection children after creating/listing their destination off GTK.
+    async fn expand_playlist_rows_async(
+        weak: std::rc::Weak<Self>,
         id: u64,
+        generation: u64,
         item: &DownloadItem,
         pl: &crate::media_types::PlaylistInfo,
     ) -> (usize, usize, usize) {
-        let (quality, audio_only) = match self.video_source(id) {
+        let Some(this) = weak.upgrade() else {
+            return (0, pl.total, 0);
+        };
+        let (quality, audio_only) = match this.video_source(id) {
             Some(crate::media_types::VideoSource::Page {
                 quality,
                 audio_only,
@@ -1079,31 +1193,67 @@ impl DownloadManager {
             }) => (quality, audio_only),
             _ => return (0, pl.total, 0),
         };
-        let dest_dir = self.resolve_dir(Some(&item.dest_dir()));
-        let _batch = self.batch_guard();
-        // Multi-item collections land in a titled subfolder, torrent-style; a
-        // lone item keeps the flat behavior.
-        let dest_dir = if pl.total > 1 {
-            crate::file_names::collection_subdir(&dest_dir, &pl.title)
-        } else {
-            dest_dir
+        let base_dir = this.resolve_dir(Some(&item.dest_dir()));
+        let multi = pl.total > 1;
+        let title = pl.title.clone();
+        // The local task must not keep a strong manager Rc pinned while the
+        // directory worker is pending; upgrade again before touching queue state.
+        drop(this);
+        let prepared = gio::spawn_blocking(move || {
+            let dest_dir = if multi {
+                crate::file_names::collection_subdir(&base_dir, &title)
+            } else {
+                base_dir
+            };
+            let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
+            (dest_dir, existing)
+        })
+        .await;
+        let (dest_dir, existing) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    parent_id = id,
+                    "playlist import directory preparation failed"
+                );
+                return (0, pl.total, 0);
+            }
         };
-        // The shared network-policy helper enforces a collection-local host
-        // cap for untrusted browser handoffs and remembers accepted hosts.
+
+        let Some(this) = weak.upgrade() else {
+            return (0, pl.total, 0);
+        };
+        // The main context yielded while the folder was prepared. Do not
+        // enqueue stale children after pause/cancel/remove.
+        // Collection metadata is untrusted. Re-check the carrier after yielding so
+        // removed/cancelled rows cannot create children from stale resolver output.
+        if !this.is_current(id, generation) {
+            return (0, pl.total, 0);
+        }
+        let Some(current) = this.find(id) else {
+            return (0, pl.total, 0);
+        };
+        if matches!(
+            current.status(),
+            DownloadStatus::Cancelled | DownloadStatus::Paused
+        ) {
+            return (0, pl.total, 0);
+        }
+
+        let _batch = this.batch_guard();
+        // Collection results are untrusted input. Keep policy inheritance and the
+        // distinct-host cap in the shared helper so automatic expansion and the picker
+        // enforce the same destination/network rules.
         let mut guarded_child_hosts = HashSet::new();
         let mut skipped_by_host_limit = 0usize;
-        // One readdir for the whole expansion instead of one per entry.
-        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
-        let mut added = 0;
+        let mut added = 0usize;
         for entry in &pl.items {
             let Some(url) =
                 crate::video_probe::expand_child_target(&item.url(), &pl.page_url, entry)
             else {
                 continue;
             };
-            // Collection results are untrusted input. Keep the shared helper
-            // responsible for both policy inheritance and the distinct-host
-            // limit, so picker and automatic expansion behave identically.
             match crate::download_net::inherit_public_resolution_for_collection(
                 &item.url(),
                 &url,
@@ -1116,13 +1266,13 @@ impl DownloadManager {
                 }
                 Err(crate::download_net::CollectionHostError::UnsafeDestination) => continue,
             }
-            // Match the interactive picker: carry each entry's title into its
-            // output filename, falling back to an entry URL slug when needed.
-            let remux = crate::video_prefs::remux_video_active(&self.settings.remux_video());
+            // Match the interactive picker by carrying each entry title into its filename.
+            let remux = crate::video_prefs::remux_video_active(&this.settings.remux_video());
             let name =
                 crate::video::default_video_filename(&entry.title, audio_only, remux.as_deref());
-            // Live streams queued from a playlist take the VOD path; each child re-resolves its own page.
-            if self
+            // Live streams discovered inside a collection use the VOD path; each child
+            // resolves its own page rather than inheriting the carrier's live-capture state.
+            if this
                 .enqueue_video_staged(
                     &url,
                     &dest_dir,
@@ -1141,8 +1291,8 @@ impl DownloadManager {
                 added += 1;
             }
         }
-        // Reported total, not attempted ("500 of 600"). Include a separate
-        // count for the security cap so the carrier row can explain omissions.
+        // Report the collection's stated total, not merely attempted entries, so the
+        // carrier can accurately show "added of total" alongside host-cap omissions.
         (added, pl.total, skipped_by_host_limit)
     }
 
@@ -1452,7 +1602,7 @@ impl DownloadManager {
         self.discards
             .borrow_mut()
             .retain(|_, pending| !pending.finalizer.is_finished());
-        while self.running.borrow().len() < self.max_concurrent() {
+        while self.running.borrow().len() + self.preparing.borrow().len() < self.max_concurrent() {
             let next = self
                 .items()
                 // A discard still tearing down owns its destination: the row stays Queued until the reservation clears.
@@ -1473,106 +1623,251 @@ impl DownloadManager {
     }
 
     fn spawn(self: &Rc<Self>, item: DownloadItem) {
+        let id = item.id();
+        let dest = item.file_path();
+        let dest_dir = item.dest_dir().to_string();
+        let url = item.url().to_string();
+        let is_torrent = crate::torrent::is_torrent(&url);
+        let is_video = matches!(
+            self.video_source(id),
+            Some(crate::media_types::VideoSource::Page { .. })
+        );
+        let segments = self.segment_state.borrow().get(&id).cloned();
+        let started = self.started.borrow().contains(&id);
+        // Reserve the target and a scheduler slot while filesystem validation is in flight.
+        // This keeps another queued row or a rapid retry from claiming the same path,
+        // and prevents async preparation from bypassing max_concurrent.
+        self.reserve_dest(&dest);
+        self.preparing.borrow_mut().insert(id);
+        let weak = Rc::downgrade(self);
+        let task_weak = weak.clone();
+        let handle = glib::spawn_future_local(async move {
+            async move {
+                let worker_dest = dest.clone();
+                let worker_dir = dest_dir.clone();
+                let worker_recorded = item.output_dir().to_string();
+                let worker_segments = segments.clone();
+                let preparation = gio::spawn_blocking(move || {
+                    let parent = worker_dest.parent();
+                    if let Some(parent) = parent {
+                        // Re-check containment on the worker immediately before touching the
+                        // path: a symlink planted after intake must not redirect the write.
+                        match ensure_contained_parent(parent, &worker_dir) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return Err(gettext("Download path escapes the download folder"));
+                            }
+                            Err(error) => {
+                                return Err(gettext(
+                                    "Could not create the download folder: {error}",
+                                )
+                                .replace("{error}", &error.to_string()));
+                            }
+                        }
+                    }
+
+                    if is_torrent {
+                        let dir = std::path::PathBuf::from(&worker_dir);
+                        let recorded_path = std::path::PathBuf::from(&worker_recorded);
+                        let (output, output_dir) = if worker_recorded.is_empty() {
+                            (dir.clone(), None)
+                        } else {
+                            // Re-guard the recorded folder at spawn time; a symlink may have
+                            // been planted after intake. Never follow it outside the destination.
+                            let guarded =
+                                crate::torrent::guard_output_folder(&dir, recorded_path.clone());
+                            let output_dir = (guarded != recorded_path)
+                                .then(|| guarded.to_string_lossy().into_owned());
+                            if output_dir.is_none() && guarded.parent() != Some(dir.as_path()) {
+                                std::fs::create_dir_all(&guarded).map_err(|error| {
+                                    gettext("Could not create the download folder: {error}")
+                                        .replace("{error}", &error.to_string())
+                                })?;
+                            }
+                            (guarded, output_dir)
+                        };
+                        if worker_recorded.is_empty() {
+                            std::fs::create_dir_all(&dir).map_err(|error| {
+                                gettext("Could not create the download folder: {error}")
+                                    .replace("{error}", &error.to_string())
+                            })?;
+                        }
+                        return Ok(PreparedSpawn::Torrent {
+                            dest: output,
+                            output_dir,
+                        });
+                    }
+                    if is_video {
+                        return Ok(PreparedSpawn::Video);
+                    }
+
+                    let mut drop_segments = false;
+                    let mode = match worker_segments {
+                        Some(state) => {
+                            // Drop an invalid bitmap and stale partial together. Do both on
+                            // the worker so resume validation does not block GTK.
+                            let len = std::fs::metadata(&worker_dest)
+                                .map(|metadata| metadata.len())
+                                .unwrap_or(0);
+                            if len < state.prefix_len() || len > state.total {
+                                let _ = std::fs::remove_file(&worker_dest);
+                                drop_segments = true;
+                                StartMode::Fresh
+                            } else {
+                                StartMode::Resume(state)
+                            }
+                        }
+                        // Existing destination is refused for a fresh row; never overwrite a
+                        // file that may belong to the user or another application.
+                        None => match std::fs::metadata(&worker_dest) {
+                            Err(_) => StartMode::Fresh,
+                            Ok(_) if !started => {
+                                return Err(DEST_EXISTS.to_string());
+                            }
+                            Ok(_) => StartMode::Single,
+                        },
+                    };
+                    Ok(PreparedSpawn::Plain {
+                        mode,
+                        drop_segments,
+                    })
+                })
+                .await;
+
+                let Some(manager) = weak.upgrade() else {
+                    return;
+                };
+                manager.preparing.borrow_mut().remove(&id);
+                manager.release_dest(&dest);
+                let Some(current) = manager.find(id) else {
+                    manager.start_next();
+                    return;
+                };
+                if current.status() != DownloadStatus::Queued || current.file_path() != dest {
+                    manager.start_next();
+                    return;
+                }
+                // A cancel/retry can happen while the blocking task runs. If any input
+                // changed, discard its answer and let the scheduler take a fresh snapshot.
+                let current_segments = manager.segment_state.borrow().get(&id).cloned();
+                let same_segments = match (&segments, &current_segments) {
+                    (None, None) => true,
+                    (Some(before), Some(after)) => {
+                        before.total == after.total && before.done == after.done
+                    }
+                    _ => false,
+                };
+                if !same_segments || manager.started.borrow().contains(&id) != started {
+                    manager.start_next();
+                    return;
+                }
+
+                let prepared = match preparation {
+                    Ok(Ok(prepared)) => prepared,
+                    Ok(Err(detail)) => {
+                        current.set_detail(detail.clone());
+                        current.set_status(DownloadStatus::Failed);
+                        manager.changed();
+                        manager.notify_finished(&current, Err(detail));
+                        manager.start_next();
+                        return;
+                    }
+                    Err(error) => {
+                        let detail = gettext("Could not prepare download destination: {error}")
+                            .replace("{error}", &format!("{error:?}"));
+                        current.set_detail(detail.clone());
+                        current.set_status(DownloadStatus::Failed);
+                        manager.changed();
+                        manager.notify_finished(&current, Err(detail));
+                        manager.start_next();
+                        return;
+                    }
+                };
+                if matches!(
+                    &prepared,
+                    PreparedSpawn::Plain {
+                        drop_segments: true,
+                        ..
+                    }
+                ) {
+                    manager.segment_state.borrow_mut().remove(&id);
+                    manager.persist_queue();
+                }
+                manager.spawn_prepared(current, prepared);
+            }
+            .await;
+            if let Some(manager) = task_weak.upgrade() {
+                manager.preparation_handles.borrow_mut().remove(&id);
+            }
+        });
+        // Insert after creating the task, before the main context can poll it.
+        if let Some(old) = self.preparation_handles.borrow_mut().insert(id, handle) {
+            old.abort();
+        }
+    }
+
+    fn spawn_prepared(self: &Rc<Self>, item: DownloadItem, prepared: PreparedSpawn) {
         let opts = DownloadOptions::from_settings(&self.settings);
         // Re-stash per attempt: a stale Last-Modified must never apply when the new run's server sends none.
         self.server_mtime.borrow_mut().remove(&item.id());
         let dest = item.file_path();
-        if let Some(parent) = dest.parent() {
-            // A planted symlink in any parent component would divert the
-            // download outside the destination: refuse instead of following
-            // it. (Filenames can't contain separators, so the parent is the
-            // destination itself today; this pins the invariant.)
-            // A mkdir failure is reported distinctly: it is not a containment
-            // refusal, so "escapes the download folder" would mislead.
-            let blocked = match ensure_contained_parent(parent, &item.dest_dir()) {
-                Ok(true) => None,
-                Ok(false) => Some(gettext("Download path escapes the download folder")),
-                Err(e) => Some(
-                    gettext("Could not create the download folder: {error}")
-                        .replace("{error}", &e.to_string()),
-                ),
-            };
-            if let Some(detail) = blocked {
-                item.set_detail(detail.clone());
-                item.set_status(DownloadStatus::Failed);
-                self.changed();
-                self.notify_finished(&item, Err(detail));
-                return;
-            }
-        }
         // Fail fast on junk; later edits apply without re-queueing.
         let limit = opts.limit_rate.trim();
         if !limit.is_empty() && limit != "0" && parse_rate(limit).is_none() {
             item.set_detail(gettext("Invalid speed limit: {limit}").replace("{limit}", limit));
             item.set_status(DownloadStatus::Failed);
             self.changed();
+            self.start_next();
             return;
         }
         publish_rate_limit(&self.settings);
         let url = item.url().to_string();
-        if crate::torrent::is_torrent(&url) {
-            return self.spawn_torrent(item, url);
-        }
-        if let Some(crate::media_types::VideoSource::Page {
-            page_url,
-            quality,
-            audio_only,
-            is_live,
-            video_format_id,
-            playlist_item_id,
-            ..
-        }) = self.video_source(item.id())
-        {
-            return self.spawn_video(SpawnVideoParams {
-                item,
-                page_url,
-                quality,
-                audio_only,
-                video_format_id,
-                is_live,
-                playlist_item_id,
-            });
-        }
+        let mode = match prepared {
+            PreparedSpawn::Torrent { dest, output_dir } => {
+                if let Some(output_dir) = output_dir {
+                    item.set_output_dir(output_dir);
+                }
+                return self.spawn_torrent(item, url, dest);
+            }
+            PreparedSpawn::Video => {
+                let Some(crate::media_types::VideoSource::Page {
+                    page_url,
+                    quality,
+                    audio_only,
+                    is_live,
+                    video_format_id,
+                    playlist_item_id,
+                    ..
+                }) = self.video_source(item.id())
+                else {
+                    let detail = gettext("Could not prepare video source");
+                    item.set_detail(detail);
+                    item.set_status(DownloadStatus::Failed);
+                    self.changed();
+                    self.start_next();
+                    return;
+                };
+                return self.spawn_video(SpawnVideoParams {
+                    item,
+                    page_url,
+                    quality,
+                    audio_only,
+                    video_format_id,
+                    is_live,
+                    playlist_item_id,
+                });
+            }
+            PreparedSpawn::Plain { mode, .. } => mode,
+        };
         let connections = (opts.connections.max(1) as usize).min(16);
         let timeout = Duration::from_secs(30);
-        // A saved bitmap means non-contiguous pieces: only a segmented resume is correct.
-        let mode = match self.segment_state.borrow().get(&item.id()).cloned() {
-            Some(st) => {
-                // Drop the bitmap if the file no longer holds the completed prefix (deleted/truncated/replaced while paused).
-                let len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-                if len < st.prefix_len() || len > st.total {
-                    self.segment_state.borrow_mut().remove(&item.id());
-                    let _ = std::fs::remove_file(&dest);
-                    StartMode::Fresh
-                } else {
-                    let frac =
-                        (st.completed_bytes() as f64 / st.total.max(1) as f64).clamp(0.0, 1.0);
-                    item.set_progress(frac);
-                    StartMode::Resume(st)
-                }
-            }
-            None => match std::fs::metadata(&dest) {
-                // A missing destination is a fresh download. An existing
-                // destination — even zero bytes — is refused: it may not be
-                // ours, and silently deleting it could destroy foreign data.
-                Err(_) => StartMode::Fresh,
-                Ok(_) => {
-                    // Parabolic-style dedup: refuse an existing destination
-                    // instead of truncating or renaming it. Restored/retried
-                    // rows carry `started` and resume their own partials
-                    // below (progress alone can't tell: a crash before the
-                    // first tick restores at 0.0 with bytes on disk).
-                    if !self.started.borrow().contains(&item.id()) {
-                        item.set_detail(DEST_EXISTS.to_string());
-                        item.set_status(DownloadStatus::Failed);
-                        self.changed();
-                        self.notify_finished(&item, Err(DEST_EXISTS.to_string()));
-                        return;
-                    }
-                    StartMode::Single
-                }
-            },
-        };
+        // Restore the visible fraction from the saved bitmap before starting the
+        // resumed engine; preparation runs off-thread but UI state remains main-thread-owned.
+        if let StartMode::Resume(state) = &mode {
+            let fraction =
+                (state.completed_bytes() as f64 / state.total.max(1) as f64).clamp(0.0, 1.0);
+            item.set_progress(fraction);
+        }
         let generation = self.epoch.borrow().get(&item.id()).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(item.id(), generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1583,6 +1878,7 @@ impl DownloadManager {
                 item.set_detail(e);
                 item.set_status(DownloadStatus::Failed);
                 self.changed();
+                self.start_next();
                 return;
             }
         };
@@ -1592,6 +1888,7 @@ impl DownloadManager {
                 item.set_detail(e);
                 item.set_status(DownloadStatus::Failed);
                 self.changed();
+                self.start_next();
                 return;
             }
         };
@@ -1625,6 +1922,7 @@ impl DownloadManager {
             timeout,
             tx,
         };
+        let resuming = matches!(&mode, StartMode::Resume(_));
         let handle = tokio_rt().spawn(run_download(ctx, connections, mode));
         self.running.borrow_mut().insert(item.id(), handle);
         // The engine owns the destination from here: later spawns resume it rather than refusing as foreign.
@@ -1632,13 +1930,18 @@ impl DownloadManager {
         self.started.borrow_mut().insert(item.id());
         self.persist_queue();
         item.set_status(DownloadStatus::Downloading);
-        // Attempts start indeterminate: clear any stale fraction so the row pulses through the connecting phase.
-        item.set_progress(0.0);
+        // Fresh attempts pulse while connecting; a segmented resume keeps its
+        // restored completed-byte fraction visible instead of flashing back to zero.
+        if !resuming {
+            item.set_progress(0.0);
+        }
         let host = url::Url::parse(&item.url())
             .ok()
             .and_then(|u| u.host_str().map(|h| h.to_string()))
             .unwrap_or_default();
-        item.set_detail(if host.is_empty() {
+        item.set_detail(if resuming {
+            gettext("Resuming download…")
+        } else if host.is_empty() {
             gettext("Starting…")
         } else {
             gettext("Connecting to {host}…").replace("{host}", &host)
@@ -1649,9 +1952,38 @@ impl DownloadManager {
         self.pump(item, item_id, generation, rx);
     }
 
+    /// Atomically adopt a finished filename. The directory listing can go stale between
+    /// deduplication and rename, so remember each candidate that lost EEXIST rather
+    /// than retrying the same name from the stale snapshot.
+    fn adopt_final_name(
+        old_path: &std::path::Path,
+        dir: &std::path::Path,
+        wanted: &str,
+        is_taken: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        let lost_claims = RefCell::new(Vec::<String>::new());
+        let taken =
+            |name: &str| lost_claims.borrow().iter().any(|lost| lost == name) || is_taken(name);
+        for _ in 0..8 {
+            let candidate = dedupe_filename(wanted, taken);
+            let target = dir.join(&candidate);
+            if old_path == target {
+                return Some(candidate);
+            }
+            match rename_noreplace(old_path, &target) {
+                Ok(()) => return Some(candidate),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    lost_claims.borrow_mut().push(candidate);
+                }
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
     /// Whether a finished-name candidate is taken (file on disk, reserved stem, or live row holding it). Used by the Finished claim loop.
     fn is_name_taken(&self, dir: &str, existing: &[String], n: &str) -> bool {
-        std::path::Path::new(dir).join(n).exists()
+        existing.iter().any(|entry| entry == n)
             || crate::video_staging::stem_reserved_in(existing, name_stem(n))
             // A discard still tearing down owns this destination and its
             // stem: the finalizer's sweep (and the orphan removal when the
@@ -1777,38 +2109,71 @@ impl DownloadManager {
                         {
                             // A pause keeps its pending name: resumed single-stream attempts never re-suggest.
                             let pending = this.pending_names.borrow_mut().remove(&id);
-                            if let Some(name) = pending {
-                                // Re-apply the final name policy: adoption is the last gate before dedupe/rename. Idempotent on finalized names.
+                            // Drop the strong manager reference across the blocking directory
+                            // listing. Re-upgrade into the arm's continuing binding afterward.
+                            let (this, pending, existing) = if let Some(name) = pending {
+                                // Re-apply the final name policy before yielding; idempotent on finalized names.
                                 let name = this.finalize_filename(&name);
                                 let current = item.filename().to_string();
                                 let dir = item.dest_dir().to_string();
-                                let existing = crate::video_staging::dir_file_names(
-                                    std::path::Path::new(&dir),
-                                );
-                                let taken = |n: &str| this.is_name_taken(&dir, &existing, n);
+                                let listing_dir = dir.clone();
+                                drop(this);
+                                let existing = match gio::spawn_blocking(move || {
+                                    crate::video_staging::dir_file_names(std::path::Path::new(
+                                        &listing_dir,
+                                    ))
+                                })
+                                .await
+                                {
+                                    Ok(names) => names,
+                                    Err(error) => {
+                                        tracing::warn!(error = ?error, dir = %dir, "finished-name directory listing failed");
+                                        Vec::new()
+                                    }
+                                };
+                                let Some(this) = weak.upgrade() else {
+                                    done = true;
+                                    break;
+                                };
+                                if !this.is_current(id, generation) {
+                                    done = true;
+                                    break;
+                                }
+                                (this, Some((name, current, dir)), Some(existing))
+                            } else {
+                                (this, None, None)
+                            };
+                            if let Some((name, current, dir)) = pending {
+                                let existing = existing.unwrap_or_default();
+                                // The main context was yielded while the directory was read. Do not finalize a row that was
+                                // paused/cancelled, removed, or replaced while the worker ran.
+                                if item.status() == DownloadStatus::Cancelled
+                                    || item.status() == DownloadStatus::Paused
+                                {
+                                    done = true;
+                                    break;
+                                }
                                 // Claim-then-move so a file appearing between dedupe and rename is never clobbered.
                                 let old_path = item.file_path();
-                                let mut final_name = dedupe_filename(&name, taken);
-                                let mut moved = !old_path.exists();
-                                for _ in 0..8 {
-                                    if moved
-                                        || old_path == std::path::Path::new(&dir).join(&final_name)
-                                    {
-                                        break;
-                                    }
-                                    match rename_noreplace(
-                                        &old_path,
-                                        &std::path::Path::new(&dir).join(&final_name),
-                                    ) {
-                                        Ok(()) => {
-                                            moved = true;
+                                let (final_name, moved) =
+                                    if !existing.iter().any(|entry| entry == &current) {
+                                        (
+                                            dedupe_filename(&name, |n| {
+                                                this.is_name_taken(&dir, &existing, n)
+                                            }),
+                                            true,
+                                        )
+                                    } else {
+                                        match Self::adopt_final_name(
+                                            &old_path,
+                                            std::path::Path::new(&dir),
+                                            &name,
+                                            |n| this.is_name_taken(&dir, &existing, n),
+                                        ) {
+                                            Some(name) => (name, true),
+                                            None => (current.clone(), false),
                                         }
-                                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                                            final_name = dedupe_filename(&name, taken);
-                                        }
-                                        Err(_) => break,
-                                    }
-                                }
+                                    };
                                 if moved && final_name != current {
                                     item.set_filename(final_name);
                                 }
@@ -1818,32 +2183,63 @@ impl DownloadManager {
                             // pre-rename one. Paints the engine's size now,
                             // refines with the measured size when it lands.
                             this.set_finished_detail(&item, size);
-                            // Server file date, when asked: best-effort, never fails the row.
+                            // Server-date stamping and torrent directory cleanup can perform filesystem
+                            // metadata reads and recursive walks; snapshot plain inputs and defer them.
                             let mtime = this.server_mtime.borrow_mut().remove(&id);
-                            if this.settings.keep_server_date()
-                                && let Some(t) = mtime
-                                && let Ok(f) = std::fs::File::open(item.file_path())
-                            {
-                                let _ = f.set_modified(t);
-                            }
+                            let keep_server_date = this.settings.keep_server_date();
+                            let cleanup_torrent = crate::torrent::is_torrent(&url)
+                                && !this.settings.torrent_seed_finished();
+                            // Snapshot the filter before dropping its row-scoped state; the
+                            // filesystem cleanup runs later on a blocking worker.
+                            let cleanup_selection = cleanup_torrent
+                                .then(|| crate::torrent::get_selection(&url))
+                                .flatten();
+                            let finished_path = item.file_path();
+                            let torrent_dest_dir = item.dest_dir().to_string();
+                            let torrent_output_dir = item.output_dir().to_string();
+                            let torrent_filename = item.filename().to_string();
                             item.set_progress(1.0);
                             item.set_status(DownloadStatus::Done);
                             // One finished record per URL (Parabolic parity): re-downloads replace instead of stacking.
                             this.drop_finished_duplicates(&url, id);
                             this.segment_state.borrow_mut().remove(&id);
                             this.torrent_pieces.borrow_mut().remove(&id);
-                            // Filtered torrents: drop untoggled files now that every selected byte is on disk. Skipped while seeding (serving still reads those spans).
-                            if crate::torrent::is_torrent(&url)
-                                && !this.settings.torrent_seed_finished()
-                            {
-                                let folder = Self::torrent_folder(&item);
-                                if folder.is_dir() {
-                                    crate::torrent::cleanup_unselected(&folder, &url);
-                                }
+                            if cleanup_torrent {
                                 // The intake filter is spent: keeping it would pin the index list for a done row.
                                 crate::torrent::drop_selection(&url);
                             }
-                            this.notify_finished(&item, Ok(()));
+                            if this.find(id).is_some() {
+                                this.notify_finished(&item, Ok(()));
+                            }
+                            if (keep_server_date && mtime.is_some()) || cleanup_torrent {
+                                let worker_url = url.clone();
+                                glib::spawn_future_local(async move {
+                                    let _ = gio::spawn_blocking(move || {
+                                        if keep_server_date
+                                            && let Some(time) = mtime
+                                            && let Ok(file) = std::fs::File::open(&finished_path)
+                                        {
+                                            let _ = file.set_modified(time);
+                                        }
+                                        if let Some(selected) = cleanup_selection {
+                                            let folder = DownloadManager::torrent_folder_from_parts(
+                                                &torrent_dest_dir,
+                                                &worker_url,
+                                                &torrent_output_dir,
+                                                &torrent_filename,
+                                            );
+                                            if folder.is_dir() {
+                                                crate::torrent::cleanup_unselected(
+                                                    &folder,
+                                                    &worker_url,
+                                                    &selected,
+                                                );
+                                            }
+                                        }
+                                    })
+                                    .await;
+                                });
+                            }
                         }
                         done = true;
                         break;
@@ -1857,8 +2253,25 @@ impl DownloadManager {
                             break;
                         }
                         // Playlist expansion runs on the main thread where queueing is legal; the new rows are the feedback.
+                        let weak = Rc::downgrade(&this);
+                        drop(this);
                         let (added, total, skipped_by_host_limit) =
-                            this.expand_playlist_rows(id, &item, &pl);
+                            Self::expand_playlist_rows_async(
+                                weak.clone(),
+                                id,
+                                generation,
+                                &item,
+                                &pl,
+                            )
+                            .await;
+                        let Some(this) = weak.upgrade() else {
+                            done = true;
+                            break;
+                        };
+                        if !this.is_current(id, generation) {
+                            done = true;
+                            break;
+                        }
                         let skipped_detail = || {
                             ngettext(
                                 "{skipped} item skipped because the collection exceeded the limit of {limit} distinct hosts",
@@ -1941,11 +2354,27 @@ impl DownloadManager {
                         // get 200 on every piece, and fail again permanently.
                         // Explicitly delete the partial file: its bytes belong to the dead version and must not survive
                         // into a retry (previously this was only emergent via 416/hole handling).
-                        let _ = std::fs::remove_file(item.file_path());
+                        let invalid_path = item.file_path();
                         this.segment_state.borrow_mut().remove(&id);
                         this.pending_names.borrow_mut().remove(&id);
                         item.set_etag(String::new());
                         item.set_last_modified(String::new());
+                        this.persist_queue();
+                        this.reserve_dest(&invalid_path);
+                        let worker_path = invalid_path.clone();
+                        drop(this);
+                        let _ =
+                            gio::spawn_blocking(move || std::fs::remove_file(worker_path)).await;
+                        let Some(this) = weak.upgrade() else {
+                            done = true;
+                            break;
+                        };
+                        this.release_dest(&invalid_path);
+                        if !this.is_current(id, generation) {
+                            done = true;
+                            break;
+                        }
+                        this.start_next();
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
@@ -1968,6 +2397,7 @@ impl DownloadManager {
                         // no bitmap, and a 416 would pass it off as complete on
                         // filesystems that zero-fill instead of leaving holes.
                         this.persist_queue();
+                        drop(this);
                         ack.send(()).await.ok();
                     }
                     EngineMsg::PieceDone(idx) => {
@@ -1985,19 +2415,79 @@ impl DownloadManager {
                         }
                     }
                     EngineMsg::TruncatePrefix => {
-                        if let Some(st) = this.segment_state.borrow_mut().get_mut(&id) {
-                            truncate_to_prefix(&item.file_path(), st);
-                            // The file lost everything past the prefix; the bitmap must forget it too or a later resume skips missing pieces.
-                            st.forget_beyond_prefix();
+                        // Commit the matching bitmap first: Undo/retry during the worker must never see a
+                        // prefix-truncated file paired with bits beyond the first gap.
+                        let state = {
+                            let mut states = this.segment_state.borrow_mut();
+                            states.get_mut(&id).map(|st| {
+                                st.forget_beyond_prefix();
+                                st.clone()
+                            })
+                        };
+                        if let Some(state) = state {
+                            this.persist_queue();
+                            let path = item.file_path();
+                            this.reserve_dest(&path);
+                            let worker_path = path.clone();
+                            drop(this);
+                            let _ = gio::spawn_blocking(move || {
+                                truncate_to_prefix(&worker_path, &state)
+                            })
+                            .await;
+                            let Some(this) = weak.upgrade() else {
+                                done = true;
+                                break;
+                            };
+                            this.release_dest(&path);
+                            if !this.is_current(id, generation) {
+                                done = true;
+                                break;
+                            }
+                            this.start_next();
                         }
                     }
                     EngineMsg::FallbackSingle { ack } => {
-                        // Server throttled parallel connections: shrink to the completed prefix and forget the bitmap on the main thread. The engine waits for this ack before appending at EOF.
-                        if let Some(st) = this.segment_state.borrow().get(&id) {
-                            truncate_to_prefix(&item.file_path(), st);
+                        // Keep the bitmap persisted until the sparse/segmented file is
+                        // actually truncated. A crash during the worker must still restore
+                        // with the bitmap rather than append to a file with holes.
+                        let segment_state = { this.segment_state.borrow().get(&id).cloned() };
+                        if let Some(state) = segment_state {
+                            let path = item.file_path();
+                            this.reserve_dest(&path);
+                            let worker_path = path.clone();
+                            drop(this);
+                            let truncated = gio::spawn_blocking(move || {
+                                truncate_to_prefix(&worker_path, &state)
+                            })
+                            .await
+                            .is_ok();
+                            let Some(this) = weak.upgrade() else {
+                                done = true;
+                                break;
+                            };
+                            this.release_dest(&path);
+                            if !this.is_current(id, generation) {
+                                done = true;
+                                break;
+                            }
+                            if truncated {
+                                this.segment_state.borrow_mut().remove(&id);
+                                this.persist_queue();
+                                this.start_next();
+                                drop(this);
+                                ack.send(()).await.ok();
+                            } else {
+                                tracing::warn!(path = %path.display(), "could not truncate segmented file before single-stream fallback");
+                                // Dropping ack tells the engine that fallback cannot safely proceed.
+                                done = true;
+                                break;
+                            }
+                        } else {
+                            this.segment_state.borrow_mut().remove(&id);
+                            this.persist_queue();
+                            drop(this);
+                            ack.send(()).await.ok();
                         }
-                        this.segment_state.borrow_mut().remove(&id);
-                        ack.send(()).await.ok();
                     }
                     EngineMsg::SuggestName(name) => {
                         // Stash the server-advertised name for adoption at Finished:
@@ -2098,29 +2588,13 @@ impl DownloadManager {
     }
 
     /// Spawn the torrent engine for a magnet row. Mirrors `spawn`'s contract so pause/cancel/retry and the stale-pump guard keep working.
-    fn spawn_torrent(self: &Rc<Self>, item: DownloadItem, magnet: String) {
-        let dir = std::path::PathBuf::from(item.dest_dir().to_string());
-        // Magnets recorded their subfolder at enqueue; archived torrents recompute theirs from metadata.
+    fn spawn_torrent(
+        self: &Rc<Self>,
+        item: DownloadItem,
+        magnet: String,
+        dest: std::path::PathBuf,
+    ) {
         let recorded = item.output_dir().to_string();
-        let dest = if recorded.is_empty() {
-            let _ = std::fs::create_dir_all(&dir);
-            dir.clone()
-        } else {
-            // Re-guard the recorded subfolder at spawn: a symlink planted
-            // after intake (a wide window for queued torrents) would
-            // otherwise divert the engine's writes. A squatted name dedupes
-            // to a fresh folder, like collection subfolders.
-            let recorded_path = std::path::PathBuf::from(&recorded);
-            let guarded = crate::torrent::guard_output_folder(&dir, recorded_path.clone());
-            if guarded != recorded_path {
-                item.set_output_dir(guarded.to_string_lossy().into_owned());
-            } else if guarded.parent() != Some(dir.as_path()) {
-                // Not under the dest dir (shouldn't happen: every recorded
-                // path is dir-joined): keep the old ensure-exists behavior.
-                let _ = std::fs::create_dir_all(&guarded);
-            }
-            guarded
-        };
         let settings = &self.settings;
         let seed_finished = settings.torrent_seed_finished();
         let peer_limit: Option<usize> = None; // rqbit default
@@ -2215,6 +2689,20 @@ impl DownloadManager {
         self.changed();
         self.pump(item, id, generation, rx);
     }
+}
+
+/// Validated worker preparation. The enum makes impossible combinations (such as a
+/// torrent without an output directory or a plain row without a start mode) unrepresentable.
+enum PreparedSpawn {
+    Torrent {
+        dest: std::path::PathBuf,
+        output_dir: Option<String>,
+    },
+    Video,
+    Plain {
+        mode: StartMode,
+        drop_segments: bool,
+    },
 }
 
 /// Video-page spawn inputs, bundled so the field list doesn't trip clippy's too-many-arguments lint.
@@ -2776,7 +3264,9 @@ impl DownloadManager {
 
     /// Cancel a download; retry with [`DownloadManager::retry`].
     pub fn cancel(self: &Rc<Self>, id: u64) {
-        self.cancel_inner(id, false, Stop::Preserve);
+        if let Some(path) = self.cancel_inner(id, false, Stop::Preserve) {
+            self.schedule_partial_cleanup(path);
+        }
         self.persist_queue();
         self.changed();
         self.start_next();
@@ -2833,7 +3323,7 @@ impl DownloadManager {
         }
     }
 
-    fn cancel_inner(&self, id: u64, keep_partial: bool, stop: Stop) {
+    fn cancel_inner(&self, id: u64, keep_partial: bool, stop: Stop) -> Option<std::path::PathBuf> {
         // Live rows keep what's recorded (Stop, not Cancel): signal the worker and skip the abort plus the Cancelled preset, so its Finished still lands. Removal is the one caller that discards.
         let live = self.live_rows.borrow().contains(&id);
         // Only a *video* worker can be told to discard: plain rows have no `video_abort` sender, so a Discard-only path would leak the engine and its slot.
@@ -2852,10 +3342,12 @@ impl DownloadManager {
         self.pending_names.borrow_mut().remove(&id);
         let had_segments = self.segment_state.borrow_mut().remove(&id).is_some();
         self.torrent_pieces.borrow_mut().remove(&id);
+        let mut partial_to_remove = None;
         if let Some(item) = self.find(id) {
             // Segmented partials have holes: without the bitmap cancel drops the file — unless the row may come back via Undo.
+            // Return the path so callers can reserve it and unlink off the GTK thread.
             if had_segments && !keep_partial {
-                let _ = std::fs::remove_file(item.file_path());
+                partial_to_remove = Some(item.file_path());
             }
             // Unfinished torrent rows drop their session entry but keep partial files, so cancel/retry and remove/Undo resume.
             if crate::torrent::is_torrent(&item.url()) && item.status() != DownloadStatus::Done {
@@ -2869,6 +3361,7 @@ impl DownloadManager {
                 item.set_detail(item.status().label());
             }
         }
+        partial_to_remove
     }
 
     /// Re-queue a failed or cancelled download.
@@ -2900,7 +3393,7 @@ impl DownloadManager {
 
     /// Cancel and drop a row; restore with [`DownloadManager::unremove`]. The partial file is kept so Undo can resume.
     pub fn remove(self: &Rc<Self>, id: u64) {
-        self.cancel_inner(id, true, Stop::Discard);
+        let _ = self.cancel_inner(id, true, Stop::Discard);
         self.epoch.borrow_mut().remove(&id);
         self.started.borrow_mut().remove(&id);
         // Video rows defer the sweep to `finish_discard`, which waits for the worker: a finalize path still inside its rename would otherwise deliver a file for a row that no longer exists.
@@ -2998,6 +3491,7 @@ impl DownloadManager {
     /// recorded branch refuses a path that is itself a symlink. Either way, a
     /// symlink planted after the download finished can't divert the
     /// delete/trash onto its target.
+    #[cfg(test)]
     fn torrent_folder(item: &DownloadItem) -> std::path::PathBuf {
         let dest_dir = item.dest_dir().to_string();
         let url = item.url().to_string();
@@ -3148,6 +3642,7 @@ impl DownloadManager {
     /// Cancel every queued, downloading or paused item.
     pub fn cancel_all(self: &Rc<Self>) {
         // One persist at the end and no per-row start_next: cancel() would briefly spawn the next queued row only to cancel it right after.
+        let mut partials_to_remove = Vec::new();
         self.for_matching(
             |s| {
                 matches!(
@@ -3155,8 +3650,15 @@ impl DownloadManager {
                     DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
                 )
             },
-            |m, id| m.cancel_inner(id, false, Stop::Preserve),
+            |m, id| {
+                if let Some(path) = m.cancel_inner(id, false, Stop::Preserve) {
+                    partials_to_remove.push(path);
+                }
+            },
         );
+        for path in partials_to_remove {
+            self.schedule_partial_cleanup(path);
+        }
         self.persist_queue();
         self.changed();
         self.start_next();
@@ -3395,8 +3897,10 @@ impl DownloadManager {
             Self::write_queue_file(&text);
         }
         #[cfg(not(test))]
-        if let (Some(text), Some(tx)) = (self.serialize_queue(), &*self.persist_tx.borrow()) {
-            tx.send_replace(Some(text));
+        if let (Some(queue), Some(tx)) =
+            (self.snapshot_queue_inner(false), &*self.persist_tx.borrow())
+        {
+            tx.send_replace(Some(queue));
         }
     }
 
@@ -3404,17 +3908,19 @@ impl DownloadManager {
     /// Extracted for testing: `watch::changed()` delivers the final value before
     /// the closed-channel Err, so dropping the sender after a final send guarantees
     /// the last write lands.
-    pub(crate) async fn persist_task_loop(
-        mut rx: tokio::sync::watch::Receiver<Option<String>>,
-        write: impl Fn(String) + Clone + Send + 'static,
-    ) {
+    pub(crate) async fn persist_task_loop<T>(
+        mut rx: tokio::sync::watch::Receiver<Option<T>>,
+        write: impl Fn(T) + Clone + Send + 'static,
+    ) where
+        T: Clone + Send + 'static,
+    {
         while rx.changed().await.is_ok() {
-            let Some(text) = rx.borrow_and_update().clone() else {
+            let Some(value) = rx.borrow_and_update().clone() else {
                 continue;
             };
-            // File I/O must not block the async runtime.
+            // Queue serialization and disk I/O must not block GTK or the async runtime.
             let write = write.clone();
-            let _ = tokio::task::spawn_blocking(move || write(text)).await;
+            let _ = tokio::task::spawn_blocking(move || write(value)).await;
         }
     }
 
@@ -3435,29 +3941,24 @@ impl DownloadManager {
                 tracing::warn!(
                     "shutdown: queue restore did not complete; preserving the saved queue file"
                 );
-            } else if let (Some(text), Some(tx)) =
-                (self.serialize_queue_inner(true), &*self.persist_tx.borrow())
+            } else if let (Some(queue), Some(tx)) =
+                (self.snapshot_queue_inner(true), &*self.persist_tx.borrow())
             {
-                tx.send_replace(Some(text));
+                tx.send_replace(Some(queue));
             }
             drop(self.persist_tx.borrow_mut().take());
+            // This fallback runs after the main loop has exited, when blocking
+            // cannot freeze GTK. Bound the wait so a stalled disk cannot hang exit.
             if let Some(task) = self.persist_task.borrow_mut().take() {
-                // Bound the shutdown wait: a stalled disk must not hang quit.
-                let _ = tokio_rt().block_on(async {
-                    tokio::time::timeout(std::time::Duration::from_secs(5), task).await
-                });
+                let _ = tokio_rt()
+                    .block_on(async { tokio::time::timeout(Duration::from_secs(5), task).await });
             }
         }
     }
 
-    /// Serialize the queue to JSON. Returns None if batching or on serialize error.
-    fn serialize_queue(&self) -> Option<String> {
-        self.serialize_queue_inner(false)
-    }
-
-    /// Serialize the queue to JSON, bypassing the batch gate when `force` is true.
-    /// Shutdown uses `force=true`: quitting mid-batch must persist the final state.
-    fn serialize_queue_inner(&self, force: bool) -> Option<String> {
+    /// Build a thread-safe snapshot from GTK-owned rows. The expensive JSON
+    /// encoding is done by the background persistence worker.
+    fn snapshot_queue_inner(&self, force: bool) -> Option<StoredQueue> {
         if !force && self.batch.get() > 0 {
             return None;
         }
@@ -3526,20 +4027,33 @@ impl DownloadManager {
                 });
             }
         }
-        let data = StoredQueue {
+        Some(StoredQueue {
             version: QUEUE_VERSION,
             items,
-        };
-        // Compact output cuts queue size ~3x but does not enforce the 10 MB
-        // restore cap; a very large paused set can still be quarantined.
-        let text = match serde_json::to_string(&data) {
-            Ok(text) => text,
-            Err(e) => {
-                tracing::error!("could not serialize download queue: {e}");
-                return None;
+        })
+    }
+
+    /// Test helper for assertions over the serialized queue representation.
+    #[cfg(test)]
+    fn serialize_queue(&self) -> Option<String> {
+        self.serialize_queue_inner(false)
+    }
+
+    /// Synchronous serialization is used only by deterministic test persistence.
+    #[cfg(test)]
+    fn serialize_queue_inner(&self, force: bool) -> Option<String> {
+        let queue = self.snapshot_queue_inner(force)?;
+        Self::serialize_snapshot(queue)
+    }
+
+    fn serialize_snapshot(queue: StoredQueue) -> Option<String> {
+        match serde_json::to_string(&queue) {
+            Ok(text) => Some(text),
+            Err(error) => {
+                tracing::error!("could not serialize download queue: {error}");
+                None
             }
-        };
-        Some(text)
+        }
     }
 
     /// Write the serialized queue atomically: temp file + sync_all + rename +
@@ -4230,10 +4744,10 @@ impl DownloadManager {
         #[cfg(not(test))]
         {
             if self.restore_state.get() == RestoreState::Ready {
-                if let (Some(text), Some(tx)) =
-                    (self.serialize_queue_inner(true), &*self.persist_tx.borrow())
+                if let (Some(queue), Some(tx)) =
+                    (self.snapshot_queue_inner(true), &*self.persist_tx.borrow())
                 {
-                    tx.send_replace(Some(text));
+                    tx.send_replace(Some(queue));
                 }
             } else {
                 tracing::warn!(
@@ -4262,50 +4776,22 @@ impl DownloadManager {
         }
     }
 
-    pub(crate) fn shutdown_with_timeout(&self, timeout: Duration) {
+    pub(crate) fn shutdown_with_timeout(&self, _timeout: Duration) {
         self.stop_scheduler();
         self.draining.set(true);
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
-        // Discard workers first through their retained abort handles: aborting a finalizer would detach its worker instead of stopping it. Finalizers are awaited (not aborted) so cleanup still runs.
         let finals: Vec<PendingDiscard> =
             self.discards.borrow_mut().drain().map(|(_, p)| p).collect();
-        for handle in handles.iter() {
+        for handle in &handles {
             handle.abort();
         }
         for pending in &finals {
             pending.worker_abort.abort();
         }
-        // Bound the join: on timeout the remaining handles are dropped
-        // (detached) and partial files are left alone — the next launch
-        // reconciles them via the length-vs-prefix check in spawn().
-        let joined = tokio_rt()
-            .block_on(async {
-                tokio::time::timeout(timeout, async {
-                    for handle in handles {
-                        let _ = handle.await;
-                    }
-                    for pending in finals {
-                        let _ = pending.finalizer.await;
-                    }
-                })
-                .await
-            })
-            .is_ok();
-        if !joined {
-            tracing::warn!("shutdown: join timed out; persisting without truncating partial files");
-            self.persist_for_shutdown();
-            return;
-        }
-        let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
-        for id in ids {
-            if let Some(item) = self.find(id)
-                && let Some(st) = self.segment_state.borrow_mut().get_mut(&id)
-            {
-                truncate_to_prefix(&item.file_path(), st);
-                st.forget_beyond_prefix();
-            }
-        }
-        // Persist BEFORE returning: pump tails exit silently once draining is set, so this is the only persist that matters.
+        // This synchronous fallback is only for shutdown paths that bypass the
+        // normal GLib async close flow. Do not block GTK joining workers or
+        // truncating files. Preserve the bitmap as-is; the next launch can
+        // reconcile stale partial lengths without risking a false bitmap.
         self.persist_for_shutdown();
     }
 }

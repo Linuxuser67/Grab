@@ -157,7 +157,10 @@ async fn intake_remote_torrent(
             Routed::OpenedCard
         }
         Ok(_) => {
-            if let Err(e) = manager.enqueue_torrent_file(bytes, &stem, None, None) {
+            if let Err(e) = manager
+                .enqueue_torrent_file_async(bytes, &stem, None, None)
+                .await
+            {
                 fail(e);
                 return Routed::Failed;
             }
@@ -560,8 +563,9 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
                                 add_card.open_torrent_picker(file_name, bytes, entries);
                             }
                             Ok(_) => {
-                                if let Err(e) =
-                                    manager.enqueue_torrent_file(bytes, &stem, None, None)
+                                if let Err(e) = manager
+                                    .enqueue_torrent_file_async(bytes, &stem, None, None)
+                                    .await
                                 {
                                     toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(
                                         &e,

@@ -30,15 +30,56 @@ static QUEUE_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// wrong thread. Take AFTER QUEUE_FILE_LOCK, always that order.
 static MAIN_LOOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+fn lock_queue_file() -> std::sync::MutexGuard<'static, ()> {
+    QUEUE_FILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock_main_loop() -> std::sync::MutexGuard<'static, ()> {
+    MAIN_LOOP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Both locks in the safe order (queue, then loop); reversed order deadlocks the suite.
 fn test_locks() -> (
     std::sync::MutexGuard<'static, ()>,
     std::sync::MutexGuard<'static, ()>,
 ) {
-    // Recover from poison: a panicking test shouldn't cascade into 28 identical failures.
-    let q = QUEUE_FILE_LOCK.lock().unwrap();
-    let l = MAIN_LOOP_LOCK.lock().unwrap();
-    (q, l)
+    (lock_queue_file(), lock_main_loop())
+}
+
+/// Wait for the asynchronous spawn preparation to hand a queued row to its engine.
+fn wait_for_started(manager: &DownloadManager, id: u64, timeout: Duration) -> bool {
+    let ctx = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + timeout;
+    while !manager.started.borrow().contains(&id)
+        && manager
+            .find(id)
+            .is_some_and(|item| item.status() == DownloadStatus::Queued)
+        && std::time::Instant::now() < deadline
+    {
+        ctx.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    manager.started.borrow().contains(&id)
+}
+
+/// Wait for async destination preparation to settle, including its local-task cleanup.
+fn wait_for_preparation(manager: &DownloadManager, id: u64, timeout: Duration) -> bool {
+    let ctx = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + timeout;
+    while (manager.preparing.borrow().contains(&id)
+        || manager.preparation_handles.borrow().contains_key(&id))
+        && std::time::Instant::now() < deadline
+    {
+        ctx.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    quiesce(&ctx);
+    !manager.preparing.borrow().contains(&id)
+        && !manager.preparation_handles.borrow().contains_key(&id)
 }
 
 /// Minimal persisted row for `restore_existing` fixtures (no id => pre-v3 allocate path).
@@ -83,12 +124,36 @@ fn drain_engine(manager: &DownloadManager, id: u64) {
     // Also wait for finished-row sizings: `set_finished_detail` spawns one
     // per completion, and it outlives the engine that triggered it.
     while (manager.running.borrow().contains_key(&id)
+        || manager.preparing.borrow().contains(&id)
+        || manager.preparation_handles.borrow().contains_key(&id)
         || manager.pump_handles.borrow().contains_key(&id)
+        || manager
+            .find(id)
+            .is_some_and(|item| manager.dest_reserved(&item.file_path()))
         || manager.sizing_inflight.get() > 0)
         && std::time::Instant::now() < deadline
     {
         ctx.iteration(false);
         std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    quiesce(&ctx);
+}
+
+/// Wait for cancel_all's path reservations to clear, proving its blocking
+/// cleanup workers and their main-context continuations have completed.
+fn drain_cancel_cleanups(manager: &DownloadManager) {
+    let ctx = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while manager
+        .items()
+        .any(|item| manager.dest_reserved(&item.file_path()))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out draining cancellation cleanup workers"
+        );
+        ctx.iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
     }
     quiesce(&ctx);
 }
@@ -433,7 +498,7 @@ fn dedupe_caps_iterations() {
 
 #[test]
 fn corrupt_queue_is_quarantined() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let qf = test_queue_file("quarantine");
     std::fs::write(&qf, b"{not json").unwrap();
     let settings = test_settings();
@@ -451,7 +516,7 @@ fn invalid_utf8_queue_is_quarantined() {
     // read_to_string fails on invalid UTF-8: must quarantine like the other
     // corrupt-queue branches instead of silently starting empty (a later
     // persist would then overwrite the unreadable file).
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let qf = test_queue_file("quarantine-utf8");
     std::fs::write(&qf, b"{\xff\xfe not utf-8").unwrap();
     let settings = test_settings();
@@ -468,7 +533,7 @@ fn invalid_utf8_queue_is_quarantined() {
 fn shutdown_with_timeout_returns_promptly_with_stuck_finalizer() {
     // A wedged finalizer must not hang the GTK thread on quit: the join is
     // bounded, partial files are left for the next launch to reconcile.
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let _qf = test_queue_file("shutdown-timeout");
     let settings = test_settings();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -828,7 +893,7 @@ fn parses_rates() {
 
 #[test]
 fn rate_limit_follows_settings_live() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let _qf = test_queue_file("rate-live");
     let settings = test_settings();
     // Watch publishes; cap follows with no re-queue, junk reads as unlimited.
@@ -860,7 +925,7 @@ fn notification_toggles() {
 
 #[test]
 fn transferring_ignores_paused() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let _qf = test_queue_file("transferring");
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -1058,8 +1123,8 @@ fn enqueue_video_spawns_and_fails_without_tools() {
         .join("grab-video-enqueue")
         .to_string_lossy()
         .into_owned();
-    let item = manager
-        .enqueue_video(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest),
             Some("My Video.mp4"),
@@ -1070,7 +1135,7 @@ fn enqueue_video_spawns_and_fails_without_tools() {
                 is_live: false,
                 playlist_item_id: None,
             },
-        )
+        ))
         .expect("video enqueue");
     let id = item.id();
     // The worker runs and fails fast on the missing tools (no network).
@@ -1105,8 +1170,8 @@ fn enqueue_video_restrict_filenames_folds_name() {
     let dest = std::env::temp_dir().join("grab-video-restrict");
     std::fs::create_dir_all(&dest).unwrap();
     let dest = dest.to_string_lossy().into_owned();
-    let item = manager
-        .enqueue_video(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest),
             Some("Café & Croissants.mp4"),
@@ -1117,7 +1182,7 @@ fn enqueue_video_restrict_filenames_folds_name() {
                 is_live: false,
                 playlist_item_id: None,
             },
-        )
+        ))
         .expect("video enqueue");
     assert_eq!(item.filename(), "Cafe_Croissants.mp4");
     let id = item.id();
@@ -1299,8 +1364,8 @@ fn video_source_survives_restore_and_retry() {
     let id = {
         let settings = test_settings();
         let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-        let item = manager
-            .enqueue_video(
+        let item = glib::MainContext::default()
+            .block_on(manager.enqueue_video_async(
                 "https://vimeo.com/123456",
                 Some(&dest),
                 Some("Clip.mp4"),
@@ -1311,7 +1376,7 @@ fn video_source_survives_restore_and_retry() {
                     is_live: false,
                     playlist_item_id: None,
                 },
-            )
+            ))
             .expect("video enqueue");
         // Persisted with the Page marker (not silently dropped).
         let text = std::fs::read_to_string(&qf).unwrap();
@@ -1339,7 +1404,7 @@ fn video_source_survives_restore_and_retry() {
 
 #[test]
 fn mismatched_video_source_dropped_on_restore() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let qf = test_queue_file("video-mismatch");
     // Hand-edited queue: the Page marker names another video.
     let queue = StoredQueue {
@@ -1461,8 +1526,8 @@ fn unremove_restores_video_source() {
         .join("grab-video-unremove")
         .to_string_lossy()
         .into_owned();
-    let item = manager
-        .enqueue_video(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://vimeo.com/123456",
             Some(&dest),
             Some("Clip.mp4"),
@@ -1473,7 +1538,7 @@ fn unremove_restores_video_source() {
                 is_live: false,
                 playlist_item_id: None,
             },
-        )
+        ))
         .expect("video enqueue");
     let id = item.id();
     drain_engine(&manager, id);
@@ -1513,14 +1578,14 @@ fn unremove_restores_video_source() {
 #[test]
 fn queue_file_never_carries_cookies() {
     // Secrets must not reach the persisted queue, whatever the settings.
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let (_lock, _loop) = test_locks();
     let _notools = NoVideoTools::apply();
     let qf = test_queue_file("video-cookies-persist");
     let settings = test_settings();
     settings.set_string("cookies-browser", "firefox").unwrap();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    let item = manager
-        .enqueue_video(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://vimeo.com/123456",
             Some("/tmp/dl"),
             Some("Clip.mp4"),
@@ -1531,7 +1596,7 @@ fn queue_file_never_carries_cookies() {
                 is_live: false,
                 playlist_item_id: None,
             },
-        )
+        ))
         .expect("video enqueue");
     // Drain the worker here so no woken pump tail trips another test's thread guard.
     drain_engine(&manager, item.id());
@@ -1548,7 +1613,7 @@ fn queue_file_never_carries_cookies() {
 
 #[test]
 fn active_count_covers_cancel_all_scope() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let _qf = test_queue_file("active-count");
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -1571,7 +1636,7 @@ fn active_count_covers_cancel_all_scope() {
 
 #[test]
 fn error_banner_ignores_cancelled() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let _qf = test_queue_file("error-banner");
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -1632,7 +1697,7 @@ fn path_size_async_measures_off_thread() {
     // The async wrapper must actually measure, not just resolve: a stub that
     // returns None without scanning would leave finished rows unsized.
     // MAIN_LOOP_LOCK: glib futures abort if polled from the wrong thread.
-    let _loop = MAIN_LOOP_LOCK.lock().unwrap();
+    let _loop = lock_main_loop();
     let dir = std::env::temp_dir().join(format!("grab-path-size-async-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let sub = dir.join("sub");
@@ -1802,7 +1867,7 @@ fn staged_selection_survives_respawn() {
 
 #[test]
 fn torrent_file_enqueue_uses_stem_stub() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let (_lock, _loop) = test_locks();
     let _qf = test_queue_file("torrent-enqueue");
     let settings = test_settings();
     // Occupy the only slot so nothing spawns a real engine below.
@@ -1813,13 +1878,13 @@ fn torrent_file_enqueue_uses_stem_stub() {
     });
     manager.running.borrow_mut().insert(99, holder);
     let stem = format!("grab-enqueue-{}", std::process::id());
-    let item = manager
-        .enqueue_torrent_file(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_torrent_file_async(
             single_torrent_bytes(),
             &format!("{stem}.torrent"),
             None,
             None,
-        )
+        ))
         .unwrap();
     assert_eq!(item.status(), DownloadStatus::Queued);
     assert!(crate::torrent::is_torrent_url(&item.url()));
@@ -1834,7 +1899,7 @@ fn torrent_file_enqueue_uses_stem_stub() {
 
 #[test]
 fn staged_selection_reaches_spawn_take() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let (_lock, _loop) = test_locks();
     let _qf = test_queue_file("torrent-take");
     let settings = test_settings();
     // Occupy the only slot so nothing spawns a real engine below.
@@ -1845,13 +1910,13 @@ fn staged_selection_reaches_spawn_take() {
     });
     manager.running.borrow_mut().insert(99, holder);
     let stem = format!("grab-take-{}", std::process::id());
-    let item = manager
-        .enqueue_torrent_file(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_torrent_file_async(
             single_torrent_bytes(),
             &format!("{stem}.torrent"),
             None,
             Some(vec![0]),
-        )
+        ))
         .unwrap();
     // Must survive the archive → normalize → store round-trip identically.
     assert_eq!(
@@ -1893,6 +1958,7 @@ fn delete_download_trashes_torrent_files() {
             .block_on(manager.delete_download_async(7))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert!(!file.exists());
     assert_eq!(store.n_items(), 0);
     assert!(crate::torrent::archive_path_for_url(&pseudo).is_none());
@@ -1905,7 +1971,7 @@ fn delete_download_trashes_torrent_files() {
 
 #[test]
 fn remove_keeps_torrent_archive_for_undo() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let (_lock, _loop) = test_locks();
     let _qf = test_queue_file("torrent-remove");
     let settings = test_settings();
     // Occupy the only slot so nothing spawns a real engine below.
@@ -1916,13 +1982,13 @@ fn remove_keeps_torrent_archive_for_undo() {
     });
     manager.running.borrow_mut().insert(99, holder);
     let stem = format!("grab-undo-{}", std::process::id());
-    let item = manager
-        .enqueue_torrent_file(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_torrent_file_async(
             single_torrent_bytes(),
             &format!("{stem}.torrent"),
             None,
             None,
-        )
+        ))
         .unwrap();
     let id = item.id();
     let url = item.url().to_string();
@@ -1942,7 +2008,7 @@ fn remove_keeps_torrent_archive_for_undo() {
 
 #[test]
 fn rejects_relative_download_dir() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let _qf = test_queue_file("relative-dir");
     let settings = test_settings();
     // Occupy the only slot so nothing spawns a real engine below.
@@ -2034,6 +2100,7 @@ fn delete_download_removes_file_and_row() {
             .block_on(manager.delete_download_async(7))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert!(!file.exists());
     assert_eq!(store.n_items(), 0);
     // Undo the test's own Trash litter.
@@ -2053,6 +2120,7 @@ fn delete_download_removes_file_and_row() {
             .block_on(manager.delete_download_async(8))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert_eq!(store.n_items(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2123,7 +2191,11 @@ fn finish_cleans_untoggled_placeholders() {
     std::fs::create_dir_all(folder.join("sub")).unwrap();
     std::fs::write(folder.join("a.txt"), b"kept").unwrap();
     std::fs::write(folder.join("sub").join("b.txt"), b"").unwrap();
-    crate::torrent::cleanup_unselected(&folder, &pseudo);
+    let selected = crate::torrent::get_selection(&pseudo).unwrap();
+    // Finished drops the URL-scoped selection before its deferred worker runs.
+    // Passing the snapshot must still remove untoggled placeholders.
+    crate::torrent::drop_selection(&pseudo);
+    crate::torrent::cleanup_unselected(&folder, &pseudo, &selected);
     assert!(folder.join("a.txt").exists());
     assert!(!folder.join("sub").exists());
     assert!(folder.exists());
@@ -2160,6 +2232,7 @@ fn delete_download_trashes_torrent_subfolder() {
             .block_on(manager.delete_download_async(9))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     // Owned file trashed, unrelated file survives, folder left in place.
     assert!(!folder.join("a.txt").exists());
     assert!(folder.join("unrelated.txt").exists());
@@ -2202,6 +2275,7 @@ fn delete_download_magnet_leaves_preexisting_folder() {
             .block_on(manager.delete_download_async(10))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     // Folder and unrelated file must survive.
     assert!(folder.exists());
     assert_eq!(
@@ -2247,6 +2321,7 @@ fn torrent_delete_refuses_symlinked_subdirectory() {
             .block_on(manager.delete_download_async(11))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     // Precious file and symlink must survive.
     assert_eq!(std::fs::read(outside.join("b.txt")).unwrap(), b"precious");
     assert!(folder.join("sub").is_symlink());
@@ -2399,7 +2474,12 @@ fn enqueue_keeps_name_when_file_exists() {
         )
         .expect("enqueue");
     assert_eq!(item.filename(), "dup.bin");
-    // insert -> start_next -> spawn run synchronously: the fresh row refuses the foreign file.
+    // Destination validation now runs asynchronously off the main context.
+    assert!(wait_for_preparation(
+        &manager,
+        item.id(),
+        Duration::from_secs(15)
+    ));
     assert_eq!(item.status(), DownloadStatus::Failed);
     assert_eq!(item.detail(), crate::engine_msg::DEST_EXISTS);
     assert_eq!(
@@ -2423,8 +2503,8 @@ fn enqueue_video_keeps_name_when_file_exists() {
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("clip.mp4"), b"someone else").unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
-    let item = manager
-        .enqueue_video(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("clip.mp4"),
@@ -2435,7 +2515,7 @@ fn enqueue_video_keeps_name_when_file_exists() {
                 is_live: false,
                 playlist_item_id: None,
             },
-        )
+        ))
         .expect("video enqueue");
     assert_eq!(item.filename(), "clip.mp4");
     assert_eq!(
@@ -2469,6 +2549,11 @@ fn restored_unstarted_row_refuses_existing_dest() {
     // Explicit never-started (new queue file): the bytes are foreign.
     stored.started = Some(false);
     let item = manager.restore_existing(&stored).expect("restore");
+    assert!(wait_for_preparation(
+        &manager,
+        item.id(),
+        Duration::from_secs(15)
+    ));
     assert_eq!(item.status(), DownloadStatus::Failed);
     assert_eq!(item.detail(), crate::engine_msg::DEST_EXISTS);
     assert_eq!(
@@ -2589,8 +2674,8 @@ fn expand_playlist_rows_use_titled_subfolder() {
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
-    let parent = manager
-        .enqueue_video(
+    let parent = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/playlist?list=PLx",
             Some(&dest_s),
             Some("parent.mp4"),
@@ -2601,7 +2686,7 @@ fn expand_playlist_rows_use_titled_subfolder() {
                 is_live: false,
                 playlist_item_id: None,
             },
-        )
+        ))
         .expect("parent enqueue");
     // Stage a Page source so the expansion reads quality/audio_only.
     manager.video_sources.borrow_mut().insert(
@@ -2637,8 +2722,25 @@ fn expand_playlist_rows_use_titled_subfolder() {
         ]
         .into_boxed_slice(),
     };
-    let (added, total, skipped_by_host_limit) =
-        manager.expand_playlist_rows(parent.id(), &parent, &pl);
+    assert!(
+        wait_for_preparation(&manager, parent.id(), Duration::from_secs(15)),
+        "playlist parent preparation did not settle"
+    );
+    let generation = manager
+        .epoch
+        .borrow()
+        .get(&parent.id())
+        .copied()
+        .unwrap_or(0);
+    let (added, total, skipped_by_host_limit) = glib::MainContext::default().block_on(
+        crate::download::DownloadManager::expand_playlist_rows_async(
+            Rc::downgrade(&manager),
+            parent.id(),
+            generation,
+            &parent,
+            &pl,
+        ),
+    );
     assert_eq!((added, total, skipped_by_host_limit), (2, 2, 0));
     let sub = dest.join("My Mix: Vol. 1");
     assert!(sub.is_dir());
@@ -2715,7 +2817,7 @@ fn restrict_filename_ascii_folds_to_ascii() {
 
 #[test]
 fn restore_keeps_exact_filename() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let _qf = test_queue_file("restore-exact");
     test_settings();
     let dir = std::env::temp_dir().join(format!("grab-restore-{}", std::process::id()));
@@ -2847,7 +2949,7 @@ fn history_restore_roundtrip() {
 
 #[test]
 fn selection_survives_persist_restore() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let qf = test_queue_file("selection-roundtrip");
     let settings = test_settings();
     settings.set_int("max-concurrent", 1).unwrap();
@@ -2908,7 +3010,7 @@ fn sane_filenames() {
 
 #[test]
 fn restore_rejects_bad_filenames() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let _qf = test_queue_file("restore-bad");
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -2998,15 +3100,11 @@ fn cancel_frees_slot_immediately() {
     manager.cancel(41);
     assert_eq!(a.status(), DownloadStatus::Cancelled);
     assert!(!manager.running.borrow().contains_key(&41));
-    assert_eq!(b.status(), DownloadStatus::Downloading);
-    assert!(manager.running.borrow().contains_key(&42));
-    // Drain B's UI future here: already queued, or another test's loop aborts on thread-affinity.
-    let ctx = glib::MainContext::default();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while manager.running.borrow().contains_key(&42) && std::time::Instant::now() < deadline {
-        ctx.iteration(false);
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
+    assert!(
+        wait_for_started(&manager, 42, Duration::from_secs(10)),
+        "cancel must release the slot and start the next queued row"
+    );
+    drain_engine(&manager, 42);
     assert!(!manager.running.borrow().contains_key(&42));
     assert_eq!(b.status(), DownloadStatus::Failed);
 }
@@ -3030,15 +3128,13 @@ fn pause_starts_next_queued() {
     manager.pause(61);
     assert_eq!(a.status(), DownloadStatus::Paused);
     assert!(!manager.running.borrow().contains_key(&61));
-    assert_eq!(b.status(), DownloadStatus::Downloading);
-    assert!(manager.running.borrow().contains_key(&62));
-    let ctx = glib::MainContext::default();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while manager.running.borrow().contains_key(&62) && std::time::Instant::now() < deadline {
-        ctx.iteration(false);
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
+    assert!(
+        wait_for_started(&manager, 62, Duration::from_secs(10)),
+        "pause must release the slot and start the next queued row"
+    );
+    drain_engine(&manager, 62);
     assert!(!manager.running.borrow().contains_key(&62));
+    assert_eq!(b.status(), DownloadStatus::Failed);
 }
 
 #[test]
@@ -3060,22 +3156,20 @@ fn raising_max_concurrent_starts_queued() {
     assert_eq!(b.status(), DownloadStatus::Queued);
     // The preferences SpinRow writes this key; the queued row must start with no other event.
     settings.set_int("max-concurrent", 2).unwrap();
-    assert_eq!(b.status(), DownloadStatus::Downloading);
-    assert!(manager.running.borrow().contains_key(&64));
-    let ctx = glib::MainContext::default();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while manager.running.borrow().contains_key(&64) && std::time::Instant::now() < deadline {
-        ctx.iteration(false);
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
+    assert!(
+        wait_for_started(&manager, 64, Duration::from_secs(10)),
+        "raising the concurrency limit must start the newly eligible row"
+    );
+    drain_engine(&manager, 64);
     assert!(!manager.running.borrow().contains_key(&64));
+    assert_eq!(b.status(), DownloadStatus::Failed);
     // Restore: the memory backend is shared across tests.
     settings.set_int("max-concurrent", 3).unwrap();
 }
 
 #[test]
 fn defer_yields_slot_and_goes_last() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let (_lock, _loop) = test_locks();
     let _qf = test_queue_file("defer");
     let settings = test_settings();
     settings.set_int("max-concurrent", 1).unwrap();
@@ -3106,12 +3200,15 @@ fn defer_yields_slot_and_goes_last() {
     // Cancel first so no queued row remains for the backend restore to spawn.
     manager.cancel_all();
     assert!(!manager.running.borrow().contains_key(&72));
+    // cancel_all schedules partial-file cleanup on the GLib context. Drain
+    // the workers and their continuations before another test owns the context.
+    drain_cancel_cleanups(&manager);
     settings.set_int("max-concurrent", 3).unwrap();
 }
 
 #[test]
 fn lowering_max_concurrent_parks_newest() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let _qf = test_queue_file("preempt");
     let settings = test_settings();
     settings.set_int("max-concurrent", 2).unwrap();
@@ -3201,7 +3298,7 @@ fn restore_preserves_intent() {
 
 #[test]
 fn restored_status_mapping() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let _qf = test_queue_file("restored-mapping");
     let settings = test_settings();
     // Occupy the only slot so restored rows never spawn an engine.
@@ -3235,7 +3332,7 @@ fn restored_status_mapping() {
 
 #[test]
 fn retry_persists_immediately() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let qf = test_queue_file("retry-persist");
     let settings = test_settings();
     settings.set_int("max-concurrent", 1).unwrap();
@@ -3590,12 +3687,30 @@ fn stale_pump_future_ignores_respawned_row() {
         .enqueue(&url, Some(&dest), Some("h.bin"))
         .unwrap_or_else(|e| abort(&server, &e));
     let id = item.id();
+    assert!(
+        wait_for_started(&manager, id, Duration::from_secs(15)),
+        "download preparation did not start the engine"
+    );
     assert_eq!(item.status(), DownloadStatus::Downloading);
     // Let the first engine get going, then defer: park aborts it and a
     // second engine takes over the same row.
     std::thread::sleep(std::time::Duration::from_millis(500));
     manager.defer(id);
-    assert_eq!(item.status(), DownloadStatus::Downloading);
+    assert_eq!(item.status(), DownloadStatus::Queued);
+    // Preparation is now asynchronous; wait until the replacement engine owns
+    // the row before checking that the stale pump cannot overwrite its state.
+    let restart_deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while (!manager.running.borrow().contains_key(&id)
+        || item.status() != DownloadStatus::Downloading)
+        && std::time::Instant::now() < restart_deadline
+    {
+        glib::MainContext::default().iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        manager.running.borrow().contains_key(&id) && item.status() == DownloadStatus::Downloading,
+        "replacement engine did not start after defer"
+    );
     // Let the aborted engine die and the hanging one settle, then pump:
     // the stale future's tail runs here and must stay silent.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -3618,7 +3733,11 @@ fn stale_pump_future_ignores_respawned_row() {
     }
     manager.cancel(id);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while manager.running.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
+    while (manager.running.borrow().contains_key(&id)
+        || manager.preparing.borrow().contains(&id)
+        || manager.preparation_handles.borrow().contains_key(&id))
+        && std::time::Instant::now() < deadline
+    {
         ctx.iteration(false);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
@@ -3760,13 +3879,15 @@ fn segmented_pause_resume_keeps_bytes() {
             .enqueue(&url, Some(&dest), Some("big.bin"))
             .unwrap_or_else(|e| abort(&server, &e));
         let id = item.id();
-        // Wait for one 1 MB piece (5%), then pause. Status check is in the loop condition
-        // so it cannot slip to Done before pause() with no await in between.
+        // Wait for asynchronous preparation to start the engine, then reach one
+        // 1 MB piece (5%) before pausing. A queued row is not evidence of completion.
         let mut waited = 0;
-        while item.status() == DownloadStatus::Downloading
-            && item.progress() < 0.05
-            && waited < 2000
+        while item.status() == DownloadStatus::Queued
+            || (item.status() == DownloadStatus::Downloading && item.progress() < 0.05)
         {
+            if waited >= 2000 {
+                break;
+            }
             glib::timeout_future(std::time::Duration::from_millis(5)).await;
             waited += 1;
         }
@@ -3811,7 +3932,7 @@ fn segmented_pause_resume_keeps_bytes() {
 
 #[test]
 fn bitmap_persists_across_managers() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let qf = test_queue_file("segpersist");
     let settings = test_settings();
     let m1 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
@@ -3970,10 +4091,12 @@ fn shutdown_restart_resumes_segmented() {
             .unwrap_or_else(|e| abort(&server, &e));
         let id = item.id();
         let mut waited = 0;
-        while item.status() == DownloadStatus::Downloading
-            && item.progress() < 0.05
-            && waited < 2000
+        while item.status() == DownloadStatus::Queued
+            || (item.status() == DownloadStatus::Downloading && item.progress() < 0.05)
         {
+            if waited >= 2000 {
+                break;
+            }
             glib::timeout_future(std::time::Duration::from_millis(5)).await;
             waited += 1;
         }
@@ -4232,10 +4355,14 @@ fn restart_with_smaller_file_keeps_partial() {
         .restore_existing(&stored)
         .unwrap_or_else(|e| abort(&server, &e));
     let id = item.id();
-    // Drain the engine's pump future on this thread (see MAIN_LOOP_LOCK).
+    // Drain both asynchronous destination preparation and the engine/pump on this thread.
     let ctx = glib::MainContext::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while manager.running.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
+    while (manager.running.borrow().contains_key(&id)
+        || manager.preparing.borrow().contains(&id)
+        || manager.preparation_handles.borrow().contains_key(&id))
+        && std::time::Instant::now() < deadline
+    {
         ctx.iteration(false);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
@@ -4280,7 +4407,7 @@ fn aggregate_downsamples_by_half() {
 
 #[test]
 fn piece_bitmap_prefers_segment_then_torrent_then_bytes() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let _qf = test_queue_file("piece-bitmap");
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -5251,7 +5378,7 @@ exit 0
 
 #[test]
 fn clear_finished_drops_only_done() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let qf = test_queue_file("clear-finished");
     let settings = test_settings();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -5353,7 +5480,7 @@ fn restore_dedups_finished_urls() {
 fn drop_finished_duplicates_keeps_active_and_newest() {
     // The finish hook's policy, directly: the just-finished row stays,
     // older Done rows for the URL go, everything else is user intent.
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _lock = lock_queue_file();
     let _qf = test_queue_file("history-dedup-live");
     let settings = test_settings();
     let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
@@ -5398,8 +5525,8 @@ fn enqueue_video_reserves_part_namespaced_stems() {
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("Clip.video.mp4"), b"foreign").unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
-    let item = manager
-        .enqueue_video(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.mp4"),
@@ -5410,7 +5537,7 @@ fn enqueue_video_reserves_part_namespaced_stems() {
                 is_live: false,
                 playlist_item_id: None,
             },
-        )
+        ))
         .expect("video enqueue");
     assert_eq!(item.filename(), "Clip (1).mp4");
     // The foreign file is untouched and the fresh stem is unreserved.
@@ -5484,11 +5611,13 @@ fn delete_download_trashes_video_sidecars() {
             .block_on(manager.delete_download_async(11))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert!(
         glib::MainContext::default()
             .block_on(manager.delete_download_async(12))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     // Video + its sidecars trashed; plain row's same-named srt stays.
     for n in ["Clip.mp4", "Clip.en.srt", "Clip.fr.srt", "Other.mp4"] {
         assert!(!dir.join(n).exists(), "{n} must be trashed");
@@ -5517,8 +5646,8 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("Clip.en.srt"), b"foreign").unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
-    let item = manager
-        .enqueue_video(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.mp4"),
@@ -5529,7 +5658,7 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
                 is_live: false,
                 playlist_item_id: None,
             },
-        )
+        ))
         .expect("video enqueue");
     assert_eq!(item.filename(), "Clip (1).mp4");
     assert_eq!(std::fs::read(dest.join("Clip.en.srt")).unwrap(), b"foreign");
@@ -5553,18 +5682,18 @@ fn enqueue_video_accepts_unlisted_url() {
         is_live: false,
         playlist_item_id: None,
     };
-    let item = manager
-        .enqueue_video(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://example.com/f.iso",
             Some("/tmp/dl"),
             None,
             choices.clone(),
-        )
+        ))
         .expect("probed intake");
     assert_eq!(item.filename(), "f.iso");
     assert!(
-        manager
-            .enqueue_video("not a url", Some("/tmp/dl"), None, choices)
+        glib::MainContext::default()
+            .block_on(manager.enqueue_video_async("not a url", Some("/tmp/dl"), None, choices))
             .is_err()
     );
     // Drain the spawned worker (fails fast without tools) so no woken
@@ -5618,11 +5747,23 @@ fn a_video_attempt_gets_a_gate_and_a_plain_row_does_not() {
         backend: None,
     });
     let item = manager.restore_existing(&row).expect("video row");
+    // Destination validation is asynchronous now. Wait until the attempt has
+    // passed preparation and installed its delivery gate before asserting the
+    // fail-fast proxy path; don't assume GTK setup runs in the enqueue call.
+    let context = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while manager.gate_for(item.id()).is_none()
+        && item.status() == DownloadStatus::Queued
+        && std::time::Instant::now() < deadline
+    {
+        context.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     assert!(
         manager.gate_for(item.id()).is_some(),
-        "a video row with no gate cannot arbitrate delivery, so a removal \
-         could not stop it placing a file"
+        "a video attempt must install its delivery gate before engine validation"
     );
+    quiesce(&context);
 
     manager
         .settings()
@@ -5866,8 +6007,8 @@ fn a_reserved_destination_forces_video_intake_to_dedupe() {
     std::fs::create_dir_all(&dest).unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
     manager.reserve_dest(&dest.join("Clip.mp4"));
-    let item = manager
-        .enqueue_video(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.mp4"),
@@ -5878,7 +6019,7 @@ fn a_reserved_destination_forces_video_intake_to_dedupe() {
                 is_live: false,
                 playlist_item_id: None,
             },
-        )
+        ))
         .expect("video enqueue");
     assert_eq!(
         item.filename(),
@@ -5932,8 +6073,8 @@ fn a_reserved_stem_forces_video_intake_to_dedupe() {
     std::fs::create_dir_all(&dest).unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
     manager.reserve_dest(&dest.join("Clip.mp4"));
-    let item = manager
-        .enqueue_video(
+    let item = glib::MainContext::default()
+        .block_on(manager.enqueue_video_async(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.m4a"),
@@ -5944,7 +6085,7 @@ fn a_reserved_stem_forces_video_intake_to_dedupe() {
                 is_live: false,
                 playlist_item_id: None,
             },
-        )
+        ))
         .expect("video enqueue");
     assert_eq!(
         item.filename(),
@@ -7578,7 +7719,9 @@ fn enqueue_gallery_resolves_dest_and_id() {
         let mut job = gallery_job_fixture();
         job.dest_dir = std::path::PathBuf::from(dest);
         job.item_id = 0; // placeholder
-        let item = m.enqueue_gallery(&job).expect("enqueue");
+        let item = glib::MainContext::default()
+            .block_on(m.enqueue_gallery_async(&job))
+            .expect("enqueue");
         // Destination resolved to an absolute path.
         assert!(std::path::Path::new(&item.dest_dir()).is_absolute());
         assert!(!item.dest_dir().is_empty());
@@ -7657,7 +7800,9 @@ fn gallery_remove_discards_handoff_cookies() {
     crate::extension_server::store_handoff_cookies(&job.page_url, path, None);
     assert!(crate::extension_server::live_handoff_cookie_path(&job.page_url, "none").is_some());
     // Enqueue the gallery, then remove it.
-    let item = m.enqueue_gallery(&job).expect("enqueue");
+    let item = glib::MainContext::default()
+        .block_on(m.enqueue_gallery_async(&job))
+        .expect("enqueue");
     let id = item.id();
     // Drain the spawned task to avoid tripping the glib thread guard.
     drain_engine(&m, id);
@@ -7780,7 +7925,9 @@ fn gallery_enqueue_uses_unique_dir_when_title_collides() {
     let mut job = gallery_job_fixture();
     job.dest_dir = tmp.clone();
     job.title = "Test Gallery".to_string();
-    let item = m.enqueue_gallery(&job).expect("enqueue");
+    let item = glib::MainContext::default()
+        .block_on(m.enqueue_gallery_async(&job))
+        .expect("enqueue");
     // Must NOT use the pre-existing directory.
     assert_ne!(item.filename(), "Test Gallery");
     assert!(item.filename().starts_with("Test Gallery-"));
@@ -7793,7 +7940,9 @@ fn gallery_enqueue_uses_unique_dir_when_title_collides() {
     assert!(preexisting.join("unrelated.txt").exists());
     // A second gallery with the same title (neither downloaded yet, so no
     // dir on disk) must get a *different* unique name — in-memory collision.
-    let item2 = m.enqueue_gallery(&job).expect("enqueue second");
+    let item2 = glib::MainContext::default()
+        .block_on(m.enqueue_gallery_async(&job))
+        .expect("enqueue second");
     assert_ne!(item2.filename(), item.filename());
     assert_ne!(item2.filename(), "Test Gallery");
     // Drain both spawned engines so no woken tail trips a later test's
@@ -7988,6 +8137,7 @@ fn delete_download_legacy_gallery_row_keeps_unrelated_folder() {
             .block_on(manager.delete_download_async(7))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert_eq!(store.n_items(), 0);
     // The unrelated folder and its content survive.
     assert!(decoy.join("keep.txt").exists());
@@ -8015,6 +8165,7 @@ fn delete_download_gallery_row_without_job_keeps_folder() {
             .block_on(manager.delete_download_async(7))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert_eq!(store.n_items(), 0);
     assert!(folder.join("keep.txt").exists());
     let _ = std::fs::remove_dir_all(&dir);
@@ -8044,6 +8195,7 @@ fn delete_download_new_gallery_row_trashes_subfolder() {
             .block_on(manager.delete_download_async(7))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert_eq!(store.n_items(), 0);
     assert!(!sub.exists());
     // Undo the test's own Trash litter.
@@ -8080,6 +8232,7 @@ fn delete_download_after_gallery_rename_trashes_renamed_folder() {
             .block_on(manager.delete_download_async(7))
             .is_ok()
     );
+    quiesce(&glib::MainContext::default());
     assert_eq!(store.n_items(), 0);
     // The renamed folder — the one Grab owns — must be trashed.
     assert!(!dir.join("renamed").exists());
@@ -8123,4 +8276,59 @@ fn restoring_public_only_row_reinstates_its_host_policy() {
     );
 
     let _ = std::fs::remove_file(queue_file);
+}
+
+#[test]
+fn start_next_counts_preparing_rows_against_the_cap() {
+    let (_lock, _loop) = test_locks();
+    let _qf = test_queue_file("preparing-cap");
+    let settings = test_settings();
+    settings.set_int("max-concurrent", 2).unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+
+    for i in 0..5 {
+        manager
+            .enqueue(&format!("http://127.0.0.1:9/f{i}"), Some("/tmp"), None)
+            .unwrap();
+    }
+
+    assert!(
+        manager.preparing.borrow().len() + manager.running.borrow().len() <= 2,
+        "filesystem preparation must consume a scheduler slot"
+    );
+    assert_eq!(manager.preparing.borrow().len(), 2);
+    manager.cancel_all();
+
+    let context = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !manager.preparing.borrow().is_empty() && std::time::Instant::now() < deadline {
+        context.iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        manager.preparing.borrow().is_empty(),
+        "preparation workers must drain"
+    );
+    quiesce(&context);
+}
+
+#[test]
+fn finished_name_adoption_retries_after_stale_listing_collision() {
+    let dir = std::env::temp_dir().join(format!("grab-finished-name-race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("tmp.bin");
+    let occupied = dir.join("a.mp4");
+    std::fs::write(&source, b"downloaded").unwrap();
+    std::fs::write(&occupied, b"foreign").unwrap();
+
+    // Simulate a stale listing that says every name is free. The atomic rename
+    // must reject a.mp4 and retry with a distinct name, never overwrite it.
+    let adopted = DownloadManager::adopt_final_name(&source, &dir, "a.mp4", |_| false)
+        .expect("a later collision-free candidate should be adopted");
+    assert_ne!(adopted, "a.mp4");
+    assert!(dir.join(&adopted).exists());
+    assert_eq!(std::fs::read(&occupied).unwrap(), b"foreign");
+    assert_eq!(std::fs::read(dir.join(adopted)).unwrap(), b"downloaded");
+    let _ = std::fs::remove_dir_all(&dir);
 }

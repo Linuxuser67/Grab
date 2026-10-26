@@ -396,10 +396,7 @@ pub(crate) fn single_file_path(dest: &std::path::Path, url: &str) -> Option<std:
 }
 
 /// Delete untoggled files after a filtered torrent finishes (librqbit pre-creates every file, so unselected ones must be removed here).
-pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str) {
-    let Some(selected) = get_selection(url) else {
-        return;
-    };
+pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str, selected: &[usize]) {
     if selected.is_empty() {
         return;
     }
@@ -412,7 +409,7 @@ pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str) {
     if entries.len() < 2 {
         return;
     }
-    let keep: std::collections::HashSet<usize> = selected.into_iter().collect();
+    let keep: std::collections::HashSet<usize> = selected.iter().copied().collect();
     for (i, entry) in entries.iter().enumerate() {
         if let Some(target) = deletion_target(folder, i, &keep, entry) {
             remove_file_and_prune_parents(&target, folder);

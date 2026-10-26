@@ -749,17 +749,12 @@ impl DownloadManager {
     }
 
     /// In-memory allocator for callers that listed the destination off GTK.
-    /// An empty or unreadable listing still checks the destination on disk
-    /// before reusing an id (manifests can be missed by a failed read_dir).
-    fn alloc_id_for_in(&self, dest_dir: &std::path::Path, existing: &[String]) -> u64 {
+    /// Callers must pass a complete listing; an unreadable directory must be
+    /// reported rather than falling back to filesystem I/O on the main thread.
+    fn alloc_id_for_in(&self, existing: &[String]) -> u64 {
         loop {
             let id = self.alloc_id();
-            let occupied = if existing.is_empty() {
-                crate::video::staging_occupied(dest_dir, id)
-            } else {
-                crate::video_staging::staging_occupied_in(existing, id)
-            };
-            if !occupied {
+            if !crate::video_staging::staging_occupied_in(existing, id) {
                 return id;
             }
         }
@@ -903,10 +898,11 @@ impl DownloadManager {
         let dir = self.resolve_dir(dest_dir);
         let listing_dir = dir.clone();
         let existing = gio::spawn_blocking(move || {
-            crate::video_staging::dir_file_names(std::path::Path::new(&listing_dir))
+            crate::video_staging::try_dir_file_names(std::path::Path::new(&listing_dir))
         })
         .await
-        .map_err(|error| format!("Could not inspect download folder: {error:?}"))?;
+        .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
+        .map_err(|error| format!("Could not inspect download folder: {error}"))?;
         let guard = self.batch_guard();
         let item = self.enqueue_with_listing(url, Some(&dir), filename, &existing)?;
         Ok((item, guard))
@@ -969,7 +965,7 @@ impl DownloadManager {
                 })
         });
         let item = DownloadItem::new(
-            self.alloc_id_for_in(std::path::Path::new(&dir), existing),
+            self.alloc_id_for_in(existing),
             &url,
             &name,
             &dir,
@@ -1022,7 +1018,8 @@ impl DownloadManager {
             // Parse metadata before archiving so invalid input never leaves an archive behind.
             let base = crate::torrent::intake_plan(&bytes).map(|(base, _multi)| base);
             let pseudo = crate::torrent::archive_torrent_file(&worker_file_name, &bytes)?;
-            let existing = crate::video_staging::dir_file_names(std::path::Path::new(&worker_dir));
+            let existing = crate::video_staging::try_dir_file_names(std::path::Path::new(&worker_dir))
+                .map_err(|error| format!("Could not inspect torrent destination: {error}"))?;
             Ok::<_, String>((pseudo, base, existing))
         })
         .await
@@ -1107,10 +1104,11 @@ impl DownloadManager {
         let dir = self.resolve_dir(dest_dir);
         let listing_dir = dir.clone();
         let existing = gio::spawn_blocking(move || {
-            crate::video_staging::dir_file_names(std::path::Path::new(&listing_dir))
+            crate::video_staging::try_dir_file_names(std::path::Path::new(&listing_dir))
         })
         .await
-        .map_err(|error| format!("Could not inspect download folder: {error:?}"))?;
+        .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
+        .map_err(|error| format!("Could not inspect download folder: {error}"))?;
         let guard = self.batch_guard();
         let item = self.enqueue_video_staged(page_url, &dir, filename, choices, &existing)?;
         Ok((item, guard))
@@ -1142,10 +1140,11 @@ impl DownloadManager {
         let title = crate::file_names::sanitize_folder_name(&job.title);
         let listing_dir = dir.clone();
         let existing = gio::spawn_blocking(move || {
-            crate::video_staging::dir_file_names(std::path::Path::new(&listing_dir))
+            crate::video_staging::try_dir_file_names(std::path::Path::new(&listing_dir))
         })
         .await
-        .map_err(|error| format!("Could not inspect gallery destination: {error:?}"))?;
+        .map_err(|error| format!("Could not inspect gallery destination: {error:?}"))?
+        .map_err(|error| format!("Could not inspect gallery destination: {error}"))?;
 
         // Only hold the queue during the synchronous commit, never across listing I/O.
         let guard = self.batch_guard();
@@ -1163,7 +1162,7 @@ impl DownloadManager {
             unique_title = format!("{title}-{counter}");
         }
         let item = DownloadItem::new(
-            self.alloc_id_for_in(std::path::Path::new(&dir), &existing),
+            self.alloc_id_for_in(&existing),
             &url,
             &unique_title,
             &dir,
@@ -1213,7 +1212,7 @@ impl DownloadManager {
                     })
         });
         let item = DownloadItem::new(
-            self.alloc_id_for_in(std::path::Path::new(dir), existing),
+            self.alloc_id_for_in(existing),
             &url,
             &name,
             dir,
@@ -1268,12 +1267,20 @@ impl DownloadManager {
             } else {
                 base_dir
             };
-            let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
-            (dest_dir, existing)
+            crate::video_staging::try_dir_file_names(std::path::Path::new(&dest_dir))
+                .map(|existing| (dest_dir, existing))
         })
         .await;
         let (dest_dir, existing) = match prepared {
-            Ok(prepared) => prepared,
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    error = %error,
+                    parent_id = id,
+                    "playlist import directory listing failed"
+                );
+                return (0, pl.total, 0);
+            }
             Err(error) => {
                 tracing::warn!(
                     error = ?error,
@@ -3520,27 +3527,25 @@ impl DownloadManager {
 
     /// Re-insert a previously removed download (Undo) after listing its
     /// destination off GTK.
-    pub(crate) async fn unremove_async(self: &Rc<Self>, snap: RemovedSnapshot) -> DownloadItem {
+    pub(crate) async fn unremove_async(
+        self: &Rc<Self>,
+        snap: RemovedSnapshot,
+    ) -> Result<DownloadItem, String> {
         let dir = snap.dest_dir.clone();
-        let listing = gio::spawn_blocking(move || {
-            crate::video_staging::dir_file_names(std::path::Path::new(&dir))
+        let existing = gio::spawn_blocking(move || {
+            crate::video_staging::try_dir_file_names(std::path::Path::new(&dir))
         })
-        .await;
-        let existing = match &listing {
-            Ok(names) => Some(names.as_slice()),
-            Err(error) => {
-                tracing::warn!("could not inspect Undo destination: {error:?}");
-                None
-            }
-        };
-        self.unremove_with_listing(snap, existing)
+        .await
+        .map_err(|error| format!("Could not inspect Undo destination: {error:?}"))?
+        .map_err(|error| format!("Could not inspect Undo destination: {error}"))?;
+        Ok(self.unremove_with_listing(snap, &existing))
     }
 
     /// Synchronous Undo for tests; production callers use [`Self::unremove_async`].
     #[cfg(test)]
     pub fn unremove(self: &Rc<Self>, snap: RemovedSnapshot) -> DownloadItem {
         let existing = crate::video_staging::dir_file_names(std::path::Path::new(&snap.dest_dir));
-        self.unremove_with_listing(snap, Some(&existing))
+        self.unremove_with_listing(snap, &existing)
     }
 
     /// Re-insert a previously removed download (Undo). Restored `Downloading`
@@ -3549,12 +3554,9 @@ impl DownloadManager {
     fn unremove_with_listing(
         self: &Rc<Self>,
         snap: RemovedSnapshot,
-        existing: Option<&[String]>,
+        existing: &[String],
     ) -> DownloadItem {
-        let id = match existing {
-            Some(names) => self.alloc_id_for_in(std::path::Path::new(&snap.dest_dir), names),
-            None => self.alloc_id_for(std::path::Path::new(&snap.dest_dir)),
-        };
+        let id = self.alloc_id_for_in(existing);
         let item = DownloadItem::new(id, &snap.url, &snap.filename, &snap.dest_dir);
         item.set_progress(snap.progress.clamp(0.0, 1.0));
         item.set_detail(snap.detail);

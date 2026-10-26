@@ -551,7 +551,7 @@ fn shutdown_with_timeout_returns_promptly_with_stuck_finalizer() {
     m.discards.borrow_mut().insert(
         1,
         PendingDiscard {
-            worker_abort: worker.abort_handle(),
+            worker_abort: Some(worker.abort_handle()),
             finalizer,
         },
     );

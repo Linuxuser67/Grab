@@ -878,10 +878,10 @@ fn detects_sparse_holes() {
     let sparse = dir.join("sparse.bin");
     let f = std::fs::File::create(&sparse).unwrap();
     f.set_len(20_000_000).unwrap();
-    assert!(has_holes(&sparse));
+    assert!(tokio_rt().block_on(has_holes(&sparse)));
     std::fs::write(&sparse, vec![9u8; 100]).unwrap();
-    assert!(!has_holes(&sparse));
-    assert!(!has_holes(&dir.join("missing.bin")));
+    assert!(!tokio_rt().block_on(has_holes(&sparse)));
+    assert!(!tokio_rt().block_on(has_holes(&dir.join("missing.bin"))));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3999,7 +3999,7 @@ fn killed_segmented_resume_starts_over() {
         let mut f = f;
         f.write_all(&payload[..1_000_000]).unwrap();
     }
-    assert!(has_holes(&dest));
+    assert!(tokio_rt().block_on(has_holes(&dest)));
     std::fs::write(
         &qf,
         serde_json::to_string(&StoredQueue {

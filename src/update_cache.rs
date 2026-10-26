@@ -57,18 +57,18 @@ pub(crate) fn is_fresh(checked_at: u64, now: u64, max_age: u64) -> bool {
     checked_at <= now && now - checked_at < max_age
 }
 
-fn read_cache(path: &Path) -> Option<Stored> {
-    let text = std::fs::read_to_string(path).ok()?;
+async fn read_cache(path: &Path) -> Option<Stored> {
+    let text = tokio::fs::read_to_string(path).await.ok()?;
     serde_json::from_str(&text).ok()
 }
 
-fn write_cache(path: &Path, stored: &Stored) {
+async fn write_cache(path: &Path, stored: &Stored) {
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = tokio::fs::create_dir_all(dir).await;
     }
     if let Ok(text) = serde_json::to_string(stored) {
         // Best effort: a failed write only means the next check fetches again.
-        let _ = std::fs::write(path, text);
+        let _ = tokio::fs::write(path, text).await;
     }
 }
 
@@ -98,7 +98,7 @@ async fn fetch_all() -> Latest {
 pub async fn latest(max_age: u64) -> Latest {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let path = cache_path();
-        if let Some(stored) = read_cache(&path)
+        if let Some(stored) = read_cache(&path).await
             && stored.latest.is_complete()
             && is_fresh(stored.checked_at, now_secs(), max_age)
         {
@@ -110,7 +110,7 @@ pub async fn latest(max_age: u64) -> Latest {
                 checked_at: now_secs(),
                 latest: latest.clone(),
             };
-            write_cache(&path, &stored);
+            write_cache(&path, &stored).await;
         }
         latest
     });
@@ -139,6 +139,37 @@ mod tests {
         );
         assert!(!parsed.is_complete());
         assert_eq!(parsed.gallerydl.as_deref(), Some("2026.10.15"));
+    }
+
+    #[test]
+    fn cache_round_trip_uses_async_filesystem_operations() {
+        let path = std::env::temp_dir().join(format!(
+            "grab-update-cache-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos()),
+        ));
+        let latest = Latest {
+            ytdlp: Some("2026.10.15".into()),
+            deno: Some("v2.9.8".into()),
+            gallerydl: Some("v1.32.17".into()),
+            gallerydl_digest: Some("a".repeat(64)),
+        };
+        let expected = Stored {
+            checked_at: 1_234,
+            latest,
+        };
+
+        let actual = crate::runtime::tokio_rt().block_on(async {
+            write_cache(&path, &expected).await;
+            read_cache(&path).await
+        });
+
+        let _ = std::fs::remove_file(&path);
+        let actual = actual.expect("cache file should round-trip");
+        assert_eq!(actual.checked_at, expected.checked_at);
+        assert_eq!(actual.latest, expected.latest);
     }
 
     #[test]

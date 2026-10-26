@@ -2722,6 +2722,10 @@ fn expand_playlist_rows_use_titled_subfolder() {
         ]
         .into_boxed_slice(),
     };
+    assert!(
+        wait_for_preparation(&manager, parent.id(), Duration::from_secs(15)),
+        "playlist parent preparation did not settle"
+    );
     let generation = manager
         .epoch
         .borrow()
@@ -3692,7 +3696,22 @@ fn stale_pump_future_ignores_respawned_row() {
     // second engine takes over the same row.
     std::thread::sleep(std::time::Duration::from_millis(500));
     manager.defer(id);
-    assert_eq!(item.status(), DownloadStatus::Downloading);
+    assert_eq!(item.status(), DownloadStatus::Queued);
+    // Preparation is now asynchronous; wait until the replacement engine owns
+    // the row before checking that the stale pump cannot overwrite its state.
+    let restart_deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while (!manager.running.borrow().contains_key(&id)
+        || item.status() != DownloadStatus::Downloading)
+        && std::time::Instant::now() < restart_deadline
+    {
+        glib::MainContext::default().iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        manager.running.borrow().contains_key(&id)
+            && item.status() == DownloadStatus::Downloading,
+        "replacement engine did not start after defer"
+    );
     // Let the aborted engine die and the hanging one settle, then pump:
     // the stale future's tail runs here and must stay silent.
     std::thread::sleep(std::time::Duration::from_millis(500));

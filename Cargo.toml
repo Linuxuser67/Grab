@@ -17,7 +17,7 @@ glib = "0.22"
 gio = "0.22"
 url = "2"
 # Read the single verified Deno executable from the official release ZIP.
-zip = { version = "8.6.0", default-features = false, features = ["deflate", "deflate-flate2-zlib-rs"] }
+zip = { version = "9.1.2", default-features = false, features = ["deflate", "deflate-flate2-zlib-rs"] }
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -43,7 +43,7 @@ gettext-rs = "0.8"
 # Video-page extraction (YouTube etc). Wrapper around the yt-dlp + ffmpeg
 # binaries: rustls keeps the rustls-only posture; no cache backend in v1
 # (metadata is refetched, CDN URLs expire in ~6h anyway).
-yt-dlp = { version = "2.9.0", default-features = false, features = ["rustls"] }
+yt-dlp = { version = "2.9.1", default-features = false, features = ["rustls"] }
 libc = "0.2"
 # Mozilla Public Suffix List for validating browser cookie domains.
 psl = "=2.1.228"

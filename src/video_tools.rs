@@ -1198,7 +1198,10 @@ fn extract_deno_archive(archive_path: &Path, dest: &Path) -> Result<(), String> 
     let mut binary = archive
         .by_name("deno")
         .map_err(|error| format!("Deno archive has no deno executable: {error}"))?;
-    if binary.name() != "deno" || !binary.is_file() {
+    let entry_name = binary
+        .name()
+        .map_err(|error| format!("Deno archive entry has an invalid name: {error}"))?;
+    if entry_name.as_ref() != "deno" || !binary.is_file() {
         return Err("Deno archive entry is not the expected executable".to_string());
     }
     if binary

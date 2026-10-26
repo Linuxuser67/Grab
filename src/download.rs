@@ -1471,8 +1471,7 @@ impl DownloadManager {
         stored: &StoredItem,
         job: Option<crate::gallery_argv::GalleryJob>,
     ) -> Result<DownloadItem, String> {
-        let existing =
-            crate::video_staging::dir_file_names(std::path::Path::new(&stored.dest_dir));
+        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&stored.dest_dir));
         self.restore_existing_gallery_with_listing(stored, job, &existing)
     }
 
@@ -4356,7 +4355,10 @@ impl DownloadManager {
                 let names = crate::video_staging::try_dir_file_names(path).map_err(|error| {
                     std::io::Error::new(
                         error.kind(),
-                        format!("cannot list restore destination {}: {error}", path.display()),
+                        format!(
+                            "cannot list restore destination {}: {error}",
+                            path.display()
+                        ),
                     )
                 })?;
                 Ok((dir, names))

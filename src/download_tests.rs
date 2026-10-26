@@ -287,9 +287,8 @@ fn restore_destination_listing_reports_unreadable_directories() {
     ));
     std::fs::write(&path, b"not a directory").expect("test fixture should be created");
     let directory = path.to_string_lossy().into_owned();
-    let result = DownloadManager::list_restore_destinations(
-        std::collections::HashSet::from([directory]),
-    );
+    let result =
+        DownloadManager::list_restore_destinations(std::collections::HashSet::from([directory]));
     let _ = std::fs::remove_file(&path);
 
     let error = result.expect_err("a file cannot be listed as a destination directory");

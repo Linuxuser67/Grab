@@ -1035,12 +1035,16 @@ fn register_actions(
                             ));
                             toast.set_button_label(Some(&gettext("Undo")));
                             let m2 = manager.clone();
+                            let undo_toasts = toasts.clone();
                             toast.connect_button_clicked(move |_| {
                                 let manager = Rc::clone(&m2);
+                                let toasts = undo_toasts.clone();
                                 let snapshots = snapshots.clone();
                                 glib::spawn_future_local(async move {
                                     for snap in snapshots {
-                                        manager.unremove_async(snap).await;
+                                        if let Err(error) = manager.unremove_async(snap).await {
+                                            toasts.add_toast(adw::Toast::new(&error));
+                                        }
                                     }
                                 });
                             });

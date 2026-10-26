@@ -2549,7 +2549,11 @@ fn restored_unstarted_row_refuses_existing_dest() {
     // Explicit never-started (new queue file): the bytes are foreign.
     stored.started = Some(false);
     let item = manager.restore_existing(&stored).expect("restore");
-    assert!(wait_for_preparation(&manager, item.id(), Duration::from_secs(15)));
+    assert!(wait_for_preparation(
+        &manager,
+        item.id(),
+        Duration::from_secs(15)
+    ));
     assert_eq!(item.status(), DownloadStatus::Failed);
     assert_eq!(item.detail(), crate::engine_msg::DEST_EXISTS);
     assert_eq!(

@@ -1327,11 +1327,11 @@ mod tests {
         // No manifest written.
 
         assert!(
-            staging_occupied(&dir, 7),
+            staging_occupied_in(&dir_file_names(&dir), 7),
             "id 7 must stay occupied via id-in-name even with no manifest"
         );
         assert!(
-            !staging_occupied(&dir, 8),
+            !staging_occupied_in(&dir_file_names(&dir), 8),
             "unrelated id 8 must not be occupied"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1413,7 +1413,7 @@ mod tests {
             "corrupt manifest must read as None"
         );
         assert!(
-            staging_occupied(&dir, 7),
+            staging_occupied_in(&dir_file_names(&dir), 7),
             "id 7 must stay occupied via id-in-name despite corrupt manifest"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1429,8 +1429,8 @@ mod tests {
         std::fs::write(dir.join("Title.4.mp4.part"), b"row4").unwrap();
         std::fs::write(dir.join("Title.9.mp4.part"), b"row9").unwrap();
 
-        assert!(staging_occupied(&dir, 4), "id 4 occupied");
-        assert!(staging_occupied(&dir, 9), "id 9 occupied");
+        assert!(staging_occupied_in(&dir_file_names(&dir), 4), "id 4 occupied");
+        assert!(staging_occupied_in(&dir_file_names(&dir), 9), "id 9 occupied");
 
         // Without a manifest, the sweep must NOT pattern-delete: Title.4.mp4.part
         // is indistinguishable from a user's own file. Deletion requires the

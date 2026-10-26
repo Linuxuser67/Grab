@@ -968,7 +968,12 @@ impl DownloadManager {
                         || it.output_dir() == p.to_string_lossy()
                 })
         });
-        let item = DownloadItem::new(self.alloc_id_for_in(std::path::Path::new(&dir), existing), &url, &name, &dir);
+        let item = DownloadItem::new(
+            self.alloc_id_for_in(std::path::Path::new(&dir), existing),
+            &url,
+            &name,
+            &dir,
+        );
         if crate::torrent::is_magnet(&url) {
             // Magnets carry no archive to recompute the output folder from later, so record their subfolder now.
             item.set_output_dir(
@@ -1157,7 +1162,12 @@ impl DownloadManager {
             counter += 1;
             unique_title = format!("{title}-{counter}");
         }
-        let item = DownloadItem::new(self.alloc_id_for_in(std::path::Path::new(&dir), &existing), &url, &unique_title, &dir);
+        let item = DownloadItem::new(
+            self.alloc_id_for_in(std::path::Path::new(&dir), &existing),
+            &url,
+            &unique_title,
+            &dir,
+        );
         item.set_is_gallery(true);
         item.set_gallery_file_count(job.file_count.unwrap_or(0));
         item.set_gallery_files_done(0);
@@ -1202,7 +1212,12 @@ impl DownloadManager {
                             || it.output_dir() == p.to_string_lossy()
                     })
         });
-        let item = DownloadItem::new(self.alloc_id_for_in(std::path::Path::new(dir), existing), &url, &name, dir);
+        let item = DownloadItem::new(
+            self.alloc_id_for_in(std::path::Path::new(dir), existing),
+            &url,
+            &name,
+            dir,
+        );
         item.set_detail(pending_resolve_detail(choices.audio_only));
         self.video_sources.borrow_mut().insert(
             item.id(),
@@ -1564,7 +1579,7 @@ impl DownloadManager {
 
     fn insert_history(
         self: &Rc<Self>,
-        stored_id: u64,
+        stored_id: Option<u64>,
         url: String,
         dir: String,
         name: String,
@@ -1585,7 +1600,7 @@ impl DownloadManager {
             return;
         }
         let item = DownloadItem::new(
-            self.claim_id(Some(stored_id), std::path::Path::new(&dir)),
+            self.claim_id(stored_id, std::path::Path::new(&dir)),
             &url,
             &name,
             &dir,
@@ -3524,8 +3539,7 @@ impl DownloadManager {
     /// Synchronous Undo for tests; production callers use [`Self::unremove_async`].
     #[cfg(test)]
     pub fn unremove(self: &Rc<Self>, snap: RemovedSnapshot) -> DownloadItem {
-        let existing =
-            crate::video_staging::dir_file_names(std::path::Path::new(&snap.dest_dir));
+        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&snap.dest_dir));
         self.unremove_with_listing(snap, Some(&existing))
     }
 

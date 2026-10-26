@@ -489,11 +489,12 @@ async fn attempt_multi(
 }
 
 /// True when the file has unallocated (sparse) regions: a later append-at-EOF resume must not inherit holes.
-pub(crate) fn has_holes(path: &std::path::Path) -> bool {
-    std::fs::metadata(path)
-        .map(|m| {
+pub(crate) async fn has_holes(path: &std::path::Path) -> bool {
+    tokio::fs::metadata(path)
+        .await
+        .map(|metadata| {
             use std::os::unix::fs::MetadataExt;
-            m.blocks().saturating_mul(512) < m.len()
+            metadata.blocks().saturating_mul(512) < metadata.len()
         })
         .unwrap_or(false)
 }
@@ -543,7 +544,7 @@ async fn attempt_once(
                 .and_then(|v| v.split('/').next_back())
                 .and_then(|t| t.parse::<u64>().ok());
             // A length match alone proves nothing: the allocation check above rules out holes.
-            if start > 0 && claimed == Some(start) && !has_holes(&ctx.dest) {
+            if start > 0 && claimed == Some(start) && !has_holes(&ctx.dest).await {
                 return Ok(());
             }
             if claimed.is_none() && start > 0 && !restarted {
@@ -552,7 +553,7 @@ async fn attempt_once(
                 if let Ok(hresp) = execute_with_timeout(&ctx.client, hreq, ctx.timeout).await
                     && hresp.status().is_success()
                     && hresp.content_length() == Some(start)
-                    && !has_holes(&ctx.dest)
+                    && !has_holes(&ctx.dest).await
                 {
                     return Ok(());
                 }
@@ -566,7 +567,13 @@ async fn attempt_once(
             if restarted {
                 return Err(gettext("Server rejects range requests"));
             }
-            let _ = std::fs::remove_file(&ctx.dest);
+            match tokio::fs::remove_file(&ctx.dest).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("Cannot reset partial download: {error}"));
+                }
+            }
             restarted = true;
             continue;
         }
@@ -762,10 +769,16 @@ fn std_open_nofollow(
 }
 
 async fn open_nofollow(
-    configure: impl FnOnce(&mut std::fs::OpenOptions),
+    configure: impl FnOnce(&mut std::fs::OpenOptions) + Send + 'static,
     path: &std::path::Path,
 ) -> std::io::Result<tokio::fs::File> {
-    std_open_nofollow(configure, path).map(tokio::fs::File::from_std)
+    // Keep O_NOFOLLOW while moving the synchronous open off the Tokio worker.
+    let path = path.to_path_buf();
+    let file = crate::runtime::tokio_rt()
+        .spawn_blocking(move || std_open_nofollow(configure, &path))
+        .await
+        .map_err(std::io::Error::other)??;
+    Ok(tokio::fs::File::from_std(file))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

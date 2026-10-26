@@ -1373,8 +1373,7 @@ impl DownloadManager {
     /// Returns a display-ready message when the stored entry is invalid.
     #[cfg(test)]
     pub fn restore_existing(self: &Rc<Self>, stored: &StoredItem) -> Result<DownloadItem, String> {
-        let existing =
-            crate::video_staging::dir_file_names(std::path::Path::new(&stored.dest_dir));
+        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&stored.dest_dir));
         self.restore_existing_with_listing(stored, &existing)
     }
 
@@ -1633,12 +1632,7 @@ impl DownloadManager {
             tracing::warn!("skipping history entry with relative destination");
             return;
         }
-        let item = DownloadItem::new(
-            self.claim_id_in(stored_id, existing),
-            &url,
-            &name,
-            &dir,
-        );
+        let item = DownloadItem::new(self.claim_id_in(stored_id, existing), &url, &name, &dir);
         item.set_progress(progress.clamp(0.0, 1.0));
         item.set_status(DownloadStatus::Done);
         // Already trust-checked by the caller (must sit inside `dir`).
@@ -4347,16 +4341,25 @@ impl DownloadManager {
             .collect()
     }
 
-    /// Read only destination directories that may need a new staging id.
-    /// This runs on a blocking worker; best-effort behavior matches the former
-    /// allocator for legacy queue entries whose ids were not persisted.
-    fn list_restore_destinations(directories: HashSet<String>) -> HashMap<String, Vec<String>> {
+    /// Read destination directories needed for fallback IDs.
+    ///
+    /// Missing destinations are empty; other listing failures are returned so
+    /// an ID is never selected from an incomplete directory snapshot.
+    /// Production callers run this on a blocking worker, not on GTK.
+    fn list_restore_destinations(
+        directories: HashSet<String>,
+    ) -> std::io::Result<HashMap<String, Vec<String>>> {
         directories
             .into_iter()
             .map(|dir| {
-                let names =
-                    crate::video_staging::dir_file_names(std::path::Path::new(&dir));
-                (dir, names)
+                let path = std::path::Path::new(&dir);
+                let names = crate::video_staging::try_dir_file_names(path).map_err(|error| {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!("cannot list restore destination {}: {error}", path.display()),
+                    )
+                })?;
+                Ok((dir, names))
             })
             .collect()
     }
@@ -4375,7 +4378,16 @@ impl DownloadManager {
             let pending = Self::load_restore_queue(queue_file);
             if let Some(pending) = pending {
                 let directories = self.restore_dirs_requiring_id_listing(&pending);
-                let existing_by_dir = Self::list_restore_destinations(directories);
+                let existing_by_dir = match Self::list_restore_destinations(directories) {
+                    Ok(existing) => existing,
+                    Err(error) => {
+                        tracing::error!(
+                            "download queue destination listing failed: {error}; preserving the saved queue"
+                        );
+                        self.finish_restore(RestoreOutcome::Failed);
+                        return;
+                    }
+                };
                 let plan = self.apply_restored_queue(pending, &existing_by_dir);
                 let keep = Self::run_restore_sweeps(plan);
                 Self::schedule_session_orphan_sweep(keep);
@@ -4409,15 +4421,23 @@ impl DownloadManager {
                         let directories = manager.restore_dirs_requiring_id_listing(&pending);
                         let prepared = tokio_rt()
                             .spawn_blocking(move || {
-                                let existing_by_dir = Self::list_restore_destinations(directories);
-                                (pending, existing_by_dir)
+                                Self::list_restore_destinations(directories)
+                                    .map(|existing_by_dir| (pending, existing_by_dir))
                             })
                             .await;
                         let (pending, existing_by_dir) = match prepared {
-                            Ok(prepared) => prepared,
-                            Err(e) => {
+                            Ok(Ok(prepared)) => prepared,
+                            Ok(Err(error)) => {
                                 tracing::error!(
-                                    "download queue destination listing failed: {e}; preserving the saved queue"
+                                    "download queue destination listing failed: {error}; preserving the saved queue"
+                                );
+                                manager.finish_restore(RestoreOutcome::Failed);
+                                completion.finished = true;
+                                return;
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    "download queue destination listing task failed: {error}; preserving the saved queue"
                                 );
                                 manager.finish_restore(RestoreOutcome::Failed);
                                 completion.finished = true;

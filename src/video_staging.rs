@@ -109,19 +109,8 @@ pub(crate) fn staging_name_matches_id(file_name: &str, item_id: u64) -> bool {
     false
 }
 
-/// Whether any staging file exists for this id: the id allocator must skip
-/// it so a fresh row never lands on a leftover.
-pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
-    // Manifest exists = occupied (it tracks the exact staging name). The
-    // listing check also sees it when the directory is readable.
-    if manifest_path(dest_dir, item_id).exists() {
-        return true;
-    }
-    staging_occupied_in(&dir_file_names(dest_dir), item_id)
-}
-
-/// In-memory form of [`staging_occupied`] for callers that already listed the
-/// destination off the GTK thread.
+/// In-memory check for staging files associated with an item id, using an
+/// already-complete destination listing made off the GTK thread.
 pub(crate) fn staging_occupied_in(names: &[String], item_id: u64) -> bool {
     // Id-in-name scheme: the file itself carries the id, so a lost manifest
     // cannot orphan the id into reuse.

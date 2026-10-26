@@ -1,0 +1,4 @@
+# Tests mutate process-global environment variables; keep plain `cargo test`
+# serial as well as the explicit CI invocation.
+[env]
+RUST_TEST_THREADS = { value = "1", force = true }

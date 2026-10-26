@@ -1014,7 +1014,13 @@ pub(crate) fn response_total(
     start: u64,
 ) -> Option<u64> {
     content_length
-        .map(|t| if partial { t + start } else { t })
+        .and_then(|t| {
+            if partial {
+                t.checked_add(start)
+            } else {
+                Some(t)
+            }
+        })
         .or_else(|| {
             if !partial {
                 return None;

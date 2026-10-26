@@ -896,14 +896,27 @@ fn live_handoff_cookie_path_at(url: &str, browser: &str, now: SystemTime) -> Opt
 /// download finishes; failures and aborts keep the entry (bounded) so a retry
 /// or resume still passes the challenge.
 pub(crate) fn discard_handoff_cookies(url: &str) {
-    let path = handoff_key(url).and_then(|key| {
+    if let Some(p) = take_handoff_cookie_path(url) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// GTK-safe variant: drop the in-memory entry now and unlink its file on the
+/// runtime's blocking pool.
+pub(crate) fn discard_handoff_cookies_async(url: &str) {
+    if let Some(p) = take_handoff_cookie_path(url) {
+        drop(crate::runtime::tokio_rt().spawn_blocking(move || {
+            let _ = std::fs::remove_file(p);
+        }));
+    }
+}
+
+fn take_handoff_cookie_path(url: &str) -> Option<PathBuf> {
+    handoff_key(url).and_then(|key| {
         let mut store = lock_handoff_cookies();
         store.order.retain(|k| k != &key);
         store.by_key.remove(&key).map(|e| e.path)
-    });
-    if let Some(p) = path {
-        let _ = std::fs::remove_file(p);
-    }
+    })
 }
 
 /// Delete every staged cookie file. Called at shutdown: the entries only live

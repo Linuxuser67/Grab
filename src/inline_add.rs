@@ -873,7 +873,6 @@ fn submit_probed_single(
     let error_step = Rc::clone(step);
     let error_lookup_add = Rc::clone(lookup_add);
     enqueue_and_close_async(
-        manager,
         dest,
         close_card,
         scheduled_at,
@@ -1010,7 +1009,6 @@ fn submit_gallery_all(
     let error_step = Rc::clone(step);
     let error_lookup_add = Rc::clone(lookup_add);
     enqueue_and_close_async(
-        manager,
         dest,
         close_card,
         scheduled_at,
@@ -1048,6 +1046,7 @@ fn fallback_plain_failed(
 /// temporary in a `match` scrutinee would live into the arms, and
 /// `close_card()` re-borrows the same cell mutably to reset the destination —
 /// panicking with "RefCell already borrowed" on every successful Add.
+#[cfg(test)]
 pub(crate) fn enqueue_and_close(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
@@ -1073,7 +1072,6 @@ pub(crate) fn enqueue_and_close(
 }
 
 pub(crate) fn enqueue_and_close_async<F>(
-    _manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
     scheduled_at: Option<i64>,
@@ -1105,18 +1103,21 @@ pub(crate) fn enqueue_and_close_async<F>(
 
 /// Queue a probed link as a plain file and collapse the card: the fallback when
 /// extraction finds no playable media on an unlisted page. `Err` when plain intake rejects the URL.
-fn queue_plain(
+async fn queue_plain(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
     url: &str,
     scheduled_at: Option<i64>,
 ) -> Result<(), String> {
+    let destination = Some(dest.borrow().clone());
     // Batch guard defers start_next until the Scheduled status is set.
-    let _guard = manager.batch_guard();
-    let item = manager.enqueue(url, Some(&dest.borrow()), None)?;
+    let (item, guard) = manager
+        .enqueue_async_batched(url, destination.as_deref(), None)
+        .await?;
     apply_scheduled_at(&item, scheduled_at);
     close_card();
+    drop(guard);
     Ok(())
 }
 
@@ -1294,14 +1295,22 @@ fn push_playlist_items_page(
                     } else {
                         base_dir
                     };
-                    let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
-                    (dir, existing)
+                    crate::video_staging::try_dir_file_names(std::path::Path::new(&dir))
+                        .map(|existing| (dir, existing))
                 })
                 .await
                 {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!("playlist import dir setup failed: {e:?}");
+                    Ok(Ok(prepared)) => prepared,
+                    Ok(Err(error)) => {
+                        tracing::warn!("playlist import directory listing failed: {error}");
+                        show_picker_on_error();
+                        error_caption.set_text(&gettext("Could not inspect the download folder"));
+                        error_caption.set_visible(true);
+                        add_btn.set_sensitive(true);
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!("playlist import dir setup failed: {error:?}");
                         show_picker_on_error();
                         error_caption.set_text(&gettext("Could not prepare the download folder"));
                         error_caption.set_visible(true);
@@ -1554,7 +1563,6 @@ fn push_torrent_picker_page(
             let enqueue_bytes = bytes.clone();
             let enqueue_name = file_name.clone();
             enqueue_and_close_async(
-                &manager,
                 &dest_dir,
                 &close_card,
                 scheduled_at.get(),
@@ -1646,7 +1654,6 @@ fn wire_torrent_picker(
                 let enqueue_manager = Rc::clone(&m);
                 let torrent_btn_on_error = torrent_btn.clone();
                 enqueue_and_close_async(
-                    &m,
                     &dd,
                     &close_card,
                     scheduled_at.get(),
@@ -2741,7 +2748,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 &close_b,
                                 &direct,
                                 scheduled_at_b.get(),
-                            ) {
+                            )
+                            .await
+                            {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     probe_b.borrow_mut().info.take();
@@ -2768,7 +2777,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 &close_b,
                                 &url,
                                 scheduled_at_b.get(),
-                            ) {
+                            )
+                            .await
+                            {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     fallback_plain_failed(
@@ -2830,7 +2841,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 &close_b,
                                 &url,
                                 scheduled_at_b.get(),
-                            ) {
+                            )
+                            .await
+                            {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     fallback_plain_failed(
@@ -2940,11 +2953,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let scheduled_at = Rc::clone(&scheduled_at);
         Rc::new(move |source: SubmitSource| {
             let from_activate = matches!(source, SubmitSource::Enter | SubmitSource::Auto);
-            let fail = |message: &str| {
-                // Form-validation pattern: the error state lives on the
-                // entry itself, not in a caption underneath it.
-                set_field_error(&url_entry, message);
-            };
             // Add queues the whole gallery. The separate "Select files…"
             // button is the only path that opens per-file selection.
             if step2.is_gallery.get() {
@@ -3058,13 +3066,21 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if url.is_empty() && from_activate {
                 return;
             }
-            enqueue_and_close(
-                &m,
+            let enqueue_manager = Rc::clone(&m);
+            let enqueue_url = url.clone();
+            let error_entry = url_entry.clone();
+            enqueue_and_close_async(
                 &dd,
                 &close_card,
                 scheduled_at.get(),
-                |d| m.enqueue(&url, d, None),
-                fail,
+                move |d| async move {
+                    enqueue_manager
+                        .enqueue_async_batched(&enqueue_url, d.as_deref(), None)
+                        .await
+                },
+                // Form-validation pattern: the error state lives on the entry
+                // itself, not in a caption underneath it.
+                move |message| set_field_error(&error_entry, message),
             );
         })
     };

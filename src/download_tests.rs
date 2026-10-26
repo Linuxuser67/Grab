@@ -430,6 +430,13 @@ fn resolves_response_totals() {
     assert_eq!(response_total(None, Some("bytes 0-0/100"), true, 40), None);
     assert_eq!(response_total(None, None, true, 40), None);
     assert_eq!(response_total(None, None, false, 0), None);
+    // A server-controlled length near u64::MAX must not overflow the offset
+    // addition; fall back to a valid Content-Range instead.
+    assert_eq!(response_total(Some(u64::MAX), None, true, 1), None);
+    assert_eq!(
+        response_total(Some(u64::MAX), Some("bytes 1-99/100"), true, 1),
+        Some(100)
+    );
 }
 
 #[test]
@@ -544,7 +551,7 @@ fn shutdown_with_timeout_returns_promptly_with_stuck_finalizer() {
     m.discards.borrow_mut().insert(
         1,
         PendingDiscard {
-            worker_abort: worker.abort_handle(),
+            worker_abort: Some(worker.abort_handle()),
             finalizer,
         },
     );

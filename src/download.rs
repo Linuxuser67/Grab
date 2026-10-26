@@ -1010,12 +1010,13 @@ impl DownloadManager {
         let worker_file_name = file_name.clone();
         let worker_dir = dir.clone();
         let (pseudo, base, existing) = gio::spawn_blocking(move || {
-            // Parse metadata before archiving so invalid input never leaves an archive behind.
+            // Validate the torrent and destination before archiving so a failed
+            // intake does not leave an unqueued archive behind.
             let base = crate::torrent::intake_plan(&bytes).map(|(base, _multi)| base);
-            let pseudo = crate::torrent::archive_torrent_file(&worker_file_name, &bytes)?;
             let existing =
                 crate::video_staging::try_dir_file_names(std::path::Path::new(&worker_dir))
                     .map_err(|error| format!("Could not inspect torrent destination: {error}"))?;
+            let pseudo = crate::torrent::archive_torrent_file(&worker_file_name, &bytes)?;
             Ok::<_, String>((pseudo, base, existing))
         })
         .await

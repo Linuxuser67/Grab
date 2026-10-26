@@ -1297,14 +1297,22 @@ fn push_playlist_items_page(
                     } else {
                         base_dir
                     };
-                    let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
-                    (dir, existing)
+                    crate::video_staging::try_dir_file_names(std::path::Path::new(&dir))
+                        .map(|existing| (dir, existing))
                 })
                 .await
                 {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!("playlist import dir setup failed: {e:?}");
+                    Ok(Ok(prepared)) => prepared,
+                    Ok(Err(error)) => {
+                        tracing::warn!("playlist import directory listing failed: {error}");
+                        show_picker_on_error();
+                        error_caption.set_text(&gettext("Could not inspect the download folder"));
+                        error_caption.set_visible(true);
+                        add_btn.set_sensitive(true);
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!("playlist import dir setup failed: {error:?}");
                         show_picker_on_error();
                         error_caption.set_text(&gettext("Could not prepare the download folder"));
                         error_caption.set_visible(true);

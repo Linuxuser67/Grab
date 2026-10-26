@@ -40,9 +40,7 @@ pub use crate::video_staging::clean_staging;
 pub use crate::video_staging::clean_staging_files;
 /// Facade: staging/parts/manifest/resume lives in
 /// [`video_staging`](crate::video_staging) now.
-pub use crate::video_staging::{
-    clean_dest_parts, staging_occupied, staging_root, sweep_dest_staging,
-};
+pub use crate::video_staging::{clean_dest_parts, staging_root, sweep_dest_staging};
 /// Facade: tool provisioning lives in [`video_tools`](crate::video_tools) now.
 pub use crate::video_tools::{
     install_deno, install_ytdlp, latest_deno_tag, latest_ytdlp_tag, resolve_libraries,

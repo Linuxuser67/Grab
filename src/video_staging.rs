@@ -109,19 +109,8 @@ pub(crate) fn staging_name_matches_id(file_name: &str, item_id: u64) -> bool {
     false
 }
 
-/// Whether any staging file exists for this id: the id allocator must skip
-/// it so a fresh row never lands on a leftover.
-pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
-    // Manifest exists = occupied (it tracks the exact staging name). The
-    // listing check also sees it when the directory is readable.
-    if manifest_path(dest_dir, item_id).exists() {
-        return true;
-    }
-    staging_occupied_in(&dir_file_names(dest_dir), item_id)
-}
-
-/// In-memory form of [`staging_occupied`] for callers that already listed the
-/// destination off the GTK thread.
+/// In-memory check for staging files associated with an item id, using an
+/// already-complete destination listing made off the GTK thread.
 pub(crate) fn staging_occupied_in(names: &[String], item_id: u64) -> bool {
     // Id-in-name scheme: the file itself carries the id, so a lost manifest
     // cannot orphan the id into reuse.
@@ -475,8 +464,8 @@ pub(crate) fn is_grab_part(file_name: &str, stem: &str) -> bool {
     // Legacy ID-namespaced live: {id}.live. (e.g., "1.live.mp4.part").
     // The bare {id}. pattern is NOT checked here: it false-positives on user
     // files like Movie.2024.mp4. Pattern-based deletion of id-in-name files
-    // is unsafe (no marker); only `staging_occupied` uses the pattern, and
-    // only conservatively.
+    // is unsafe (no marker); the ID allocator only checks these patterns
+    // conservatively.
     if let Some(dot_pos) = remainder.find('.') {
         let (id_part, rest) = remainder.split_at(dot_pos);
         if !id_part.is_empty()
@@ -604,7 +593,7 @@ fn stem_has_subtitle_sidecar(names: &[String], stem: &str) -> bool {
 /// Only legacy marked patterns (`PART_KINDS`, `.live.`) are matched: the
 /// id-in-name scheme has no marker, so pattern-deleting it would risk user
 /// files like `Movie.2024.mp4.part`. ID reuse is prevented separately by
-/// `staging_occupied`.
+/// the allocator's `staging_occupied_in` check.
 pub fn clean_dest_parts(dest: &Path) {
     let (Some(dir), Some(stem)) = (dest.parent(), dest.file_stem().and_then(|s| s.to_str())) else {
         return;
@@ -1338,11 +1327,11 @@ mod tests {
         // No manifest written.
 
         assert!(
-            staging_occupied(&dir, 7),
+            staging_occupied_in(&dir_file_names(&dir), 7),
             "id 7 must stay occupied via id-in-name even with no manifest"
         );
         assert!(
-            !staging_occupied(&dir, 8),
+            !staging_occupied_in(&dir_file_names(&dir), 8),
             "unrelated id 8 must not be occupied"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1380,7 +1369,7 @@ mod tests {
         // Without a manifest, id-in-name sidecars are NOT swept by pattern:
         // without a marker, `Title.7.mp4.part` is indistinguishable from a
         // user's own file. Deletion requires the manifest's exact name.
-        // ID reuse is still prevented by `staging_occupied`.
+        // ID reuse is still prevented by the allocator's `staging_occupied_in` check.
         let dir = unique_dir("manifest-loss-sweep");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Title.7.mp4.part"), b"partial").unwrap();
@@ -1424,7 +1413,7 @@ mod tests {
             "corrupt manifest must read as None"
         );
         assert!(
-            staging_occupied(&dir, 7),
+            staging_occupied_in(&dir_file_names(&dir), 7),
             "id 7 must stay occupied via id-in-name despite corrupt manifest"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1440,8 +1429,14 @@ mod tests {
         std::fs::write(dir.join("Title.4.mp4.part"), b"row4").unwrap();
         std::fs::write(dir.join("Title.9.mp4.part"), b"row9").unwrap();
 
-        assert!(staging_occupied(&dir, 4), "id 4 occupied");
-        assert!(staging_occupied(&dir, 9), "id 9 occupied");
+        assert!(
+            staging_occupied_in(&dir_file_names(&dir), 4),
+            "id 4 occupied"
+        );
+        assert!(
+            staging_occupied_in(&dir_file_names(&dir), 9),
+            "id 9 occupied"
+        );
 
         // Without a manifest, the sweep must NOT pattern-delete: Title.4.mp4.part
         // is indistinguishable from a user's own file. Deletion requires the

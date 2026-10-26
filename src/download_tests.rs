@@ -221,6 +221,81 @@ fn test_port(offset: u16) -> u16 {
 }
 
 #[test]
+fn legacy_restore_id_allocation_skips_prelisted_staging_names() {
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    manager.next_id.set(7);
+    let existing = vec!["Title.7.mp4.part".to_string()];
+
+    assert_eq!(manager.claim_id_in(None, &existing), 8);
+}
+
+#[test]
+fn restore_prepares_destination_listings_only_for_fallback_ids() {
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let legacy = PendingRestore {
+        item: stored_row(
+            "https://example.test/file.mp4",
+            "/tmp/grab-restore-legacy",
+            "file.mp4",
+            DownloadStatus::Paused,
+        ),
+        output_dir: None,
+        segments: None,
+        gallery_job: None,
+    };
+    assert_eq!(
+        manager.restore_dirs_requiring_id_listing(std::slice::from_ref(&legacy)),
+        std::collections::HashSet::from(["/tmp/grab-restore-legacy".to_string()])
+    );
+
+    let mut current = legacy;
+    current.item.id = Some(7);
+    assert!(
+        manager
+            .restore_dirs_requiring_id_listing(std::slice::from_ref(&current))
+            .is_empty()
+    );
+
+    let mut duplicate = PendingRestore {
+        item: stored_row(
+            "https://example.test/duplicate.mp4",
+            "/tmp/grab-restore-duplicate",
+            "duplicate.mp4",
+            DownloadStatus::Paused,
+        ),
+        output_dir: None,
+        segments: None,
+        gallery_job: None,
+    };
+    duplicate.item.id = Some(7);
+    assert_eq!(
+        manager.restore_dirs_requiring_id_listing(&[current, duplicate]),
+        std::collections::HashSet::from(["/tmp/grab-restore-duplicate".to_string()])
+    );
+}
+
+#[test]
+fn restore_destination_listing_reports_unreadable_directories() {
+    let path = std::env::temp_dir().join(format!(
+        "grab-restore-not-a-directory-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos()),
+    ));
+    std::fs::write(&path, b"not a directory").expect("test fixture should be created");
+    let directory = path.to_string_lossy().into_owned();
+    let result =
+        DownloadManager::list_restore_destinations(std::collections::HashSet::from([directory]));
+    let _ = std::fs::remove_file(&path);
+
+    let error = result.expect_err("a file cannot be listed as a destination directory");
+    assert!(error.to_string().contains(&path.display().to_string()));
+}
+
+#[test]
 fn backoff_delay_stays_within_cap() {
     // Bound-only: deterministic, never flakes. Do NOT assert distinctness (jitter is random).
     for _ in 0..100 {
@@ -2621,7 +2696,9 @@ fn unremove_restores_started_for_single_connection_partial() {
     // A row the engine started (single-connection: no segment bitmap).
     // Inserted Paused so nothing spawns before the snapshot; flipped to
     // Downloading to mirror a live row at remove time.
-    let id = manager.alloc_id_for(std::path::Path::new(&dest_s));
+    let existing = crate::video_staging::try_dir_file_names(std::path::Path::new(&dest_s))
+        .expect("test destination should be readable");
+    let id = manager.alloc_id_for_in(&existing);
     let item = DownloadItem::new(
         id,
         "https://example.com/partial.bin",

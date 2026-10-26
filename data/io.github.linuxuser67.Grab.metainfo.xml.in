@@ -50,7 +50,7 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="6.4.0~beta.1" date="2026-10-26">
+    <release version="6.4.0" date="2026-10-26">
       <description>
         <ul>
           <li>Move download trash, filesystem, restore, cache, and Undo cleanup off the GTK main thread.</li>

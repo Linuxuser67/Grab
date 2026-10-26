@@ -1364,6 +1364,18 @@ mod tests {
     }
 
     #[test]
+    fn try_dir_file_names_distinguishes_missing_from_unreadable() {
+        let base = unique_dir("try-dir-file-names");
+        assert!(try_dir_file_names(&base).unwrap().is_empty());
+
+        let file = base.with_extension("not-a-directory");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(try_dir_file_names(&file).is_err());
+
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
     fn manifest_loss_sweep_reclaims_sidecars_preserves_base() {
         // Without a manifest, id-in-name sidecars are NOT swept by pattern:
         // without a marker, `Title.7.mp4.part` is indistinguishable from a

@@ -758,18 +758,6 @@ impl DownloadManager {
         id
     }
 
-    /// Fresh id that lands on no existing staging dir: the allocator must skip
-    /// leftover `grab-<id>-*` files in dest dirs and legacy tmp dirs, or a new row
-    /// would resume (or sweep) a stranger's scratch.
-    fn alloc_id_for(&self, dest_dir: &std::path::Path) -> u64 {
-        loop {
-            let id = self.alloc_id();
-            if !crate::video::staging_occupied(dest_dir, id) {
-                return id;
-            }
-        }
-    }
-
     /// In-memory allocator for callers that listed the destination off GTK.
     /// Callers must pass a complete listing; an unreadable directory must be
     /// reported rather than falling back to filesystem I/O on the main thread.
@@ -782,20 +770,24 @@ impl DownloadManager {
         }
     }
 
-    /// Reuse a restored row's persisted id where possible, else allocate. The id is the staging key, so a fresh number would point at the wrong `grab-<id>-*` files and risk colliding with a later row.
-    fn claim_id(&self, stored: Option<u64>, dest_dir: &std::path::Path) -> u64 {
-        let Some(id) = stored else {
-            return self.alloc_id_for(dest_dir);
-        };
-        // Already owned in this session: a hand-edited/duplicated queue must never share one staging directory.
+    /// Claim a stored id only if this session has not already assigned it.
+    fn claim_persisted_id(&self, stored: Option<u64>) -> Option<u64> {
+        let id = stored?;
+        // A hand-edited/duplicated queue must never share one staging identity.
         if self.find(id).is_some() || self.epoch.borrow().contains_key(&id) {
-            return self.alloc_id_for(dest_dir);
+            return None;
         }
-        // Keep the allocator ahead of every adopted id so a new row never reuses a restored row's number.
+        // Keep the allocator ahead of every adopted id so a new row never reuses its number.
         if id >= self.next_id.get() {
             self.next_id.set(id + 1);
         }
-        id
+        Some(id)
+    }
+
+    /// Reuse a persisted id or allocate against a destination snapshot made off GTK.
+    fn claim_id_in(&self, stored: Option<u64>, existing: &[String]) -> u64 {
+        self.claim_persisted_id(stored)
+            .unwrap_or_else(|| self.alloc_id_for_in(existing))
     }
 
     /// The underlying download list.
@@ -1375,12 +1367,22 @@ impl DownloadManager {
         (added, pl.total, skipped_by_host_limit)
     }
 
-    /// Re-queue one persisted entry, preserving its intent (paused/failed stay). Names restore verbatim to keep resume identity.
-    /// The video-page source is staged *before* insert (see `enqueue_video`).
+    /// Synchronous restore helper for tests; production passes a prelisted destination.
     ///
     /// # Errors
     /// Returns a display-ready message when the stored entry is invalid.
+    #[cfg(test)]
     pub fn restore_existing(self: &Rc<Self>, stored: &StoredItem) -> Result<DownloadItem, String> {
+        let existing =
+            crate::video_staging::dir_file_names(std::path::Path::new(&stored.dest_dir));
+        self.restore_existing_with_listing(stored, &existing)
+    }
+
+    fn restore_existing_with_listing(
+        self: &Rc<Self>,
+        stored: &StoredItem,
+        existing: &[String],
+    ) -> Result<DownloadItem, String> {
         let StoredItem {
             id: stored_id,
             url: raw_url,
@@ -1406,7 +1408,7 @@ impl DownloadManager {
         }
         let filename = shorten_filename(raw_filename);
         let item = DownloadItem::new(
-            self.claim_id(*stored_id, std::path::Path::new(dest_dir)),
+            self.claim_id_in(*stored_id, existing),
             &url,
             &filename,
             dest_dir,
@@ -1463,12 +1465,23 @@ impl DownloadManager {
         Ok(self.insert(item))
     }
 
-    /// Restore a gallery row from a validated stored entry + parsed job.
-    /// Mirrors `enqueue_gallery` but reuses the stored id and status.
+    /// Synchronous gallery restore helper for tests; production passes a prelisted destination.
+    #[cfg(test)]
     pub fn restore_existing_gallery(
         self: &Rc<Self>,
         stored: &StoredItem,
         job: Option<crate::gallery_argv::GalleryJob>,
+    ) -> Result<DownloadItem, String> {
+        let existing =
+            crate::video_staging::dir_file_names(std::path::Path::new(&stored.dest_dir));
+        self.restore_existing_gallery_with_listing(stored, job, &existing)
+    }
+
+    fn restore_existing_gallery_with_listing(
+        self: &Rc<Self>,
+        stored: &StoredItem,
+        job: Option<crate::gallery_argv::GalleryJob>,
+        existing: &[String],
     ) -> Result<DownloadItem, String> {
         let mut job = job.ok_or_else(|| "gallery entry missing job".to_string())?;
         let url = normalize_url(&stored.url)?;
@@ -1485,7 +1498,7 @@ impl DownloadManager {
         // load; use it verbatim so the restored row matches the on-disk
         // subfolder instead of the payload's base title.
         let title = stored.filename.clone();
-        let id = self.claim_id(stored.id, std::path::Path::new(&stored.dest_dir));
+        let id = self.claim_id_in(stored.id, existing);
         job.item_id = id;
         let item = DownloadItem::new(id, &url, &title, &stored.dest_dir);
         item.set_public_only(public_only);
@@ -1593,7 +1606,12 @@ impl DownloadManager {
         });
     }
 
-    fn insert_history(self: &Rc<Self>, stored: StoredItem, output_dir: Option<String>) {
+    fn insert_history(
+        self: &Rc<Self>,
+        stored: StoredItem,
+        output_dir: Option<String>,
+        existing: &[String],
+    ) {
         let StoredItem {
             id: stored_id,
             url: raw_url,
@@ -1616,7 +1634,7 @@ impl DownloadManager {
             return;
         }
         let item = DownloadItem::new(
-            self.claim_id(stored_id, std::path::Path::new(&dir)),
+            self.claim_id_in(stored_id, existing),
             &url,
             &name,
             &dir,
@@ -4315,6 +4333,34 @@ impl DownloadManager {
         })
     }
 
+    /// Find restore rows whose id allocation may need a staging-name scan.
+    /// Normal rows with unique persisted ids need no directory listing.
+    fn restore_dirs_requiring_id_listing(&self, pending: &[PendingRestore]) -> HashSet<String> {
+        let mut used_ids: HashSet<u64> = self.items().map(|item| item.id()).collect();
+        used_ids.extend(self.epoch.borrow().keys().copied());
+        pending
+            .iter()
+            .filter_map(|entry| match entry.item.id {
+                Some(id) if used_ids.insert(id) => None,
+                _ => Some(entry.item.dest_dir.clone()),
+            })
+            .collect()
+    }
+
+    /// Read only destination directories that may need a new staging id.
+    /// This runs on a blocking worker; best-effort behavior matches the former
+    /// allocator for legacy queue entries whose ids were not persisted.
+    fn list_restore_destinations(directories: HashSet<String>) -> HashMap<String, Vec<String>> {
+        directories
+            .into_iter()
+            .map(|dir| {
+                let names =
+                    crate::video_staging::dir_file_names(std::path::Path::new(&dir));
+                (dir, names)
+            })
+            .collect()
+    }
+
     /// Read and validate the saved queue away from GTK's main context.
     /// Only ListStore/model mutation is applied on the main context; disk sweeps
     /// are sent to Tokio's blocking pool before restore becomes Ready.
@@ -4328,7 +4374,9 @@ impl DownloadManager {
             // the same sweep implementation with production.
             let pending = Self::load_restore_queue(queue_file);
             if let Some(pending) = pending {
-                let plan = self.apply_restored_queue(pending);
+                let directories = self.restore_dirs_requiring_id_listing(&pending);
+                let existing_by_dir = Self::list_restore_destinations(directories);
+                let plan = self.apply_restored_queue(pending, &existing_by_dir);
                 let keep = Self::run_restore_sweeps(plan);
                 Self::schedule_session_orphan_sweep(keep);
             }
@@ -4358,8 +4406,32 @@ impl DownloadManager {
                 match loaded {
                     Ok(Some(pending)) => {
                         manager.restore_dirty.set(false);
+                        let directories = manager.restore_dirs_requiring_id_listing(&pending);
+                        let prepared = tokio_rt()
+                            .spawn_blocking(move || {
+                                let existing_by_dir = Self::list_restore_destinations(directories);
+                                (pending, existing_by_dir)
+                            })
+                            .await;
+                        let (pending, existing_by_dir) = match prepared {
+                            Ok(prepared) => prepared,
+                            Err(e) => {
+                                tracing::error!(
+                                    "download queue destination listing failed: {e}; preserving the saved queue"
+                                );
+                                manager.finish_restore(RestoreOutcome::Failed);
+                                completion.finished = true;
+                                return;
+                            }
+                        };
+                        // The main context yielded while legacy/duplicate ids were checked.
+                        if manager.restore_should_abort() {
+                            manager.finish_restore(RestoreOutcome::Failed);
+                            completion.finished = true;
+                            return;
+                        }
                         let plan = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            manager.apply_restored_queue(pending)
+                            manager.apply_restored_queue(pending, &existing_by_dir)
                         }));
                         let plan = match plan {
                             Ok(plan) => plan,
@@ -4529,24 +4601,36 @@ impl DownloadManager {
 
     /// Apply validated rows to GTK's model and snapshot cleanup keep-sets.
     /// Filesystem traversal/deletion happens later on a blocking worker.
-    fn apply_restored_queue(self: &Rc<Self>, pending: Vec<PendingRestore>) -> RestoreSweepPlan {
+    fn apply_restored_queue(
+        self: &Rc<Self>,
+        pending: Vec<PendingRestore>,
+        existing_by_dir: &HashMap<String, Vec<String>>,
+    ) -> RestoreSweepPlan {
         let mut selections = Vec::new();
         {
             let _batch = self.batch_guard();
-            // JSON parsing and per-row validation completed off-thread.
+            // JSON parsing, validation and any necessary listings completed off-thread.
             // GObject construction and model mutation stay on this context.
             for p in pending {
+                let existing = existing_by_dir
+                    .get(&p.item.dest_dir)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 match p.item.status {
                     DownloadStatus::Done => {
                         if p.gallery_job.is_some() {
                             let mut restored_item = p.item.clone();
                             restored_item.segments = p.segments;
-                            match self.restore_existing_gallery(&restored_item, p.gallery_job) {
+                            match self.restore_existing_gallery_with_listing(
+                                &restored_item,
+                                p.gallery_job,
+                                existing,
+                            ) {
                                 Ok(_) => {}
                                 Err(e) => tracing::warn!("skipping queue entry: {e}"),
                             }
                         } else {
-                            self.insert_history(p.item, p.output_dir);
+                            self.insert_history(p.item, p.output_dir, existing);
                         }
                     }
                     status => {
@@ -4561,9 +4645,13 @@ impl DownloadManager {
                         restored_item.status = status;
                         restored_item.segments = p.segments;
                         let result = if let Some(job) = p.gallery_job {
-                            self.restore_existing_gallery(&restored_item, Some(job))
+                            self.restore_existing_gallery_with_listing(
+                                &restored_item,
+                                Some(job),
+                                existing,
+                            )
                         } else {
-                            self.restore_existing(&restored_item)
+                            self.restore_existing_with_listing(&restored_item, existing)
                         };
                         match result {
                             Ok(restored) => {

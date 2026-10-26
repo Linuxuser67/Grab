@@ -221,6 +221,45 @@ fn test_port(offset: u16) -> u16 {
 }
 
 #[test]
+fn legacy_restore_id_allocation_skips_prelisted_staging_names() {
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    manager.next_id.set(7);
+    let existing = vec!["Title.7.mp4.part".to_string()];
+
+    assert_eq!(manager.claim_id_in(None, &existing), 8);
+}
+
+#[test]
+fn restore_prepares_destination_listings_only_for_fallback_ids() {
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let legacy = PendingRestore {
+        item: stored_row(
+            "https://example.test/file.mp4",
+            "/tmp/grab-restore-legacy",
+            "file.mp4",
+            DownloadStatus::Paused,
+        ),
+        output_dir: None,
+        segments: None,
+        gallery_job: None,
+    };
+    assert_eq!(
+        manager.restore_dirs_requiring_id_listing(std::slice::from_ref(&legacy)),
+        std::collections::HashSet::from(["/tmp/grab-restore-legacy".to_string()])
+    );
+
+    let mut current = legacy;
+    current.item.id = Some(7);
+    assert!(
+        manager
+            .restore_dirs_requiring_id_listing(std::slice::from_ref(&current))
+            .is_empty()
+    );
+}
+
+#[test]
 fn backoff_delay_stays_within_cap() {
     // Bound-only: deterministic, never flakes. Do NOT assert distinctness (jitter is random).
     for _ in 0..100 {

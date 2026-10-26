@@ -64,10 +64,11 @@ pub use crate::download_store::DownloadStatus;
 use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
 use crate::video::AttemptGate;
 
-/// A removal whose worker is still tearing down.
+/// A removal whose cleanup is still draining; `worker_abort` is absent when
+/// no worker had to be awaited.
 struct PendingDiscard {
     /// Aborts the *worker*: aborting the finalizer would drop this handle and detach the task instead of stopping it.
-    worker_abort: tokio::task::AbortHandle,
+    worker_abort: Option<tokio::task::AbortHandle>,
     finalizer: tokio::task::JoinHandle<()>,
 }
 
@@ -313,7 +314,7 @@ pub struct DownloadManager {
     gates: RefCell<HashMap<u64, std::sync::Arc<AttemptGate>>>,
     /// Destinations with a discard in flight (exact path + stem key). Consulted by intake *and* `unremove`, which bypasses intake.
     reservations: std::sync::Arc<std::sync::Mutex<Reservations>>,
-    /// Finalizers reclaiming a removed row's scratch, by row. Each keeps the worker abort handle: aborting the finalizer would detach the worker, leaving yt-dlp unsupervised (#180).
+    /// Finalizers reclaiming a removed row's scratch, by row. A worker abort handle is kept when one had to be awaited; aborting the finalizer detaches it (#180).
     discards: RefCell<HashMap<u64, PendingDiscard>>,
     /// Rows currently capturing a live stream. Pause/cancel/park only signal these; the worker finalizes and its message drives the row.
     live_rows: RefCell<std::collections::HashSet<u64>>,
@@ -747,6 +748,23 @@ impl DownloadManager {
         }
     }
 
+    /// In-memory allocator for callers that listed the destination off GTK.
+    /// An empty or unreadable listing still checks the destination on disk
+    /// before reusing an id (manifests can be missed by a failed read_dir).
+    fn alloc_id_for_in(&self, dest_dir: &std::path::Path, existing: &[String]) -> u64 {
+        loop {
+            let id = self.alloc_id();
+            let occupied = if existing.is_empty() {
+                crate::video::staging_occupied(dest_dir, id)
+            } else {
+                crate::video_staging::staging_occupied_in(existing, id)
+            };
+            if !occupied {
+                return id;
+            }
+        }
+    }
+
     /// Reuse a restored row's persisted id where possible, else allocate. The id is the staging key, so a fresh number would point at the wrong `grab-<id>-*` files and risk colliding with a later row.
     fn claim_id(&self, stored: Option<u64>, dest_dir: &std::path::Path) -> u64 {
         let Some(id) = stored else {
@@ -875,11 +893,56 @@ impl DownloadManager {
     ///
     /// # Errors
     /// Returns a display-ready message when the URL or filename is invalid.
+    /// Queue a plain download after listing its destination off GTK.
+    pub(crate) async fn enqueue_async_batched(
+        self: &Rc<Self>,
+        url: &str,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+    ) -> Result<(DownloadItem, BatchGuard), String> {
+        let dir = self.resolve_dir(dest_dir);
+        let listing_dir = dir.clone();
+        let existing = gio::spawn_blocking(move || {
+            crate::video_staging::dir_file_names(std::path::Path::new(&listing_dir))
+        })
+        .await
+        .map_err(|error| format!("Could not inspect download folder: {error:?}"))?;
+        let guard = self.batch_guard();
+        let item = self.enqueue_with_listing(url, Some(&dir), filename, &existing)?;
+        Ok((item, guard))
+    }
+
+    pub(crate) async fn enqueue_async(
+        self: &Rc<Self>,
+        url: &str,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+    ) -> Result<DownloadItem, String> {
+        let (item, guard) = self.enqueue_async_batched(url, dest_dir, filename).await?;
+        drop(guard);
+        Ok(item)
+    }
+
+    /// Synchronous intake for tests; production paths list the destination off
+    /// GTK and call [`Self::enqueue_async_batched`].
+    #[cfg(test)]
     pub fn enqueue(
         self: &Rc<Self>,
         url: &str,
         dest_dir: Option<&str>,
         filename: Option<&str>,
+    ) -> Result<DownloadItem, String> {
+        let dir = self.resolve_dir(dest_dir);
+        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
+        self.enqueue_with_listing(url, Some(&dir), filename, &existing)
+    }
+
+    fn enqueue_with_listing(
+        self: &Rc<Self>,
+        url: &str,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+        existing: &[String],
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
         let dir = self.resolve_dir(dest_dir);
@@ -905,12 +968,7 @@ impl DownloadManager {
                         || it.output_dir() == p.to_string_lossy()
                 })
         });
-        let item = DownloadItem::new(
-            self.alloc_id_for(std::path::Path::new(&dir)),
-            &url,
-            &name,
-            &dir,
-        );
+        let item = DownloadItem::new(self.alloc_id_for_in(std::path::Path::new(&dir), existing), &url, &name, &dir);
         if crate::torrent::is_magnet(&url) {
             // Magnets carry no archive to recompute the output folder from later, so record their subfolder now.
             item.set_output_dir(
@@ -971,7 +1029,7 @@ impl DownloadManager {
             crate::torrent::stage_selection(&pseudo, selection);
         }
         let stub = crate::torrent::stub_name_for_file(&file_name);
-        let item = self.enqueue(&pseudo, dest_dir, Some(&stub))?;
+        let item = self.enqueue_with_listing(&pseudo, Some(&dir), Some(&stub), &existing)?;
 
         // The engine writes with overwrite:true, so reserve a collision-free
         // output folder from the listing snapshot before it can be spawned.
@@ -1099,12 +1157,7 @@ impl DownloadManager {
             counter += 1;
             unique_title = format!("{title}-{counter}");
         }
-        let item = DownloadItem::new(
-            self.alloc_id_for(std::path::Path::new(&dir)),
-            &url,
-            &unique_title,
-            &dir,
-        );
+        let item = DownloadItem::new(self.alloc_id_for_in(std::path::Path::new(&dir), &existing), &url, &unique_title, &dir);
         item.set_is_gallery(true);
         item.set_gallery_file_count(job.file_count.unwrap_or(0));
         item.set_gallery_files_done(0);
@@ -1149,12 +1202,7 @@ impl DownloadManager {
                             || it.output_dir() == p.to_string_lossy()
                     })
         });
-        let item = DownloadItem::new(
-            self.alloc_id_for(std::path::Path::new(&dir)),
-            &url,
-            &name,
-            dir,
-        );
+        let item = DownloadItem::new(self.alloc_id_for_in(std::path::Path::new(dir), existing), &url, &name, dir);
         item.set_detail(pending_resolve_detail(choices.audio_only));
         self.video_sources.borrow_mut().insert(
             item.id(),
@@ -1516,6 +1564,7 @@ impl DownloadManager {
 
     fn insert_history(
         self: &Rc<Self>,
+        stored_id: u64,
         url: String,
         dir: String,
         name: String,
@@ -1536,7 +1585,7 @@ impl DownloadManager {
             return;
         }
         let item = DownloadItem::new(
-            self.alloc_id_for(std::path::Path::new(&dir)),
+            self.claim_id(Some(stored_id), std::path::Path::new(&dir)),
             &url,
             &name,
             &dir,
@@ -3305,20 +3354,32 @@ impl DownloadManager {
                 self.discards.borrow_mut().insert(
                     id,
                     PendingDiscard {
-                        worker_abort,
+                        worker_abort: Some(worker_abort),
                         finalizer,
                     },
                 );
             }
-            // No task to wait for: sweep the scratch, never the finished file (no orphan is possible without a worker in flight).
+            // No task to wait for: sweep the scratch, never the finished file
+            // (no orphan is possible without a worker in flight). Run the
+            // cleanup off GTK too; a large staging dir must not stall the UI.
             None => {
-                if let Some(dest_dir) = dest.parent() {
-                    crate::video::clean_staging_files(dest_dir, id);
-                }
-                crate::video::clean_dest_parts(&dest);
-                self.release_dest(&dest);
-                // Same wakeup as the async finalizer above; already on the main thread.
-                wake_queue();
+                let finalizer = crate::runtime::tokio_rt().spawn(async move {
+                    if let Some(dest_dir) = dest.parent() {
+                        crate::video::clean_staging_files(dest_dir, id);
+                    }
+                    crate::video::clean_dest_parts(&dest);
+                    if let Ok(mut r) = reservations.lock() {
+                        r.remove(&dest);
+                    }
+                    wake_queue();
+                });
+                self.discards.borrow_mut().insert(
+                    id,
+                    PendingDiscard {
+                        worker_abort: None,
+                        finalizer,
+                    },
+                );
             }
         }
     }
@@ -3416,7 +3477,7 @@ impl DownloadManager {
         // Gallery: discard handoff cookies on removal (failed rows keep them
         // for retry, but removal means the user is done with this URL).
         if let Some(job) = self.gallery_jobs.borrow().get(&id) {
-            crate::extension_server::discard_handoff_cookies(&job.page_url);
+            crate::extension_server::discard_handoff_cookies_async(&job.page_url);
         }
         self.gallery_jobs.borrow_mut().remove(&id);
         let released = self.find(id).filter(|item| item.public_only());
@@ -3442,14 +3503,45 @@ impl DownloadManager {
         self.started.borrow().contains(&id)
     }
 
-    /// Re-insert a previously removed download (Undo). Restored `Downloading` restarts as `Queued`; a restored bitmap resumes, a stale one is dropped at spawn.
+    /// Re-insert a previously removed download (Undo) after listing its
+    /// destination off GTK.
+    pub(crate) async fn unremove_async(self: &Rc<Self>, snap: RemovedSnapshot) -> DownloadItem {
+        let dir = snap.dest_dir.clone();
+        let listing = gio::spawn_blocking(move || {
+            crate::video_staging::dir_file_names(std::path::Path::new(&dir))
+        })
+        .await;
+        let existing = match &listing {
+            Ok(names) => Some(names.as_slice()),
+            Err(error) => {
+                tracing::warn!("could not inspect Undo destination: {error:?}");
+                None
+            }
+        };
+        self.unremove_with_listing(snap, existing)
+    }
+
+    /// Synchronous Undo for tests; production callers use [`Self::unremove_async`].
+    #[cfg(test)]
     pub fn unremove(self: &Rc<Self>, snap: RemovedSnapshot) -> DownloadItem {
-        let item = DownloadItem::new(
-            self.alloc_id_for(std::path::Path::new(&snap.dest_dir)),
-            &snap.url,
-            &snap.filename,
-            &snap.dest_dir,
-        );
+        let existing =
+            crate::video_staging::dir_file_names(std::path::Path::new(&snap.dest_dir));
+        self.unremove_with_listing(snap, Some(&existing))
+    }
+
+    /// Re-insert a previously removed download (Undo). Restored `Downloading`
+    /// restarts as `Queued`; a restored bitmap resumes, a stale one is dropped
+    /// at spawn.
+    fn unremove_with_listing(
+        self: &Rc<Self>,
+        snap: RemovedSnapshot,
+        existing: Option<&[String]>,
+    ) -> DownloadItem {
+        let id = match existing {
+            Some(names) => self.alloc_id_for_in(std::path::Path::new(&snap.dest_dir), names),
+            None => self.alloc_id_for(std::path::Path::new(&snap.dest_dir)),
+        };
+        let item = DownloadItem::new(id, &snap.url, &snap.filename, &snap.dest_dir);
         item.set_progress(snap.progress.clamp(0.0, 1.0));
         item.set_detail(snap.detail);
         item.set_status(match snap.status {
@@ -4440,6 +4532,7 @@ impl DownloadManager {
                         } else {
                             let video_source = p.item.video_source.clone();
                             self.insert_history(
+                                p.item.id,
                                 p.item.url,
                                 p.item.dest_dir,
                                 p.item.filename,
@@ -4676,7 +4769,9 @@ impl DownloadManager {
             handle.abort();
         }
         for pending in &finals {
-            pending.worker_abort.abort();
+            if let Some(worker_abort) = &pending.worker_abort {
+                worker_abort.abort();
+            }
         }
 
         let (joined_tx, joined_rx) = tokio::sync::oneshot::channel();
@@ -4786,7 +4881,9 @@ impl DownloadManager {
             handle.abort();
         }
         for pending in &finals {
-            pending.worker_abort.abort();
+            if let Some(worker_abort) = &pending.worker_abort {
+                worker_abort.abort();
+            }
         }
         // This synchronous fallback is only for shutdown paths that bypass the
         // normal GLib async close flow. Do not block GTK joining workers or

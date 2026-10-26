@@ -271,6 +271,8 @@ fn media_icon_failed_reserves_red_for_failure() {
 #[test]
 #[ignore = "needs a display; run under Xvfb (see ci.yml)"]
 fn queue_row_resynced_after_picker_returns_to_form() {
+    // SAFETY: UI tests run serially; no other thread reads these variables
+    // while this process-global setup runs.
     unsafe {
         std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
         std::env::set_var("GSETTINGS_BACKEND", "memory");

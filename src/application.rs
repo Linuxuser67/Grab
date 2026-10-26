@@ -284,8 +284,14 @@ enum Routed {
 /// Enqueue a URI that the handoff classifier has identified as a direct file
 /// or magnet. Separated from the GTK/toast routing so auto-add's queueing path
 /// can be exercised without networking or opening a confirmation dialog.
-fn enqueue_direct_handoff(manager: &Rc<DownloadManager>, uri: &url::Url) -> Result<(), String> {
-    manager.enqueue(uri.as_str(), None, None).map(|_| ())
+async fn enqueue_direct_handoff(
+    manager: &Rc<DownloadManager>,
+    uri: &url::Url,
+) -> Result<(), String> {
+    manager
+        .enqueue_async(uri.as_str(), None, None)
+        .await
+        .map(|_| ())
 }
 
 async fn route_open_uri(
@@ -335,7 +341,7 @@ async fn route_open_uri(
         add_card.open(Some(uri.as_str().to_string()));
         return Routed::OpenedCard;
     }
-    match enqueue_direct_handoff(&manager, &uri) {
+    match enqueue_direct_handoff(&manager, &uri).await {
         Ok(()) => Routed::Queued,
         Err(e) => {
             toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
@@ -1030,9 +1036,13 @@ fn register_actions(
                             toast.set_button_label(Some(&gettext("Undo")));
                             let m2 = manager.clone();
                             toast.connect_button_clicked(move |_| {
-                                for snap in snapshots.clone() {
-                                    m2.unremove(snap);
-                                }
+                                let manager = Rc::clone(&m2);
+                                let snapshots = snapshots.clone();
+                                glib::spawn_future_local(async move {
+                                    for snap in snapshots {
+                                        manager.unremove_async(snap).await;
+                                    }
+                                });
                             });
                             toasts.add_toast(toast);
                         },
@@ -1188,8 +1198,10 @@ mod tests {
         let queue_file =
             std::env::temp_dir().join(format!("grab-auto-add-{}-{tag}.json", std::process::id()));
         let _ = std::fs::remove_file(&queue_file);
-        // Cargo test runs this suite serially in CI; isolate the GSettings schema,
+        // Cargo test runs this suite serially; isolate the GSettings schema,
         // memory backend, and persisted queue so no real network transfer starts.
+        // SAFETY: serial test process; no other thread reads these variables
+        // while this setup runs.
         unsafe {
             std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
             std::env::set_var("GSETTINGS_BACKEND", "memory");
@@ -1220,7 +1232,9 @@ mod tests {
                 !handoff_should_confirm(true, Some(true), &uri, settings.auto_add_downloads()),
                 "a public direct-file handoff skips confirmation when auto-add is enabled"
             );
-            enqueue_direct_handoff(&manager, &uri).expect("direct handoff should enqueue");
+            gtk4::glib::MainContext::default()
+                .block_on(enqueue_direct_handoff(&manager, &uri))
+                .expect("direct handoff should enqueue");
             assert_eq!(manager.store().n_items(), 1);
             let item = manager
                 .store()
@@ -1266,7 +1280,8 @@ mod tests {
 
             // This is the confirmation dialog's acceptance route: once the
             // user approves, it invokes the same direct enqueue path as auto-add.
-            enqueue_direct_handoff(&manager, &uri)
+            gtk4::glib::MainContext::default()
+                .block_on(enqueue_direct_handoff(&manager, &uri))
                 .expect("a confirmed direct handoff should enqueue");
             assert_eq!(manager.store().n_items(), 1);
             assert!(

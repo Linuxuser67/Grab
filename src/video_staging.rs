@@ -112,32 +112,31 @@ pub(crate) fn staging_name_matches_id(file_name: &str, item_id: u64) -> bool {
 /// Whether any staging file exists for this id: the id allocator must skip
 /// it so a fresh row never lands on a leftover.
 pub fn staging_occupied(dest_dir: &Path, item_id: u64) -> bool {
-    // Manifest exists = occupied (it tracks the exact staging name).
+    // Manifest exists = occupied (it tracks the exact staging name). The
+    // listing check also sees it when the directory is readable.
     if manifest_path(dest_dir, item_id).exists() {
         return true;
     }
+    staging_occupied_in(&dir_file_names(dest_dir), item_id)
+}
+
+/// In-memory form of [`staging_occupied`] for callers that already listed the
+/// destination off the GTK thread.
+pub(crate) fn staging_occupied_in(names: &[String], item_id: u64) -> bool {
     // Id-in-name scheme: the file itself carries the id, so a lost manifest
     // cannot orphan the id into reuse.
     // Legacy patterns: grab-{id}- prefix (safe) and .{id}.live. (has marker, safe).
     // The bare .{id}. pattern is deliberately NOT checked: it false-positives
     // on user files like linux-5.4.0.tar.gz.
+    let manifest = format!(".{item_id}.manifest.json");
     let prefix = format!("grab-{item_id}-");
     let live_pattern = format!(".{item_id}.live.");
-    std::fs::read_dir(dest_dir)
-        .ok()
-        .map(|entries| {
-            entries.filter_map(|e| e.ok()).any(|e| {
-                e.file_name()
-                    .to_str()
-                    .map(|n| {
-                        staging_name_matches_id(n, item_id)
-                            || n.starts_with(&prefix)
-                            || n.contains(&live_pattern)
-                    })
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+    names.iter().any(|n| {
+        n == &manifest
+            || staging_name_matches_id(n, item_id)
+            || n.starts_with(&prefix)
+            || n.contains(&live_pattern)
+    })
 }
 
 /// Create a staging dir under an explicit root, verifying it stays there (a
@@ -1339,6 +1338,21 @@ mod tests {
             "unrelated id 8 must not be occupied"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn staging_occupied_in_uses_a_prelisted_directory() {
+        let names = vec![
+            "Title.7.mp4.part".to_string(),
+            ".9.manifest.json".to_string(),
+            "grab-11-notes.txt".to_string(),
+            "Title.13.live.mp4".to_string(),
+        ];
+        assert!(staging_occupied_in(&names, 7));
+        assert!(staging_occupied_in(&names, 9));
+        assert!(staging_occupied_in(&names, 11));
+        assert!(staging_occupied_in(&names, 13));
+        assert!(!staging_occupied_in(&names, 8));
     }
 
     #[test]

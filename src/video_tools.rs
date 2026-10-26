@@ -553,7 +553,7 @@ fn file_stamp(binary: &Path) -> FileStamp {
         .unwrap_or((None, 0))
 }
 
-static IMPERSONATE_CACHE: OnceLock<ProbeCache<PathBuf, bool, ()>> = OnceLock::new();
+static IMPERSONATE_CACHE: OnceLock<ProbeCache<PathBuf, bool, ToolProbeError>> = OnceLock::new();
 
 /// Whether yt-dlp's --impersonate flag is supported by this binary.
 /// The probe is asynchronous and forwarded to Tokio when called outside a
@@ -587,7 +587,7 @@ async fn ytdlp_supports_impersonation_cached(key: PathBuf) -> bool {
 /// One-shot `--list-impersonate-targets` probe. The 15-second limit is retained
 /// as a guard against a genuinely wedged executable; process waiting and output
 /// draining are asynchronous. Timeout cleanup signals the whole process group.
-async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ()> {
+async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ToolProbeError> {
     use std::process::Stdio;
     let mut command = tokio::process::Command::new(youtube_bin);
     command
@@ -601,7 +601,9 @@ async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ()> {
         use std::os::unix::process::CommandExt as _;
         command.as_std_mut().process_group(0);
     }
-    let child = command.spawn().map_err(|_| ())?;
+    let child = command
+        .spawn()
+        .map_err(|error| ToolProbeError::Spawn(error.to_string()))?;
     let pid = child.id().unwrap_or_default();
     let mut group = ProbeProcessGroup::new(pid);
     match tokio::time::timeout(std::time::Duration::from_secs(15), child.wait_with_output()).await {
@@ -610,7 +612,7 @@ async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ()> {
             // the drop guard signal a process group whose PID may be reused.
             group.disarm();
             if !output.status.success() {
-                return Err(());
+                return Err(ToolProbeError::FailedExit);
             }
             let out = String::from_utf8_lossy(&output.stdout);
             let supported = out.lines().any(|line| {
@@ -619,7 +621,8 @@ async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ()> {
             });
             Ok(supported)
         }
-        Err(_) | Ok(Err(_)) => Err(()),
+        Ok(Err(error)) => Err(ToolProbeError::Wait(error.to_string())),
+        Err(_) => Err(ToolProbeError::Timeout),
     }
 }
 
@@ -678,7 +681,7 @@ pub(crate) const LIVE_DOWNLOADER_ARGS: &str =
 /// fMP4 HLS URLs often end in .fmp4 while FFmpeg detects MOV/MP4.
 pub(crate) const LIVE_INPUT_DOWNLOADER_ARGS: &str = "ffmpeg_i:-allowed_extensions 3gp,aac,avi,ac3,eac3,flac,mkv,m3u8,m4a,m4s,m4v,mpg,mov,mp2,mp3,mp4,mpeg,mpegts,ogg,ogv,oga,ts,vob,vtt,wav,webvtt,cmfv,cmfa,ec3,fmp4 -seg_max_retry 3";
 
-static FFMPEG_HLS_CACHE: OnceLock<ProbeCache<PathBuf, bool, ()>> = OnceLock::new();
+static FFMPEG_HLS_CACHE: OnceLock<ProbeCache<PathBuf, bool, ToolProbeError>> = OnceLock::new();
 
 /// Whether this FFmpeg supports the HLS demuxer's extension_picky option.
 pub(crate) async fn ffmpeg_supports_hls_extension_picky(ffmpeg_bin: &Path) -> bool {
@@ -706,7 +709,7 @@ async fn ffmpeg_supports_hls_extension_picky_cached(key: PathBuf) -> bool {
         .unwrap_or(false)
 }
 
-async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Result<bool, ()> {
+async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Result<bool, ToolProbeError> {
     use std::process::Stdio;
     let mut command = tokio::process::Command::new(ffmpeg_bin);
     command
@@ -720,7 +723,9 @@ async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Result<bool, ()>
         use std::os::unix::process::CommandExt as _;
         command.as_std_mut().process_group(0);
     }
-    let child = command.spawn().map_err(|_| ())?;
+    let child = command
+        .spawn()
+        .map_err(|error| ToolProbeError::Spawn(error.to_string()))?;
     let pid = child.id().unwrap_or_default();
     let mut group = ProbeProcessGroup::new(pid);
     let output =
@@ -731,10 +736,11 @@ async fn probe_ffmpeg_hls_extension_picky(ffmpeg_bin: &Path) -> Result<bool, ()>
                 group.disarm();
                 output
             }
-            Err(_) | Ok(Err(_)) => return Err(()),
+            Ok(Err(error)) => return Err(ToolProbeError::Wait(error.to_string())),
+            Err(_) => return Err(ToolProbeError::Timeout),
         };
     if !output.status.success() {
-        return Err(());
+        return Err(ToolProbeError::FailedExit);
     }
     let help = format!(
         "{}{}",
@@ -2067,20 +2073,22 @@ pub(crate) fn extractor_failure(log: &str) -> bool {
 }
 
 /// Why an installed tool's version probe did not return a version line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum ToolProbeError {
-    #[error("could not start the version-check process")]
-    Spawn,
+    #[error("could not start the version-check process: {0}")]
+    Spawn(String),
     #[error("version-check process exited unsuccessfully")]
     FailedExit,
+    #[error("version-check process failed while waiting: {0}")]
+    Wait(String),
     #[error("version-check process returned no output")]
     EmptyOutput,
     #[error("version-check process returned invalid output")]
     InvalidOutput,
     #[error("version check timed out")]
     Timeout,
-    #[error("background version check failed")]
-    Runtime,
+    #[error("background version check failed: {0}")]
+    Runtime(String),
 }
 
 /// Upper bound for version probes: long enough for cold Python startup, but
@@ -2130,7 +2138,7 @@ pub(crate) async fn probe_first_line(
                 .spawn(async move { cached_tool_first_line(binary, version_arg).await }),
         )
         .await
-        .map_err(|_| ToolProbeError::Runtime)?
+        .map_err(|error| ToolProbeError::Runtime(error.to_string()))?
     }
 }
 
@@ -2169,7 +2177,9 @@ async fn run_version_probe_uncached(
         use std::os::unix::process::CommandExt as _;
         command.as_std_mut().process_group(0);
     }
-    let child = command.spawn().map_err(|_| ToolProbeError::Spawn)?;
+    let child = command
+        .spawn()
+        .map_err(|error| ToolProbeError::Spawn(error.to_string()))?;
     let pid = child.id().unwrap_or_default();
     let mut group = ProbeProcessGroup::new(pid);
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
@@ -2177,7 +2187,7 @@ async fn run_version_probe_uncached(
             group.disarm();
             output
         }
-        Ok(Err(_)) => return Err(ToolProbeError::FailedExit),
+        Ok(Err(error)) => return Err(ToolProbeError::Wait(error.to_string())),
         Err(_) => return Err(ToolProbeError::Timeout),
     };
     if !output.status.success() {
@@ -2381,6 +2391,34 @@ mod tests {
             start.elapsed()
         );
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn async_version_probe_preserves_spawn_error_detail() {
+        let binary = unique_dir("version-probe-spawn").join("missing-yt-dlp");
+        assert!(!binary.exists());
+
+        match run_version_probe_uncached(&binary, "--version", std::time::Duration::from_millis(50))
+            .await
+        {
+            Err(ToolProbeError::Spawn(detail)) => assert!(!detail.is_empty()),
+            other => panic!("expected spawn error detail, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn feature_probe_helpers_preserve_spawn_error_detail() {
+        let binary = unique_dir("feature-probe-spawn").join("missing-tool");
+        assert!(!binary.exists());
+
+        assert!(matches!(
+            probe_impersonate_support(&binary).await,
+            Err(ToolProbeError::Spawn(detail)) if !detail.is_empty()
+        ));
+        assert!(matches!(
+            probe_ffmpeg_hls_extension_picky(&binary).await,
+            Err(ToolProbeError::Spawn(detail)) if !detail.is_empty()
+        ));
     }
 
     #[tokio::test]

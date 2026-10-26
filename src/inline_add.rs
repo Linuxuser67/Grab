@@ -1105,18 +1105,21 @@ pub(crate) fn enqueue_and_close_async<F>(
 
 /// Queue a probed link as a plain file and collapse the card: the fallback when
 /// extraction finds no playable media on an unlisted page. `Err` when plain intake rejects the URL.
-fn queue_plain(
+async fn queue_plain(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
     url: &str,
     scheduled_at: Option<i64>,
 ) -> Result<(), String> {
+    let destination = Some(dest.borrow().clone());
     // Batch guard defers start_next until the Scheduled status is set.
-    let _guard = manager.batch_guard();
-    let item = manager.enqueue(url, Some(&dest.borrow()), None)?;
+    let (item, guard) = manager
+        .enqueue_async_batched(url, destination.as_deref(), None)
+        .await?;
     apply_scheduled_at(&item, scheduled_at);
     close_card();
+    drop(guard);
     Ok(())
 }
 
@@ -2741,7 +2744,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 &close_b,
                                 &direct,
                                 scheduled_at_b.get(),
-                            ) {
+                            )
+                            .await
+                            {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     probe_b.borrow_mut().info.take();
@@ -2768,7 +2773,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 &close_b,
                                 &url,
                                 scheduled_at_b.get(),
-                            ) {
+                            )
+                            .await
+                            {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     fallback_plain_failed(
@@ -2830,7 +2837,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 &close_b,
                                 &url,
                                 scheduled_at_b.get(),
-                            ) {
+                            )
+                            .await
+                            {
                                 Ok(()) => return,
                                 Err(pe) => {
                                     fallback_plain_failed(
@@ -2940,11 +2949,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let scheduled_at = Rc::clone(&scheduled_at);
         Rc::new(move |source: SubmitSource| {
             let from_activate = matches!(source, SubmitSource::Enter | SubmitSource::Auto);
-            let fail = |message: &str| {
-                // Form-validation pattern: the error state lives on the
-                // entry itself, not in a caption underneath it.
-                set_field_error(&url_entry, message);
-            };
             // Add queues the whole gallery. The separate "Select files…"
             // button is the only path that opens per-file selection.
             if step2.is_gallery.get() {
@@ -3058,13 +3062,22 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if url.is_empty() && from_activate {
                 return;
             }
-            enqueue_and_close(
+            let enqueue_manager = Rc::clone(&m);
+            let enqueue_url = url.clone();
+            let error_entry = url_entry.clone();
+            enqueue_and_close_async(
                 &m,
                 &dd,
                 &close_card,
                 scheduled_at.get(),
-                |d| m.enqueue(&url, d, None),
-                fail,
+                move |d| async move {
+                    enqueue_manager
+                        .enqueue_async_batched(&enqueue_url, d.as_deref(), None)
+                        .await
+                },
+                // Form-validation pattern: the error state lives on the entry
+                // itself, not in a caption underneath it.
+                move |message| set_field_error(&error_entry, message),
             );
         })
     };

@@ -74,11 +74,7 @@ struct PendingDiscard {
 
 /// Reclaim the removed row's filesystem scratch on Tokio's blocking pool.
 /// The caller retains the destination reservation until this future completes.
-async fn cleanup_discarded_files(
-    dest: std::path::PathBuf,
-    id: u64,
-    remove_delivered_orphan: bool,
-) {
+async fn cleanup_discarded_files(dest: std::path::PathBuf, id: u64, remove_delivered_orphan: bool) {
     let worker_dest = dest.clone();
     if let Err(error) = crate::runtime::tokio_rt()
         .spawn_blocking(move || {

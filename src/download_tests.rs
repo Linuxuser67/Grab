@@ -4324,10 +4324,14 @@ fn restart_with_smaller_file_keeps_partial() {
         .restore_existing(&stored)
         .unwrap_or_else(|e| abort(&server, &e));
     let id = item.id();
-    // Drain the engine's pump future on this thread (see MAIN_LOOP_LOCK).
+    // Drain both asynchronous destination preparation and the engine/pump on this thread.
     let ctx = glib::MainContext::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while manager.running.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
+    while (manager.running.borrow().contains_key(&id)
+        || manager.preparing.borrow().contains(&id)
+        || manager.preparation_handles.borrow().contains_key(&id))
+        && std::time::Instant::now() < deadline
+    {
         ctx.iteration(false);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }

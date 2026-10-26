@@ -1429,8 +1429,14 @@ mod tests {
         std::fs::write(dir.join("Title.4.mp4.part"), b"row4").unwrap();
         std::fs::write(dir.join("Title.9.mp4.part"), b"row9").unwrap();
 
-        assert!(staging_occupied_in(&dir_file_names(&dir), 4), "id 4 occupied");
-        assert!(staging_occupied_in(&dir_file_names(&dir), 9), "id 9 occupied");
+        assert!(
+            staging_occupied_in(&dir_file_names(&dir), 4),
+            "id 4 occupied"
+        );
+        assert!(
+            staging_occupied_in(&dir_file_names(&dir), 9),
+            "id 9 occupied"
+        );
 
         // Without a manifest, the sweep must NOT pattern-delete: Title.4.mp4.part
         // is indistinguishable from a user's own file. Deletion requires the

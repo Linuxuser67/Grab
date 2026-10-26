@@ -489,16 +489,24 @@ pub(crate) fn is_grab_part(file_name: &str, stem: &str) -> bool {
     false
 }
 
-/// File names directly inside `dir` (unreadable dirs read as empty).
+/// File names directly inside `dir`, preserving read errors for callers that
+/// must not allocate identifiers from an incomplete directory snapshot.
+/// A not-yet-created destination is equivalent to an empty directory.
+pub(crate) fn try_dir_file_names(dir: &Path) -> std::io::Result<Vec<String>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    entries
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect()
+}
+
+/// Best-effort file listing for cleanup and display paths that can tolerate a
+/// missing or unreadable directory.
 pub(crate) fn dir_file_names(dir: &Path) -> Vec<String> {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter_map(|e| e.file_name().to_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    try_dir_file_names(dir).unwrap_or_default()
 }
 
 /// Reclaim this row's interrupted remuxes only. Remux temp files share the

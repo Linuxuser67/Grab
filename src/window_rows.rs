@@ -1179,11 +1179,15 @@ pub(crate) fn build_row(
             );
             toast.set_button_label(Some(&gettext("Undo")));
             let m2 = Rc::clone(&m);
+            let undo_toasts = Rc::clone(&t);
             toast.connect_button_clicked(move |_| {
                 let manager = Rc::clone(&m2);
+                let toasts = Rc::clone(&undo_toasts);
                 let snapshot = snapshot.clone();
                 glib::spawn_future_local(async move {
-                    manager.unremove_async(snapshot).await;
+                    if let Err(error) = manager.unremove_async(snapshot).await {
+                        toasts.add_toast(adw::Toast::new(&error));
+                    }
                 });
             });
             t.add_toast(toast);

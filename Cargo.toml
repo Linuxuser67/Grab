@@ -17,7 +17,7 @@ glib = "0.22"
 gio = "0.22"
 url = "2"
 # Read the single verified Deno executable from the official release ZIP.
-zip = { version = "8.6.0", default-features = false, features = ["deflate", "deflate-flate2-zlib-rs"] }
+zip = { version = "9.1.2", default-features = false, features = ["deflate", "deflate-flate2-zlib-rs"] }
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -29,7 +29,7 @@ axum = { version = "0.8", features = ["json"] }
 sha2 = "0.11"
 # HMAC-SHA256 for the browser-extension pairing handshake (extension_server).
 hmac = "0.13"
-tokio = { version = "~1.53.3", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "fs", "io-util", "macros", "net", "process"] }
+tokio = { version = "~1.54.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "fs", "io-util", "macros", "net", "process"] }
 futures-util = "0.3.34"
 getrandom = "=0.4.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "socks", "cookies", "gzip", "brotli", "deflate"] }
@@ -43,10 +43,10 @@ gettext-rs = "0.8"
 # Video-page extraction (YouTube etc). Wrapper around the yt-dlp + ffmpeg
 # binaries: rustls keeps the rustls-only posture; no cache backend in v1
 # (metadata is refetched, CDN URLs expire in ~6h anyway).
-yt-dlp = { version = "2.8.3", default-features = false, features = ["rustls"] }
+yt-dlp = { version = "2.9.1", default-features = false, features = ["rustls"] }
 libc = "0.2"
 # Mozilla Public Suffix List for validating browser cookie domains.
-psl = "=2.1.228"
+psl = "=2.1.241"
 # Safe wrappers for Linux no-replace renameat2 operations.
 rustix = { version = "1.1.5", features = ["fs"] }
 thiserror = "2"

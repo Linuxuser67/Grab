@@ -905,9 +905,9 @@ pub(crate) fn discard_handoff_cookies(url: &str) {
 /// runtime's blocking pool.
 pub(crate) fn discard_handoff_cookies_async(url: &str) {
     if let Some(p) = take_handoff_cookie_path(url) {
-        let _ = crate::runtime::tokio_rt().spawn_blocking(move || {
+        drop(crate::runtime::tokio_rt().spawn_blocking(move || {
             let _ = std::fs::remove_file(p);
-        });
+        }));
     }
 }
 

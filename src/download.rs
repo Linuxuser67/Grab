@@ -1595,15 +1595,19 @@ impl DownloadManager {
 
     fn insert_history(
         self: &Rc<Self>,
-        stored_id: Option<u64>,
-        url: String,
-        dir: String,
-        name: String,
-        progress: f64,
+        stored: StoredItem,
         output_dir: Option<String>,
-        video_source: Option<crate::media_types::VideoSource>,
     ) {
-        let Ok(url) = normalize_url(&url) else {
+        let StoredItem {
+            id: stored_id,
+            url: raw_url,
+            dest_dir: dir,
+            filename: name,
+            progress,
+            video_source,
+            ..
+        } = stored;
+        let Ok(url) = normalize_url(&raw_url) else {
             tracing::warn!("skipping history entry with bad URL");
             return;
         };
@@ -4546,16 +4550,7 @@ impl DownloadManager {
                                 Err(e) => tracing::warn!("skipping queue entry: {e}"),
                             }
                         } else {
-                            let video_source = p.item.video_source.clone();
-                            self.insert_history(
-                                p.item.id,
-                                p.item.url,
-                                p.item.dest_dir,
-                                p.item.filename,
-                                p.item.progress,
-                                p.output_dir,
-                                video_source,
-                            );
+                            self.insert_history(p.item, p.output_dir);
                         }
                     }
                     status => {

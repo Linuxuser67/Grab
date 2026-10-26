@@ -72,6 +72,32 @@ struct PendingDiscard {
     finalizer: tokio::task::JoinHandle<()>,
 }
 
+/// Reclaim the removed row's filesystem scratch on Tokio's blocking pool.
+/// The caller retains the destination reservation until this future completes.
+async fn cleanup_discarded_files(
+    dest: std::path::PathBuf,
+    id: u64,
+    remove_delivered_orphan: bool,
+) {
+    let worker_dest = dest.clone();
+    if let Err(error) = crate::runtime::tokio_rt()
+        .spawn_blocking(move || {
+            if let Some(dest_dir) = worker_dest.parent() {
+                crate::video::clean_staging_files(dest_dir, id);
+            }
+            crate::video::clean_dest_parts(&worker_dest);
+            if remove_delivered_orphan {
+                // The worker committed after its row was removed. This is the
+                // narrowly scoped orphan case; normal finished files survive.
+                let _ = std::fs::remove_file(&worker_dest);
+            }
+        })
+        .await
+    {
+        tracing::warn!(item_id = id, error = ?error, "discard cleanup worker failed");
+    }
+}
+
 #[derive(Debug)]
 enum DeleteOperation {
     Gallery {
@@ -3343,14 +3369,8 @@ impl DownloadManager {
                 let worker_abort = handle.abort_handle();
                 let finalizer = crate::runtime::tokio_rt().spawn(async move {
                     let _ = handle.await;
-                    if let Some(dest_dir) = dest.parent() {
-                        crate::video::clean_staging_files(dest_dir, id);
-                    }
-                    crate::video::clean_dest_parts(&dest);
-                    if gate.was_delivered() {
-                        // The commit won the race, so this file is the attempt's own orphan and the row is gone: the one sanctioned exception to never deleting a finished file.
-                        let _ = std::fs::remove_file(&dest);
-                    }
+                    let remove_delivered_orphan = gate.was_delivered();
+                    cleanup_discarded_files(dest.clone(), id, remove_delivered_orphan).await;
                     if let Ok(mut r) = reservations.lock() {
                         r.remove(&dest);
                     }
@@ -3373,10 +3393,7 @@ impl DownloadManager {
             // cleanup off GTK too; a large staging dir must not stall the UI.
             None => {
                 let finalizer = crate::runtime::tokio_rt().spawn(async move {
-                    if let Some(dest_dir) = dest.parent() {
-                        crate::video::clean_staging_files(dest_dir, id);
-                    }
-                    crate::video::clean_dest_parts(&dest);
+                    cleanup_discarded_files(dest.clone(), id, false).await;
                     if let Ok(mut r) = reservations.lock() {
                         r.remove(&dest);
                     }

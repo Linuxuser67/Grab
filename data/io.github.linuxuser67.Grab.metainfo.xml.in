@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.4.0~beta.1" date="2026-10-26">
+      <description>
+        <ul>
+          <li>Move download trash, filesystem, restore, cache, and Undo cleanup off the GTK main thread.</li>
+          <li>Add checked arithmetic and stronger probe-error detail to media tool support.</li>
+          <li>Keep release metadata consistent across cargo, Meson, and AppStream.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.3.2" date="2026-10-25">
       <description>
         <ul>

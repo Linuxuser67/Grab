@@ -1464,17 +1464,6 @@ impl DownloadManager {
         Ok(self.insert(item))
     }
 
-    /// Synchronous gallery restore helper for tests; production passes a prelisted destination.
-    #[cfg(test)]
-    pub fn restore_existing_gallery(
-        self: &Rc<Self>,
-        stored: &StoredItem,
-        job: Option<crate::gallery_argv::GalleryJob>,
-    ) -> Result<DownloadItem, String> {
-        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&stored.dest_dir));
-        self.restore_existing_gallery_with_listing(stored, job, &existing)
-    }
-
     fn restore_existing_gallery_with_listing(
         self: &Rc<Self>,
         stored: &StoredItem,

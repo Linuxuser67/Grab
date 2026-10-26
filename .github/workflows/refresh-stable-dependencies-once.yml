@@ -1,0 +1,35 @@
+name: One-shot stable dependency refresh
+
+on:
+  push:
+    branches:
+      - dependency-update-latest-stable-2026-10
+
+# This temporary workflow only runs for the dedicated dependency-update branch.
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Update every compatible crates.io dependency to its latest stable release
+        run: cargo update
+      - name: Validate the resolved lockfile
+        run: cargo metadata --locked --format-version 1 > /dev/null
+      - name: Regenerate the Flatpak offline source manifest
+        run: python3 build-aux/gen-cargo-sources.py
+      - name: Commit dependency updates and remove this temporary workflow
+        env:
+          BRANCH: dependency-update-latest-stable-2026-10
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/refresh-stable-dependencies-once.yml
+          git add Cargo.lock build-aux/cargo-sources.json
+          git diff --cached --check
+          git diff --cached --stat
+          git commit -m "chore(deps): refresh latest stable dependencies"
+          git push origin "HEAD:refs/heads/$BRANCH"

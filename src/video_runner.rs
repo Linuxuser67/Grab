@@ -23,10 +23,10 @@ use crate::video_spawn::{
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging_files, collect_sidecar,
-    dest_part_path, discover_unified_output, ensure_staging_dir_in, file_len, read_manifest,
-    release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
-    staging_location_for_dest, sweep_partial_remuxes, sweep_staging_preserving_recordings,
-    write_private,
+    dest_part_path, discover_unified_output, ensure_staging_dir_in, file_len, info_json_path,
+    live_info_json_path, read_manifest, release_remux_lease, reserve_remux_temp, resume_plan,
+    sidecar_path_for, staging_location_for_dest, sweep_partial_remuxes,
+    sweep_staging_preserving_recordings, write_private,
 };
 use crate::video_tools::{VideoError, ensure_tool_versions, resolve_libraries};
 use crate::video_types::{FetchedVideo, VideoOutcome, yt_dlp_reports_currently_live};
@@ -45,6 +45,26 @@ pub enum StopIntent {
     Preserve,
     /// Stop and throw it away (row removal): reap the recorder and return without adopting, remuxing or delivering; scratch stays for the manager to reclaim after the task returns.
     Discard,
+}
+
+/// Remove a single-use probe info JSON on drop. Both attempt paths have early
+/// returns (abort, failure, lost race) that would otherwise leak it.
+struct InfoJsonGuard {
+    path: Option<PathBuf>,
+}
+
+impl InfoJsonGuard {
+    fn new(path: Option<PathBuf>) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for InfoJsonGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Run one attempt: resolve → download parts → merge → rename into place.
@@ -325,6 +345,10 @@ async fn run_video_download_inner(
     let plan = resume_plan(&query);
     match plan {
         ResumePlan::Finished => {
+            // The finished file is in place; this row's scratch and manifest
+            // are spent. Sweep before returning, or the bookkeeping outlives
+            // the download.
+            sweep_staging_preserving_recordings(&staging, job.item_id);
             return Ok(match file_len(&job.dest) {
                 Some(n) => VideoOutcome::Finished(n),
                 None => VideoOutcome::Aborted,
@@ -338,9 +362,6 @@ async fn run_video_download_inner(
             }
             // Clear this item's staging files (grab-<id>-*), not the dest dir itself: a previous attempt's detached writers may still hold old inodes, so unlink first. Only mismatches/oversize leftovers land here; same-selection resume never does.
             crate::video::clean_staging_files(&staging, job.item_id);
-            // Reclaim a previous attempt's info-JSON temp file (crash debris;
-            // the normal path deletes it after the attempt).
-            let _ = std::fs::remove_file(staging.join(format!(".grab-info-{}.json", job.item_id)));
             // Dest-dir parts are Grab-namespaced, so a mismatch restarts clean instead of resuming into a foreign lookalike. The finished file itself is never touched.
             clean_dest_parts(&job.dest);
             // Record this attempt's selection up front: a pause from here on leaves a matchable sidecar, so the next attempt resumes instead of wiping.
@@ -363,6 +384,7 @@ async fn run_video_download_inner(
                     // `{stem}.{id}.`; record the prefix so cleanup can reclaim
                     // them. Manifest-anchored, not inferred.
                     staging_prefix: Some(unified_staging_prefix(&job.dest, job.item_id)),
+                    dest_dir: None,
                 },
             )
             .await?;
@@ -555,8 +577,8 @@ pub(crate) async fn run_unified_ytdlp(
     // resolve above), so every requested format ID is present. yt-dlp still
     // re-extracts automatically if a loaded format URL 403/404s (safety net
     // for stale signed URLs).
-    let info_json_path: Option<std::path::PathBuf> = if let Some(json) = job.info_json.as_ref() {
-        let json_path = staging.join(format!(".grab-info-{}.json", job.item_id));
+    let json_path: Option<std::path::PathBuf> = if let Some(json) = job.info_json.as_ref() {
+        let json_path = info_json_path(job.item_id);
         // Private write: the JSON can hold signed media URLs and headers.
         let written = match serde_json::to_string(json) {
             Ok(text) => write_private(&json_path, text.as_bytes()).await.is_ok(),
@@ -579,6 +601,8 @@ pub(crate) async fn run_unified_ytdlp(
     } else {
         None
     };
+    // Single-use: removed on drop, including every early return below.
+    let info_guard = InfoJsonGuard::new(json_path);
     // Single-counter progress with the pump's granularity gate; `done` is capped against the metadata total so the bar never passes 100%.
     let sent = Arc::new(AtomicU64::new(0));
     let report = {
@@ -619,12 +643,9 @@ pub(crate) async fn run_unified_ytdlp(
         timeout,
     )
     .await;
-    // The info JSON temp file is single-use: delete it now that yt-dlp has
-    // read it (or failed to). Staging's manifest cleanup never owns it.
-    if let Some(path) = info_json_path {
-        let _ = std::fs::remove_file(path);
-    }
     let (done, after_move, abort_intent) = attempt_result?;
+    // yt-dlp is done reading it; don't keep signed URLs on disk through merge.
+    drop(info_guard);
     let Some(()) = done else {
         // User abort: on Preserve, try merging partial DASH parts into a
         // single file instead of abandoning them.
@@ -1641,6 +1662,7 @@ pub(crate) async fn run_live_ytdlp(
             final_bytes: None,
             staging_name: Some(staging_name.clone()),
             staging_prefix: None,
+            dest_dir: None,
         },
     )
     .await;
@@ -1661,7 +1683,7 @@ pub(crate) async fn run_live_ytdlp(
         .and_then(|json| serde_json::to_string(json).ok())
     {
         Some(text) => {
-            let path = staging.join(format!(".grab-live-{}.json", job.item_id));
+            let path = live_info_json_path(job.item_id);
             // Private write: the JSON can hold signed manifest URLs.
             match write_private(&path, text.as_bytes()).await {
                 Ok(()) => Some(path),
@@ -1672,23 +1694,11 @@ pub(crate) async fn run_live_ytdlp(
     };
     // Reclaim a previous run's crash debris (the normal path deletes it below).
     if live_info_path.is_none() {
-        let _ = std::fs::remove_file(staging.join(format!(".grab-live-{}.json", job.item_id)));
+        let _ = std::fs::remove_file(live_info_json_path(job.item_id));
     }
     // Deleted on drop: the attempt loop has early returns (quiesce failure,
     // nothing recorded) that would otherwise leak it.
-    struct InfoJsonGuard {
-        path: Option<std::path::PathBuf>,
-    }
-    impl Drop for InfoJsonGuard {
-        fn drop(&mut self) {
-            if let Some(p) = self.path.take() {
-                let _ = std::fs::remove_file(p);
-            }
-        }
-    }
-    let _info_guard = InfoJsonGuard {
-        path: live_info_path.clone(),
-    };
+    let _info_guard = InfoJsonGuard::new(live_info_path.clone());
     let mut downgraded: Option<VideoJob> = None;
     let src = 'attempt: loop {
         let attempt: &VideoJob = downgraded.as_ref().unwrap_or(job);
@@ -2075,6 +2085,9 @@ pub(crate) async fn run_live_ytdlp(
         Exit::Delivered,
     )
     .await;
+    // Delivered: the manifest's job is done. Failure paths above keep it,
+    // because it is the ownership proof for a salvaged recording.
+    sweep_staging_preserving_recordings(staging, job.item_id);
     Ok(file_len(&job.dest))
 }
 

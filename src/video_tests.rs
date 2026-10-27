@@ -735,6 +735,7 @@ fn test_manifest() -> VideoManifest {
         final_bytes: None,
         staging_name: None,
         staging_prefix: None,
+        dest_dir: None,
     }
 }
 
@@ -4093,6 +4094,9 @@ fn live_capture_adopts_part_and_remuxes() {
     let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
+    // Force the probe-info temp through the runner: it must be private scratch,
+    // never a file beside the finished download.
+    job.info_json = Some(serde_json::json!({"id": "grabtest"}));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     // Natural end with a `.part` shell: adopted, remuxed, delivered.
@@ -4111,17 +4115,21 @@ fn live_capture_adopts_part_and_remuxes() {
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"tsbytes");
-    let prefix = format!("grab-{}-", job.item_id);
+    // The download dir holds only the payload and the test's fake binaries:
+    // manifest and probe JSON are bookkeeping, kept in the state/runtime roots.
+    let leftovers: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".json"))
+        .collect();
     assert!(
-        !std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .any(|e| e
-                .file_name()
-                .to_str()
-                .map(|n| n.starts_with(&prefix) && !n.ends_with(".manifest.json"))
-                .unwrap_or(false)),
-        "staging cleaned"
+        leftovers.is_empty(),
+        "JSON left in the download dir: {leftovers:?}"
+    );
+    assert!(
+        read_manifest(&staging, job.item_id).is_none(),
+        "delivered live row kept its resume manifest"
     );
     assert!(
         !dir.join("v.1.mp4.part").exists(),
@@ -4919,9 +4927,11 @@ fn sweep_never_touches_bystander_with_id_like_name() {
         final_bytes: None,
         staging_name: Some("My Video.mp4".into()),
         staging_prefix: None,
+        dest_dir: Some(staging.clone()),
     };
-    let manifest_path = staging.join(".4.manifest.json");
-    std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+    let manifest_file = manifest_path(&staging, 4);
+    std::fs::create_dir_all(manifest_file.parent().unwrap()).unwrap();
+    std::fs::write(&manifest_file, serde_json::to_string(&manifest).unwrap()).unwrap();
     std::fs::write(staging.join("My Video.mp4.part"), b"partial").unwrap();
 
     sweep_staging_preserving_recordings(&staging, 4);
@@ -4938,7 +4948,7 @@ fn sweep_never_touches_bystander_with_id_like_name() {
     assert_eq!(std::fs::read(staging.join("x.4.y")).unwrap(), b"bystander");
     // Our staging is reclaimed.
     assert!(!staging.join("My Video.mp4.part").exists());
-    assert!(!manifest_path.exists());
+    assert!(!manifest_file.exists());
     let _ = std::fs::remove_dir_all(&staging);
 }
 
@@ -9506,6 +9516,9 @@ fn unified_runner_downloads_claims_and_collects() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     job.subtitles = Some("en".into());
+    // Exercise the probe-info temp path: it must live in private scratch, not
+    // beside the finished download.
+    job.info_json = Some(serde_json::json!({"id": "v123"}));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let gate = AttemptGate::new();
@@ -9531,18 +9544,21 @@ fn unified_runner_downloads_claims_and_collects() {
          finalizer would never know to reclaim it"
     );
     assert_eq!(std::fs::read(dir.join("v.en.srt")).unwrap(), b"subtitles");
-    let prefix = format!("grab-{}-", job.item_id);
-    assert!(
-        !std::fs::read_dir(&dir)
+    // Nothing JSON may remain in the download dirs: the probe temp is runtime
+    // scratch and the manifest lives under the state root.
+    for dir in [&dir, &staging] {
+        let leftovers: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .any(|e| e
-                .file_name()
-                .to_str()
-                .map(|n| n.starts_with(&prefix))
-                .unwrap_or(false)),
-        "staging cleaned"
-    );
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".json"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "JSON left in {}: {leftovers:?}",
+            dir.display()
+        );
+    }
     let mut progress = false;
     let mut merging = false;
     while let Ok(msg) = rx.try_recv() {

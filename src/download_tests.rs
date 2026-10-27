@@ -4549,7 +4549,9 @@ fn remove_cleans_video_staging() {
     let manifest_json = format!(
         r#"{{"page_url":"https://x.com/u/status/1","quality":"1080p","video_format_id":null,"video_ext":"mp4","audio_format_id":"","audio_ext":"","final_bytes":null,"staging_name":"v.{id}.mp4"}}"#
     );
-    std::fs::write(destdir.join(format!(".{id}.manifest.json")), manifest_json).unwrap();
+    let manifest_file = crate::video_staging::manifest_path(&destdir, id);
+    std::fs::create_dir_all(manifest_file.parent().unwrap()).unwrap();
+    std::fs::write(&manifest_file, manifest_json).unwrap();
     for n in ["v.mp4", "v.srt"] {
         std::fs::write(destdir.join(n), b"x").unwrap();
     }
@@ -4578,7 +4580,7 @@ fn remove_cleans_video_staging() {
     );
     manager.remove(id);
     assert!(
-        !destdir.join(format!(".{id}.manifest.json")).exists(),
+        !manifest_file.exists(),
         "staged sidecar must go with the row"
     );
     assert!(

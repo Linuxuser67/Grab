@@ -1490,6 +1490,7 @@ pub(crate) fn real_home_dir() -> Option<PathBuf> {
     // NSS may need more than the POSIX minimum. Retry ERANGE but bound growth
     // so a broken NSS module cannot make this allocate indefinitely.
     const MAX_PASSWD_BUFFER: usize = 1024 * 1024;
+    // SAFETY: `sysconf` reads the process environment; no pointers involved.
     let suggested = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
     let initial = if suggested > 0 {
         (suggested as usize).clamp(1024, MAX_PASSWD_BUFFER)
@@ -1522,6 +1523,8 @@ pub(crate) fn real_home_dir() -> Option<PathBuf> {
         if entry.pw_dir.is_null() {
             return None;
         }
+        // SAFETY: `getpwuid_r` succeeded, so `pw_dir` is a non-null C string
+        // inside `buffer`; the bytes are copied out before `buffer` changes.
         let bytes = unsafe { CStr::from_ptr(entry.pw_dir) }.to_bytes();
         return (!bytes.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(bytes)));
     }

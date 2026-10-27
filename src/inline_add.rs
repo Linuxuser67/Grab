@@ -486,7 +486,10 @@ pub(crate) struct VideoStep {
     /// manager, dest, etc. are in scope). The button invokes it if set.
     /// The nested Rc/RefCell/Option is the wiring cost of connecting the
     /// button (wired at VideoStep construction) to context available later.
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "nested Rc/RefCell/Option keeps the button wiring in one place"
+    )]
     pub(crate) gallery_select_opener: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
     /// Abort handle for the in-flight gallery file enumeration (picker).
     /// Aborted when the card closes, a new lookup starts, or the opener is
@@ -817,7 +820,6 @@ fn selected_audio_only(step: &VideoStep) -> bool {
         .unwrap_or(false)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_probed_single(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
@@ -902,7 +904,10 @@ fn submit_probed_single(
 /// Dispatch a fresh preview to its submit path: singles keep their chosen
 /// format, while collections queue their resolved entries. The caller's
 /// freshness gate stays.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the preview and submit paths share this GUI wiring; a context struct only renames it"
+)]
 fn submit_probe(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
@@ -1449,7 +1454,10 @@ fn push_playlist_items_page(
 
 /// Multi-file .torrent intake normally queues every file without displaying
 /// the selection page; the page remains available if enqueueing fails.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "single call site; bundling these into a struct would only move the arguments"
+)]
 fn push_torrent_picker_page(
     nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,

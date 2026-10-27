@@ -194,7 +194,6 @@ pub(crate) fn playlist_scope_args(playlist_index: Option<usize>) -> Vec<String> 
 }
 
 /// yt-dlp argv for one unified direct download into a staging temp. Pure.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn unified_download_argv(
     job: &VideoJob,
     spec: &str,
@@ -474,7 +473,6 @@ pub(crate) fn live_from_start_unsupported(log: &str) -> bool {
 }
 
 /// yt-dlp argv for one VOD HLS capture (planner-pinned variant id, merge/extract, proxy/identity). Pure.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn hls_download_argv(
     job: &VideoJob,
     hls_format_id: &str,

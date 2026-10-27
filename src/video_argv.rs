@@ -3,7 +3,9 @@
 
 use crate::video_prefs::subtitle_cli_args;
 use crate::video_quality::quality_height;
-use crate::video_staging::{VideoManifest, dest_part_path, manifest_path, ytdlp_output_template};
+use crate::video_staging::{
+    VideoManifest, dest_part_path, manifest_path, write_private, ytdlp_output_template,
+};
 use crate::video_tools::{VideoError, ffmpeg_location_dir};
 use std::path::{Path, PathBuf};
 
@@ -12,8 +14,13 @@ pub(crate) async fn write_manifest(
     item_id: u64,
     manifest: &VideoManifest,
 ) -> Result<(), VideoError> {
-    let text = serde_json::to_string_pretty(manifest).map_err(VideoError::staging)?;
-    tokio::fs::write(manifest_path(dir, item_id), text)
+    // Record the destination at the single writer choke point: callers build
+    // the selection fields, never the path bookkeeping.
+    let mut manifest = manifest.clone();
+    manifest.dest_dir = Some(dir.to_path_buf());
+    let text = serde_json::to_string_pretty(&manifest).map_err(VideoError::staging)?;
+    // Private: the manifest carries the page URL and destination path.
+    write_private(&manifest_path(dir, item_id), text.as_bytes())
         .await
         .map_err(VideoError::staging)
 }

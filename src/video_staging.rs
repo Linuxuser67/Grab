@@ -19,7 +19,7 @@
 use crate::video_prefs::subtitle_content_languages;
 use crate::video_tools::VideoError;
 use gettextrs::gettext;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Shared root for tiny engine scratch (cookie dumps, probe output). Stays on
 /// tmpfs: only small files ever land here. Bulky download parts stage beside
@@ -27,6 +27,91 @@ use std::path::{Path, PathBuf};
 /// there fills memory and fails large downloads with "no space left".
 pub fn staging_root() -> PathBuf {
     std::env::temp_dir().join("grab-video")
+}
+
+/// Root for persistent per-item bookkeeping (resume manifests). This is
+/// application state, not user content: it survives restarts but is not a
+/// download. Debug-only `GRAB_STATE_DIR` seam: tests can point it at a scratch
+/// dir; release builds always use the real location.
+fn state_root() -> PathBuf {
+    if let Some(dir) = debug_dir_override("GRAB_STATE_DIR") {
+        return dir;
+    }
+    #[cfg(test)]
+    {
+        test_root("state")
+    }
+    #[cfg(not(test))]
+    {
+        xdg_dir("XDG_STATE_HOME")
+            .unwrap_or_else(|| glib::home_dir().join(".local/state"))
+            .join("grab")
+    }
+}
+
+/// Root for single-use private scratch (probe info JSON holding signed URLs).
+/// Ephemeral under `$XDG_RUNTIME_DIR`; when the session provides none, the
+/// state root keeps it private and the startup sweep reclaims it.
+fn runtime_root() -> PathBuf {
+    if let Some(dir) = debug_dir_override("GRAB_RUNTIME_DIR") {
+        return dir;
+    }
+    #[cfg(test)]
+    {
+        test_root("runtime")
+    }
+    #[cfg(not(test))]
+    {
+        match xdg_dir("XDG_RUNTIME_DIR") {
+            Some(dir) => dir.join("grab"),
+            None => state_root().join("run"),
+        }
+    }
+}
+
+/// Single-use probe JSON paths in the private scratch root. Private because
+/// they can carry signed media URLs and request headers; single-use because a
+/// resumed attempt resolves fresh.
+pub(crate) fn info_json_path(item_id: u64) -> PathBuf {
+    runtime_root().join(format!("info-{item_id}.json"))
+}
+
+pub(crate) fn live_info_json_path(item_id: u64) -> PathBuf {
+    runtime_root().join(format!("live-{item_id}.json"))
+}
+
+/// An absolute XDG base dir, or `None` when unset or relative (the spec says
+/// relative paths must be ignored).
+#[cfg(not(test))]
+fn xdg_dir(var: &str) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
+#[cfg(debug_assertions)]
+fn debug_dir_override(var: &str) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_dir_override(_var: &str) -> Option<PathBuf> {
+    None
+}
+
+/// One scratch root per test process. Tests run serially but their temp dirs
+/// differ; the shared root keeps them off the developer's real state dirs.
+#[cfg(test)]
+fn test_root(kind: &str) -> PathBuf {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!("grab-test-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    })
+    .join(kind)
 }
 
 /// Staging files live directly in the destination dir, visible like other download managers:
@@ -162,12 +247,42 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir(dir)
 }
 
-/// The staging leaf must be a real directory, never a symlink: build the
-/// parent chain, then create the leaf atomically, so a pre-planted link is
-/// refused up front and a link racing for the name can't be followed into
-/// place. Staging names are item ids, so unlike shareable folders there is
-/// nothing to dedupe to — refusing loudly is the safe behavior.
-fn ensure_real_staging_leaf(dir: &Path) -> Result<(), VideoError> {
+/// Create a private bookkeeping dir and any missing ancestors with owner-only
+/// permissions (0700). A symlinked leaf is refused, never followed: these dirs
+/// hold manifests and probe JSONs.
+fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut missing = Vec::new();
+    let mut current = dir;
+    while std::fs::symlink_metadata(current).is_err() {
+        missing.push(current.to_path_buf());
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+    for path in missing.iter().rev() {
+        match create_private_dir(path) {
+            Ok(()) => {}
+            // Lost a race for the name: the check below validates the winner.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_dir() => Ok(()),
+        _ => Err(std::io::Error::other(
+            "bookkeeping directory is not a real directory",
+        )),
+    }
+}
+
+/// The leaf must be a real directory, never a symlink: build the parent
+/// chain, then create the leaf atomically, so a pre-planted link is refused
+/// up front and a link racing for the name can't be followed into place.
+/// Used for staging dirs and for Grab's private bookkeeping dirs; names are
+/// item ids, so unlike shareable folders there is nothing to dedupe to —
+/// refusing loudly is the safe behavior.
+pub(crate) fn ensure_real_staging_leaf(dir: &Path) -> Result<(), VideoError> {
     let refused = || VideoError::staging(gettext("staging directory is not a real directory"));
     match std::fs::symlink_metadata(dir) {
         // `symlink_metadata` doesn't follow the final component, so a link
@@ -271,18 +386,17 @@ pub(crate) fn drop_empty_staging_root(root: &Path) {
     let _ = std::fs::remove_dir(canon);
 }
 
-/// Reclaim an orphan staging dir: scratch goes, completed `final.*` recordings
-/// stay. Only numeric dir names; runs at startup after queue restore, so
-/// nothing live is touched.
-/// Sweep one destination's staging files: files for item IDs with no live row
-/// are reclaimed. A missing dest dir is a no-op.
+/// Startup sweep for manifests that older versions left in the destination
+/// dir (canonical + legacy names). New manifests live in the state dir and are
+/// handled by [`sweep_state_staging`]. A missing dest dir is a no-op.
 ///
-/// Startup sweep: reclaim staging files for items with no live row.
-/// Scans for manifest files, extracts their ids, and deletes exactly the
-/// files each manifest owns (`staging_name` / `staging_prefix`). A manifest
-/// that records no ownership is left alone. A user's own files are never
-/// touched: without a manifest, everything is preserved.
+/// Also removes the previous versions' single-use probe JSONs
+/// (`.grab-info-*` / `.grab-live-*`): they are never reused across restarts.
 ///
+/// Deletes exactly the files each manifest owns (`staging_name` /
+/// `staging_prefix`). A manifest that records no ownership is left alone. A
+/// user's own files are never touched: without a manifest, everything is
+/// preserved.
 pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>) {
     // Manifest-driven cleanup: the ONLY destructive authority for staging
     // files is the manifest's `staging_name` / `staging_prefix`. Scan for
@@ -293,6 +407,11 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
     for entry in entries.filter_map(|e| e.ok()) {
         let name = entry.file_name();
         let name_str = name.to_str().unwrap_or("");
+        // Old single-use probe JSONs: stale by definition after a restart.
+        if is_legacy_info_name(name_str) {
+            let _ = std::fs::remove_file(entry.path());
+            continue;
+        }
         // Find manifest files: .{id}.manifest.json (canonical) or legacy.
         let id = if let Some(id_str) = name_str
             .strip_prefix('.')
@@ -324,6 +443,85 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
     }
 }
 
+/// Startup sweep for state-dir manifests: reclaim every manifest whose
+/// `(destination, id)` no longer has a queue row. `keep` carries the raw queue
+/// dest strings; keys are normalized here so a trailing slash cannot hide a
+/// live row. Also clears stale runtime scratch.
+pub fn sweep_state_staging(keep: &std::collections::HashSet<(String, u64)>) {
+    let keep: std::collections::HashSet<(String, u64)> = keep
+        .iter()
+        .map(|(dest, id)| (dest_key(Path::new(dest)), *id))
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(state_root().join("video")) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(id) = state_manifest_id(&name) else {
+                continue;
+            };
+            let Some(manifest) = read_manifest_file(&entry.path()) else {
+                // Unreadable manifest: it proves no ownership we can act on.
+                let _ = std::fs::remove_file(entry.path());
+                continue;
+            };
+            let Some(dest) = manifest.dest_dir.as_deref() else {
+                // No destination recorded = no file it could prove ownership
+                // of. State manifests always record one; drop the stray.
+                let _ = std::fs::remove_file(entry.path());
+                continue;
+            };
+            if keep.contains(&(dest_key(dest), id)) {
+                continue;
+            }
+            remove_manifest_owned_files(dest, id);
+        }
+    }
+    sweep_private_temps();
+}
+
+/// `{id}-{key}.manifest.json` -> id.
+fn state_manifest_id(name: &str) -> Option<u64> {
+    let (id, key) = name.strip_suffix(".manifest.json")?.split_once('-')?;
+    if key.len() != 16 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    id.parse().ok()
+}
+
+/// Startup: all scratch JSON is per-attempt and never reused across a process.
+fn sweep_private_temps() {
+    let Ok(entries) = std::fs::read_dir(runtime_root()) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if is_private_temp_name(&name) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// `.grab-info-{id}.json` / `.grab-live-{id}.json` (pre-runtime-dir names).
+fn is_legacy_info_name(name: &str) -> bool {
+    let rest = name
+        .strip_prefix(".grab-info-")
+        .or_else(|| name.strip_prefix(".grab-live-"));
+    rest.and_then(|s| s.strip_suffix(".json"))
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `info-{id}.json` / `live-{id}.json` in the private scratch root.
+fn is_private_temp_name(name: &str) -> bool {
+    let rest = name
+        .strip_prefix("info-")
+        .or_else(|| name.strip_prefix("live-"));
+    rest.and_then(|s| s.strip_suffix(".json"))
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Sidecar recording completed parts, so a retry can skip straight to the merge.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct VideoManifest {
@@ -346,6 +544,12 @@ pub(crate) struct VideoManifest {
     /// pattern is manifest-anchored, not inferred.
     #[serde(default)]
     pub(crate) staging_prefix: Option<String>,
+    /// Destination directory this attempt writes into. The state-dir filename
+    /// already carries a hash of it; recording it lets the startup sweep find
+    /// the files without reversing the hash. Absent in older manifests (which
+    /// still live inside the destination and need no lookup).
+    #[serde(default)]
+    pub(crate) dest_dir: Option<PathBuf>,
 }
 
 impl VideoManifest {
@@ -560,11 +764,8 @@ pub fn sweep_staging_preserving_recordings(staging: &Path, item_id: u64) {
         }
         let _ = std::fs::remove_file(path);
     }
-    // Remove the manifest itself (canonical + legacy names).
-    let _ = std::fs::remove_file(manifest_path(staging, item_id));
-    for path in legacy_manifest_paths(staging, item_id) {
-        let _ = std::fs::remove_file(path);
-    }
+    // Remove the manifest itself plus the item's single-use probe temps.
+    remove_manifest_files(staging, item_id);
     // Never remove_dir: staging is the user's dest dir, not a dedicated subfolder.
 }
 
@@ -643,15 +844,59 @@ pub(crate) fn collect_sidecar(src: &Path, dest: &Path, lang: &str) {
     }
 }
 
-pub(crate) fn manifest_path(dest_dir: &Path, item_id: u64) -> PathBuf {
-    // Genuinely hidden: dot at the start of the basename. Internal bookkeeping,
-    // invisible in normal file views. Just the ID: simple and unique.
-    dest_dir.join(format!(".{item_id}.manifest.json"))
+/// Stable identifier for a destination directory: FNV-1a 64 over the resolved
+/// absolute path (canonical when it exists, lexical otherwise). Two
+/// destinations that reuse an item id get distinct manifests, and a restart
+/// that spells the same path differently — a symlinked Downloads dir, a
+/// trailing slash, `.`/`..` segments — still finds the same one.
+pub(crate) fn dest_key(dest: &Path) -> String {
+    let normalized = std::fs::canonicalize(dest).unwrap_or_else(|_| lexical_absolute(dest));
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in normalized.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
-/// Previous manifest names, for backward-compatible reads.
-fn legacy_manifest_paths(dest_dir: &Path, item_id: u64) -> [PathBuf; 3] {
+/// Absolute path with `.` dropped and `..` resolved lexically. No filesystem
+/// access: the key must stay stable for a destination that does not exist yet.
+fn lexical_absolute(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let mut out = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(component);
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Persistent manifest location: `$XDG_STATE_HOME/grab/video/{id}-{key}.json`.
+/// The key scopes it to one destination dir, so an id reused elsewhere never
+/// adopts this row's parts.
+pub(crate) fn manifest_path(dest_dir: &Path, item_id: u64) -> PathBuf {
+    state_root()
+        .join("video")
+        .join(format!("{item_id}-{}.manifest.json", dest_key(dest_dir)))
+}
+
+/// Previous manifest names, all inside the destination dir: the canonical
+/// pre-migration name first, then three older variants. Kept readable (and
+/// reclaimable) for one upgrade cycle.
+fn legacy_manifest_paths(dest_dir: &Path, item_id: u64) -> [PathBuf; 4] {
     [
+        dest_dir.join(format!(".{item_id}.manifest.json")),
         dest_dir.join(format!(".grab-{item_id}-manifest.json")),
         dest_dir.join(format!("grab-{item_id}-.manifest.json")),
         dest_dir.join(format!("grab-{item_id}-manifest.json")),
@@ -709,12 +954,23 @@ fn owned_file_names(dest_dir: &Path, ownership: &ManifestOwnership) -> Vec<Strin
     names
 }
 
-/// Delete the manifest sidecar files (canonical + legacy names).
+/// Delete the manifest sidecar files (canonical + legacy names), the item's
+/// single-use probe JSONs, and the old dest-dir info JSONs. Every path here is
+/// Grab-created bookkeeping, never user content.
 fn remove_manifest_files(dest_dir: &Path, item_id: u64) {
     let _ = std::fs::remove_file(manifest_path(dest_dir, item_id));
     for path in legacy_manifest_paths(dest_dir, item_id) {
         let _ = std::fs::remove_file(path);
     }
+    remove_private_temps(item_id);
+    let _ = std::fs::remove_file(dest_dir.join(format!(".grab-info-{item_id}.json")));
+    let _ = std::fs::remove_file(dest_dir.join(format!(".grab-live-{item_id}.json")));
+}
+
+/// Remove the item's single-use probe JSONs from the private scratch root.
+pub(crate) fn remove_private_temps(item_id: u64) {
+    let _ = std::fs::remove_file(info_json_path(item_id));
+    let _ = std::fs::remove_file(live_info_json_path(item_id));
 }
 
 /// Delete exactly the files a manifest owns. The manifest's `staging_name`
@@ -746,16 +1002,20 @@ fn remove_manifest_owned_files(dest_dir: &Path, item_id: u64) {
     remove_manifest_files(dest_dir, item_id);
 }
 
+/// Read the state-dir manifest for this destination, falling back to the
+/// legacy names that older versions left inside the destination dir.
 pub(crate) fn read_manifest(dest_dir: &Path, item_id: u64) -> Option<VideoManifest> {
-    // Try the hidden path first, then legacy names.
-    std::fs::read_to_string(manifest_path(dest_dir, item_id))
-        .ok()
-        .or_else(|| {
-            legacy_manifest_paths(dest_dir, item_id)
-                .iter()
-                .find_map(|p| std::fs::read_to_string(p).ok())
-        })
-        .and_then(|text| serde_json::from_str(&text).ok())
+    read_manifest_file(&manifest_path(dest_dir, item_id)).or_else(|| {
+        legacy_manifest_paths(dest_dir, item_id)
+            .iter()
+            .find_map(|path| read_manifest_file(path))
+    })
+}
+
+/// Parse one manifest file. Corrupt or unreadable sidecars read as absent.
+fn read_manifest_file(path: &Path) -> Option<VideoManifest> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 pub(crate) fn file_len(path: &Path) -> Option<u64> {
@@ -778,6 +1038,9 @@ pub(crate) fn file_len(path: &Path) -> Option<u64> {
 #[cfg(unix)]
 pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt as _;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        ensure_private_dir(parent)?;
+    }
     // Remove first so the 0600 mode in `open_new_private` always applies
     // (creation only).
     let _ = tokio::fs::remove_file(path).await;
@@ -806,6 +1069,9 @@ async fn open_new_private(path: &Path) -> std::io::Result<tokio::fs::File> {
 #[cfg(not(unix))]
 pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt as _;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        ensure_private_dir(parent)?;
+    }
     let mut file = tokio::fs::File::create(path).await?;
     file.write_all(bytes).await?;
     file.flush().await?;
@@ -962,6 +1228,21 @@ mod tests {
         ))
     }
 
+    fn test_manifest(staging_name: &str, dest_dir: Option<PathBuf>) -> VideoManifest {
+        VideoManifest {
+            page_url: "https://example.com".to_string(),
+            quality: "1080p".to_string(),
+            video_format_id: None,
+            video_ext: "mp4".to_string(),
+            audio_format_id: String::new(),
+            audio_ext: String::new(),
+            final_bytes: None,
+            staging_name: Some(staging_name.to_string()),
+            staging_prefix: None,
+            dest_dir,
+        }
+    }
+
     /// Regression: info-JSON temp files must be owner-only (0600), even
     /// when a wider-mode file from a crashed run is already in place.
     #[tokio::test]
@@ -1040,25 +1321,17 @@ mod tests {
     }
 
     #[test]
-    fn success_path_leaves_no_empty_staging_root() {
-        // The run_unified_ytdlp success tail: sweep the item's manifest-owned files.
-        // The dest dir itself is never removed.
+    fn success_path_leaves_no_bookkeeping_in_the_dest_dir() {
+        // The runner's success tail: sweep the item's manifest-owned files and
+        // its state-dir manifest. The dest dir itself is never removed.
         let staging = unique_dir("success-root");
         std::fs::create_dir_all(&staging).unwrap();
-        // Create manifest owning the staging file.
-        let manifest = VideoManifest {
-            page_url: "https://example.com".to_string(),
-            quality: "1080p".to_string(),
-            video_format_id: None,
-            video_ext: "mp4".to_string(),
-            audio_format_id: String::new(),
-            audio_ext: String::new(),
-            final_bytes: None,
-            staging_name: Some("Title.42.mp4".to_string()),
-            staging_prefix: None,
-        };
-        let manifest_json = serde_json::to_string(&manifest).unwrap();
-        std::fs::write(staging.join(".42.manifest.json"), manifest_json).unwrap();
+        let manifest = test_manifest("Title.42.mp4", Some(staging.clone()));
+        std::fs::write(
+            manifest_path(&staging, 42),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
         std::fs::write(staging.join("Title.42.mp4.part"), b"scratch").unwrap();
         std::fs::write(staging.join("unrelated.txt"), b"keep").unwrap();
         sweep_staging_preserving_recordings(&staging, 42);
@@ -1066,11 +1339,20 @@ mod tests {
             !staging.join("Title.42.mp4.part").exists(),
             "item staging file is swept on success"
         );
+        assert!(
+            read_manifest(&staging, 42).is_none(),
+            "state-dir manifest is swept on success"
+        );
         assert!(staging.exists(), "dest dir is never removed");
         assert!(
             staging.join("unrelated.txt").exists(),
             "unrelated files are never touched"
         );
+        let json: Vec<String> = dir_file_names(&staging)
+            .into_iter()
+            .filter(|n| n.ends_with(".json"))
+            .collect();
+        assert!(json.is_empty(), "JSON left in the dest dir: {json:?}");
         let _ = std::fs::remove_dir_all(&staging);
     }
 
@@ -1092,6 +1374,7 @@ mod tests {
             final_bytes: None,
             staging_name: Some("Title.44.mp4".to_string()),
             staging_prefix: None,
+            dest_dir: None,
         };
         let manifest_json = serde_json::to_string(&manifest).unwrap();
         std::fs::write(staging.join(".44.manifest.json"), manifest_json).unwrap();
@@ -1530,6 +1813,7 @@ mod tests {
             final_bytes: None,
             staging_name: Some("Title.42.mp4".to_string()),
             staging_prefix: None,
+            dest_dir: None,
         };
         let manifest_json = serde_json::to_string(&manifest).unwrap();
         std::fs::write(dir.join(".42.manifest.json"), manifest_json).unwrap();
@@ -1566,6 +1850,7 @@ mod tests {
             final_bytes: None,
             staging_name: None,
             staging_prefix: Some("My Video.42.".to_string()),
+            dest_dir: None,
         };
         let manifest_json = serde_json::to_string(&manifest).unwrap();
         std::fs::write(dir.join(".42.manifest.json"), manifest_json).unwrap();
@@ -1625,6 +1910,7 @@ mod tests {
             final_bytes: None,
             staging_name: None,
             staging_prefix: None,
+            dest_dir: None,
         };
         let manifest_json = serde_json::to_string(&manifest).unwrap();
         std::fs::write(dir.join(".42.manifest.json"), manifest_json).unwrap();
@@ -1669,5 +1955,135 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    /// Fresh profiles have no `grab/video` chain: `write_private` builds it
+    /// owner-only, and every dir it creates is 0700.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn write_private_creates_private_parent_chain() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = unique_dir("write-parent");
+        let path = root.join("grab/video/x.json");
+        write_private(&path, b"{}").await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        for dir in [&root, &root.join("grab"), &root.join("grab/video")] {
+            let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{} must be owner-only", dir.display());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An item id reused in a second destination must not read the first
+    /// destination's manifest: the file name carries a destination key.
+    #[test]
+    fn manifest_is_scoped_to_its_destination() {
+        let dest_a = unique_dir("manifest-scope-a");
+        let dest_b = unique_dir("manifest-scope-b");
+        std::fs::create_dir_all(&dest_a).unwrap();
+        std::fs::create_dir_all(&dest_b).unwrap();
+        let id = 8_000_001u64;
+        let path = manifest_path(&dest_a, id);
+        let manifest = test_manifest("v.8000001.mp4", Some(dest_a.clone()));
+        std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();
+
+        assert_eq!(read_manifest(&dest_a, id).as_ref(), Some(&manifest));
+        assert!(
+            read_manifest(&dest_b, id).is_none(),
+            "an id reused in another destination must not adopt this manifest"
+        );
+        assert_ne!(manifest_path(&dest_a, id), manifest_path(&dest_b, id));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dest_a);
+        let _ = std::fs::remove_dir_all(&dest_b);
+    }
+
+    /// Startup reclaims state manifests whose `(destination, id)` is gone,
+    /// deleting exactly the files that manifest owns, and clears stale probe
+    /// temps while it is there.
+    #[test]
+    fn state_sweep_reclaims_orphans_and_keeps_live_rows() {
+        let live = unique_dir("state-sweep-live");
+        let orphan = unique_dir("state-sweep-orphan");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&orphan).unwrap();
+        let live_id = 8_000_002u64;
+        let orphan_id = 8_000_003u64;
+        for (dir, id) in [(&live, live_id), (&orphan, orphan_id)] {
+            let name = format!("v.{id}.mp4");
+            std::fs::write(dir.join(format!("{name}.part")), b"scratch").unwrap();
+            let manifest = test_manifest(&name, Some(dir.clone()));
+            std::fs::write(
+                manifest_path(dir, id),
+                serde_json::to_string(&manifest).unwrap(),
+            )
+            .unwrap();
+        }
+        let stale_temp = info_json_path(orphan_id);
+        ensure_private_dir(stale_temp.parent().unwrap()).unwrap();
+        std::fs::write(&stale_temp, b"{}").unwrap();
+
+        let keep =
+            std::collections::HashSet::from([(live.to_string_lossy().into_owned(), live_id)]);
+        sweep_state_staging(&keep);
+
+        assert!(
+            read_manifest(&live, live_id).is_some(),
+            "a queued row keeps its resume manifest"
+        );
+        assert!(live.join(format!("v.{live_id}.mp4.part")).exists());
+        assert!(
+            read_manifest(&orphan, orphan_id).is_none(),
+            "orphan state manifest is reclaimed"
+        );
+        assert!(
+            !orphan.join(format!("v.{orphan_id}.mp4.part")).exists(),
+            "the orphan manifest's owned part is reclaimed"
+        );
+        assert!(!stale_temp.exists(), "startup clears stale probe temps");
+
+        let _ = std::fs::remove_file(manifest_path(&live, live_id));
+        let _ = std::fs::remove_dir_all(&live);
+        let _ = std::fs::remove_dir_all(&orphan);
+    }
+
+    /// Discarding a row removes its state manifest and both probe temps,
+    /// including the old dest-dir names from pre-migration versions.
+    #[test]
+    fn clean_staging_files_removes_state_and_probe_temps() {
+        let dir = unique_dir("clean-state");
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = 8_000_004u64;
+        let name = format!("v.{id}.mp4");
+        std::fs::write(dir.join(format!("{name}.part")), b"scratch").unwrap();
+        std::fs::write(dir.join("keep.txt"), b"user").unwrap();
+        let manifest = test_manifest(&name, Some(dir.clone()));
+        std::fs::write(
+            manifest_path(&dir, id),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+        ensure_private_dir(&runtime_root()).unwrap();
+        let info = info_json_path(id);
+        let live = live_info_json_path(id);
+        std::fs::write(&info, b"{}").unwrap();
+        std::fs::write(&live, b"{}").unwrap();
+        let legacy_info = dir.join(format!(".grab-info-{id}.json"));
+        let legacy_live = dir.join(format!(".grab-live-{id}.json"));
+        std::fs::write(&legacy_info, b"{}").unwrap();
+        std::fs::write(&legacy_live, b"{}").unwrap();
+
+        clean_staging_files(&dir, id);
+
+        assert!(!dir.join(format!("{name}.part")).exists());
+        assert!(read_manifest(&dir, id).is_none(), "state manifest must go");
+        assert!(!info.exists(), "runtime probe temp must go with the row");
+        assert!(!live.exists(), "runtime live temp must go with the row");
+        assert!(!legacy_info.exists(), "old dest-dir info JSON must go");
+        assert!(!legacy_live.exists(), "old dest-dir live JSON must go");
+        assert!(dir.join("keep.txt").exists(), "user files stay");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

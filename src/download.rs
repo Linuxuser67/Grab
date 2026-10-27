@@ -433,6 +433,7 @@ struct RestoreSweepPlan {
     referenced: HashSet<String>,
     live: HashSet<u64>,
     dest_dirs: HashSet<String>,
+    state_keep: HashSet<(String, u64)>,
     selections: Vec<(String, Vec<usize>)>,
     session_keep: Option<HashSet<String>>,
 }
@@ -4685,6 +4686,13 @@ impl DownloadManager {
             .collect();
         let live: HashSet<u64> = self.items().map(|it| it.id()).collect();
         let dest_dirs: HashSet<String> = self.items().map(|it| it.dest_dir()).collect();
+        // State manifests belong to rows that can still resume. Done rows have
+        // delivered; anything they leave behind is crash debris.
+        let state_keep: HashSet<(String, u64)> = self
+            .items()
+            .filter(|it| it.status() != DownloadStatus::Done)
+            .map(|it| (it.dest_dir(), it.id()))
+            .collect();
         let session_keep = crate::torrent::session_handle().is_some().then(|| {
             self.items()
                 .filter(|it| {
@@ -4697,6 +4705,7 @@ impl DownloadManager {
             referenced,
             live,
             dest_dirs,
+            state_keep,
             selections,
             session_keep,
         }
@@ -4711,6 +4720,7 @@ impl DownloadManager {
         for dest_dir in plan.dest_dirs {
             crate::video::sweep_dest_staging(std::path::Path::new(&dest_dir), &plan.live);
         }
+        crate::video::sweep_state_staging(&plan.state_keep);
         crate::cookies::sweep_cookie_staging();
         plan.session_keep
     }

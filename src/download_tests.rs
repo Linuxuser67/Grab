@@ -4579,7 +4579,10 @@ fn remove_cleans_video_staging() {
         },
     );
     manager.remove(id);
-    assert!(!manifest_file.exists(), "staged sidecar must go with the row");
+    assert!(
+        !manifest_file.exists(),
+        "staged sidecar must go with the row"
+    );
     assert!(
         !destdir.join(format!("v.{id}.mp4.part")).exists(),
         "manifest-owned part goes too"

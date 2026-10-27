@@ -1927,7 +1927,10 @@ mod tests {
             dir.join("My Video.1080p.srt").exists(),
             "user file outside the prefix must survive"
         );
-        assert!(read_manifest(&dir, 42).is_none(), "manifest goes after its files");
+        assert!(
+            read_manifest(&dir, 42).is_none(),
+            "manifest goes after its files"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

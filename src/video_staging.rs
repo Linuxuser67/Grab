@@ -393,10 +393,11 @@ pub(crate) fn drop_empty_staging_root(root: &Path) {
 /// Also removes the previous versions' single-use probe JSONs
 /// (`.grab-info-*` / `.grab-live-*`): they are never reused across restarts.
 ///
-/// Deletes exactly the files each manifest owns (`staging_name` /
-/// `staging_prefix`). A manifest that records no ownership is left alone. A
-/// user's own files are never touched: without a manifest, everything is
-/// preserved.
+/// Legacy manifests are no longer parsed: the sweep deletes the bookkeeping
+/// files themselves, plus anything a *state* manifest for the same row still
+/// proves ownership of (`staging_name` / `staging_prefix`). A manifest that
+/// records no ownership is left alone. A user's own files are never touched:
+/// without a manifest, everything is preserved.
 pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>) {
     // Manifest-driven cleanup: the ONLY destructive authority for staging
     // files is the manifest's `staging_name` / `staging_prefix`. Scan for
@@ -912,9 +913,9 @@ pub(crate) fn manifest_path(dest_dir: &Path, item_id: u64) -> PathBuf {
 }
 
 /// Previous manifest names, all inside the destination dir: the canonical
-/// pre-migration name first, then three older variants. Still read and
-/// reclaimed so upgrades keep resuming; they are no longer written and can be
-/// dropped once no supported version produces them.
+/// pre-migration name first, then three older variants. They are never read;
+/// the startup sweep deletes the files by name so the dest dir stops
+/// collecting Grab bookkeeping.
 fn legacy_manifest_paths(dest_dir: &Path, item_id: u64) -> [PathBuf; 4] {
     [
         dest_dir.join(format!(".{item_id}.manifest.json")),
@@ -1032,14 +1033,11 @@ fn remove_owned_files(dest_dir: &Path, ownership: &ManifestOwnership) {
     }
 }
 
-/// Read the state-dir manifest for this destination, falling back to the
-/// legacy names that older versions left inside the destination dir.
+/// Read the state-dir manifest for this destination. Manifest files left in
+/// the destination dir by older versions are not read: the startup sweep
+/// removes them (and their probe JSONs) by name.
 pub(crate) fn read_manifest(dest_dir: &Path, item_id: u64) -> Option<VideoManifest> {
-    read_manifest_file(&manifest_path(dest_dir, item_id)).or_else(|| {
-        legacy_manifest_paths(dest_dir, item_id)
-            .iter()
-            .find_map(|path| read_manifest_file(path))
-    })
+    read_manifest_file(&manifest_path(dest_dir, item_id))
 }
 
 /// Parse one manifest file. Corrupt or unreadable sidecars read as absent.
@@ -1284,6 +1282,12 @@ mod tests {
         }
     }
 
+    fn write_state_manifest(dir: &Path, id: u64, manifest: &VideoManifest) {
+        let path = manifest_path(dir, id);
+        ensure_private_dir(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_string(manifest).unwrap()).unwrap();
+    }
+
     /// Regression: info-JSON temp files must be owner-only (0600), even
     /// when a wider-mode file from a crashed run is already in place.
     #[tokio::test]
@@ -1417,8 +1421,7 @@ mod tests {
             staging_prefix: None,
             dest_dir: None,
         };
-        let manifest_json = serde_json::to_string(&manifest).unwrap();
-        std::fs::write(staging.join(".44.manifest.json"), manifest_json).unwrap();
+        write_state_manifest(&staging, 44, &manifest);
         std::fs::write(staging.join("Title.44.mp4.part"), b"scratch").unwrap();
         sweep_staging_preserving_recordings(&staging, 44);
         assert!(
@@ -1839,8 +1842,9 @@ mod tests {
     }
 
     #[test]
-    fn sweep_dest_staging_removes_manifest_owned_file() {
-        // With a manifest recording staging_name, the exact files are removed.
+    fn state_sweep_removes_manifest_owned_file() {
+        // With a state manifest recording staging_name, the exact files are
+        // removed.
         let dir = unique_dir("manifest-owned");
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1854,20 +1858,19 @@ mod tests {
             final_bytes: None,
             staging_name: Some("Title.42.mp4".to_string()),
             staging_prefix: None,
-            dest_dir: None,
+            dest_dir: Some(dir.clone()),
         };
-        let manifest_json = serde_json::to_string(&manifest).unwrap();
-        std::fs::write(dir.join(".42.manifest.json"), manifest_json).unwrap();
+        write_state_manifest(&dir, 42, &manifest);
         std::fs::write(dir.join("Title.42.mp4.part"), b"staging").unwrap();
 
-        sweep_dest_staging(&dir, &std::collections::HashSet::new());
+        sweep_state_staging(&std::collections::HashSet::new());
 
         assert!(
             !dir.join("Title.42.mp4.part").exists(),
             "manifest-owned file should be removed"
         );
         assert!(
-            !dir.join(".42.manifest.json").exists(),
+            read_manifest(&dir, 42).is_none(),
             "manifest should be removed after cleanup"
         );
 
@@ -1891,10 +1894,9 @@ mod tests {
             final_bytes: None,
             staging_name: None,
             staging_prefix: Some("My Video.42.".to_string()),
-            dest_dir: None,
+            dest_dir: Some(dir.clone()),
         };
-        let manifest_json = serde_json::to_string(&manifest).unwrap();
-        std::fs::write(dir.join(".42.manifest.json"), manifest_json).unwrap();
+        write_state_manifest(&dir, 42, &manifest);
         std::fs::write(dir.join("My Video.42.f137.mp4.part"), b"part").unwrap();
         std::fs::write(dir.join("My Video.42.f251.webm.part"), b"part").unwrap();
         std::fs::write(dir.join("My Video.42.mp4.ytdl"), b"meta").unwrap();
@@ -1925,10 +1927,7 @@ mod tests {
             dir.join("My Video.1080p.srt").exists(),
             "user file outside the prefix must survive"
         );
-        assert!(
-            !dir.join(".42.manifest.json").exists(),
-            "manifest goes after its files"
-        );
+        assert!(read_manifest(&dir, 42).is_none(), "manifest goes after its files");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1951,16 +1950,15 @@ mod tests {
             final_bytes: None,
             staging_name: None,
             staging_prefix: None,
-            dest_dir: None,
+            dest_dir: Some(dir.clone()),
         };
-        let manifest_json = serde_json::to_string(&manifest).unwrap();
-        std::fs::write(dir.join(".42.manifest.json"), manifest_json).unwrap();
+        write_state_manifest(&dir, 42, &manifest);
         std::fs::write(dir.join("orphan.mp4.part"), b"scratch").unwrap();
 
         remove_manifest_owned_files(&dir, 42);
 
         assert!(
-            dir.join(".42.manifest.json").exists(),
+            read_manifest(&dir, 42).is_some(),
             "manifest without ownership must survive the sweep"
         );
         assert!(

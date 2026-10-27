@@ -4927,10 +4927,11 @@ fn sweep_never_touches_bystander_with_id_like_name() {
         final_bytes: None,
         staging_name: Some("My Video.mp4".into()),
         staging_prefix: None,
-        dest_dir: None,
+        dest_dir: Some(staging.clone()),
     };
-    let manifest_path = staging.join(".4.manifest.json");
-    std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+    let manifest_file = manifest_path(&staging, 4);
+    std::fs::create_dir_all(manifest_file.parent().unwrap()).unwrap();
+    std::fs::write(&manifest_file, serde_json::to_string(&manifest).unwrap()).unwrap();
     std::fs::write(staging.join("My Video.mp4.part"), b"partial").unwrap();
 
     sweep_staging_preserving_recordings(&staging, 4);
@@ -4947,7 +4948,7 @@ fn sweep_never_touches_bystander_with_id_like_name() {
     assert_eq!(std::fs::read(staging.join("x.4.y")).unwrap(), b"bystander");
     // Our staging is reclaimed.
     assert!(!staging.join("My Video.mp4.part").exists());
-    assert!(!manifest_path.exists());
+    assert!(!manifest_file.exists());
     let _ = std::fs::remove_dir_all(&staging);
 }
 

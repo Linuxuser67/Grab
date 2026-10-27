@@ -131,7 +131,10 @@ fn format_range(start: usize, end: usize) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test-only wrapper that forwards the full argv matrix to the proxy variant"
+)]
 pub fn download_argv(
     tool: &Path,
     url: &str,
@@ -155,7 +158,10 @@ pub fn download_argv(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "argv assembly matrix: every parameter maps to one flag; a struct adds indirection"
+)]
 pub fn download_argv_with_proxy(
     tool: &Path,
     url: &str,

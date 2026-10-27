@@ -508,7 +508,10 @@ async fn try_merge_dash_partials(
     Some(size)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one attempt pipeline: splitting it would scatter cancellation and merge state"
+)]
 pub(crate) async fn run_unified_ytdlp(
     youtube_bin: &Path,
     ffmpeg_bin: &Path,
@@ -704,7 +707,6 @@ pub(crate) async fn await_child(
 }
 
 /// One yt-dlp spawn: parse template progress, collect the log tail, capture `--print after_move:filepath`. `Ok((None, _))` is a user abort (the caller stays quiet). `on_merge` fires once on the first merge line. `timeout` is a stall budget, not a wall clock: any stdout line resets it, so only silence kills the attempt. The stall deadline gives way to a generous merge wall-clock once the merge starts (see `await_child`).
-#[allow(clippy::too_many_arguments)]
 async fn run_ytdlp_attempt(
     youtube_bin: &Path,
     argv: &[String],
@@ -1555,7 +1557,10 @@ pub(crate) fn live_info_json_args(path: Option<&std::path::Path>) -> Vec<String>
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors run_unified_ytdlp so both attempts keep the same cancellation contract"
+)]
 pub(crate) async fn run_live_ytdlp(
     youtube_bin: &Path,
     ffmpeg_bin: &Path,
@@ -1584,7 +1589,10 @@ pub(crate) async fn run_live_ytdlp(
     // recording — only the .part shell.
     // NOTE: the `&staging` borrow is required (&PathBuf -> &Path coercion);
     // clippy::needless_borrow false-positives on it inside let-chains (1.99).
-    #[allow(clippy::needless_borrow)]
+    #[expect(
+        clippy::needless_borrow,
+        reason = "clippy false positive inside a let-chain: `&staging` is `&PathBuf -> &Path`"
+    )]
     if let Some(old) = read_manifest(&staging, job.item_id)
         && let Some(old_name) = old.staging_name.as_deref()
         && old_name != staging_name
@@ -2070,7 +2078,10 @@ pub(crate) async fn run_live_ytdlp(
     Ok(file_len(&job.dest))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the other attempt runners so the HLS path keeps the same contract"
+)]
 pub(crate) async fn run_hls_ytdlp(
     youtube_bin: &Path,
     ffmpeg_bin: &Path,

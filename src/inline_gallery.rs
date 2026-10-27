@@ -243,7 +243,10 @@ impl GalleryPickerStream {
 /// The grid arrives empty and fills from a streamed enumeration (see
 /// `GalleryPickerStream`); `None` means another picker page already owns
 /// the screen, so the caller should drop its enumeration.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the picker page builder threads live GUI state from the enumeration caller"
+)]
 pub(crate) fn push_gallery_picker_page(
     nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,

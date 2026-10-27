@@ -220,7 +220,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) || !text.is_ascii() {
+    // Reject non-hex digits outright: `from_str_radix` accepts a leading `+`.
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     (0..text.len())
@@ -1204,10 +1205,12 @@ async fn handle_add(
     if req.cookies.len() > 100 {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    // During a rolling upgrade, old paired extensions do not include the
+    // Legacy compatibility: old paired extensions do not include the
     // timestamp/nonce pair. Preserve their URL handoff, but downgrade them to
     // the same confirmation-only, no-cookie behavior as unpaired callers.
     // A partially present or malformed pair is never treated as legacy.
+    // Remove after 2027-03-01, once extension builds predating the nonce have
+    // aged out of auto-update.
     let legacy_authenticated =
         token_authenticated && req.timestamp_ms.is_none() && req.nonce.is_none();
     if token_authenticated
@@ -1346,7 +1349,10 @@ async fn handle_add(
 }
 
 #[cfg(test)]
-#[allow(clippy::await_holding_lock)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "tests hold the serial-test guard across awaits by design"
+)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2326,6 +2332,16 @@ mod tests {
         // A different secret yields a different proof: an impostor cannot fake it.
         let other = Pairing::from_secret([9; SECRET_LEN]).proof(nonce);
         assert!(!r.contains(&other));
+    }
+
+    #[test]
+    fn hex_decode_rejects_non_hex_digits() {
+        assert_eq!(hex_decode("0F"), Some(vec![0x0f]));
+        // `from_str_radix` accepts a leading `+`; the decoder must not.
+        assert_eq!(hex_decode("+f"), None);
+        assert_eq!(hex_decode("0f+0"), None);
+        assert_eq!(hex_decode("0g"), None);
+        assert_eq!(hex_decode("0"), None);
     }
 
     #[tokio::test]

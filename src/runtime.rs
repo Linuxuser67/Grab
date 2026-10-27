@@ -18,11 +18,3 @@ pub(crate) fn tokio_rt() -> &'static tokio::runtime::Runtime {
 pub(crate) fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
-
-#[cfg(test)]
-mod tests {
-    // NOTE: `two_slow_tasks_do_not_block_third_on_two_workers` was removed:
-    // it tested tokio's scheduler (timing margins on a 2-worker runtime),
-    // not Grab code, and its rationale referenced `block_on_sync`, which no
-    // longer exists.
-}

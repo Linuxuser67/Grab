@@ -367,6 +367,16 @@ pub(crate) fn live_capture_argv(
     args
 }
 
+/// Clamp `PTS`/`DTS` pairs that movenc cannot represent as a signed 32-bit delta.
+///
+/// A live capture can jump its timeline mid-file (for example across an ad
+/// break). FFmpeg corrects the jump from the third post-jump packet, but the
+/// first two keep the new PTS and a DTS synthesised from the pre-jump reorder
+/// buffer; that difference overflows movenc's int32 check and aborts the remux.
+/// Ten minutes at the 90 kHz MPEG-TS timebase is far beyond a real reorder
+/// delay, so anything larger is corruption. `NOPTS` is left untouched.
+const LIVE_REMUX_PTS_DTS_BSF: &str = "setts=pts='if(eq(DTS,NOPTS),PTS,if(eq(PTS,NOPTS),PTS,DTS+(PTS-DTS)*lt(abs(PTS-DTS),54000000)))'";
+
 /// ffmpeg argv remuxing a stopped live capture into the finished file (stream-copy + faststart). Pure.
 /// `page_url` is stamped into `comment`: the live leg never gets `--embed-metadata`, so this is its only provenance.
 /// `dest` is the `.part` remux target: ffmpeg can't guess a container from that name, so `-f`
@@ -390,6 +400,13 @@ pub(crate) fn live_remux_argv(
     // PTS and ignore inconsistent DTS; keep these input-scoped, before -i.
     if repair_timestamps {
         argv.extend(["-fflags".to_string(), "+genpts+igndts".to_string()]);
+    }
+    // Input-scoped: this runs after FFmpeg's own discontinuity correction and
+    // before the interleaver, so the pairs it could not fix never reach movenc.
+    // shortcut: clamps only the >10-minute pairs; remove when FFmpeg flushes
+    // its reorder buffer on a PTS jump.
+    if !audio_only {
+        argv.extend(["-bsf:v".to_string(), LIVE_REMUX_PTS_DTS_BSF.to_string()]);
     }
     argv.extend(["-i".to_string(), ts_path.to_string_lossy().into_owned()]);
     if audio_only {
@@ -644,6 +661,38 @@ mod live_remux_argv_tests {
             .map(|pair| pair[1].as_str())
             .collect();
         assert_eq!(maps, vec!["0"]);
+    }
+
+    #[test]
+    fn live_video_remux_clamps_pts_dts_pairs_before_input() {
+        let args = live_remux_argv(
+            Path::new("capture.ts"),
+            Path::new("finished.mp4.part"),
+            false,
+            true,
+            false,
+            "",
+        );
+        let bsf_at = args
+            .iter()
+            .position(|arg| arg == "-bsf:v")
+            .expect("video remuxes must clamp overflowing pts/dts pairs");
+        let input = args.iter().position(|arg| arg == "-i").unwrap();
+        assert!(bsf_at < input, "the clamp is an input BSF");
+        assert_eq!(args[bsf_at + 1], super::LIVE_REMUX_PTS_DTS_BSF);
+
+        let audio = live_remux_argv(
+            Path::new("capture.m4a"),
+            Path::new("finished.m4a.part"),
+            true,
+            true,
+            false,
+            "",
+        );
+        assert!(
+            !audio.iter().any(|arg| arg == "-bsf:v"),
+            "audio-only remuxes have no video stream to clamp"
+        );
     }
 
     #[test]

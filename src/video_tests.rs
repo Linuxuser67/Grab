@@ -3909,6 +3909,7 @@ fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
     assert!(!argv.windows(2).any(|w| w == ["-map", "0:a?"]));
     assert!(argv.windows(2).any(|w| w == ["-c", "copy"]));
     assert!(argv.windows(2).any(|w| w == ["-bsf:a", "aac_adtstoasc"]));
+    assert!(argv.windows(2).any(|w| w[0] == "-bsf:v"));
     assert!(argv.windows(2).any(|w| w == ["-f", "mp4"]));
     assert!(argv.windows(2).any(|w| w == ["-movflags", "+faststart"]));
     assert!(!argv.iter().any(|a| a == "-vn"));
@@ -3936,6 +3937,7 @@ fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
     assert!(argv.windows(2).any(|w| w == ["-map", "0:a?"]));
     assert!(argv.windows(2).any(|w| w == ["-f", "mp4"]));
     assert!(!argv.iter().any(|a| a == "-bsf:a"));
+    assert!(!argv.iter().any(|a| a == "-bsf:v"));
 }
 
 #[test]

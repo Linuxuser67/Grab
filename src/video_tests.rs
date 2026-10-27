@@ -4123,7 +4123,10 @@ fn live_capture_adopts_part_and_remuxes() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.ends_with(".json"))
         .collect();
-    assert!(leftovers.is_empty(), "JSON left in the download dir: {leftovers:?}");
+    assert!(
+        leftovers.is_empty(),
+        "JSON left in the download dir: {leftovers:?}"
+    );
     assert!(
         read_manifest(&staging, job.item_id).is_none(),
         "delivered live row kept its resume manifest"

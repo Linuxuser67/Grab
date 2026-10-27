@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.4.1" date="2026-10-27">
+      <description>
+        <ul>
+          <li>Reject malformed pairing tokens in browser-extension handoffs and cover the decoder with a unit test.</li>
+          <li>Keep gallery downloads running when a stderr reader panics, instead of failing on a poisoned lock.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.4.0" date="2026-10-26">
       <description>
         <ul>

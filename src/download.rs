@@ -4684,7 +4684,13 @@ impl DownloadManager {
             .map(|it| it.url().to_string())
             .filter(|u| crate::torrent::is_torrent_url(u))
             .collect();
-        let live: HashSet<u64> = self.items().map(|it| it.id()).collect();
+        // Only rows that can still resume own staging: a Done row has
+        // delivered, so anything it left in its dest dir is debris.
+        let live: HashSet<u64> = self
+            .items()
+            .filter(|it| it.status() != DownloadStatus::Done)
+            .map(|it| it.id())
+            .collect();
         let dest_dirs: HashSet<String> = self.items().map(|it| it.dest_dir()).collect();
         // State manifests belong to rows that can still resume. Done rows have
         // delivered; anything they leave behind is crash debris.

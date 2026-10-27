@@ -457,24 +457,43 @@ pub fn sweep_state_staging(keep: &std::collections::HashSet<(String, u64)>) {
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
+            // An interrupted atomic write leaves this temp, never a truncated
+            // manifest. No writer runs during startup, so it is always debris.
+            if name.ends_with(".tmp") {
+                let _ = std::fs::remove_file(entry.path());
+                continue;
+            }
             let Some(id) = state_manifest_id(&name) else {
                 continue;
             };
             let Some(manifest) = read_manifest_file(&entry.path()) else {
-                // Unreadable manifest: it proves no ownership we can act on.
-                let _ = std::fs::remove_file(entry.path());
+                // Unreadable manifest: keep it while any queued row still
+                // claims the id, or a crash mid-write would drop resume state.
+                if !keep.iter().any(|(_, kid)| *kid == id) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
                 continue;
             };
             let Some(dest) = manifest.dest_dir.as_deref() else {
                 // No destination recorded = no file it could prove ownership
-                // of. State manifests always record one; drop the stray.
-                let _ = std::fs::remove_file(entry.path());
+                // of. State manifests always record one; drop the stray unless
+                // a queued row still claims the id.
+                if !keep.iter().any(|(_, kid)| *kid == id) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
                 continue;
             };
             if keep.contains(&(dest_key(dest), id)) {
                 continue;
             }
-            remove_manifest_owned_files(dest, id);
+            // Act on the manifest we opened: its recorded destination may no
+            // longer hash to the path in its own filename (moved/symlink).
+            let Some(ownership) = manifest_ownership_of(&manifest) else {
+                continue;
+            };
+            remove_owned_files(dest, &ownership);
+            let _ = std::fs::remove_file(entry.path());
+            remove_manifest_files(dest, id);
         }
     }
     sweep_private_temps();
@@ -515,6 +534,7 @@ fn is_legacy_info_name(name: &str) -> bool {
 
 /// `info-{id}.json` / `live-{id}.json` in the private scratch root.
 fn is_private_temp_name(name: &str) -> bool {
+    let name = name.strip_suffix(".tmp").unwrap_or(name);
     let rest = name
         .strip_prefix("info-")
         .or_else(|| name.strip_prefix("live-"));
@@ -892,8 +912,9 @@ pub(crate) fn manifest_path(dest_dir: &Path, item_id: u64) -> PathBuf {
 }
 
 /// Previous manifest names, all inside the destination dir: the canonical
-/// pre-migration name first, then three older variants. Kept readable (and
-/// reclaimable) for one upgrade cycle.
+/// pre-migration name first, then three older variants. Still read and
+/// reclaimed so upgrades keep resuming; they are no longer written and can be
+/// dropped once no supported version produces them.
 fn legacy_manifest_paths(dest_dir: &Path, item_id: u64) -> [PathBuf; 4] {
     [
         dest_dir.join(format!(".{item_id}.manifest.json")),
@@ -914,7 +935,11 @@ struct ManifestOwnership {
 }
 
 fn manifest_ownership(dest_dir: &Path, item_id: u64) -> Option<ManifestOwnership> {
-    let m = read_manifest(dest_dir, item_id)?;
+    manifest_ownership_of(&read_manifest(dest_dir, item_id)?)
+}
+
+/// Ownership fields of one already-parsed manifest.
+fn manifest_ownership_of(m: &VideoManifest) -> Option<ManifestOwnership> {
     let mut exact = Vec::new();
     if let Some(base) = &m.staging_name {
         exact.push(base.clone());
@@ -989,8 +1014,14 @@ fn remove_manifest_owned_files(dest_dir: &Path, item_id: u64) {
         }
         return;
     };
+    remove_owned_files(dest_dir, &ownership);
+    remove_manifest_files(dest_dir, item_id);
+}
+
+/// Delete exactly the files a manifest's ownership fields name.
+fn remove_owned_files(dest_dir: &Path, ownership: &ManifestOwnership) {
     // Read owned names BEFORE deleting the manifest.
-    let names = owned_file_names(dest_dir, &ownership);
+    let names = owned_file_names(dest_dir, ownership);
     for name in names {
         let path = dest_dir.join(&name);
         // Basename only; never allow manifest data to escape dest_dir.
@@ -999,7 +1030,6 @@ fn remove_manifest_owned_files(dest_dir: &Path, item_id: u64) {
         }
         let _ = std::fs::remove_file(path);
     }
-    remove_manifest_files(dest_dir, item_id);
 }
 
 /// Read the state-dir manifest for this destination, falling back to the
@@ -1025,29 +1055,37 @@ pub(crate) fn file_len(path: &Path) -> Option<u64> {
 /// Write `bytes` to `path` with owner-only permissions (0600), without
 /// blocking the async executor.
 ///
-/// The probe info-JSON temp files can hold signed media URLs and request
-/// headers, so they must not be world-readable. Any pre-existing file is
-/// removed first: `mode(0o600)` only applies at creation, and a previous
-/// run's crash debris could otherwise keep wider permissions. The open then
-/// uses `create_new`: the staging dir sits inside the user's destination
-/// folder, which may be shared, and anything planted in the gap after the
-/// removal — a symlink, most importantly — must fail the open, not be
-/// followed or truncated. Flushes before returning: `write_all` only queues
-/// into tokio's buffer, and a backend spawn reading the file right after
-/// must see the whole thing.
+/// The manifests and probe info-JSON temp files can hold signed media URLs
+/// and request headers, so they must not be world-readable. The bytes go to a
+/// sibling temp first and are renamed into place: an interrupted write leaves
+/// the previous file intact. `mode(0o600)` only applies at creation, so the
+/// temp is removed first (previous crash debris) and opened with `create_new`:
+/// the state dir can sit below a shared folder, and anything planted at the
+/// temp path — a symlink, most importantly — must fail the open, not be
+/// followed or truncated. Flushes before renaming: `write_all` only queues
+/// into tokio's buffer, and a reader right after must see the whole thing.
 #[cfg(unix)]
 pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt as _;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         ensure_private_dir(parent)?;
     }
-    // Remove first so the 0600 mode in `open_new_private` always applies
-    // (creation only).
-    let _ = tokio::fs::remove_file(path).await;
-    let mut file = open_new_private(path).await?;
+    // Write beside the target and rename: an interrupted write leaves the
+    // previous file intact instead of truncating it.
+    let temp = private_temp_path(path);
+    let _ = tokio::fs::remove_file(&temp).await;
+    let mut file = open_new_private(&temp).await?;
     file.write_all(bytes).await?;
     file.flush().await?;
-    Ok(())
+    drop(file);
+    tokio::fs::rename(&temp, path).await
+}
+
+/// Sibling path for an atomic write, e.g. `info-1.json.tmp`.
+fn private_temp_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(".tmp");
+    path.with_file_name(name)
 }
 
 /// Open `path` exclusively for writing with owner-only permissions: if
@@ -2046,6 +2084,31 @@ mod tests {
         let _ = std::fs::remove_file(manifest_path(&live, live_id));
         let _ = std::fs::remove_dir_all(&live);
         let _ = std::fs::remove_dir_all(&orphan);
+    }
+
+    /// A crash mid-write can leave an unreadable manifest for a queued row.
+    /// The sweep must not delete it: the row still needs to resume (or at
+    /// least keep its parts reclaimable) despite the bad sidecar.
+    #[test]
+    fn state_sweep_keeps_a_queued_rows_unreadable_manifest() {
+        let dir = unique_dir("state-sweep-corrupt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = 8_000_005u64;
+        let path = manifest_path(&dir, id);
+        ensure_private_dir(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{truncated").unwrap();
+        let keep = std::collections::HashSet::from([(dir.to_string_lossy().into_owned(), id)]);
+
+        sweep_state_staging(&keep);
+        assert!(
+            path.exists(),
+            "a queued row keeps its manifest even when unreadable"
+        );
+
+        sweep_state_staging(&std::collections::HashSet::new());
+        assert!(!path.exists(), "an orphaned unreadable manifest is reclaimed");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Discarding a row removes its state manifest and both probe temps,

@@ -602,7 +602,7 @@ pub(crate) async fn run_unified_ytdlp(
         None
     };
     // Single-use: removed on drop, including every early return below.
-    let _info_guard = InfoJsonGuard::new(json_path);
+    let info_guard = InfoJsonGuard::new(json_path);
     // Single-counter progress with the pump's granularity gate; `done` is capped against the metadata total so the bar never passes 100%.
     let sent = Arc::new(AtomicU64::new(0));
     let report = {
@@ -644,6 +644,8 @@ pub(crate) async fn run_unified_ytdlp(
     )
     .await;
     let (done, after_move, abort_intent) = attempt_result?;
+    // yt-dlp is done reading it; don't keep signed URLs on disk through merge.
+    drop(info_guard);
     let Some(()) = done else {
         // User abort: on Preserve, try merging partial DASH parts into a
         // single file instead of abandoning them.

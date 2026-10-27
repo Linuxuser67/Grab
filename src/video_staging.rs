@@ -1083,7 +1083,10 @@ pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<
 
 /// Sibling path for an atomic write, e.g. `info-1.json.tmp`.
 fn private_temp_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
     name.push(".tmp");
     path.with_file_name(name)
 }
@@ -2106,7 +2109,10 @@ mod tests {
         );
 
         sweep_state_staging(&std::collections::HashSet::new());
-        assert!(!path.exists(), "an orphaned unreadable manifest is reclaimed");
+        assert!(
+            !path.exists(),
+            "an orphaned unreadable manifest is reclaimed"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

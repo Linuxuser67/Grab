@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.4.2" date="2026-10-27">
+      <description>
+        <ul>
+          <li>Move resume manifests and probe metadata out of the download folder into the XDG state and runtime directories, so Grab no longer leaves JSON files beside your downloads.</li>
+          <li>Reclaim bookkeeping left in download folders by earlier versions, write manifests atomically, and keep a queued download's resume state through a crash.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.4.1" date="2026-10-27">
       <description>
         <ul>

@@ -1640,20 +1640,28 @@ fn wire_torrent_picker(
                 .basename()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "download.torrent".to_string());
-            let bytes = match file
-                .path()
-                .and_then(|p| crate::torrent::read_torrent_bytes(&p))
-            {
-                Some(b) => b,
-                None => {
-                    set_field_error(&torrent_row, &gettext("Could not read that .torrent file"));
+            let Some(path) = file.path() else {
+                set_field_error(&torrent_row, &gettext("Could not read that .torrent file"));
+                return;
+            };
+            // Read and parse off the GTK thread: a large multi-file torrent
+            // must not stall the main loop.
+            let loaded = gio::spawn_blocking(move || {
+                let Some(bytes) = crate::torrent::read_torrent_bytes(&path) else {
+                    return Err(gettext("Could not read that .torrent file"));
+                };
+                let list = crate::torrent::torrent_file_list(&bytes)?;
+                Ok::<_, String>((bytes, list))
+            })
+            .await;
+            let (bytes, (_tname, entries)) = match loaded {
+                Ok(Ok(loaded)) => loaded,
+                Ok(Err(e)) => {
+                    set_field_error(&torrent_row, &e);
                     return;
                 }
-            };
-            let (_tname, entries) = match crate::torrent::torrent_file_list(&bytes) {
-                Ok(v) => v,
-                Err(e) => {
-                    set_field_error(&torrent_row, &e);
+                Err(_) => {
+                    set_field_error(&torrent_row, &gettext("Could not read that .torrent file"));
                     return;
                 }
             };

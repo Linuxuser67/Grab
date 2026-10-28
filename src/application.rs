@@ -148,28 +148,38 @@ async fn intake_remote_torrent(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "download".to_string());
     // Multi-file torrents offer per-file switches in the inline picker's
-    // right-sliding page.
-    match crate::torrent::torrent_file_list(&bytes) {
-        Ok((_, entries)) if entries.len() > 1 => {
-            add_card.open_torrent_picker(file_name, bytes, entries);
-            // Picker opened, not queued: return OpenedCard (202) so the
-            // extension keeps the browser copy until the user chooses.
-            Routed::OpenedCard
-        }
-        Ok(_) => {
-            if let Err(e) = manager
-                .enqueue_torrent_file_async(bytes, &stem, None, None)
-                .await
-            {
-                fail(e);
-                return Routed::Failed;
-            }
-            Routed::Queued
-        }
-        Err(e) => {
+    // right-sliding page. Parse off the GTK thread: bencode decode and the
+    // info-hash hash are CPU work on up to 10 MB.
+    let parsed = gio::spawn_blocking(move || {
+        let list = crate::torrent::torrent_file_list(&bytes)?;
+        Ok::<_, String>((bytes, list))
+    })
+    .await;
+    let (bytes, (_tname, entries)) = match parsed {
+        Ok(Ok(parsed)) => parsed,
+        Ok(Err(e)) => {
             fail(e);
-            Routed::Failed
+            return Routed::Failed;
         }
+        Err(_) => {
+            fail(gettext("Could not read that .torrent file"));
+            return Routed::Failed;
+        }
+    };
+    if entries.len() > 1 {
+        add_card.open_torrent_picker(file_name, bytes, entries);
+        // Picker opened, not queued: return OpenedCard (202) so the
+        // extension keeps the browser copy until the user chooses.
+        Routed::OpenedCard
+    } else {
+        if let Err(e) = manager
+            .enqueue_torrent_file_async(bytes, &stem, None, None)
+            .await
+        {
+            fail(e);
+            return Routed::Failed;
+        }
+        Routed::Queued
     }
 }
 
@@ -551,36 +561,38 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| format!("{stem}.torrent"));
                     glib::spawn_future_local(async move {
-                        let bytes =
-                            gio::spawn_blocking(move || crate::torrent::read_torrent_bytes(&path))
-                                .await
-                                .ok()
-                                .flatten();
-                        let Some(bytes) = bytes else {
-                            toasts.add_toast(adw::Toast::new(&gettext(
-                                "Could not read that .torrent file",
-                            )));
-                            return;
+                        // Read and parse off the GTK thread: a large multi-file
+                        // torrent must not stall the main loop.
+                        let loaded = gio::spawn_blocking(move || {
+                            let Some(bytes) = crate::torrent::read_torrent_bytes(&path) else {
+                                return Err(gettext("Could not read that .torrent file"));
+                            };
+                            let list = crate::torrent::torrent_file_list(&bytes)?;
+                            Ok::<_, String>((bytes, list))
+                        })
+                        .await;
+                        let (bytes, (_tname, entries)) = match loaded {
+                            Ok(Ok(loaded)) => loaded,
+                            Ok(Err(e)) => {
+                                toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+                                return;
+                            }
+                            Err(_) => {
+                                toasts.add_toast(adw::Toast::new(&gettext(
+                                    "Could not read that .torrent file",
+                                )));
+                                return;
+                            }
                         };
                         // Multi-file torrents offer per-file switches in the
                         // inline picker's right-sliding page.
-                        match crate::torrent::torrent_file_list(&bytes) {
-                            Ok((_, entries)) if entries.len() > 1 => {
-                                add_card.open_torrent_picker(file_name, bytes, entries);
-                            }
-                            Ok(_) => {
-                                if let Err(e) = manager
-                                    .enqueue_torrent_file_async(bytes, &stem, None, None)
-                                    .await
-                                {
-                                    toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(
-                                        &e,
-                                    )));
-                                }
-                            }
-                            Err(e) => {
-                                toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
-                            }
+                        if entries.len() > 1 {
+                            add_card.open_torrent_picker(file_name, bytes, entries);
+                        } else if let Err(e) = manager
+                            .enqueue_torrent_file_async(bytes, &stem, None, None)
+                            .await
+                        {
+                            toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
                         }
                     });
                     continue;

@@ -230,6 +230,18 @@ pub(crate) fn read_torrent_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
     (buf.len() as u64 <= MAX_TORRENT_BYTES).then_some(buf)
 }
 
+/// Read and parse a `.torrent` file in one call, so UI paths can hand the
+/// whole job to a blocking pool.
+pub(crate) fn load_torrent_file(
+    path: &std::path::Path,
+) -> Result<(Vec<u8>, String, Vec<TorrentFileEntry>), String> {
+    let Some(bytes) = read_torrent_bytes(path) else {
+        return Err(gettext("Could not read that .torrent file"));
+    };
+    let (name, entries) = torrent_file_list(&bytes)?;
+    Ok((bytes, name, entries))
+}
+
 /// Bounded read of the archived `.torrent` behind a queue pseudo-URL (`None` when missing, unreadable, or over the ceiling).
 pub(crate) fn read_archive_bytes(url: &str) -> Option<Vec<u8>> {
     read_torrent_bytes(&archive_path_for_url(url)?)

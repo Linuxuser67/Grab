@@ -435,7 +435,7 @@ struct RestoreSweepPlan {
     dest_dirs: HashSet<String>,
     state_keep: HashSet<(String, u64)>,
     selections: Vec<(String, Vec<usize>)>,
-    session_keep: Option<HashSet<String>>,
+    session_urls: Option<Vec<String>>,
 }
 
 /// One validated queue entry awaiting the restore apply phase (module level so a mid-loop failure never leaves half-spawned engines).
@@ -4699,12 +4699,12 @@ impl DownloadManager {
             .filter(|it| it.status() != DownloadStatus::Done)
             .map(|it| (it.dest_dir(), it.id()))
             .collect();
-        let session_keep = crate::torrent::session_handle().is_some().then(|| {
+        let session_urls = crate::torrent::session_handle().is_some().then(|| {
             self.items()
                 .filter(|it| {
                     it.status() != DownloadStatus::Done && crate::torrent::is_torrent(&it.url())
                 })
-                .filter_map(|it| crate::torrent::info_hash_for_url(&it.url()))
+                .map(|it| it.url().to_string())
                 .collect()
         });
         RestoreSweepPlan {
@@ -4713,7 +4713,7 @@ impl DownloadManager {
             dest_dirs,
             state_keep,
             selections,
-            session_keep,
+            session_urls,
         }
     }
 
@@ -4728,7 +4728,13 @@ impl DownloadManager {
         }
         crate::video::sweep_state_staging(&plan.state_keep);
         crate::cookies::sweep_cookie_staging();
-        plan.session_keep
+        // Hashing reads each torrent archive: do it here, on the blocking pool,
+        // not while building the plan on the GTK thread.
+        plan.session_urls.map(|urls| {
+            urls.into_iter()
+                .filter_map(|url| crate::torrent::info_hash_for_url(&url))
+                .collect()
+        })
     }
 
     fn schedule_session_orphan_sweep(keep: Option<HashSet<String>>) {

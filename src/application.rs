@@ -147,25 +147,27 @@ async fn intake_remote_torrent(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "download".to_string());
-    // Multi-file torrents offer per-file switches in the inline picker's
-    // right-sliding page. Parse off the GTK thread: bencode decode and the
-    // info-hash hash are CPU work on up to 10 MB.
+    // Parse off the GTK thread: bencode decode and the info-hash hash are
+    // CPU work on up to 10 MB.
     let parsed = gio::spawn_blocking(move || {
         let list = crate::torrent::torrent_file_list(&bytes)?;
         Ok::<_, String>((bytes, list))
     })
     .await;
     let (bytes, (_tname, entries)) = match parsed {
-        Ok(Ok(parsed)) => parsed,
+        Ok(Ok(data)) => data,
         Ok(Err(e)) => {
             fail(e);
             return Routed::Failed;
         }
-        Err(_) => {
+        Err(e) => {
+            tracing::warn!(error = ?e, "torrent parse worker failed");
             fail(gettext("Could not read that .torrent file"));
             return Routed::Failed;
         }
     };
+    // Multi-file torrents offer per-file switches in the inline picker's
+    // right-sliding page.
     if entries.len() > 1 {
         add_card.open_torrent_picker(file_name, bytes, entries);
         // Picker opened, not queued: return OpenedCard (202) so the
@@ -563,21 +565,17 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
                     glib::spawn_future_local(async move {
                         // Read and parse off the GTK thread: a large multi-file
                         // torrent must not stall the main loop.
-                        let loaded = gio::spawn_blocking(move || {
-                            let Some(bytes) = crate::torrent::read_torrent_bytes(&path) else {
-                                return Err(gettext("Could not read that .torrent file"));
-                            };
-                            let list = crate::torrent::torrent_file_list(&bytes)?;
-                            Ok::<_, String>((bytes, list))
-                        })
-                        .await;
-                        let (bytes, (_tname, entries)) = match loaded {
-                            Ok(Ok(loaded)) => loaded,
+                        let loaded =
+                            gio::spawn_blocking(move || crate::torrent::load_torrent_file(&path))
+                                .await;
+                        let (bytes, _, entries) = match loaded {
+                            Ok(Ok(data)) => data,
                             Ok(Err(e)) => {
                                 toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
                                 return;
                             }
-                            Err(_) => {
+                            Err(e) => {
+                                tracing::warn!(error = ?e, "torrent read/parse worker failed");
                                 toasts.add_toast(adw::Toast::new(&gettext(
                                     "Could not read that .torrent file",
                                 )));

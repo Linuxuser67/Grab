@@ -1646,21 +1646,16 @@ fn wire_torrent_picker(
             };
             // Read and parse off the GTK thread: a large multi-file torrent
             // must not stall the main loop.
-            let loaded = gio::spawn_blocking(move || {
-                let Some(bytes) = crate::torrent::read_torrent_bytes(&path) else {
-                    return Err(gettext("Could not read that .torrent file"));
-                };
-                let list = crate::torrent::torrent_file_list(&bytes)?;
-                Ok::<_, String>((bytes, list))
-            })
-            .await;
-            let (bytes, (_tname, entries)) = match loaded {
-                Ok(Ok(loaded)) => loaded,
+            let loaded =
+                gio::spawn_blocking(move || crate::torrent::load_torrent_file(&path)).await;
+            let (bytes, _, entries) = match loaded {
+                Ok(Ok(data)) => data,
                 Ok(Err(e)) => {
                     set_field_error(&torrent_row, &e);
                     return;
                 }
-                Err(_) => {
+                Err(e) => {
+                    tracing::warn!(error = ?e, "torrent read/parse worker failed");
                     set_field_error(&torrent_row, &gettext("Could not read that .torrent file"));
                     return;
                 }

@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.4.5" date="2026-10-28">
+      <description>
+        <ul>
+          <li>Read and parse .torrent files on a background thread, so adding a large multi-file torrent no longer freezes the window.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.4.4" date="2026-10-28">
       <description>
         <ul>

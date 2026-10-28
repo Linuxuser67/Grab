@@ -604,18 +604,13 @@ pub(crate) fn dest_part_path(dest: &Path, kind: &str, ext: &str) -> PathBuf {
     dir.join(format!("{stem}.{kind}.{ext}"))
 }
 
-/// Render a path as a yt-dlp `-o` template: double literal `%` (genuine `%(name)s` fields left intact).
+/// Render a literal path as a yt-dlp `-o` template: every `%` is doubled except the trailing `%(ext)s` field.
 pub(crate) fn ytdlp_output_template(path: &Path) -> String {
     let s = path.to_string_lossy();
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        out.push(c);
-        if c == '%' && !matches!(chars.clone().next(), Some('(')) {
-            out.push('%');
-        }
+    match s.strip_suffix("%(ext)s") {
+        Some(stem) => format!("{}%(ext)s", stem.replace('%', "%%")),
+        None => s.replace('%', "%%"),
     }
-    out
 }
 
 /// Grab-namespaced part infixes (the only names `clean_dest_parts` touches).

@@ -7096,6 +7096,24 @@ fn ytdlp_output_template_doubles_percent_in_stem() {
 }
 
 #[test]
+fn ytdlp_output_template_escapes_percent_fields_outside_the_trailing_ext() {
+    // Only the final `%(ext)s` is a field: `%(` in a title or directory is literal data.
+    assert_eq!(
+        ytdlp_output_template(std::path::Path::new("/tmp/dl/Save 50%(ext)s.hls.%(ext)s")),
+        "/tmp/dl/Save 50%%(ext)s.hls.%(ext)s"
+    );
+    assert_eq!(
+        ytdlp_output_template(std::path::Path::new("/tmp/%(title)s/Clip.hls.%(ext)s")),
+        "/tmp/%%(title)s/Clip.hls.%(ext)s"
+    );
+    // No trailing ext field (live capture writes a concrete name): every percent is literal.
+    assert_eq!(
+        ytdlp_output_template(std::path::Path::new("/tmp/50%(title)s.grab-1.mp4")),
+        "/tmp/50%%(title)s.grab-1.mp4"
+    );
+}
+
+#[test]
 fn ytdlp_output_template_round_trips_existing_double_percent() {
     // A stem that already contains `%%` doubles again: yt-dlp renders
     // `%%%%` back to `%%`, so the on-disk name is unchanged.
@@ -7130,6 +7148,19 @@ fn hls_argv_escapes_percent_in_stem() {
     );
     let o = argv.iter().position(|a| a == "-o").expect("-o");
     assert_eq!(argv[o + 1], "/tmp/dl/100%%.hls.%(ext)s");
+
+    // A `%(field)s` in the title is data; only the template's trailing `%(ext)s` may expand.
+    job.dest = std::path::PathBuf::from("/tmp/dl/Save 50%(ext)s.mp4");
+    let dest = job.dest.clone();
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &dest,
+        None,
+    );
+    let o = argv.iter().position(|a| a == "-o").expect("-o");
+    assert_eq!(argv[o + 1], "/tmp/dl/Save 50%%(ext)s.hls.%(ext)s");
 }
 
 #[test]

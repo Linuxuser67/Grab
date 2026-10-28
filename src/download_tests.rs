@@ -1,8 +1,8 @@
 use super::*;
 use crate::download_fetch::{
     AttemptFail, FetchCtx, StartMode, accepts_content_range, backoff_delay, fetch_piece,
-    filename_from_content_disposition, has_holes, parse_content_range, rejects_unexpected_restart,
-    response_total, run_download, stamp_request, truncate_to_prefix,
+    filename_from_content_disposition, has_holes, open_partial, parse_content_range,
+    rejects_unexpected_restart, response_total, run_download, stamp_request, truncate_to_prefix,
 };
 use crate::download_intake::{MAX_URL_LEN, normalize_url};
 use crate::download_net::{
@@ -551,6 +551,31 @@ fn accepts_content_range_validates_206_start() {
     // Missing or unparseable: reject (206 without valid Content-Range is non-compliant).
     assert!(!accepts_content_range(None, 40, Some(100)));
     assert!(!accepts_content_range(Some("garbage"), 40, Some(100)));
+}
+
+#[test]
+fn partial_resume_rejects_a_file_that_changed_after_stat() {
+    let dir = std::env::temp_dir().join(format!(
+        "grab-resume-race-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos()),
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("v.bin");
+    std::fs::write(&path, b"12345").unwrap();
+    let rt = tokio_rt();
+    assert!(rt.block_on(open_partial(&path, 5)).is_ok());
+    // Grew after the offset was read: appending at EOF would corrupt the file.
+    std::fs::write(&path, b"123456").unwrap();
+    assert!(rt.block_on(open_partial(&path, 5)).is_err());
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 6);
+    // Shrank after the offset was read.
+    std::fs::write(&path, b"123").unwrap();
+    assert!(rt.block_on(open_partial(&path, 5)).is_err());
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

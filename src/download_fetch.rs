@@ -499,6 +499,14 @@ pub(crate) async fn has_holes(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Current local length, or `None` when it cannot be read: an offset from an earlier stat is then untrustworthy.
+async fn local_len(path: &std::path::Path) -> Option<u64> {
+    tokio::fs::metadata(path)
+        .await
+        .map(|metadata| metadata.len())
+        .ok()
+}
+
 async fn attempt_once(
     ctx: &FetchCtx,
     expected_total: Option<u64>,
@@ -514,10 +522,12 @@ async fn attempt_once(
         if claim && tokio::fs::symlink_metadata(&ctx.dest).await.is_ok() {
             return Err(DEST_EXISTS.to_string());
         }
-        let start = tokio::fs::metadata(&ctx.dest)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let start = match tokio::fs::metadata(&ctx.dest).await {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            // A stat failure is not an empty file: starting over would truncate bytes we may not own.
+            Err(error) => return Err(format!("Cannot inspect file: {error}")),
+        };
         let mut req = stamp_request(ctx.client.get(&ctx.url), &ctx.user_agent, &ctx.url);
         if start > 0 {
             req = req.header("Range", format!("bytes={start}-"));
@@ -536,15 +546,19 @@ async fn attempt_once(
             return Err(DEST_EXISTS.to_string());
         }
         if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-            // "Already complete" only with proof: matching length AND fully allocated bytes (a sparse full-size file must never take this shortcut).
+            // "Already complete" only with proof: matching length AND a still-unchanged local size AND fully allocated bytes (a sparse full-size file must never take this shortcut).
             let claimed = resp
                 .headers()
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.split('/').next_back())
                 .and_then(|t| t.parse::<u64>().ok());
-            // A length match alone proves nothing: the allocation check above rules out holes.
-            if start > 0 && claimed == Some(start) && !has_holes(&ctx.dest).await {
+            // A length match alone proves nothing: recheck the local file (the offset came from an earlier stat) and its allocation.
+            if start > 0
+                && claimed == Some(start)
+                && local_len(&ctx.dest).await == Some(start)
+                && !has_holes(&ctx.dest).await
+            {
                 return Ok(());
             }
             if claimed.is_none() && start > 0 && !restarted {
@@ -553,6 +567,7 @@ async fn attempt_once(
                 if let Ok(hresp) = execute_with_timeout(&ctx.client, hreq, ctx.timeout).await
                     && hresp.status().is_success()
                     && hresp.content_length() == Some(start)
+                    && local_len(&ctx.dest).await == Some(start)
                     && !has_holes(&ctx.dest).await
                 {
                     return Ok(());
@@ -639,14 +654,7 @@ async fn attempt_once(
             return Err(gettext("Server restarted the download with a smaller file"));
         }
         let mut file = if partial {
-            open_nofollow(
-                |o| {
-                    o.append(true);
-                },
-                &ctx.dest,
-            )
-            .await
-            .map_err(|e| format!("Cannot write file: {e}"))?
+            open_partial(&ctx.dest, start).await?
         } else if claim {
             // Retries truncate our own bytes (see the `claim` parameter).
             // Use O_NOFOLLOW: a dangling symlink must not have its target created.
@@ -779,6 +787,31 @@ async fn open_nofollow(
         .await
         .map_err(std::io::Error::other)??;
     Ok(tokio::fs::File::from_std(file))
+}
+
+/// Open a partial download for append only if it still holds exactly the `start` bytes the Range offset was computed from.
+pub(crate) async fn open_partial(
+    path: &std::path::Path,
+    start: u64,
+) -> Result<tokio::fs::File, String> {
+    let file = open_nofollow(
+        |o| {
+            o.append(true);
+        },
+        path,
+    )
+    .await
+    .map_err(|e| format!("Cannot write file: {e}"))?;
+    // The stat happened before the request: a local append/truncate in that window would shift every byte.
+    let at = file
+        .metadata()
+        .await
+        .map_err(|e| format!("Cannot write file: {e}"))?
+        .len();
+    if at != start {
+        return Err(gettext("The partial file changed during resume"));
+    }
+    Ok(file)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

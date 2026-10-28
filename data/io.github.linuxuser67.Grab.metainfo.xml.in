@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.4.4" date="2026-10-28">
+      <description>
+        <ul>
+          <li>Escape percent signs in video titles before handing output paths to yt-dlp, so a name containing %(ext)s or %(title)s is written as-is rather than expanded as a template field.</li>
+          <li>Reject a resumed download when the partial file changes after its offset is read, and surface file-inspection errors instead of silently restarting and truncating.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.4.3" date="2026-10-27">
       <description>
         <ul>

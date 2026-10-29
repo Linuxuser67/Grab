@@ -6,6 +6,89 @@ use super::*;
 
 use crate::video_argv::VideoJob;
 
+/// A destination created after download preflight must never be replaced when
+/// preserving a single completed DASH part on Stop.
+#[test]
+fn dash_preserve_single_part_does_not_clobber_existing_destination() {
+    let base = std::env::temp_dir().join(format!(
+        "grab-dash-preserve-single-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    let staging = base.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+
+    let part = staging.join("video.f137.mp4");
+    let part_content = vec![b'p'; 2048];
+    std::fs::write(&part, &part_content).unwrap();
+    let dest = base.join("video.mp4");
+    let user_content = b"user-created file";
+    std::fs::write(&dest, user_content).unwrap();
+
+    let result = crate::runtime::tokio_rt().block_on(try_merge_dash_partials(
+        std::path::Path::new("unused-ffmpeg"),
+        &staging,
+        &dest,
+        "https://example.com/video",
+    ));
+
+    assert_eq!(result, None);
+    assert_eq!(std::fs::read(&dest).unwrap(), user_content);
+    assert_eq!(std::fs::read(&part).unwrap(), part_content);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A failed final claim after FFmpeg has produced the merged temporary must
+/// leave the pre-existing destination and both source fragments intact.
+#[cfg(unix)]
+#[test]
+fn dash_preserve_merge_does_not_clobber_existing_destination() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let base = std::env::temp_dir().join(format!(
+        "grab-dash-preserve-merge-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    let staging = base.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+
+    let video_part = staging.join("video.f137.mp4");
+    let audio_part = staging.join("audio.f140.m4a");
+    std::fs::write(&video_part, vec![b'v'; 2048]).unwrap();
+    std::fs::write(&audio_part, vec![b'a'; 2048]).unwrap();
+
+    let fake_ffmpeg = base.join("fake-ffmpeg");
+    std::fs::write(
+        &fake_ffmpeg,
+        "#!/bin/sh\nfor output do :; done\nprintf 'merged output' > \"$output\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let dest = base.join("video.mp4");
+    let user_content = b"user-created file";
+    std::fs::write(&dest, user_content).unwrap();
+
+    let result = crate::runtime::tokio_rt().block_on(try_merge_dash_partials(
+        &fake_ffmpeg,
+        &staging,
+        &dest,
+        "https://example.com/video",
+    ));
+
+    assert_eq!(result, None);
+    assert_eq!(std::fs::read(&dest).unwrap(), user_content);
+    assert!(video_part.exists(), "video fragment must remain resumable");
+    assert!(audio_part.exists(), "audio fragment must remain resumable");
+    assert!(
+        !base.join("video.merged.tmp").exists(),
+        "failed merged output must be cleaned up"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+
 #[test]
 fn live_remux_retry_policy_repairs_timestamps_before_dropping_aac_filter() {
     assert_eq!(

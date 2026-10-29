@@ -131,6 +131,9 @@ fn dash_preserve_merge_does_not_clobber_existing_destination() {
     let dest = base.join("video.mp4");
     let user_content = b"user-created file".to_vec();
     std::fs::write(&dest, &user_content).unwrap();
+    let user_temp = base.join("video.merged.tmp");
+    let user_temp_content = b"unrelated user file".to_vec();
+    std::fs::write(&user_temp, &user_temp_content).unwrap();
     let gate = AttemptGate::new();
 
     let result = crate::runtime::tokio_rt().block_on(try_merge_dash_partials(
@@ -143,11 +146,18 @@ fn dash_preserve_merge_does_not_clobber_existing_destination() {
 
     assert_eq!(result, None);
     assert_eq!(std::fs::read(&dest).unwrap(), user_content);
+    assert_eq!(
+        std::fs::read(&user_temp).unwrap(),
+        user_temp_content,
+        "the user's similarly named temp file must be untouched"
+    );
     assert!(video_part.exists(), "video fragment must remain resumable");
     assert!(audio_part.exists(), "audio fragment must remain resumable");
     assert!(
-        !base.join("video.merged.tmp").exists(),
-        "failed merged output must be cleaned up"
+        std::fs::read_dir(&staging)
+            .unwrap()
+            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".grab-dash-merge-")),
+        "private merge workspace must be cleaned up"
     );
     let _ = std::fs::remove_dir_all(&base);
 }

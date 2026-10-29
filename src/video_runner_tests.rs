@@ -92,13 +92,14 @@ fn dash_preserve_single_part_does_not_clobber_existing_destination() {
     let dest = base.join("video.mp4");
     let user_content = b"user-created file".to_vec();
     std::fs::write(&dest, &user_content).unwrap();
+    let gate = AttemptGate::new();
 
     let result = crate::runtime::tokio_rt().block_on(try_merge_dash_partials(
         std::path::Path::new("unused-ffmpeg"),
         &staging,
         &dest,
         "https://example.com/video",
-        &AttemptGate::new(),
+        &gate,
     ));
 
     assert_eq!(result, None);
@@ -136,14 +137,16 @@ fn dash_preserve_merge_does_not_clobber_existing_destination() {
     std::fs::set_permissions(&fake_ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let dest = base.join("video.mp4");
-    let user_content = b"user-created file";
-    std::fs::write(&dest, user_content).unwrap();
+    let user_content = b"user-created file".to_vec();
+    std::fs::write(&dest, &user_content).unwrap();
+    let gate = AttemptGate::new();
 
     let result = crate::runtime::tokio_rt().block_on(try_merge_dash_partials(
         &fake_ffmpeg,
         &staging,
         &dest,
         "https://example.com/video",
+        &gate,
     ));
 
     assert_eq!(result, None);
@@ -156,7 +159,6 @@ fn dash_preserve_merge_does_not_clobber_existing_destination() {
     );
     let _ = std::fs::remove_dir_all(&base);
 }
-
 
 #[test]
 fn live_remux_retry_policy_repairs_timestamps_before_dropping_aac_filter() {

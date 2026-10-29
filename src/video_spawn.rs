@@ -373,7 +373,16 @@ pub(crate) fn validate_guarded_proxy_args(args: &[String]) -> Result<(), &'stati
     if args.get(separator + 1).is_none() {
         return Err("Extractor arguments are missing the URL after the terminator");
     }
-    if args[..separator].iter().any(|arg| arg == "--proxy") {
+    let overrides_guarded_proxy = args[..separator].iter().any(|arg| {
+        // Python option parsers accept both --option=value and unambiguous
+        // long-option abbreviations. Reject any spelling that could select
+        // --proxy before the positional URL terminator.
+        let option = arg
+            .split_once('=')
+            .map_or(arg.as_str(), |(name, _value)| name);
+        option == "--proxy" || (option.len() > 2 && "--proxy".starts_with(option))
+    });
+    if overrides_guarded_proxy {
         return Err("Cannot safely enforce public-address checks through a configured proxy");
     }
     Ok(())
@@ -675,13 +684,29 @@ mod tests {
         validate_guarded_proxy_args(&args).expect("argv can use the guarded proxy");
         assert_eq!(args, original, "credentials must stay out of argv");
 
-        let conflict = vec![
+        // Reject the exact option, --option=value, and abbreviations accepted
+        // by Python's long-option parsers before the positional terminator.
+        for option in [
+            "--proxy",
+            "--proxy=http://example-proxy.invalid",
+            "--prox",
+            "--prox=http://example-proxy.invalid",
+            "--pro",
+            "--p",
+        ] {
+            let conflict = vec![option.to_string(), "--".to_string(), target.to_string()];
+            assert!(
+                validate_guarded_proxy_args(&conflict).is_err(),
+                "unguarded proxy spelling must be rejected: {option}"
+            );
+        }
+        let conflict_with_separate_value = vec![
             "--proxy".to_string(),
             "http://example-proxy.invalid".to_string(),
             "--".to_string(),
             target.to_string(),
         ];
-        assert!(validate_guarded_proxy_args(&conflict).is_err());
+        assert!(validate_guarded_proxy_args(&conflict_with_separate_value).is_err());
         assert!(validate_guarded_proxy_args(&["--ignore-config".to_string()]).is_err());
     }
 

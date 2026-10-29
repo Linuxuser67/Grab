@@ -45,6 +45,26 @@ impl Drop for AbortTaskOnDrop {
     }
 }
 
+/// Own one torrent-picker flow at a time. The file dialog is asynchronous, so
+/// a second click can otherwise start another parse before the first enqueue.
+struct TorrentPickerGuard(Rc<Cell<bool>>);
+
+impl TorrentPickerGuard {
+    fn acquire(in_flight: &Rc<Cell<bool>>) -> Option<Self> {
+        if in_flight.replace(true) {
+            None
+        } else {
+            Some(Self(Rc::clone(in_flight)))
+        }
+    }
+}
+
+impl Drop for TorrentPickerGuard {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
 /// Where a submit came from: Enter, the Add button or tick icon, or auto-add.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SubmitSource {
@@ -1611,7 +1631,12 @@ fn wire_torrent_picker(
     let nav = nav.clone();
     let torrent_btn = torrent_btn.clone();
     let scheduled_at_c = Rc::clone(&scheduled_at);
+    let picker_in_flight = Rc::new(Cell::new(false));
+    let picker_in_flight_c = Rc::clone(&picker_in_flight);
     torrent_btn.clone().connect_clicked(move |_| {
+        let Some(picker_guard) = TorrentPickerGuard::acquire(&picker_in_flight_c) else {
+            return;
+        };
         let torrent_btn = torrent_btn.clone();
         let m = manager.clone();
         let dd = dest_dir.clone();
@@ -1622,6 +1647,7 @@ fn wire_torrent_picker(
         // A fresh pick clears the previous row-level error.
         clear_field_error(&torrent_row);
         glib::spawn_future_local(async move {
+            let _picker_guard = picker_guard;
             let filter = gtk4::FileFilter::new();
             filter.set_name(Some(&gettext("Torrent files")));
             filter.add_mime_type("application/x-bittorrent");
@@ -3869,6 +3895,22 @@ mod tests {
             is_live: false,
             fetchable: true,
         })
+    }
+
+    #[test]
+    fn torrent_picker_guard_suppresses_overlapping_flows_and_releases_on_drop() {
+        let in_flight = Rc::new(Cell::new(false));
+        let guard = TorrentPickerGuard::acquire(&in_flight).expect("first flow acquires");
+        assert!(in_flight.get(), "the flow holds the single-flight slot");
+        assert!(
+            TorrentPickerGuard::acquire(&in_flight).is_none(),
+            "overlapping flow is rejected"
+        );
+
+        drop(guard);
+        assert!(!in_flight.get(), "dropping the flow releases the slot");
+        let next = TorrentPickerGuard::acquire(&in_flight).expect("next flow can start");
+        drop(next);
     }
 
     #[tokio::test]

@@ -2445,12 +2445,12 @@ mod tests {
     }
 
     #[test]
-    fn declined_suppression_restores_the_previous_approved_cutoff() {
+    fn declined_suppression_restores_approved_cutoff_and_allows_newer_fallback() {
         let _g = exclusive();
         clear_handoff_cookies();
         let old_url = "https://cutoff.example/old";
         let old_path = write_handoff_cookies(old_url, &[cookie("c", "old")]).expect("old jar");
-        store_handoff_cookies(old_url, old_path, None);
+        store_handoff_cookies(old_url, old_path.clone(), None);
         suppress_handoff_host(old_url)
             .expect("first suppression")
             .keep();
@@ -2467,10 +2467,17 @@ mod tests {
         assert!(handoff_cookie_args(fresh_url).is_empty());
         drop(declined);
 
-        let args = handoff_cookie_args(fresh_url);
-        assert_eq!(args.len(), 2);
-        assert_eq!(PathBuf::from(&args[1]), fresh_path);
-        assert!(handoff_cookie_args(old_url).is_empty());
+        let fresh_args = handoff_cookie_args(fresh_url);
+        assert_eq!(fresh_args.len(), 2);
+        assert_eq!(PathBuf::from(&fresh_args[1]), fresh_path);
+
+        // Declining the newer request rolls back only its pending cutoff. The
+        // old exact-URL jar stays suppressed, while lookup may use the newer
+        // same-host jar as fallback instead of reviving the old jar.
+        let old_args = handoff_cookie_args(old_url);
+        assert_eq!(old_args.len(), 2);
+        assert_eq!(PathBuf::from(&old_args[1]), fresh_path);
+        assert_ne!(PathBuf::from(&old_args[1]), old_path);
         clear_handoff_cookies();
     }
 

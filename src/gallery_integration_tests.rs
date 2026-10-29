@@ -364,8 +364,8 @@ async fn gallery_dl_sends_proxy_credentials_from_environment() {
     };
 
     // Exercise the real gallery-dl HTTP client with a local proxy that issues
-    // the same 407 challenge as Grab's guarded proxy. No external network is
-    // contacted: the fake proxy returns 403 as soon as it sees valid auth.
+    // the same 407 challenge as Grab's guarded proxy. The intended request stays
+    // on loopback; the reserved .invalid target fails safely if the proxy is bypassed.
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
         .expect("bind local test proxy");
     listener

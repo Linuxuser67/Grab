@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.4.6" date="2026-10-29">
+      <description>
+        <ul>
+          <li>Harden proxy handling for gallery downloads, including validation of proxy options and authentication behavior.</li>
+          <li>Make DASH output delivery safer: respect discard requests and avoid overwriting existing files during final delivery.</li>
+          <li>Refresh stable Rust dependencies and the offline Flatpak source manifest.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.4.5" date="2026-10-28">
       <description>
         <ul>

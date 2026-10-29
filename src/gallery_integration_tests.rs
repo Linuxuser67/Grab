@@ -4,6 +4,7 @@
 //! Skipped when gallery-dl is not on PATH. Run in CI with a pinned
 //! gallery-dl version.
 
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -353,4 +354,112 @@ async fn gallery_integration_range_indexes_filtered_files() {
     );
 
     std::fs::remove_dir_all(&dest).ok();
+}
+
+#[tokio::test]
+async fn gallery_dl_sends_proxy_credentials_from_environment() {
+    let Some(tool) = find_gallery_dl() else {
+        eprintln!("SKIP: gallery-dl not on PATH");
+        return;
+    };
+
+    // Exercise the real gallery-dl HTTP client with a local proxy that issues
+    // the same 407 challenge as Grab's guarded proxy. No external network is
+    // contacted: the fake proxy returns 403 as soon as it sees valid auth.
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("bind local test proxy");
+    listener
+        .set_nonblocking(true)
+        .expect("make local proxy listener nonblocking");
+    let proxy_addr = listener.local_addr().expect("read local proxy address");
+    let proxy_url = format!("http://grab:test-token@{proxy_addr}");
+    let (auth_tx, auth_rx) = std::sync::mpsc::channel();
+    let proxy_thread = std::thread::spawn(move || {
+        let expected = "Basic Z3JhYjp0ZXN0LXRva2Vu";
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 1024];
+                    loop {
+                        match stream.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(count) => {
+                                request.extend_from_slice(&chunk[..count]);
+                                if request.windows(4).any(|window| window == b"\r\n\r\n")
+                                    || request.len() > 64 * 1024
+                                {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+
+                    let request = String::from_utf8_lossy(&request);
+                    let has_expected_auth = request.lines().any(|line| {
+                        let Some((name, value)) = line.split_once(':') else {
+                            return false;
+                        };
+                        name.trim().eq_ignore_ascii_case("proxy-authorization")
+                            && value.trim() == expected
+                    });
+                    if has_expected_auth {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                        );
+                        let _ = auth_tx.send(true);
+                        return;
+                    }
+
+                    // A standards-based proxy challenge should make the client
+                    // retry using the credentials embedded in HTTP_PROXY.
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"Grab integration test\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = auth_tx.send(false);
+    });
+
+    let mut command = tokio::process::Command::new(&tool);
+    command
+        .args(["--ignore-config", "--simulate", "generic:http://example.invalid/"])
+        .env("HTTP_PROXY", &proxy_url)
+        .env("http_proxy", &proxy_url)
+        .env("HTTPS_PROXY", &proxy_url)
+        .env("https_proxy", &proxy_url)
+        .env("NO_PROXY", "")
+        .env("no_proxy", "")
+        .env("ALL_PROXY", "")
+        .env("all_proxy", "")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+
+    let output = tokio::time::timeout(Duration::from_secs(8), command.output())
+        .await
+        .expect("gallery-dl must finish after the local proxy refuses the request")
+        .expect("run gallery-dl");
+    // A 403 is intentional. The assertion is that the real client authenticated
+    // with the proxy, not that it could download from the fake destination.
+    assert!(!output.status.success(), "the test proxy should reject the page");
+
+    let authenticated = auth_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("test proxy should report whether client authentication arrived");
+    proxy_thread.join().expect("test proxy thread should exit");
+    assert!(
+        authenticated,
+        "gallery-dl did not send the HTTP_PROXY credentials as Proxy-Authorization"
+    );
 }

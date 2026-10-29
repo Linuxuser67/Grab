@@ -366,8 +366,8 @@ async fn gallery_dl_sends_proxy_credentials_from_environment() {
     // Exercise the real gallery-dl HTTP client with a local proxy that issues
     // the same 407 challenge as Grab's guarded proxy. The intended request stays
     // on loopback; the reserved .invalid target fails safely if the proxy is bypassed.
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind local test proxy");
+    let listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind local test proxy");
     listener
         .set_nonblocking(true)
         .expect("make local proxy listener nonblocking");
@@ -432,7 +432,11 @@ async fn gallery_dl_sends_proxy_credentials_from_environment() {
 
     let mut command = tokio::process::Command::new(&tool);
     command
-        .args(["--config-ignore", "--simulate", "generic:http://example.invalid/"])
+        .args([
+            "--config-ignore",
+            "--simulate",
+            "generic:http://example.invalid/",
+        ])
         .env("HTTP_PROXY", &proxy_url)
         .env("http_proxy", &proxy_url)
         .env("HTTPS_PROXY", &proxy_url)

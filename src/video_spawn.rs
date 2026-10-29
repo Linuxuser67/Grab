@@ -694,11 +694,7 @@ mod tests {
             "--pro",
             "--p",
         ] {
-            let conflict = vec![
-                option.to_string(),
-                "--".to_string(),
-                target.to_string(),
-            ];
+            let conflict = vec![option.to_string(), "--".to_string(), target.to_string()];
             assert!(
                 validate_guarded_proxy_args(&conflict).is_err(),
                 "unguarded proxy spelling must be rejected: {option}"

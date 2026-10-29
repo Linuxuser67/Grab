@@ -432,7 +432,7 @@ async fn gallery_dl_sends_proxy_credentials_from_environment() {
 
     let mut command = tokio::process::Command::new(&tool);
     command
-        .args(["--ignore-config", "--simulate", "generic:http://example.invalid/"])
+        .args(["--config-ignore", "--simulate", "generic:http://example.invalid/"])
         .env("HTTP_PROXY", &proxy_url)
         .env("http_proxy", &proxy_url)
         .env("HTTPS_PROXY", &proxy_url)

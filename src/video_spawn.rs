@@ -380,7 +380,7 @@ pub(crate) fn validate_guarded_proxy_args(args: &[String]) -> Result<(), &'stati
 }
 
 /// Apply the loopback proxy when the initial page URL is a marked browser handoff.
-pub(crate) fn guard_untrusted_args(args: &mut Vec<String>) -> Result<Option<String>, VideoError> {
+pub(crate) fn guard_untrusted_args(args: &[String]) -> Result<Option<String>, VideoError> {
     let Some(separator) = args.iter().position(|arg| arg == "--") else {
         return Err(VideoError::fetch(
             "Extractor arguments are missing the URL terminator",

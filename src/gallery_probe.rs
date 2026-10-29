@@ -1110,7 +1110,7 @@ pub async fn count_gallery_files_with_proxy(
     if untrusted_handoff && proxy.is_some() {
         return None;
     }
-    let mut argv = crate::gallery_argv::count_argv_with_proxy(
+    let argv = crate::gallery_argv::count_argv_with_proxy(
         tool,
         url,
         cookies_file,

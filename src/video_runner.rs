@@ -468,6 +468,7 @@ async fn try_merge_dash_partials(
     staging: &Path,
     dest: &Path,
     page_url: &str,
+    gate: &AttemptGate,
 ) -> Option<u64> {
     // Find DASH format files in staging: both in-progress (.part) and
     // completed (.f137.mp4 without .part). yt-dlp renames completed formats,
@@ -496,6 +497,9 @@ async fn try_merge_dash_partials(
     if parts.len() == 1 {
         let (part, _) = &parts[0];
         let size = std::fs::metadata(part).ok()?.len();
+        if !gate.try_commit() {
+            return None;
+        }
         if let Err(error) = crate::file_names::rename_noreplace(part, dest) {
             tracing::warn!(
                 error = %error,
@@ -503,6 +507,7 @@ async fn try_merge_dash_partials(
             );
             return None;
         }
+        gate.mark_delivered();
         return Some(size);
     }
 
@@ -528,6 +533,11 @@ async fn try_merge_dash_partials(
         let _ = std::fs::remove_file(&merged_tmp);
         return None;
     }
+    // Removal can win while FFmpeg is merging; only commit if this row still owns delivery.
+    if !gate.try_commit() {
+        let _ = std::fs::remove_file(&merged_tmp);
+        return None;
+    }
     // Claim the destination atomically; a file created after preflight must survive.
     if let Err(error) = crate::file_names::rename_noreplace(&merged_tmp, dest) {
         let _ = std::fs::remove_file(&merged_tmp);
@@ -537,6 +547,7 @@ async fn try_merge_dash_partials(
         );
         return None;
     }
+    gate.mark_delivered();
     // Clean up the parts we merged.
     let _ = std::fs::remove_file(video_part);
     let _ = std::fs::remove_file(audio_part);
@@ -664,7 +675,7 @@ pub(crate) async fn run_unified_ytdlp(
         // single file instead of abandoning them.
         if matches!(abort_intent, Some(StopIntent::Preserve))
             && let Some(merged) =
-                try_merge_dash_partials(ffmpeg_bin, staging, &job.dest, &job.page_url).await
+                try_merge_dash_partials(ffmpeg_bin, staging, &job.dest, &job.page_url, gate).await
         {
             return Ok(Some(merged));
         }

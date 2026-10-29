@@ -673,7 +673,10 @@ async fn read_probe_stdout_bounded(
 
     let mut output = Vec::new();
     let mut reader = tokio::io::BufReader::new(stream);
-    (&mut reader).take(limit + 1).read_to_end(&mut output).await?;
+    (&mut reader)
+        .take(limit + 1)
+        .read_to_end(&mut output)
+        .await?;
     if output.len() as u64 <= limit {
         return Ok(output);
     }

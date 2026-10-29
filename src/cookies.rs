@@ -277,8 +277,7 @@ async fn stage_cookie_file(
     // Both cookie sources are intentional here: `--cookies` is this export's
     // output file and `--cookies-from-browser` is what fills it, so this spawn
     // must not use the handoff-aware ytdlp_spawn_identity.
-    let identity_args =
-        crate::video_tools::ytdlp_identity_args(cookies_browser, None, page_url);
+    let identity_args = crate::video_tools::ytdlp_identity_args(cookies_browser, None, page_url);
     let guarded_proxy = match crate::video_spawn::guard_untrusted_args(&identity_args) {
         Ok(guarded) => guarded,
         Err(e) => {

@@ -830,14 +830,37 @@ async fn fetch_ytdlp_inner(
         })?;
     tokio::fs::rename(part, dest)
         .await
-        .map_err(|e| VideoError::install(format!("couldn't install {}: {e}", dest.display())))
+        .map_err(|e| VideoError::install(format!("couldn't install {}: {e}", dest.display())))?;
+    sync_install_directory(dest).await;
+    Ok(())
+}
+
+/// Best-effort directory sync after atomically installing a managed tool.
+/// A failed sync is logged without reporting installation failure because the
+/// rename has already succeeded and the executable is in place.
+async fn sync_install_directory(path: &Path) {
+    let Some(parent) = path.parent() else {
+        tracing::warn!(path = %path.display(), "installed tool has no parent directory to sync");
+        return;
+    };
+    let result = match tokio::fs::File::open(parent).await {
+        Ok(directory) => directory.sync_all().await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        tracing::warn!(
+            path = %parent.display(),
+            %error,
+            "installed tool, but could not sync its directory entry"
+        );
+    }
 }
 
 /// Stable Deno Linux archives are published by denoland/deno with per-asset SHA-256 digests.
 const DENO_MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 const DENO_MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 const DENO_LATEST_RELEASE_API: &str = "https://api.github.com/repos/denoland/deno/releases/latest";
-const DENO_RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
+const RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
 const DENO_MIN_VERSION: [u32; 3] = [2, 3, 0];
 
 /// Candidate validated by ensure_deno, kept in sync with yt-dlp's runtime path.
@@ -863,7 +886,7 @@ fn selected_deno_path() -> Option<PathBuf> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct DenoRelease {
+struct ReleaseAsset {
     tag: String,
     download_url: String,
     sha256: Option<String>,
@@ -948,21 +971,25 @@ pub(crate) async fn bounded_response_text(
     String::from_utf8(body).ok()
 }
 
-fn parse_deno_release_metadata(body: &str, arch: &str) -> Option<DenoRelease> {
+/// Parse release metadata only when its tag and selected asset URL match the
+/// expected upstream release shape. An absent or invalid digest is preserved as
+/// None, so installation fails closed while release checks can show the tag.
+fn parse_pinned_release_asset(
+    body: &str,
+    asset_name: &str,
+    expected_url_for_tag: impl FnOnce(&str) -> Option<String>,
+) -> Option<ReleaseAsset> {
     let release: serde_json::Value = serde_json::from_str(body).ok()?;
     let tag = release.get("tag_name")?.as_str()?.to_owned();
     if !valid_release_tag(&tag) {
         return None;
     }
-    let expected_url = deno_download_url_for_arch(&tag, arch)?;
-    let asset_name = deno_asset_name_for_arch(arch)?;
-    let asset =
-        release.get("assets")?.as_array()?.iter().find(|asset| {
-            asset.get("name").and_then(serde_json::Value::as_str) == Some(asset_name)
-        })?;
+    let expected_url = expected_url_for_tag(&tag)?;
+    let asset = release.get("assets")?.as_array()?.iter().find(|asset| {
+        asset.get("name").and_then(serde_json::Value::as_str) == Some(asset_name)
+    })?;
     let download_url = asset.get("browser_download_url")?.as_str()?.to_owned();
-    // Only accept the expected upstream asset URL; never fetch a URL supplied
-    // by arbitrary release metadata, even when the digest field is present.
+    // Never fetch a URL supplied by arbitrary release metadata.
     if download_url != expected_url {
         return None;
     }
@@ -972,14 +999,33 @@ fn parse_deno_release_metadata(body: &str, arch: &str) -> Option<DenoRelease> {
         .and_then(|value| value.strip_prefix("sha256:"))
         .filter(|value| valid_sha256_digest(value))
         .map(str::to_owned);
-    Some(DenoRelease {
+    Some(ReleaseAsset {
         tag,
         download_url,
         sha256,
     })
 }
 
-async fn latest_deno_release() -> Option<DenoRelease> {
+fn parse_deno_release_metadata(body: &str, arch: &str) -> Option<ReleaseAsset> {
+    let asset_name = deno_asset_name_for_arch(arch)?;
+    parse_pinned_release_asset(body, asset_name, |tag| {
+        deno_download_url_for_arch(tag, arch)
+    })
+}
+
+fn ytdlp_download_url(tag: &str) -> Option<String> {
+    valid_release_tag(tag).then(|| {
+        format!(
+            "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/download/{tag}/yt-dlp_linux"
+        )
+    })
+}
+
+fn parse_ytdlp_release_metadata(body: &str) -> Option<ReleaseAsset> {
+    parse_pinned_release_asset(body, "yt-dlp_linux", ytdlp_download_url)
+}
+
+async fn latest_deno_release() -> Option<ReleaseAsset> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let client = tool_client_builder_proxied()
             .ok()?
@@ -994,7 +1040,7 @@ async fn latest_deno_release() -> Option<DenoRelease> {
             .ok()?
             .error_for_status()
             .ok()?;
-        let body = bounded_response_text(response, DENO_RELEASE_METADATA_MAX_BYTES).await?;
+        let body = bounded_response_text(response, RELEASE_METADATA_MAX_BYTES).await?;
         parse_deno_release_metadata(&body, std::env::consts::ARCH)
     });
     handle.await.ok().flatten()
@@ -1157,24 +1203,8 @@ async fn install_deno_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
             part.display()
         )));
     }
-    match std::fs::symlink_metadata(&dest) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            std::fs::remove_file(&part).ok();
-            return Err(VideoError::install(format!(
-                "refusing to replace Deno through symlink {}",
-                dest.display()
-            )));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            std::fs::remove_file(&part).ok();
-            return Err(VideoError::install(format!(
-                "couldn't inspect {}: {error}",
-                dest.display()
-            )));
-        }
-    }
+    // Rename replaces the destination directory entry atomically; it does
+    // not follow a symlink at dest, so a pre-check would be a TOCTOU window.
     if let Err(error) = tokio::fs::rename(&part, &dest).await {
         std::fs::remove_file(&part).ok();
         return Err(VideoError::install(format!(
@@ -1182,6 +1212,7 @@ async fn install_deno_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
             dest.display()
         )));
     }
+    sync_install_directory(&dest).await;
     Ok(dest)
 }
 
@@ -2035,39 +2066,43 @@ pub(crate) fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
         .into_owned()
 }
 
-/// Latest nightly yt-dlp download URL and its SHA-256 digest.
-/// Fail closed: `None` digest means no verified install.
-/// The nightly builds publish `yt-dlp_linux` with a `digest: "sha256:…"` field.
-pub async fn latest_ytdlp_asset() -> Option<(String, Option<String>)> {
+const YTDLP_LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/yt-dlp/yt-dlp-nightly-builds/releases/latest";
+
+/// Fetch and validate the latest yt-dlp release through the configured app proxy.
+/// Metadata is size-bounded like Deno's, and the parser pins the asset URL.
+async fn latest_ytdlp_release() -> Option<ReleaseAsset> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
-        let fetcher =
-            yt_dlp::client::deps::github::GitHubFetcher::new("yt-dlp", "yt-dlp-nightly-builds");
-        let release = fetcher.fetch_latest_release(None).await.ok()?;
-        let asset = release.assets.iter().find(|a| a.name == "yt-dlp_linux")?;
-        let digest = asset
-            .digest
-            .as_deref()
-            .and_then(|d| d.strip_prefix("sha256:"))
-            .map(str::to_owned);
-        Some((asset.download_url.clone(), digest))
+        let client = tool_client_builder_proxied()
+            .ok()?
+            .user_agent(concat!("Grab/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .ok()?;
+        let response = client
+            .get(YTDLP_LATEST_RELEASE_API)
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        let body = bounded_response_text(response, RELEASE_METADATA_MAX_BYTES).await?;
+        parse_ytdlp_release_metadata(&body)
     });
     handle.await.ok().flatten()
 }
 
-/// Latest nightly yt-dlp tag without downloading anything: one user-initiated
-/// GitHub API call. `None` on any network/API failure — the row then reports the
-/// check failed instead of prompting.
+/// Latest nightly yt-dlp download URL and its SHA-256 digest.
+/// An absent or invalid digest means installation fails closed.
+pub async fn latest_ytdlp_asset() -> Option<(String, Option<String>)> {
+    latest_ytdlp_release()
+        .await
+        .map(|release| (release.download_url, release.sha256))
+}
+
+/// Latest nightly yt-dlp tag without downloading the asset.
 pub async fn latest_ytdlp_tag() -> Option<String> {
-    let handle = crate::runtime::tokio_rt().spawn(async move {
-        let fetcher =
-            yt_dlp::client::deps::github::GitHubFetcher::new("yt-dlp", "yt-dlp-nightly-builds");
-        fetcher
-            .fetch_latest_release(None)
-            .await
-            .ok()
-            .map(|release| release.tag_name)
-    });
-    handle.await.ok().flatten()
+    latest_ytdlp_release().await.map(|release| release.tag)
 }
 
 /// Whether a failed yt-dlp log shows the extractor breaking, which a newer
@@ -2859,7 +2894,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod deno_release_tests {
+mod release_metadata_tests {
     use super::*;
 
     fn unique_dir(tag: &str) -> PathBuf {
@@ -3000,6 +3035,33 @@ mod deno_release_tests {
                 .is_none()
         );
         assert!(parse_deno_release_metadata(&body, "unsupported").is_none());
+    }
+
+    #[test]
+    fn ytdlp_release_metadata_pins_tag_asset_url_and_digest() {
+        let tag = "2026.10.28.123456";
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let url = ytdlp_download_url(tag).expect("valid tag");
+        let body = format!(
+            r#"{{"tag_name":"{tag}","assets":[{{"name":"yt-dlp_linux","browser_download_url":"{url}","digest":"sha256:{digest}"}}]}}"#
+        );
+
+        let release = parse_ytdlp_release_metadata(&body).expect("valid release metadata");
+        assert_eq!(release.tag, tag);
+        assert_eq!(release.download_url, url);
+        assert_eq!(release.sha256.as_deref(), Some(digest));
+
+        let bad_url = body.replace(&url, "https://attacker.example/yt-dlp_linux");
+        assert!(parse_ytdlp_release_metadata(&bad_url).is_none());
+        let bad_tag = body.replace(tag, "../main");
+        assert!(parse_ytdlp_release_metadata(&bad_tag).is_none());
+        let bad_digest = body.replace(digest, "abc123");
+        assert_eq!(
+            parse_ytdlp_release_metadata(&bad_digest)
+                .expect("asset URL remains valid")
+                .sha256,
+            None
+        );
     }
 
     #[test]

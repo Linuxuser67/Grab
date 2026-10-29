@@ -47,6 +47,11 @@ use axum::{
     routing::{get, post},
 };
 use hmac::{Hmac, KeyInit as _, Mac};
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper::Request as HyperRequest;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
 use serde::Deserialize;
 use sha2::Sha256;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -60,6 +65,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tokio::sync::oneshot;
+use tower::ServiceExt as _;
 
 const PORT: u16 = 9412;
 /// A URL plus JSON framing; the intake itself caps URLs at `download_intake::MAX_URL_LEN`.
@@ -69,6 +75,11 @@ pub(crate) const QUEUE_DEPTH: usize = 16;
 /// How long `/add?confirm=1` waits for the user to answer the dialog. The
 /// extension's own timeout must be longer.
 pub(crate) const CONFIRM_WAIT: Duration = Duration::from_secs(120);
+/// Bound slow HTTP/1 request headers on the loopback extension API.
+const EXTENSION_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound the lifetime of one connection, including stalled request bodies.
+/// Longer than CONFIRM_WAIT so a legitimate user confirmation can complete.
+const EXTENSION_CONNECTION_TIMEOUT: Duration = Duration::from_secs(180);
 /// Upper bound on confirmation requests in flight. The handoff queue depth
 /// alone does not bound dialogs: the GTK thread drains it into one dialog per
 /// request. Kept well below the queue so a flood cannot bury the user.
@@ -419,12 +430,14 @@ struct HandoffCookies {
     staged_instant: Instant,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct SuppressedHost {
+    /// Effective cutoff: newest approved suppression or in-flight request.
     at: Instant,
-    /// Number of in-flight cookieless handoffs that rely on this tombstone.
-    /// The entry disappears only when the last one is refused/declined.
-    pending: usize,
+    /// Last approved cutoff remains in force while any older jar exists.
+    approved_at: Option<Instant>,
+    /// Unique cutoff for each pending handoff, so declines do not undo others.
+    pending: Vec<(u64, Instant)>,
 }
 
 /// Cookie files handed off from the extension, keyed by canonical URL. Every
@@ -482,6 +495,7 @@ const MAX_SUPPRESSED_HOSTS: usize = MAX_HANDOFF_ENTRIES * 4;
 /// downloads run immediately; this only affects cards left open for a while.
 const HANDOFF_FRESH: Duration = Duration::from_secs(30 * 60);
 static COOKIE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SUPPRESSION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Canonical map key for a handoff URL: the `url::Url` serialization, so the
 /// raw extension string and the intake-normalized form hit the same entry
@@ -609,7 +623,22 @@ fn write_handoff_cookies_with_count(url: &str, cookies: &[Cookie]) -> Option<(Pa
         opts.mode(0o600);
     }
     let mut file = opts.open(&path).ok()?;
-    file.write_all(content.as_bytes()).ok()?;
+    if let Err(error) = file.write_all(content.as_bytes()) {
+        drop(file);
+        if let Err(cleanup_error) = std::fs::remove_file(&path) {
+            tracing::debug!(
+                path = %path.display(),
+                error = %cleanup_error,
+                "could not remove incomplete extension cookie file"
+            );
+        }
+        tracing::debug!(
+            path = %path.display(),
+            %error,
+            "could not write extension cookie file"
+        );
+        return None;
+    }
     Some((path, written))
 }
 
@@ -646,6 +675,10 @@ pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option
         if let Some(old) = store.by_key.remove(&oldest) {
             let _ = std::fs::remove_file(old.path);
         }
+    }
+    let hosts: Vec<String> = store.suppressed_hosts.keys().cloned().collect();
+    for host in hosts {
+        prune_suppression(&mut store, &host);
     }
 }
 
@@ -687,15 +720,13 @@ fn handoff_entry(url: &str) -> Option<HandoffCookies> {
         })
 }
 
-/// A suppression owned by one cookieless handoff. Dropping it (decline,
-/// timeout, queue refusal, or handler cancellation) releases exactly this
-/// request's reference; approving the handoff calls [`Self::keep`].
+/// A suppression owned by one cookieless handoff. Each request has its own cutoff.
 struct Suppression {
     host: String,
-    keep: bool,
-    /// The handoff reached the GTK queue. If this handler is cancelled while
-    /// waiting for the answer, GTK may still show the dialog and route the
-    /// handoff, so cancellation must keep the tombstone (fail closed).
+    id: u64,
+    at: Instant,
+    finished: bool,
+    /// A queued handoff may still be processed by GTK after client disconnect.
     sent: bool,
 }
 
@@ -704,38 +735,93 @@ impl Suppression {
         self.sent = true;
     }
 
-    /// Release explicitly after a decline/failure/timeout.
+    /// Release after a decline, timeout, queue refusal, or other failure.
     fn release(&mut self) {
-        if !self.keep {
-            unsuppress_handoff_host(&self.host);
-            self.keep = true;
+        if !self.finished {
+            finish_suppression(&self.host, self.id, self.at, false);
+            self.finished = true;
         }
     }
 
+    /// Keep older staged jars suppressed after an approved handoff.
     fn keep(mut self) {
-        self.keep = true;
+        if !self.finished {
+            finish_suppression(&self.host, self.id, self.at, true);
+            self.finished = true;
+        }
     }
 }
 
 impl Drop for Suppression {
     fn drop(&mut self) {
-        if !self.keep && !self.sent {
-            unsuppress_handoff_host(&self.host);
+        if !self.finished {
+            // Once sent to GTK, cancellation cannot prove the handoff was declined.
+            // Fail closed until the older jar is removed or replaced.
+            finish_suppression(&self.host, self.id, self.at, self.sent);
+            self.finished = true;
         }
     }
 }
 
-/// Suppress older staged jars for `url`'s host until this request is
-/// approved. Each in-flight request holds one reference so declining one
-/// cannot re-expose a jar another still needs hidden.
+/// Suppress older staged jars for a URL's host until the request is approved.
+fn host_has_stale_handoff(store: &HandoffStore, host: &str, at: Instant) -> bool {
+    store.by_key.iter().any(|(key, entry)| {
+        entry.staged_instant < at
+            && url::Url::parse(key)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+                .is_some_and(|key_host| key_host == host)
+    })
+}
+
+/// Remove a tombstone only when no request depends on it and deleting it cannot
+/// expose a jar older than the last approved cutoff.
+fn prune_suppression(store: &mut HandoffStore, host: &str) {
+    let Some(suppressed) = store.suppressed_hosts.get(host).cloned() else {
+        return;
+    };
+    let removable = suppressed.pending.is_empty()
+        && suppressed
+            .approved_at
+            .is_none_or(|at| !host_has_stale_handoff(store, host, at));
+    if removable {
+        store.suppressed_hosts.remove(host);
+        store.suppressed_order.retain(|candidate| candidate != host);
+    }
+}
+
+fn finish_suppression(host: &str, id: u64, at: Instant, approved: bool) {
+    let mut store = lock_handoff_cookies();
+    if let Some(suppressed) = store.suppressed_hosts.get_mut(host) {
+        if let Some(index) = suppressed
+            .pending
+            .iter()
+            .position(|(pending_id, _)| *pending_id == id)
+        {
+            suppressed.pending.remove(index);
+        }
+        if approved {
+            suppressed.approved_at = Some(suppressed.approved_at.map_or(at, |old| old.max(at)));
+        }
+        if let Some(cutoff) = suppressed
+            .pending
+            .iter()
+            .map(|(_, cutoff)| *cutoff)
+            .chain(suppressed.approved_at)
+            .max()
+        {
+            suppressed.at = cutoff;
+        }
+    }
+    prune_suppression(&mut store, host);
+}
+
 fn suppress_handoff_host(url: &str) -> Option<Suppression> {
     let host = url::Url::parse(url)
         .ok()
         .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))?;
     let mut store = lock_handoff_cookies();
-    // Without an older jar there is nothing to suppress. This also keeps a
-    // cookieless flood from growing the tombstone map: only hosts that had a
-    // staged entry can need one.
+    // Without a staged jar there is nothing to suppress and no tombstone is needed.
     let has_staged = store.by_key.keys().any(|key| {
         url::Url::parse(key)
             .ok()
@@ -745,30 +831,34 @@ fn suppress_handoff_host(url: &str) -> Option<Suppression> {
     if !has_staged {
         return None;
     }
-    // Moving `at` forward is more restrictive for older jars, never less.
+    // Every current jar predates this cutoff. Decline later restores the prior
+    // approved cutoff, while overlapping requests retain independent references.
+    let id = SUPPRESSION_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let at = Instant::now();
     store
         .suppressed_hosts
         .entry(host.clone())
         .and_modify(|suppressed| {
-            suppressed.at = Instant::now();
-            suppressed.pending += 1;
+            suppressed.at = suppressed.at.max(at);
+            suppressed.pending.push((id, at));
         })
         .or_insert(SuppressedHost {
-            at: Instant::now(),
-            pending: 1,
+            at,
+            approved_at: None,
+            pending: vec![(id, at)],
         });
-    store.suppressed_order.retain(|h| h != &host);
+    store.suppressed_order.retain(|candidate| candidate != &host);
     store.suppressed_order.push_back(host.clone());
     while store.suppressed_hosts.len() > MAX_SUPPRESSED_HOSTS {
-        // Never evict a tombstone an in-flight handoff still relies on; skip
-        // pending entries and only drop an idle one.
-        let idle = store.suppressed_order.iter().position(|host| {
-            store
-                .suppressed_hosts
-                .get(host)
-                .is_some_and(|suppressed| suppressed.pending == 0)
+        let removable = store.suppressed_order.iter().position(|candidate| {
+            store.suppressed_hosts.get(candidate).is_some_and(|entry| {
+                entry.pending.is_empty()
+                    && entry
+                        .approved_at
+                        .is_none_or(|cutoff| !host_has_stale_handoff(&store, candidate, cutoff))
+            })
         });
-        let Some(index) = idle else {
+        let Some(index) = removable else {
             break;
         };
         let Some(oldest) = store.suppressed_order.remove(index) else {
@@ -778,25 +868,13 @@ fn suppress_handoff_host(url: &str) -> Option<Suppression> {
     }
     Some(Suppression {
         host,
-        keep: false,
+        id,
+        at,
+        finished: false,
         sent: false,
     })
 }
 
-fn unsuppress_handoff_host(host: &str) {
-    let mut store = lock_handoff_cookies();
-    let release = store
-        .suppressed_hosts
-        .get_mut(host)
-        .is_some_and(|suppressed| {
-            suppressed.pending = suppressed.pending.saturating_sub(1);
-            suppressed.pending == 0
-        });
-    if release {
-        store.suppressed_hosts.remove(host);
-        store.suppressed_order.retain(|h| h != host);
-    }
-}
 
 /// Browser UA staged with a handoff's cookies, if any. Same lookup as the
 /// cookies (exact URL, then same-host fallback).
@@ -915,8 +993,15 @@ pub(crate) fn discard_handoff_cookies_async(url: &str) {
 fn take_handoff_cookie_path(url: &str) -> Option<PathBuf> {
     handoff_key(url).and_then(|key| {
         let mut store = lock_handoff_cookies();
-        store.order.retain(|k| k != &key);
-        store.by_key.remove(&key).map(|e| e.path)
+        store.order.retain(|candidate| candidate != &key);
+        let path = store.by_key.remove(&key).map(|entry| entry.path);
+        if let Some(host) = url::Url::parse(&key)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+        {
+            prune_suppression(&mut store, &host);
+        }
+        path
     })
 }
 
@@ -1054,10 +1139,31 @@ async fn serve_listener_with_cap(
     confirm_wait: Duration,
     confirm_cap: usize,
 ) {
+    serve_listener_with_cap_and_timeouts(
+        listener,
+        tx,
+        pairing,
+        confirm_wait,
+        confirm_cap,
+        EXTENSION_HEADER_READ_TIMEOUT,
+        EXTENSION_CONNECTION_TIMEOUT,
+    )
+    .await;
+}
+
+async fn serve_listener_with_cap_and_timeouts(
+    listener: TcpListener,
+    tx: Sender<Handoff>,
+    pairing: Option<Arc<Pairing>>,
+    confirm_wait: Duration,
+    confirm_cap: usize,
+    header_read_timeout: Duration,
+    connection_timeout: Duration,
+) {
     let port = match listener.local_addr() {
-        Ok(a) => a.port(),
-        Err(e) => {
-            tracing::warn!("Extension HTTP server has no local address: {e}");
+        Ok(address) => address.port(),
+        Err(error) => {
+            tracing::warn!("Extension HTTP server has no local address: {error}");
             return;
         }
     };
@@ -1067,8 +1173,42 @@ async fn serve_listener_with_cap(
         confirm_wait,
         confirm_slots: Arc::new(Semaphore::new(confirm_cap)),
     };
-    if let Err(e) = axum::serve(listener, router(state, port)).await {
-        tracing::warn!("Extension HTTP server error: {e}");
+    let app = router(state, port);
+    loop {
+        let (stream, peer) = match listener.accept().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                tracing::warn!(%error, "Extension HTTP server accept failed");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        let app = app.clone();
+        tokio::spawn(async move {
+            let service = app.map_request(
+                |request: HyperRequest<Incoming>| request.map(axum::body::Body::new),
+            );
+            let service = TowerToHyperService::new(service);
+            let mut builder = http1::Builder::new();
+            builder
+                .timer(TokioTimer::default())
+                .header_read_timeout(header_read_timeout)
+                .keep_alive(false);
+            match tokio::time::timeout(
+                connection_timeout,
+                builder.serve_connection(TokioIo::new(stream), service),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::debug!(%peer, %error, "Extension HTTP connection ended");
+                }
+                Err(_) => {
+                    tracing::debug!(%peer, "Extension HTTP connection timed out");
+                }
+            }
+        });
     }
 }
 
@@ -1383,15 +1523,36 @@ mod tests {
         wait: Duration,
         confirm_cap: usize,
     ) -> Server {
+        start_with_cap_and_timeouts(
+            depth,
+            pairing,
+            wait,
+            confirm_cap,
+            EXTENSION_HEADER_READ_TIMEOUT,
+            EXTENSION_CONNECTION_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn start_with_cap_and_timeouts(
+        depth: usize,
+        pairing: Option<Arc<Pairing>>,
+        wait: Duration,
+        confirm_cap: usize,
+        header_read_timeout: Duration,
+        connection_timeout: Duration,
+    ) -> Server {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = channel(depth);
-        tokio::spawn(serve_listener_with_cap(
+        tokio::spawn(serve_listener_with_cap_and_timeouts(
             listener,
             tx,
             pairing,
             wait,
             confirm_cap,
+            header_read_timeout,
+            connection_timeout,
         ));
         Server { port, rx }
     }
@@ -2236,6 +2397,110 @@ mod tests {
     }
 
     #[test]
+    fn approved_suppression_is_reclaimed_when_the_old_jar_is_removed() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+        let url = "https://reclaimed.example/file";
+        let path = write_handoff_cookies(url, &[cookie("c", "old")]).expect("old jar");
+        store_handoff_cookies(url, path, None);
+        suppress_handoff_host(url).expect("suppression").keep();
+
+        assert!(handoff_cookie_args(url).is_empty());
+        assert!(
+            lock_handoff_cookies()
+                .suppressed_hosts
+                .contains_key("reclaimed.example")
+        );
+        discard_handoff_cookies(url);
+        assert!(
+            !lock_handoff_cookies()
+                .suppressed_hosts
+                .contains_key("reclaimed.example")
+        );
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn approved_suppression_is_reclaimed_when_the_old_jar_is_replaced() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+        let url = "https://replaced.example/file";
+        let old_path = write_handoff_cookies(url, &[cookie("c", "old")]).expect("old jar");
+        store_handoff_cookies(url, old_path.clone(), None);
+        suppress_handoff_host(url).expect("suppression").keep();
+
+        let fresh_path =
+            write_handoff_cookies(url, &[cookie("c", "fresh")]).expect("fresh jar");
+        store_handoff_cookies(url, fresh_path.clone(), None);
+
+        assert!(
+            !lock_handoff_cookies()
+                .suppressed_hosts
+                .contains_key("replaced.example")
+        );
+        let args = handoff_cookie_args(url);
+        assert_eq!(args.len(), 2);
+        assert_eq!(PathBuf::from(&args[1]), fresh_path);
+        assert_ne!(PathBuf::from(&args[1]), old_path);
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn declined_suppression_restores_the_previous_approved_cutoff() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+        let old_url = "https://cutoff.example/old";
+        let old_path =
+            write_handoff_cookies(old_url, &[cookie("c", "old")]).expect("old jar");
+        store_handoff_cookies(old_url, old_path, None);
+        suppress_handoff_host(old_url).expect("first suppression").keep();
+
+        let fresh_url = "https://cutoff.example/fresh";
+        let fresh_path =
+            write_handoff_cookies(fresh_url, &[cookie("c", "fresh")]).expect("fresh jar");
+        store_handoff_cookies(fresh_url, fresh_path.clone(), None);
+        let fresh_args = handoff_cookie_args(fresh_url);
+        assert_eq!(fresh_args.len(), 2);
+        assert_eq!(PathBuf::from(&fresh_args[1]), fresh_path);
+
+        let declined = suppress_handoff_host(fresh_url).expect("second suppression");
+        assert!(handoff_cookie_args(fresh_url).is_empty());
+        drop(declined);
+
+        let args = handoff_cookie_args(fresh_url);
+        assert_eq!(args.len(), 2);
+        assert_eq!(PathBuf::from(&args[1]), fresh_path);
+        assert!(handoff_cookie_args(old_url).is_empty());
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn approved_suppression_entries_stay_bounded_as_old_jars_are_evicted() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+
+        for index in 0..(MAX_SUPPRESSED_HOSTS * 2) {
+            let url = format!("https://host-{index}.example.com/file");
+            let path = write_handoff_cookies(&url, &[cookie("c", "v")]).expect("jar");
+            store_handoff_cookies(&url, path, None);
+            suppress_handoff_host(&url)
+                .expect("staged jar should be suppressed")
+                .keep();
+
+            let store = lock_handoff_cookies();
+            assert!(
+                store.suppressed_hosts.len() <= MAX_HANDOFF_ENTRIES,
+                "suppression entries without a stale staged jar should be reclaimed"
+            );
+            assert!(
+                store.suppressed_hosts.len() <= MAX_SUPPRESSED_HOSTS,
+                "tombstone map must remain within its documented cap"
+            );
+        }
+        clear_handoff_cookies();
+    }
+
+    #[test]
     fn cookieless_suppression_ignores_hosts_without_a_staged_jar() {
         let _g = exclusive();
         clear_handoff_cookies();
@@ -2947,6 +3212,56 @@ mod tests {
         let task = add_confirming(srv.port);
         drop(srv.rx.recv().await.expect("handoff").decision);
         assert_eq!(status(&task.await.unwrap()), "409");
+    }
+
+    #[tokio::test]
+    async fn header_read_timeout_closes_an_incomplete_request() {
+        let server = start_with_cap_and_timeouts(
+            4,
+            test_pairing(),
+            Duration::from_secs(5),
+            MAX_PENDING_CONFIRMATIONS,
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+        )
+        .await;
+        let mut stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, server.port))
+            .await
+            .unwrap();
+        stream.write_all(b"GET /hello HTTP/1.1\r\nHost:").await.unwrap();
+        let mut byte = [0_u8; 1];
+        let result = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte)).await;
+        assert!(
+            matches!(result, Ok(Ok(0)) | Ok(Err(_))),
+            "server should close an incomplete request after the header deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_timeout_closes_a_stalled_request_body() {
+        let server = start_with_cap_and_timeouts(
+            4,
+            test_pairing(),
+            Duration::from_secs(5),
+            MAX_PENDING_CONFIRMATIONS,
+            Duration::from_secs(5),
+            Duration::from_millis(50),
+        )
+        .await;
+        let host = format!("127.0.0.1:{}", server.port);
+        let request = format!(
+            "POST /add HTTP/1.1\r\nHost: {host}\r\nOrigin: chrome-extension://abc123\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{\"url\":"
+        );
+        let mut stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, server.port))
+            .await
+            .unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut byte = [0_u8; 1];
+        let result = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte)).await;
+        assert!(
+            matches!(result, Ok(Ok(0)) | Ok(Err(_))),
+            "server should close a request whose body stalls past the connection deadline"
+        );
     }
 
     #[tokio::test]

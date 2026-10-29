@@ -615,7 +615,7 @@ async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ToolProbe
         .stdout
         .take()
         .ok_or_else(|| ToolProbeError::Wait("yt-dlp gave no output pipe".to_string()))?;
-    let stdout_task = tokio::spawn(crate::video_spawn::read_bounded(stdout, MAX_OUTPUT_BYTES));
+    let stdout_task = tokio::spawn(read_probe_stdout_bounded(stdout, MAX_OUTPUT_BYTES));
     let stdout_abort = stdout_task.abort_handle();
 
     let status = match tokio::time::timeout(PROBE_TIMEOUT, child.wait()).await {
@@ -661,6 +661,29 @@ async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ToolProbe
         line.contains("chrome") && !line.contains("unavailable")
     });
     Ok(supported)
+}
+
+/// Drain the impersonation probe's stdout into a bounded buffer. Always drains
+/// excess bytes to EOF so the child cannot block on a full pipe while being waited.
+async fn read_probe_stdout_bounded(
+    stream: impl tokio::io::AsyncRead + Unpin,
+    limit: u64,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut output = Vec::new();
+    let mut reader = tokio::io::BufReader::new(stream);
+    (&mut reader).take(limit + 1).read_to_end(&mut output).await?;
+    if output.len() as u64 <= limit {
+        return Ok(output);
+    }
+
+    let mut discard = [0u8; 8192];
+    while reader.read(&mut discard).await? != 0 {}
+    Err(std::io::Error::new(
+        std::io::ErrorKind::QuotaExceeded,
+        "impersonation probe output exceeded the size limit",
+    ))
 }
 
 /// Best-effort process-group cleanup when a probe is cancelled or times out.

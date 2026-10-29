@@ -7,7 +7,7 @@
 //! HTTP proxy requests. It is only enabled for browser-handoff hosts whose
 //! public-resolution policy is active.
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::fmt::Write as _;
 use std::io;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
@@ -712,7 +712,9 @@ mod tests {
         let expected_authorization = proxy_authorization_header("test-token");
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, &expected_authorization).await.unwrap();
+            serve_connection(stream, &expected_authorization)
+                .await
+                .unwrap();
         });
 
         let mut client = TcpStream::connect(proxy_addr).await.unwrap();

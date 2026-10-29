@@ -141,8 +141,7 @@ pub async fn run_gallery_download_with_proxy(
         proxy,
     );
     let guarded_proxy = if untrusted_handoff {
-        crate::video_spawn::validate_guarded_proxy_args(&argv)
-            .map_err(GalleryError::probe)?;
+        crate::video_spawn::validate_guarded_proxy_args(&argv).map_err(GalleryError::probe)?;
         Some(crate::subprocess_proxy::ensure_started().map_err(GalleryError::probe)?)
     } else {
         None

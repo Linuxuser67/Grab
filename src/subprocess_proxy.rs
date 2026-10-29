@@ -8,6 +8,7 @@
 //! public-resolution policy is active.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use std::fmt::Write as _;
 use std::io;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::pin::Pin;
@@ -42,7 +43,11 @@ fn random_proxy_token() -> Result<String, String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes)
         .map_err(|error| format!("couldn't generate guarded proxy token: {error}"))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut token, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(token)
 }
 
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
@@ -235,7 +240,11 @@ fn start_proxy_listener(
             .map_err(|e| format!("couldn't start the guarded extractor proxy: {e}"))?
     };
 
-    match state.set(ProxyState { addr, token, expected_authorization }) {
+    match state.set(ProxyState {
+        addr,
+        token,
+        expected_authorization,
+    }) {
         Ok(()) => {
             let expected_authorization = state
                 .get()
@@ -252,7 +261,9 @@ fn start_proxy_listener(
                             let expected_authorization = expected_authorization.clone();
                             tokio::spawn(async move {
                                 let _permit = permit;
-                                if let Err(e) = serve_connection(stream, &expected_authorization).await {
+                                if let Err(e) =
+                                    serve_connection(stream, &expected_authorization).await
+                                {
                                     tracing::debug!(error = %e, "guarded extractor proxy request failed");
                                 }
                             });

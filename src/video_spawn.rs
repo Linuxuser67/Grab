@@ -405,8 +405,8 @@ pub(crate) fn guard_untrusted_args(args: &mut Vec<String>) -> Result<Option<Stri
     Ok(Some(proxy))
 }
 
-/// Route yt-dlp's external FFmpeg downloader through the same HTTP proxy.
-/// yt-dlp's --proxy does not automatically cover every external downloader.
+/// Route extractor and external-downloader requests through the guarded proxy.
+/// The authenticated URL stays in standard environment variables, never argv.
 pub(crate) fn apply_guarded_proxy_env(cmd: &mut tokio::process::Command, proxy: Option<&str>) {
     if let Some(proxy) = proxy {
         cmd.env("NO_PROXY", "")

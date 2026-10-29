@@ -154,9 +154,11 @@ fn dash_preserve_merge_does_not_clobber_existing_destination() {
     assert!(video_part.exists(), "video fragment must remain resumable");
     assert!(audio_part.exists(), "audio fragment must remain resumable");
     assert!(
-        std::fs::read_dir(&staging)
+        std::fs::read_dir(&staging).unwrap().all(|entry| !entry
             .unwrap()
-            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".grab-dash-merge-")),
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".grab-dash-merge-")),
         "private merge workspace must be cleaned up"
     );
     let _ = std::fs::remove_dir_all(&base);

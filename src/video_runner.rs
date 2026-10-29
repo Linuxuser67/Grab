@@ -496,7 +496,13 @@ async fn try_merge_dash_partials(
     if parts.len() == 1 {
         let (part, _) = &parts[0];
         let size = std::fs::metadata(part).ok()?.len();
-        std::fs::rename(part, dest).ok()?;
+        if let Err(error) = crate::file_names::rename_noreplace(part, dest) {
+            tracing::warn!(
+                error = %error,
+                "could not preserve DASH partial without clobbering the destination"
+            );
+            return None;
+        }
         return Some(size);
     }
 
@@ -522,8 +528,15 @@ async fn try_merge_dash_partials(
         let _ = std::fs::remove_file(&merged_tmp);
         return None;
     }
-    // Move into place.
-    std::fs::rename(&merged_tmp, dest).ok()?;
+    // Claim the destination atomically; a file created after preflight must survive.
+    if let Err(error) = crate::file_names::rename_noreplace(&merged_tmp, dest) {
+        let _ = std::fs::remove_file(&merged_tmp);
+        tracing::warn!(
+            error = %error,
+            "could not preserve merged DASH partial without clobbering the destination"
+        );
+        return None;
+    }
     // Clean up the parts we merged.
     let _ = std::fs::remove_file(video_part);
     let _ = std::fs::remove_file(audio_part);

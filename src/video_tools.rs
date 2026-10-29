@@ -985,9 +985,10 @@ fn parse_pinned_release_asset(
         return None;
     }
     let expected_url = expected_url_for_tag(&tag)?;
-    let asset = release.get("assets")?.as_array()?.iter().find(|asset| {
-        asset.get("name").and_then(serde_json::Value::as_str) == Some(asset_name)
-    })?;
+    let asset =
+        release.get("assets")?.as_array()?.iter().find(|asset| {
+            asset.get("name").and_then(serde_json::Value::as_str) == Some(asset_name)
+        })?;
     let download_url = asset.get("browser_download_url")?.as_str()?.to_owned();
     // Never fetch a URL supplied by arbitrary release metadata.
     if download_url != expected_url {

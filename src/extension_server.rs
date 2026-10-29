@@ -47,9 +47,9 @@ use axum::{
     routing::{get, post},
 };
 use hmac::{Hmac, KeyInit as _, Mac};
+use hyper::Request as HyperRequest;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
-use hyper::Request as HyperRequest;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use serde::Deserialize;
@@ -847,7 +847,9 @@ fn suppress_handoff_host(url: &str) -> Option<Suppression> {
             approved_at: None,
             pending: vec![(id, at)],
         });
-    store.suppressed_order.retain(|candidate| candidate != &host);
+    store
+        .suppressed_order
+        .retain(|candidate| candidate != &host);
     store.suppressed_order.push_back(host.clone());
     while store.suppressed_hosts.len() > MAX_SUPPRESSED_HOSTS {
         let removable = store.suppressed_order.iter().position(|candidate| {
@@ -874,7 +876,6 @@ fn suppress_handoff_host(url: &str) -> Option<Suppression> {
         sent: false,
     })
 }
-
 
 /// Browser UA staged with a handoff's cookies, if any. Same lookup as the
 /// cookies (exact URL, then same-host fallback).
@@ -1185,9 +1186,8 @@ async fn serve_listener_with_cap_and_timeouts(
         };
         let app = app.clone();
         tokio::spawn(async move {
-            let service = app.map_request(
-                |request: HyperRequest<Incoming>| request.map(axum::body::Body::new),
-            );
+            let service = app
+                .map_request(|request: HyperRequest<Incoming>| request.map(axum::body::Body::new));
             let service = TowerToHyperService::new(service);
             let mut builder = http1::Builder::new();
             builder
@@ -2429,8 +2429,7 @@ mod tests {
         store_handoff_cookies(url, old_path.clone(), None);
         suppress_handoff_host(url).expect("suppression").keep();
 
-        let fresh_path =
-            write_handoff_cookies(url, &[cookie("c", "fresh")]).expect("fresh jar");
+        let fresh_path = write_handoff_cookies(url, &[cookie("c", "fresh")]).expect("fresh jar");
         store_handoff_cookies(url, fresh_path.clone(), None);
 
         assert!(
@@ -2450,10 +2449,11 @@ mod tests {
         let _g = exclusive();
         clear_handoff_cookies();
         let old_url = "https://cutoff.example/old";
-        let old_path =
-            write_handoff_cookies(old_url, &[cookie("c", "old")]).expect("old jar");
+        let old_path = write_handoff_cookies(old_url, &[cookie("c", "old")]).expect("old jar");
         store_handoff_cookies(old_url, old_path, None);
-        suppress_handoff_host(old_url).expect("first suppression").keep();
+        suppress_handoff_host(old_url)
+            .expect("first suppression")
+            .keep();
 
         let fresh_url = "https://cutoff.example/fresh";
         let fresh_path =
@@ -3228,7 +3228,10 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, server.port))
             .await
             .unwrap();
-        stream.write_all(b"GET /hello HTTP/1.1\r\nHost:").await.unwrap();
+        stream
+            .write_all(b"GET /hello HTTP/1.1\r\nHost:")
+            .await
+            .unwrap();
         let mut byte = [0_u8; 1];
         let result = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte)).await;
         assert!(

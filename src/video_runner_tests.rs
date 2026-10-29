@@ -10,10 +10,8 @@ use crate::video_argv::VideoJob;
 /// and must not create the final destination.
 #[test]
 fn dash_preserve_does_not_deliver_after_discard_wins() {
-    let base = std::env::temp_dir().join(format!(
-        "grab-dash-preserve-discard-{}",
-        std::process::id()
-    ));
+    let base =
+        std::env::temp_dir().join(format!("grab-dash-preserve-discard-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let staging = base.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
@@ -45,10 +43,8 @@ fn dash_preserve_does_not_deliver_after_discard_wins() {
 /// reclaim the delivered orphan after the worker exits.
 #[test]
 fn dash_preserve_success_marks_delivery() {
-    let base = std::env::temp_dir().join(format!(
-        "grab-dash-preserve-success-{}",
-        std::process::id()
-    ));
+    let base =
+        std::env::temp_dir().join(format!("grab-dash-preserve-success-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let staging = base.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
@@ -78,10 +74,8 @@ fn dash_preserve_success_marks_delivery() {
 /// preserving a single completed DASH part on Stop.
 #[test]
 fn dash_preserve_single_part_does_not_clobber_existing_destination() {
-    let base = std::env::temp_dir().join(format!(
-        "grab-dash-preserve-single-{}",
-        std::process::id()
-    ));
+    let base =
+        std::env::temp_dir().join(format!("grab-dash-preserve-single-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let staging = base.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
@@ -115,10 +109,8 @@ fn dash_preserve_single_part_does_not_clobber_existing_destination() {
 fn dash_preserve_merge_does_not_clobber_existing_destination() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let base = std::env::temp_dir().join(format!(
-        "grab-dash-preserve-merge-{}",
-        std::process::id()
-    ));
+    let base =
+        std::env::temp_dir().join(format!("grab-dash-preserve-merge-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let staging = base.join("staging");
     std::fs::create_dir_all(&staging).unwrap();

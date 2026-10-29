@@ -6,6 +6,164 @@ use super::*;
 
 use crate::video_argv::VideoJob;
 
+/// A removal that wins before the final claim must keep the partial in staging
+/// and must not create the final destination.
+#[test]
+fn dash_preserve_does_not_deliver_after_discard_wins() {
+    let base =
+        std::env::temp_dir().join(format!("grab-dash-preserve-discard-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let staging = base.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+
+    let part = staging.join("video.f137.mp4");
+    let part_content = vec![b'p'; 2048];
+    std::fs::write(&part, &part_content).unwrap();
+    let dest = base.join("video.mp4");
+    let gate = AttemptGate::new();
+    assert!(gate.discard());
+
+    let result = crate::runtime::tokio_rt().block_on(try_merge_dash_partials(
+        std::path::Path::new("unused-ffmpeg"),
+        &staging,
+        &dest,
+        "https://example.com/video",
+        &gate,
+    ));
+
+    assert_eq!(result, None);
+    assert!(!dest.exists());
+    assert!(part.exists());
+    assert_eq!(std::fs::read(&part).unwrap(), part_content);
+    assert!(!gate.was_delivered());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Successful preservation marks delivery so a concurrent row removal can
+/// reclaim the delivered orphan after the worker exits.
+#[test]
+fn dash_preserve_success_marks_delivery() {
+    let base =
+        std::env::temp_dir().join(format!("grab-dash-preserve-success-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let staging = base.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+
+    let part = staging.join("video.f137.mp4");
+    let part_content = vec![b'p'; 2048];
+    std::fs::write(&part, &part_content).unwrap();
+    let dest = base.join("video.mp4");
+    let gate = AttemptGate::new();
+
+    let result = crate::runtime::tokio_rt().block_on(try_merge_dash_partials(
+        std::path::Path::new("unused-ffmpeg"),
+        &staging,
+        &dest,
+        "https://example.com/video",
+        &gate,
+    ));
+
+    assert_eq!(result, Some(part_content.len() as u64));
+    assert_eq!(std::fs::read(&dest).unwrap(), part_content);
+    assert!(!part.exists());
+    assert!(gate.was_delivered());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A destination created after download preflight must never be replaced when
+/// preserving a single completed DASH part on Stop.
+#[test]
+fn dash_preserve_single_part_does_not_clobber_existing_destination() {
+    let base =
+        std::env::temp_dir().join(format!("grab-dash-preserve-single-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let staging = base.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+
+    let part = staging.join("video.f137.mp4");
+    let part_content = vec![b'p'; 2048];
+    std::fs::write(&part, &part_content).unwrap();
+    let dest = base.join("video.mp4");
+    let user_content = b"user-created file".to_vec();
+    std::fs::write(&dest, &user_content).unwrap();
+    let gate = AttemptGate::new();
+
+    let result = crate::runtime::tokio_rt().block_on(try_merge_dash_partials(
+        std::path::Path::new("unused-ffmpeg"),
+        &staging,
+        &dest,
+        "https://example.com/video",
+        &gate,
+    ));
+
+    assert_eq!(result, None);
+    assert_eq!(std::fs::read(&dest).unwrap(), user_content);
+    assert_eq!(std::fs::read(&part).unwrap(), part_content);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A failed final claim after FFmpeg has produced the merged temporary must
+/// leave the pre-existing destination and both source fragments intact.
+#[cfg(unix)]
+#[test]
+fn dash_preserve_merge_does_not_clobber_existing_destination() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let base =
+        std::env::temp_dir().join(format!("grab-dash-preserve-merge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let staging = base.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+
+    let video_part = staging.join("video.f137.mp4");
+    let audio_part = staging.join("audio.f140.m4a");
+    std::fs::write(&video_part, vec![b'v'; 2048]).unwrap();
+    std::fs::write(&audio_part, vec![b'a'; 2048]).unwrap();
+
+    let fake_ffmpeg = base.join("fake-ffmpeg");
+    std::fs::write(
+        &fake_ffmpeg,
+        "#!/bin/sh\nfor output do :; done\nprintf 'merged output' > \"$output\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let dest = base.join("video.mp4");
+    let user_content = b"user-created file".to_vec();
+    std::fs::write(&dest, &user_content).unwrap();
+    let user_temp = base.join("video.merged.tmp");
+    let user_temp_content = b"unrelated user file".to_vec();
+    std::fs::write(&user_temp, &user_temp_content).unwrap();
+    let gate = AttemptGate::new();
+
+    let result = crate::runtime::tokio_rt().block_on(try_merge_dash_partials(
+        &fake_ffmpeg,
+        &staging,
+        &dest,
+        "https://example.com/video",
+        &gate,
+    ));
+
+    assert_eq!(result, None);
+    assert_eq!(std::fs::read(&dest).unwrap(), user_content);
+    assert_eq!(
+        std::fs::read(&user_temp).unwrap(),
+        user_temp_content,
+        "the user's similarly named temp file must be untouched"
+    );
+    assert!(video_part.exists(), "video fragment must remain resumable");
+    assert!(audio_part.exists(), "audio fragment must remain resumable");
+    assert!(
+        std::fs::read_dir(&staging).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".grab-dash-merge-")),
+        "private merge workspace must be cleaned up"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn live_remux_retry_policy_repairs_timestamps_before_dropping_aac_filter() {
     assert_eq!(

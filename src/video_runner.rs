@@ -459,6 +459,56 @@ async fn run_video_download_inner(
     }
 }
 
+static DASH_MERGE_TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Private same-filesystem workspace for the user-stopped DASH merge.
+/// Never reuse a predictable output filename in the download directory: a
+/// pre-existing `<dest>.merged.tmp` belongs to the user, not this attempt.
+struct DashMergeTempDir(PathBuf);
+
+impl DashMergeTempDir {
+    fn create(parent: &Path) -> std::io::Result<Self> {
+        for _ in 0..128 {
+            let sequence = DASH_MERGE_TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!(
+                ".grab-dash-merge-{}-{sequence}",
+                std::process::id()
+            ));
+            match create_private_merge_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate a private DASH merge directory",
+        ))
+    }
+
+    fn output_path(&self) -> PathBuf {
+        self.0.join("merged.tmp")
+    }
+}
+
+impl Drop for DashMergeTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(unix)]
+fn create_private_merge_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_merge_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(path)
+}
+
 /// One direct download through a single yt-dlp invocation: Grab claims the output into place (EXDEV-safe, no clobber) and wipes staging.
 /// Returns the finished size, or `None` on user abort (the caller stays quiet).
 /// On Preserve abort of a DASH download, partial video+audio are merged into
@@ -468,6 +518,7 @@ async fn try_merge_dash_partials(
     staging: &Path,
     dest: &Path,
     page_url: &str,
+    gate: &AttemptGate,
 ) -> Option<u64> {
     // Find DASH format files in staging: both in-progress (.part) and
     // completed (.f137.mp4 without .part). yt-dlp renames completed formats,
@@ -496,16 +547,27 @@ async fn try_merge_dash_partials(
     if parts.len() == 1 {
         let (part, _) = &parts[0];
         let size = std::fs::metadata(part).ok()?.len();
-        std::fs::rename(part, dest).ok()?;
+        if !gate.try_commit() {
+            return None;
+        }
+        if let Err(error) = crate::file_names::rename_noreplace(part, dest) {
+            tracing::warn!(
+                error = %error,
+                "could not preserve DASH partial without clobbering the destination"
+            );
+            return None;
+        }
+        gate.mark_delivered();
         return Some(size);
     }
 
     let (video_part, _) = &parts[0];
     let (audio_part, _) = &parts[1];
 
-    // Merge into dest with a .tmp suffix, then rename.
-    let mut merged_tmp = dest.to_path_buf();
-    merged_tmp.set_extension("merged.tmp");
+    // Merge in an exclusive private directory beside staging, keeping the final
+    // no-clobber move on the same filesystem without touching user-owned temp names.
+    let merged_dir = DashMergeTempDir::create(staging).ok()?;
+    let merged_tmp = merged_dir.output_path();
     let argv = dash_merge_argv(video_part, audio_part, &merged_tmp, page_url);
     let mut cmd = tokio::process::Command::new(ffmpeg_bin);
     cmd.args(&argv);
@@ -522,8 +584,21 @@ async fn try_merge_dash_partials(
         let _ = std::fs::remove_file(&merged_tmp);
         return None;
     }
-    // Move into place.
-    std::fs::rename(&merged_tmp, dest).ok()?;
+    // Removal can win while FFmpeg is merging; only commit if this row still owns delivery.
+    if !gate.try_commit() {
+        let _ = std::fs::remove_file(&merged_tmp);
+        return None;
+    }
+    // Claim the destination atomically; a file created after preflight must survive.
+    if let Err(error) = crate::file_names::rename_noreplace(&merged_tmp, dest) {
+        let _ = std::fs::remove_file(&merged_tmp);
+        tracing::warn!(
+            error = %error,
+            "could not preserve merged DASH partial without clobbering the destination"
+        );
+        return None;
+    }
+    gate.mark_delivered();
     // Clean up the parts we merged.
     let _ = std::fs::remove_file(video_part);
     let _ = std::fs::remove_file(audio_part);
@@ -651,7 +726,7 @@ pub(crate) async fn run_unified_ytdlp(
         // single file instead of abandoning them.
         if matches!(abort_intent, Some(StopIntent::Preserve))
             && let Some(merged) =
-                try_merge_dash_partials(ffmpeg_bin, staging, &job.dest, &job.page_url).await
+                try_merge_dash_partials(ffmpeg_bin, staging, &job.dest, &job.page_url, gate).await
         {
             return Ok(Some(merged));
         }

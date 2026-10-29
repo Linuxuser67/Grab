@@ -93,7 +93,7 @@ pub(crate) async fn fetch_raw_dump_json(
         cookies_browser,
         url,
     ));
-    let guarded_proxy = guard_untrusted_args(&mut args)?;
+    let guarded_proxy = guard_untrusted_args(&args)?;
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin).await;
     // Belt-and-braces with the ProcessGroupGuard below (which SIGKILLs the
@@ -687,8 +687,8 @@ mod tests {
 
     #[test]
     fn guarded_argv_without_url_terminator_fails_closed() {
-        let mut args = vec!["--ignore-config".to_string()];
-        assert!(guard_untrusted_args(&mut args).is_err());
+        let args = vec!["--ignore-config".to_string()];
+        assert!(guard_untrusted_args(&args).is_err());
     }
 
     #[test]
@@ -697,10 +697,10 @@ mod tests {
             "https://user-entered-{}.example.invalid/watch",
             std::process::id()
         );
-        let mut args = vec!["--ignore-config".to_string(), "--".to_string(), url];
+        let args = vec!["--ignore-config".to_string(), "--".to_string(), url];
         let original = args.clone();
         assert!(
-            guard_untrusted_args(&mut args)
+            guard_untrusted_args(&args)
                 .expect("ordinary user-entered URLs need no guarded proxy")
                 .is_none()
         );

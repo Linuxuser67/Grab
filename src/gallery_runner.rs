@@ -129,7 +129,7 @@ pub async fn run_gallery_download_with_proxy(
             "Cannot safely use a configured proxy for an untrusted browser handoff".to_string(),
         ));
     }
-    let mut argv = download_argv_with_proxy(
+    let argv = download_argv_with_proxy(
         tool,
         &job.page_url,
         &job.dest_dir,
@@ -141,10 +141,9 @@ pub async fn run_gallery_download_with_proxy(
         proxy,
     );
     let guarded_proxy = if untrusted_handoff {
-        let proxy = crate::subprocess_proxy::ensure_started().map_err(GalleryError::probe)?;
-        crate::video_spawn::insert_guarded_proxy_arg(&mut argv, &proxy)
+        crate::video_spawn::validate_guarded_proxy_args(&argv)
             .map_err(GalleryError::probe)?;
-        Some(proxy)
+        Some(crate::subprocess_proxy::ensure_started().map_err(GalleryError::probe)?)
     } else {
         None
     };

@@ -7,6 +7,8 @@ description = "A GNOME download manager (GTK 4 / libadwaita, reqwest backend)"
 license = "GPL-3.0-only"
 
 [dependencies]
+# Encode the per-run guarded-proxy credential for HTTP Proxy-Authorization.
+base64 = "0.23.1"
 # Version features must match the system libs (GTK 4.22+ / Adw 1.9+, GNOME 51 runtime).
 gtk4 = { version = "0.11", features = ["v4_10", "v4_12", "v4_14", "v4_16", "v4_18", "v4_20", "v4_22"] }
 libadwaita = { version = "0.9", features = ["v1_4", "v1_5", "v1_6", "v1_7", "v1_8", "v1_9"] }

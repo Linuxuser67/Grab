@@ -1319,6 +1319,7 @@ name = "grab"
 version = "6.4.5"
 dependencies = [
  "axum",
+ "base64",
  "futures-util",
  "getrandom 0.4.3",
  "gettext-rs",

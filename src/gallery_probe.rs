@@ -303,13 +303,7 @@ fn apply_guarded_proxy(
         ));
     }
     let proxy = crate::subprocess_proxy::ensure_started().map_err(GalleryError::probe)?;
-    cmd.arg("--proxy").arg(&proxy);
-    cmd.env("NO_PROXY", "")
-        .env("no_proxy", "")
-        .env("HTTP_PROXY", &proxy)
-        .env("http_proxy", &proxy)
-        .env("HTTPS_PROXY", &proxy)
-        .env("https_proxy", &proxy);
+    crate::video_spawn::apply_guarded_proxy_env(cmd, Some(&proxy));
     Ok(true)
 }
 
@@ -423,9 +417,6 @@ async fn run_to_completion(
         .spawn()
         .map_err(|e| GalleryError::install(format!("couldn't spawn gallery-dl: {e}")))?;
     let mut guard = ProcessGroupGuard::new(&child);
-    // Recorded before the wait so the drain-timeout branch can still signal
-    // the group after the reap disarms the guard.
-    let pgid = guard.pgid();
     let stdout = child
         .stdout
         .take()
@@ -502,26 +493,12 @@ async fn run_to_completion(
             )));
         }
         Err(_) => {
-            // EOF never came; the length caps already watch the bytes, so
-            // this is a pipe inherited by a surviving descendant. Abort the
-            // drains, then kill the group by the recorded PGID (the guard
-            // disarmed at reap) and fail the probe instead of hanging it.
-            //
-            // The reap is up to 60 s old (DRAIN_AFTER_EXIT_TIMEOUT), so the
-            // PGID may be free or recycled: this is a best-effort signal for
-            // a descendant still in the group, not a guarantee. One that
-            // setsid'd away is unreachable and survives (now without pipe
-            // readers).
+            // EOF never came: a descendant may have inherited a pipe after
+            // the direct child was reaped. Abort the drains and fail the probe,
+            // but do not signal the old PGID: it may have been recycled after
+            // the leader exited, so killpg could terminate unrelated work.
             out_abort.abort();
             err_abort.abort();
-            #[cfg(unix)]
-            if let Some(pgid) = pgid {
-                // SAFETY: constant signal number; ESRCH (already dead) is
-                // harmless.
-                unsafe {
-                    libc::killpg(pgid, libc::SIGKILL);
-                }
-            }
             return Err(GalleryError::probe(format!(
                 "{what} didn't close its pipes after exiting"
             )));
@@ -1133,7 +1110,7 @@ pub async fn count_gallery_files_with_proxy(
     if untrusted_handoff && proxy.is_some() {
         return None;
     }
-    let mut argv = crate::gallery_argv::count_argv_with_proxy(
+    let argv = crate::gallery_argv::count_argv_with_proxy(
         tool,
         url,
         cookies_file,
@@ -1143,9 +1120,8 @@ pub async fn count_gallery_files_with_proxy(
         proxy,
     );
     let guarded_proxy = if untrusted_handoff {
-        let proxy = crate::subprocess_proxy::ensure_started().ok()?;
-        crate::video_spawn::insert_guarded_proxy_arg(&mut argv, &proxy).ok()?;
-        Some(proxy)
+        crate::video_spawn::validate_guarded_proxy_args(&argv).ok()?;
+        Some(crate::subprocess_proxy::ensure_started().ok()?)
     } else {
         None
     };

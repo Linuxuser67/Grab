@@ -93,7 +93,7 @@ pub(crate) async fn fetch_raw_dump_json(
         cookies_browser,
         url,
     ));
-    let guarded_proxy = guard_untrusted_args(&mut args)?;
+    let guarded_proxy = guard_untrusted_args(&args)?;
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin).await;
     // Belt-and-braces with the ProcessGroupGuard below (which SIGKILLs the
@@ -363,27 +363,24 @@ pub(crate) async fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command
     cmd
 }
 
-/// Insert the guarded proxy before yt-dlp/gallery-dl's positional URL terminator.
-/// Shared by both runners so option placement and conflict checks stay identical.
-pub(crate) fn insert_guarded_proxy_arg(
-    args: &mut Vec<String>,
-    proxy: &str,
-) -> Result<(), &'static str> {
+/// Validate that extractor argv has a URL and no explicit proxy override.
+/// The authenticated proxy URL must stay out of argv because debug logging
+/// records arguments; the child receives it through standard proxy variables.
+pub(crate) fn validate_guarded_proxy_args(args: &[String]) -> Result<(), &'static str> {
     let Some(separator) = args.iter().position(|arg| arg == "--") else {
         return Err("Extractor arguments are missing the URL terminator");
     };
+    if args.get(separator + 1).is_none() {
+        return Err("Extractor arguments are missing the URL after the terminator");
+    }
     if args[..separator].iter().any(|arg| arg == "--proxy") {
         return Err("Cannot safely enforce public-address checks through a configured proxy");
     }
-    args.splice(
-        separator..separator,
-        ["--proxy".to_string(), proxy.to_string()],
-    );
     Ok(())
 }
 
 /// Apply the loopback proxy when the initial page URL is a marked browser handoff.
-pub(crate) fn guard_untrusted_args(args: &mut Vec<String>) -> Result<Option<String>, VideoError> {
+pub(crate) fn guard_untrusted_args(args: &[String]) -> Result<Option<String>, VideoError> {
     let Some(separator) = args.iter().position(|arg| arg == "--") else {
         return Err(VideoError::fetch(
             "Extractor arguments are missing the URL terminator",
@@ -403,13 +400,13 @@ pub(crate) fn guard_untrusted_args(args: &mut Vec<String>) -> Result<Option<Stri
     if !crate::download_net::is_untrusted_handoff_host(&host) {
         return Ok(None);
     }
+    validate_guarded_proxy_args(args).map_err(VideoError::fetch)?;
     let proxy = crate::subprocess_proxy::ensure_started().map_err(VideoError::fetch)?;
-    insert_guarded_proxy_arg(args, &proxy).map_err(VideoError::fetch)?;
     Ok(Some(proxy))
 }
 
-/// Route yt-dlp's external FFmpeg downloader through the same HTTP proxy.
-/// yt-dlp's --proxy does not automatically cover every external downloader.
+/// Route extractor and external-downloader requests through the guarded proxy.
+/// The authenticated URL stays in standard environment variables, never argv.
 pub(crate) fn apply_guarded_proxy_env(cmd: &mut tokio::process::Command, proxy: Option<&str>) {
     if let Some(proxy) = proxy {
         cmd.env("NO_PROXY", "")
@@ -667,33 +664,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn guarded_proxy_arg_precedes_url_terminator_and_rejects_existing_proxy() {
+    fn guarded_proxy_validation_leaves_credentials_out_of_argv_and_rejects_overrides() {
         let target = "https://video.example.invalid/watch";
-        let mut args = vec![
+        let args = vec![
             "--ignore-config".to_string(),
             "--".to_string(),
             target.to_string(),
         ];
-        insert_guarded_proxy_arg(&mut args, "http://127.0.0.1:43123")
-            .expect("guarded proxy should be inserted");
-        let separator = args.iter().position(|arg| arg == "--").unwrap();
-        assert_eq!(args[separator - 2], "--proxy");
-        assert_eq!(args[separator - 1], "http://127.0.0.1:43123");
-        assert_eq!(args[separator + 1], target);
+        let original = args.clone();
+        validate_guarded_proxy_args(&args).expect("argv can use the guarded proxy");
+        assert_eq!(args, original, "credentials must stay out of argv");
 
-        let mut conflict = vec![
+        let conflict = vec![
             "--proxy".to_string(),
             "http://example-proxy.invalid".to_string(),
             "--".to_string(),
             target.to_string(),
         ];
-        assert!(insert_guarded_proxy_arg(&mut conflict, "http://127.0.0.1:43123").is_err());
+        assert!(validate_guarded_proxy_args(&conflict).is_err());
+        assert!(validate_guarded_proxy_args(&["--ignore-config".to_string()]).is_err());
     }
 
     #[test]
     fn guarded_argv_without_url_terminator_fails_closed() {
-        let mut args = vec!["--ignore-config".to_string()];
-        assert!(guard_untrusted_args(&mut args).is_err());
+        let args = vec!["--ignore-config".to_string()];
+        assert!(guard_untrusted_args(&args).is_err());
     }
 
     #[test]
@@ -702,10 +697,10 @@ mod tests {
             "https://user-entered-{}.example.invalid/watch",
             std::process::id()
         );
-        let mut args = vec!["--ignore-config".to_string(), "--".to_string(), url];
+        let args = vec!["--ignore-config".to_string(), "--".to_string(), url];
         let original = args.clone();
         assert!(
-            guard_untrusted_args(&mut args)
+            guard_untrusted_args(&args)
                 .expect("ordinary user-entered URLs need no guarded proxy")
                 .is_none()
         );
@@ -716,7 +711,7 @@ mod tests {
     fn guarded_proxy_environment_clears_bypasses_and_covers_external_downloaders() {
         use std::ffi::OsStr;
 
-        let proxy = "http://127.0.0.1:43123";
+        let proxy = "http://grab:0123456789abcdef@127.0.0.1:43123";
         let mut command = tokio::process::Command::new("ffmpeg");
         apply_guarded_proxy_env(&mut command, Some(proxy));
         let envs: Vec<_> = command

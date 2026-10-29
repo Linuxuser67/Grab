@@ -738,8 +738,8 @@ async fn run_ytdlp_attempt(
     timeout: Duration,
 ) -> Result<(Option<()>, Option<String>, Option<StopIntent>), VideoError> {
     use tokio::io::AsyncBufReadExt as _;
-    let mut guarded_argv = argv.to_vec();
-    let guarded_proxy = crate::video_spawn::guard_untrusted_args(&mut guarded_argv)?;
+    let guarded_argv = argv.to_vec();
+    let guarded_proxy = crate::video_spawn::guard_untrusted_args(&guarded_argv)?;
     let mut cmd = ytdlp_command(youtube_bin).await;
     cmd.args(&guarded_argv);
     apply_proxy_env(&mut cmd, proxy);
@@ -1284,7 +1284,7 @@ pub(crate) async fn resolve_subtitle_lang(
         &job.cookies_browser,
         &job.page_url,
     ));
-    let guarded_proxy = match crate::video_spawn::guard_untrusted_args(&mut argv) {
+    let guarded_proxy = match crate::video_spawn::guard_untrusted_args(&argv) {
         Ok(proxy) => proxy,
         Err(e) => {
             tracing::warn!(error = %e, "subtitle probe refused without guarded extractor networking");
@@ -1723,7 +1723,7 @@ pub(crate) async fn run_live_ytdlp(
             extension_picky_supported,
         );
         splice_before_terminator(&mut argv, live_info_json_args(live_info_path.as_deref()));
-        let guarded_proxy = crate::video_spawn::guard_untrusted_args(&mut argv)?;
+        let guarded_proxy = crate::video_spawn::guard_untrusted_args(&argv)?;
         let mut cmd = ytdlp_command(youtube_bin).await;
         cmd.args(&argv);
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
@@ -2125,8 +2125,8 @@ pub(crate) async fn run_hls_ytdlp(
         Ok(lang) => lang,
         Err(()) => return Ok(None),
     };
-    let mut argv = hls_download_argv(&job, hls_format_id, ffmpeg_bin, &job.dest, playlist_index);
-    let guarded_proxy = crate::video_spawn::guard_untrusted_args(&mut argv)?;
+    let argv = hls_download_argv(&job, hls_format_id, ffmpeg_bin, &job.dest, playlist_index);
+    let guarded_proxy = crate::video_spawn::guard_untrusted_args(&argv)?;
     let mut cmd = ytdlp_command(youtube_bin).await;
     cmd.args(&argv);
     apply_proxy_env(&mut cmd, job.proxy.as_ref());

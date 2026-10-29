@@ -7,6 +7,8 @@
 //! HTTP proxy requests. It is only enabled for browser-handoff hosts whose
 //! public-resolution policy is active.
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use std::fmt::Write as _;
 use std::io;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::pin::Pin;
@@ -18,7 +20,64 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Re
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
-static PROXY_ADDR: OnceLock<SocketAddr> = OnceLock::new();
+static PROXY_STATE: OnceLock<ProxyState> = OnceLock::new();
+
+#[derive(Clone)]
+struct ProxyState {
+    addr: SocketAddr,
+    token: String,
+    expected_authorization: String,
+}
+
+impl ProxyState {
+    fn proxy_url(&self) -> String {
+        format!("http://grab:{}@{}", self.token, self.addr)
+    }
+}
+
+fn proxy_authorization_header(token: &str) -> String {
+    format!("Basic {}", STANDARD.encode(format!("grab:{token}")))
+}
+
+fn random_proxy_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("couldn't generate guarded proxy token: {error}"))?;
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut token, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(token)
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (&a, &b) in left.iter().zip(right) {
+        difference |= a ^ b;
+    }
+    difference == 0
+}
+
+/// Match exactly one Proxy-Authorization header; duplicated headers are rejected.
+fn proxy_authorization_matches(header: &[u8], expected: &str) -> bool {
+    let text = String::from_utf8_lossy(header);
+    let mut provided = None;
+    for line in text.split("\r\n").skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("proxy-authorization") {
+            if provided.is_some() {
+                return false;
+            }
+            provided = Some(value.trim());
+        }
+    }
+    provided.is_some_and(|value| constant_time_equal(value.as_bytes(), expected.as_bytes()))
+}
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bound DNS resolution and sequential public-address connection attempts too:
@@ -148,22 +207,24 @@ pub(crate) fn validate_proxy_compatibility() -> Result<(), String> {
     Ok(())
 }
 
-/// Start the proxy once and return its HTTP proxy URL.
+/// Start the proxy once and return an authentication-bearing URL for the
+/// child environment. The random credential is created once per Grab process.
 pub(crate) fn ensure_started() -> Result<String, String> {
     validate_proxy_compatibility()?;
-    if let Some(addr) = PROXY_ADDR.get() {
-        return Ok(format!("http://{addr}"));
+    if let Some(state) = PROXY_STATE.get() {
+        return Ok(state.proxy_url());
     }
     let listener = StdTcpListener::bind(("127.0.0.1", 0))
         .map_err(|e| format!("couldn't start the guarded extractor proxy: {e}"))?;
-    start_proxy_listener(listener, &PROXY_ADDR)
+    start_proxy_listener(listener, &PROXY_STATE, random_proxy_token()?)
 }
 
 /// Register and serve a listener under Grab's process-lifetime runtime. The
 /// state parameter lets tests exercise isolated initialization state too.
 fn start_proxy_listener(
     listener: StdTcpListener,
-    state: &OnceLock<SocketAddr>,
+    state: &OnceLock<ProxyState>,
+    token: String,
 ) -> Result<String, String> {
     listener
         .set_nonblocking(true)
@@ -171,6 +232,7 @@ fn start_proxy_listener(
     let addr = listener
         .local_addr()
         .map_err(|e| format!("couldn't read guarded proxy address: {e}"))?;
+    let expected_authorization = proxy_authorization_header(&token);
     let runtime = crate::runtime::tokio_rt();
     let listener = {
         let _entered = runtime.enter();
@@ -178,8 +240,16 @@ fn start_proxy_listener(
             .map_err(|e| format!("couldn't start the guarded extractor proxy: {e}"))?
     };
 
-    match state.set(addr) {
+    match state.set(ProxyState {
+        addr,
+        token,
+        expected_authorization,
+    }) {
         Ok(()) => {
+            let expected_authorization = state
+                .get()
+                .map(|state| state.expected_authorization.clone())
+                .ok_or_else(|| "guarded proxy state was not initialized".to_string())?;
             runtime.spawn(async move {
                 loop {
                     let permit = match Arc::clone(&PROXY_CONNECTIONS).acquire_owned().await {
@@ -188,9 +258,12 @@ fn start_proxy_listener(
                     };
                     match listener.accept().await {
                         Ok((stream, _peer)) => {
+                            let expected_authorization = expected_authorization.clone();
                             tokio::spawn(async move {
                                 let _permit = permit;
-                                if let Err(e) = serve_connection(stream).await {
+                                if let Err(e) =
+                                    serve_connection(stream, &expected_authorization).await
+                                {
                                     tracing::debug!(error = %e, "guarded extractor proxy request failed");
                                 }
                             });
@@ -203,12 +276,15 @@ fn start_proxy_listener(
                     }
                 }
             });
-            Ok(format!("http://{addr}"))
+            state
+                .get()
+                .map(ProxyState::proxy_url)
+                .ok_or_else(|| "guarded proxy state was not initialized".to_string())
         }
-        Err(_) => Ok(format!(
-            "http://{}",
-            state.get().expect("proxy address initialized")
-        )),
+        Err(_) => state
+            .get()
+            .map(ProxyState::proxy_url)
+            .ok_or_else(|| "guarded proxy state was not initialized".to_string()),
     }
 }
 
@@ -360,7 +436,18 @@ async fn reply_status(stream: &mut TcpStream, code: u16, reason: &str) {
     let _ = stream.write_all(response.as_bytes()).await;
 }
 
-async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
+async fn reply_proxy_auth_required(stream: &mut TcpStream) -> io::Result<()> {
+    stream
+        .write_all(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"Grab guarded extractor proxy\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await
+}
+
+async fn serve_connection(
+    mut client: TcpStream,
+    expected_authorization: &str,
+) -> std::io::Result<()> {
     let (header, trailing) = match read_header_with_timeout(&mut client, HEADER_TIMEOUT).await {
         Ok(parts) => parts,
         Err(error) => {
@@ -372,6 +459,10 @@ async fn serve_connection(mut client: TcpStream) -> std::io::Result<()> {
             return Err(error);
         }
     };
+    if !proxy_authorization_matches(&header, expected_authorization) {
+        reply_proxy_auth_required(&mut client).await?;
+        return Ok(());
+    }
     let text = String::from_utf8_lossy(&header);
     let mut lines = text.split("\r\n");
     let Some(request_line) = lines.next() else {
@@ -485,17 +576,22 @@ mod tests {
             caller_runtime
                 .block_on(async {
                     let listener = StdTcpListener::bind(("127.0.0.1", 0)).unwrap();
-                    start_proxy_listener(listener, &state)
+                    start_proxy_listener(listener, &state, "test-token".to_string())
                 })
                 .expect("start guarded proxy")
         })
         .join()
         .expect("caller thread");
-        let address: SocketAddr = proxy_url
-            .strip_prefix("http://")
-            .expect("proxy URL scheme")
-            .parse()
-            .expect("proxy address");
+        let parsed = url::Url::parse(&proxy_url).expect("proxy URL");
+        assert_eq!(parsed.username(), "grab");
+        assert_eq!(parsed.password(), Some("test-token"));
+        let address: SocketAddr = format!(
+            "{}:{}",
+            parsed.host_str().expect("proxy host"),
+            parsed.port().expect("proxy port")
+        )
+        .parse()
+        .expect("proxy address");
 
         let response = crate::runtime::tokio_rt()
             .block_on(async {
@@ -514,8 +610,8 @@ mod tests {
             .expect("proxy connection and request");
 
         assert!(
-            String::from_utf8_lossy(&response).starts_with("HTTP/1.1 403"),
-            "proxy should survive caller runtime shutdown: {}",
+            String::from_utf8_lossy(&response).starts_with("HTTP/1.1 407"),
+            "proxy should require authentication and survive caller runtime shutdown: {}",
             String::from_utf8_lossy(&response)
         );
     }
@@ -613,16 +709,20 @@ mod tests {
     async fn proxy_rejects_private_connect_destinations() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let proxy_addr = listener.local_addr().unwrap();
+        let expected_authorization = proxy_authorization_header("test-token");
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream).await.unwrap();
+            serve_connection(stream, &expected_authorization)
+                .await
+                .unwrap();
         });
 
         let mut client = TcpStream::connect(proxy_addr).await.unwrap();
-        client
-            .write_all(b"CONNECT 127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")
-            .await
-            .unwrap();
+        let request = format!(
+            "CONNECT 127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\nProxy-Authorization: {}\r\n\r\n",
+            proxy_authorization_header("test-token")
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
         let mut response = Vec::new();
         client.read_to_end(&mut response).await.unwrap();
         assert!(

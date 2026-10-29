@@ -589,6 +589,11 @@ async fn ytdlp_supports_impersonation_cached(key: PathBuf) -> bool {
 /// draining are asynchronous. Timeout cleanup signals the whole process group.
 async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ToolProbeError> {
     use std::process::Stdio;
+
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+    const OUTPUT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
+
     let mut command = tokio::process::Command::new(youtube_bin);
     command
         .arg("--list-impersonate-targets")
@@ -601,29 +606,87 @@ async fn probe_impersonate_support(youtube_bin: &Path) -> Result<bool, ToolProbe
         use std::os::unix::process::CommandExt as _;
         command.as_std_mut().process_group(0);
     }
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|error| ToolProbeError::Spawn(error.to_string()))?;
     let pid = child.id().unwrap_or_default();
     let mut group = ProbeProcessGroup::new(pid);
-    match tokio::time::timeout(std::time::Duration::from_secs(15), child.wait_with_output()).await {
-        Ok(Ok(output)) => {
-            // The child has exited, regardless of its exit code. Do not let
-            // the drop guard signal a process group whose PID may be reused.
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ToolProbeError::Wait("yt-dlp gave no output pipe".to_string()))?;
+    let stdout_task = tokio::spawn(read_probe_stdout_bounded(stdout, MAX_OUTPUT_BYTES));
+    let stdout_abort = stdout_task.abort_handle();
+
+    let status = match tokio::time::timeout(PROBE_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) => {
+            // Reaped: this process-group ID is no longer safe to signal.
             group.disarm();
-            if !output.status.success() {
-                return Err(ToolProbeError::FailedExit);
-            }
-            let out = String::from_utf8_lossy(&output.stdout);
-            let supported = out.lines().any(|line| {
-                let line = line.to_ascii_lowercase();
-                line.contains("chrome") && !line.contains("unavailable")
-            });
-            Ok(supported)
+            status
         }
-        Ok(Err(error)) => Err(ToolProbeError::Wait(error.to_string())),
-        Err(_) => Err(ToolProbeError::Timeout),
+        Ok(Err(error)) => {
+            // The reap state is uncertain; leave process-group signaling off.
+            // Child::drop still has kill_on_drop enabled for the direct process.
+            group.disarm();
+            stdout_abort.abort();
+            return Err(ToolProbeError::Wait(error.to_string()));
+        }
+        Err(_) => {
+            // child.wait() was cancelled while the owned Child remains alive.
+            // Kill its group before dropping the child, then disarm the guard.
+            group.kill_now();
+            stdout_abort.abort();
+            return Err(ToolProbeError::Timeout);
+        }
+    };
+
+    let output = match tokio::time::timeout(OUTPUT_DRAIN_TIMEOUT, stdout_task).await {
+        Ok(Ok(Ok(output))) => output,
+        Ok(Ok(Err(error))) => return Err(ToolProbeError::Wait(error.to_string())),
+        Ok(Err(error)) => return Err(ToolProbeError::Wait(error.to_string())),
+        Err(_) => {
+            // A descendant may keep stdout open after the leader exits. Abort
+            // the drain but do not signal a potentially recycled process group.
+            stdout_abort.abort();
+            return Err(ToolProbeError::Timeout);
+        }
+    };
+
+    if !status.success() {
+        return Err(ToolProbeError::FailedExit);
     }
+    let out = String::from_utf8_lossy(&output);
+    let supported = out.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("chrome") && !line.contains("unavailable")
+    });
+    Ok(supported)
+}
+
+/// Drain the impersonation probe's stdout into a bounded buffer. Always drains
+/// excess bytes to EOF so the child cannot block on a full pipe while being waited.
+async fn read_probe_stdout_bounded(
+    stream: impl tokio::io::AsyncRead + Unpin,
+    limit: u64,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut output = Vec::new();
+    let mut reader = tokio::io::BufReader::new(stream);
+    (&mut reader)
+        .take(limit + 1)
+        .read_to_end(&mut output)
+        .await?;
+    if output.len() as u64 <= limit {
+        return Ok(output);
+    }
+
+    let mut discard = [0u8; 8192];
+    while reader.read(&mut discard).await? != 0 {}
+    Err(std::io::Error::new(
+        std::io::ErrorKind::QuotaExceeded,
+        "impersonation probe output exceeded the size limit",
+    ))
 }
 
 /// Best-effort process-group cleanup when a probe is cancelled or times out.
@@ -641,13 +704,19 @@ impl ProbeProcessGroup {
     fn disarm(&mut self) {
         self.armed = false;
     }
+
+    /// Signal only while the owned child is still unreaped.
+    fn kill_now(&mut self) {
+        if self.armed {
+            kill_probe_group(self.pid);
+            self.armed = false;
+        }
+    }
 }
 
 impl Drop for ProbeProcessGroup {
     fn drop(&mut self) {
-        if self.armed {
-            kill_probe_group(self.pid);
-        }
+        self.kill_now();
     }
 }
 

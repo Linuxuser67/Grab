@@ -219,7 +219,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
-    match playlist.playlist_type {
+    match playlist.playlist_type.as_ref() {
         Some(MediaPlaylistType::Event) | Some(MediaPlaylistType::Other(_)) => {
             return Err(ManifestError::UnsupportedPlaylist);
         }

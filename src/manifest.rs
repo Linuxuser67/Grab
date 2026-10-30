@@ -422,10 +422,7 @@ fn resolve_resource_url(base_url: &Url, raw: &str) -> Result<Url, ManifestError>
     Ok(url)
 }
 
-fn checked_byte_range(
-    length: u64,
-    offset: u64,
-) -> Result<ManifestByteRange, ManifestError> {
+fn checked_byte_range(length: u64, offset: u64) -> Result<ManifestByteRange, ManifestError> {
     if length == 0 || offset.checked_add(length).is_none() {
         return Err(ManifestError::InvalidByteRange);
     }

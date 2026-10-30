@@ -11,8 +11,8 @@ const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
 const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
-// DASH-IF's current identifier, its legacy HTTP form used by FFmpeg packager
-// output, and the ISO trick-mode scheme used by other DASH packagers.
+// DASH-IF's current HTTPS identifier, the HTTP identifier emitted by FFmpeg,
+// and the ISO trick-mode URN used by other DASH packagers.
 const DASH_TRICK_MODE_SCHEMES: [&str; 3] = [
     "https://dashif.org/guidelines/trickmode",
     "http://dashif.org/guidelines/trickmode",
@@ -1151,6 +1151,10 @@ mod tests {
             (
                 "EssentialProperty",
                 "https://dashif.org/guidelines/trickmode",
+            ),
+            (
+                "EssentialProperty",
+                "http://dashif.org/guidelines/trickmode",
             ),
             (
                 "SupplementalProperty",

@@ -212,7 +212,8 @@ pub(crate) fn parse_dash_manifest(
             role.schemeIdUri == DASH_ROLE_SCHEME && role.value.as_deref() == Some("main")
         });
 
-        for (representation_index, representation) in adaptation.representations.iter().enumerate() {
+        for (representation_index, representation) in adaptation.representations.iter().enumerate()
+        {
             if representation.href.is_some() || !representation.ContentProtection.is_empty() {
                 return Err(DashError::UnsupportedPresentation);
             }
@@ -370,7 +371,9 @@ fn resolve_base_url(
     if values.next().is_some()
         || candidates.iter().any(|candidate| {
             candidate.byte_range.is_some()
-                || candidate.availability_time_offset.is_some_and(|offset| offset != 0.0)
+                || candidate
+                    .availability_time_offset
+                    .is_some_and(|offset| offset != 0.0)
                 || candidate.availability_time_complete == Some(false)
                 || candidate.timeShiftBufferDepth.is_some()
         })

@@ -1151,7 +1151,11 @@ mod tests {
             .expect("Representation-level Role is ignored by dash-mpd-core 0.1.0");
 
         assert_eq!(plan.audio_representations.len(), 2);
-        assert!(plan.audio_representations.iter().all(|track| !track.is_default_audio));
+        assert!(
+            plan.audio_representations
+                .iter()
+                .all(|track| !track.is_default_audio)
+        );
         assert_eq!(
             plan.default_audio()
                 .and_then(|track| track.representation_id.as_deref()),

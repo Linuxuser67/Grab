@@ -17,11 +17,12 @@ mod inline_add;
 mod inline_gallery;
 mod install_help;
 mod install_progress;
-// The parser is introduced as a pure slice before the downloader consumes it.
-// Remove this expectation when the pipeline integration lands.
+mod manifest_intake;
+// Segment expansion and local-playlist serialization are consumed by the next
+// native queue/fetch phase; keep the parser's remaining helpers covered here.
 #[expect(
     dead_code,
-    reason = "native manifest pipeline integration is the next implementation slice"
+    reason = "native segment queue and fetch integration is the next implementation phase"
 )]
 mod manifest;
 mod media_types;

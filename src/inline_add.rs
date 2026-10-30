@@ -95,6 +95,7 @@ fn paste_fingerprint(url: &str) -> String {
 /// waits on the user (the queued links stay queued instead of replacing it).
 struct DrainPending {
     probe: Rc<RefCell<ProbeState>>,
+    manifest: Rc<RefCell<Option<crate::manifest_intake::ManifestLookup>>>,
     pending: Rc<RefCell<VecDeque<String>>>,
     start: Rc<dyn Fn(String)>,
 }
@@ -104,15 +105,16 @@ impl Drop for DrainPending {
         if self.pending.borrow().is_empty() {
             return;
         }
-        let (probe, pending, start) = (
+        let (probe, manifest, pending, start) = (
             Rc::clone(&self.probe),
+            Rc::clone(&self.manifest),
             Rc::clone(&self.pending),
             Rc::clone(&self.start),
         );
         glib::idle_add_local_once(move || {
             let busy = {
                 let st = probe.borrow();
-                st.inflight.is_some() || st.info.is_some()
+                st.inflight.is_some() || st.info.is_some() || manifest.borrow().is_some()
             };
             if busy {
                 return;
@@ -267,6 +269,7 @@ struct VideoLookupResult {
 }
 
 enum MediaLookupOutcome {
+    Manifest(Box<crate::manifest_intake::ManifestLookup>),
     Gallery(Vec<crate::gallery_probe::GalleryItem>),
     Video(Box<VideoLookupResult>),
 }
@@ -298,6 +301,7 @@ async fn lookup_media(
         url_host = %host,
         total_ms = started.elapsed().as_millis() as u64,
         result = match &result {
+            Ok(MediaLookupOutcome::Manifest(_)) => "manifest",
             Ok(MediaLookupOutcome::Gallery(_)) => "gallery",
             Ok(MediaLookupOutcome::Video(_)) => "video",
             Err(_) => "error",
@@ -313,6 +317,34 @@ async fn lookup_media_inner(
     newest_first: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
+    // Native manifest intake is a fast path ahead of tool discovery. The
+    // request runs on Tokio, and aborting this lookup also aborts its HTTP task.
+    if crate::manifest_intake::supports(&url) {
+        let manifest_url = url.clone();
+        let manifest_proxy = proxy.clone();
+        let handle = crate::runtime::tokio_rt().spawn(async move {
+            crate::manifest_intake::lookup(&manifest_url, manifest_proxy.as_ref()).await
+        });
+        let native_result = {
+            let _abort = AbortTaskOnDrop(handle.abort_handle());
+            handle.await
+        };
+        match native_result {
+            Ok(Ok(Some(manifest))) => {
+                return Ok(MediaLookupOutcome::Manifest(Box::new(manifest)));
+            }
+            Ok(Ok(None)) => {
+                tracing::debug!("native manifest unsupported; falling back to yt-dlp");
+            }
+            Ok(Err(_)) => {
+                tracing::debug!("native manifest retrieval failed; falling back to yt-dlp");
+            }
+            Err(_) => {
+                tracing::debug!("native manifest task failed; falling back to yt-dlp");
+            }
+        }
+    }
+
     let needs_gallery_tool = needs_gallery_probe(&url);
     let tool_started = std::time::Instant::now();
     let local_tools_result = crate::runtime::tokio_rt()
@@ -475,6 +507,12 @@ pub(crate) struct VideoStep {
     /// a single Automatic row when nothing is pinnable, and always an
     /// Audio only row — the whole format decision lives in this one row.
     pub(crate) format: adw::ComboRow,
+    /// Native HLS/DASH presentation and selected representation key.
+    pub(crate) manifest: Rc<RefCell<Option<crate::manifest_intake::ManifestLookup>>>,
+    pub(crate) manifest_choices: Rc<RefCell<Vec<crate::manifest_intake::ManifestChoice>>>,
+    pub(crate) manifest_selection: Rc<RefCell<Option<String>>>,
+    pub(crate) manifest_info: adw::ActionRow,
+    pub(crate) manifest_format: adw::ComboRow,
     /// Index-aligned with the combo's model. Reset on every resolve.
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
     pub(crate) tools: adw::ActionRow,
@@ -591,7 +629,7 @@ pub(crate) fn sync_entry_icon(v: &VideoStep) {
         !v.url_entry.text().trim().is_empty(),
         v.looking_up.get(),
         v.action_revealer.reveals_child(),
-        v.error.is_visible() || v.tools.is_visible(),
+        v.error.is_visible() || v.tools.is_visible() || v.manifest_info.is_visible(),
     );
     let pos = gtk4::EntryIconPosition::Secondary;
     match icon {
@@ -633,6 +671,8 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
+    v.manifest_info.set_visible(false);
+    v.manifest_format.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
     v.gallery_info.set_visible(false);
@@ -644,6 +684,58 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     // out: the revealer is only ever revealed after show_video_ready /
     // show_video_playlist set the label, so the icon-only form is never
     // visible — resetting it here would flash a blue tick mid-slide.
+}
+
+/// Clear a native manifest preview and its transient selection.
+fn clear_manifest_preview(step: &VideoStep) {
+    step.manifest.borrow_mut().take();
+    step.manifest_choices.borrow_mut().clear();
+    step.manifest_selection.borrow_mut().take();
+    step.manifest_format
+        .set_model(Some(&gtk4::StringList::new(&[])));
+    step.manifest_info.set_subtitle("");
+}
+
+/// Show a parsed manifest and let the user choose its video representation.
+/// The queue action remains unavailable until the native queue phase lands.
+fn show_manifest_ready(
+    step: &VideoStep,
+    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
+    manifest: crate::manifest_intake::ManifestLookup,
+) {
+    hide_video_step(step);
+
+    let choices = manifest.choices();
+    let labels = choices
+        .iter()
+        .map(|choice| choice.label.as_str())
+        .collect::<Vec<_>>();
+
+    step.manifest_choices.replace(choices);
+    step.manifest_selection.replace(
+        step.manifest_choices
+            .borrow()
+            .first()
+            .map(|choice| choice.key.clone()),
+    );
+    step.manifest.replace(Some(manifest.clone()));
+    step.manifest_info.set_subtitle(&manifest.summary());
+    step.manifest_format
+        .set_model(Some(&gtk4::StringList::new(&labels)));
+    step.manifest_format.set_selected(0);
+    step.manifest_info.set_visible(true);
+    step.manifest_format.set_visible(true);
+
+    // This phase deliberately stops at the validated variant choice. It must
+    // not pass a raw .m3u8/.mpd URL to the generic file queue or yt-dlp row.
+    step.action_revealer.set_reveal_child(false);
+    set_looking_up(step, false);
+    set_lookup_add(lookup_add, false);
+
+    // Keep the picker inside the existing animated preview card.
+    step.group_revealer.set_visible(true);
+    step.group_revealer.set_reveal_child(true);
+    sync_entry_icon(step);
 }
 
 /// Abort the in-flight gallery file enumeration, if any. The generation
@@ -677,6 +769,7 @@ fn reset_video_step(step: &VideoStep) {
     // probe children instead of letting them run on for a dead card.
     abort_enumeration(step);
     abort_lookup(step);
+    clear_manifest_preview(step);
     // Drop the format options and the current pick.
     step.options.borrow_mut().clear();
     step.format.set_model(Some(&gtk4::StringList::new(&[])));
@@ -712,6 +805,7 @@ fn arm_mode_toggle(step: &VideoStep, items: Option<ToggleItems>) {
 
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
+    clear_manifest_preview(v);
     // A new lookup supersedes any in-flight file enumeration: kill it.
     abort_enumeration(v);
     // A new lookup supersedes the previous media-type choice; the switcher
@@ -2027,6 +2121,17 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // Media-format selector, filled per video on resolve: exact pinnable
     // formats, tallest first (the preference preselects the closest row), or a
     // single Automatic row when nothing is pinnable.
+    let manifest_info = adw::ActionRow::builder()
+        .title(gettext("Native stream manifest"))
+        .use_markup(false)
+        .build();
+    manifest_info.set_visible(false);
+    video_group.add(&manifest_info);
+    let manifest_format = adw::ComboRow::builder()
+        .title(gettext("Video variant"))
+        .build();
+    video_group.add(&manifest_format);
+
     let video_format = adw::ComboRow::builder()
         .title(gettext("Media format"))
         .build();
@@ -2116,6 +2221,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         name: video_name,
         revert: video_revert_btn,
         format: video_format,
+        manifest: Rc::new(RefCell::new(None)),
+        manifest_choices: Rc::new(RefCell::new(Vec::new())),
+        manifest_selection: Rc::new(RefCell::new(None)),
+        manifest_info,
+        manifest_format,
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
         error: video_error,
@@ -2134,6 +2244,23 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         lookup_abort: Rc::new(RefCell::new(None)),
         add_btn: add_btn.clone(),
     });
+    // Keep the selected representation key aligned with the ComboRow.
+    {
+        let choices = Rc::clone(&step.manifest_choices);
+        let selection = Rc::clone(&step.manifest_selection);
+        let manifest = Rc::clone(&step.manifest);
+        let info = step.manifest_info.clone();
+        step.manifest_format.connect_selected_notify(move |row| {
+            let selected = choices
+                .borrow()
+                .get(row.selected() as usize)
+                .cloned();
+            selection.replace(selected.as_ref().map(|choice| choice.key.clone()));
+            if let (Some(selected), Some(manifest)) = (selected, manifest.borrow().as_ref()) {
+                info.set_subtitle(&format!("{} · {}", manifest.summary(), selected.label));
+            }
+        });
+    }
     // "Select files…" invokes the opener set below (where the picker context
     // lives). Connected once; the opener is set once at build time.
     {
@@ -2603,6 +2730,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // the next queued link with the in-flight marker already clear.
                 let _drain = DrainPending {
                     probe: Rc::clone(&probe_b),
+                    manifest: Rc::clone(&step_b.manifest),
                     pending: Rc::clone(&pending_b),
                     start: {
                         let url_entry = url_b.clone();
@@ -2629,9 +2757,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // Unlisted links probe only on explicit kicks (Add/Enter,
                 // retry). Non-HTTP schemes never probe: magnets have their
                 // own flows.
-                let probing = probe_unlisted
-                    && !crate::video::is_video_page(&url)
-                    && crate::video::is_http_url(&url);
+                let probing = crate::manifest_intake::supports(&url)
+                    || (probe_unlisted
+                        && !crate::video::is_video_page(&url)
+                        && crate::video::is_http_url(&url));
                 if url.is_empty() || (!crate::video::is_video_page(&url) && !probing) {
                     // A stale probe for another URL must not linger: editing to a fresh
                     // URL would show the old preview.
@@ -2644,6 +2773,16 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         probe_b.borrow_mut().info.take();
                         set_lookup_add(&lookup_add_b, true);
                     }
+                    return;
+                }
+                let fresh_manifest = step_b
+                    .manifest
+                    .borrow()
+                    .as_ref()
+                    .filter(|manifest| manifest.source_url == url)
+                    .cloned();
+                if let Some(manifest) = fresh_manifest {
+                    show_manifest_ready(&step_b, &lookup_add_b, manifest);
                     return;
                 }
                 let fresh = {
@@ -2730,6 +2869,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 }
                 let (ytdlp_result, gallery_error, mut toggle_items, probe_json_key) = match outcome
                 {
+                    MediaLookupOutcome::Manifest(manifest) => {
+                        show_manifest_ready(&step_b, &lookup_add_b, *manifest);
+                        return;
+                    }
                     MediaLookupOutcome::Gallery(items) => {
                         // Queue creation stays behind the full picker because
                         // the dual probe may cap the file list.
@@ -3004,6 +3147,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 return;
             }
             let url = url_entry.text().trim().to_string();
+            if step2
+                .manifest
+                .borrow()
+                .as_ref()
+                .is_some_and(|manifest| manifest.source_url == url)
+            {
+                // Native queue creation is intentionally handled in the next phase.
+                return;
+            }
             if crate::video::is_video_page(&url) {
                 // Same freshness gate as the kick skip: the stored page URL is
                 // canonicalized, so only the round-trip key (which text was resolved) decides.
@@ -3227,22 +3379,24 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             }
             // A probed preview counts as video mode while its canonical URL
             // matches the entry text.
-            let fresh = probe
+            let fresh_video = probe
                 .borrow()
                 .info
                 .as_ref()
                 .is_some_and(|p| p.page_url() == text);
-            // Leaving video-land (or editing a resolved URL) hides the stale
-            // step at once; `fresh` is deliberately the stricter canonical
-            // compare: a mismatch is always safe to hide.
-            if !crate::video::is_video_page(&text) || !fresh {
+            let fresh_manifest = step2
+                .manifest
+                .borrow()
+                .as_ref()
+                .is_some_and(|manifest| manifest.source_url == text);
+            let fresh = fresh_video || fresh_manifest;
+            // A matching native manifest or extractor preview remains visible;
+            // any settled URL change invalidates both forms of preview.
+            if !fresh {
                 hide_video_step(&step2);
-                // Editing the URL stales the preview: slide the Add button
-                // out too (the tick re-submits for a fresh lookup).
                 step2.action_revealer.set_reveal_child(false);
-                if !fresh {
-                    probe.borrow_mut().info.take();
-                }
+                probe.borrow_mut().info.take();
+                clear_manifest_preview(&step2);
             }
             // Any edit clears the lookup-in-flight state, and the icon
             // follows: the tick returns for non-empty text, the spinner

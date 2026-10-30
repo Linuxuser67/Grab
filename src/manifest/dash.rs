@@ -5,9 +5,7 @@ use std::time::Duration;
 use thiserror::Error;
 use url::Url;
 
-use super::ManifestByteRange;
-
-const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
+use super::{ManifestByteRange, MAX_MANIFEST_BYTES};
 const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
 const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";

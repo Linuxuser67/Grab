@@ -3666,7 +3666,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     url_entry.set_text(&normalized);
                 }
             } else if !already && url_entry.text().trim().is_empty() {
-                if let Some(next) = pending_url.borrow_mut().pop_front() {
+                let next = { pending_url.borrow_mut().pop_front() };
+                if let Some(next) = next {
                     // A manifest preview may have held this FIFO entry until
                     // the user dismissed it. Resume the oldest queued URL first.
                     url_entry.set_text(&next);

@@ -1134,10 +1134,10 @@ mod tests {
         assert_eq!(
             urls,
             [
-                "/seg-10-0.m4s",
-                "/seg-11-2.m4s",
-                "/seg-12-4.m4s",
-                "/seg-13-7.m4s"
+                "/path/seg-10-0.m4s",
+                "/path/seg-11-2.m4s",
+                "/path/seg-12-4.m4s",
+                "/path/seg-13-7.m4s"
             ]
         );
     }
@@ -1170,7 +1170,12 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             times,
-            ["/seg-0.m4s", "/seg-2.m4s", "/seg-4.m4s", "/seg-5.m4s"]
+            [
+                "/path/seg-0.m4s",
+                "/path/seg-2.m4s",
+                "/path/seg-4.m4s",
+                "/path/seg-5.m4s"
+            ]
         );
     }
 
@@ -1199,7 +1204,7 @@ mod tests {
             .filter(|resource| resource.kind == DashResourceKind::Segment)
             .map(|resource| resource.url.path().to_owned())
             .collect::<Vec<_>>();
-        assert_eq!(times, ["/seg-4.m4s", "/seg-8.m4s"]);
+        assert_eq!(times, ["/path/seg-4.m4s", "/path/seg-8.m4s"]);
     }
 
     #[test]

@@ -17,6 +17,13 @@ mod inline_add;
 mod inline_gallery;
 mod install_help;
 mod install_progress;
+// The parser is introduced as a pure slice before the downloader consumes it.
+// Remove this expectation when the pipeline integration lands.
+#[expect(
+    dead_code,
+    reason = "native manifest pipeline integration is the next implementation slice"
+)]
+mod manifest;
 mod media_types;
 mod net_types;
 mod preferences;

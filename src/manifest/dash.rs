@@ -585,6 +585,7 @@ fn effective_list(levels: &[Option<&dash_mpd_core::SegmentList>]) -> Result<Dash
     for list in levels.iter().flatten() {
         segment_list_seen = true;
         if list.indexRange.is_some()
+            || list.indexRangeExact == Some(true)
             || list.href.is_some()
             || list.sltype.is_some()
             || list.show.is_some()
@@ -737,12 +738,12 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
     let mut number = template.start_number;
 
     if let Some(timeline) = &template.timeline {
-        let period_end = duration_to_ticks_ceil(template.period_duration, template.timescale)?;
         let mut next_start = 0_u64;
+        let mut previous_start = None;
 
         for (index, entry) in timeline.iter().enumerate() {
             let start = entry.start.unwrap_or(next_start);
-            if start < next_start {
+            if previous_start.is_some_and(|previous| start < previous) {
                 return Err(DashError::InvalidSegment);
             }
 
@@ -752,19 +753,29 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                     .and_then(|repeat| repeat.checked_add(1))
                     .ok_or(DashError::InvalidSegment)?,
                 -1 => {
+                    // The negative repeat is bounded only by the next S@t,
+                    // not by a later explicit timestamp. DASH defines the
+                    // number of repeats with a ceiling, so a final segment
+                    // may overlap the next S@t or Period end.
                     let next_explicit_start =
-                        timeline.iter().skip(index + 1).find_map(|next| next.start);
-                    let end = next_explicit_start.unwrap_or(period_end);
-                    if end <= start {
-                        return Err(DashError::InvalidSegment);
+                        timeline.get(index + 1).and_then(|next| next.start);
+                    match next_explicit_start {
+                        Some(end) => {
+                            let distance = end
+                                .checked_sub(start)
+                                .filter(|distance| *distance > 0)
+                                .ok_or(DashError::InvalidSegment)?;
+                            ceil_div_u64(distance, entry.duration)?
+                        }
+                        None => {
+                            segments_until_period_end(
+                                template.period_duration,
+                                template.timescale,
+                                start,
+                                entry.duration,
+                            )?
+                        }
                     }
-                    if next_explicit_start.is_some() && (end - start) % entry.duration != 0 {
-                        return Err(DashError::InvalidSegment);
-                    }
-                    (end - start)
-                        .checked_add(entry.duration - 1)
-                        .ok_or(DashError::InvalidSegment)?
-                        / entry.duration
                 }
                 _ => return Err(DashError::InvalidSegment),
             };
@@ -777,7 +788,11 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                     .checked_mul(entry.duration)
                     .and_then(|offset| start.checked_add(offset))
                     .ok_or(DashError::InvalidSegment)?;
-                if time >= period_end {
+                if !time_precedes_period_end(
+                    time,
+                    template.period_duration,
+                    template.timescale,
+                )? {
                     return Err(DashError::InvalidSegment);
                 }
                 output.push((number, time));
@@ -791,6 +806,7 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                 .checked_mul(entry.duration)
                 .ok_or(DashError::InvalidSegment)?;
             next_start = start.checked_add(span).ok_or(DashError::InvalidSegment)?;
+            previous_start = Some(start);
         }
 
         return Ok(output);
@@ -807,10 +823,7 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
     let denominator = u128::from(duration_ticks)
         .checked_mul(1_000_000_000)
         .ok_or(DashError::InvalidSegment)?;
-    let count = numerator
-        .checked_add(denominator - 1)
-        .ok_or(DashError::InvalidSegment)?
-        / denominator;
+    let count = ceil_div_u128(numerator, denominator)?;
     let count = usize::try_from(count).map_err(|_| DashError::LimitExceeded)?;
     if count == 0 || count > MAX_SEGMENTS {
         return Err(if count > MAX_SEGMENTS {
@@ -835,16 +848,65 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
     Ok(output)
 }
 
-fn duration_to_ticks_ceil(duration: Duration, timescale: u64) -> Result<u64, DashError> {
-    let numerator = duration
+fn ceil_div_u64(numerator: u64, denominator: u64) -> Result<u64, DashError> {
+    if denominator == 0 {
+        return Err(DashError::InvalidSegment);
+    }
+    let numerator = u128::from(numerator);
+    let denominator = u128::from(denominator);
+    ceil_div_u128(numerator, denominator)
+}
+
+fn ceil_div_u128(numerator: u128, denominator: u128) -> Result<u64, DashError> {
+    if denominator == 0 {
+        return Err(DashError::InvalidSegment);
+    }
+    let quotient = numerator
+        .checked_add(denominator - 1)
+        .ok_or(DashError::InvalidSegment)?
+        / denominator;
+    u64::try_from(quotient).map_err(|_| DashError::LimitExceeded)
+}
+
+fn segments_until_period_end(
+    period_duration: Duration,
+    timescale: u64,
+    segment_start: u64,
+    segment_duration: u64,
+) -> Result<u64, DashError> {
+    if segment_duration == 0 {
+        return Err(DashError::InvalidSegment);
+    }
+    let period_end_scaled = period_duration
         .as_nanos()
         .checked_mul(u128::from(timescale))
         .ok_or(DashError::InvalidSegment)?;
-    let ticks = numerator
-        .checked_add(999_999_999)
-        .ok_or(DashError::InvalidSegment)?
-        / 1_000_000_000;
-    u64::try_from(ticks).map_err(|_| DashError::InvalidSegment)
+    let start_scaled = u128::from(segment_start)
+        .checked_mul(1_000_000_000)
+        .ok_or(DashError::InvalidSegment)?;
+    let remaining = period_end_scaled
+        .checked_sub(start_scaled)
+        .filter(|remaining| *remaining > 0)
+        .ok_or(DashError::InvalidSegment)?;
+    let segment_duration_scaled = u128::from(segment_duration)
+        .checked_mul(1_000_000_000)
+        .ok_or(DashError::InvalidSegment)?;
+    ceil_div_u128(remaining, segment_duration_scaled)
+}
+
+fn time_precedes_period_end(
+    segment_start: u64,
+    period_duration: Duration,
+    timescale: u64,
+) -> Result<bool, DashError> {
+    let period_end_scaled = period_duration
+        .as_nanos()
+        .checked_mul(u128::from(timescale))
+        .ok_or(DashError::InvalidSegment)?;
+    let segment_start_scaled = u128::from(segment_start)
+        .checked_mul(1_000_000_000)
+        .ok_or(DashError::InvalidSegment)?;
+    Ok(segment_start_scaled < period_end_scaled)
 }
 
 fn substitute_template(
@@ -1085,6 +1147,63 @@ mod tests {
                 "/seg-13-7.m4s"
             ]
         );
+    }
+
+    #[test]
+    fn negative_timeline_repeat_uses_ceiling_to_next_explicit_start() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" media="seg-$Time$.m4s">
+        <SegmentTimeline>
+          <S t="0" d="2" r="-1"/>
+          <S t="5" d="3" r="0"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body).expect("timeline MPD should parse");
+        let video = &plan.video_representations[0];
+        let resources = plan_dash_representation(&plan, &video.key)
+            .expect("negative repeat should expand to the next explicit start");
+        let times = resources
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.url.path().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(times, ["/seg-0.m4s", "/seg-2.m4s", "/seg-4.m4s", "/seg-5.m4s"]);
+    }
+
+    #[test]
+    fn negative_timeline_repeat_uses_ceiling_to_period_end() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" media="seg-$Time$.m4s">
+        <SegmentTimeline>
+          <S t="4" d="4" r="-1"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body).expect("timeline MPD should parse");
+        let video = &plan.video_representations[0];
+        let resources = plan_dash_representation(&plan, &video.key)
+            .expect("last negative repeat should reach the Period end");
+        let times = resources
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.url.path().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(times, ["/seg-4.m4s", "/seg-8.m4s"]);
     }
 
     #[test]

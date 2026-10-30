@@ -596,7 +596,8 @@ one.ts
             Some(ManifestError::UnsupportedPlaylist)
         );
 
-        let partial_body = b"#EXTM3U\n#EXT-X-PART-INF:PART-TARGET=0.5\n#EXTINF:2,\none.ts\n#EXT-X-ENDLIST\n";
+        let partial_body =
+            b"#EXTM3U\n#EXT-X-PART-INF:PART-TARGET=0.5\n#EXTINF:2,\none.ts\n#EXT-X-ENDLIST\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, partial_body).err(),
             Some(ManifestError::UnsupportedPlaylist)

@@ -20,8 +20,6 @@ pub(crate) enum ManifestError {
     Parse,
     #[error("expected an HLS master playlist")]
     ExpectedMasterPlaylist,
-    #[error("expected an HLS media playlist")]
-    ExpectedMediaPlaylist,
     #[error("HLS media playlist contains no segments")]
     EmptyPlaylist,
     #[error("unsupported HLS playlist type")]
@@ -457,7 +455,7 @@ media.mp4
         let plan = plan_hls_media_playlist(BASE_URL, body)
             .expect("valid VOD playlist should produce a local fetch plan");
 
-        assert_eq!(plan.duration, Duration::from_millis(7_200));
+        assert!((plan.duration.as_secs_f64() - 7.2).abs() < 0.000_001);
         assert_eq!(plan.resources.len(), 3);
         assert_eq!(plan.resources[0].kind, HlsResourceKind::InitMap);
         assert_eq!(

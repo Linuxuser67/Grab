@@ -102,7 +102,7 @@ fn fixture_files(directory: &Path, urls: &[Url]) -> HashMap<String, Vec<u8>> {
         let filename = url
             .path()
             .rsplit('/')
-            .next_back()
+            .next()
             .filter(|filename| !filename.is_empty())
             .expect("planned fixture URL has a filename");
         let path = directory.join(filename);
@@ -201,7 +201,7 @@ fn loopback_resource_url(base_url: &Url, original: &Url) -> Url {
     let filename = original
         .path()
         .rsplit('/')
-        .next_back()
+        .next()
         .filter(|filename| !filename.is_empty())
         .expect("planned fixture URL has a filename");
     let mut url = base_url.clone();

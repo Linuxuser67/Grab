@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use m3u8_rs::{AlternativeMediaType, KeyMethod, MediaPlaylist, MediaPlaylistType, Playlist};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
@@ -55,11 +56,40 @@ pub(crate) struct ManifestByteRange {
     pub(crate) length: u64,
 }
 
+/// Generate a staging filename tied to the resolved resource URL and byte range.
+/// Signed query strings remain part of the identity: a changed URL never adopts stale bytes.
+pub(crate) fn resource_filename(
+    prefix: &str,
+    index: Option<usize>,
+    url: &Url,
+    range: Option<ManifestByteRange>,
+) -> String {
+    let mut hasher = Sha256::new();
+    let mut stable_url = url.clone();
+    stable_url.set_fragment(None);
+    hasher.update(stable_url.as_str().as_bytes());
+    if let Some(range) = range {
+        hasher.update(range.offset.to_le_bytes());
+        hasher.update(range.length.to_le_bytes());
+    }
+    let digest = hasher.finalize();
+    let fingerprint: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    match index {
+        Some(index) => format!("{prefix}-{index:06}-{fingerprint}.bin"),
+        None => format!("{prefix}-{fingerprint}.bin"),
+    }
+}
+
 /// The kind of remote object fetched for a local HLS presentation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HlsResourceKind {
     InitMap,
     Segment,
+    /// AES-128 identity key localized beside the rewritten media playlist.
+    Key,
 }
 
 /// One HTTPS resource required by the selected HLS media playlist.
@@ -229,7 +259,8 @@ pub(crate) fn parse_hls_master_playlist(
 ///
 /// Byte ranges are converted to explicit offsets, init maps are fetched once per
 /// distinct URI/range pair, and every media segment gets its own local filename.
-/// AES-128 key URLs remain remote for FFmpeg's HLS demuxer; other encryption
+/// AES-128 identity keys are included in the local fetch plan and the
+/// rewritten playlist points FFmpeg at the staged key file; other encryption
 /// methods are deliberately rejected.
 ///
 /// # Errors
@@ -272,6 +303,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
 
     let mut resources = Vec::with_capacity(playlist.segments.len());
     let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> = HashMap::new();
+    let mut key_filenames: HashMap<String, String> = HashMap::new();
     // An implicit segment offset is defined only by the immediately preceding
     // media segment, and only when it was a sub-range of the same resource.
     let mut previous_segment_range: Option<(String, u64)> = None;
@@ -334,7 +366,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             let filename = match map_filenames.get(&map_key) {
                 Some(existing) => existing.clone(),
                 None => {
-                    let filename = format!("init-{:06}.bin", map_filenames.len());
+                    let filename = resource_filename("init", None, &map_url, map_range);
                     resources.push(HlsResource {
                         url: map_url,
                         range: map_range,
@@ -374,7 +406,23 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                 .uri
                 .as_deref()
                 .ok_or(ManifestError::UnsupportedEncryption)?;
-            key.uri = Some(resolve_resource_url(&base_url, key_uri)?.to_string());
+            let key_url = resolve_resource_url(&base_url, key_uri)?;
+            let key_url_string = key_url.as_str().to_string();
+            let filename = match key_filenames.get(&key_url_string) {
+                Some(existing) => existing.clone(),
+                None => {
+                    let filename = resource_filename("key", None, &key_url, None);
+                    resources.push(HlsResource {
+                        url: key_url,
+                        range: None,
+                        filename: filename.clone(),
+                        kind: HlsResourceKind::Key,
+                    });
+                    key_filenames.insert(key_url_string, filename.clone());
+                    filename
+                }
+            };
+            key.uri = Some(filename);
         }
 
         let segment_url = resolve_resource_url(&base_url, &segment.uri)?;
@@ -402,7 +450,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                 None
             }
         };
-        let filename = format!("segment-{:06}.bin", index);
+        let filename = resource_filename("segment", Some(index), &segment_url, range);
         resources.push(HlsResource {
             url: segment_url,
             range,
@@ -598,10 +646,15 @@ media.mp4
         assert_eq!(parsed.playlist_type, Some(MediaPlaylistType::Vod));
         assert!(parsed.end_list);
         assert_eq!(parsed.segments.len(), 2);
-        assert_eq!(parsed.segments[0].uri, "segment-000000.bin");
-        assert_eq!(
-            parsed.segments[0].map.as_ref().map(|map| map.uri.as_str()),
-            Some("init-000000.bin")
+        assert!(
+            parsed.segments[0].uri.starts_with("segment-000000-"),
+            "local segment names include their remote resource identity"
+        );
+        assert!(
+            parsed.segments[0]
+                .map
+                .as_ref()
+                .is_some_and(|map| map.uri.starts_with("init-"))
         );
         assert!(
             parsed
@@ -614,6 +667,25 @@ media.mp4
                 .map
                 .as_ref()
                 .is_some_and(|map| map.byte_range.is_none())
+        );
+    }
+
+    #[test]
+    fn resource_filenames_change_when_a_segment_url_changes() {
+        let first = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXTINF:2,\none.ts\n#EXT-X-ENDLIST\n",
+        )
+        .expect("first media playlist");
+        let second = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n",
+        )
+        .expect("second media playlist");
+        assert_ne!(
+            first.resources[0].filename,
+            second.resources[0].filename,
+            "a changed resource URL must not reuse bytes cached under the old segment ordinal"
         );
     }
 
@@ -652,7 +724,9 @@ three.m4s
             .iter()
             .filter_map(|segment| segment.map.as_ref().map(|map| map.uri.as_str()))
             .collect::<Vec<_>>();
-        assert_eq!(map_names, ["init-000000.bin"; 3]);
+        assert_eq!(map_names[0], map_names[1]);
+        assert_eq!(map_names[1], map_names[2]);
+        assert!(map_names[0].starts_with("init-"));
     }
 
     #[test]
@@ -719,11 +793,18 @@ one.ts
             .expect("playlist should serialize");
         let parsed =
             m3u8_rs::parse_media_playlist_res(&bytes).expect("serialized playlist should parse");
-        assert_eq!(
+        assert!(
             parsed.segments[0]
                 .key
                 .as_ref()
-                .and_then(|key| key.uri.as_deref()),
+                .and_then(|key| key.uri.as_deref())
+                .is_some_and(|uri| uri.starts_with("key-"))
+        );
+        assert_eq!(
+            plan.resources
+                .iter()
+                .find(|resource| resource.kind == HlsResourceKind::Key)
+                .map(|resource| resource.url.as_str()),
             Some("https://cdn.example.test/keys/media.key")
         );
         assert_eq!(parsed.version, Some(5));
@@ -756,18 +837,20 @@ third.m4s
                 .key
                 .as_ref()
                 .is_some_and(
-                    |key| key.uri.as_deref() == Some("https://cdn.example.test/path/key.bin")
+                    |key| key.uri.as_deref().is_some_and(|uri| uri.starts_with("key-"))
                 ))
         );
         assert!(parsed.segments[0].map.is_none());
-        assert_eq!(
-            parsed.segments[1].map.as_ref().map(|map| map.uri.as_str()),
-            Some("init-000000.bin")
-        );
-        assert_eq!(
-            parsed.segments[2].map.as_ref().map(|map| map.uri.as_str()),
-            Some("init-000000.bin")
-        );
+        let first_map = parsed.segments[1]
+            .map
+            .as_ref()
+            .map(|map| map.uri.as_str());
+        let second_map = parsed.segments[2]
+            .map
+            .as_ref()
+            .map(|map| map.uri.as_str());
+        assert_eq!(first_map, second_map);
+        assert!(first_map.is_some_and(|uri| uri.starts_with("init-")));
     }
 
     #[test]

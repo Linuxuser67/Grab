@@ -318,6 +318,23 @@ pub(crate) fn http_client_with_jar(
     b.build().map_err(|e| e.to_string())
 }
 
+/// Build an attempt-scoped client with browser-bound cookies and the matching user agent.
+pub(crate) fn http_client_with_jar_and_user_agent(
+    proxy: Option<&ResolvedProxy>,
+    jar: std::sync::Arc<reqwest::cookie::Jar>,
+    user_agent: &str,
+) -> Result<reqwest::Client, String> {
+    let mut builder = client_builder()
+        .cookie_provider(jar)
+        .user_agent(user_agent);
+    if let Some(proxy) = proxy {
+        for resolved in &proxy.proxies {
+            builder = builder.proxy(resolved.clone());
+        }
+    }
+    builder.build().map_err(|error| error.to_string())
+}
+
 fn private_v4(a: Ipv4Addr) -> bool {
     let o = a.octets();
     a.is_loopback()

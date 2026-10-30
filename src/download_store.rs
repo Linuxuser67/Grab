@@ -36,7 +36,7 @@ impl DownloadStatus {
     }
 }
 
-pub(crate) const QUEUE_VERSION: u32 = 3;
+pub(crate) const QUEUE_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StoredItem {

@@ -18,12 +18,7 @@ mod inline_gallery;
 mod install_help;
 mod install_progress;
 mod manifest_intake;
-// Segment expansion and local-playlist serialization are consumed by the next
-// native queue/fetch phase; keep the parser's remaining helpers covered here.
-#[expect(
-    dead_code,
-    reason = "native segment queue and fetch integration is the next implementation phase"
-)]
+mod manifest_runner;
 mod manifest;
 mod media_types;
 mod net_types;

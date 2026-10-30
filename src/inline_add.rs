@@ -286,12 +286,6 @@ fn needs_gallery_probe(url: &str) -> bool {
     !crate::gallery_probe::url_is_direct_media(url) && !crate::video_tools::is_youtube_url(url)
 }
 
-/// Native variant preview is experimental until the native queue/fetch path exists.
-/// Keep the established yt-dlp route for every supported manifest by default.
-fn should_use_native_manifest_picker(enabled: bool, url: &str) -> bool {
-    enabled && crate::manifest_intake::supports(url)
-}
-
 /// A video page always probes. Other HTTP(S) links probe only on an explicit
 /// unlisted kick (Add/Enter/Retry) or the opt-in auto-add kick.
 fn should_probe_url(url: &str, probe_unlisted: bool) -> bool {
@@ -327,7 +321,6 @@ async fn lookup_media(
     url: String,
     browser: String,
     newest_first: bool,
-    native_manifest_picker_enabled: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     let started = std::time::Instant::now();
@@ -336,7 +329,6 @@ async fn lookup_media(
         url,
         browser,
         newest_first,
-        native_manifest_picker_enabled,
         proxy,
     )
     .await;
@@ -358,17 +350,21 @@ async fn lookup_media_inner(
     url: String,
     browser: String,
     newest_first: bool,
-    native_manifest_picker_enabled: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
-    // The native picker remains an explicit experiment until the queue/fetch
-    // phase can enqueue its selected representation. Production defaults keep
-    // every supported URL on the established yt-dlp preview and queue path.
-    if should_use_native_manifest_picker(native_manifest_picker_enabled, &url) {
+    // Native HLS/DASH intake runs before extraction. Unsupported or malformed
+    // manifests continue through the established yt-dlp/gallery fallback.
+    if crate::manifest_intake::supports(&url) {
         let manifest_url = url.clone();
+        let manifest_browser = browser.clone();
         let manifest_proxy = proxy.clone();
         let handle = crate::runtime::tokio_rt().spawn(async move {
-            crate::manifest_intake::lookup(&manifest_url, manifest_proxy.as_ref()).await
+            crate::manifest_intake::lookup(
+                &manifest_url,
+                &manifest_browser,
+                manifest_proxy.as_ref(),
+            )
+            .await
         });
         let native_result = {
             let _abort = AbortTaskOnDrop(handle.abort_handle());
@@ -741,8 +737,7 @@ fn clear_manifest_preview(step: &VideoStep) {
     step.manifest_info.set_subtitle("");
 }
 
-/// Show a parsed manifest and let the user choose its video representation.
-/// The queue action remains unavailable until the native queue phase lands.
+/// Show a parsed manifest and enable Add for the validated representation.
 fn show_manifest_ready(
     step: &VideoStep,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
@@ -779,12 +774,17 @@ fn show_manifest_ready(
     step.manifest_format.set_selected(0);
     step.manifest_info.set_visible(true);
     step.manifest_format.set_visible(true);
+    if step.name.text().trim().is_empty() {
+        step.name.set_text("Stream.mp4");
+    }
+    step.name.set_visible(true);
+    // The existing revert action is tied to yt-dlp title metadata.
+    step.revert.set_visible(false);
 
-    // This phase deliberately stops at the validated variant choice. It must
-    // not pass a raw .m3u8/.mpd URL to the generic file queue or yt-dlp row.
-    step.action_revealer.set_reveal_child(false);
+    // Native rows keep the source URL and selected key as durable queue metadata.
+    step.action_revealer.set_reveal_child(true);
     set_looking_up(step, false);
-    set_lookup_add(lookup_add, false);
+    set_lookup_add(lookup_add, true);
 
     // Keep the picker inside the existing animated preview card.
     step.group_revealer.set_visible(true);
@@ -2893,7 +2893,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     url.clone(),
                     browser,
                     newest_first,
-                    settings_b.native_manifest_picker_enabled(),
                     proxy.clone(),
                 )
                 .await;
@@ -3203,36 +3202,47 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             }
             let url = url_entry.text().trim().to_string();
             if crate::manifest_intake::supports(&url) {
-                let preview_is_fresh = step2
-                    .manifest
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|manifest| manifest.source_url == url);
-                if preview_is_fresh {
-                    // The selected key is retained for the native queue phase.
-                    return;
-                }
-                let extractor_preview = {
-                    let state = probe.borrow();
-                    if crate::video::preview_fresh(&state.info, state.last_ok.as_str(), &url) {
-                        state.info.clone()
-                    } else {
-                        None
-                    }
+                let selected_source = {
+                    let manifest = step2.manifest.borrow();
+                    let selected = step2.manifest_selection.borrow();
+                    manifest
+                        .as_ref()
+                        .filter(|manifest| manifest.source_url == url)
+                        .and_then(|manifest| {
+                            selected
+                                .as_deref()
+                                .and_then(|key| manifest.selected_source(key))
+                        })
                 };
-                if let Some(extractor_preview) = extractor_preview {
-                    // Native parsing may reject a dynamic or encrypted stream.
-                    // Keep the established yt-dlp path usable when it resolved it.
-                    submit_probe(
-                        &m,
+                if let Some(source) = selected_source {
+                    let filename = step2.name.text().trim().to_string();
+                    let enqueue_manager = Rc::clone(&m);
+                    let error_step = Rc::clone(&step2);
+                    let error_lookup_add = Rc::clone(&lookup_add_submit);
+                    enqueue_and_close_async(
                         &dd,
                         &close_card,
-                        &step2,
-                        &lookup_add_submit,
-                        &nav2,
-                        extractor_preview,
                         scheduled_at.get(),
+                        move |directory| async move {
+                            enqueue_manager
+                                .enqueue_manifest_async_batched(
+                                    source,
+                                    directory.as_deref(),
+                                    Some(&filename),
+                                )
+                                .await
+                        },
+                        move |error| {
+                            show_video_error(&error_step, error);
+                            set_lookup_add(&error_lookup_add, true);
+                        },
                     );
+                } else if step2.manifest.borrow().is_some() {
+                    show_video_error(
+                        &step2,
+                        &gettext("Select a valid stream representation before adding."),
+                    );
+                    set_lookup_add(&lookup_add_submit, true);
                 } else if probe.borrow().is_inflight(&url, true) {
                     show_video_error(
                         &step2,
@@ -4059,11 +4069,13 @@ mod tests {
     }
 
     #[test]
-    fn supported_manifest_uses_the_queueable_ytdlp_path_by_default() {
-        let url = "https://cdn.example.test/master.m3u8?token=abc";
-        assert!(crate::manifest_intake::supports(url));
-        assert!(!should_use_native_manifest_picker(false, url));
-        assert!(should_use_native_manifest_picker(true, url));
+    fn supported_manifest_urls_are_handled_by_native_intake() {
+        assert!(crate::manifest_intake::supports(
+            "https://cdn.example.test/master.m3u8?token=abc"
+        ));
+        assert!(crate::manifest_intake::supports(
+            "https://cdn.example.test/manifest.mpd"
+        ));
     }
 
     #[test]

@@ -8,7 +8,6 @@ pub mod key {
     pub const RESTRICT_FILENAMES: &str = "restrict-filenames";
     pub const ENABLE_SCHEDULED_DOWNLOADS: &str = "enable-scheduled-downloads";
     pub const AUTO_ADD_DOWNLOADS: &str = "auto-add-downloads";
-    pub const NATIVE_MANIFEST_PICKER_ENABLED: &str = "native-manifest-picker-enabled";
     pub const MAX_CONCURRENT: &str = "max-concurrent";
     pub const CONNECTIONS: &str = "connections";
     pub const SPEED_LIMIT: &str = "speed-limit";
@@ -69,10 +68,6 @@ impl AppSettings {
     /// links opened from other apps skip the "Add this download?" dialog.
     pub fn auto_add_downloads(&self) -> bool {
         self.0.boolean(key::AUTO_ADD_DOWNLOADS)
-    }
-    /// Experimental native HLS/DASH picker; disabled until native queueing is integrated.
-    pub fn native_manifest_picker_enabled(&self) -> bool {
-        self.0.boolean(key::NATIVE_MANIFEST_PICKER_ENABLED)
     }
     pub fn max_concurrent(&self) -> i32 {
         self.0.int(key::MAX_CONCURRENT)
@@ -214,19 +209,3 @@ impl std::ops::Deref for AppSettings {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::AppSettings;
-
-    #[test]
-    fn native_manifest_picker_is_disabled_by_default() {
-        // SAFETY: the project CI test suite runs serially; no other test
-        // accesses GSettings while the memory backend is selected.
-        unsafe {
-            std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
-            std::env::set_var("GSETTINGS_BACKEND", "memory");
-        }
-
-        assert!(!AppSettings::new().native_manifest_picker_enabled());
-    }
-}

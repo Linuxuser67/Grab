@@ -11,6 +11,13 @@ const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
 const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
+// DASH-IF's current identifier, its legacy HTTP form used by FFmpeg packager
+// output, and the ISO trick-mode scheme used by other DASH packagers.
+const DASH_TRICK_MODE_SCHEMES: [&str; 3] = [
+    "https://dashif.org/guidelines/trickmode",
+    "http://dashif.org/guidelines/trickmode",
+    "urn:mpeg:dash:trickmode:2016",
+];
 
 /// Errors returned when a DASH MPD is outside Grab's native v1 subset.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -206,12 +213,24 @@ pub(crate) fn parse_dash_manifest(
         if adaptation.href.is_some() || !adaptation.ContentProtection.is_empty() {
             return Err(DashError::UnsupportedPresentation);
         }
+        if has_trick_mode_properties(
+            &adaptation.essential_property,
+            &adaptation.supplemental_property,
+        ) {
+            continue;
+        }
 
         let adaptation_base = resolve_base_url(period_base.clone(), &adaptation.BaseURL)?;
         for (representation_index, representation) in adaptation.representations.iter().enumerate()
         {
             if representation.href.is_some() || !representation.ContentProtection.is_empty() {
                 return Err(DashError::UnsupportedPresentation);
+            }
+            if has_trick_mode_properties(
+                &representation.essential_property,
+                &representation.supplemental_property,
+            ) {
+                continue;
             }
 
             let mime_type = representation
@@ -385,6 +404,22 @@ fn resolve_base_url(
         .join(value)
         .map_err(|_| DashError::UnsupportedAddressing)?;
     validate_https_url(resolved)
+}
+
+fn has_trick_mode_properties(
+    essential_properties: &[dash_mpd_core::EssentialProperty],
+    supplemental_properties: &[dash_mpd_core::SupplementalProperty],
+) -> bool {
+    essential_properties
+        .iter()
+        .any(|property| is_trick_mode_scheme(&property.schemeIdUri))
+        || supplemental_properties
+            .iter()
+            .any(|property| is_trick_mode_scheme(&property.schemeIdUri))
+}
+
+fn is_trick_mode_scheme(scheme_id_uri: &str) -> bool {
+    DASH_TRICK_MODE_SCHEMES.contains(&scheme_id_uri)
 }
 
 fn track_kind(
@@ -740,10 +775,15 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
     if let Some(timeline) = &template.timeline {
         let mut next_start = 0_u64;
         let mut previous_start = None;
+        let mut previous_run_uses_negative_repeat = false;
 
         for (index, entry) in timeline.iter().enumerate() {
             let start = entry.start.unwrap_or(next_start);
-            if previous_start.is_some_and(|previous| start < previous) {
+            let starts_before_previous = previous_start.is_some_and(|previous| start < previous);
+            let overlaps_previous_run = entry.start.is_some()
+                && !previous_run_uses_negative_repeat
+                && start < next_start;
+            if starts_before_previous || overlaps_previous_run {
                 return Err(DashError::InvalidSegment);
             }
 
@@ -800,6 +840,7 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                 .ok_or(DashError::InvalidSegment)?;
             next_start = start.checked_add(span).ok_or(DashError::InvalidSegment)?;
             previous_start = Some(start);
+            previous_run_uses_negative_repeat = entry.repeat == -1;
         }
 
         return Ok(output);
@@ -1041,6 +1082,32 @@ mod tests {
 
     const BASE_URL: &str = "https://cdn.example.test/path/manifest.mpd";
 
+    fn mpd_with_trick_mode_property(
+        on_adaptation: bool,
+        element: &str,
+        scheme_id_uri: &str,
+    ) -> String {
+        let property = format!(
+            r#"<{element} schemeIdUri="{scheme_id_uri}" value="0"/>"#
+        );
+        let adaptation_property = if on_adaptation { &property } else { "" };
+        let representation_property = if on_adaptation { "" } else { &property };
+
+        format!(
+            r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      {adaptation_property}
+      <SegmentTemplate timescale="1" duration="5" media="seg-$Number$.m4s"/>
+      <Representation id="trick" bandwidth="1000000">{representation_property}</Representation>
+      <Representation id="normal" bandwidth="2000000"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#
+        )
+    }
+
     const TEMPLATE_MPD: &str = r#"<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
   <BaseURL>media/</BaseURL>
@@ -1079,6 +1146,52 @@ mod tests {
                 .and_then(|audio| audio.representation_id.as_deref()),
             Some("a1")
         );
+    }
+
+    #[test]
+    fn excludes_adaptation_sets_marked_for_trick_mode() {
+        for (element, scheme_id_uri) in [
+            (
+                "EssentialProperty",
+                "https://dashif.org/guidelines/trickmode",
+            ),
+            (
+                "SupplementalProperty",
+                "http://dashif.org/guidelines/trickmode",
+            ),
+        ] {
+            let body = mpd_with_trick_mode_property(true, element, scheme_id_uri);
+            assert_eq!(
+                parse_dash_manifest(BASE_URL, &body).err(),
+                Some(DashError::NoVideoRepresentations),
+                "{element} with {scheme_id_uri} must exclude the entire AdaptationSet"
+            );
+        }
+    }
+
+    #[test]
+    fn excludes_representations_marked_for_trick_mode() {
+        for (element, scheme_id_uri) in [
+            (
+                "EssentialProperty",
+                "urn:mpeg:dash:trickmode:2016",
+            ),
+            (
+                "SupplementalProperty",
+                "https://dashif.org/guidelines/trickmode",
+            ),
+        ] {
+            let body = mpd_with_trick_mode_property(false, element, scheme_id_uri);
+            let plan = parse_dash_manifest(BASE_URL, &body)
+                .expect("regular video representation should remain selectable");
+
+            assert_eq!(plan.video_representations.len(), 1);
+            assert_eq!(
+                plan.video_representations[0].representation_id.as_deref(),
+                Some("normal"),
+                "{element} with {scheme_id_uri} must exclude only its Representation"
+            );
+        }
     }
 
     #[test]
@@ -1180,6 +1293,32 @@ mod tests {
                 "/path/seg-4.m4s",
                 "/path/seg-5.m4s"
             ]
+        );
+    }
+
+    #[test]
+    fn rejects_explicit_timeline_start_overlapping_previous_positive_repeat_run() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT12S">
+  <Period duration="PT12S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" media="seg-$Time$.m4s">
+        <SegmentTimeline>
+          <S t="0" d="4" r="2"/>
+          <S t="4" d="4"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body).expect("MPD syntax is valid");
+        let video = &plan.video_representations[0];
+
+        assert_eq!(
+            plan_dash_representation(&plan, &video.key).err(),
+            Some(DashError::InvalidSegment),
+            "the explicit t=4 entry overlaps the preceding run ending at t=12"
         );
     }
 

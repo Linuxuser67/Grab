@@ -3171,7 +3171,28 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     // The selected key is retained for the native queue phase.
                     return;
                 }
-                if probe.borrow().is_inflight(&url, true) {
+                let extractor_preview = {
+                    let state = probe.borrow();
+                    if crate::video::preview_fresh(&state.info, state.last_ok.as_str(), &url) {
+                        state.info.clone()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(extractor_preview) = extractor_preview {
+                    // Native parsing may reject a dynamic or encrypted stream.
+                    // Keep the established yt-dlp path usable when it resolved it.
+                    submit_probe(
+                        &m,
+                        &dd,
+                        &close_card,
+                        &step2,
+                        &lookup_add_submit,
+                        &nav2,
+                        extractor_preview,
+                        scheduled_at.get(),
+                    );
+                } else if probe.borrow().is_inflight(&url, true) {
                     show_video_error(
                         &step2,
                         &gettext(

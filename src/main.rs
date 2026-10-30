@@ -18,6 +18,7 @@ mod inline_gallery;
 mod install_help;
 mod install_progress;
 mod media_types;
+mod manifest;
 mod net_types;
 mod preferences;
 mod runtime;

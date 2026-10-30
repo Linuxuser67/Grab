@@ -241,7 +241,9 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
 
     let mut resources = Vec::with_capacity(playlist.segments.len());
     let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> = HashMap::new();
-    let mut next_range_offsets: HashMap<String, u64> = HashMap::new();
+    // An implicit segment offset is defined only by the immediately preceding
+    // media segment, and only when it was a sub-range of the same resource.
+    let mut previous_segment_range: Option<(String, u64)> = None;
     let mut total_duration = Duration::ZERO;
     let mut maximum_segment_duration = 0.0_f64;
 
@@ -267,16 +269,15 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
 
         if let Some(map) = segment.map.as_mut() {
             let map_url = resolve_resource_url(&base_url, &map.uri)?;
+            // EXT-X-MAP byte ranges do not have a preceding media-segment
+            // range to infer from. Require an explicit offset rather than
+            // guessing and fetching the wrong initialization bytes.
             let map_range = map
                 .byte_range
                 .as_ref()
                 .map(|range| {
-                    resolve_byte_range(
-                        range.length,
-                        range.offset,
-                        &map_url,
-                        &mut next_range_offsets,
-                    )
+                    let offset = range.offset.ok_or(ManifestError::MissingByteRangeOffset)?;
+                    checked_byte_range(range.length, offset)
                 })
                 .transpose()?;
             let map_key = (map_url.as_str().to_owned(), map_range);
@@ -321,18 +322,30 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         }
 
         let segment_url = resolve_resource_url(&base_url, &segment.uri)?;
-        let range = segment
-            .byte_range
-            .as_ref()
-            .map(|range| {
-                resolve_byte_range(
-                    range.length,
-                    range.offset,
-                    &segment_url,
-                    &mut next_range_offsets,
-                )
-            })
-            .transpose()?;
+        let range = match segment.byte_range.as_ref() {
+            Some(byte_range) => {
+                let resource_url = segment_url.as_str();
+                let offset = match byte_range.offset {
+                    Some(offset) => offset,
+                    None => previous_segment_range
+                        .as_ref()
+                        .filter(|(previous_url, _)| previous_url == resource_url)
+                        .map(|(_, next_offset)| *next_offset)
+                        .ok_or(ManifestError::MissingByteRangeOffset)?,
+                };
+                let range = checked_byte_range(byte_range.length, offset)?;
+                let next_offset = offset
+                    .checked_add(byte_range.length)
+                    .ok_or(ManifestError::InvalidByteRange)?;
+                previous_segment_range = Some((resource_url.to_owned(), next_offset));
+                Some(range)
+            }
+            None => {
+                // A full-resource segment breaks implicit range continuation.
+                previous_segment_range = None;
+                None
+            }
+        };
         let filename = format!("segment-{:06}.bin", index);
         resources.push(HlsResource {
             url: segment_url,
@@ -409,26 +422,13 @@ fn resolve_resource_url(base_url: &Url, raw: &str) -> Result<Url, ManifestError>
     Ok(url)
 }
 
-fn resolve_byte_range(
+fn checked_byte_range(
     length: u64,
-    explicit_offset: Option<u64>,
-    url: &Url,
-    next_offsets: &mut HashMap<String, u64>,
+    offset: u64,
 ) -> Result<ManifestByteRange, ManifestError> {
-    if length == 0 {
+    if length == 0 || offset.checked_add(length).is_none() {
         return Err(ManifestError::InvalidByteRange);
     }
-
-    let offset = match explicit_offset {
-        Some(offset) => offset,
-        None => *next_offsets
-            .get(url.as_str())
-            .ok_or(ManifestError::MissingByteRangeOffset)?,
-    };
-    let next_offset = offset
-        .checked_add(length)
-        .ok_or(ManifestError::InvalidByteRange)?;
-    next_offsets.insert(url.as_str().to_owned(), next_offset);
 
     Ok(ManifestByteRange { offset, length })
 }
@@ -541,6 +541,35 @@ media.mp4
                 .map
                 .as_ref()
                 .is_some_and(|map| map.byte_range.is_none())
+        );
+    }
+
+    #[test]
+    fn implicit_byte_range_requires_the_immediately_previous_segment_on_same_resource() {
+        let body = b"#EXTM3U\n#EXTINF:1,\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:4@0\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:4\nmedia.mp4\n#EXT-X-ENDLIST\n";
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("consecutive byte ranges of one resource should continue");
+        assert_eq!(
+            plan.resources[2].range,
+            Some(ManifestByteRange {
+                offset: 4,
+                length: 4
+            })
+        );
+
+        let interrupted = b"#EXTM3U\n#EXTINF:1,\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:4@0\nmedia.mp4\n#EXTINF:1,\nother.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:4\nmedia.mp4\n#EXT-X-ENDLIST\n";
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, interrupted).err(),
+            Some(ManifestError::MissingByteRangeOffset)
+        );
+    }
+
+    #[test]
+    fn init_map_byte_range_requires_an_explicit_offset() {
+        let body = b"#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\",BYTERANGE=\"16\"\n#EXTINF:2,\nmedia.mp4\n#EXT-X-ENDLIST\n";
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, body).err(),
+            Some(ManifestError::MissingByteRangeOffset)
         );
     }
 

@@ -6,12 +6,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Maximum response body accepted by the native manifest intake.
-pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
-
 use m3u8_rs::{AlternativeMediaType, KeyMethod, MediaPlaylist, MediaPlaylistType, Playlist};
 use thiserror::Error;
 use url::Url;
+
+/// Maximum response body accepted by the native manifest intake.
+pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 
 pub(crate) mod dash;
 
@@ -896,6 +896,19 @@ one.ts
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, insecure_body).err(),
             Some(ManifestError::UnsupportedResourceUrl)
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_hls_manifest_bodies_before_parsing() {
+        let body = vec![b' '; MAX_MANIFEST_BYTES + 1];
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, &body).err(),
+            Some(ManifestError::Parse)
+        );
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, &body).err(),
+            Some(ManifestError::Parse)
         );
     }
 }

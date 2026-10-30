@@ -706,11 +706,6 @@ fn show_manifest_ready(
     hide_video_step(step);
 
     let choices = manifest.choices();
-    let labels = choices
-        .iter()
-        .map(|choice| choice.label.as_str())
-        .collect::<Vec<_>>();
-
     step.manifest_choices.replace(choices);
     step.manifest_selection.replace(
         step.manifest_choices
@@ -720,8 +715,16 @@ fn show_manifest_ready(
     );
     step.manifest.replace(Some(manifest.clone()));
     step.manifest_info.set_subtitle(&manifest.summary());
+
+    let labels = step
+        .manifest_choices
+        .borrow()
+        .iter()
+        .map(|choice| choice.label.clone())
+        .collect::<Vec<_>>();
+    let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
     step.manifest_format
-        .set_model(Some(&gtk4::StringList::new(&labels)));
+        .set_model(Some(&gtk4::StringList::new(&label_refs)));
     step.manifest_format.set_selected(0);
     step.manifest_info.set_visible(true);
     step.manifest_format.set_visible(true);
@@ -2130,6 +2133,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let manifest_format = adw::ComboRow::builder()
         .title(gettext("Video variant"))
         .build();
+    manifest_format.set_visible(false);
     video_group.add(&manifest_format);
 
     let video_format = adw::ComboRow::builder()
@@ -3147,13 +3151,26 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 return;
             }
             let url = url_entry.text().trim().to_string();
-            if step2
-                .manifest
-                .borrow()
-                .as_ref()
-                .is_some_and(|manifest| manifest.source_url == url)
-            {
-                // Native queue creation is intentionally handled in the next phase.
+            if crate::manifest_intake::supports(&url) {
+                let preview_is_fresh = step2
+                    .manifest
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.source_url == url);
+                if preview_is_fresh {
+                    // The selected key is retained for the native queue phase.
+                    return;
+                }
+                if probe.borrow().is_inflight(&url, true) {
+                    show_video_error(
+                        &step2,
+                        &gettext(
+                            "Still looking up the media — wait for the preview, then add.",
+                        ),
+                    );
+                } else {
+                    kick(true);
+                }
                 return;
             }
             if crate::video::is_video_page(&url) {

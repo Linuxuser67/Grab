@@ -501,7 +501,6 @@ async fn fetch_bounded_manifest(
     }
 }
 
-#[must_use]
 fn manifest_status_error(status: reqwest::StatusCode) -> ManifestIntakeError {
     let message = format!("The stream server returned HTTP {}", status.as_u16());
     if status == reqwest::StatusCode::REQUEST_TIMEOUT

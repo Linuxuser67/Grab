@@ -672,19 +672,14 @@ media.mp4
 
     #[test]
     fn resource_filenames_change_when_a_segment_url_changes() {
-        let first = plan_hls_media_playlist(
-            BASE_URL,
-            b"#EXTM3U\n#EXTINF:2,\none.ts\n#EXT-X-ENDLIST\n",
-        )
-        .expect("first media playlist");
-        let second = plan_hls_media_playlist(
-            BASE_URL,
-            b"#EXTM3U\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n",
-        )
-        .expect("second media playlist");
+        let first =
+            plan_hls_media_playlist(BASE_URL, b"#EXTM3U\n#EXTINF:2,\none.ts\n#EXT-X-ENDLIST\n")
+                .expect("first media playlist");
+        let second =
+            plan_hls_media_playlist(BASE_URL, b"#EXTM3U\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n")
+                .expect("second media playlist");
         assert_ne!(
-            first.resources[0].filename,
-            second.resources[0].filename,
+            first.resources[0].filename, second.resources[0].filename,
             "a changed resource URL must not reuse bytes cached under the old segment ordinal"
         );
     }
@@ -833,22 +828,17 @@ third.m4s
             m3u8_rs::parse_media_playlist_res(&bytes).expect("serialized playlist should parse");
         assert_eq!(parsed.segments.len(), 3);
         assert!(
-            parsed.segments.iter().all(|segment| segment
-                .key
-                .as_ref()
-                .is_some_and(
-                    |key| key.uri.as_deref().is_some_and(|uri| uri.starts_with("key-"))
-                ))
+            parsed
+                .segments
+                .iter()
+                .all(|segment| segment.key.as_ref().is_some_and(|key| key
+                    .uri
+                    .as_deref()
+                    .is_some_and(|uri| uri.starts_with("key-"))))
         );
         assert!(parsed.segments[0].map.is_none());
-        let first_map = parsed.segments[1]
-            .map
-            .as_ref()
-            .map(|map| map.uri.as_str());
-        let second_map = parsed.segments[2]
-            .map
-            .as_ref()
-            .map(|map| map.uri.as_str());
+        let first_map = parsed.segments[1].map.as_ref().map(|map| map.uri.as_str());
+        let second_map = parsed.segments[2].map.as_ref().map(|map| map.uri.as_str());
         assert_eq!(first_map, second_map);
         assert!(first_map.is_some_and(|uri| uri.starts_with("init-")));
     }

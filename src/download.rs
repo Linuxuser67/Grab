@@ -1999,40 +1999,38 @@ impl DownloadManager {
                 }
                 return self.spawn_torrent(item, url, dest);
             }
-            PreparedSpawn::Video => {
-                match self.video_source(item.id()) {
-                    Some(crate::media_types::VideoSource::Page {
+            PreparedSpawn::Video => match self.video_source(item.id()) {
+                Some(crate::media_types::VideoSource::Page {
+                    page_url,
+                    quality,
+                    audio_only,
+                    is_live,
+                    video_format_id,
+                    playlist_item_id,
+                    ..
+                }) => {
+                    return self.spawn_video(SpawnVideoParams {
+                        item,
                         page_url,
                         quality,
                         audio_only,
-                        is_live,
                         video_format_id,
+                        is_live,
                         playlist_item_id,
-                        ..
-                    }) => {
-                        return self.spawn_video(SpawnVideoParams {
-                            item,
-                            page_url,
-                            quality,
-                            audio_only,
-                            video_format_id,
-                            is_live,
-                            playlist_item_id,
-                        });
-                    }
-                    Some(crate::media_types::VideoSource::Manifest { source }) => {
-                        return self.spawn_manifest(item, source);
-                    }
-                    _ => {
-                        let detail = gettext("Could not prepare video source");
-                        item.set_detail(detail);
-                        item.set_status(DownloadStatus::Failed);
-                        self.changed();
-                        self.start_next();
-                        return;
-                    }
+                    });
                 }
-            }
+                Some(crate::media_types::VideoSource::Manifest { source }) => {
+                    return self.spawn_manifest(item, source);
+                }
+                _ => {
+                    let detail = gettext("Could not prepare video source");
+                    item.set_detail(detail);
+                    item.set_status(DownloadStatus::Failed);
+                    self.changed();
+                    self.start_next();
+                    return;
+                }
+            },
             PreparedSpawn::Plain { mode, .. } => mode,
         };
         let connections = (opts.connections.max(1) as usize).min(16);
@@ -3116,8 +3114,7 @@ impl DownloadManager {
         let generation = self.epoch.borrow().get(&id).copied().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(id, generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (abort_tx, abort_rx) =
-            tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
         let gate = AttemptGate::new();
         self.gates.borrow_mut().insert(id, gate.clone());
         self.video_abort.borrow_mut().insert(id, abort_tx);

@@ -404,10 +404,7 @@ fn stable_representation_key(
     });
     hash_optional_text(&mut hasher, id);
     hash_optional_text(&mut hasher, base_url.host_str());
-    hash_optional_number(
-        &mut hasher,
-        base_url.port_or_known_default().map(u64::from),
-    );
+    hash_optional_number(&mut hasher, base_url.port_or_known_default().map(u64::from));
     hash_optional_text(&mut hasher, Some(base_url.path()));
     hash_optional_text(&mut hasher, mime_type);
     hash_optional_text(&mut hasher, codecs);
@@ -1215,8 +1212,7 @@ fn expand_list(
 
     for (index, segment) in list.segments.iter().enumerate() {
         let url = resolve_resource(base_url, &segment.media)?;
-        let filename =
-            super::resource_filename("dash-segment", Some(index), &url, segment.range);
+        let filename = super::resource_filename("dash-segment", Some(index), &url, segment.range);
         resources.push(DashResource {
             url,
             range: segment.range,
@@ -1338,8 +1334,8 @@ mod tests {
 
     #[test]
     fn representation_key_survives_manifest_order_changes() {
-        let original = parse_dash_manifest(BASE_URL, TEMPLATE_MPD)
-            .expect("original MPD should parse");
+        let original =
+            parse_dash_manifest(BASE_URL, TEMPLATE_MPD).expect("original MPD should parse");
         let original_v1 = original
             .video_representations
             .iter()
@@ -1357,10 +1353,13 @@ mod tests {
                 "      <Representation id=\"v1\" bandwidth=\"1000000\" width=\"1280\" height=\"720\" codecs=\"avc1.64001f\"/>"
             ),
         );
-        assert_ne!(reordered_body, TEMPLATE_MPD, "fixture must reorder the variants");
+        assert_ne!(
+            reordered_body, TEMPLATE_MPD,
+            "fixture must reorder the variants"
+        );
 
-        let refreshed = parse_dash_manifest(BASE_URL, &reordered_body)
-            .expect("reordered MPD should parse");
+        let refreshed =
+            parse_dash_manifest(BASE_URL, &reordered_body).expect("reordered MPD should parse");
         let refreshed_v1 = refreshed
             .video_representations
             .iter()
@@ -1599,12 +1598,18 @@ mod tests {
             video_names.is_disjoint(&audio_names),
             "audio and video staging names must not collide"
         );
-        assert!(video.resources.iter().all(|resource| {
-            resource.filename.starts_with("dash-")
-        }));
-        assert!(audio.resources.iter().all(|resource| {
-            resource.filename.starts_with("dash-")
-        }));
+        assert!(
+            video
+                .resources
+                .iter()
+                .all(|resource| { resource.filename.starts_with("dash-") })
+        );
+        assert!(
+            audio
+                .resources
+                .iter()
+                .all(|resource| { resource.filename.starts_with("dash-") })
+        );
     }
 
     #[test]

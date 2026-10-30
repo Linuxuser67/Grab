@@ -324,9 +324,7 @@ pub(crate) fn http_client_with_jar_and_user_agent(
     jar: std::sync::Arc<reqwest::cookie::Jar>,
     user_agent: &str,
 ) -> Result<reqwest::Client, String> {
-    let mut builder = client_builder()
-        .cookie_provider(jar)
-        .user_agent(user_agent);
+    let mut builder = client_builder().cookie_provider(jar).user_agent(user_agent);
     if let Some(proxy) = proxy {
         for resolved in &proxy.proxies {
             builder = builder.proxy(resolved.clone());

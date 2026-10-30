@@ -325,13 +325,7 @@ async fn lookup_media(
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     let started = std::time::Instant::now();
     let host = crate::video_probe::page_host(&url);
-    let result = lookup_media_inner(
-        url,
-        browser,
-        newest_first,
-        proxy,
-    )
-    .await;
+    let result = lookup_media_inner(url, browser, newest_first, proxy).await;
     tracing::info!(
         url_host = %host,
         total_ms = started.elapsed().as_millis() as u64,
@@ -2889,13 +2883,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 };
                 let browser = settings_b.cookies_browser();
                 let newest_first = settings_b.video_codec_newest();
-                let outcome = lookup_media(
-                    url.clone(),
-                    browser,
-                    newest_first,
-                    proxy.clone(),
-                )
-                .await;
+                let outcome = lookup_media(url.clone(), browser, newest_first, proxy.clone()).await;
                 let outcome = match outcome {
                     Ok(outcome) => outcome,
                     Err(MediaLookupFailure::MissingTools(message)) => {

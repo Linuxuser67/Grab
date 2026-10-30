@@ -1357,12 +1357,14 @@ mod tests {
         let marker = stage.join(".grab-manifest-owner");
         assert!(marker.is_file());
         assert!(stage.join("video").parent().is_some());
-        std::fs::write(stage.join("video-segment.bin"), b"segment")
-            .expect("staged segment");
+        std::fs::write(stage.join("video-segment.bin"), b"segment").expect("staged segment");
 
         clean_manifest_staging_files(&dest, id);
         assert!(!stage.exists(), "only the marker-owned stage is removed");
-        assert!(dest.is_dir(), "the user's destination directory is preserved");
+        assert!(
+            dest.is_dir(),
+            "the user's destination directory is preserved"
+        );
         let _ = std::fs::remove_dir_all(&dest);
     }
 
@@ -1379,8 +1381,14 @@ mod tests {
 
         sweep_dest_staging(&dest, &std::collections::HashSet::from([live_id]));
 
-        assert!(live.join("segment.bin").is_file(), "queued row keeps its stage");
-        assert!(!orphan.exists(), "unreferenced marker-owned stage is reclaimed");
+        assert!(
+            live.join("segment.bin").is_file(),
+            "queued row keeps its stage"
+        );
+        assert!(
+            !orphan.exists(),
+            "unreferenced marker-owned stage is reclaimed"
+        );
         let _ = std::fs::remove_dir_all(&dest);
     }
 

@@ -208,4 +208,3 @@ impl std::ops::Deref for AppSettings {
         &self.0
     }
 }
-

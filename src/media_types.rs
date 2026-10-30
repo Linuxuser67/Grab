@@ -61,9 +61,7 @@ pub enum VideoSource {
     /// Ordinary file for the plain HTTP engine.
     Direct,
     /// Direct HLS/DASH manifest with a durable selected video representation.
-    Manifest {
-        source: ManifestSource,
-    },
+    Manifest { source: ManifestSource },
     /// Media behind a page needing yt-dlp; identity is the page URL, `media_url`/`expires_at` transient, quality/audio per-item choices.
     Page {
         page_url: String,

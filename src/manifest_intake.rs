@@ -10,7 +10,9 @@ use gettextrs::{gettext, ngettext};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::manifest::{HlsMasterPlan, HlsPlan, HlsVariant, MAX_MANIFEST_BYTES, dash::DashManifestPlan};
+use crate::manifest::{
+    HlsMasterPlan, HlsPlan, HlsVariant, MAX_MANIFEST_BYTES, dash::DashManifestPlan,
+};
 
 const MANIFEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -267,9 +269,7 @@ pub(crate) async fn client_for_manifest(
                 .as_deref()
                 .unwrap_or(crate::download_net::DEFAULT_USER_AGENT);
             return crate::download_net::http_client_with_jar_and_user_agent(
-                proxy,
-                jar,
-                user_agent,
+                proxy, jar, user_agent,
             );
         }
     }
@@ -295,7 +295,9 @@ pub(crate) async fn client_for_manifest(
                 tracing::warn!(error = %error, "browser-cookie export skipped for native manifest");
             }
             Err(_) => {
-                tracing::warn!("browser-cookie export exceeded its 120-second native manifest deadline");
+                tracing::warn!(
+                    "browser-cookie export exceeded its 120-second native manifest deadline"
+                );
             }
         }
     }
@@ -395,7 +397,13 @@ fn is_secure_manifest_url(url: &Url) -> bool {
 pub(crate) fn hls_variant_key(variant: &HlsVariant) -> String {
     let mut hasher = Sha256::new();
     hasher.update(variant.url.host_str().unwrap_or_default().as_bytes());
-    hasher.update(variant.url.port_or_known_default().unwrap_or_default().to_le_bytes());
+    hasher.update(
+        variant
+            .url
+            .port_or_known_default()
+            .unwrap_or_default()
+            .to_le_bytes(),
+    );
     hasher.update([0]);
     hasher.update(variant.url.path().as_bytes());
     hasher.update([0]);
@@ -403,7 +411,13 @@ pub(crate) fn hls_variant_key(variant: &HlsVariant) -> String {
     hasher.update(variant.average_bandwidth.unwrap_or_default().to_le_bytes());
     hasher.update(variant.width.unwrap_or_default().to_le_bytes());
     hasher.update(variant.height.unwrap_or_default().to_le_bytes());
-    hasher.update(variant.frame_rate.unwrap_or_default().to_bits().to_le_bytes());
+    hasher.update(
+        variant
+            .frame_rate
+            .unwrap_or_default()
+            .to_bits()
+            .to_le_bytes(),
+    );
     if let Some(codecs) = variant.codecs.as_deref() {
         hasher.update(codecs.as_bytes());
     }
@@ -438,15 +452,12 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
                             && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
                     })
         }
-        crate::media_types::ManifestKind::Dash => {
-            source
-                .representation_key
-                .strip_prefix("dash-")
-                .is_some_and(|fingerprint| {
-                    fingerprint.len() == 32
-                        && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
-                })
-        }
+        crate::media_types::ManifestKind::Dash => source
+            .representation_key
+            .strip_prefix("dash-")
+            .is_some_and(|fingerprint| {
+                fingerprint.len() == 32 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }),
     }
 }
 
@@ -550,20 +561,28 @@ mod tests {
 
     #[test]
     fn hls_variant_key_survives_signed_query_rotation() {
-        let variant = |url: &str, height| HlsVariant {
+        let variant = |url: &str, height: Option<u64>| HlsVariant {
             url: Url::parse(url).expect("valid variant URL"),
             bandwidth: 2_000_000,
             average_bandwidth: Some(1_800_000),
             width: Some(1920),
-            height: Some(height),
+            height,
             codecs: Some("avc1.640028".to_string()),
             frame_rate: Some(30.0),
             audio_group: Some("audio-main".to_string()),
         };
-        let original = variant("https://cdn.example.test/video/1080.m3u8?sig=old", Some(1080));
-        let refreshed =
-            variant("https://cdn.example.test/video/1080.m3u8?sig=new", Some(1080));
-        let different = variant("https://cdn.example.test/video/1080.m3u8?sig=new", Some(720));
+        let original = variant(
+            "https://cdn.example.test/video/1080.m3u8?sig=old",
+            Some(1080),
+        );
+        let refreshed = variant(
+            "https://cdn.example.test/video/1080.m3u8?sig=new",
+            Some(1080),
+        );
+        let different = variant(
+            "https://cdn.example.test/video/1080.m3u8?sig=new",
+            Some(720),
+        );
 
         assert_eq!(hls_variant_key(&original), hls_variant_key(&refreshed));
         assert_ne!(hls_variant_key(&original), hls_variant_key(&different));

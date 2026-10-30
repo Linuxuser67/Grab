@@ -1513,10 +1513,7 @@ fn video_source_survives_restore_and_retry() {
 fn native_manifest_source_survives_queue_restore() {
     let (_queue_lock, _main_loop_lock) = test_locks();
     let queue_file = test_queue_file("manifest-restore");
-    let dest = std::env::temp_dir().join(format!(
-        "grab-manifest-restore-{}",
-        std::process::id()
-    ));
+    let dest = std::env::temp_dir().join(format!("grab-manifest-restore-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).expect("destination directory");
     let dest_string = dest.to_string_lossy().into_owned();
@@ -1527,10 +1524,7 @@ fn native_manifest_source_survives_queue_restore() {
     };
 
     let id = {
-        let manager = DownloadManager::new(
-            gio::ListStore::new::<DownloadItem>(),
-            test_settings(),
-        );
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
         let (item, guard) = glib::MainContext::default()
             .block_on(manager.enqueue_manifest_async_batched(
                 source.clone(),
@@ -1549,10 +1543,8 @@ fn native_manifest_source_survives_queue_restore() {
         id
     };
 
-    let restored_manager = DownloadManager::new(
-        gio::ListStore::new::<DownloadItem>(),
-        test_settings(),
-    );
+    let restored_manager =
+        DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
     restored_manager.restore_queue();
     let restored = restored_manager.find(id).expect("manifest row restored");
     assert_eq!(restored.status(), DownloadStatus::Paused);
@@ -1569,29 +1561,18 @@ fn native_manifest_source_survives_queue_restore() {
 #[test]
 fn native_manifest_rejects_filename_extension_that_disagrees_with_mp4_muxer() {
     let (_queue_lock, _main_loop_lock) = test_locks();
-    let dest = std::env::temp_dir().join(format!(
-        "grab-manifest-name-{}",
-        std::process::id()
-    ));
+    let dest = std::env::temp_dir().join(format!("grab-manifest-name-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).expect("destination directory");
     let directory = dest.to_string_lossy().into_owned();
-    let manager = DownloadManager::new(
-        gio::ListStore::new::<DownloadItem>(),
-        test_settings(),
-    );
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
     let source = crate::media_types::ManifestSource {
         url: "https://cdn.example.test/master.m3u8".to_string(),
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
     };
 
-    let result = manager.enqueue_manifest_staged(
-        source,
-        &directory,
-        Some("Stream.mkv"),
-        &[],
-    );
+    let result = manager.enqueue_manifest_staged(source, &directory, Some("Stream.mkv"), &[]);
     assert!(result.is_err());
     assert_eq!(manager.store().n_items(), 0);
 
@@ -1636,10 +1617,7 @@ fn invalid_native_manifest_source_is_skipped_on_restore() {
     )
     .expect("write queue");
 
-    let manager = DownloadManager::new(
-        gio::ListStore::new::<DownloadItem>(),
-        test_settings(),
-    );
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
     manager.restore_queue();
     assert_eq!(manager.store().n_items(), 0);
 

@@ -12,10 +12,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 use url::Url;
 
 use crate::engine_msg::EngineMsg;
-use crate::manifest::{
-    HlsPlan, HlsResourceKind, ManifestByteRange,
-    dash::DashRepresentationPlan,
-};
+use crate::manifest::{HlsPlan, HlsResourceKind, ManifestByteRange, dash::DashRepresentationPlan};
 use crate::manifest_intake::{ManifestLookup, NativeManifest};
 use crate::media_types::{ManifestKind, ManifestSource};
 
@@ -109,7 +106,8 @@ pub(crate) async fn run_manifest_download(
     ensure_track_dir(&video_dir).await?;
     let audio_dir = staging.join("audio");
     let has_audio = match &tracks {
-        Tracks::Hls { audio, .. } | Tracks::Dash { audio, .. } => audio.is_some(),
+        Tracks::Hls { audio, .. } => audio.is_some(),
+        Tracks::Dash { audio, .. } => audio.is_some(),
     };
     if has_audio {
         ensure_track_dir(&audio_dir).await?;
@@ -169,14 +167,7 @@ pub(crate) async fn run_manifest_download(
             {
                 return Ok(ManifestOutcome::Aborted);
             }
-            if !concat_dash_track(
-                video,
-                &video_dir,
-                "video-track.mp4",
-                &mut abort,
-            )
-            .await?
-            {
+            if !concat_dash_track(video, &video_dir, "video-track.mp4", &mut abort).await? {
                 return Ok(ManifestOutcome::Aborted);
             }
             if let Some(audio) = audio {
@@ -193,14 +184,7 @@ pub(crate) async fn run_manifest_download(
                 {
                     return Ok(ManifestOutcome::Aborted);
                 }
-                if !concat_dash_track(
-                    audio,
-                    &audio_dir,
-                    "audio-track.mp4",
-                    &mut abort,
-                )
-                .await?
-                {
+                if !concat_dash_track(audio, &audio_dir, "audio-track.mp4", &mut abort).await? {
                     return Ok(ManifestOutcome::Aborted);
                 }
             }
@@ -213,8 +197,11 @@ pub(crate) async fn run_manifest_download(
     tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
         .ok();
 
-    let ffmpeg_dir = crate::video_tools::toolchain_dir_in(&crate::video_tools::ffmpeg_search_dirs())
-        .ok_or_else(|| "FFmpeg and ffprobe are required for native stream downloads".to_string())?;
+    let ffmpeg_dir =
+        crate::video_tools::toolchain_dir_in(&crate::video_tools::ffmpeg_search_dirs())
+            .ok_or_else(|| {
+                "FFmpeg and ffprobe are required for native stream downloads".to_string()
+            })?;
     let ffmpeg = ffmpeg_dir.join("ffmpeg");
     if !ffmpeg.is_file() {
         return Err("The FFmpeg executable could not be found".to_string());
@@ -267,7 +254,11 @@ pub(crate) async fn run_manifest_download(
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(crate::engine_msg::DEST_EXISTS.to_string());
         }
-        Err(error) => return Err(format!("Could not move the finished stream into place: {error}")),
+        Err(error) => {
+            return Err(format!(
+                "Could not move the finished stream into place: {error}"
+            ));
+        }
     }
     let parent = job.dest.parent().map(Path::to_path_buf);
     if let Some(parent) = parent {
@@ -299,8 +290,7 @@ async fn resolve_tracks(
                 .variants
                 .iter()
                 .find(|variant| {
-                    crate::manifest_intake::hls_variant_key(variant)
-                        == source.representation_key
+                    crate::manifest_intake::hls_variant_key(variant) == source.representation_key
                 })
                 .ok_or_else(|| "The selected HLS variant is no longer available".to_string())?;
             let video_url = variant.url.clone();
@@ -322,7 +312,8 @@ async fn resolve_tracks(
             if let Some(audio_url) = audio_url.as_ref() {
                 guard_manifest_child_url(&source.url, audio_url, &mut guarded_child_hosts)?;
             }
-            let video = crate::manifest_intake::lookup_hls_media(client, video_url.as_str()).await?;
+            let video =
+                crate::manifest_intake::lookup_hls_media(client, video_url.as_str()).await?;
             guard_hls_resources(&source.url, &video, &mut guarded_child_hosts)?;
             let audio = match audio_url {
                 Some(url) => {
@@ -336,11 +327,9 @@ async fn resolve_tracks(
             Ok(Tracks::Hls { video, audio })
         }
         NativeManifest::Dash(dash) => {
-            let video = crate::manifest::dash::plan_dash_representation(
-                &dash,
-                &source.representation_key,
-            )
-            .map_err(|error| error.to_string())?;
+            let video =
+                crate::manifest::dash::plan_dash_representation(&dash, &source.representation_key)
+                    .map_err(|error| error.to_string())?;
             let audio = dash
                 .default_audio()
                 .map(|track| {
@@ -349,19 +338,11 @@ async fn resolve_tracks(
                 })
                 .transpose()?;
             for resource in video.resources.iter() {
-                guard_manifest_child_url(
-                    &source.url,
-                    &resource.url,
-                    &mut guarded_child_hosts,
-                )?;
+                guard_manifest_child_url(&source.url, &resource.url, &mut guarded_child_hosts)?;
             }
             if let Some(audio) = audio.as_ref() {
                 for resource in audio.resources.iter() {
-                    guard_manifest_child_url(
-                        &source.url,
-                        &resource.url,
-                        &mut guarded_child_hosts,
-                    )?;
+                    guard_manifest_child_url(&source.url, &resource.url, &mut guarded_child_hosts)?;
                 }
             }
             Ok(Tracks::Dash { video, audio })
@@ -400,9 +381,9 @@ fn guard_manifest_child_url(
             "The stream manifest exceeds the limit of {} distinct resource hosts",
             crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
         )),
-        Err(crate::download_net::CollectionHostError::UnsafeDestination) => Err(
-            "The stream manifest references a local or private network resource".to_string(),
-        ),
+        Err(crate::download_net::CollectionHostError::UnsafeDestination) => {
+            Err("The stream manifest references a local or private network resource".to_string())
+        }
     }
 }
 
@@ -485,9 +466,7 @@ async fn fetch_resources(
         let directory = directory.to_path_buf();
         let tx = tx.clone();
         let downloaded = Arc::clone(downloaded);
-        async move {
-            fetch_resource(&client, resource, &directory, &tx, &downloaded).await
-        }
+        async move { fetch_resource(&client, resource, &directory, &tx, &downloaded).await }
     }))
     .buffer_unordered(connections.clamp(1, MAX_RESOURCE_CONNECTIONS));
     tokio::pin!(jobs);
@@ -503,7 +482,7 @@ async fn fetch_resources(
 
 fn reserve_download_bytes(downloaded: &AtomicU64, bytes: u64) -> Result<u64, String> {
     downloaded
-        .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+        .try_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
             current
                 .checked_add(bytes)
                 .filter(|total| *total <= MAX_MANIFEST_DOWNLOAD_BYTES)
@@ -529,7 +508,9 @@ async fn fetch_resource(
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err("A manifest resource path is not a regular file".to_string());
         }
-        let cached_range_matches = resource.range.is_none_or(|range| metadata.len() == range.length);
+        let cached_range_matches = resource
+            .range
+            .is_none_or(|range| metadata.len() == range.length);
         if metadata.len() > 0
             && metadata.len() <= MAX_RESOURCE_BYTES
             && cached_range_matches
@@ -554,7 +535,10 @@ async fn fetch_resource(
             .checked_add(range.length)
             .and_then(|value| value.checked_sub(1))
             .ok_or_else(|| "The stream manifest contains an invalid byte range".to_string())?;
-        request = request.header(reqwest::header::RANGE, format!("bytes={}-{end}", range.offset));
+        request = request.header(
+            reqwest::header::RANGE,
+            format!("bytes={}-{end}", range.offset),
+        );
     }
     let response = tokio::time::timeout(RESOURCE_IDLE_TIMEOUT, request.send())
         .await
@@ -606,8 +590,7 @@ async fn fetch_resource(
         let Some(chunk) = next else {
             break;
         };
-        let chunk = chunk
-            .map_err(|error| format!("A stream segment transfer failed: {error}"))?;
+        let chunk = chunk.map_err(|error| format!("A stream segment transfer failed: {error}"))?;
         size = size
             .checked_add(chunk.len() as u64)
             .filter(|size| *size <= MAX_RESOURCE_BYTES)
@@ -647,7 +630,8 @@ async fn fetch_resource(
     drop(file);
     crate::file_names::rename_noreplace(&part, &target)
         .map_err(|error| format!("Could not publish a stream segment: {error}"))?;
-    tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
+    tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+        .ok();
     Ok(size)
 }
 
@@ -720,7 +704,7 @@ async fn concat_dash_track(
             .map_err(|error| format!("Could not open a DASH segment: {error}"))?;
         tokio::select! {
             biased;
-            _ = abort => return Ok(false),
+            _ = &mut *abort => return Ok(false),
             result = tokio::io::copy(&mut input, &mut output) => {
                 result.map_err(|error| format!("Could not assemble a DASH track: {error}"))?;
             }
@@ -728,7 +712,7 @@ async fn concat_dash_track(
     }
     tokio::select! {
         biased;
-        _ = abort => return Ok(false),
+        _ = &mut *abort => return Ok(false),
         result = output.sync_all() => {
             result.map_err(|error| format!("Could not flush a DASH track: {error}"))?;
         }
@@ -768,17 +752,9 @@ async fn run_ffmpeg(
         .arg(video_input);
     if let Some(audio_input) = audio_input {
         command.arg("-i").arg(audio_input);
-        command
-            .arg("-map")
-            .arg("0:v:0")
-            .arg("-map")
-            .arg("1:a:0");
+        command.arg("-map").arg("0:v:0").arg("-map").arg("1:a:0");
     } else {
-        command
-            .arg("-map")
-            .arg("0:v:0?")
-            .arg("-map")
-            .arg("0:a:0?");
+        command.arg("-map").arg("0:v:0?").arg("-map").arg("0:a:0?");
     }
     command
         .args(["-c", "copy", "-movflags", "+faststart", "-f", "mp4"])
@@ -817,7 +793,10 @@ async fn run_ffmpeg(
     };
     let log = stderr_task.await.unwrap_or_default();
     if !status.success() {
-        let detail = log.lines().rev().find(|line| !line.trim().is_empty())
+        let detail = log
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
             .unwrap_or("FFmpeg could not mux the stream");
         return Err(format!("FFmpeg could not mux the stream: {detail}"));
     }

@@ -62,7 +62,7 @@ fn tools_available() -> bool {
     false
 }
 
-fn assert_command_succeeded(output: Output, context: &str) {
+fn assert_command_succeeded(output: &Output, context: &str) {
     assert!(
         output.status.success(),
         "{context}: {}",
@@ -83,7 +83,7 @@ fn assert_mp4_has_audio_and_video(ffprobe: &Path, output: &Path) {
         .arg(output)
         .output()
         .expect("run ffprobe on finalized manifest download");
-    assert_command_succeeded(probe, "ffprobe rejected the finalized MP4");
+    assert_command_succeeded(&probe, "ffprobe rejected the finalized MP4");
 
     let streams = String::from_utf8_lossy(&probe.stdout);
     assert!(
@@ -266,7 +266,7 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
         .arg(fixture_dir.join("media.m3u8"))
         .output()
         .expect("generate HLS fMP4 fixture");
-    assert_command_succeeded(generated, "FFmpeg failed to generate the HLS fixture");
+    assert_command_succeeded(&generated, "FFmpeg failed to generate the HLS fixture");
 
     let manifest_url = "https://fixture.invalid/media.m3u8";
     let manifest = std::fs::read(fixture_dir.join("media.m3u8"))
@@ -386,7 +386,7 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
         .arg(fixture_dir.join("manifest.mpd"))
         .output()
         .expect("generate DASH fMP4 fixture");
-    assert_command_succeeded(generated, "FFmpeg failed to generate the DASH fixture");
+    assert_command_succeeded(&generated, "FFmpeg failed to generate the DASH fixture");
 
     let manifest_url = "https://fixture.invalid/manifest.mpd";
     let manifest = std::fs::read_to_string(fixture_dir.join("manifest.mpd"))

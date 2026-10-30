@@ -1246,6 +1246,7 @@ mod tests {
         assert!(!safe_resource_filename(""));
     }
 }
+
 #[cfg(test)]
 #[path = "manifest_runner/integration_tests.rs"]
 mod integration_tests;

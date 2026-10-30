@@ -8,10 +8,10 @@
 
 use super::*;
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use url::Url;
@@ -102,18 +102,25 @@ fn fixture_files(directory: &Path, urls: &[Url]) -> HashMap<String, Vec<u8>> {
         let filename = url
             .path()
             .rsplit('/')
-            .next()
+            .next_back()
             .filter(|filename| !filename.is_empty())
             .expect("planned fixture URL has a filename");
         let path = directory.join(filename);
         let bytes = std::fs::read(&path)
             .unwrap_or_else(|error| panic!("read fixture resource {}: {error}", path.display()));
         let request_path = format!("/{filename}");
-        if let Some(previous) = files.insert(request_path.clone(), bytes.clone()) {
-            assert_eq!(
-                previous, bytes,
-                "fixture resources collide at {request_path}"
-            );
+        match files.entry(request_path) {
+            Entry::Vacant(entry) => {
+                entry.insert(bytes);
+            }
+            Entry::Occupied(entry) => {
+                assert_eq!(
+                    entry.get(),
+                    &bytes,
+                    "fixture resources collide at {}",
+                    entry.key()
+                );
+            }
         }
     }
     files
@@ -123,10 +130,10 @@ async fn spawn_fixture_server(
     files: HashMap<String, Vec<u8>>,
     expected_requests: usize,
 ) -> (Url, tokio::task::JoinHandle<()>) {
-    assert_eq!(
-        files.is_empty(),
-        expected_requests == 0,
-        "fixture server request count must match its resource set"
+    assert!(!files.is_empty(), "fixture server requires at least one resource");
+    assert!(
+        expected_requests >= files.len(),
+        "fixture request count cannot be smaller than the unique resource set"
     );
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -182,11 +189,18 @@ async fn spawn_fixture_server(
     (base_url, server)
 }
 
+async fn wait_for_fixture_server(server: tokio::task::JoinHandle<()>) {
+    tokio::time::timeout(Duration::from_secs(20), server)
+        .await
+        .expect("fixture server timed out waiting for resource requests")
+        .expect("fixture server task failed");
+}
+
 fn loopback_resource_url(base_url: &Url, original: &Url) -> Url {
     let filename = original
         .path()
         .rsplit('/')
-        .next()
+        .next_back()
         .filter(|filename| !filename.is_empty())
         .expect("planned fixture URL has a filename");
     let mut url = base_url.clone();
@@ -249,13 +263,13 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
             "-hls_segment_filename",
         ])
         .arg(fixture_dir.join("segment%03d.m4s"))
-        .arg(fixture_dir.join("master.m3u8"))
+        .arg(fixture_dir.join("media.m3u8"))
         .output()
         .expect("generate HLS fMP4 fixture");
     assert_command_succeeded(generated, "FFmpeg failed to generate the HLS fixture");
 
-    let manifest_url = "https://fixture.invalid/master.m3u8";
-    let manifest = std::fs::read(fixture_dir.join("master.m3u8"))
+    let manifest_url = "https://fixture.invalid/media.m3u8";
+    let manifest = std::fs::read(fixture_dir.join("media.m3u8"))
         .expect("read generated HLS media playlist");
     let mut plan = crate::manifest::plan_hls_media_playlist(manifest_url, &manifest)
         .expect("parse generated HLS media playlist");
@@ -292,7 +306,7 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
         .expect("fetch HLS resources"),
         "HLS resource fetch unexpectedly aborted"
     );
-    server.await.expect("HLS fixture server completed all requests");
+    wait_for_fixture_server(server).await;
     assert!(downloaded.load(Ordering::Relaxed) > 0);
 
     write_playlist(&video_dir, &plan)
@@ -458,7 +472,7 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
         .expect("fetch DASH audio resources"),
         "DASH audio resource fetch unexpectedly aborted"
     );
-    server.await.expect("DASH fixture server completed all requests");
+    wait_for_fixture_server(server).await;
     assert!(downloaded.load(Ordering::Relaxed) > 0);
 
     assert!(

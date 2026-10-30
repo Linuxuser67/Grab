@@ -212,9 +212,7 @@ pub(crate) fn parse_dash_manifest(
             role.schemeIdUri == DASH_ROLE_SCHEME && role.value.as_deref() == Some("main")
         });
 
-        for (representation_index, representation) in
-            adaptation.representations.iter().enumerate()
-        {
+        for (representation_index, representation) in adaptation.representations.iter().enumerate() {
             if representation.href.is_some() || !representation.ContentProtection.is_empty() {
                 return Err(DashError::UnsupportedPresentation);
             }
@@ -257,7 +255,10 @@ pub(crate) fn parse_dash_manifest(
                     .codecs
                     .clone()
                     .or_else(|| adaptation.codecs.clone()),
-                language: representation.lang.clone().or_else(|| adaptation.lang.clone()),
+                language: representation
+                    .lang
+                    .clone()
+                    .or_else(|| adaptation.lang.clone()),
                 kind,
                 is_default_audio: kind == DashTrackKind::Audio && is_default_audio,
                 source: DashRepresentationSource {
@@ -312,7 +313,10 @@ pub(crate) fn plan_dash_representation(
         DashAddressing::List(list) => expand_list(&representation.source.base_url, list)?,
     };
 
-    if !resources.iter().any(|resource| resource.kind == DashResourceKind::Segment) {
+    if !resources
+        .iter()
+        .any(|resource| resource.kind == DashResourceKind::Segment)
+    {
         return Err(DashError::InvalidSegment);
     }
 
@@ -345,11 +349,16 @@ fn resolve_base_url(
     base_url: Url,
     candidates: &[dash_mpd_core::BaseURL],
 ) -> Result<Url, DashError> {
-    let mut values = candidates.iter().map(|candidate| candidate.base.trim()).filter(|value| !value.is_empty());
+    let mut values = candidates
+        .iter()
+        .map(|candidate| candidate.base.trim())
+        .filter(|value| !value.is_empty());
     let Some(value) = values.next() else {
         if candidates.iter().any(|candidate| {
             candidate.byte_range.is_some()
-                || candidate.availability_time_offset.is_some_and(|offset| offset != 0.0)
+                || candidate
+                    .availability_time_offset
+                    .is_some_and(|offset| offset != 0.0)
                 || candidate.availability_time_complete == Some(false)
                 || candidate.timeShiftBufferDepth.is_some()
         }) {
@@ -384,9 +393,7 @@ fn track_kind(
     let content_type = representation_content_type.or(adaptation_content_type);
     let mime_type = representation_mime_type.or(adaptation_mime_type);
 
-    if content_type == Some("video")
-        || mime_type.is_some_and(|mime| mime.starts_with("video/"))
-    {
+    if content_type == Some("video") || mime_type.is_some_and(|mime| mime.starts_with("video/")) {
         Some(DashTrackKind::Video)
     } else if content_type == Some("audio")
         || mime_type.is_some_and(|mime| mime.starts_with("audio/"))
@@ -454,8 +461,12 @@ fn effective_template(
             || template.failover_content.is_some()
             || template.eptDelta.is_some_and(|delta| delta != 0)
             || template.pbDelta.is_some_and(|delta| delta != 0)
-            || template.presentationTimeOffset.is_some_and(|offset| offset != 0)
-            || template.availabilityTimeOffset.is_some_and(|offset| offset != 0.0)
+            || template
+                .presentationTimeOffset
+                .is_some_and(|offset| offset != 0)
+            || template
+                .availabilityTimeOffset
+                .is_some_and(|offset| offset != 0.0)
             || template.availabilityTimeComplete == Some(false)
             || template.BitstreamSwitching.is_some()
         {
@@ -493,7 +504,9 @@ fn effective_template(
     if initialization_template.is_some() && initialization_element.is_some() {
         return Err(DashError::UnsupportedAddressing);
     }
-    if initialization_template.as_deref().is_some_and(str::is_empty)
+    if initialization_template
+        .as_deref()
+        .is_some_and(str::is_empty)
         || initialization_element
             .as_ref()
             .and_then(|element| element.sourceURL.as_deref())
@@ -505,11 +518,7 @@ fn effective_template(
     let initialization = if let Some(template) = initialization_template {
         Some(DashInitialization::Template(template))
     } else if let Some(element) = initialization_element {
-        let range = element
-            .range
-            .as_deref()
-            .map(parse_byte_range)
-            .transpose()?;
+        let range = element.range.as_deref().map(parse_byte_range).transpose()?;
         Some(DashInitialization::Resource {
             url: element.sourceURL,
             range,
@@ -565,9 +574,7 @@ fn effective_template(
     })
 }
 
-fn effective_list(
-    levels: &[Option<&dash_mpd_core::SegmentList>],
-) -> Result<DashList, DashError> {
+fn effective_list(levels: &[Option<&dash_mpd_core::SegmentList>]) -> Result<DashList, DashError> {
     let mut initialization = None;
     let mut segment_urls = None;
     let mut segment_list_seen = false;
@@ -586,11 +593,7 @@ fn effective_list(
         if let Some(element) = &list.Initialization {
             initialization = Some(DashInitialization::Resource {
                 url: element.sourceURL.clone(),
-                range: element
-                    .range
-                    .as_deref()
-                    .map(parse_byte_range)
-                    .transpose()?,
+                range: element.range.as_deref().map(parse_byte_range).transpose()?,
             });
         }
 
@@ -647,7 +650,9 @@ fn effective_list(
 /// Parse DASH's inclusive first-last byte-range syntax.
 fn parse_byte_range(raw: &str) -> Result<ManifestByteRange, DashError> {
     let (first, last) = raw.split_once('-').ok_or(DashError::InvalidSegment)?;
-    let offset = first.parse::<u64>().map_err(|_| DashError::InvalidSegment)?;
+    let offset = first
+        .parse::<u64>()
+        .map_err(|_| DashError::InvalidSegment)?;
     let last = last.parse::<u64>().map_err(|_| DashError::InvalidSegment)?;
     let length = last
         .checked_sub(offset)
@@ -673,7 +678,11 @@ fn expand_template(
         });
     }
 
-    let initialization_count = if template.initialization.is_some() { 1 } else { 0 };
+    let initialization_count = if template.initialization.is_some() {
+        1
+    } else {
+        0
+    };
     let mut resources = Vec::with_capacity(segments.len() + initialization_count);
 
     if let Some(initialization) = &template.initialization {
@@ -686,7 +695,10 @@ fn expand_template(
                     0,
                     false,
                 )?;
-                (resolve_resource(&representation.source.base_url, &uri)?, None)
+                (
+                    resolve_resource(&representation.source.base_url, &uri)?,
+                    None,
+                )
             }
             DashInitialization::Resource { url, range } => {
                 let resolved = match url.as_deref() {
@@ -705,13 +717,7 @@ fn expand_template(
     }
 
     for (index, (number, time)) in segments.into_iter().enumerate() {
-        let uri = substitute_template(
-            media_template,
-            representation,
-            number,
-            time,
-            true,
-        )?;
+        let uri = substitute_template(media_template, representation, number, time, true)?;
         resources.push(DashResource {
             url: resolve_resource(&representation.source.base_url, &uri)?,
             range: None,
@@ -743,10 +749,8 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                     .and_then(|repeat| repeat.checked_add(1))
                     .ok_or(DashError::InvalidSegment)?,
                 -1 => {
-                    let next_explicit_start = timeline
-                        .iter()
-                        .skip(index + 1)
-                        .find_map(|next| next.start);
+                    let next_explicit_start =
+                        timeline.iter().skip(index + 1).find_map(|next| next.start);
                     let end = next_explicit_start.unwrap_or(period_end);
                     if end <= start {
                         return Err(DashError::InvalidSegment);
@@ -789,7 +793,9 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
         return Ok(output);
     }
 
-    let duration_ticks = template.duration_ticks.ok_or(DashError::UnsupportedAddressing)?;
+    let duration_ticks = template
+        .duration_ticks
+        .ok_or(DashError::UnsupportedAddressing)?;
     let numerator = template
         .period_duration
         .as_nanos()
@@ -999,26 +1005,33 @@ mod tests {
 
         assert_eq!(plan.duration, Duration::from_secs(10));
         assert_eq!(plan.video_representations.len(), 2);
-        assert_eq!(plan.video_representations[0].representation_id.as_deref(), Some("v1"));
+        assert_eq!(
+            plan.video_representations[0].representation_id.as_deref(),
+            Some("v1")
+        );
         assert_eq!(plan.video_representations[0].height, Some(720));
         assert_eq!(plan.video_representations[1].height, Some(1080));
         assert_eq!(plan.audio_representations.len(), 1);
         assert_eq!(
-            plan.default_audio().and_then(|audio| audio.representation_id.as_deref()),
+            plan.default_audio()
+                .and_then(|audio| audio.representation_id.as_deref()),
             Some("a1")
         );
     }
 
     #[test]
     fn expands_duration_template_with_initialization_and_padded_numbers() {
-        let plan = parse_dash_manifest(BASE_URL, TEMPLATE_MPD)
-            .expect("valid template MPD should parse");
+        let plan =
+            parse_dash_manifest(BASE_URL, TEMPLATE_MPD).expect("valid template MPD should parse");
         let video = &plan.video_representations[0];
         let resources = plan_dash_representation(&plan, &video.key)
             .expect("selected representation should expand");
 
         assert_eq!(resources.resources.len(), 4);
-        assert_eq!(resources.resources[0].kind, DashResourceKind::Initialization);
+        assert_eq!(
+            resources.resources[0].kind,
+            DashResourceKind::Initialization
+        );
         assert_eq!(
             resources.resources[0].url.as_str(),
             "https://cdn.example.test/path/media/init-v1.mp4"
@@ -1049,13 +1062,14 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let plan = parse_dash_manifest(BASE_URL, body)
-            .expect("timeline MPD should parse");
+        let plan = parse_dash_manifest(BASE_URL, body).expect("timeline MPD should parse");
         let video = &plan.video_representations[0];
-        let resources = plan_dash_representation(&plan, &video.key)
-            .expect("timeline should expand");
+        let resources =
+            plan_dash_representation(&plan, &video.key).expect("timeline should expand");
 
-        let urls = resources.resources.iter()
+        let urls = resources
+            .resources
+            .iter()
             .filter(|resource| resource.kind == DashResourceKind::Segment)
             .map(|resource| resource.url.path().to_owned())
             .collect::<Vec<_>>();
@@ -1085,24 +1099,32 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let plan = parse_dash_manifest(BASE_URL, body)
-            .expect("SegmentList MPD should parse");
+        let plan = parse_dash_manifest(BASE_URL, body).expect("SegmentList MPD should parse");
         let video = &plan.video_representations[0];
-        let resources = plan_dash_representation(&plan, &video.key)
-            .expect("SegmentList should expand");
+        let resources =
+            plan_dash_representation(&plan, &video.key).expect("SegmentList should expand");
 
         assert_eq!(resources.resources.len(), 3);
         assert_eq!(
             resources.resources[0].range,
-            Some(ManifestByteRange { offset: 0, length: 1_000 })
+            Some(ManifestByteRange {
+                offset: 0,
+                length: 1_000
+            })
         );
         assert_eq!(
             resources.resources[1].range,
-            Some(ManifestByteRange { offset: 1_000, length: 1_000 })
+            Some(ManifestByteRange {
+                offset: 1_000,
+                length: 1_000
+            })
         );
         assert_eq!(
             resources.resources[2].range,
-            Some(ManifestByteRange { offset: 2_000, length: 1_000 })
+            Some(ManifestByteRange {
+                offset: 2_000,
+                length: 1_000
+            })
         );
     }
 
@@ -1133,7 +1155,10 @@ mod tests {
 
         assert_eq!(
             parse_dash_manifest(BASE_URL, unknown)
-                .and_then(|plan| plan_dash_representation(&plan, &plan.video_representations[0].key))
+                .and_then(|plan| plan_dash_representation(
+                    &plan,
+                    &plan.video_representations[0].key
+                ))
                 .err(),
             Some(DashError::UnsupportedAddressing)
         );

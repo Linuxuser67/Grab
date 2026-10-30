@@ -949,6 +949,26 @@ async fn remove_regular_file_if_present(path: &Path) -> Result<(), String> {
     }
 }
 
+fn is_hls_playlist_input(input: &Path) -> bool {
+    input
+        .extension()
+        .is_some_and(|extension| extension == std::ffi::OsStr::new("m3u8"))
+}
+
+fn add_hls_staging_options(command: &mut tokio::process::Command) {
+    // Every HLS child URI is rewritten to a generated, single-component
+    // .bin staging name. Permit only those names and probe their contents:
+    // HLS resources may contain MPEG-TS, fragmented MP4, or encryption keys.
+    command.args([
+        "-allowed_extensions",
+        "bin",
+        "-allowed_segment_extensions",
+        "bin",
+        "-extension_picky",
+        "0",
+    ]);
+}
+
 async fn run_ffmpeg(
     ffmpeg: &Path,
     video_input: &Path,
@@ -957,6 +977,9 @@ async fn run_ffmpeg(
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
     let mut command = tokio::process::Command::new(ffmpeg);
+    if is_hls_playlist_input(video_input) {
+        add_hls_staging_options(&mut command);
+    }
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -964,6 +987,9 @@ async fn run_ffmpeg(
         .arg("-i")
         .arg(video_input);
     if let Some(audio_input) = audio_input {
+        if is_hls_playlist_input(audio_input) {
+            add_hls_staging_options(&mut command);
+        }
         command.arg("-i").arg(audio_input);
         command.arg("-map").arg("0:v:0").arg("-map").arg("1:a:0");
     } else {
@@ -1246,3 +1272,7 @@ mod tests {
         assert!(!safe_resource_filename(""));
     }
 }
+
+#[cfg(test)]
+#[path = "manifest_runner/integration_tests.rs"]
+mod integration_tests;

@@ -756,9 +756,8 @@ fn show_manifest_ready(
     let choices = manifest.choices();
     let selected_index =
         crate::manifest_intake::preferred_choice_index(&choices, preferred_quality);
-    step.manifest_selection.replace(
-        choices.get(selected_index).map(|choice| choice.key.clone()),
-    );
+    step.manifest_selection
+        .replace(choices.get(selected_index).map(|choice| choice.key.clone()));
     step.manifest_choices.replace(choices);
     step.manifest_info.set_subtitle(&manifest.summary());
 
@@ -2831,12 +2830,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     .as_ref()
                     .is_some_and(|manifest| manifest.source_url == url);
                 if fresh_manifest {
-                    show_manifest_ready(
-                        &step_b,
-                        &lookup_add_b,
-                        None,
-                        &settings_b.video_quality(),
-                    );
+                    show_manifest_ready(&step_b, &lookup_add_b, None, &settings_b.video_quality());
                     return;
                 }
                 let fresh = {

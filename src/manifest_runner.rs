@@ -87,9 +87,7 @@ impl From<crate::manifest_intake::ManifestIntakeError> for ManifestRunError {
             crate::manifest_intake::ManifestIntakeError::Unsupported(error) => {
                 Self::Unsupported(error)
             }
-            crate::manifest_intake::ManifestIntakeError::Retryable(error) => {
-                Self::Retryable(error)
-            }
+            crate::manifest_intake::ManifestIntakeError::Retryable(error) => Self::Retryable(error),
             crate::manifest_intake::ManifestIntakeError::Failed(error) => Self::Failed(error),
         }
     }
@@ -360,9 +358,7 @@ async fn resolve_tracks(
                 .variants
                 .iter()
                 .zip(crate::manifest_intake::hls_variant_keys(&master.variants))
-                .find_map(|(variant, key)| {
-                    (key == source.representation_key).then_some(variant)
-                })
+                .find_map(|(variant, key)| (key == source.representation_key).then_some(variant))
                 .ok_or_else(|| {
                     ManifestRunError::Unsupported(
                         "The selected HLS variant is no longer available".to_string(),
@@ -423,11 +419,9 @@ async fn resolve_tracks(
             }
             Ok(Tracks::Dash { video, audio })
         }
-        NativeManifest::HlsMedia(_) => {
-            Err(ManifestRunError::Unsupported(
-                "The selected HLS media playlist is invalid".to_string(),
-            ))
-        }
+        NativeManifest::HlsMedia(_) => Err(ManifestRunError::Unsupported(
+            "The selected HLS media playlist is invalid".to_string(),
+        )),
     }
 }
 
@@ -560,12 +554,14 @@ async fn fetch_resources(
     // partial byte reservations before the corrected total is sent.
     match result {
         None => {
-            tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                .ok();
             Ok(false)
         }
         Some(Ok(())) => Ok(true),
         Some(Err(error)) => {
-            tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                .ok();
             Err(error)
         }
     }
@@ -634,12 +630,11 @@ async fn fetch_resource(
         let result = fetch_resource_once(client, &resource, directory, tx, downloaded).await;
         if result.is_err() {
             // The failed attempt's reservation has been dropped; publish the rolled-back total.
-            tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                .ok();
         }
         match result {
-            Err(ManifestRunError::Retryable(error))
-                if attempt + 1 < MAX_RESOURCE_ATTEMPTS =>
-            {
+            Err(ManifestRunError::Retryable(error)) if attempt + 1 < MAX_RESOURCE_ATTEMPTS => {
                 attempt += 1;
                 let delay = RESOURCE_RETRY_BASE_DELAY * attempt;
                 tracing::debug!(
@@ -983,9 +978,7 @@ async fn run_ffmpeg(
         .kill_on_drop(true);
     let mut child = command
         .spawn()
-        .map_err(|error| {
-            ManifestRunError::Failed(format!("Could not start FFmpeg: {error}"))
-        })?;
+        .map_err(|error| ManifestRunError::Failed(format!("Could not start FFmpeg: {error}")))?;
     let stderr = child.stderr.take();
     let stderr_task = tokio::spawn(async move {
         let Some(stderr) = stderr else {
@@ -1098,8 +1091,8 @@ mod tests {
     async fn transient_resource_response_is_retried_and_completed_file_is_reused() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let directory = std::env::temp_dir()
-            .join(format!("grab-manifest-retry-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("grab-manifest-retry-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&directory).await;
         tokio::fs::create_dir_all(&directory)
             .await
@@ -1110,10 +1103,7 @@ mod tests {
             .expect("bind HTTP test listener");
         let address = listener.local_addr().expect("listener address");
         let server = tokio::spawn(async move {
-            for (status, body) in [
-                ("503 Service Unavailable", ""),
-                ("200 OK", "data"),
-            ] {
+            for (status, body) in [("503 Service Unavailable", ""), ("200 OK", "data")] {
                 let (mut socket, _) = listener.accept().await.expect("accept resource request");
                 let mut request = [0_u8; 1024];
                 let _ = socket.read(&mut request).await.expect("read request");
@@ -1133,8 +1123,7 @@ mod tests {
             .build()
             .expect("build direct HTTP test client");
         let resource = Resource {
-            url: Url::parse(&format!("http://{address}/segment.m4s"))
-                .expect("resource URL"),
+            url: Url::parse(&format!("http://{address}/segment.m4s")).expect("resource URL"),
             range: None,
             filename: "segment-000001-0123456789abcdef0123456789abcdef.bin".to_string(),
             key: false,
@@ -1161,8 +1150,8 @@ mod tests {
     async fn truncated_byte_range_is_retried_without_counting_partial_bytes() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let directory = std::env::temp_dir()
-            .join(format!("grab-manifest-range-retry-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("grab-manifest-range-retry-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&directory).await;
         tokio::fs::create_dir_all(&directory)
             .await
@@ -1193,8 +1182,7 @@ mod tests {
             .build()
             .expect("build direct HTTP test client");
         let resource = Resource {
-            url: Url::parse(&format!("http://{address}/range.m4s"))
-                .expect("range resource URL"),
+            url: Url::parse(&format!("http://{address}/range.m4s")).expect("range resource URL"),
             range: Some(ManifestByteRange {
                 offset: 0,
                 length: 4,

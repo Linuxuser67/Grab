@@ -125,7 +125,9 @@ pub(crate) fn preferred_choice_index(choices: &[ManifestChoice], quality: &str) 
         .min_by_key(|(index, choice)| {
             let height = choice.height.unwrap_or_default();
             let distance = desired_height.map_or(0, |desired| {
-                choice.height.map_or(u64::MAX, |height| height.abs_diff(desired))
+                choice
+                    .height
+                    .map_or(u64::MAX, |height| height.abs_diff(desired))
             });
             (
                 distance,
@@ -475,16 +477,16 @@ async fn fetch_bounded_manifest(
     requested_url: Url,
 ) -> Result<(Url, Vec<u8>), ManifestIntakeError> {
     if !is_secure_manifest_url(&requested_url) {
-        return Err(ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")));
+        return Err(ManifestIntakeError::Failed(gettext(
+            "Invalid stream manifest URL",
+        )));
     }
 
     let mut attempt = 0_u32;
     loop {
         attempt += 1;
         match fetch_bounded_manifest_once(client, &requested_url).await {
-            Err(ManifestIntakeError::Retryable(error))
-                if attempt < MAX_MANIFEST_ATTEMPTS =>
-            {
+            Err(ManifestIntakeError::Retryable(error)) if attempt < MAX_MANIFEST_ATTEMPTS => {
                 let delay = MANIFEST_RETRY_BASE_DELAY * attempt;
                 tracing::debug!(
                     attempt,
@@ -532,9 +534,9 @@ async fn fetch_bounded_manifest_once(
     }
     let final_url = response.url().clone();
     if !is_secure_manifest_url(&final_url) {
-        return Err(ManifestIntakeError::Failed(
-            gettext("The stream manifest redirected to an unsafe URL"),
-        ));
+        return Err(ManifestIntakeError::Failed(gettext(
+            "The stream manifest redirected to an unsafe URL",
+        )));
     }
     let body = read_bounded_response(response).await?;
     Ok((final_url, body))
@@ -674,15 +676,9 @@ async fn read_bounded_response(
     }
 
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| {
-            ManifestIntakeError::Retryable(format!(
-                "Could not read the stream manifest: {error}"
-            ))
-        })?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        ManifestIntakeError::Retryable(format!("Could not read the stream manifest: {error}"))
+    })? {
         if body.len().saturating_add(chunk.len()) > MAX_MANIFEST_BYTES {
             return Err(ManifestIntakeError::Unsupported(format!(
                 "The stream manifest exceeds the {} MiB size limit",
@@ -894,7 +890,10 @@ highest.m3u8
 
         assert_eq!(hls_variant_key(&original), hls_variant_key(&refreshed));
         assert_ne!(hls_variant_key(&original), hls_variant_key(&different));
-        assert_eq!(hls_variant_key(&refreshed), hls_variant_key(&different_query));
+        assert_eq!(
+            hls_variant_key(&refreshed),
+            hls_variant_key(&different_query)
+        );
 
         let collision_keys = hls_variant_keys(&[refreshed.clone(), different_query.clone()]);
         assert_ne!(collision_keys[0], collision_keys[1]);
@@ -909,7 +908,6 @@ highest.m3u8
 
         let unique_keys = hls_variant_keys(std::slice::from_ref(&refreshed));
         assert_eq!(unique_keys[0], hls_variant_key(&refreshed));
-
     }
 
     #[test]

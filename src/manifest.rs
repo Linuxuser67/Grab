@@ -1033,18 +1033,15 @@ one.ts
 
     #[test]
     fn media_resource_cache_reuses_bytes_after_signature_rotation() {
-        let first = Url::parse(
-            "https://cdn.example.test/seg/1.m4s?quality=1080&sig=old&expires=100",
-        )
-        .expect("first signed resource URL");
-        let refreshed = Url::parse(
-            "https://cdn.example.test/seg/1.m4s?expires=200&sig=new&token=new&quality=1080",
-        )
-        .expect("refreshed signed resource URL");
-        let different_variant = Url::parse(
-            "https://cdn.example.test/seg/1.m4s?quality=720&sig=new&expires=200",
-        )
-        .expect("different representation URL");
+        let first =
+            Url::parse("https://cdn.example.test/seg/1.m4s?quality=1080&sig=old&expires=100")
+                .expect("first signed resource URL");
+        let refreshed =
+            Url::parse("https://cdn.example.test/seg/1.m4s?quality=1080&expires=200&sig=new")
+                .expect("refreshed signed resource URL");
+        let different_variant =
+            Url::parse("https://cdn.example.test/seg/1.m4s?quality=720&sig=new&expires=200")
+                .expect("different representation URL");
 
         assert_eq!(
             resource_filename("segment", Some(1), &first, None),

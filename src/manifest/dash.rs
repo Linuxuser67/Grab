@@ -236,14 +236,10 @@ pub(crate) fn parse_dash_manifest(
                 continue;
             };
             let is_default_audio = kind == DashTrackKind::Audio
-                && adaptation
-                    .Role
-                    .iter()
-                    .chain(representation.Role.iter())
-                    .any(|role| {
-                        role.schemeIdUri == DASH_ROLE_SCHEME
-                            && role.value.as_deref() == Some("main")
-                    });
+                && adaptation.Role.iter().any(|role| {
+                    role.schemeIdUri == DASH_ROLE_SCHEME
+                        && role.value.as_deref() == Some("main")
+                });
 
             let representation_base =
                 resolve_base_url(adaptation_base.clone(), &representation.BaseURL)?;
@@ -1079,32 +1075,6 @@ mod tests {
         assert_eq!(plan.video_representations[0].height, Some(720));
         assert_eq!(plan.video_representations[1].height, Some(1080));
         assert_eq!(plan.audio_representations.len(), 1);
-        assert_eq!(
-            plan.default_audio()
-                .and_then(|audio| audio.representation_id.as_deref()),
-            Some("a1")
-        );
-    }
-
-    #[test]
-    fn representation_level_main_role_marks_audio_as_default() {
-        let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <Period duration="PT2S">
-    <AdaptationSet contentType="audio" mimeType="audio/mp4">
-      <SegmentTemplate duration="2" media="audio-$Number$.m4s"/>
-      <Representation id="a1" bandwidth="128000">
-        <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
-      </Representation>
-    </AdaptationSet>
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <SegmentTemplate duration="2" media="video-$Number$.m4s"/>
-      <Representation id="v1" bandwidth="500000"/>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let plan =
-            parse_dash_manifest(BASE_URL, body).expect("static video/audio MPD should parse");
         assert_eq!(
             plan.default_audio()
                 .and_then(|audio| audio.representation_id.as_deref()),

@@ -377,9 +377,10 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         .iter()
         .any(|segment| segment.map.is_some());
     let has_key_format_attributes = playlist.segments.iter().any(|segment| {
-        segment.key.as_ref().is_some_and(|key| {
-            key.keyformat.is_some() || key.keyformatversions.is_some()
-        })
+        segment
+            .key
+            .as_ref()
+            .is_some_and(|key| key.keyformat.is_some() || key.keyformatversions.is_some())
     });
     playlist.version = Some(if has_initialization_map {
         6

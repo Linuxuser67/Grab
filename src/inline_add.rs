@@ -295,8 +295,7 @@ fn should_use_native_manifest_picker(enabled: bool, url: &str) -> bool {
 /// A video page always probes. Other HTTP(S) links probe only on an explicit
 /// unlisted kick (Add/Enter/Retry) or the opt-in auto-add kick.
 fn should_probe_url(url: &str, probe_unlisted: bool) -> bool {
-    crate::video::is_video_page(url)
-        || (probe_unlisted && crate::video::is_http_url(url))
+    crate::video::is_video_page(url) || (probe_unlisted && crate::video::is_http_url(url))
 }
 
 const AUTO_ADD_LOOKUP_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(800);
@@ -3436,21 +3435,20 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let debounce_c = Rc::clone(&debounce);
                 let host = crate::video_probe::page_host(&text);
                 let debounce_started = std::time::Instant::now();
-                let id =
-                    glib::timeout_add_local(AUTO_ADD_LOOKUP_DEBOUNCE, move || {
-                        // Clear the stored ID first: after Break the source is
-                        // gone, and a later `changed` (e.g. programmatic
-                        // set_text) must not remove this dead ID — that was a
-                        // hard abort ("Source ID was not found").
-                        *debounce_c.borrow_mut() = None;
-                        tracing::info!(
-                            url_host = %host,
-                            debounce_ms = debounce_started.elapsed().as_millis() as u64,
-                            "auto-add debounce elapsed"
-                        );
-                        s(SubmitSource::Auto);
-                        glib::ControlFlow::Break
-                    });
+                let id = glib::timeout_add_local(AUTO_ADD_LOOKUP_DEBOUNCE, move || {
+                    // Clear the stored ID first: after Break the source is
+                    // gone, and a later `changed` (e.g. programmatic
+                    // set_text) must not remove this dead ID — that was a
+                    // hard abort ("Source ID was not found").
+                    *debounce_c.borrow_mut() = None;
+                    tracing::info!(
+                        url_host = %host,
+                        debounce_ms = debounce_started.elapsed().as_millis() as u64,
+                        "auto-add debounce elapsed"
+                    );
+                    s(SubmitSource::Auto);
+                    glib::ControlFlow::Break
+                });
                 *debounce.borrow_mut() = Some(id);
             } else if let Some(id) = debounce.borrow_mut().take() {
                 id.remove();

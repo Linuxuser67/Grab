@@ -933,9 +933,8 @@ fn resolve_resource(base_url: &Url, raw: &str) -> Result<Url, DashError> {
 }
 
 fn expand_list(base_url: &Url, list: &DashList) -> Result<Vec<DashResource>, DashError> {
-    let mut resources = Vec::with_capacity(
-        list.segments.len() + usize::from(list.initialization.is_some()),
-    );
+    let initialization_count = if list.initialization.is_some() { 1 } else { 0 };
+    let mut resources = Vec::with_capacity(list.segments.len() + initialization_count);
 
     if let Some(initialization) = &list.initialization {
         let (url, range) = match initialization {

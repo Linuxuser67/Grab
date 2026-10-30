@@ -757,8 +757,7 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                     // not by a later explicit timestamp. DASH defines the
                     // number of repeats with a ceiling, so a final segment
                     // may overlap the next S@t or Period end.
-                    let next_explicit_start =
-                        timeline.get(index + 1).and_then(|next| next.start);
+                    let next_explicit_start = timeline.get(index + 1).and_then(|next| next.start);
                     match next_explicit_start {
                         Some(end) => {
                             let distance = end
@@ -767,14 +766,12 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                                 .ok_or(DashError::InvalidSegment)?;
                             ceil_div_u64(distance, entry.duration)?
                         }
-                        None => {
-                            segments_until_period_end(
-                                template.period_duration,
-                                template.timescale,
-                                start,
-                                entry.duration,
-                            )?
-                        }
+                        None => segments_until_period_end(
+                            template.period_duration,
+                            template.timescale,
+                            start,
+                            entry.duration,
+                        )?,
                     }
                 }
                 _ => return Err(DashError::InvalidSegment),
@@ -788,11 +785,7 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                     .checked_mul(entry.duration)
                     .and_then(|offset| start.checked_add(offset))
                     .ok_or(DashError::InvalidSegment)?;
-                if !time_precedes_period_end(
-                    time,
-                    template.period_duration,
-                    template.timescale,
-                )? {
+                if !time_precedes_period_end(time, template.period_duration, template.timescale)? {
                     return Err(DashError::InvalidSegment);
                 }
                 output.push((number, time));
@@ -1175,7 +1168,10 @@ mod tests {
             .filter(|resource| resource.kind == DashResourceKind::Segment)
             .map(|resource| resource.url.path().to_owned())
             .collect::<Vec<_>>();
-        assert_eq!(times, ["/seg-0.m4s", "/seg-2.m4s", "/seg-4.m4s", "/seg-5.m4s"]);
+        assert_eq!(
+            times,
+            ["/seg-0.m4s", "/seg-2.m4s", "/seg-4.m4s", "/seg-5.m4s"]
+        );
     }
 
     #[test]

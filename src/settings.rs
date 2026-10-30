@@ -213,3 +213,21 @@ impl std::ops::Deref for AppSettings {
         &self.0
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::AppSettings;
+
+    #[test]
+    fn native_manifest_picker_is_disabled_by_default() {
+        // SAFETY: the project CI test suite runs serially; no other test
+        // accesses GSettings while the memory backend is selected.
+        unsafe {
+            std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+            std::env::set_var("GSETTINGS_BACKEND", "memory");
+        }
+
+        assert!(!AppSettings::new().native_manifest_picker_enabled());
+    }
+}

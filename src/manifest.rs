@@ -273,11 +273,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     let mut maximum_segment_duration = 0.0_f64;
 
     for (index, segment) in playlist.segments.iter_mut().enumerate() {
-        if segment
-            .unknown_tags
-            .iter()
-            .any(|tag| tag.tag == "X-KEY")
-        {
+        if segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY") {
             // A key tag the parser could not decode must never pass through
             // into FFmpeg, where it could bypass our encryption policy.
             return Err(ManifestError::UnsupportedEncryption);
@@ -638,8 +634,8 @@ three.m4s
         let bytes = plan
             .local_playlist_bytes()
             .expect("local playlist should serialize");
-        let parsed = m3u8_rs::parse_media_playlist_res(&bytes)
-            .expect("serialized playlist should parse");
+        let parsed =
+            m3u8_rs::parse_media_playlist_res(&bytes).expect("serialized playlist should parse");
         let map_names = parsed
             .segments
             .iter()
@@ -745,11 +741,12 @@ third.m4s
             .expect("serialized playlist should parse");
         assert_eq!(parsed.segments.len(), 3);
         assert!(
-            parsed
-                .segments
-                .iter()
-                .all(|segment| segment.key.as_ref().is_some_and(|key| key.uri.as_deref()
-                    == Some("https://cdn.example.test/path/key.bin")))
+            parsed.segments.iter().all(|segment| segment
+                .key
+                .as_ref()
+                .is_some_and(
+                    |key| key.uri.as_deref() == Some("https://cdn.example.test/path/key.bin")
+                ))
         );
         assert!(parsed.segments[0].map.is_none());
         assert_eq!(

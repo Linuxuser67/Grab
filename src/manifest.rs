@@ -10,6 +10,8 @@ use m3u8_rs::{AlternativeMediaType, KeyMethod, MediaPlaylist, MediaPlaylistType,
 use thiserror::Error;
 use url::Url;
 
+pub(crate) mod dash;
+
 /// Errors that make a manifest unsuitable for Grab's native download path.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum ManifestError {

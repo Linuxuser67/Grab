@@ -780,9 +780,8 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
         for (index, entry) in timeline.iter().enumerate() {
             let start = entry.start.unwrap_or(next_start);
             let starts_before_previous = previous_start.is_some_and(|previous| start < previous);
-            let overlaps_previous_run = entry.start.is_some()
-                && !previous_run_uses_negative_repeat
-                && start < next_start;
+            let overlaps_previous_run =
+                entry.start.is_some() && !previous_run_uses_negative_repeat && start < next_start;
             if starts_before_previous || overlaps_previous_run {
                 return Err(DashError::InvalidSegment);
             }
@@ -1087,9 +1086,7 @@ mod tests {
         element: &str,
         scheme_id_uri: &str,
     ) -> String {
-        let property = format!(
-            r#"<{element} schemeIdUri="{scheme_id_uri}" value="0"/>"#
-        );
+        let property = format!(r#"<{element} schemeIdUri="{scheme_id_uri}" value="0"/>"#);
         let adaptation_property = if on_adaptation { &property } else { "" };
         let representation_property = if on_adaptation { "" } else { &property };
 
@@ -1172,10 +1169,7 @@ mod tests {
     #[test]
     fn excludes_representations_marked_for_trick_mode() {
         for (element, scheme_id_uri) in [
-            (
-                "EssentialProperty",
-                "urn:mpeg:dash:trickmode:2016",
-            ),
+            ("EssentialProperty", "urn:mpeg:dash:trickmode:2016"),
             (
                 "SupplementalProperty",
                 "https://dashif.org/guidelines/trickmode",

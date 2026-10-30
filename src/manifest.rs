@@ -329,7 +329,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                     Some(offset) => offset,
                     None => previous_segment_range
                         .as_ref()
-                        .filter(|(previous_url, _)| previous_url == resource_url)
+                        .filter(|(previous_url, _)| previous_url.as_str() == resource_url)
                         .map(|(_, next_offset)| *next_offset)
                         .ok_or(ManifestError::MissingByteRangeOffset)?,
                 };

@@ -14,8 +14,9 @@
 //! freshness and twin suppression, the unlisted-URL and direct-file
 //! fallbacks, the Drive fallback, clipboard prefill, probe cancellation on
 //! close, preferred-quality preselection, and the select-all/none pickers.
-//! The probe never fires on its own: pasting or typing only syncs the form,
-//! and the lookup starts when Add Download (or Enter) is pressed.
+//! By default, pasting or typing only syncs the form; lookup starts on Add
+//! Download (or Enter). When auto-add is enabled, complete URLs are looked
+//! up after an 800 ms quiet period before the download is submitted.
 
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
@@ -285,6 +286,36 @@ fn needs_gallery_probe(url: &str) -> bool {
     !crate::gallery_probe::url_is_direct_media(url) && !crate::video_tools::is_youtube_url(url)
 }
 
+/// Native variant preview is experimental until the native queue/fetch path exists.
+/// Keep the established yt-dlp route for every supported manifest by default.
+fn should_use_native_manifest_picker(enabled: bool, url: &str) -> bool {
+    enabled && crate::manifest_intake::supports(url)
+}
+
+/// A video page always probes. Other HTTP(S) links probe only on an explicit
+/// unlisted kick (Add/Enter/Retry) or the opt-in auto-add kick.
+fn should_probe_url(url: &str, probe_unlisted: bool) -> bool {
+    crate::video::is_video_page(url)
+        || (probe_unlisted && crate::video::is_http_url(url))
+}
+
+const AUTO_ADD_LOOKUP_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// Only complete URLs are eligible for the auto-add debounce; partial input
+/// and disabled auto-add never start a lookup as the user types.
+fn should_auto_add_lookup(auto_add_enabled: bool, url: &str) -> bool {
+    if !auto_add_enabled {
+        return false;
+    }
+    if url.starts_with("magnet:?") {
+        return true;
+    }
+    url::Url::parse(url).is_ok_and(|parsed| {
+        matches!(parsed.scheme(), "http" | "https")
+            && parsed.host_str().is_some_and(|host| host.contains('.'))
+    })
+}
+
 /// A manifest URL must never be queued as a raw file when extraction fails.
 fn plain_fallback_allowed(url: &str) -> bool {
     !crate::video::is_video_page(url) && !crate::video::is_stream_manifest_url(url)
@@ -297,11 +328,19 @@ async fn lookup_media(
     url: String,
     browser: String,
     newest_first: bool,
+    native_manifest_picker_enabled: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     let started = std::time::Instant::now();
     let host = crate::video_probe::page_host(&url);
-    let result = lookup_media_inner(url, browser, newest_first, proxy).await;
+    let result = lookup_media_inner(
+        url,
+        browser,
+        newest_first,
+        native_manifest_picker_enabled,
+        proxy,
+    )
+    .await;
     tracing::info!(
         url_host = %host,
         total_ms = started.elapsed().as_millis() as u64,
@@ -320,11 +359,13 @@ async fn lookup_media_inner(
     url: String,
     browser: String,
     newest_first: bool,
+    native_manifest_picker_enabled: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
-    // Native manifest intake is a fast path ahead of tool discovery. The
-    // request runs on Tokio, and aborting this lookup also aborts its HTTP task.
-    if crate::manifest_intake::supports(&url) {
+    // The native picker remains an explicit experiment until the queue/fetch
+    // phase can enqueue its selected representation. Production defaults keep
+    // every supported URL on the established yt-dlp preview and queue path.
+    if should_use_native_manifest_picker(native_manifest_picker_enabled, &url) {
         let manifest_url = url.clone();
         let manifest_proxy = proxy.clone();
         let handle = crate::runtime::tokio_rt().spawn(async move {
@@ -2766,13 +2807,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     my,
                 };
                 let url = url_b.text().trim().to_string();
-                // Unlisted links probe only on explicit kicks (Add/Enter,
-                // retry). Non-HTTP schemes never probe: magnets have their
-                // own flows.
-                let probing = crate::manifest_intake::supports(&url)
-                    || (probe_unlisted
-                        && !crate::video::is_video_page(&url)
-                        && crate::video::is_http_url(&url));
+                // Manifest URLs use the same policy as other unlisted HTTP(S)
+                // links: explicit Add/Enter/Retry, or the configured auto-add
+                // kick after its 800 ms debounce. Non-HTTP schemes never probe.
+                let probing = should_probe_url(&url, probe_unlisted);
                 if url.is_empty() || (!crate::video::is_video_page(&url) && !probing) {
                     // A stale probe for another URL must not linger: editing to a fresh
                     // URL would show the old preview.
@@ -2852,7 +2890,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 };
                 let browser = settings_b.cookies_browser();
                 let newest_first = settings_b.video_codec_newest();
-                let outcome = lookup_media(url.clone(), browser, newest_first, proxy.clone()).await;
+                let outcome = lookup_media(
+                    url.clone(),
+                    browser,
+                    newest_first,
+                    settings_b.native_manifest_picker_enabled(),
+                    proxy.clone(),
+                )
+                .await;
                 let outcome = match outcome {
                     Ok(outcome) => outcome,
                     Err(MediaLookupFailure::MissingTools(message)) => {
@@ -3358,18 +3403,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let debounce: Rc<std::cell::RefCell<Option<glib::SourceId>>> =
             Rc::new(std::cell::RefCell::new(None));
         let last_text: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-        // Only auto-trigger for URLs that look complete: a parseable
-        // http(s) URL with a dotted host, or a magnet link. This avoids
-        // firing on partial input while the user is still typing.
-        let url_looks_complete = |text: &str| -> bool {
-            if text.starts_with("magnet:?") {
-                return true;
-            }
-            url::Url::parse(text).is_ok_and(|u| {
-                matches!(u.scheme(), "http" | "https")
-                    && u.host_str().is_some_and(|h| h.contains('.'))
-            })
-        };
+        // Complete URLs, including HLS/DASH manifests, share one tested
+        // auto-add policy and the same quiet-period debounce.
         // GTK emits `changed` twice for a replace (clear, then insert). The
         // 0 ms coalescing below drops the transient "", the sync handler
         // only invalidates on a settled non-empty change, and the guard then
@@ -3393,7 +3428,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             clear_field_error(&entry);
             // Auto-add: debounce the lookup so it fires after the user
             // pauses typing/pasting, not on every keystroke.
-            if settings_auto.auto_add_downloads() && url_looks_complete(&text) {
+            if should_auto_add_lookup(settings_auto.auto_add_downloads(), &text) {
                 if let Some(id) = debounce.borrow_mut().take() {
                     id.remove();
                 }
@@ -3402,7 +3437,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let host = crate::video_probe::page_host(&text);
                 let debounce_started = std::time::Instant::now();
                 let id =
-                    glib::timeout_add_local(std::time::Duration::from_millis(800), move || {
+                    glib::timeout_add_local(AUTO_ADD_LOOKUP_DEBOUNCE, move || {
                         // Clear the stored ID first: after Break the source is
                         // gone, and a later `changed` (e.g. programmatic
                         // set_text) must not remove this dead ID — that was a
@@ -4023,6 +4058,30 @@ mod tests {
         assert!(needs_gallery_probe(
             "https://youtube.com.example.org/watch?v=abc123"
         ));
+    }
+
+    #[test]
+    fn supported_manifest_uses_the_queueable_ytdlp_path_by_default() {
+        let url = "https://cdn.example.test/master.m3u8?token=abc";
+        assert!(crate::manifest_intake::supports(url));
+        assert!(!should_use_native_manifest_picker(false, url));
+        assert!(should_use_native_manifest_picker(true, url));
+    }
+
+    #[test]
+    fn manifest_probe_obeys_explicit_and_auto_add_kick_policy() {
+        let url = "https://cdn.example.test/master.m3u8?token=abc";
+        assert!(!should_probe_url(url, false));
+        assert!(should_probe_url(url, true));
+        assert!(should_probe_url("https://www.youtube.com/watch?v=x", false));
+
+        assert!(!should_auto_add_lookup(false, url));
+        assert!(should_auto_add_lookup(true, url));
+        assert!(!should_auto_add_lookup(true, "https://cdn.example.test/"));
+        assert_eq!(
+            AUTO_ADD_LOOKUP_DEBOUNCE,
+            std::time::Duration::from_millis(800)
+        );
     }
 
     #[test]

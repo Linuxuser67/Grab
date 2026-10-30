@@ -115,6 +115,20 @@ enum DashAddressing {
     List(DashList),
 }
 
+#[derive(Clone, Copy)]
+struct RepresentationIdentity<'a> {
+    id: Option<&'a str>,
+    kind: DashTrackKind,
+    bandwidth: Option<u64>,
+    width: Option<u64>,
+    height: Option<u64>,
+    mime_type: Option<&'a str>,
+    codecs: Option<&'a str>,
+    language: Option<&'a str>,
+    base_url: &'a Url,
+    addressing: &'a DashAddressing,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DashTemplate {
     media: String,
@@ -208,7 +222,7 @@ pub(crate) fn parse_dash_manifest(
     let mut video_representations = Vec::new();
     let mut audio_representations = Vec::new();
 
-    for (adaptation_index, adaptation) in period.adaptations.iter().enumerate() {
+    for adaptation in &period.adaptations {
         if adaptation.href.is_some() || !adaptation.ContentProtection.is_empty() {
             return Err(DashError::UnsupportedPresentation);
         }
@@ -220,8 +234,7 @@ pub(crate) fn parse_dash_manifest(
         }
 
         let adaptation_base = resolve_base_url(period_base.clone(), &adaptation.BaseURL)?;
-        for (representation_index, representation) in adaptation.representations.iter().enumerate()
-        {
+        for representation in &adaptation.representations {
             if representation.href.is_some() || !representation.ContentProtection.is_empty() {
                 return Err(DashError::UnsupportedPresentation);
             }
@@ -277,18 +290,18 @@ pub(crate) fn parse_dash_manifest(
                 .lang
                 .clone()
                 .or_else(|| adaptation.lang.clone());
-            let key = stable_representation_key(
-                representation_id.as_deref(),
+            let key = stable_representation_key(RepresentationIdentity {
+                id: representation_id.as_deref(),
                 kind,
                 bandwidth,
                 width,
                 height,
-                mime_type.as_deref(),
-                codecs.as_deref(),
-                language.as_deref(),
-                &representation_base,
-                &addressing,
-            );
+                mime_type: mime_type.as_deref(),
+                codecs: codecs.as_deref(),
+                language: language.as_deref(),
+                base_url: &representation_base,
+                addressing: &addressing,
+            });
 
             let choice = DashRepresentation {
                 key,
@@ -385,18 +398,19 @@ fn validate_https_url(url: Url) -> Result<Url, DashError> {
 
 /// Stable identifier for a DASH representation, independent of adaptation
 /// and representation order. Query signatures are excluded from BaseURL identity.
-fn stable_representation_key(
-    id: Option<&str>,
-    kind: DashTrackKind,
-    bandwidth: Option<u64>,
-    width: Option<u64>,
-    height: Option<u64>,
-    mime_type: Option<&str>,
-    codecs: Option<&str>,
-    language: Option<&str>,
-    base_url: &Url,
-    addressing: &DashAddressing,
-) -> String {
+fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
+    let RepresentationIdentity {
+        id,
+        kind,
+        bandwidth,
+        width,
+        height,
+        mime_type,
+        codecs,
+        language,
+        base_url,
+        addressing,
+    } = identity;
     let mut hasher = Sha256::new();
     hasher.update(match kind {
         DashTrackKind::Video => b"video".as_slice(),

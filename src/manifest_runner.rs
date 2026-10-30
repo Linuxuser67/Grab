@@ -60,7 +60,7 @@ enum Tracks {
     },
     Dash {
         video: DashRepresentationPlan,
-        audio: Option<DashRepresentationPlan>,
+        audio: Option<Box<DashRepresentationPlan>>,
     },
 }
 
@@ -133,8 +133,8 @@ pub(crate) async fn run_manifest_download(
             {
                 return Ok(ManifestOutcome::Aborted);
             }
-            if let Some(audio) = audio {
-                if !fetch_resources(
+            if let Some(audio) = audio
+                && !fetch_resources(
                     &client,
                     hls_resources(audio),
                     &audio_dir,
@@ -144,9 +144,8 @@ pub(crate) async fn run_manifest_download(
                     &mut abort,
                 )
                 .await?
-                {
-                    return Ok(ManifestOutcome::Aborted);
-                }
+            {
+                return Ok(ManifestOutcome::Aborted);
             }
             write_playlist(&video_dir, video).await?;
             if let Some(audio) = audio {
@@ -334,6 +333,7 @@ async fn resolve_tracks(
                 .default_audio()
                 .map(|track| {
                     crate::manifest::dash::plan_dash_representation(&dash, &track.key)
+                        .map(Box::new)
                         .map_err(|error| error.to_string())
                 })
                 .transpose()?;

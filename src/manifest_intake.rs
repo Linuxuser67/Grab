@@ -54,7 +54,7 @@ pub(crate) struct ManifestChoice {
     pub(crate) label: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum NativeManifest {
     HlsMaster(HlsMasterPlan),
     HlsMedia(HlsPlan),
@@ -65,7 +65,7 @@ enum NativeManifest {
 ///
 /// The source URL is the freshness key used by the inline card. All child
 /// resources have already been resolved against the post-redirect URL.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct ManifestLookup {
     pub(crate) source_url: String,
     manifest: NativeManifest,

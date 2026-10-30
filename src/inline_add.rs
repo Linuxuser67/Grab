@@ -285,6 +285,11 @@ fn needs_gallery_probe(url: &str) -> bool {
     !crate::gallery_probe::url_is_direct_media(url) && !crate::video_tools::is_youtube_url(url)
 }
 
+/// A manifest URL must never be queued as a raw file when extraction fails.
+fn plain_fallback_allowed(url: &str) -> bool {
+    !crate::video::is_video_page(url) && !crate::video::is_stream_manifest_url(url)
+}
+
 /// Resolve tool paths and run the appropriate extractor probe(s). Cancellation
 /// drops this future; a dual probe has an abort-on-drop guard so its subprocesses
 /// do not outlive the lookup that owns them.
@@ -701,10 +706,17 @@ fn clear_manifest_preview(step: &VideoStep) {
 fn show_manifest_ready(
     step: &VideoStep,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
-    manifest: crate::manifest_intake::ManifestLookup,
+    manifest: Option<crate::manifest_intake::ManifestLookup>,
 ) {
+    if let Some(manifest) = manifest {
+        step.manifest.replace(Some(manifest));
+    }
     hide_video_step(step);
 
+    let manifest_state = step.manifest.borrow();
+    let Some(manifest) = manifest_state.as_ref() else {
+        return;
+    };
     let choices = manifest.choices();
     step.manifest_choices.replace(choices);
     step.manifest_selection.replace(
@@ -713,7 +725,6 @@ fn show_manifest_ready(
             .first()
             .map(|choice| choice.key.clone()),
     );
-    step.manifest.replace(Some(manifest.clone()));
     step.manifest_info.set_subtitle(&manifest.summary());
 
     let labels = step
@@ -2783,10 +2794,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     .manifest
                     .borrow()
                     .as_ref()
-                    .filter(|manifest| manifest.source_url == url)
-                    .cloned();
-                if let Some(manifest) = fresh_manifest {
-                    show_manifest_ready(&step_b, &lookup_add_b, manifest);
+                    .is_some_and(|manifest| manifest.source_url == url);
+                if fresh_manifest {
+                    show_manifest_ready(&step_b, &lookup_add_b, None);
                     return;
                 }
                 let fresh = {
@@ -2874,7 +2884,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let (ytdlp_result, gallery_error, mut toggle_items, probe_json_key) = match outcome
                 {
                     MediaLookupOutcome::Manifest(manifest) => {
-                        show_manifest_ready(&step_b, &lookup_add_b, *manifest);
+                        show_manifest_ready(&step_b, &lookup_add_b, Some(*manifest));
                         return;
                     }
                     MediaLookupOutcome::Gallery(items) => {
@@ -2952,7 +2962,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         // Plain fallback for yt-dlp "unsupported url" on non-video
                         // pages (e.g. direct .pdf/.zip links). gallery-dl was
                         // already tried above and found nothing.
-                        let plain_fallback_ok = !crate::video::is_video_page(&url)
+                        let plain_fallback_ok = plain_fallback_allowed(&url)
                             && e.to_string().to_lowercase().contains("unsupported url");
                         if plain_fallback_ok {
                             match queue_plain(
@@ -3018,7 +3028,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         }
                         // Resolved but nothing playable, and not a listed video
                         // page: same plain fallback as above.
-                        if !probe.fetchable() && !crate::video::is_video_page(&url) {
+                        if !probe.fetchable() && plain_fallback_allowed(&url) {
                             match queue_plain(
                                 &manager_b,
                                 &dest_b,
@@ -3635,33 +3645,39 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     url_entry.set_text(&normalized);
                 }
             } else if !already && url_entry.text().trim().is_empty() {
-                // Single clipboard read per fresh open; no watch, no polling.
-                let url_entry = url_entry.clone();
-                let last_auto_paste = Rc::clone(&last_auto_paste);
-                glib::spawn_future_local(async move {
-                    let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
-                    let Some(clipboard) = clipboard else { return };
-                    let Ok(Some(text)) = clipboard.read_text_future().await else {
-                        return;
-                    };
-                    if !url_entry.text().trim().is_empty() {
-                        return;
-                    }
-                    let pasted = text.trim().to_string();
-                    if let Ok(normalized) = crate::download::normalize_url(&pasted) {
-                        // Paste once: skip a link this auto-paste already inserted.
-                        let fingerprint = paste_fingerprint(&normalized);
-                        if last_auto_paste.borrow().as_deref() == Some(fingerprint.as_str()) {
+                if let Some(next) = pending_url.borrow_mut().pop_front() {
+                    // A manifest preview may have held this FIFO entry until
+                    // the user dismissed it. Resume the oldest queued URL first.
+                    url_entry.set_text(&next);
+                } else {
+                    // Single clipboard read per fresh open; no watch, no polling.
+                    let url_entry = url_entry.clone();
+                    let last_auto_paste = Rc::clone(&last_auto_paste);
+                    glib::spawn_future_local(async move {
+                        let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
+                        let Some(clipboard) = clipboard else { return };
+                        let Ok(Some(text)) = clipboard.read_text_future().await else {
+                            return;
+                        };
+                        if !url_entry.text().trim().is_empty() {
                             return;
                         }
-                        url_entry.set_text(&normalized);
-                        *last_auto_paste.borrow_mut() = Some(fingerprint.clone());
-                        // Persist so a restart doesn't re-paste the stale link.
-                        // The manager Rc isn't available in this async block;
-                        // settings are global via the default AppSettings.
-                        crate::settings::AppSettings::new().set_last_auto_paste(&fingerprint);
-                    }
-                });
+                        let pasted = text.trim().to_string();
+                        if let Ok(normalized) = crate::download::normalize_url(&pasted) {
+                            // Paste once: skip a link this auto-paste already inserted.
+                            let fingerprint = paste_fingerprint(&normalized);
+                            if last_auto_paste.borrow().as_deref() == Some(fingerprint.as_str()) {
+                                return;
+                            }
+                            url_entry.set_text(&normalized);
+                            *last_auto_paste.borrow_mut() = Some(fingerprint.clone());
+                            // Persist so a restart doesn't re-paste the stale link.
+                            // The manager Rc isn't available in this async block;
+                            // settings are global via the default AppSettings.
+                            crate::settings::AppSettings::new().set_last_auto_paste(&fingerprint);
+                        }
+                    });
+                }
             }
             // Keyboard-first: focus lands in the URL field so typing starts a
             // download with no tab stops.
@@ -4289,4 +4305,16 @@ mod tests {
         st.set(true);
         assert_eq!(*seen.borrow(), vec![true, false, true]);
     }
+
+    #[test]
+    fn stream_manifests_never_use_the_plain_file_fallback() {
+        for extension in ["m3u8", "m3u", "pls", "mpd"] {
+            let url = format!("https://cdn.example.test/stream.{extension}");
+            assert!(!plain_fallback_allowed(&url), "{url}");
+        }
+        assert!(plain_fallback_allowed(
+            "https://cdn.example.test/archive.zip"
+        ));
+    }
+
 }

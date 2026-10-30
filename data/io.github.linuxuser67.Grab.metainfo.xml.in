@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.1" date="2026-10-30">
+      <description>
+        <ul>
+          <li>Add native downloads for supported HLS and static DASH streams, including segment fetching, track assembly, and MP4 finalization.</li>
+          <li>Improve manifest transfer reliability with bounded resource downloads, retry and staging reuse, and safe no-overwrite delivery.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.4.6" date="2026-10-29">
       <description>
         <ul>

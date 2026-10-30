@@ -32,6 +32,11 @@
       <summary>Add downloads automatically</summary>
       <description>Skip confirmation: single videos start right after lookup with the preferred quality, and links opened from other apps start without asking, except links to this computer or a private network, which always ask.</description>
     </key>
+    <key name="native-manifest-picker-enabled" type="b">
+      <default>false</default>
+      <summary>Enable the experimental native stream manifest picker</summary>
+      <description>Disabled by default until native manifest downloads can be queued. When disabled, HLS and DASH URLs use the established yt-dlp preview and download path.</description>
+    </key>
     <key name="max-concurrent" type="i">
       <default>3</default>
       <range min="1" max="10"/>

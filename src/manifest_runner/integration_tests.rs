@@ -8,12 +8,12 @@
 
 use super::*;
 
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::AsyncReadExt as _;
 use url::Url;
 
 struct TempRoot(PathBuf);
@@ -130,7 +130,10 @@ async fn spawn_fixture_server(
     files: HashMap<String, Vec<u8>>,
     expected_requests: usize,
 ) -> (Url, tokio::task::JoinHandle<()>) {
-    assert!(!files.is_empty(), "fixture server requires at least one resource");
+    assert!(
+        !files.is_empty(),
+        "fixture server requires at least one resource"
+    );
     assert!(
         expected_requests >= files.len(),
         "fixture request count cannot be smaller than the unique resource set"
@@ -174,10 +177,8 @@ async fn spawn_fixture_server(
                     response.extend_from_slice(body);
                     response
                 }
-                None => {
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                        .to_vec()
-                }
+                None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_vec(),
             };
             socket
                 .write_all(&response)
@@ -269,8 +270,8 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
     assert_command_succeeded(&generated, "FFmpeg failed to generate the HLS fixture");
 
     let manifest_url = "https://fixture.invalid/media.m3u8";
-    let manifest = std::fs::read(fixture_dir.join("media.m3u8"))
-        .expect("read generated HLS media playlist");
+    let manifest =
+        std::fs::read(fixture_dir.join("media.m3u8")).expect("read generated HLS media playlist");
     let mut plan = crate::manifest::plan_hls_media_playlist(manifest_url, &manifest)
         .expect("parse generated HLS media playlist");
     let urls: Vec<_> = plan
@@ -389,8 +390,8 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
     assert_command_succeeded(&generated, "FFmpeg failed to generate the DASH fixture");
 
     let manifest_url = "https://fixture.invalid/manifest.mpd";
-    let manifest = std::fs::read_to_string(fixture_dir.join("manifest.mpd"))
-        .expect("read generated DASH MPD");
+    let manifest =
+        std::fs::read_to_string(fixture_dir.join("manifest.mpd")).expect("read generated DASH MPD");
     let parsed = crate::manifest::dash::parse_dash_manifest(manifest_url, &manifest)
         .expect("parse generated DASH MPD");
     let video_key = parsed
@@ -404,12 +405,10 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
         .expect("generated DASH fixture has an audio representation")
         .key
         .clone();
-    let mut video_plan =
-        crate::manifest::dash::plan_dash_representation(&parsed, &video_key)
-            .expect("plan generated DASH video representation");
-    let mut audio_plan =
-        crate::manifest::dash::plan_dash_representation(&parsed, &audio_key)
-            .expect("plan generated DASH audio representation");
+    let mut video_plan = crate::manifest::dash::plan_dash_representation(&parsed, &video_key)
+        .expect("plan generated DASH video representation");
+    let mut audio_plan = crate::manifest::dash::plan_dash_representation(&parsed, &audio_key)
+        .expect("plan generated DASH audio representation");
 
     let mut urls: Vec<_> = video_plan
         .resources

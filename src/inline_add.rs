@@ -4077,7 +4077,7 @@ mod tests {
 
         assert!(!should_auto_add_lookup(false, url));
         assert!(should_auto_add_lookup(true, url));
-        assert!(!should_auto_add_lookup(true, "https://cdn.example.test/"));
+        assert!(!should_auto_add_lookup(true, "https://localhost/"));
         assert_eq!(
             AUTO_ADD_LOOKUP_DEBOUNCE,
             std::time::Duration::from_millis(800)

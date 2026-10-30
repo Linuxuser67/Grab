@@ -208,10 +208,6 @@ pub(crate) fn parse_dash_manifest(
         }
 
         let adaptation_base = resolve_base_url(period_base.clone(), &adaptation.BaseURL)?;
-        let is_default_audio = adaptation.Role.iter().any(|role| {
-            role.schemeIdUri == DASH_ROLE_SCHEME && role.value.as_deref() == Some("main")
-        });
-
         for (representation_index, representation) in adaptation.representations.iter().enumerate()
         {
             if representation.href.is_some() || !representation.ContentProtection.is_empty() {
@@ -239,6 +235,15 @@ pub(crate) fn parse_dash_manifest(
                 // Text, metadata, and unknown adaptation sets are not media inputs.
                 continue;
             };
+            let is_default_audio = kind == DashTrackKind::Audio
+                && adaptation
+                    .Role
+                    .iter()
+                    .chain(representation.Role.iter())
+                    .any(|role| {
+                        role.schemeIdUri == DASH_ROLE_SCHEME
+                            && role.value.as_deref() == Some("main")
+                    });
 
             let representation_base =
                 resolve_base_url(adaptation_base.clone(), &representation.BaseURL)?;
@@ -311,7 +316,7 @@ pub(crate) fn plan_dash_representation(
         DashAddressing::Template(template) => {
             expand_template(&representation, &template.media, template)?
         }
-        DashAddressing::List(list) => expand_list(&representation.source.base_url, list)?,
+        DashAddressing::List(list) => expand_list(&representation, list)?,
     };
 
     if !resources
@@ -715,7 +720,7 @@ fn expand_template(
         resources.push(DashResource {
             url,
             range,
-            filename: "init.bin".to_owned(),
+            filename: format!("{}-init.bin", representation.key),
             kind: DashResourceKind::Initialization,
         });
     }
@@ -725,7 +730,7 @@ fn expand_template(
         resources.push(DashResource {
             url: resolve_resource(&representation.source.base_url, &uri)?,
             range: None,
-            filename: format!("segment-{index:06}.bin"),
+            filename: format!("{}-segment-{index:06}.bin", representation.key),
             kind: DashResourceKind::Segment,
         });
     }
@@ -996,7 +1001,11 @@ fn resolve_resource(base_url: &Url, raw: &str) -> Result<Url, DashError> {
     Ok(resolved)
 }
 
-fn expand_list(base_url: &Url, list: &DashList) -> Result<Vec<DashResource>, DashError> {
+fn expand_list(
+    representation: &DashRepresentation,
+    list: &DashList,
+) -> Result<Vec<DashResource>, DashError> {
+    let base_url = &representation.source.base_url;
     let initialization_count = if list.initialization.is_some() { 1 } else { 0 };
     let mut resources = Vec::with_capacity(list.segments.len() + initialization_count);
 
@@ -1014,7 +1023,7 @@ fn expand_list(base_url: &Url, list: &DashList) -> Result<Vec<DashResource>, Das
         resources.push(DashResource {
             url,
             range,
-            filename: "init.bin".to_owned(),
+            filename: format!("{}-init.bin", representation.key),
             kind: DashResourceKind::Initialization,
         });
     }
@@ -1023,7 +1032,7 @@ fn expand_list(base_url: &Url, list: &DashList) -> Result<Vec<DashResource>, Das
         resources.push(DashResource {
             url: resolve_resource(base_url, &segment.media)?,
             range: segment.range,
-            filename: format!("segment-{index:06}.bin"),
+            filename: format!("{}-segment-{index:06}.bin", representation.key),
             kind: DashResourceKind::Segment,
         });
     }
@@ -1073,6 +1082,31 @@ mod tests {
         assert_eq!(
             plan.default_audio()
                 .and_then(|audio| audio.representation_id.as_deref()),
+            Some("a1")
+        );
+    }
+
+    #[test]
+    fn representation_level_main_role_marks_audio_as_default() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <AdaptationSet contentType="audio" mimeType="audio/mp4">
+      <SegmentTemplate duration="2" media="audio-$Number$.m4s"/>
+      <Representation id="a1" bandwidth="128000">
+        <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="2" media="video-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="500000"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body)
+            .expect("static video/audio MPD should parse");
+        assert_eq!(
+            plan.default_audio().and_then(|audio| audio.representation_id.as_deref()),
             Some("a1")
         );
     }
@@ -1205,6 +1239,39 @@ mod tests {
             .map(|resource| resource.url.path().to_owned())
             .collect::<Vec<_>>();
         assert_eq!(times, ["/path/seg-4.m4s", "/path/seg-8.m4s"]);
+    }
+
+    #[test]
+    fn video_and_audio_resource_filenames_are_representation_scoped() {
+        let plan = parse_dash_manifest(BASE_URL, TEMPLATE_MPD)
+            .expect("static video/audio MPD should parse");
+        let video = plan_dash_representation(
+            &plan,
+            &plan.video_representations[0].key
+        ).expect("video representation should expand");
+        let audio = plan_dash_representation(
+            &plan,
+            &plan.audio_representations[0].key
+        ).expect("audio representation should expand");
+
+        let video_names = video.resources
+            .iter()
+            .map(|resource| resource.filename.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let audio_names = audio.resources
+            .iter()
+            .map(|resource| resource.filename.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            video_names.is_disjoint(&audio_names),
+            "audio and video staging names must not collide"
+        );
+        assert!(video.resources.iter().all(|resource| {
+            resource.filename.starts_with(&format!("{}-", video.representation.key))
+        }));
+        assert!(audio.resources.iter().all(|resource| {
+            resource.filename.starts_with(&format!("{}-", audio.representation.key))
+        }));
     }
 
     #[test]

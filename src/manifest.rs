@@ -544,9 +544,11 @@ one.ts
 "#;
         let plan = plan_hls_media_playlist(BASE_URL, body)
             .expect("AES-128 VOD playlist should remain available to FFmpeg");
-        let bytes = plan.local_playlist_bytes().expect("playlist should serialize");
-        let parsed = m3u8_rs::parse_media_playlist_res(&bytes)
-            .expect("serialized playlist should parse");
+        let bytes = plan
+            .local_playlist_bytes()
+            .expect("playlist should serialize");
+        let parsed =
+            m3u8_rs::parse_media_playlist_res(&bytes).expect("serialized playlist should parse");
         assert_eq!(
             parsed.segments[0]
                 .key

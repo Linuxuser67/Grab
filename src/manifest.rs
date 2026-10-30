@@ -10,6 +10,9 @@ use m3u8_rs::{AlternativeMediaType, KeyMethod, MediaPlaylist, MediaPlaylistType,
 use thiserror::Error;
 use url::Url;
 
+/// Maximum response body accepted by the native manifest intake.
+pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
+
 pub(crate) mod dash;
 
 /// Errors that make a manifest unsuitable for Grab's native download path.
@@ -132,6 +135,9 @@ pub(crate) fn parse_hls_master_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<HlsMasterPlan, ManifestError> {
+    if body.len() > MAX_MANIFEST_BYTES {
+        return Err(ManifestError::Parse);
+    }
     let base_url = parse_manifest_url(manifest_url)?;
     let playlist = m3u8_rs::parse_playlist_res(body).map_err(|_| ManifestError::Parse)?;
 
@@ -233,6 +239,9 @@ pub(crate) fn plan_hls_media_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<HlsPlan, ManifestError> {
+    if body.len() > MAX_MANIFEST_BYTES {
+        return Err(ManifestError::Parse);
+    }
     let base_url = parse_manifest_url(manifest_url)?;
     let playlist = m3u8_rs::parse_media_playlist_res(body).map_err(|_| ManifestError::Parse)?;
     build_hls_plan(base_url, playlist)
@@ -887,6 +896,19 @@ one.ts
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, insecure_body).err(),
             Some(ManifestError::UnsupportedResourceUrl)
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_hls_manifest_bodies_before_parsing() {
+        let body = vec![b' '; MAX_MANIFEST_BYTES + 1];
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, &body).err(),
+            Some(ManifestError::Parse)
+        );
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, &body).err(),
+            Some(ManifestError::Parse)
         );
     }
 }

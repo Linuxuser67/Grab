@@ -14,8 +14,9 @@
 //! freshness and twin suppression, the unlisted-URL and direct-file
 //! fallbacks, the Drive fallback, clipboard prefill, probe cancellation on
 //! close, preferred-quality preselection, and the select-all/none pickers.
-//! The probe never fires on its own: pasting or typing only syncs the form,
-//! and the lookup starts when Add Download (or Enter) is pressed.
+//! By default, pasting or typing only syncs the form; lookup starts on Add
+//! Download (or Enter). When auto-add is enabled, complete URLs are looked
+//! up after an 800 ms quiet period before the download is submitted.
 
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
@@ -95,6 +96,7 @@ fn paste_fingerprint(url: &str) -> String {
 /// waits on the user (the queued links stay queued instead of replacing it).
 struct DrainPending {
     probe: Rc<RefCell<ProbeState>>,
+    manifest: Rc<RefCell<Option<crate::manifest_intake::ManifestLookup>>>,
     pending: Rc<RefCell<VecDeque<String>>>,
     start: Rc<dyn Fn(String)>,
 }
@@ -104,15 +106,16 @@ impl Drop for DrainPending {
         if self.pending.borrow().is_empty() {
             return;
         }
-        let (probe, pending, start) = (
+        let (probe, manifest, pending, start) = (
             Rc::clone(&self.probe),
+            Rc::clone(&self.manifest),
             Rc::clone(&self.pending),
             Rc::clone(&self.start),
         );
         glib::idle_add_local_once(move || {
             let busy = {
                 let st = probe.borrow();
-                st.inflight.is_some() || st.info.is_some()
+                st.inflight.is_some() || st.info.is_some() || manifest.borrow().is_some()
             };
             if busy {
                 return;
@@ -267,6 +270,7 @@ struct VideoLookupResult {
 }
 
 enum MediaLookupOutcome {
+    Manifest(Box<crate::manifest_intake::ManifestLookup>),
     Gallery(Vec<crate::gallery_probe::GalleryItem>),
     Video(Box<VideoLookupResult>),
 }
@@ -282,6 +286,40 @@ fn needs_gallery_probe(url: &str) -> bool {
     !crate::gallery_probe::url_is_direct_media(url) && !crate::video_tools::is_youtube_url(url)
 }
 
+/// Native variant preview is experimental until the native queue/fetch path exists.
+/// Keep the established yt-dlp route for every supported manifest by default.
+fn should_use_native_manifest_picker(enabled: bool, url: &str) -> bool {
+    enabled && crate::manifest_intake::supports(url)
+}
+
+/// A video page always probes. Other HTTP(S) links probe only on an explicit
+/// unlisted kick (Add/Enter/Retry) or the opt-in auto-add kick.
+fn should_probe_url(url: &str, probe_unlisted: bool) -> bool {
+    crate::video::is_video_page(url) || (probe_unlisted && crate::video::is_http_url(url))
+}
+
+const AUTO_ADD_LOOKUP_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// Only complete URLs are eligible for the auto-add debounce; partial input
+/// and disabled auto-add never start a lookup as the user types.
+fn should_auto_add_lookup(auto_add_enabled: bool, url: &str) -> bool {
+    if !auto_add_enabled {
+        return false;
+    }
+    if url.starts_with("magnet:?") {
+        return true;
+    }
+    url::Url::parse(url).is_ok_and(|parsed| {
+        matches!(parsed.scheme(), "http" | "https")
+            && parsed.host_str().is_some_and(|host| host.contains('.'))
+    })
+}
+
+/// A manifest URL must never be queued as a raw file when extraction fails.
+fn plain_fallback_allowed(url: &str) -> bool {
+    !crate::video::is_video_page(url) && !crate::video::is_stream_manifest_url(url)
+}
+
 /// Resolve tool paths and run the appropriate extractor probe(s). Cancellation
 /// drops this future; a dual probe has an abort-on-drop guard so its subprocesses
 /// do not outlive the lookup that owns them.
@@ -289,15 +327,24 @@ async fn lookup_media(
     url: String,
     browser: String,
     newest_first: bool,
+    native_manifest_picker_enabled: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     let started = std::time::Instant::now();
     let host = crate::video_probe::page_host(&url);
-    let result = lookup_media_inner(url, browser, newest_first, proxy).await;
+    let result = lookup_media_inner(
+        url,
+        browser,
+        newest_first,
+        native_manifest_picker_enabled,
+        proxy,
+    )
+    .await;
     tracing::info!(
         url_host = %host,
         total_ms = started.elapsed().as_millis() as u64,
         result = match &result {
+            Ok(MediaLookupOutcome::Manifest(_)) => "manifest",
             Ok(MediaLookupOutcome::Gallery(_)) => "gallery",
             Ok(MediaLookupOutcome::Video(_)) => "video",
             Err(_) => "error",
@@ -311,8 +358,38 @@ async fn lookup_media_inner(
     url: String,
     browser: String,
     newest_first: bool,
+    native_manifest_picker_enabled: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
+    // The native picker remains an explicit experiment until the queue/fetch
+    // phase can enqueue its selected representation. Production defaults keep
+    // every supported URL on the established yt-dlp preview and queue path.
+    if should_use_native_manifest_picker(native_manifest_picker_enabled, &url) {
+        let manifest_url = url.clone();
+        let manifest_proxy = proxy.clone();
+        let handle = crate::runtime::tokio_rt().spawn(async move {
+            crate::manifest_intake::lookup(&manifest_url, manifest_proxy.as_ref()).await
+        });
+        let native_result = {
+            let _abort = AbortTaskOnDrop(handle.abort_handle());
+            handle.await
+        };
+        match native_result {
+            Ok(Ok(Some(manifest))) => {
+                return Ok(MediaLookupOutcome::Manifest(Box::new(manifest)));
+            }
+            Ok(Ok(None)) => {
+                tracing::debug!("native manifest unsupported; falling back to yt-dlp");
+            }
+            Ok(Err(_)) => {
+                tracing::debug!("native manifest retrieval failed; falling back to yt-dlp");
+            }
+            Err(_) => {
+                tracing::debug!("native manifest task failed; falling back to yt-dlp");
+            }
+        }
+    }
+
     let needs_gallery_tool = needs_gallery_probe(&url);
     let tool_started = std::time::Instant::now();
     let local_tools_result = crate::runtime::tokio_rt()
@@ -475,6 +552,12 @@ pub(crate) struct VideoStep {
     /// a single Automatic row when nothing is pinnable, and always an
     /// Audio only row — the whole format decision lives in this one row.
     pub(crate) format: adw::ComboRow,
+    /// Native HLS/DASH presentation and selected representation key.
+    pub(crate) manifest: Rc<RefCell<Option<crate::manifest_intake::ManifestLookup>>>,
+    pub(crate) manifest_choices: Rc<RefCell<Vec<crate::manifest_intake::ManifestChoice>>>,
+    pub(crate) manifest_selection: Rc<RefCell<Option<String>>>,
+    pub(crate) manifest_info: adw::ActionRow,
+    pub(crate) manifest_format: adw::ComboRow,
     /// Index-aligned with the combo's model. Reset on every resolve.
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
     pub(crate) tools: adw::ActionRow,
@@ -591,7 +674,7 @@ pub(crate) fn sync_entry_icon(v: &VideoStep) {
         !v.url_entry.text().trim().is_empty(),
         v.looking_up.get(),
         v.action_revealer.reveals_child(),
-        v.error.is_visible() || v.tools.is_visible(),
+        v.error.is_visible() || v.tools.is_visible() || v.manifest_info.is_visible(),
     );
     let pos = gtk4::EntryIconPosition::Secondary;
     match icon {
@@ -633,6 +716,8 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
+    v.manifest_info.set_visible(false);
+    v.manifest_format.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
     v.gallery_info.set_visible(false);
@@ -644,6 +729,67 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     // out: the revealer is only ever revealed after show_video_ready /
     // show_video_playlist set the label, so the icon-only form is never
     // visible — resetting it here would flash a blue tick mid-slide.
+}
+
+/// Clear a native manifest preview and its transient selection.
+fn clear_manifest_preview(step: &VideoStep) {
+    step.manifest.borrow_mut().take();
+    step.manifest_choices.borrow_mut().clear();
+    step.manifest_selection.borrow_mut().take();
+    step.manifest_format
+        .set_model(Some(&gtk4::StringList::new(&[])));
+    step.manifest_info.set_subtitle("");
+}
+
+/// Show a parsed manifest and let the user choose its video representation.
+/// The queue action remains unavailable until the native queue phase lands.
+fn show_manifest_ready(
+    step: &VideoStep,
+    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
+    manifest: Option<crate::manifest_intake::ManifestLookup>,
+) {
+    if let Some(manifest) = manifest {
+        step.manifest.replace(Some(manifest));
+    }
+    hide_video_step(step);
+
+    let manifest_state = step.manifest.borrow();
+    let Some(manifest) = manifest_state.as_ref() else {
+        return;
+    };
+    let choices = manifest.choices();
+    step.manifest_choices.replace(choices);
+    step.manifest_selection.replace(
+        step.manifest_choices
+            .borrow()
+            .first()
+            .map(|choice| choice.key.clone()),
+    );
+    step.manifest_info.set_subtitle(&manifest.summary());
+
+    let labels = step
+        .manifest_choices
+        .borrow()
+        .iter()
+        .map(|choice| choice.label.clone())
+        .collect::<Vec<_>>();
+    let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    step.manifest_format
+        .set_model(Some(&gtk4::StringList::new(&label_refs)));
+    step.manifest_format.set_selected(0);
+    step.manifest_info.set_visible(true);
+    step.manifest_format.set_visible(true);
+
+    // This phase deliberately stops at the validated variant choice. It must
+    // not pass a raw .m3u8/.mpd URL to the generic file queue or yt-dlp row.
+    step.action_revealer.set_reveal_child(false);
+    set_looking_up(step, false);
+    set_lookup_add(lookup_add, false);
+
+    // Keep the picker inside the existing animated preview card.
+    step.group_revealer.set_visible(true);
+    step.group_revealer.set_reveal_child(true);
+    sync_entry_icon(step);
 }
 
 /// Abort the in-flight gallery file enumeration, if any. The generation
@@ -677,6 +823,7 @@ fn reset_video_step(step: &VideoStep) {
     // probe children instead of letting them run on for a dead card.
     abort_enumeration(step);
     abort_lookup(step);
+    clear_manifest_preview(step);
     // Drop the format options and the current pick.
     step.options.borrow_mut().clear();
     step.format.set_model(Some(&gtk4::StringList::new(&[])));
@@ -712,6 +859,7 @@ fn arm_mode_toggle(step: &VideoStep, items: Option<ToggleItems>) {
 
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
+    clear_manifest_preview(v);
     // A new lookup supersedes any in-flight file enumeration: kill it.
     abort_enumeration(v);
     // A new lookup supersedes the previous media-type choice; the switcher
@@ -2027,6 +2175,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // Media-format selector, filled per video on resolve: exact pinnable
     // formats, tallest first (the preference preselects the closest row), or a
     // single Automatic row when nothing is pinnable.
+    let manifest_info = adw::ActionRow::builder()
+        .title(gettext("Native stream manifest"))
+        .use_markup(false)
+        .build();
+    manifest_info.set_visible(false);
+    video_group.add(&manifest_info);
+    let manifest_format = adw::ComboRow::builder()
+        .title(gettext("Video variant"))
+        .build();
+    manifest_format.set_visible(false);
+    video_group.add(&manifest_format);
+
     let video_format = adw::ComboRow::builder()
         .title(gettext("Media format"))
         .build();
@@ -2116,6 +2276,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         name: video_name,
         revert: video_revert_btn,
         format: video_format,
+        manifest: Rc::new(RefCell::new(None)),
+        manifest_choices: Rc::new(RefCell::new(Vec::new())),
+        manifest_selection: Rc::new(RefCell::new(None)),
+        manifest_info,
+        manifest_format,
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
         error: video_error,
@@ -2134,6 +2299,20 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         lookup_abort: Rc::new(RefCell::new(None)),
         add_btn: add_btn.clone(),
     });
+    // Keep the selected representation key aligned with the ComboRow.
+    {
+        let choices = Rc::clone(&step.manifest_choices);
+        let selection = Rc::clone(&step.manifest_selection);
+        let manifest = Rc::clone(&step.manifest);
+        let info = step.manifest_info.clone();
+        step.manifest_format.connect_selected_notify(move |row| {
+            let selected = choices.borrow().get(row.selected() as usize).cloned();
+            selection.replace(selected.as_ref().map(|choice| choice.key.clone()));
+            if let (Some(selected), Some(manifest)) = (selected, manifest.borrow().as_ref()) {
+                info.set_subtitle(&format!("{} · {}", manifest.summary(), selected.label));
+            }
+        });
+    }
     // "Select files…" invokes the opener set below (where the picker context
     // lives). Connected once; the opener is set once at build time.
     {
@@ -2603,6 +2782,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // the next queued link with the in-flight marker already clear.
                 let _drain = DrainPending {
                     probe: Rc::clone(&probe_b),
+                    manifest: Rc::clone(&step_b.manifest),
                     pending: Rc::clone(&pending_b),
                     start: {
                         let url_entry = url_b.clone();
@@ -2626,12 +2806,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     my,
                 };
                 let url = url_b.text().trim().to_string();
-                // Unlisted links probe only on explicit kicks (Add/Enter,
-                // retry). Non-HTTP schemes never probe: magnets have their
-                // own flows.
-                let probing = probe_unlisted
-                    && !crate::video::is_video_page(&url)
-                    && crate::video::is_http_url(&url);
+                // Manifest URLs use the same policy as other unlisted HTTP(S)
+                // links: explicit Add/Enter/Retry, or the configured auto-add
+                // kick after its 800 ms debounce. Non-HTTP schemes never probe.
+                let probing = should_probe_url(&url, probe_unlisted);
                 if url.is_empty() || (!crate::video::is_video_page(&url) && !probing) {
                     // A stale probe for another URL must not linger: editing to a fresh
                     // URL would show the old preview.
@@ -2644,6 +2822,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         probe_b.borrow_mut().info.take();
                         set_lookup_add(&lookup_add_b, true);
                     }
+                    return;
+                }
+                let fresh_manifest = step_b
+                    .manifest
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.source_url == url);
+                if fresh_manifest {
+                    show_manifest_ready(&step_b, &lookup_add_b, None);
                     return;
                 }
                 let fresh = {
@@ -2702,7 +2889,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 };
                 let browser = settings_b.cookies_browser();
                 let newest_first = settings_b.video_codec_newest();
-                let outcome = lookup_media(url.clone(), browser, newest_first, proxy.clone()).await;
+                let outcome = lookup_media(
+                    url.clone(),
+                    browser,
+                    newest_first,
+                    settings_b.native_manifest_picker_enabled(),
+                    proxy.clone(),
+                )
+                .await;
                 let outcome = match outcome {
                     Ok(outcome) => outcome,
                     Err(MediaLookupFailure::MissingTools(message)) => {
@@ -2730,6 +2924,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 }
                 let (ytdlp_result, gallery_error, mut toggle_items, probe_json_key) = match outcome
                 {
+                    MediaLookupOutcome::Manifest(manifest) => {
+                        show_manifest_ready(&step_b, &lookup_add_b, Some(*manifest));
+                        return;
+                    }
                     MediaLookupOutcome::Gallery(items) => {
                         // Queue creation stays behind the full picker because
                         // the dual probe may cap the file list.
@@ -2805,7 +3003,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         // Plain fallback for yt-dlp "unsupported url" on non-video
                         // pages (e.g. direct .pdf/.zip links). gallery-dl was
                         // already tried above and found nothing.
-                        let plain_fallback_ok = !crate::video::is_video_page(&url)
+                        let plain_fallback_ok = plain_fallback_allowed(&url)
                             && e.to_string().to_lowercase().contains("unsupported url");
                         if plain_fallback_ok {
                             match queue_plain(
@@ -2871,7 +3069,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         }
                         // Resolved but nothing playable, and not a listed video
                         // page: same plain fallback as above.
-                        if !probe.fetchable() && !crate::video::is_video_page(&url) {
+                        if !probe.fetchable() && plain_fallback_allowed(&url) {
                             match queue_plain(
                                 &manager_b,
                                 &dest_b,
@@ -3004,6 +3202,47 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 return;
             }
             let url = url_entry.text().trim().to_string();
+            if crate::manifest_intake::supports(&url) {
+                let preview_is_fresh = step2
+                    .manifest
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.source_url == url);
+                if preview_is_fresh {
+                    // The selected key is retained for the native queue phase.
+                    return;
+                }
+                let extractor_preview = {
+                    let state = probe.borrow();
+                    if crate::video::preview_fresh(&state.info, state.last_ok.as_str(), &url) {
+                        state.info.clone()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(extractor_preview) = extractor_preview {
+                    // Native parsing may reject a dynamic or encrypted stream.
+                    // Keep the established yt-dlp path usable when it resolved it.
+                    submit_probe(
+                        &m,
+                        &dd,
+                        &close_card,
+                        &step2,
+                        &lookup_add_submit,
+                        &nav2,
+                        extractor_preview,
+                        scheduled_at.get(),
+                    );
+                } else if probe.borrow().is_inflight(&url, true) {
+                    show_video_error(
+                        &step2,
+                        &gettext("Still looking up the media — wait for the preview, then add."),
+                    );
+                } else {
+                    kick(true);
+                }
+                return;
+            }
             if crate::video::is_video_page(&url) {
                 // Same freshness gate as the kick skip: the stored page URL is
                 // canonicalized, so only the round-trip key (which text was resolved) decides.
@@ -3163,18 +3402,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let debounce: Rc<std::cell::RefCell<Option<glib::SourceId>>> =
             Rc::new(std::cell::RefCell::new(None));
         let last_text: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-        // Only auto-trigger for URLs that look complete: a parseable
-        // http(s) URL with a dotted host, or a magnet link. This avoids
-        // firing on partial input while the user is still typing.
-        let url_looks_complete = |text: &str| -> bool {
-            if text.starts_with("magnet:?") {
-                return true;
-            }
-            url::Url::parse(text).is_ok_and(|u| {
-                matches!(u.scheme(), "http" | "https")
-                    && u.host_str().is_some_and(|h| h.contains('.'))
-            })
-        };
+        // Complete URLs, including HLS/DASH manifests, share one tested
+        // auto-add policy and the same quiet-period debounce.
         // GTK emits `changed` twice for a replace (clear, then insert). The
         // 0 ms coalescing below drops the transient "", the sync handler
         // only invalidates on a settled non-empty change, and the guard then
@@ -3198,7 +3427,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             clear_field_error(&entry);
             // Auto-add: debounce the lookup so it fires after the user
             // pauses typing/pasting, not on every keystroke.
-            if settings_auto.auto_add_downloads() && url_looks_complete(&text) {
+            if should_auto_add_lookup(settings_auto.auto_add_downloads(), &text) {
                 if let Some(id) = debounce.borrow_mut().take() {
                     id.remove();
                 }
@@ -3206,43 +3435,44 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let debounce_c = Rc::clone(&debounce);
                 let host = crate::video_probe::page_host(&text);
                 let debounce_started = std::time::Instant::now();
-                let id =
-                    glib::timeout_add_local(std::time::Duration::from_millis(800), move || {
-                        // Clear the stored ID first: after Break the source is
-                        // gone, and a later `changed` (e.g. programmatic
-                        // set_text) must not remove this dead ID — that was a
-                        // hard abort ("Source ID was not found").
-                        *debounce_c.borrow_mut() = None;
-                        tracing::info!(
-                            url_host = %host,
-                            debounce_ms = debounce_started.elapsed().as_millis() as u64,
-                            "auto-add debounce elapsed"
-                        );
-                        s(SubmitSource::Auto);
-                        glib::ControlFlow::Break
-                    });
+                let id = glib::timeout_add_local(AUTO_ADD_LOOKUP_DEBOUNCE, move || {
+                    // Clear the stored ID first: after Break the source is
+                    // gone, and a later `changed` (e.g. programmatic
+                    // set_text) must not remove this dead ID — that was a
+                    // hard abort ("Source ID was not found").
+                    *debounce_c.borrow_mut() = None;
+                    tracing::info!(
+                        url_host = %host,
+                        debounce_ms = debounce_started.elapsed().as_millis() as u64,
+                        "auto-add debounce elapsed"
+                    );
+                    s(SubmitSource::Auto);
+                    glib::ControlFlow::Break
+                });
                 *debounce.borrow_mut() = Some(id);
             } else if let Some(id) = debounce.borrow_mut().take() {
                 id.remove();
             }
             // A probed preview counts as video mode while its canonical URL
             // matches the entry text.
-            let fresh = probe
+            let fresh_video = probe
                 .borrow()
                 .info
                 .as_ref()
                 .is_some_and(|p| p.page_url() == text);
-            // Leaving video-land (or editing a resolved URL) hides the stale
-            // step at once; `fresh` is deliberately the stricter canonical
-            // compare: a mismatch is always safe to hide.
-            if !crate::video::is_video_page(&text) || !fresh {
+            let fresh_manifest = step2
+                .manifest
+                .borrow()
+                .as_ref()
+                .is_some_and(|manifest| manifest.source_url == text);
+            let fresh = fresh_video || fresh_manifest;
+            // A matching native manifest or extractor preview remains visible;
+            // any settled URL change invalidates both forms of preview.
+            if !fresh {
                 hide_video_step(&step2);
-                // Editing the URL stales the preview: slide the Add button
-                // out too (the tick re-submits for a fresh lookup).
                 step2.action_revealer.set_reveal_child(false);
-                if !fresh {
-                    probe.borrow_mut().info.take();
-                }
+                probe.borrow_mut().info.take();
+                clear_manifest_preview(&step2);
             }
             // Any edit clears the lookup-in-flight state, and the icon
             // follows: the tick returns for non-empty text, the spinner
@@ -3464,33 +3694,40 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     url_entry.set_text(&normalized);
                 }
             } else if !already && url_entry.text().trim().is_empty() {
-                // Single clipboard read per fresh open; no watch, no polling.
-                let url_entry = url_entry.clone();
-                let last_auto_paste = Rc::clone(&last_auto_paste);
-                glib::spawn_future_local(async move {
-                    let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
-                    let Some(clipboard) = clipboard else { return };
-                    let Ok(Some(text)) = clipboard.read_text_future().await else {
-                        return;
-                    };
-                    if !url_entry.text().trim().is_empty() {
-                        return;
-                    }
-                    let pasted = text.trim().to_string();
-                    if let Ok(normalized) = crate::download::normalize_url(&pasted) {
-                        // Paste once: skip a link this auto-paste already inserted.
-                        let fingerprint = paste_fingerprint(&normalized);
-                        if last_auto_paste.borrow().as_deref() == Some(fingerprint.as_str()) {
+                let next = { pending_url.borrow_mut().pop_front() };
+                if let Some(next) = next {
+                    // A manifest preview may have held this FIFO entry until
+                    // the user dismissed it. Resume the oldest queued URL first.
+                    url_entry.set_text(&next);
+                } else {
+                    // Single clipboard read per fresh open; no watch, no polling.
+                    let url_entry = url_entry.clone();
+                    let last_auto_paste = Rc::clone(&last_auto_paste);
+                    glib::spawn_future_local(async move {
+                        let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
+                        let Some(clipboard) = clipboard else { return };
+                        let Ok(Some(text)) = clipboard.read_text_future().await else {
+                            return;
+                        };
+                        if !url_entry.text().trim().is_empty() {
                             return;
                         }
-                        url_entry.set_text(&normalized);
-                        *last_auto_paste.borrow_mut() = Some(fingerprint.clone());
-                        // Persist so a restart doesn't re-paste the stale link.
-                        // The manager Rc isn't available in this async block;
-                        // settings are global via the default AppSettings.
-                        crate::settings::AppSettings::new().set_last_auto_paste(&fingerprint);
-                    }
-                });
+                        let pasted = text.trim().to_string();
+                        if let Ok(normalized) = crate::download::normalize_url(&pasted) {
+                            // Paste once: skip a link this auto-paste already inserted.
+                            let fingerprint = paste_fingerprint(&normalized);
+                            if last_auto_paste.borrow().as_deref() == Some(fingerprint.as_str()) {
+                                return;
+                            }
+                            url_entry.set_text(&normalized);
+                            *last_auto_paste.borrow_mut() = Some(fingerprint.clone());
+                            // Persist so a restart doesn't re-paste the stale link.
+                            // The manager Rc isn't available in this async block;
+                            // settings are global via the default AppSettings.
+                            crate::settings::AppSettings::new().set_last_auto_paste(&fingerprint);
+                        }
+                    });
+                }
             }
             // Keyboard-first: focus lands in the URL field so typing starts a
             // download with no tab stops.
@@ -3822,6 +4059,30 @@ mod tests {
     }
 
     #[test]
+    fn supported_manifest_uses_the_queueable_ytdlp_path_by_default() {
+        let url = "https://cdn.example.test/master.m3u8?token=abc";
+        assert!(crate::manifest_intake::supports(url));
+        assert!(!should_use_native_manifest_picker(false, url));
+        assert!(should_use_native_manifest_picker(true, url));
+    }
+
+    #[test]
+    fn manifest_probe_obeys_explicit_and_auto_add_kick_policy() {
+        let url = "https://cdn.example.test/master.m3u8?token=abc";
+        assert!(!should_probe_url(url, false));
+        assert!(should_probe_url(url, true));
+        assert!(should_probe_url("https://www.youtube.com/watch?v=x", false));
+
+        assert!(!should_auto_add_lookup(false, url));
+        assert!(should_auto_add_lookup(true, url));
+        assert!(!should_auto_add_lookup(true, "https://localhost/"));
+        assert_eq!(
+            AUTO_ADD_LOOKUP_DEBOUNCE,
+            std::time::Duration::from_millis(800)
+        );
+    }
+
+    #[test]
     fn repeated_text_is_ignored() {
         // The UI coalesces GTK's clear+insert pair before this guard runs;
         // this pins the guard itself: an identical re-set is not an edit, so
@@ -4117,5 +4378,16 @@ mod tests {
         assert!(!st.is_open());
         st.set(true);
         assert_eq!(*seen.borrow(), vec![true, false, true]);
+    }
+
+    #[test]
+    fn stream_manifests_never_use_the_plain_file_fallback() {
+        for extension in ["m3u8", "m3u", "pls", "mpd"] {
+            let url = format!("https://cdn.example.test/stream.{extension}");
+            assert!(!plain_fallback_allowed(&url), "{url}");
+        }
+        assert!(plain_fallback_allowed(
+            "https://cdn.example.test/archive.zip"
+        ));
     }
 }

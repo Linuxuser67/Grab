@@ -5,9 +5,7 @@ use std::time::Duration;
 use thiserror::Error;
 use url::Url;
 
-use super::ManifestByteRange;
-
-const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
+use super::{MAX_MANIFEST_BYTES, ManifestByteRange};
 const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
 const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
@@ -254,6 +252,10 @@ pub(crate) fn parse_dash_manifest(
                 // Text, metadata, and unknown adaptation sets are not media inputs.
                 continue;
             };
+            // dash-mpd-core 0.1.0 exposes Role only on AdaptationSet, not
+            // Representation. A spec-valid Representation-level Role=main
+            // is therefore ignored; default_audio() falls back to the first
+            // audio representation unless its AdaptationSet declares main.
             let is_default_audio = kind == DashTrackKind::Audio
                 && adaptation.Role.iter().any(|role| {
                     role.schemeIdUri == DASH_ROLE_SCHEME && role.value.as_deref() == Some("main")
@@ -1123,6 +1125,44 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
+
+    #[test]
+    fn representation_level_main_role_falls_back_to_first_audio_track() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet contentType="audio" mimeType="audio/mp4">
+      <SegmentTemplate duration="5" media="first-$Number$.m4s"/>
+      <Representation id="first" bandwidth="128000"/>
+    </AdaptationSet>
+    <AdaptationSet contentType="audio" mimeType="audio/mp4">
+      <SegmentTemplate duration="5" media="main-$Number$.m4s"/>
+      <Representation id="declared-main" bandwidth="192000">
+        <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="5" media="video-$Number$.m4s"/>
+      <Representation id="video" bandwidth="1000000"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body)
+            .expect("Representation-level Role is ignored by dash-mpd-core 0.1.0");
+
+        assert_eq!(plan.audio_representations.len(), 2);
+        assert!(
+            plan.audio_representations
+                .iter()
+                .all(|track| !track.is_default_audio)
+        );
+        assert_eq!(
+            plan.default_audio()
+                .and_then(|track| track.representation_id.as_deref()),
+            Some("first"),
+            "without an AdaptationSet Role=main, the first audio track is the fallback"
+        );
+    }
 
     #[test]
     fn parses_video_and_audio_representations_and_selects_main_audio() {

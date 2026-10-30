@@ -4,7 +4,6 @@
 //! body into validated remote resources and a local playlist description.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::time::Duration;
 
 use m3u8_rs::{AlternativeMediaType, KeyMethod, MediaPlaylist, MediaPlaylistType, Playlist};
@@ -215,10 +214,7 @@ pub(crate) fn plan_hls_media_playlist(
     build_hls_plan(base_url, playlist)
 }
 
-fn build_hls_plan(
-    base_url: Url,
-    mut playlist: MediaPlaylist,
-) -> Result<HlsPlan, ManifestError> {
+fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan, ManifestError> {
     if !playlist.end_list || playlist.i_frames_only {
         return Err(ManifestError::UnsupportedPlaylist);
     }
@@ -235,8 +231,7 @@ fn build_hls_plan(
     }
 
     let mut resources = Vec::with_capacity(playlist.segments.len());
-    let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> =
-        HashMap::new();
+    let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> = HashMap::new();
     let mut next_range_offsets: HashMap<String, u64> = HashMap::new();
     let mut total_duration = Duration::ZERO;
     let mut maximum_segment_duration = 0.0_f64;
@@ -290,7 +285,10 @@ fn build_hls_plan(
             if key.method != KeyMethod::AES128 {
                 return Err(ManifestError::UnsupportedEncryption);
             }
-            if key.keyformat.as_deref().is_some_and(|format| format != "identity")
+            if key
+                .keyformat
+                .as_deref()
+                .is_some_and(|format| format != "identity")
                 || key
                     .keyformatversions
                     .as_deref()
@@ -334,11 +332,17 @@ fn build_hls_plan(
         return Err(ManifestError::DurationOverflow);
     }
     playlist.target_duration = rounded_target_duration as u64;
-    playlist.version = Some(if playlist.segments.iter().any(|segment| segment.map.is_some()) {
-        6
-    } else {
-        3
-    });
+    playlist.version = Some(
+        if playlist
+            .segments
+            .iter()
+            .any(|segment| segment.map.is_some())
+        {
+            6
+        } else {
+            3
+        },
+    );
     playlist.playlist_type = Some(MediaPlaylistType::Vod);
     playlist.end_list = true;
 
@@ -521,9 +525,11 @@ two.ts
 "#;
         let plan = plan_hls_media_playlist(BASE_URL, body)
             .expect("simple VOD playlist should produce a local plan");
-        let bytes = plan.local_playlist_bytes().expect("playlist should serialize");
-        let parsed = m3u8_rs::parse_media_playlist_res(&bytes)
-            .expect("serialized playlist should parse");
+        let bytes = plan
+            .local_playlist_bytes()
+            .expect("playlist should serialize");
+        let parsed =
+            m3u8_rs::parse_media_playlist_res(&bytes).expect("serialized playlist should parse");
         assert_eq!(parsed.version, Some(3));
         assert_eq!(parsed.target_duration, 3);
     }
@@ -542,7 +548,10 @@ one.ts
         let parsed = m3u8_rs::parse_media_playlist_res(&bytes)
             .expect("serialized playlist should parse");
         assert_eq!(
-            parsed.segments[0].key.as_ref().and_then(|key| key.uri.as_deref()),
+            parsed.segments[0]
+                .key
+                .as_ref()
+                .and_then(|key| key.uri.as_deref()),
             Some("https://cdn.example.test/keys/media.key")
         );
     }
@@ -578,7 +587,8 @@ one.ts
             Some(ManifestError::InvalidManifestUrl)
         );
 
-        let insecure_body = b"#EXTM3U\n#EXTINF:2,\nhttp://cdn.example.test/one.ts\n#EXT-X-ENDLIST\n";
+        let insecure_body =
+            b"#EXTM3U\n#EXTINF:2,\nhttp://cdn.example.test/one.ts\n#EXT-X-ENDLIST\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, insecure_body).err(),
             Some(ManifestError::UnsupportedResourceUrl)

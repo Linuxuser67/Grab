@@ -1103,10 +1103,11 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let plan = parse_dash_manifest(BASE_URL, body)
-            .expect("static video/audio MPD should parse");
+        let plan =
+            parse_dash_manifest(BASE_URL, body).expect("static video/audio MPD should parse");
         assert_eq!(
-            plan.default_audio().and_then(|audio| audio.representation_id.as_deref()),
+            plan.default_audio()
+                .and_then(|audio| audio.representation_id.as_deref()),
             Some("a1")
         );
     }
@@ -1245,20 +1246,18 @@ mod tests {
     fn video_and_audio_resource_filenames_are_representation_scoped() {
         let plan = parse_dash_manifest(BASE_URL, TEMPLATE_MPD)
             .expect("static video/audio MPD should parse");
-        let video = plan_dash_representation(
-            &plan,
-            &plan.video_representations[0].key
-        ).expect("video representation should expand");
-        let audio = plan_dash_representation(
-            &plan,
-            &plan.audio_representations[0].key
-        ).expect("audio representation should expand");
+        let video = plan_dash_representation(&plan, &plan.video_representations[0].key)
+            .expect("video representation should expand");
+        let audio = plan_dash_representation(&plan, &plan.audio_representations[0].key)
+            .expect("audio representation should expand");
 
-        let video_names = video.resources
+        let video_names = video
+            .resources
             .iter()
             .map(|resource| resource.filename.as_str())
             .collect::<std::collections::HashSet<_>>();
-        let audio_names = audio.resources
+        let audio_names = audio
+            .resources
             .iter()
             .map(|resource| resource.filename.as_str())
             .collect::<std::collections::HashSet<_>>();
@@ -1267,10 +1266,14 @@ mod tests {
             "audio and video staging names must not collide"
         );
         assert!(video.resources.iter().all(|resource| {
-            resource.filename.starts_with(&format!("{}-", video.representation.key))
+            resource
+                .filename
+                .starts_with(&format!("{}-", video.representation.key))
         }));
         assert!(audio.resources.iter().all(|resource| {
-            resource.filename.starts_with(&format!("{}-", audio.representation.key))
+            resource
+                .filename
+                .starts_with(&format!("{}-", audio.representation.key))
         }));
     }
 

@@ -23,6 +23,8 @@ pub(crate) enum ManifestError {
     EmptyPlaylist,
     #[error("HLS master playlist contains no video variants")]
     NoVideoVariants,
+    #[error("HLS variant references an unknown audio group")]
+    InvalidAudioGroup,
     #[error("unsupported HLS playlist type")]
     UnsupportedPlaylist,
     #[error("unsupported HLS encryption method")]
@@ -198,6 +200,17 @@ pub(crate) fn parse_hls_master_playlist(
         })
         .collect::<Result<Vec<_>, ManifestError>>()?;
 
+    let has_unmatched_audio_group = variants.iter().any(|variant| {
+        variant.audio_group.as_deref().is_some_and(|group_id| {
+            !audio_renditions
+                .iter()
+                .any(|rendition| rendition.group_id == group_id)
+        })
+    });
+    if has_unmatched_audio_group {
+        return Err(ManifestError::InvalidAudioGroup);
+    }
+
     Ok(HlsMasterPlan {
         variants: variants.into_boxed_slice(),
         audio_renditions: audio_renditions.into_boxed_slice(),
@@ -251,6 +264,11 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     // An implicit segment offset is defined only by the immediately preceding
     // media segment, and only when it was a sub-range of the same resource.
     let mut previous_segment_range: Option<(String, u64)> = None;
+    // m3u8-rs resets these fields after each segment URI. HLS keeps each tag
+    // active until the next tag, so retain the source values separately from
+    // the rewritten per-segment copies below.
+    let mut active_key = None;
+    let mut active_map = None;
     let mut total_duration = Duration::ZERO;
     let mut maximum_segment_duration = 0.0_f64;
 
@@ -258,10 +276,28 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         if segment
             .unknown_tags
             .iter()
+            .any(|tag| tag.tag == "X-KEY")
+        {
+            // A key tag the parser could not decode must never pass through
+            // into FFmpeg, where it could bypass our encryption policy.
+            return Err(ManifestError::UnsupportedEncryption);
+        }
+        if segment
+            .unknown_tags
+            .iter()
             .any(|tag| is_unsupported_hls_tag(&tag.tag))
         {
             return Err(ManifestError::UnsupportedPlaylist);
         }
+
+        if let Some(key) = segment.key.as_ref() {
+            active_key = Some(key.clone());
+        }
+        if let Some(map) = segment.map.as_ref() {
+            active_map = Some(map.clone());
+        }
+        segment.key = active_key.clone();
+        segment.map = active_map.clone();
 
         let segment_duration = f64::from(segment.duration);
         if !segment_duration.is_finite() || segment_duration <= 0.0 {
@@ -310,6 +346,9 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             if key.method != KeyMethod::AES128 {
                 return Err(ManifestError::UnsupportedEncryption);
             }
+            // RFC 8216 requires an explicit IV for AES-128-encrypted
+            // initialization sections; the media-sequence-derived IV rule
+            // applies to media segments, not initialization sections.
             if segment.map.is_some() && key.iv.is_none() {
                 return Err(ManifestError::UnsupportedEncryption);
             }
@@ -409,18 +448,22 @@ fn is_unsupported_hls_tag(tag: &str) -> bool {
             | "X-PART-INF"
             | "X-RENDITION-REPORT"
             | "X-SKIP"
+            | "X-KEY"
             | "X-DEFINE"
             | "X-CONTENT-STEERING"
     )
 }
 
+fn is_valid_https_resource_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
 fn parse_manifest_url(raw: &str) -> Result<Url, ManifestError> {
     let url = Url::parse(raw).map_err(|_| ManifestError::InvalidManifestUrl)?;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
+    if !is_valid_https_resource_url(&url) {
         return Err(ManifestError::InvalidManifestUrl);
     }
     Ok(url)
@@ -430,11 +473,7 @@ fn resolve_resource_url(base_url: &Url, raw: &str) -> Result<Url, ManifestError>
     let url = base_url
         .join(raw)
         .map_err(|_| ManifestError::UnsupportedResourceUrl)?;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
+    if !is_valid_https_resource_url(&url) {
         return Err(ManifestError::UnsupportedResourceUrl);
     }
     Ok(url)
@@ -482,6 +521,18 @@ video/1080.m3u8
         assert_eq!(
             plan.audio_renditions[0].url.as_ref().map(Url::as_str),
             Some("https://cdn.example.test/path/audio/en.m3u8")
+        );
+    }
+
+    #[test]
+    fn rejects_variants_with_unmatched_audio_groups() {
+        let body = br#"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1200000,AUDIO="missing"
+video/720.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::InvalidAudioGroup)
         );
     }
 
@@ -560,6 +611,44 @@ media.mp4
     }
 
     #[test]
+    fn deduplicates_repeated_initialization_maps() {
+        let body = br#"#EXTM3U
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:2,
+one.m4s
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:2,
+two.m4s
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:2,
+three.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("identical init maps should be shared by local segments");
+
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.kind == HlsResourceKind::InitMap)
+                .count(),
+            1
+        );
+
+        let bytes = plan
+            .local_playlist_bytes()
+            .expect("local playlist should serialize");
+        let parsed = m3u8_rs::parse_media_playlist_res(&bytes)
+            .expect("serialized playlist should parse");
+        let map_names = parsed
+            .segments
+            .iter()
+            .filter_map(|segment| segment.map.as_ref().map(|map| map.uri.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(map_names, ["init-000000.bin"; 3]);
+    }
+
+    #[test]
     fn implicit_byte_range_requires_the_immediately_previous_segment_on_same_resource() {
         let body = b"#EXTM3U\n#EXTINF:1,\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:4@0\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:4\nmedia.mp4\n#EXT-X-ENDLIST\n";
         let plan = plan_hls_media_playlist(BASE_URL, body)
@@ -631,6 +720,86 @@ one.ts
             Some("https://cdn.example.test/keys/media.key")
         );
         assert_eq!(parsed.version, Some(5));
+    }
+
+    #[test]
+    fn carries_active_key_and_map_to_following_segments() {
+        let body = br#"#EXTM3U
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x00000000000000000000000000000001
+#EXTINF:2,
+first.ts
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:2,
+second.m4s
+#EXTINF:2,
+third.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("key and map scope should persist after their tags");
+
+        let bytes = plan
+            .local_playlist_bytes()
+            .expect("local playlist should serialize");
+        let parsed = m3u8_rs::parse_media_playlist_res(&bytes)
+            .expect("serialized playlist should parse");
+        assert_eq!(parsed.segments.len(), 3);
+        assert!(
+            parsed
+                .segments
+                .iter()
+                .all(|segment| segment.key.as_ref().is_some_and(|key| key.uri.as_deref()
+                    == Some("https://cdn.example.test/path/key.bin")))
+        );
+        assert!(parsed.segments[0].map.is_none());
+        assert_eq!(
+            parsed.segments[1].map.as_ref().map(|map| map.uri.as_str()),
+            Some("init-000000.bin")
+        );
+        assert_eq!(
+            parsed.segments[2].map.as_ref().map(|map| map.uri.as_str()),
+            Some("init-000000.bin")
+        );
+    }
+
+    #[test]
+    fn rejects_encrypted_map_when_the_active_key_was_declared_on_an_earlier_segment() {
+        let body = br#"#EXTM3U
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin"
+#EXTINF:2,
+one.ts
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:2,
+two.m4s
+#EXT-X-ENDLIST
+"#;
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, body).err(),
+            Some(ManifestError::UnsupportedEncryption)
+        );
+    }
+
+    #[test]
+    fn rejects_method_none_key_tags_with_or_without_iv() {
+        let without_iv = br#"#EXTM3U
+#EXT-X-KEY:METHOD=NONE
+#EXTINF:2,
+one.ts
+#EXT-X-ENDLIST
+"#;
+        let with_iv = br#"#EXTM3U
+#EXT-X-KEY:METHOD=NONE,IV=0x00000000000000000000000000000001
+#EXTINF:2,
+one.ts
+#EXT-X-ENDLIST
+"#;
+
+        for body in [without_iv.as_slice(), with_iv.as_slice()] {
+            assert_eq!(
+                plan_hls_media_playlist(BASE_URL, body).err(),
+                Some(ManifestError::UnsupportedEncryption)
+            );
+        }
     }
 
     #[test]

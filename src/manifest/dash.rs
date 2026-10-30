@@ -493,6 +493,14 @@ fn effective_template(
     if initialization_template.is_some() && initialization_element.is_some() {
         return Err(DashError::UnsupportedAddressing);
     }
+    if initialization_template.as_deref().is_some_and(str::is_empty)
+        || initialization_element
+            .as_ref()
+            .and_then(|element| element.sourceURL.as_deref())
+            .is_some_and(str::is_empty)
+    {
+        return Err(DashError::InvalidSegment);
+    }
 
     let initialization = if let Some(template) = initialization_template {
         Some(DashInitialization::Template(template))
@@ -665,9 +673,8 @@ fn expand_template(
         });
     }
 
-    let mut resources = Vec::with_capacity(
-        segments.len() + usize::from(template.initialization.is_some()),
-    );
+    let initialization_count = if template.initialization.is_some() { 1 } else { 0 };
+    let mut resources = Vec::with_capacity(segments.len() + initialization_count);
 
     if let Some(initialization) = &template.initialization {
         let (url, range) = match initialization {
@@ -677,6 +684,7 @@ fn expand_template(
                     representation,
                     template.start_number,
                     0,
+                    false,
                 )?;
                 (resolve_resource(&representation.source.base_url, &uri)?, None)
             }
@@ -702,6 +710,7 @@ fn expand_template(
             representation,
             number,
             time,
+            true,
         )?;
         resources.push(DashResource {
             url: resolve_resource(&representation.source.base_url, &uri)?,
@@ -761,6 +770,9 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                     .checked_mul(entry.duration)
                     .and_then(|offset| start.checked_add(offset))
                     .ok_or(DashError::InvalidSegment)?;
+                if time >= period_end {
+                    return Err(DashError::InvalidSegment);
+                }
                 output.push((number, time));
                 if output.len() > MAX_SEGMENTS {
                     return Err(DashError::LimitExceeded);
@@ -831,6 +843,7 @@ fn substitute_template(
     representation: &DashRepresentation,
     number: u64,
     time: u64,
+    allow_segment_tokens: bool,
 ) -> Result<String, DashError> {
     let mut output = String::with_capacity(template.len() + 32);
     let mut chars = template.chars().peekable();
@@ -887,8 +900,8 @@ fn substitute_template(
                     .ok_or(DashError::InvalidSegment)?;
                 id.to_owned()
             }
-            "Number" => format_number(number, width),
-            "Time" => format_number(time, width),
+            "Number" if allow_segment_tokens => format_number(number, width),
+            "Time" if allow_segment_tokens => format_number(time, width),
             "Bandwidth" => format_number(
                 representation.bandwidth.ok_or(DashError::InvalidSegment)?,
                 width,
@@ -912,7 +925,11 @@ fn resolve_resource(base_url: &Url, raw: &str) -> Result<Url, DashError> {
     let resolved = base_url
         .join(raw)
         .map_err(|_| DashError::UnsupportedAddressing)?;
-    validate_https_url(resolved)
+    let resolved = validate_https_url(resolved)?;
+    if resolved.path().to_ascii_lowercase().ends_with(".webm") {
+        return Err(DashError::UnsupportedPresentation);
+    }
+    Ok(resolved)
 }
 
 fn expand_list(base_url: &Url, list: &DashList) -> Result<Vec<DashResource>, DashError> {
@@ -1097,7 +1114,7 @@ mod tests {
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT1S"/><Period duration="PT1S"/></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><ContentProtection schemeIdUri="urn:uuid:00000000-0000-0000-0000-000000000000"/><Period duration="PT2S"/></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S" xlink:href="external.xml"/></MPD>"#,
-            r#"<MPD xmlns="urn:mpeg:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentBase indexRange="0-10"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#,
+            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentBase indexRange="0-10"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/webm"><SegmentList><SegmentURL media="v.webm"/></SegmentList><Representation id="v1"/></AdaptationSet></Period></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate media="s-$Number$.m4s" duration="2" presentationTimeOffset="1"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#,
         ];

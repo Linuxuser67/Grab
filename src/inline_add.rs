@@ -2266,10 +2266,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let manifest = Rc::clone(&step.manifest);
         let info = step.manifest_info.clone();
         step.manifest_format.connect_selected_notify(move |row| {
-            let selected = choices
-                .borrow()
-                .get(row.selected() as usize)
-                .cloned();
+            let selected = choices.borrow().get(row.selected() as usize).cloned();
             selection.replace(selected.as_ref().map(|choice| choice.key.clone()));
             if let (Some(selected), Some(manifest)) = (selected, manifest.borrow().as_ref()) {
                 info.set_subtitle(&format!("{} · {}", manifest.summary(), selected.label));
@@ -3195,9 +3192,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 } else if probe.borrow().is_inflight(&url, true) {
                     show_video_error(
                         &step2,
-                        &gettext(
-                            "Still looking up the media — wait for the preview, then add.",
-                        ),
+                        &gettext("Still looking up the media — wait for the preview, then add."),
                     );
                 } else {
                     kick(true);
@@ -4338,5 +4333,4 @@ mod tests {
             "https://cdn.example.test/archive.zip"
         ));
     }
-
 }

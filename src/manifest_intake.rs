@@ -81,9 +81,8 @@ impl ManifestLookup {
                 .enumerate()
                 .map(|(index, variant)| {
                     let resolution = resolution_label(variant.width, variant.height);
-                    let bitrate = bitrate_label(Some(
-                        variant.average_bandwidth.unwrap_or(variant.bandwidth),
-                    ));
+                    let bitrate =
+                        bitrate_label(Some(variant.average_bandwidth.unwrap_or(variant.bandwidth)));
                     let mut label = join_label_parts(
                         resolution,
                         bitrate,
@@ -310,9 +309,7 @@ fn bitrate_label(bandwidth: Option<u64>) -> Option<String> {
 }
 
 fn codec_label(codecs: Option<&str>) -> Option<String> {
-    codecs
-        .filter(|codecs| !codecs.is_empty())
-        .map(short_label)
+    codecs.filter(|codecs| !codecs.is_empty()).map(short_label)
 }
 
 fn short_label(value: &str) -> String {
@@ -324,11 +321,7 @@ fn short_label(value: &str) -> String {
     label
 }
 
-fn join_label_parts(
-    resolution: String,
-    bitrate: Option<String>,
-    codecs: Option<String>,
-) -> String {
+fn join_label_parts(resolution: String, bitrate: Option<String>, codecs: Option<String>) -> String {
     let mut parts = vec![resolution];
     parts.extend(bitrate);
     parts.extend(codecs);
@@ -348,13 +341,17 @@ mod tests {
         assert!(!supports("https://cdn.example.test/manifest.m3u"));
         assert!(!supports("https://cdn.example.test/manifest.pls"));
         assert!(!supports("https://cdn.example.test/manifest.m3u8/"));
-        assert!(!supports("https://user:secret@cdn.example.test/manifest.mpd"));
+        assert!(!supports(
+            "https://user:secret@cdn.example.test/manifest.mpd"
+        ));
         assert!(!supports("https://cdn.example.test/path/master.m3u8.exe"));
     }
 
     #[test]
     fn supports_manifest_urls_with_query_strings() {
-        assert!(supports("https://cdn.example.test/master.m3u8?expires=1&signature=x"));
+        assert!(supports(
+            "https://cdn.example.test/master.m3u8?expires=1&signature=x"
+        ));
         assert!(supports("https://cdn.example.test/manifest.mpd#fragment"));
     }
 

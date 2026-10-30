@@ -237,8 +237,7 @@ pub(crate) fn parse_dash_manifest(
             };
             let is_default_audio = kind == DashTrackKind::Audio
                 && adaptation.Role.iter().any(|role| {
-                    role.schemeIdUri == DASH_ROLE_SCHEME
-                        && role.value.as_deref() == Some("main")
+                    role.schemeIdUri == DASH_ROLE_SCHEME && role.value.as_deref() == Some("main")
                 });
 
             let representation_base =

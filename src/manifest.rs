@@ -21,6 +21,8 @@ pub(crate) enum ManifestError {
     ExpectedMasterPlaylist,
     #[error("HLS media playlist contains no segments")]
     EmptyPlaylist,
+    #[error("HLS master playlist contains no video variants")]
+    NoVideoVariants,
     #[error("unsupported HLS playlist type")]
     UnsupportedPlaylist,
     #[error("unsupported HLS encryption method")]
@@ -166,7 +168,7 @@ pub(crate) fn parse_hls_master_playlist(
         .collect::<Result<Vec<_>, ManifestError>>()?;
 
     if variants.is_empty() {
-        return Err(ManifestError::EmptyPlaylist);
+        return Err(ManifestError::NoVideoVariants);
     }
 
     let audio_renditions = master
@@ -229,6 +231,13 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     if playlist.segments.is_empty() {
         return Err(ManifestError::EmptyPlaylist);
     }
+    if playlist
+        .unknown_tags
+        .iter()
+        .any(|tag| is_unsupported_hls_tag(&tag.tag))
+    {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
 
     let mut resources = Vec::with_capacity(playlist.segments.len());
     let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> = HashMap::new();
@@ -237,6 +246,14 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     let mut maximum_segment_duration = 0.0_f64;
 
     for (index, segment) in playlist.segments.iter_mut().enumerate() {
+        if segment
+            .unknown_tags
+            .iter()
+            .any(|tag| is_unsupported_hls_tag(&tag.tag))
+        {
+            return Err(ManifestError::UnsupportedPlaylist);
+        }
+
         let segment_duration = f64::from(segment.duration);
         if !segment_duration.is_finite() || segment_duration <= 0.0 {
             return Err(ManifestError::InvalidDuration);
@@ -351,6 +368,19 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         duration: total_duration,
         local_playlist: playlist,
     })
+}
+
+fn is_unsupported_hls_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "X-GAP"
+            | "X-PART"
+            | "X-PRELOAD-HINT"
+            | "X-SERVER-CONTROL"
+            | "X-PART-INF"
+            | "X-RENDITION-REPORT"
+            | "X-SKIP"
+    )
 }
 
 fn parse_manifest_url(raw: &str) -> Result<Url, ManifestError> {
@@ -555,6 +585,21 @@ one.ts
                 .as_ref()
                 .and_then(|key| key.uri.as_deref()),
             Some("https://cdn.example.test/keys/media.key")
+        );
+    }
+
+    #[test]
+    fn rejects_gap_and_low_latency_partial_segments() {
+        let gap_body = b"#EXTM3U\n#EXTINF:2,\n#EXT-X-GAP\none.ts\n#EXT-X-ENDLIST\n";
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, gap_body).err(),
+            Some(ManifestError::UnsupportedPlaylist)
+        );
+
+        let partial_body = b"#EXTM3U\n#EXT-X-PART-INF:PART-TARGET=0.5\n#EXTINF:2,\none.ts\n#EXT-X-ENDLIST\n";
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, partial_body).err(),
+            Some(ManifestError::UnsupportedPlaylist)
         );
     }
 

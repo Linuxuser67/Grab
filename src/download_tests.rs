@@ -1559,6 +1559,34 @@ fn native_manifest_source_survives_queue_restore() {
 }
 
 #[test]
+fn native_manifest_queue_deduplicates_repeated_requested_filenames() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let dest = std::env::temp_dir().join(format!("grab-manifest-dedupe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).expect("destination directory");
+    let directory = dest.to_string_lossy().into_owned();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let source = crate::media_types::ManifestSource {
+        url: "https://cdn.example.test/master.m3u8".to_string(),
+        kind: crate::media_types::ManifestKind::Hls,
+        representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
+    };
+
+    let first = manager
+        .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mp4"), &[])
+        .expect("first native manifest queue row");
+    let second = manager
+        .enqueue_manifest_staged(source, &directory, Some("Stream.mp4"), &[])
+        .expect("second native manifest queue row");
+
+    assert_ne!(first.filename(), second.filename());
+    assert!(first.filename().ends_with(".mp4"));
+    assert!(second.filename().ends_with(".mp4"));
+
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
 fn native_manifest_rejects_filename_extension_that_disagrees_with_mp4_muxer() {
     let (_queue_lock, _main_loop_lock) = test_locks();
     let dest = std::env::temp_dir().join(format!("grab-manifest-name-{}", std::process::id()));
@@ -7517,7 +7545,12 @@ fn probe_validator_sent_before_workers() {
                     return Some(info);
                 }
                 // Stop waiting once the download finishes or fails.
-                if matches!(msg, EngineMsg::Finished { .. } | EngineMsg::Failed(_)) {
+                if matches!(
+                    msg,
+                    EngineMsg::Finished { .. }
+                        | EngineMsg::Failed(_)
+                        | EngineMsg::ManifestRetryable(_)
+                ) {
                     return None;
                 }
             }

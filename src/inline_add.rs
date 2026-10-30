@@ -77,6 +77,12 @@ enum SubmitSource {
     Auto,
 }
 
+impl SubmitSource {
+    const fn automatically_enqueues_manifest(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
+
 /// Multi-file torrent picker opener: file name, raw bytes, parsed entries.
 type TorrentPickerOpener = Rc<dyn Fn(String, Vec<u8>, Vec<crate::torrent::TorrentFileEntry>)>;
 
@@ -736,6 +742,7 @@ fn show_manifest_ready(
     step: &VideoStep,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     manifest: Option<crate::manifest_intake::ManifestLookup>,
+    preferred_quality: &str,
 ) {
     if let Some(manifest) = manifest {
         step.manifest.replace(Some(manifest));
@@ -747,13 +754,12 @@ fn show_manifest_ready(
         return;
     };
     let choices = manifest.choices();
-    step.manifest_choices.replace(choices);
+    let selected_index =
+        crate::manifest_intake::preferred_choice_index(&choices, preferred_quality);
     step.manifest_selection.replace(
-        step.manifest_choices
-            .borrow()
-            .first()
-            .map(|choice| choice.key.clone()),
+        choices.get(selected_index).map(|choice| choice.key.clone()),
     );
+    step.manifest_choices.replace(choices);
     step.manifest_info.set_subtitle(&manifest.summary());
 
     let labels = step
@@ -765,7 +771,8 @@ fn show_manifest_ready(
     let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
     step.manifest_format
         .set_model(Some(&gtk4::StringList::new(&label_refs)));
-    step.manifest_format.set_selected(0);
+    step.manifest_format
+        .set_selected(u32::try_from(selected_index).unwrap_or_default());
     step.manifest_info.set_visible(true);
     step.manifest_format.set_visible(true);
     if step.name.text().trim().is_empty() {
@@ -2735,7 +2742,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let scheduled_at_kick = Rc::clone(&scheduled_at);
         let pending_kick = Rc::clone(&pending_url);
         let nav_kick = nav.clone();
-        Rc::new(move |probe_unlisted: bool| {
+        Rc::new(move |probe_unlisted: bool, submit_source: SubmitSource| {
             // Twin suppression: a resolve for this URL is already running for the
             // current generation (Add pressed twice is the usual trigger) — don't
             // spawn a second yt-dlp, the twin would lose the generation race anyway.
@@ -2824,7 +2831,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     .as_ref()
                     .is_some_and(|manifest| manifest.source_url == url);
                 if fresh_manifest {
-                    show_manifest_ready(&step_b, &lookup_add_b, None);
+                    show_manifest_ready(
+                        &step_b,
+                        &lookup_add_b,
+                        None,
+                        &settings_b.video_quality(),
+                    );
                     return;
                 }
                 let fresh = {
@@ -2912,7 +2924,52 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let (ytdlp_result, gallery_error, mut toggle_items, probe_json_key) = match outcome
                 {
                     MediaLookupOutcome::Manifest(manifest) => {
-                        show_manifest_ready(&step_b, &lookup_add_b, Some(*manifest));
+                        let manifest = *manifest;
+                        let preferred_quality = settings_b.video_quality();
+                        let preferred_source = manifest.preferred_source(&preferred_quality);
+                        show_manifest_ready(
+                            &step_b,
+                            &lookup_add_b,
+                            Some(manifest),
+                            &preferred_quality,
+                        );
+
+                        if submit_source.automatically_enqueues_manifest()
+                            && settings_b.auto_add_downloads()
+                        {
+                            if let Some(source) = preferred_source {
+                                let filename = step_b.name.text().trim().to_string();
+                                let enqueue_manager = Rc::clone(&manager_b);
+                                let error_step = Rc::clone(&step_b);
+                                let error_lookup_add = Rc::clone(&lookup_add_b);
+                                enqueue_and_close_async(
+                                    &dest_b,
+                                    &close_b,
+                                    scheduled_at_b.get(),
+                                    move |directory| async move {
+                                        enqueue_manager
+                                            .enqueue_manifest_async_batched(
+                                                source,
+                                                directory.as_deref(),
+                                                Some(&filename),
+                                            )
+                                            .await
+                                    },
+                                    move |error| {
+                                        show_video_error(&error_step, error);
+                                        set_lookup_add(&error_lookup_add, true);
+                                    },
+                                );
+                            } else {
+                                show_video_error(
+                                    &step_b,
+                                    &gettext(
+                                        "Could not identify a unique stream representation for automatic download.",
+                                    ),
+                                );
+                                set_lookup_add(&lookup_add_b, true);
+                            }
+                        }
                         return;
                     }
                     MediaLookupOutcome::Gallery(items) => {
@@ -3237,7 +3294,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         &gettext("Still looking up the media — wait for the preview, then add."),
                     );
                 } else {
-                    kick(true);
+                    kick(true, source);
                 }
                 return;
             }
@@ -3274,7 +3331,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 ),
                             );
                         } else {
-                            kick(false);
+                            kick(false, source);
                         }
                     }
                 }
@@ -3300,7 +3357,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             ),
                         );
                     } else {
-                        kick(true);
+                        kick(true, source);
                     }
                 } else {
                     // Fresh preview on a link that probed video-shaped (e.g. a dai.ly short
@@ -3562,7 +3619,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         video_install_btn.connect_clicked(move |_| {
             if !crate::video_tools::in_flatpak() {
                 let kick_b = kick.clone();
-                crate::install_help::show(&btn, move || kick_b(true));
+                crate::install_help::show(&btn, move || kick_b(true, SubmitSource::Button));
                 return;
             }
             // Flatpak: staged auto-install under the shared progress popover anchored at
@@ -3577,7 +3634,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 move || {
                     // Re-probe, don't just refresh: an unlisted URL that led
                     // here for missing tools has no preview yet.
-                    kick_b(true);
+                    kick_b(true, SubmitSource::Button);
                 },
                 None, // Fresh install: show all tools.
             );
@@ -3585,7 +3642,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
     {
         let kick = kick_video.clone();
-        video_retry_btn.connect_clicked(move |_| kick(true));
+        video_retry_btn.connect_clicked(move |_| kick(true, SubmitSource::Button));
     }
     // One-click restore of the title default (audio-aware, like submit).
     {
@@ -4033,6 +4090,13 @@ fn refresh_gallery_info(v: &VideoStep, title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_debounced_auto_submit_requests_manifest_auto_enqueue() {
+        assert!(SubmitSource::Auto.automatically_enqueues_manifest());
+        assert!(!SubmitSource::Button.automatically_enqueues_manifest());
+        assert!(!SubmitSource::Enter.automatically_enqueues_manifest());
+    }
 
     #[test]
     fn youtube_and_direct_media_skip_the_gallery_probe() {

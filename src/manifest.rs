@@ -56,17 +56,39 @@ pub(crate) struct ManifestByteRange {
     pub(crate) length: u64,
 }
 
-/// Generate a staging filename tied to the resolved resource URL and byte range.
-/// Signed query strings remain part of the identity: a changed URL never adopts stale bytes.
+/// Generate a stable staging filename for a manifest resource and optional byte range.
+#[must_use]
 pub(crate) fn resource_filename(
     prefix: &str,
     index: Option<usize>,
     url: &Url,
     range: Option<ManifestByteRange>,
 ) -> String {
+    resource_filename_inner(prefix, index, url, range, false)
+}
+
+/// Generate a staging filename that preserves all query parameters.
+///
+/// HLS encryption keys use this form because changed query values can select new key bytes.
+#[must_use]
+pub(crate) fn resource_filename_exact_url(
+    prefix: &str,
+    index: Option<usize>,
+    url: &Url,
+    range: Option<ManifestByteRange>,
+) -> String {
+    resource_filename_inner(prefix, index, url, range, true)
+}
+
+fn resource_filename_inner(
+    prefix: &str,
+    index: Option<usize>,
+    url: &Url,
+    range: Option<ManifestByteRange>,
+    preserve_query: bool,
+) -> String {
+    let stable_url = resource_url_identity(url, preserve_query);
     let mut hasher = Sha256::new();
-    let mut stable_url = url.clone();
-    stable_url.set_fragment(None);
     hasher.update(stable_url.as_str().as_bytes());
     if let Some(range) = range {
         hasher.update(range.offset.to_le_bytes());
@@ -81,6 +103,59 @@ pub(crate) fn resource_filename(
         Some(index) => format!("{prefix}-{index:06}-{fingerprint}.bin"),
         None => format!("{prefix}-{fingerprint}.bin"),
     }
+}
+
+/// Return a resource URL identity without known expiring-signature parameters.
+#[must_use]
+pub(crate) fn resource_cache_key(url: &Url) -> String {
+    resource_url_identity(url, false).to_string()
+}
+
+fn resource_url_identity(url: &Url, preserve_query: bool) -> Url {
+    let mut stable_url = url.clone();
+    stable_url.set_fragment(None);
+    if preserve_query {
+        return stable_url;
+    }
+
+    let query_pairs: Vec<(String, String)> = stable_url
+        .query_pairs()
+        .filter(|(name, _)| !is_rotating_signature_parameter(name))
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect();
+    stable_url.set_query(None);
+    if !query_pairs.is_empty() {
+        stable_url.query_pairs_mut().extend_pairs(query_pairs);
+    }
+    stable_url
+}
+
+fn is_rotating_signature_parameter(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "sig"
+            | "signature"
+            | "expires"
+            | "expiry"
+            | "policy"
+            | "key-pair-id"
+            | "hmac"
+            | "hdnea"
+            | "hdnts"
+            | "awsaccesskeyid"
+            | "googleaccessid"
+            | "x-amz-algorithm"
+            | "x-amz-credential"
+            | "x-amz-date"
+            | "x-amz-expires"
+            | "x-amz-security-token"
+            | "x-amz-signature"
+            | "x-goog-algorithm"
+            | "x-goog-credential"
+            | "x-goog-date"
+            | "x-goog-expires"
+            | "x-goog-signature"
+    )
 }
 
 /// The kind of remote object fetched for a local HLS presentation.
@@ -362,7 +437,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                     checked_byte_range(range.length, offset)
                 })
                 .transpose()?;
-            let map_key = (map_url.as_str().to_owned(), map_range);
+            let map_key = (resource_cache_key(&map_url), map_range);
             let filename = match map_filenames.get(&map_key) {
                 Some(existing) => existing.clone(),
                 None => {
@@ -411,7 +486,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             let filename = match key_filenames.get(&key_url_string) {
                 Some(existing) => existing.clone(),
                 None => {
-                    let filename = resource_filename("key", None, &key_url, None);
+                    let filename = resource_filename_exact_url("key", None, &key_url, None);
                     resources.push(HlsResource {
                         url: key_url,
                         range: None,
@@ -428,12 +503,12 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         let segment_url = resolve_resource_url(&base_url, &segment.uri)?;
         let range = match segment.byte_range.as_ref() {
             Some(byte_range) => {
-                let resource_url = segment_url.as_str();
+                let resource_url = resource_cache_key(&segment_url);
                 let offset = match byte_range.offset {
                     Some(offset) => offset,
                     None => previous_segment_range
                         .as_ref()
-                        .filter(|(previous_url, _)| previous_url.as_str() == resource_url)
+                        .filter(|(previous_url, _)| previous_url == &resource_url)
                         .map(|(_, next_offset)| *next_offset)
                         .ok_or(ManifestError::MissingByteRangeOffset)?,
                 };
@@ -441,7 +516,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                 let next_offset = offset
                     .checked_add(byte_range.length)
                     .ok_or(ManifestError::InvalidByteRange)?;
-                previous_segment_range = Some((resource_url.to_owned(), next_offset));
+                previous_segment_range = Some((resource_url, next_offset));
                 Some(range)
             }
             None => {
@@ -953,6 +1028,47 @@ one.ts
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, body).err(),
             Some(ManifestError::UnsupportedEncryption)
+        );
+    }
+
+    #[test]
+    fn media_resource_cache_reuses_bytes_after_signature_rotation() {
+        let first = Url::parse(
+            "https://cdn.example.test/seg/1.m4s?quality=1080&sig=old&expires=100",
+        )
+        .expect("first signed resource URL");
+        let refreshed = Url::parse(
+            "https://cdn.example.test/seg/1.m4s?expires=200&sig=new&token=new&quality=1080",
+        )
+        .expect("refreshed signed resource URL");
+        let different_variant = Url::parse(
+            "https://cdn.example.test/seg/1.m4s?quality=720&sig=new&expires=200",
+        )
+        .expect("different representation URL");
+
+        assert_eq!(
+            resource_filename("segment", Some(1), &first, None),
+            resource_filename("segment", Some(1), &refreshed, None),
+            "rotating signatures must not invalidate completed media resources",
+        );
+        assert_ne!(
+            resource_filename("segment", Some(1), &first, None),
+            resource_filename("segment", Some(1), &different_variant, None),
+            "content-selecting query parameters must remain part of resource identity",
+        );
+    }
+
+    #[test]
+    fn encryption_key_cache_preserves_all_query_parameters() {
+        let first = Url::parse("https://cdn.example.test/key.bin?sig=old")
+            .expect("first encryption key URL");
+        let refreshed = Url::parse("https://cdn.example.test/key.bin?sig=new")
+            .expect("refreshed encryption key URL");
+
+        assert_ne!(
+            resource_filename_exact_url("key", None, &first, None),
+            resource_filename_exact_url("key", None, &refreshed, None),
+            "a changed key URL must not reuse stale key bytes",
         );
     }
 

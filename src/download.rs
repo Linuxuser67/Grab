@@ -2553,7 +2553,7 @@ impl DownloadManager {
                                 page_url: url.clone(),
                                 media_url: None,
                                 expires_at: None,
-                                quality: crate::media_types::default_video_quality(),
+                                quality: this.settings.video_quality(),
                                 audio_only: false,
                                 is_live: false,
                                 video_format_id: None,
@@ -2565,8 +2565,34 @@ impl DownloadManager {
                             gettext("Native stream failed ({error}); trying yt-dlp…")
                                 .replace("{error}", &error),
                         );
+                        item.set_progress(0.0);
                         item.set_status(DownloadStatus::Queued);
                         this.persist_queue();
+                        done = true;
+                        break;
+                    }
+                    EngineMsg::ManifestRetryable(error) => {
+                        this.pending_names.borrow_mut().remove(&id);
+                        this.server_mtime.borrow_mut().remove(&id);
+                        if matches!(
+                            item.status(),
+                            DownloadStatus::Cancelled | DownloadStatus::Paused
+                        ) {
+                            done = true;
+                            break;
+                        }
+
+                        // Preserve the native source and completed staging resources.
+                        // DownloadManager::retry will re-enter the native runner.
+                        item.set_detail(
+                            gettext("Temporary stream failure after bounded retries: {error}. Retry to resume.")
+                                .replace("{error}", &error),
+                        );
+                        item.set_status(DownloadStatus::Failed);
+                        this.torrent_pieces.borrow_mut().remove(&id);
+                        this.persist_queue();
+                        this.notify_finished(&item, Err(error));
+                        this.changed();
                         done = true;
                         break;
                     }
@@ -3136,16 +3162,13 @@ impl DownloadManager {
                     tx.send(EngineMsg::Finished { size }).ok();
                 }
                 Ok(crate::manifest_runner::ManifestOutcome::Aborted) => {}
-                Err(error) if error == crate::engine_msg::DEST_EXISTS => {
-                    tx.send(EngineMsg::Failed(error)).ok();
-                }
                 Err(error) => {
                     tracing::warn!(
                         item_id = id,
                         error = %error,
-                        "native manifest attempt failed; handing off to yt-dlp"
+                        "native manifest attempt did not complete"
                     );
-                    tx.send(EngineMsg::ManifestFallback(error)).ok();
+                    tx.send(error.into_engine_message()).ok();
                 }
             }
         });

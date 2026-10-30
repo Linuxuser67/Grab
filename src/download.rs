@@ -1126,6 +1126,26 @@ impl DownloadManager {
         Ok((item, guard))
     }
 
+    /// Queue a native HLS/DASH selection after listing its destination off GTK.
+    pub(crate) async fn enqueue_manifest_async_batched(
+        self: &Rc<Self>,
+        source: crate::media_types::ManifestSource,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+    ) -> Result<(DownloadItem, BatchGuard), String> {
+        let dir = self.resolve_dir(dest_dir);
+        let listing_dir = dir.clone();
+        let existing = gio::spawn_blocking(move || {
+            crate::video_staging::try_dir_file_names(std::path::Path::new(&listing_dir))
+        })
+        .await
+        .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
+        .map_err(|error| format!("Could not inspect download folder: {error}"))?;
+        let guard = self.batch_guard();
+        let item = self.enqueue_manifest_staged(source, &dir, filename, &existing)?;
+        Ok((item, guard))
+    }
+
     /// Enqueue a gallery download (image gallery via gallery-dl).
     /// Creates a DownloadItem with gallery flags set; the actual download
     /// is driven by the gallery runner (phase 12).
@@ -1233,6 +1253,53 @@ impl DownloadManager {
                 playlist_item_id: choices.playlist_item_id,
                 backend: None,
             },
+        );
+        Ok(self.insert(item))
+    }
+
+    /// Commit a manifest row after its destination snapshot has been prepared.
+    fn enqueue_manifest_staged(
+        self: &Rc<Self>,
+        source: crate::media_types::ManifestSource,
+        dir: &str,
+        filename: Option<&str>,
+        existing: &[String],
+    ) -> Result<DownloadItem, String> {
+        if !crate::manifest_intake::valid_source(&source) {
+            return Err(gettext("The selected stream representation is invalid"));
+        }
+        let url = normalize_url(&source.url)?;
+        let mut requested_name = filename
+            .filter(|name| sane_filename(name))
+            .map(str::to_string)
+            .unwrap_or_else(|| "Stream.mp4".to_string());
+        match std::path::Path::new(&requested_name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some(extension) if extension.eq_ignore_ascii_case("mp4") => {}
+            Some(_) => {
+                return Err(gettext(
+                    "Native HLS/DASH downloads currently require an MP4 filename",
+                ));
+            }
+            None => requested_name.push_str(".mp4"),
+        }
+        let name = self.finalize_filename(&requested_name);
+        let name = dedupe_filename(&name, |candidate| {
+            let path = std::path::Path::new(dir).join(candidate);
+            crate::video_staging::stem_reserved_in(existing, name_stem(candidate))
+                || self.dest_reserved(&path)
+                || self.items().any(|item| {
+                    (item.dest_dir() == dir && item.filename() == candidate)
+                        || item.output_dir() == path.to_string_lossy()
+                })
+        });
+        let item = DownloadItem::new(self.alloc_id_for_in(existing), &url, &name, dir);
+        item.set_detail(pending_resolve_detail(false));
+        self.video_sources.borrow_mut().insert(
+            item.id(),
+            crate::media_types::VideoSource::Manifest { source },
         );
         Ok(self.insert(item))
     }
@@ -1439,8 +1506,17 @@ impl DownloadManager {
                 .insert(item.id(), st.clone());
         }
         if let Some(src) = video_source {
-            let matches = matches!(src, crate::media_types::VideoSource::Page { page_url, .. } if *page_url == url);
-            if matches {
+            let source_matches = match src {
+                crate::media_types::VideoSource::Page { page_url, .. } => {
+                    normalize_url(page_url).is_ok_and(|page| page == url)
+                }
+                crate::media_types::VideoSource::Manifest { source } => {
+                    crate::manifest_intake::valid_source(source)
+                        && normalize_url(&source.url).is_ok_and(|manifest_url| manifest_url == url)
+                }
+                crate::media_types::VideoSource::Direct => false,
+            };
+            if source_matches {
                 let audio_only = matches!(
                     src,
                     crate::media_types::VideoSource::Page {
@@ -1453,7 +1529,7 @@ impl DownloadManager {
                     .borrow_mut()
                     .insert(item.id(), src.clone());
             } else {
-                tracing::warn!("dropping video source with mismatched page URL");
+                tracing::warn!("dropping invalid or mismatched video source");
             }
         }
         // A row the engine started in a past session resumes its own
@@ -1637,10 +1713,20 @@ impl DownloadManager {
         // Keep the row's media identity: a restored video page must not fall
         // back to the generic file icon (same page-URL guard as
         // `restore_existing`).
-        if let Some(src) = video_source
-            && matches!(src, crate::media_types::VideoSource::Page { ref page_url, .. } if *page_url == url)
-        {
-            self.video_sources.borrow_mut().insert(item.id(), src);
+        if let Some(src) = video_source {
+            let source_matches = match &src {
+                crate::media_types::VideoSource::Page { page_url, .. } => {
+                    normalize_url(page_url).is_ok_and(|page| page == url)
+                }
+                crate::media_types::VideoSource::Manifest { source } => {
+                    crate::manifest_intake::valid_source(source)
+                        && normalize_url(&source.url).is_ok_and(|manifest_url| manifest_url == url)
+                }
+                crate::media_types::VideoSource::Direct => false,
+            };
+            if source_matches {
+                self.video_sources.borrow_mut().insert(item.id(), src);
+            }
         }
         self.insert(item);
     }
@@ -1711,7 +1797,10 @@ impl DownloadManager {
         let is_torrent = crate::torrent::is_torrent(&url);
         let is_video = matches!(
             self.video_source(id),
-            Some(crate::media_types::VideoSource::Page { .. })
+            Some(
+                crate::media_types::VideoSource::Page { .. }
+                    | crate::media_types::VideoSource::Manifest { .. }
+            )
         );
         let segments = self.segment_state.borrow().get(&id).cloned();
         let started = self.started.borrow().contains(&id);
@@ -1910,8 +1999,8 @@ impl DownloadManager {
                 }
                 return self.spawn_torrent(item, url, dest);
             }
-            PreparedSpawn::Video => {
-                let Some(crate::media_types::VideoSource::Page {
+            PreparedSpawn::Video => match self.video_source(item.id()) {
+                Some(crate::media_types::VideoSource::Page {
                     page_url,
                     quality,
                     audio_only,
@@ -1919,25 +2008,29 @@ impl DownloadManager {
                     video_format_id,
                     playlist_item_id,
                     ..
-                }) = self.video_source(item.id())
-                else {
+                }) => {
+                    return self.spawn_video(SpawnVideoParams {
+                        item,
+                        page_url,
+                        quality,
+                        audio_only,
+                        video_format_id,
+                        is_live,
+                        playlist_item_id,
+                    });
+                }
+                Some(crate::media_types::VideoSource::Manifest { source }) => {
+                    return self.spawn_manifest(item, source);
+                }
+                _ => {
                     let detail = gettext("Could not prepare video source");
                     item.set_detail(detail);
                     item.set_status(DownloadStatus::Failed);
                     self.changed();
                     self.start_next();
                     return;
-                };
-                return self.spawn_video(SpawnVideoParams {
-                    item,
-                    page_url,
-                    quality,
-                    audio_only,
-                    video_format_id,
-                    is_live,
-                    playlist_item_id,
-                });
-            }
+                }
+            },
             PreparedSpawn::Plain { mode, .. } => mode,
         };
         let connections = (opts.connections.max(1) as usize).min(16);
@@ -2409,6 +2502,100 @@ impl DownloadManager {
                         done = true;
                         break;
                     }
+                    EngineMsg::ManifestFallback(error) => {
+                        this.pending_names.borrow_mut().remove(&id);
+                        this.server_mtime.borrow_mut().remove(&id);
+                        if matches!(
+                            item.status(),
+                            DownloadStatus::Cancelled | DownloadStatus::Paused
+                        ) {
+                            done = true;
+                            break;
+                        }
+
+                        // Remove only files carrying this row's native-manifest
+                        // ownership marker before switching the row to yt-dlp.
+                        let directory = std::path::PathBuf::from(item.dest_dir());
+                        let manifest_id = id;
+                        let cleanup = gio::spawn_blocking(move || {
+                            crate::video_staging::clean_manifest_staging_files(
+                                &directory,
+                                manifest_id,
+                            );
+                        });
+                        drop(this);
+                        if let Err(error) = cleanup.await {
+                            tracing::warn!(
+                                item_id = id,
+                                error = ?error,
+                                "native manifest staging cleanup failed before yt-dlp fallback"
+                            );
+                        }
+                        let Some(this) = weak.upgrade() else {
+                            done = true;
+                            break;
+                        };
+                        if !this.is_current(id, generation) {
+                            done = true;
+                            break;
+                        }
+                        if matches!(
+                            item.status(),
+                            DownloadStatus::Cancelled | DownloadStatus::Paused
+                        ) {
+                            done = true;
+                            break;
+                        }
+
+                        this.video_sources.borrow_mut().insert(
+                            id,
+                            crate::media_types::VideoSource::Page {
+                                page_url: url.clone(),
+                                media_url: None,
+                                expires_at: None,
+                                quality: this.settings.video_quality(),
+                                audio_only: false,
+                                is_live: false,
+                                video_format_id: None,
+                                playlist_item_id: None,
+                                backend: None,
+                            },
+                        );
+                        item.set_detail(
+                            gettext("Native stream failed ({error}); trying yt-dlp…")
+                                .replace("{error}", &error),
+                        );
+                        item.set_progress(0.0);
+                        item.set_status(DownloadStatus::Queued);
+                        this.persist_queue();
+                        done = true;
+                        break;
+                    }
+                    EngineMsg::ManifestRetryable(error) => {
+                        this.pending_names.borrow_mut().remove(&id);
+                        this.server_mtime.borrow_mut().remove(&id);
+                        if matches!(
+                            item.status(),
+                            DownloadStatus::Cancelled | DownloadStatus::Paused
+                        ) {
+                            done = true;
+                            break;
+                        }
+
+                        // Preserve the native source and completed staging resources.
+                        // DownloadManager::retry will re-enter the native runner.
+                        item.set_detail(
+                            gettext("Temporary stream failure after bounded retries: {error}. Retry to resume.")
+                                .replace("{error}", &error),
+                        );
+                        item.set_status(DownloadStatus::Failed);
+                        this.torrent_pieces.borrow_mut().remove(&id);
+                        this.persist_queue();
+                        this.notify_finished(&item, Err(error));
+                        this.changed();
+                        done = true;
+                        break;
+                    }
                     EngineMsg::Failed(e) => {
                         // A failed download keeps its URL-derived name.
                         this.pending_names.borrow_mut().remove(&id);
@@ -2584,7 +2771,10 @@ impl DownloadManager {
                         // Container truth from video engines: same stem, truer extension. Gated on video rows so plain-engine behavior stays bit-identical.
                         let is_video_row = matches!(
                             this.video_source(id),
-                            Some(crate::media_types::VideoSource::Page { .. })
+                            Some(
+                                crate::media_types::VideoSource::Page { .. }
+                                    | crate::media_types::VideoSource::Manifest { .. }
+                            )
                         );
                         if is_video_row
                             && name.contains('.')
@@ -2908,6 +3098,90 @@ impl DownloadManager {
             gettext("Resolving audio…")
         } else {
             gettext("Resolving media…")
+        });
+        self.changed();
+        self.pump(item, id, generation, rx);
+    }
+
+    /// Spawn one native HLS/DASH attempt through the shared queue pump.
+    fn spawn_manifest(
+        self: &Rc<Self>,
+        item: DownloadItem,
+        source: crate::media_types::ManifestSource,
+    ) {
+        let opts = DownloadOptions::from_settings(&self.settings);
+        let proxy = match opts.proxy_config() {
+            Ok(proxy) => proxy,
+            Err(error) => {
+                item.set_detail(error);
+                item.set_status(DownloadStatus::Failed);
+                self.changed();
+                self.start_next();
+                return;
+            }
+        };
+
+        let source_host = url::Url::parse(&source.url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned));
+        if source_host
+            .as_deref()
+            .is_some_and(crate::download_net::is_untrusted_handoff_host)
+            && let Err(error) = crate::subprocess_proxy::validate_proxy_compatibility()
+        {
+            item.set_detail(error);
+            item.set_status(DownloadStatus::Failed);
+            self.changed();
+            self.start_next();
+            return;
+        }
+
+        let id = item.id();
+        let generation = self.epoch.borrow().get(&id).copied().unwrap_or(0) + 1;
+        self.epoch.borrow_mut().insert(id, generation);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+        let gate = AttemptGate::new();
+        self.gates.borrow_mut().insert(id, gate.clone());
+        self.video_abort.borrow_mut().insert(id, abort_tx);
+        self.live_rows.borrow_mut().remove(&id);
+
+        let job = crate::manifest_runner::ManifestJob {
+            item_id: id,
+            source,
+            dest: item.file_path(),
+            proxy,
+            cookies_browser: opts.cookies_browser.clone(),
+            connections: opts.connections.max(1) as usize,
+        };
+        let handle = tokio_rt().spawn(async move {
+            match crate::manifest_runner::run_manifest_download(job, gate, abort_rx, tx.clone())
+                .await
+            {
+                Ok(crate::manifest_runner::ManifestOutcome::Finished(size)) => {
+                    tx.send(EngineMsg::Finished { size }).ok();
+                }
+                Ok(crate::manifest_runner::ManifestOutcome::Aborted) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        item_id = id,
+                        error = %error,
+                        "native manifest attempt did not complete"
+                    );
+                    tx.send(error.into_engine_message()).ok();
+                }
+            }
+        });
+        self.running.borrow_mut().insert(id, handle);
+        let resuming = self.started.borrow().contains(&id);
+        self.started.borrow_mut().insert(id);
+        self.persist_queue();
+        item.set_status(DownloadStatus::Downloading);
+        item.set_progress(0.0);
+        item.set_detail(if resuming {
+            gettext("Resuming stream download…")
+        } else {
+            gettext("Resolving stream manifest…")
         });
         self.changed();
         self.pump(item, id, generation, rx);
@@ -4104,9 +4378,13 @@ impl DownloadManager {
                 // Empty means "no folder tracked": omit it so old files stay clean and old app versions keep reading new ones.
                 let output_dir = it.output_dir().to_string();
                 let output_dir = (!output_dir.is_empty()).then_some(output_dir);
-                let video_source = self
-                    .video_source(it.id())
-                    .filter(|s| matches!(s, crate::media_types::VideoSource::Page { .. }));
+                let video_source = self.video_source(it.id()).filter(|source| {
+                    matches!(
+                        source,
+                        crate::media_types::VideoSource::Page { .. }
+                            | crate::media_types::VideoSource::Manifest { .. }
+                    )
+                });
                 items.push(StoredItem {
                     id: Some(it.id()),
                     url: it.url().to_string(),
@@ -4228,8 +4506,19 @@ impl DownloadManager {
                     .is_some_and(|p| p == std::path::Path::new(&item.dest_dir))
         });
         // Mirror restore_existing's cheap validations now, so the apply phase below cannot fail partway and strand engines.
-        if normalize_url(&item.url).is_err() {
-            tracing::warn!("skipping queue entry with bad URL");
+        let item_url = match normalize_url(&item.url) {
+            Ok(url) => url,
+            Err(_) => {
+                tracing::warn!("skipping queue entry with bad URL");
+                return None;
+            }
+        };
+        if let Some(crate::media_types::VideoSource::Manifest { source }) =
+            item.video_source.as_ref()
+            && (!crate::manifest_intake::valid_source(source)
+                || !normalize_url(&source.url).is_ok_and(|url| url == item_url))
+        {
+            tracing::warn!("skipping queue entry with invalid native manifest source");
             return None;
         }
         if !sane_filename(&item.filename) {

@@ -77,6 +77,12 @@ enum SubmitSource {
     Auto,
 }
 
+impl SubmitSource {
+    const fn automatically_enqueues_manifest(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
+
 /// Multi-file torrent picker opener: file name, raw bytes, parsed entries.
 type TorrentPickerOpener = Rc<dyn Fn(String, Vec<u8>, Vec<crate::torrent::TorrentFileEntry>)>;
 
@@ -286,12 +292,6 @@ fn needs_gallery_probe(url: &str) -> bool {
     !crate::gallery_probe::url_is_direct_media(url) && !crate::video_tools::is_youtube_url(url)
 }
 
-/// Native variant preview is experimental until the native queue/fetch path exists.
-/// Keep the established yt-dlp route for every supported manifest by default.
-fn should_use_native_manifest_picker(enabled: bool, url: &str) -> bool {
-    enabled && crate::manifest_intake::supports(url)
-}
-
 /// A video page always probes. Other HTTP(S) links probe only on an explicit
 /// unlisted kick (Add/Enter/Retry) or the opt-in auto-add kick.
 fn should_probe_url(url: &str, probe_unlisted: bool) -> bool {
@@ -327,19 +327,11 @@ async fn lookup_media(
     url: String,
     browser: String,
     newest_first: bool,
-    native_manifest_picker_enabled: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     let started = std::time::Instant::now();
     let host = crate::video_probe::page_host(&url);
-    let result = lookup_media_inner(
-        url,
-        browser,
-        newest_first,
-        native_manifest_picker_enabled,
-        proxy,
-    )
-    .await;
+    let result = lookup_media_inner(url, browser, newest_first, proxy).await;
     tracing::info!(
         url_host = %host,
         total_ms = started.elapsed().as_millis() as u64,
@@ -358,17 +350,21 @@ async fn lookup_media_inner(
     url: String,
     browser: String,
     newest_first: bool,
-    native_manifest_picker_enabled: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
-    // The native picker remains an explicit experiment until the queue/fetch
-    // phase can enqueue its selected representation. Production defaults keep
-    // every supported URL on the established yt-dlp preview and queue path.
-    if should_use_native_manifest_picker(native_manifest_picker_enabled, &url) {
+    // Native HLS/DASH intake runs before extraction. Unsupported or malformed
+    // manifests continue through the established yt-dlp/gallery fallback.
+    if crate::manifest_intake::supports(&url) {
         let manifest_url = url.clone();
+        let manifest_browser = browser.clone();
         let manifest_proxy = proxy.clone();
         let handle = crate::runtime::tokio_rt().spawn(async move {
-            crate::manifest_intake::lookup(&manifest_url, manifest_proxy.as_ref()).await
+            crate::manifest_intake::lookup(
+                &manifest_url,
+                &manifest_browser,
+                manifest_proxy.as_ref(),
+            )
+            .await
         });
         let native_result = {
             let _abort = AbortTaskOnDrop(handle.abort_handle());
@@ -741,12 +737,12 @@ fn clear_manifest_preview(step: &VideoStep) {
     step.manifest_info.set_subtitle("");
 }
 
-/// Show a parsed manifest and let the user choose its video representation.
-/// The queue action remains unavailable until the native queue phase lands.
+/// Show a parsed manifest and enable Add for the validated representation.
 fn show_manifest_ready(
     step: &VideoStep,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     manifest: Option<crate::manifest_intake::ManifestLookup>,
+    preferred_quality: &str,
 ) {
     if let Some(manifest) = manifest {
         step.manifest.replace(Some(manifest));
@@ -758,13 +754,11 @@ fn show_manifest_ready(
         return;
     };
     let choices = manifest.choices();
+    let selected_index =
+        crate::manifest_intake::preferred_choice_index(&choices, preferred_quality);
+    step.manifest_selection
+        .replace(choices.get(selected_index).map(|choice| choice.key.clone()));
     step.manifest_choices.replace(choices);
-    step.manifest_selection.replace(
-        step.manifest_choices
-            .borrow()
-            .first()
-            .map(|choice| choice.key.clone()),
-    );
     step.manifest_info.set_subtitle(&manifest.summary());
 
     let labels = step
@@ -776,15 +770,21 @@ fn show_manifest_ready(
     let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
     step.manifest_format
         .set_model(Some(&gtk4::StringList::new(&label_refs)));
-    step.manifest_format.set_selected(0);
+    step.manifest_format
+        .set_selected(u32::try_from(selected_index).unwrap_or_default());
     step.manifest_info.set_visible(true);
     step.manifest_format.set_visible(true);
+    if step.name.text().trim().is_empty() {
+        step.name.set_text("Stream.mp4");
+    }
+    step.name.set_visible(true);
+    // The existing revert action is tied to yt-dlp title metadata.
+    step.revert.set_visible(false);
 
-    // This phase deliberately stops at the validated variant choice. It must
-    // not pass a raw .m3u8/.mpd URL to the generic file queue or yt-dlp row.
-    step.action_revealer.set_reveal_child(false);
+    // Native rows keep the source URL and selected key as durable queue metadata.
+    step.action_revealer.set_reveal_child(true);
     set_looking_up(step, false);
-    set_lookup_add(lookup_add, false);
+    set_lookup_add(lookup_add, true);
 
     // Keep the picker inside the existing animated preview card.
     step.group_revealer.set_visible(true);
@@ -2741,7 +2741,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let scheduled_at_kick = Rc::clone(&scheduled_at);
         let pending_kick = Rc::clone(&pending_url);
         let nav_kick = nav.clone();
-        Rc::new(move |probe_unlisted: bool| {
+        Rc::new(move |probe_unlisted: bool, submit_source: SubmitSource| {
             // Twin suppression: a resolve for this URL is already running for the
             // current generation (Add pressed twice is the usual trigger) — don't
             // spawn a second yt-dlp, the twin would lose the generation race anyway.
@@ -2830,7 +2830,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     .as_ref()
                     .is_some_and(|manifest| manifest.source_url == url);
                 if fresh_manifest {
-                    show_manifest_ready(&step_b, &lookup_add_b, None);
+                    show_manifest_ready(&step_b, &lookup_add_b, None, &settings_b.video_quality());
                     return;
                 }
                 let fresh = {
@@ -2889,14 +2889,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 };
                 let browser = settings_b.cookies_browser();
                 let newest_first = settings_b.video_codec_newest();
-                let outcome = lookup_media(
-                    url.clone(),
-                    browser,
-                    newest_first,
-                    settings_b.native_manifest_picker_enabled(),
-                    proxy.clone(),
-                )
-                .await;
+                let outcome = lookup_media(url.clone(), browser, newest_first, proxy.clone()).await;
                 let outcome = match outcome {
                     Ok(outcome) => outcome,
                     Err(MediaLookupFailure::MissingTools(message)) => {
@@ -2925,7 +2918,52 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let (ytdlp_result, gallery_error, mut toggle_items, probe_json_key) = match outcome
                 {
                     MediaLookupOutcome::Manifest(manifest) => {
-                        show_manifest_ready(&step_b, &lookup_add_b, Some(*manifest));
+                        let manifest = *manifest;
+                        let preferred_quality = settings_b.video_quality();
+                        let preferred_source = manifest.preferred_source(&preferred_quality);
+                        show_manifest_ready(
+                            &step_b,
+                            &lookup_add_b,
+                            Some(manifest),
+                            &preferred_quality,
+                        );
+
+                        if submit_source.automatically_enqueues_manifest()
+                            && settings_b.auto_add_downloads()
+                        {
+                            if let Some(source) = preferred_source {
+                                let filename = step_b.name.text().trim().to_string();
+                                let enqueue_manager = Rc::clone(&manager_b);
+                                let error_step = Rc::clone(&step_b);
+                                let error_lookup_add = Rc::clone(&lookup_add_b);
+                                enqueue_and_close_async(
+                                    &dest_b,
+                                    &close_b,
+                                    scheduled_at_b.get(),
+                                    move |directory| async move {
+                                        enqueue_manager
+                                            .enqueue_manifest_async_batched(
+                                                source,
+                                                directory.as_deref(),
+                                                Some(&filename),
+                                            )
+                                            .await
+                                    },
+                                    move |error| {
+                                        show_video_error(&error_step, error);
+                                        set_lookup_add(&error_lookup_add, true);
+                                    },
+                                );
+                            } else {
+                                show_video_error(
+                                    &step_b,
+                                    &gettext(
+                                        "Could not identify a unique stream representation for automatic download.",
+                                    ),
+                                );
+                                set_lookup_add(&lookup_add_b, true);
+                            }
+                        }
                         return;
                     }
                     MediaLookupOutcome::Gallery(items) => {
@@ -3203,43 +3241,54 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             }
             let url = url_entry.text().trim().to_string();
             if crate::manifest_intake::supports(&url) {
-                let preview_is_fresh = step2
-                    .manifest
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|manifest| manifest.source_url == url);
-                if preview_is_fresh {
-                    // The selected key is retained for the native queue phase.
-                    return;
-                }
-                let extractor_preview = {
-                    let state = probe.borrow();
-                    if crate::video::preview_fresh(&state.info, state.last_ok.as_str(), &url) {
-                        state.info.clone()
-                    } else {
-                        None
-                    }
+                let selected_source = {
+                    let manifest = step2.manifest.borrow();
+                    let selected = step2.manifest_selection.borrow();
+                    manifest
+                        .as_ref()
+                        .filter(|manifest| manifest.source_url == url)
+                        .and_then(|manifest| {
+                            selected
+                                .as_deref()
+                                .and_then(|key| manifest.selected_source(key))
+                        })
                 };
-                if let Some(extractor_preview) = extractor_preview {
-                    // Native parsing may reject a dynamic or encrypted stream.
-                    // Keep the established yt-dlp path usable when it resolved it.
-                    submit_probe(
-                        &m,
+                if let Some(source) = selected_source {
+                    let filename = step2.name.text().trim().to_string();
+                    let enqueue_manager = Rc::clone(&m);
+                    let error_step = Rc::clone(&step2);
+                    let error_lookup_add = Rc::clone(&lookup_add_submit);
+                    enqueue_and_close_async(
                         &dd,
                         &close_card,
-                        &step2,
-                        &lookup_add_submit,
-                        &nav2,
-                        extractor_preview,
                         scheduled_at.get(),
+                        move |directory| async move {
+                            enqueue_manager
+                                .enqueue_manifest_async_batched(
+                                    source,
+                                    directory.as_deref(),
+                                    Some(&filename),
+                                )
+                                .await
+                        },
+                        move |error| {
+                            show_video_error(&error_step, error);
+                            set_lookup_add(&error_lookup_add, true);
+                        },
                     );
+                } else if step2.manifest.borrow().is_some() {
+                    show_video_error(
+                        &step2,
+                        &gettext("Select a valid stream representation before adding."),
+                    );
+                    set_lookup_add(&lookup_add_submit, true);
                 } else if probe.borrow().is_inflight(&url, true) {
                     show_video_error(
                         &step2,
                         &gettext("Still looking up the media — wait for the preview, then add."),
                     );
                 } else {
-                    kick(true);
+                    kick(true, source);
                 }
                 return;
             }
@@ -3276,7 +3325,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 ),
                             );
                         } else {
-                            kick(false);
+                            kick(false, source);
                         }
                     }
                 }
@@ -3302,7 +3351,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             ),
                         );
                     } else {
-                        kick(true);
+                        kick(true, source);
                     }
                 } else {
                     // Fresh preview on a link that probed video-shaped (e.g. a dai.ly short
@@ -3564,7 +3613,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         video_install_btn.connect_clicked(move |_| {
             if !crate::video_tools::in_flatpak() {
                 let kick_b = kick.clone();
-                crate::install_help::show(&btn, move || kick_b(true));
+                crate::install_help::show(&btn, move || kick_b(true, SubmitSource::Button));
                 return;
             }
             // Flatpak: staged auto-install under the shared progress popover anchored at
@@ -3579,7 +3628,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 move || {
                     // Re-probe, don't just refresh: an unlisted URL that led
                     // here for missing tools has no preview yet.
-                    kick_b(true);
+                    kick_b(true, SubmitSource::Button);
                 },
                 None, // Fresh install: show all tools.
             );
@@ -3587,7 +3636,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     }
     {
         let kick = kick_video.clone();
-        video_retry_btn.connect_clicked(move |_| kick(true));
+        video_retry_btn.connect_clicked(move |_| kick(true, SubmitSource::Button));
     }
     // One-click restore of the title default (audio-aware, like submit).
     {
@@ -4037,6 +4086,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_debounced_auto_submit_requests_manifest_auto_enqueue() {
+        assert!(SubmitSource::Auto.automatically_enqueues_manifest());
+        assert!(!SubmitSource::Button.automatically_enqueues_manifest());
+        assert!(!SubmitSource::Enter.automatically_enqueues_manifest());
+    }
+
+    #[test]
     fn youtube_and_direct_media_skip_the_gallery_probe() {
         assert!(!needs_gallery_probe(
             "https://www.youtube.com/watch?v=abc123"
@@ -4059,11 +4115,13 @@ mod tests {
     }
 
     #[test]
-    fn supported_manifest_uses_the_queueable_ytdlp_path_by_default() {
-        let url = "https://cdn.example.test/master.m3u8?token=abc";
-        assert!(crate::manifest_intake::supports(url));
-        assert!(!should_use_native_manifest_picker(false, url));
-        assert!(should_use_native_manifest_picker(true, url));
+    fn supported_manifest_urls_are_handled_by_native_intake() {
+        assert!(crate::manifest_intake::supports(
+            "https://cdn.example.test/master.m3u8?token=abc"
+        ));
+        assert!(crate::manifest_intake::supports(
+            "https://cdn.example.test/manifest.mpd"
+        ));
     }
 
     #[test]

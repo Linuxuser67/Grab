@@ -40,11 +40,28 @@ pub struct VideoChoices {
     pub playlist_item_id: Option<String>,
 }
 
+/// Native manifest protocol, persisted with the selected representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum ManifestKind {
+    Hls,
+    Dash,
+}
+
+/// Stable native-manifest selection; signed child URLs are deliberately not persisted.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ManifestSource {
+    pub(crate) url: String,
+    pub(crate) kind: ManifestKind,
+    pub(crate) representation_key: String,
+}
+
 /// Where a resource comes from; serialized into the queue file, stable across releases.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VideoSource {
     /// Ordinary file for the plain HTTP engine.
     Direct,
+    /// Direct HLS/DASH manifest with a durable selected video representation.
+    Manifest { source: ManifestSource },
     /// Media behind a page needing yt-dlp; identity is the page URL, `media_url`/`expires_at` transient, quality/audio per-item choices.
     Page {
         page_url: String,

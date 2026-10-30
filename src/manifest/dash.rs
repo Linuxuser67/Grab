@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
@@ -114,6 +115,20 @@ enum DashAddressing {
     List(DashList),
 }
 
+#[derive(Clone, Copy)]
+struct RepresentationIdentity<'a> {
+    id: Option<&'a str>,
+    kind: DashTrackKind,
+    bandwidth: Option<u64>,
+    width: Option<u64>,
+    height: Option<u64>,
+    mime_type: Option<&'a str>,
+    codecs: Option<&'a str>,
+    language: Option<&'a str>,
+    base_url: &'a Url,
+    addressing: &'a DashAddressing,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DashTemplate {
     media: String,
@@ -207,7 +222,7 @@ pub(crate) fn parse_dash_manifest(
     let mut video_representations = Vec::new();
     let mut audio_representations = Vec::new();
 
-    for (adaptation_index, adaptation) in period.adaptations.iter().enumerate() {
+    for adaptation in &period.adaptations {
         if adaptation.href.is_some() || !adaptation.ContentProtection.is_empty() {
             return Err(DashError::UnsupportedPresentation);
         }
@@ -219,8 +234,7 @@ pub(crate) fn parse_dash_manifest(
         }
 
         let adaptation_base = resolve_base_url(period_base.clone(), &adaptation.BaseURL)?;
-        for (representation_index, representation) in adaptation.representations.iter().enumerate()
-        {
+        for representation in &adaptation.representations {
             if representation.href.is_some() || !representation.ContentProtection.is_empty() {
                 return Err(DashError::UnsupportedPresentation);
             }
@@ -264,23 +278,40 @@ pub(crate) fn parse_dash_manifest(
             let representation_base =
                 resolve_base_url(adaptation_base.clone(), &representation.BaseURL)?;
             let addressing = effective_addressing(period, adaptation, representation, duration)?;
-            let key = format!("a{adaptation_index}-r{representation_index}");
+            let representation_id = representation.id.clone();
+            let bandwidth = representation.bandwidth;
+            let width = representation.width.or(adaptation.width);
+            let height = representation.height.or(adaptation.height);
+            let codecs = representation
+                .codecs
+                .clone()
+                .or_else(|| adaptation.codecs.clone());
+            let language = representation
+                .lang
+                .clone()
+                .or_else(|| adaptation.lang.clone());
+            let key = stable_representation_key(RepresentationIdentity {
+                id: representation_id.as_deref(),
+                kind,
+                bandwidth,
+                width,
+                height,
+                mime_type: mime_type.as_deref(),
+                codecs: codecs.as_deref(),
+                language: language.as_deref(),
+                base_url: &representation_base,
+                addressing: &addressing,
+            });
 
             let choice = DashRepresentation {
                 key,
-                representation_id: representation.id.clone(),
-                bandwidth: representation.bandwidth,
-                width: representation.width.or(adaptation.width),
-                height: representation.height.or(adaptation.height),
+                representation_id,
+                bandwidth,
+                width,
+                height,
                 mime_type,
-                codecs: representation
-                    .codecs
-                    .clone()
-                    .or_else(|| adaptation.codecs.clone()),
-                language: representation
-                    .lang
-                    .clone()
-                    .or_else(|| adaptation.lang.clone()),
+                codecs,
+                language,
                 kind,
                 is_default_audio: kind == DashTrackKind::Audio && is_default_audio,
                 source: DashRepresentationSource {
@@ -363,6 +394,130 @@ fn validate_https_url(url: Url) -> Result<Url, DashError> {
         return Err(DashError::UnsupportedAddressing);
     }
     Ok(url)
+}
+
+/// Stable identifier for a DASH representation, independent of adaptation
+/// and representation order. Query signatures are excluded from BaseURL identity.
+fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
+    let RepresentationIdentity {
+        id,
+        kind,
+        bandwidth,
+        width,
+        height,
+        mime_type,
+        codecs,
+        language,
+        base_url,
+        addressing,
+    } = identity;
+    let mut hasher = Sha256::new();
+    hasher.update(match kind {
+        DashTrackKind::Video => b"video".as_slice(),
+        DashTrackKind::Audio => b"audio".as_slice(),
+    });
+    hash_optional_text(&mut hasher, id);
+    hash_optional_text(&mut hasher, base_url.host_str());
+    hash_optional_number(&mut hasher, base_url.port_or_known_default().map(u64::from));
+    hash_optional_text(&mut hasher, Some(base_url.path()));
+    hash_optional_text(&mut hasher, mime_type);
+    hash_optional_text(&mut hasher, codecs);
+    hash_optional_text(&mut hasher, language);
+    hash_optional_number(&mut hasher, bandwidth);
+    hash_optional_number(&mut hasher, width);
+    hash_optional_number(&mut hasher, height);
+
+    match addressing {
+        DashAddressing::Template(template) => {
+            hasher.update(b"template");
+            hasher.update(template.media.as_bytes());
+            hash_optional_number(&mut hasher, Some(template.start_number));
+            hash_optional_number(&mut hasher, template.end_number);
+            hash_optional_number(&mut hasher, Some(template.timescale));
+            hash_optional_number(&mut hasher, template.duration_ticks);
+            match &template.initialization {
+                Some(DashInitialization::Template(value)) => {
+                    hasher.update(b"init-template");
+                    hasher.update(value.as_bytes());
+                }
+                Some(DashInitialization::Resource { url, range }) => {
+                    hasher.update(b"init-resource");
+                    hash_optional_text(&mut hasher, url.as_deref());
+                    hash_optional_range(&mut hasher, *range);
+                }
+                None => {
+                    hasher.update(b"no-init");
+                }
+            }
+            if let Some(timeline) = template.timeline.as_deref() {
+                hasher.update((timeline.len() as u64).to_le_bytes());
+                for entry in timeline {
+                    hash_optional_number(&mut hasher, entry.start);
+                    hasher.update(entry.duration.to_le_bytes());
+                    hasher.update(entry.repeat.to_le_bytes());
+                }
+            }
+        }
+        DashAddressing::List(list) => {
+            hasher.update(b"list");
+            match &list.initialization {
+                Some(DashInitialization::Template(value)) => {
+                    hasher.update(b"init-template");
+                    hasher.update(value.as_bytes());
+                }
+                Some(DashInitialization::Resource { url, range }) => {
+                    hasher.update(b"init-resource");
+                    hash_optional_text(&mut hasher, url.as_deref());
+                    hash_optional_range(&mut hasher, *range);
+                }
+                None => {
+                    hasher.update(b"no-init");
+                }
+            }
+            hasher.update((list.segments.len() as u64).to_le_bytes());
+            for segment in list.segments.iter() {
+                hasher.update(segment.media.as_bytes());
+                hash_optional_range(&mut hasher, segment.range);
+            }
+        }
+    }
+
+    let digest = hasher.finalize();
+    let fingerprint: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("dash-{fingerprint}")
+}
+
+fn hash_optional_text(hasher: &mut Sha256, value: Option<&str>) {
+    if let Some(value) = value {
+        hasher.update([1]);
+        hasher.update(value.as_bytes());
+    } else {
+        hasher.update([0]);
+    }
+}
+
+fn hash_optional_number(hasher: &mut Sha256, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            hasher.update(value.to_le_bytes());
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn hash_optional_range(hasher: &mut Sha256, range: Option<ManifestByteRange>) {
+    match range {
+        Some(range) => {
+            hasher.update([1]);
+            hasher.update(range.offset.to_le_bytes());
+            hasher.update(range.length.to_le_bytes());
+        }
+        None => hasher.update([0]),
+    }
 }
 
 /// Resolve exactly one BaseURL at each inheritance level. Choosing among CDNs
@@ -749,20 +904,23 @@ fn expand_template(
                 (resolved, *range)
             }
         };
+        let filename = super::resource_filename("dash-init", None, &url, range);
         resources.push(DashResource {
             url,
             range,
-            filename: format!("{}-init.bin", representation.key),
+            filename,
             kind: DashResourceKind::Initialization,
         });
     }
 
     for (index, (number, time)) in segments.into_iter().enumerate() {
         let uri = substitute_template(media_template, representation, number, time, true)?;
+        let url = resolve_resource(&representation.source.base_url, &uri)?;
+        let filename = super::resource_filename("dash-segment", Some(index), &url, None);
         resources.push(DashResource {
-            url: resolve_resource(&representation.source.base_url, &uri)?,
+            url,
             range: None,
-            filename: format!("{}-segment-{index:06}.bin", representation.key),
+            filename,
             kind: DashResourceKind::Segment,
         });
     }
@@ -1057,19 +1215,22 @@ fn expand_list(
                 (resolved, *range)
             }
         };
+        let filename = super::resource_filename("dash-init", None, &url, range);
         resources.push(DashResource {
             url,
             range,
-            filename: format!("{}-init.bin", representation.key),
+            filename,
             kind: DashResourceKind::Initialization,
         });
     }
 
     for (index, segment) in list.segments.iter().enumerate() {
+        let url = resolve_resource(base_url, &segment.media)?;
+        let filename = super::resource_filename("dash-segment", Some(index), &url, segment.range);
         resources.push(DashResource {
-            url: resolve_resource(base_url, &segment.media)?,
+            url,
             range: segment.range,
-            filename: format!("{}-segment-{index:06}.bin", representation.key),
+            filename,
             kind: DashResourceKind::Segment,
         });
     }
@@ -1182,6 +1343,46 @@ mod tests {
             plan.default_audio()
                 .and_then(|audio| audio.representation_id.as_deref()),
             Some("a1")
+        );
+    }
+
+    #[test]
+    fn representation_key_survives_manifest_order_changes() {
+        let original =
+            parse_dash_manifest(BASE_URL, TEMPLATE_MPD).expect("original MPD should parse");
+        let original_v1 = original
+            .video_representations
+            .iter()
+            .find(|representation| representation.representation_id.as_deref() == Some("v1"))
+            .expect("v1 representation");
+        let selected_key = original_v1.key.clone();
+
+        let reordered_body = TEMPLATE_MPD.replace(
+            concat!(
+                "      <Representation id=\"v1\" bandwidth=\"1000000\" width=\"1280\" height=\"720\" codecs=\"avc1.64001f\"/>\n",
+                "      <Representation id=\"v2\" bandwidth=\"2500000\" width=\"1920\" height=\"1080\" codecs=\"avc1.640028\"/>"
+            ),
+            concat!(
+                "      <Representation id=\"v2\" bandwidth=\"2500000\" width=\"1920\" height=\"1080\" codecs=\"avc1.640028\"/>\n",
+                "      <Representation id=\"v1\" bandwidth=\"1000000\" width=\"1280\" height=\"720\" codecs=\"avc1.64001f\"/>"
+            ),
+        );
+        assert_ne!(
+            reordered_body, TEMPLATE_MPD,
+            "fixture must reorder the variants"
+        );
+
+        let refreshed =
+            parse_dash_manifest(BASE_URL, &reordered_body).expect("reordered MPD should parse");
+        let refreshed_v1 = refreshed
+            .video_representations
+            .iter()
+            .find(|representation| representation.representation_id.as_deref() == Some("v1"))
+            .expect("v1 representation after refresh");
+        assert_eq!(refreshed_v1.key, selected_key);
+        assert!(
+            plan_dash_representation(&refreshed, &selected_key).is_ok(),
+            "the queued key must still resolve to v1 after a manifest reorder"
         );
     }
 
@@ -1411,16 +1612,18 @@ mod tests {
             video_names.is_disjoint(&audio_names),
             "audio and video staging names must not collide"
         );
-        assert!(video.resources.iter().all(|resource| {
-            resource
-                .filename
-                .starts_with(&format!("{}-", video.representation.key))
-        }));
-        assert!(audio.resources.iter().all(|resource| {
-            resource
-                .filename
-                .starts_with(&format!("{}-", audio.representation.key))
-        }));
+        assert!(
+            video
+                .resources
+                .iter()
+                .all(|resource| { resource.filename.starts_with("dash-") })
+        );
+        assert!(
+            audio
+                .resources
+                .iter()
+                .all(|resource| { resource.filename.starts_with("dash-") })
+        );
     }
 
     #[test]

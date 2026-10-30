@@ -25,6 +25,10 @@ pub(crate) enum EngineMsg {
     /// on this hot channel (progress ticks) to the largest variant's size.
     ExpandPlaylist(Box<crate::media_types::PlaylistInfo>),
     Failed(String),
+    /// Native manifest rejected the presentation or resource protocol; the pump switches to yt-dlp.
+    ManifestFallback(String),
+    /// A transient native transfer exhausted its retry budget; owner-marked staging remains resumable.
+    ManifestRetryable(String),
     /// A multi worker finished one piece; the UI thread records it for resume.
     PieceDone(u64),
     /// Multi failed terminally: shrink to completed prefix (bitmap stays valid for retry).

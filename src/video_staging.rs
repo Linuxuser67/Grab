@@ -347,6 +347,79 @@ pub fn clean_staging(dir: &Path) {
     clean_staging_in(&staging_root(), dir);
 }
 
+/// Prepare a private, item-scoped staging directory for native manifest resources.
+pub(crate) fn ensure_manifest_staging_dir(
+    dest_dir: &Path,
+    item_id: u64,
+) -> Result<PathBuf, VideoError> {
+    let dest_dir = std::fs::canonicalize(dest_dir).map_err(VideoError::staging)?;
+    let dir = dest_dir.join(format!(".grab-manifest-{item_id}"));
+    let marker = dir.join(".grab-manifest-owner");
+    let expected = format!("grab-manifest-v1\n{item_id}\n{}", dest_dir.display());
+
+    match create_private_dir(&dir) {
+        Ok(()) => {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&marker)
+                .map_err(VideoError::staging)?;
+            use std::io::Write as _;
+            file.write_all(expected.as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(VideoError::staging)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            ensure_real_staging_leaf(&dir)?;
+            let metadata = std::fs::symlink_metadata(&marker).map_err(VideoError::staging)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(VideoError::staging(
+                    "manifest staging directory has no valid ownership marker",
+                ));
+            }
+            let owner = std::fs::read_to_string(&marker).map_err(VideoError::staging)?;
+            if owner != expected {
+                return Err(VideoError::staging(
+                    "manifest staging directory belongs to another attempt",
+                ));
+            }
+        }
+        Err(error) => return Err(VideoError::staging(error)),
+    }
+    Ok(dir)
+}
+
+/// Remove only a native-manifest staging directory carrying this row's marker.
+pub(crate) fn clean_manifest_staging_files(dest_dir: &Path, item_id: u64) {
+    let Ok(dest_dir) = std::fs::canonicalize(dest_dir) else {
+        return;
+    };
+    let dir = dest_dir.join(format!(".grab-manifest-{item_id}"));
+    let marker = dir.join(".grab-manifest-owner");
+    let expected = format!("grab-manifest-v1\n{item_id}\n{}", dest_dir.display());
+    let (Ok(dir_metadata), Ok(marker_metadata), Ok(owner)) = (
+        std::fs::symlink_metadata(&dir),
+        std::fs::symlink_metadata(&marker),
+        std::fs::read_to_string(&marker),
+    ) else {
+        return;
+    };
+    if dir_metadata.file_type().is_symlink()
+        || !dir_metadata.is_dir()
+        || marker_metadata.file_type().is_symlink()
+        || !marker_metadata.is_file()
+        || owner != expected
+    {
+        return;
+    }
+    let Ok(canonical_dir) = std::fs::canonicalize(&dir) else {
+        return;
+    };
+    if canonical_dir.parent() == Some(dest_dir.as_path()) {
+        let _ = std::fs::remove_dir_all(canonical_dir);
+    }
+}
+
 /// Remove Grab staging files for an item in the destination dir.
 /// Manifest ownership is the sole destructive authority: only the exact
 /// filenames recorded in the manifest (`staging_name`) and files under its
@@ -354,6 +427,7 @@ pub fn clean_staging(dir: &Path) {
 /// is left alone.
 pub fn clean_staging_files(dest_dir: &Path, item_id: u64) {
     remove_manifest_owned_files(dest_dir, item_id);
+    clean_manifest_staging_files(dest_dir, item_id);
 }
 
 /// Remove a staging dir, guarded to stay under an explicit root (never user data).
@@ -408,6 +482,18 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
     for entry in entries.filter_map(|e| e.ok()) {
         let name = entry.file_name();
         let name_str = name.to_str().unwrap_or("");
+        // Native manifest resources are scoped to a queue id and carry an
+        // explicit ownership marker. A Done/removed row no longer owns them.
+        if let Some(id) = name_str
+            .strip_prefix(".grab-manifest-")
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|id| name_str == format!(".grab-manifest-{id}"))
+        {
+            if !keep.contains(&id) {
+                clean_manifest_staging_files(dest_dir, id);
+            }
+            continue;
+        }
         // Old single-use probe JSONs: stale by definition after a restart.
         if is_legacy_info_name(name_str) {
             let _ = std::fs::remove_file(entry.path());
@@ -1260,6 +1346,72 @@ mod tests {
             "grab-staging-{tag}-{}-{n}-{nanos}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn native_manifest_staging_is_private_and_owned_cleanup_is_exact() {
+        let dest = unique_dir("native-manifest-owned");
+        std::fs::create_dir_all(&dest).expect("destination directory");
+        let id = 8_000_021;
+        let stage = ensure_manifest_staging_dir(&dest, id).expect("private manifest staging");
+        let marker = stage.join(".grab-manifest-owner");
+        assert!(marker.is_file());
+        assert!(stage.join("video").parent().is_some());
+        std::fs::write(stage.join("video-segment.bin"), b"segment").expect("staged segment");
+
+        clean_manifest_staging_files(&dest, id);
+        assert!(!stage.exists(), "only the marker-owned stage is removed");
+        assert!(
+            dest.is_dir(),
+            "the user's destination directory is preserved"
+        );
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn startup_sweep_keeps_live_manifest_staging_and_reclaims_orphans() {
+        let dest = unique_dir("native-manifest-sweep");
+        std::fs::create_dir_all(&dest).expect("destination directory");
+        let live_id = 8_000_023;
+        let orphan_id = 8_000_024;
+        let live = ensure_manifest_staging_dir(&dest, live_id).expect("live stage");
+        let orphan = ensure_manifest_staging_dir(&dest, orphan_id).expect("orphan stage");
+        std::fs::write(live.join("segment.bin"), b"live").expect("live resource");
+        std::fs::write(orphan.join("segment.bin"), b"orphan").expect("orphan resource");
+
+        sweep_dest_staging(&dest, &std::collections::HashSet::from([live_id]));
+
+        assert!(
+            live.join("segment.bin").is_file(),
+            "queued row keeps its stage"
+        );
+        assert!(
+            !orphan.exists(),
+            "unreferenced marker-owned stage is reclaimed"
+        );
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn native_manifest_cleanup_preserves_unmarked_user_directory() {
+        let dest = unique_dir("native-manifest-unmarked");
+        std::fs::create_dir_all(&dest).expect("destination directory");
+        let id = 8_000_022;
+        let stage = dest.join(format!(".grab-manifest-{id}"));
+        std::fs::create_dir(&stage).expect("user directory");
+        let user_file = stage.join("notes.txt");
+        std::fs::write(&user_file, b"user data").expect("user file");
+
+        assert!(
+            ensure_manifest_staging_dir(&dest, id).is_err(),
+            "an existing unmarked directory must not be adopted"
+        );
+        clean_manifest_staging_files(&dest, id);
+        assert_eq!(
+            std::fs::read(&user_file).expect("user data remains"),
+            b"user data"
+        );
+        let _ = std::fs::remove_dir_all(&dest);
     }
 
     fn test_manifest(staging_name: &str, dest_dir: Option<PathBuf>) -> VideoManifest {

@@ -743,7 +743,13 @@ pub(crate) fn build_row(
             })
         ),
         crate::torrent::is_torrent(&item.url()),
-        matches!(source, Some(crate::media_types::VideoSource::Page { .. })),
+        matches!(
+            source,
+            Some(
+                crate::media_types::VideoSource::Page { .. }
+                    | crate::media_types::VideoSource::Manifest { .. }
+            )
+        ),
         item.is_gallery(),
         &item.filename(),
     );

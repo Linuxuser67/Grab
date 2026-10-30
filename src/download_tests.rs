@@ -1510,6 +1510,149 @@ fn video_source_survives_restore_and_retry() {
 }
 
 #[test]
+fn native_manifest_source_survives_queue_restore() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("manifest-restore");
+    let dest = std::env::temp_dir().join(format!("grab-manifest-restore-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).expect("destination directory");
+    let dest_string = dest.to_string_lossy().into_owned();
+    let source = crate::media_types::ManifestSource {
+        url: "https://cdn.example.test/master.m3u8?token=rotating".to_string(),
+        kind: crate::media_types::ManifestKind::Hls,
+        representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
+    };
+
+    let id = {
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+        let (item, guard) = glib::MainContext::default()
+            .block_on(manager.enqueue_manifest_async_batched(
+                source.clone(),
+                Some(&dest_string),
+                Some("Stream.mp4"),
+            ))
+            .expect("native manifest enqueue");
+        item.set_status(DownloadStatus::Paused);
+        let id = item.id();
+        drop(guard);
+
+        let saved = std::fs::read_to_string(&queue_file).expect("persisted queue");
+        assert!(saved.contains("\"Manifest\""));
+        assert!(saved.contains("master.m3u8"));
+        assert!(saved.contains(&source.representation_key));
+        id
+    };
+
+    let restored_manager =
+        DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    restored_manager.restore_queue();
+    let restored = restored_manager.find(id).expect("manifest row restored");
+    assert_eq!(restored.status(), DownloadStatus::Paused);
+    assert!(matches!(
+        restored_manager.video_source(id),
+        Some(crate::media_types::VideoSource::Manifest { source: restored_source })
+            if restored_source == source
+    ));
+
+    let _ = std::fs::remove_dir_all(&dest);
+    let _ = std::fs::remove_file(&queue_file);
+}
+
+#[test]
+fn native_manifest_queue_deduplicates_repeated_requested_filenames() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let dest = std::env::temp_dir().join(format!("grab-manifest-dedupe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).expect("destination directory");
+    let directory = dest.to_string_lossy().into_owned();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let source = crate::media_types::ManifestSource {
+        url: "https://cdn.example.test/master.m3u8".to_string(),
+        kind: crate::media_types::ManifestKind::Hls,
+        representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
+    };
+
+    let first = manager
+        .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mp4"), &[])
+        .expect("first native manifest queue row");
+    let second = manager
+        .enqueue_manifest_staged(source, &directory, Some("Stream.mp4"), &[])
+        .expect("second native manifest queue row");
+
+    assert_ne!(first.filename(), second.filename());
+    assert!(first.filename().ends_with(".mp4"));
+    assert!(second.filename().ends_with(".mp4"));
+
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn native_manifest_rejects_filename_extension_that_disagrees_with_mp4_muxer() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let dest = std::env::temp_dir().join(format!("grab-manifest-name-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).expect("destination directory");
+    let directory = dest.to_string_lossy().into_owned();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let source = crate::media_types::ManifestSource {
+        url: "https://cdn.example.test/master.m3u8".to_string(),
+        kind: crate::media_types::ManifestKind::Hls,
+        representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
+    };
+
+    let result = manager.enqueue_manifest_staged(source, &directory, Some("Stream.mkv"), &[]);
+    assert!(result.is_err());
+    assert_eq!(manager.store().n_items(), 0);
+
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn invalid_native_manifest_source_is_skipped_on_restore() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("manifest-invalid-restore");
+    let item = StoredItem {
+        id: None,
+        url: "https://cdn.example.test/master.m3u8".to_string(),
+        dest_dir: "/tmp".to_string(),
+        filename: "Stream.mp4".to_string(),
+        status: DownloadStatus::Paused,
+        progress: 0.0,
+        segments: None,
+        selected_files: None,
+        output_dir: None,
+        video_source: Some(crate::media_types::VideoSource::Manifest {
+            source: crate::media_types::ManifestSource {
+                url: "https://cdn.example.test/another.mpd".to_string(),
+                kind: crate::media_types::ManifestKind::Dash,
+                representation_key: "dash-0123456789abcdef0123456789abcdef".to_string(),
+            },
+        }),
+        started: None,
+        scheduled_at: None,
+        etag: None,
+        last_modified: None,
+        public_only: None,
+        gallery: None,
+    };
+    std::fs::write(
+        &queue_file,
+        serde_json::to_string(&StoredQueue {
+            version: QUEUE_VERSION,
+            items: vec![item],
+        })
+        .expect("serialize queue"),
+    )
+    .expect("write queue");
+
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.restore_queue();
+    assert_eq!(manager.store().n_items(), 0);
+
+    let _ = std::fs::remove_file(&queue_file);
+}
+
+#[test]
 fn mismatched_video_source_dropped_on_restore() {
     let _lock = lock_queue_file();
     let qf = test_queue_file("video-mismatch");
@@ -7402,7 +7545,12 @@ fn probe_validator_sent_before_workers() {
                     return Some(info);
                 }
                 // Stop waiting once the download finishes or fails.
-                if matches!(msg, EngineMsg::Finished { .. } | EngineMsg::Failed(_)) {
+                if matches!(
+                    msg,
+                    EngineMsg::Finished { .. }
+                        | EngineMsg::Failed(_)
+                        | EngineMsg::ManifestRetryable(_)
+                ) {
                     return None;
                 }
             }

@@ -135,10 +135,17 @@ pub(crate) fn parse_hls_master_playlist(
         return Err(ManifestError::ExpectedMasterPlaylist);
     };
 
-    // Session keys would require the master-playlist encryption semantics to
-    // be reproduced locally. Keep those manifests on the established fallback.
+    // Session keys and unimplemented URI-affecting extensions need the
+    // established extractor path; silently ignoring them can select wrong media.
     if !master.session_key.is_empty() {
         return Err(ManifestError::UnsupportedEncryption);
+    }
+    if master
+        .unknown_tags
+        .iter()
+        .any(|tag| is_unsupported_hls_tag(&tag.tag))
+    {
+        return Err(ManifestError::UnsupportedPlaylist);
     }
 
     let variants = master
@@ -303,6 +310,9 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             if key.method != KeyMethod::AES128 {
                 return Err(ManifestError::UnsupportedEncryption);
             }
+            if segment.map.is_some() && key.iv.is_none() {
+                return Err(ManifestError::UnsupportedEncryption);
+            }
             if key
                 .keyformat
                 .as_deref()
@@ -362,17 +372,22 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         return Err(ManifestError::DurationOverflow);
     }
     playlist.target_duration = rounded_target_duration as u64;
-    playlist.version = Some(
-        if playlist
-            .segments
-            .iter()
-            .any(|segment| segment.map.is_some())
-        {
-            6
-        } else {
-            3
-        },
-    );
+    let has_initialization_map = playlist
+        .segments
+        .iter()
+        .any(|segment| segment.map.is_some());
+    let has_key_format_attributes = playlist.segments.iter().any(|segment| {
+        segment.key.as_ref().is_some_and(|key| {
+            key.keyformat.is_some() || key.keyformatversions.is_some()
+        })
+    });
+    playlist.version = Some(if has_initialization_map {
+        6
+    } else if has_key_format_attributes {
+        5
+    } else {
+        3
+    });
     playlist.playlist_type = Some(MediaPlaylistType::Vod);
     playlist.end_list = true;
 
@@ -393,6 +408,8 @@ fn is_unsupported_hls_tag(tag: &str) -> bool {
             | "X-PART-INF"
             | "X-RENDITION-REPORT"
             | "X-SKIP"
+            | "X-DEFINE"
+            | "X-CONTENT-STEERING"
     )
 }
 
@@ -593,7 +610,7 @@ two.ts
     #[test]
     fn aes_128_key_url_is_absolutized_for_ffmpeg() {
         let body = br#"#EXTM3U
-#EXT-X-KEY:METHOD=AES-128,URI="../keys/media.key",IV=0x00000000000000000000000000000001
+#EXT-X-KEY:METHOD=AES-128,URI="../keys/media.key",IV=0x00000000000000000000000000000001,KEYFORMAT="identity"
 #EXTINF:2,
 one.ts
 #EXT-X-ENDLIST
@@ -612,6 +629,7 @@ one.ts
                 .and_then(|key| key.uri.as_deref()),
             Some("https://cdn.example.test/keys/media.key")
         );
+        assert_eq!(parsed.version, Some(5));
     }
 
     #[test]
@@ -626,6 +644,40 @@ one.ts
             b"#EXTM3U\n#EXT-X-PART-INF:PART-TARGET=0.5\n#EXTINF:2,\none.ts\n#EXT-X-ENDLIST\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, partial_body).err(),
+            Some(ManifestError::UnsupportedPlaylist)
+        );
+    }
+
+    #[test]
+    fn rejects_encrypted_initialization_maps_without_an_explicit_iv() {
+        let body = br#"#EXTM3U
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin"
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:2,
+one.ts
+#EXT-X-ENDLIST
+"#;
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, body).err(),
+            Some(ManifestError::UnsupportedEncryption)
+        );
+    }
+
+    #[test]
+    fn rejects_uri_affecting_hls_extensions_until_they_are_supported() {
+        let body = br#"#EXTM3U
+#EXT-X-CONTENT-STEERING:SERVER-URI="steering.json",PATHWAY-ID="default"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::UnsupportedPlaylist)
+        );
+
+        let media = b"#EXTM3U\n#EXT-X-DEFINE:NAME=\"path\",VALUE=\"video\"\n#EXTINF:2,\n{$path}/one.ts\n#EXT-X-ENDLIST\n";
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, media).err(),
             Some(ManifestError::UnsupportedPlaylist)
         );
     }

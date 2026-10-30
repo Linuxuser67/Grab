@@ -737,8 +737,8 @@ third.m4s
         let bytes = plan
             .local_playlist_bytes()
             .expect("local playlist should serialize");
-        let parsed = m3u8_rs::parse_media_playlist_res(&bytes)
-            .expect("serialized playlist should parse");
+        let parsed =
+            m3u8_rs::parse_media_playlist_res(&bytes).expect("serialized playlist should parse");
         assert_eq!(parsed.segments.len(), 3);
         assert!(
             parsed.segments.iter().all(|segment| segment

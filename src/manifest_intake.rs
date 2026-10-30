@@ -19,7 +19,9 @@ enum ManifestKind {
     Dash,
 }
 
-fn manifest_kind(url: &Url) -> Option<ManifestKind> {
+/// This is narrower than video::is_stream_manifest_url: native intake accepts
+/// HTTPS .m3u8/.mpd only; the generic guard also reserves HTTP, .m3u and .pls.
+fn native_manifest_kind(url: &Url) -> Option<ManifestKind> {
     if url.scheme() != "https"
         || url.host_str().is_none()
         || !url.username().is_empty()
@@ -44,7 +46,7 @@ fn manifest_kind(url: &Url) -> Option<ManifestKind> {
 pub(crate) fn supports(raw_url: &str) -> bool {
     Url::parse(raw_url)
         .ok()
-        .is_some_and(|url| manifest_kind(&url).is_some())
+        .is_some_and(|url| native_manifest_kind(&url).is_some())
 }
 
 /// One selectable video choice from a parsed native manifest.
@@ -188,7 +190,7 @@ pub(crate) async fn lookup(
     proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Result<Option<ManifestLookup>, String> {
     let requested_url = Url::parse(raw_url).map_err(|_| gettext("Invalid stream manifest URL"))?;
-    let Some(kind) = manifest_kind(&requested_url) else {
+    let Some(kind) = native_manifest_kind(&requested_url) else {
         return Ok(None);
     };
 

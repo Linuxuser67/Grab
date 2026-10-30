@@ -42,7 +42,7 @@ jobs:
     container: fedora:44
     steps:
       - name: Install system dependencies
-        run: dnf install -y git gcc pkg-config gtk4-devel libadwaita-devel python3 xorg-x11-server-Xvfb
+        run: dnf install -y git gcc pkg-config gtk4-devel libadwaita-devel python3 ffmpeg-free xorg-x11-server-Xvfb
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No job pushes or fetches; don't persist the token in git config.
@@ -72,8 +72,11 @@ jobs:
       # --nocapture: show SKIP messages from gallery integration tests
       # (they skip gracefully when the port is busy or gallery-dl itself
       # errors internally; GRAB_REQUIRE_GALLERY_DL=1 turns skips into failures).
-      # To enforce the gate locally: GRAB_REQUIRE_GALLERY_DL=1 cargo test
-      - run: GRAB_REQUIRE_GALLERY_DL=1 cargo test -- --test-threads=1 --nocapture
+      # Native manifest integration tests generate HLS/DASH fMP4 fixtures,
+      # fetch their resources over loopback, and verify FFmpeg/ffprobe output.
+      # Both external-tool gates are mandatory in CI and may skip locally.
+      # To enforce both gates locally: GRAB_REQUIRE_GALLERY_DL=1 GRAB_REQUIRE_FFMPEG_MANIFEST=1 cargo test
+      - run: GRAB_REQUIRE_GALLERY_DL=1 GRAB_REQUIRE_FFMPEG_MANIFEST=1 cargo test -- --test-threads=1 --nocapture
       # Display-dependent picker and queue-view regressions are #[ignore]d
       # for the plain run. Xvfb supplies a display for both test filters.
       # The trailing grep guards the ignore: zero matching tests would exit 0.

@@ -214,7 +214,6 @@ impl std::ops::Deref for AppSettings {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::AppSettings;

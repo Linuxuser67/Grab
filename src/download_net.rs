@@ -429,6 +429,16 @@ const UNTRUSTED_HANDOFF_HOSTS_CAP: usize = 4096;
 /// expansion paths apply the same cap.
 pub(crate) const MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION: usize = 64;
 
+#[cfg(test)]
+static UNTRUSTED_HANDOFF_POLICY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Serialize tests that temporarily replace the process-global handoff policy.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn lock_untrusted_handoff_policy_for_test() -> std::sync::MutexGuard<'static, ()> {
+    lock_recover(&UNTRUSTED_HANDOFF_POLICY_TEST_LOCK)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CollectionHostError {
     TooManyDistinctHosts,
@@ -869,6 +879,7 @@ mod tests {
 
     #[test]
     fn public_resolution_marks_only_public_destinations() {
+        let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
             let mut set = lock_recover(cache);
@@ -898,6 +909,7 @@ mod tests {
 
     #[test]
     fn untrusted_policy_is_exact_and_children_are_registered_explicitly() {
+        let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
             let mut set = lock_recover(cache);
@@ -918,6 +930,7 @@ mod tests {
 
     #[test]
     fn collection_host_limit_is_shared_and_counts_only_accepted_hosts() {
+        let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
             let mut set = lock_recover(cache);
@@ -987,6 +1000,7 @@ mod tests {
 
     #[test]
     fn untrusted_collection_policy_is_inherited_by_queued_children() {
+        let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
             let mut set = lock_recover(cache);
@@ -1007,6 +1021,7 @@ mod tests {
 
     #[test]
     fn public_resolution_cap_fails_closed() {
+        let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
             let mut set = lock_recover(cache);
@@ -1034,6 +1049,7 @@ mod tests {
 
     #[test]
     fn releasing_a_row_keeps_the_host_registered() {
+        let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
             let mut set = lock_recover(cache);

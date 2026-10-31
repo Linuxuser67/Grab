@@ -439,6 +439,34 @@ pub(crate) fn lock_untrusted_handoff_policy_for_test() -> std::sync::MutexGuard<
     lock_recover(&UNTRUSTED_HANDOFF_POLICY_TEST_LOCK)
 }
 
+/// Restore the process-global handoff policy when a test finishes.
+#[cfg(test)]
+pub(crate) struct IsolatedUntrustedHandoffPolicy {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: std::collections::BTreeMap<String, usize>,
+}
+
+#[cfg(test)]
+impl Drop for IsolatedUntrustedHandoffPolicy {
+    fn drop(&mut self) {
+        let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        *lock_recover(cache) = std::mem::take(&mut self.previous);
+    }
+}
+
+/// Lock and temporarily clear the global handoff policy for a test.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn isolate_untrusted_handoff_policy_for_test() -> IsolatedUntrustedHandoffPolicy {
+    let lock = lock_untrusted_handoff_policy_for_test();
+    let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+    let previous = std::mem::take(&mut *lock_recover(cache));
+    IsolatedUntrustedHandoffPolicy {
+        _lock: lock,
+        previous,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CollectionHostError {
     TooManyDistinctHosts,

@@ -1075,7 +1075,7 @@ mod tests {
 
     #[test]
     fn manifest_child_guard_rejects_private_hosts_for_untrusted_sources() {
-        let _test_lock = crate::download_net::lock_untrusted_handoff_policy_for_test();
+        let _test_policy = crate::download_net::isolate_untrusted_handoff_policy_for_test();
         let parent_url = "https://manifest-private-guard.fixture.invalid/master.m3u8";
         assert!(crate::download_net::require_public_resolution(
             "manifest-private-guard.fixture.invalid"
@@ -1091,7 +1091,10 @@ mod tests {
             error,
             "The stream manifest references a local or private network resource"
         );
-        assert!(seen_hosts.is_empty(), "rejected hosts must not consume a slot");
+        assert!(
+            seen_hosts.is_empty(),
+            "rejected hosts must not consume a slot"
+        );
     }
 
     #[test]
@@ -1104,10 +1107,8 @@ mod tests {
 
         let mut seen_hosts = std::collections::HashSet::new();
         for index in 0..crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
-            let child_url = Url::parse(&format!(
-                "https://cdn-{index}.fixture.invalid/segment.m4s"
-            ))
-            .expect("public manifest child URL is valid");
+            let child_url = Url::parse(&format!("https://cdn-{index}.fixture.invalid/segment.m4s"))
+                .expect("public manifest child URL is valid");
             guard_manifest_child_url(parent_url, &child_url, &mut seen_hosts)
                 .expect("each child host below the limit should be accepted");
         }

@@ -546,11 +546,9 @@ async fn lookup_with_client_policy(
             let Ok(body) = std::str::from_utf8(&body) else {
                 return Ok(None);
             };
-            let Ok(plan) = crate::manifest::dash::parse_dash_manifest_at(
-                final_url.as_str(),
-                body,
-                server_now,
-            ) else {
+            let Ok(plan) =
+                crate::manifest::dash::parse_dash_manifest_at(final_url.as_str(), body, server_now)
+            else {
                 return Ok(None);
             };
             NativeManifest::Dash(plan)
@@ -848,9 +846,8 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
         .is_none_or(|key| match source.kind {
             crate::media_types::ManifestKind::Hls => has_hex_fingerprint(key, "hls-audio-", 32),
             crate::media_types::ManifestKind::Dash => {
-                has_hex_fingerprint(key, "dash-", 32)
-                    || has_hex_fingerprint(key, "dash-live-", 32)
-            },
+                has_hex_fingerprint(key, "dash-", 32) || has_hex_fingerprint(key, "dash-live-", 32)
+            }
         });
     video_key_is_valid && audio_key_is_valid
 }

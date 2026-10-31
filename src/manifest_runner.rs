@@ -220,6 +220,13 @@ enum DashLiveCaptureOutcome {
     Discard,
 }
 
+#[derive(Debug)]
+struct DashLiveCapture {
+    outcome: DashLiveCaptureOutcome,
+    video_resources: Vec<String>,
+    audio_resources: Option<Vec<String>>,
+}
+
 /// Run one HLS or static-DASH attempt, keeping completed resources for retry.
 ///
 /// # Errors
@@ -2808,7 +2815,7 @@ async fn run_live_dash_tracks(
                 representation_key: representation_key.to_string(),
                 audio_key: audio_key.clone(),
             },
-        );
+        );.await
         let refreshed = match refreshed {
             Ok(Tracks::Dash { video, audio }) => (video, audio.map(|audio| *audio)),
             Ok(_) => {
@@ -2831,12 +2838,10 @@ async fn run_live_dash_tracks(
         current_video_plan = refreshed.0;
         current_audio_plan = refreshed.1;
         next_refresh_at = dash_next_refresh_deadline(&current_video_plan.presentation)?;
-        let current_audio_bytes = audio
-            .as_ref()
-            .map(|(track, _)| dash_live_track_bytes(&track.state, &track.directory))
-            .transpose()
-            .await?
-            .unwrap_or(0);
+        let current_audio_bytes = match audio.as_ref() {
+            Some((track, _)) => dash_live_track_bytes(&track.state, &track.directory).await?,
+            None => 0,
+        };
 
         match apply_dash_live_snapshot(
             client,

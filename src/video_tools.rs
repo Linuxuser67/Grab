@@ -373,13 +373,15 @@ fn ffmpeg_search_dirs_in(
 /// System FFmpeg/ffprobe search paths outside Flatpak. Do not use Grab's private
 /// tool directory: older copies may remain there from versions that downloaded
 /// FFmpeg, but Grab no longer manages or prefers them.
+fn system_ffmpeg_search_dirs_from(path: &std::ffi::OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|directory| directory.is_absolute())
+        .collect()
+}
+
 fn system_ffmpeg_search_dirs() -> Vec<PathBuf> {
     std::env::var_os("PATH")
-        .map(|path| {
-            std::env::split_paths(&path)
-                .filter(|d| !d.as_os_str().is_empty())
-                .collect()
-        })
+        .map(|path| system_ffmpeg_search_dirs_from(&path))
         .unwrap_or_default()
 }
 
@@ -2683,6 +2685,21 @@ mod tests {
             std::slice::from_ref(&system),
         ));
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn system_ffmpeg_search_paths_ignore_relative_entries() {
+        let path = std::env::join_paths([
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("."),
+            PathBuf::from("bin"),
+        ])
+        .expect("PATH should accept these entries");
+
+        assert_eq!(
+            system_ffmpeg_search_dirs_from(&path),
+            [PathBuf::from("/usr/bin")]
+        );
     }
 
     #[test]

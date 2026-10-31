@@ -1135,16 +1135,30 @@ mod tests {
         )
         .expect("build the production guarded HTTP client with fixture DNS");
 
-        let response = client.get(child.clone()).send().await;
+        let mut request = tokio::spawn(async move { client.get(child.clone()).send().await });
+        match timeout(Duration::from_millis(300), listener.accept()).await {
+            Ok(Ok((socket, _))) => {
+                drop(socket);
+                request.abort();
+                panic!("a manifest-derived resource connected to a private DNS answer");
+            }
+            Ok(Err(error)) => {
+                request.abort();
+                panic!("the resolver fixture failed to accept: {error}");
+            }
+            Err(_) => {}
+        }
+        let response = match timeout(Duration::from_secs(2), &mut request).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => panic!("manifest resource request task failed: {error}"),
+            Err(_) => {
+                request.abort();
+                panic!("manifest resource request did not finish after DNS rejection");
+            }
+        };
         assert!(
             response.is_err(),
             "a public manifest's child hostname must not connect when DNS resolves privately"
-        );
-        assert!(
-            timeout(Duration::from_millis(300), listener.accept())
-                .await
-                .is_err(),
-            "the private destination must be rejected before a TCP connection is opened"
         );
     }
 

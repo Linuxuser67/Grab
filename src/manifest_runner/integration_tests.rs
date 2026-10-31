@@ -379,11 +379,12 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
     let attempt_directory = staging.clone();
     let attempt_tx = tx.clone();
     let attempt_downloaded = std::sync::Arc::clone(&downloaded);
+    let attempt_resource = slow_resource.clone();
     let attempt = tokio::spawn(async move {
         let mut abort = abort_rx;
         fetch_resources(
             &attempt_client,
-            vec![slow_resource.clone()],
+            vec![attempt_resource],
             &attempt_directory,
             1,
             &attempt_tx,

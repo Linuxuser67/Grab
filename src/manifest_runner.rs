@@ -473,6 +473,7 @@ pub(crate) async fn run_manifest_download(
             concurrency,
             &tx,
             &downloaded,
+            &mut guarded_child_hosts,
             &mut abort,
         )
         .await?;
@@ -1486,6 +1487,7 @@ async fn run_live_hls_tracks(
     connections: usize,
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &Arc<AtomicU64>,
+    guarded_child_hosts: &mut std::collections::HashSet<String>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<LiveHlsCaptureOutcome, ManifestRunError> {
     let mut video = load_live_hls_track(video_plan, video_dir).await?;
@@ -1509,7 +1511,6 @@ async fn run_live_hls_tracks(
         })?;
     downloaded.store(retained_bytes, Ordering::Relaxed);
     ensure_manifest_mux_space(destination_dir, retained_bytes)?;
-    let mut guarded_child_hosts = std::collections::HashSet::new();
 
     let audio_resource_bytes = audio
         .as_ref()

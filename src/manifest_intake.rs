@@ -585,7 +585,7 @@ pub(crate) async fn lookup_hls_media(
 async fn fetch_bounded_manifest(
     client: &reqwest::Client,
     requested_url: Url,
- ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     fetch_bounded_manifest_with_policy(client, requested_url, ManifestTransportPolicy::HttpsOnly)
         .await
 }

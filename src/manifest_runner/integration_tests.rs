@@ -1584,3 +1584,321 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
         .expect("publish finalized DASH fixture");
     assert_mp4_has_audio_and_video(Path::new("ffprobe"), &output);
 }
+
+
+#[tokio::test]
+async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4() {
+    if !tools_available() {
+        return;
+    }
+
+    let root = TempRoot::new("dynamic-dash-finalize");
+    let fixture_dir = root.path().join("fixture");
+    std::fs::create_dir_all(&fixture_dir).expect("create dynamic DASH fixture directory");
+    let generated = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=96x64:rate=12",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=48000",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-t",
+            "3",
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "5",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "64k",
+            "-f",
+            "dash",
+            "-seg_duration",
+            "1",
+            "-use_template",
+            "1",
+            "-use_timeline",
+            "0",
+            "-init_seg_name",
+            "init-$RepresentationID$.m4s",
+            "-media_seg_name",
+            "chunk-$RepresentationID$-$Number%05d$.m4s",
+            "-adaptation_sets",
+            "id=0,streams=v id=1,streams=a",
+        ])
+        .arg(fixture_dir.join("manifest.mpd"))
+        .output()
+        .expect("generate dynamic DASH fMP4 fixture");
+    assert_command_succeeded(&generated, "FFmpeg failed to generate the dynamic DASH fixture");
+
+    let source_url = "https://manifest-origin.fixture.invalid/master.mpd";
+    let manifest_url = "https://cdn.fixture.invalid/manifest.mpd";
+    let manifest = std::fs::read_to_string(fixture_dir.join("manifest.mpd"))
+        .expect("read generated DASH MPD");
+    let dynamic_manifest = if manifest.contains("type=\"static\"") {
+        manifest.replacen("type=\"static\"", "type=\"dynamic\"", 1)
+    } else {
+        manifest.replacen("<MPD ", "<MPD type=\"dynamic\" ", 1)
+    };
+    let dynamic_manifest = dynamic_manifest.replacen(
+        "<MPD ",
+        "<MPD availabilityStartTime=\"1970-01-01T00:00:00Z\" availabilityEndTime=\"1970-01-01T00:00:03Z\" minimumUpdatePeriod=\"PT4S\" timeShiftBufferDepth=\"PT10S\" ",
+        1,
+    );
+    let parsed = crate::manifest::dash::parse_dash_manifest_at(
+        manifest_url,
+        &dynamic_manifest,
+        UNIX_EPOCH + Duration::from_secs(3),
+    )
+    .expect("parse generated dynamic DASH MPD");
+    assert!(
+        matches!(&parsed.presentation, crate::manifest::DashPresentation::Dynamic(_)),
+        "generated fixture must use the native dynamic DASH path"
+    );
+
+    let video_key = parsed
+        .video_representations
+        .first()
+        .expect("generated dynamic DASH fixture has video")
+        .live_key
+        .clone();
+    let audio_key = parsed
+        .default_audio()
+        .expect("generated dynamic DASH fixture has audio")
+        .live_key
+        .clone();
+    let mut video_plan = crate::manifest::dash::plan_dash_representation(&parsed, &video_key)
+        .expect("plan dynamic DASH video representation");
+    let mut audio_plan = crate::manifest::dash::plan_dash_representation(&parsed, &audio_key)
+        .expect("plan dynamic DASH audio representation");
+    assert!(
+        video_plan
+            .resources
+            .iter()
+            .any(|resource| resource.kind == DashResourceKind::Segment),
+        "dynamic DASH planning must expose complete video segments"
+    );
+    assert!(
+        audio_plan
+            .resources
+            .iter()
+            .any(|resource| resource.kind == DashResourceKind::Segment),
+        "dynamic DASH planning must expose complete audio segments"
+    );
+
+    let mut urls = video_plan
+        .resources
+        .iter()
+        .map(|resource| resource.url.clone())
+        .collect::<Vec<_>>();
+    urls.extend(
+        audio_plan
+            .resources
+            .iter()
+            .map(|resource| resource.url.clone()),
+    );
+    let files = fixture_files(&fixture_dir, &urls);
+    let (fixture_base, server) = spawn_fixture_server(files, urls.len()).await;
+    for resource in &mut video_plan.resources {
+        resource.url = loopback_resource_url(&fixture_base, &resource.url);
+    }
+    for resource in &mut audio_plan.resources {
+        resource.url = loopback_resource_url(&fixture_base, &resource.url);
+    }
+
+    let video_dir = root.path().join("staging/video");
+    let audio_dir = root.path().join("staging/audio");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create dynamic DASH video staging");
+    tokio::fs::create_dir_all(&audio_dir)
+        .await
+        .expect("create dynamic DASH audio staging");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+
+    let capture = run_live_dash_tracks(
+        &client,
+        source_url,
+        &video_key,
+        Some(&audio_key),
+        Some(&video_plan),
+        Some(&audio_plan),
+        &video_dir,
+        &audio_dir,
+        3,
+        &tx,
+        &downloaded,
+        &mut abort,
+    )
+    .await
+    .expect("run dynamic DASH capture");
+    assert_eq!(
+        capture.outcome,
+        DashLiveCaptureOutcome::Ended,
+        "availabilityEndTime must finish the bounded fixture capture"
+    );
+    wait_for_fixture_server(server).await;
+    assert!(
+        downloaded.load(Ordering::Relaxed) > 0,
+        "dynamic DASH capture must account for fetched media"
+    );
+
+    let audio_resources = capture
+        .audio_resources
+        .as_ref()
+        .expect("dynamic DASH capture retains its selected audio track");
+    assert!(
+        concat_dash_resource_names(
+            &capture.video_resources,
+            &video_dir,
+            "video-track.mp4",
+            &mut abort,
+        )
+        .await
+        .expect("assemble captured dynamic DASH video"),
+        "dynamic DASH video assembly unexpectedly aborted"
+    );
+    assert!(
+        concat_dash_resource_names(
+            audio_resources,
+            &audio_dir,
+            "audio-track.mp4",
+            &mut abort,
+        )
+        .await
+        .expect("assemble captured dynamic DASH audio"),
+        "dynamic DASH audio assembly unexpectedly aborted"
+    );
+
+    let output_part = root.path().join("dynamic-dash-output.part.mp4");
+    assert!(
+        run_ffmpeg(
+            Path::new("ffmpeg"),
+            &video_dir.join("video-track.mp4"),
+            Some(&audio_dir.join("audio-track.mp4")),
+            &output_part,
+            &mut abort,
+        )
+        .await
+        .expect("finalize dynamic DASH fixture with FFmpeg"),
+        "dynamic DASH FFmpeg finalization unexpectedly aborted"
+    );
+    let output = root.path().join("dynamic-dash-output.mp4");
+    crate::file_names::rename_noreplace(&output_part, &output)
+        .expect("publish finalized dynamic DASH fixture");
+    assert_mp4_has_audio_and_video(Path::new("ffprobe"), &output);
+}
+
+#[tokio::test]
+async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
+    let root = TempRoot::new("dynamic-dash-preserve");
+    let fixture_dir = root.path().join("fixture");
+    let video_dir = root.path().join("video");
+    let audio_dir = root.path().join("audio");
+    std::fs::create_dir_all(&fixture_dir).expect("create dynamic DASH fixture files");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create dynamic DASH video staging");
+    tokio::fs::create_dir_all(&audio_dir)
+        .await
+        .expect("create dynamic DASH audio staging");
+
+    let mut video_plan = dynamic_dash_fixture_plan(120);
+    let representation_key = video_plan.representation.live_key.clone();
+    let urls = video_plan
+        .resources
+        .iter()
+        .map(|resource| resource.url.clone())
+        .collect::<Vec<_>>();
+    for number in 26..=30 {
+        std::fs::write(
+            fixture_dir.join(format!("seg-{number}.m4s")),
+            format!("committed-dynamic-segment-{number}"),
+        )
+        .expect("write dynamic DASH fixture segment");
+    }
+    let files = fixture_files(&fixture_dir, &urls);
+    let (fixture_base, server) = spawn_fixture_server(files, urls.len()).await;
+    for resource in &mut video_plan.resources {
+        resource.url = loopback_resource_url(&fixture_base, &resource.url);
+    }
+
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (stop_tx, mut abort) = tokio::sync::oneshot::channel();
+    let state_path = video_dir.join(DASH_LIVE_STATE_NAME);
+    let stop_task = tokio::spawn(async move {
+        tokio::time::timeout(FIXTURE_TIMEOUT, async {
+            loop {
+                if tokio::fs::try_exists(&state_path)
+                    .await
+                    .expect("inspect committed dynamic DASH state")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dynamic DASH runner did not commit its first window");
+        stop_tx
+            .send(crate::video::StopIntent::Preserve)
+            .expect("send preserve stop after committed dynamic DASH window");
+    });
+
+    let capture = run_live_dash_tracks(
+        &client,
+        "https://origin.example.test/live.mpd",
+        &representation_key,
+        None,
+        Some(&video_plan),
+        None,
+        &video_dir,
+        &audio_dir,
+        3,
+        &tx,
+        &downloaded,
+        &mut abort,
+    )
+    .await
+    .expect("stop dynamic DASH capture after its first committed window");
+    stop_task.await.expect("preserve-stop observer task failed");
+    wait_for_fixture_server(server).await;
+
+    assert_eq!(capture.outcome, DashLiveCaptureOutcome::Preserve);
+    assert_eq!(
+        capture
+            .video_resources
+            .iter()
+            .filter(|name| name.starts_with("dash-live-segment-"))
+            .count(),
+        5,
+        "preserve stop must return the committed segment set"
+    );
+    let (restored, retained_bytes) =
+        load_dash_live_track(&representation_key, &video_dir, None)
+            .await
+            .expect("restore the preserved dynamic DASH capture");
+    assert_eq!(restored.state.segments.len(), 5);
+    assert_eq!(
+        retained_bytes,
+        downloaded.load(Ordering::Relaxed),
+        "restored byte accounting must match the committed live capture"
+    );
+}

@@ -757,21 +757,26 @@ fn refresh_manifest_audio_picker(step: &VideoStep, video_key: Option<&str>) {
         .unwrap_or_default();
     let selected_index =
         crate::manifest_intake::ManifestLookup::preferred_audio_choice_index(&choices);
+    step.manifest_audio_choices.replace(choices);
     step.manifest_audio_selection.replace(
-        choices
+        step.manifest_audio_choices
+            .borrow()
             .get(selected_index)
             .map(|choice| choice.key.clone()),
     );
-    let labels = choices
+    let labels = step
+        .manifest_audio_choices
+        .borrow()
         .iter()
-        .map(|choice| choice.label.as_str())
+        .map(|choice| choice.label.clone())
         .collect::<Vec<_>>();
+    let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
     step.manifest_audio_format
-        .set_model(Some(&gtk4::StringList::new(&labels)));
+        .set_model(Some(&gtk4::StringList::new(&label_refs)));
     step.manifest_audio_format
         .set_selected(u32::try_from(selected_index).unwrap_or_default());
-    step.manifest_audio_format.set_visible(choices.len() > 1);
-    step.manifest_audio_choices.replace(choices);
+    step.manifest_audio_format
+        .set_visible(step.manifest_audio_choices.borrow().len() > 1);
 }
 
 /// Show a parsed manifest and enable Add for the validated representation.

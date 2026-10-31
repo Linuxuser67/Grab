@@ -755,7 +755,7 @@ async fn resolve_tracks(
                 Some(audio_key) => Some(
                     dash.audio_representations
                         .iter()
-                        .find(|track| track.key == audio_key)
+                        .find(|track| track.key == audio_key || track.live_key == audio_key)
                         .ok_or_else(|| {
                             ManifestRunError::Unsupported(
                                 "The selected DASH audio representation is no longer available"
@@ -767,7 +767,14 @@ async fn resolve_tracks(
             };
             let audio = selected_audio
                 .map(|track| {
-                    crate::manifest::dash::plan_dash_representation(&dash, &track.key)
+                    let plan_key = if source.representation_key.starts_with("dash-live-")
+                        || source.audio_key.as_deref() == Some(track.live_key.as_str())
+                    {
+                        track.live_key.as_str()
+                    } else {
+                        track.key.as_str()
+                    };
+                    crate::manifest::dash::plan_dash_representation(&dash, plan_key)
                         .map(Box::new)
                         .map_err(|error| ManifestRunError::Unsupported(error.to_string()))
                 })
@@ -2548,6 +2555,9 @@ async fn run_live_dash_tracks(
 ) -> Result<DashLiveCapture, ManifestRunError> {
     let (mut video, video_bytes) =
         load_dash_live_track(representation_key, video_dir, video_plan).await?;
+    let audio_key = audio_key.or_else(|| {
+        audio_plan.map(|plan| plan.representation.live_key.as_str())
+    });
     let mut audio = match (audio_key, audio_plan) {
         (Some(key), Some(plan)) => Some(load_dash_live_track(key, audio_dir, Some(plan)).await?),
         (Some(key), None) if dash_live_state_exists(audio_dir).await? => {

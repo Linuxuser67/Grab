@@ -256,7 +256,9 @@ impl ManifestLookup {
                     .iter()
                     .zip(hls_variant_keys(&master.variants))
                     .find_map(|(variant, key)| {
-                        (key == video_key).then_some(variant.audio_group.as_deref()).flatten()
+                        (key == video_key)
+                            .then_some(variant.audio_group.as_deref())
+                            .flatten()
                     });
                 let Some(group_id) = group_id else {
                     return Vec::new();
@@ -334,7 +336,9 @@ impl ManifestLookup {
         choices.get(index).and_then(|choice| {
             let audio_choices = self.audio_choices(&choice.key);
             let audio_index = Self::preferred_audio_choice_index(&audio_choices);
-            let audio_key = audio_choices.get(audio_index).map(|audio| audio.key.as_str());
+            let audio_key = audio_choices
+                .get(audio_index)
+                .map(|audio| audio.key.as_str());
             self.selected_source(&choice.key, audio_key)
         })
     }
@@ -802,11 +806,9 @@ pub(crate) fn hls_variant_keys(variants: &[HlsVariant]) -> Vec<String> {
 }
 
 fn has_hex_fingerprint(value: &str, prefix: &str, length: usize) -> bool {
-    value
-        .strip_prefix(prefix)
-        .is_some_and(|fingerprint| {
-            fingerprint.len() == length && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
+    value.strip_prefix(prefix).is_some_and(|fingerprint| {
+        fingerprint.len() == length && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 /// Check persisted source metadata before restoring a native queue row.
@@ -827,10 +829,13 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
             has_hex_fingerprint(&source.representation_key, "dash-", 32)
         }
     };
-    let audio_key_is_valid = source.audio_key.as_deref().is_none_or(|key| match source.kind {
-        crate::media_types::ManifestKind::Hls => has_hex_fingerprint(key, "hls-audio-", 32),
-        crate::media_types::ManifestKind::Dash => has_hex_fingerprint(key, "dash-", 32),
-    });
+    let audio_key_is_valid = source
+        .audio_key
+        .as_deref()
+        .is_none_or(|key| match source.kind {
+            crate::media_types::ManifestKind::Hls => has_hex_fingerprint(key, "hls-audio-", 32),
+            crate::media_types::ManifestKind::Dash => has_hex_fingerprint(key, "dash-", 32),
+        });
     video_key_is_valid && audio_key_is_valid
 }
 
@@ -1077,7 +1082,11 @@ video/es.m3u8
         let english_choices = lookup.audio_choices(&video_keys[0]);
         assert_eq!(english_choices.len(), 2);
         assert!(english_choices[0].is_default);
-        assert!(english_choices.iter().any(|choice| choice.label.contains("French")));
+        assert!(
+            english_choices
+                .iter()
+                .any(|choice| choice.label.contains("French"))
+        );
         assert_eq!(lookup.audio_choices(&video_keys[1]).len(), 1);
 
         let default_source = lookup
@@ -1092,7 +1101,10 @@ video/es.m3u8
         let selected = lookup
             .selected_source(&video_keys[0], Some(&english_choices[1].key))
             .expect("selected alternate audio rendition");
-        assert_eq!(selected.audio_key.as_deref(), Some(english_choices[1].key.as_str()));
+        assert_eq!(
+            selected.audio_key.as_deref(),
+            Some(english_choices[1].key.as_str())
+        );
         assert!(
             lookup
                 .selected_source(&video_keys[1], Some(&english_choices[1].key))
@@ -1168,19 +1180,21 @@ video/es.m3u8
         let preferred = lookup
             .preferred_source("720p")
             .expect("default DASH audio is selected automatically");
-        assert_eq!(preferred.audio_key.as_deref(), Some(main_audio_key.as_str()));
+        assert_eq!(
+            preferred.audio_key.as_deref(),
+            Some(main_audio_key.as_str())
+        );
     }
 
     #[test]
     fn manifest_source_audio_key_is_optional_and_validated() {
-        let legacy: crate::media_types::ManifestSource = serde_json::from_value(
-            serde_json::json!({
+        let legacy: crate::media_types::ManifestSource =
+            serde_json::from_value(serde_json::json!({
                 "url": "https://cdn.example.test/master.m3u8",
                 "kind": "Hls",
                 "representation_key": "hls-media"
-            }),
-        )
-        .expect("legacy manifest source without an audio key remains compatible");
+            }))
+            .expect("legacy manifest source without an audio key remains compatible");
         assert_eq!(legacy.audio_key, None);
 
         let mut source = crate::media_types::ManifestSource {

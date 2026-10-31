@@ -2239,6 +2239,528 @@ fn dash_presentation_ended(presentation: &DashPresentation) -> bool {
     }
 }
 
+async fn dash_live_resource_needs_fetch(
+    directory: &Path,
+    resource: &DashResource,
+) -> Result<bool, ManifestRunError> {
+    let path = directory.join(&resource.filename);
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(ManifestRunError::Failed(
+                "A dynamic DASH resource path is not a regular file".to_string(),
+            ))
+        }
+        Ok(metadata) => Ok(
+            metadata.len() == 0
+                || metadata.len() > MAX_RESOURCE_BYTES
+                || resource
+                    .range
+                    .is_some_and(|range| metadata.len() != range.length),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(ManifestRunError::Failed(format!(
+            "Could not inspect a dynamic DASH resource: {error}"
+        ))),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one rendition update shares its client, cancellation, progress and aggregate byte-budget context"
+)]
+async fn apply_dash_live_snapshot(
+    client: &reqwest::Client,
+    plan: &DashRepresentationPlan,
+    track: &mut DashLiveTrack,
+    connections: usize,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &Arc<AtomicU64>,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    other_rendition_bytes: u64,
+) -> Result<DashLiveUpdateOutcome, ManifestRunError> {
+    if plan.representation.live_key != track.state.representation_key {
+        return Ok(DashLiveUpdateOutcome::ContinuityLost);
+    }
+
+    let mut candidate = track.state.clone();
+    let mut resources_to_fetch = Vec::new();
+    let mut filenames_to_fetch = std::collections::HashSet::new();
+    let initialization = plan
+        .resources
+        .iter()
+        .find(|resource| resource.kind == DashResourceKind::Initialization);
+    if let Some(initialization) = initialization {
+        match candidate.initialization.as_deref() {
+            Some(previous) if previous != initialization.filename => {
+                if !candidate.segments.is_empty() {
+                    tracing::warn!(
+                        representation = %plan.representation.live_key,
+                        "dynamic DASH initialization changed after media was captured"
+                    );
+                    return Ok(DashLiveUpdateOutcome::ContinuityLost);
+                }
+                candidate.initialization = Some(initialization.filename.clone());
+            }
+            None => {
+                candidate.initialization = Some(initialization.filename.clone());
+            }
+            Some(_) => {}
+        }
+        if dash_live_resource_needs_fetch(&track.directory, initialization).await?
+            && filenames_to_fetch.insert(initialization.filename.clone())
+        {
+            resources_to_fetch.push(initialization.clone());
+        }
+    }
+
+    let mut previous_remote_number = None;
+    for resource in plan
+        .resources
+        .iter()
+        .filter(|resource| resource.kind == DashResourceKind::Segment)
+    {
+        let Some(number) = resource.segment_number else {
+            return Err(ManifestRunError::Unsupported(
+                "A dynamic DASH segment has no stable sequence number".to_string(),
+            ));
+        };
+        if previous_remote_number.is_some_and(|previous| number <= previous) {
+            return Err(ManifestRunError::Unsupported(
+                "The dynamic DASH MPD contains unordered segment numbers".to_string(),
+            ));
+        }
+        previous_remote_number = Some(number);
+
+        let first_number = candidate.segments.first().map(|segment| segment.number);
+        if first_number.is_some_and(|first| number < first) {
+            continue;
+        }
+        if let Some(existing) = candidate
+            .segments
+            .iter()
+            .find(|segment| segment.number == number)
+        {
+            if existing.filename != resource.filename {
+                tracing::warn!(
+                    representation = %plan.representation.live_key,
+                    segment_number = number,
+                    "dynamic DASH changed the URL of an already captured segment"
+                );
+                return Ok(DashLiveUpdateOutcome::ContinuityLost);
+            }
+        } else {
+            match candidate.next_number() {
+                None => {}
+                Some(next) if number == next => {}
+                Some(next) if number > next => {
+                    tracing::warn!(
+                        representation = %plan.representation.live_key,
+                        expected_segment = next,
+                        received_segment = number,
+                        "dynamic DASH MPD skipped a required segment sequence"
+                    );
+                    return Ok(DashLiveUpdateOutcome::ContinuityLost);
+                }
+                Some(_) => {
+                    return Ok(DashLiveUpdateOutcome::ContinuityLost);
+                }
+            }
+            if candidate.segments.len() >= MAX_DASH_LIVE_SEGMENTS {
+                tracing::warn!(
+                    representation = %plan.representation.live_key,
+                    "dynamic DASH recording reached its segment limit"
+                );
+                return Ok(DashLiveUpdateOutcome::ContinuityLost);
+            }
+            candidate.segments.push(DashLiveSegment {
+                number,
+                filename: resource.filename.clone(),
+            });
+        }
+
+        if dash_live_resource_needs_fetch(&track.directory, resource).await?
+            && filenames_to_fetch.insert(resource.filename.clone())
+        {
+            resources_to_fetch.push(resource.clone());
+        }
+    }
+
+    if !resources_to_fetch.is_empty() {
+        match fetch_resources_with_stop(
+            client,
+            dash_resources_from(&resources_to_fetch),
+            &track.directory,
+            connections,
+            tx,
+            downloaded,
+            abort,
+        )
+        .await?
+        {
+            ResourceFetchOutcome::Complete => {}
+            ResourceFetchOutcome::Stopped(intent) => {
+                return Ok(DashLiveUpdateOutcome::Stopped(intent));
+            }
+        }
+    }
+
+    if candidate.segments.len() > MAX_DASH_LIVE_SEGMENTS {
+        return Ok(DashLiveUpdateOutcome::ContinuityLost);
+    }
+    let retained_bytes = dash_live_track_bytes(&candidate, &track.directory).await?;
+    if retained_bytes
+        .checked_add(other_rendition_bytes)
+        .is_none_or(|total| total > MAX_MANIFEST_DOWNLOAD_BYTES)
+    {
+        tracing::warn!(
+            representation = %plan.representation.live_key,
+            "dynamic DASH recording reached its aggregate byte limit"
+        );
+        return Ok(DashLiveUpdateOutcome::ContinuityLost);
+    }
+
+    if candidate.segments != track.state.segments
+        || candidate.initialization != track.state.initialization
+    {
+        let next_track = DashLiveTrack {
+            directory: track.directory.clone(),
+            state: candidate,
+            ended: false,
+        };
+        write_dash_live_state(&next_track).await?;
+        track.state = next_track.state;
+    }
+    downloaded.store(
+        retained_bytes.saturating_add(other_rendition_bytes),
+        Ordering::Relaxed,
+    );
+    Ok(DashLiveUpdateOutcome::Committed)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the live poll loop owns the shared DASH manifest selection, rendition states, progress and cancellation"
+)]
+async fn run_live_dash_tracks(
+    client: &reqwest::Client,
+    source_url: &str,
+    representation_key: &str,
+    audio_key: Option<&str>,
+    video_plan: Option<&DashRepresentationPlan>,
+    audio_plan: Option<&DashRepresentationPlan>,
+    video_dir: &Path,
+    audio_dir: &Path,
+    connections: usize,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &Arc<AtomicU64>,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<DashLiveCaptureOutcome, ManifestRunError> {
+    let (mut video, video_bytes) =
+        load_dash_live_track(representation_key, video_dir, video_plan).await?;
+    let mut audio = match (audio_key, audio_plan) {
+        (Some(key), Some(plan)) => Some(load_dash_live_track(key, audio_dir, Some(plan)).await?),
+        (Some(key), None) if dash_live_state_exists(audio_dir).await? => {
+            Some(load_dash_live_track(key, audio_dir, None).await?)
+        }
+        _ => None,
+    };
+    let audio_bytes = audio
+        .as_ref()
+        .map_or(0, |(track, bytes)| {
+            let _ = track;
+            *bytes
+        });
+    let total_bytes = video_bytes.checked_add(audio_bytes).ok_or_else(|| {
+        ManifestRunError::Failed("The staged dynamic DASH byte total overflowed".to_string())
+    })?;
+    if total_bytes > MAX_MANIFEST_DOWNLOAD_BYTES {
+        return Ok(if !video.state.segments.is_empty() {
+            DashLiveCaptureOutcome::PreserveVideoOnly
+        } else {
+            DashLiveCaptureOutcome::Discard
+        });
+    }
+    downloaded.store(total_bytes, Ordering::Relaxed);
+
+    let (Some(mut current_video_plan), mut current_audio_plan) =
+        (video_plan.cloned(), audio_plan.cloned())
+    else {
+        return Ok(if video.state.segments.is_empty() {
+            DashLiveCaptureOutcome::Discard
+        } else {
+            DashLiveCaptureOutcome::Preserve
+        });
+    };
+
+    let initial_audio = if let Some(audio) = audio.as_mut() {
+        match apply_dash_live_snapshot(
+            client,
+            &current_audio_plan
+                .as_ref()
+                .ok_or_else(|| {
+                    ManifestRunError::Failed(
+                        "The selected live DASH audio plan is missing".to_string(),
+                    )
+                })?,
+            &mut audio.0,
+            connections,
+            tx,
+            downloaded,
+            abort,
+            video_bytes,
+        )
+        .await?
+        {
+            DashLiveUpdateOutcome::Committed => None,
+            DashLiveUpdateOutcome::Stopped(intent) => Some(intent),
+            DashLiveUpdateOutcome::ContinuityLost => {
+                return Ok(DashLiveCaptureOutcome::PreserveVideoOnly);
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(intent) = initial_audio {
+        return Ok(match intent {
+            crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::PreserveVideoOnly,
+            crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
+        });
+    }
+
+    match apply_dash_live_snapshot(
+        client,
+        &current_video_plan,
+        &mut video,
+        connections,
+        tx,
+        downloaded,
+        abort,
+        audio_bytes,
+    )
+    .await?
+    {
+        DashLiveUpdateOutcome::Committed => {}
+        DashLiveUpdateOutcome::Stopped(intent) => {
+            return Ok(match intent {
+                crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
+                crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
+            });
+        }
+        DashLiveUpdateOutcome::ContinuityLost => {
+            return Ok(if video.state.segments.is_empty() {
+                DashLiveCaptureOutcome::Discard
+            } else {
+                DashLiveCaptureOutcome::PreserveVideoOnly
+            });
+        }
+    }
+
+    loop {
+        if dash_presentation_ended(&current_video_plan.presentation) {
+            return Ok(DashLiveCaptureOutcome::Ended);
+        }
+        let DashPresentation::Dynamic(dynamic) = &current_video_plan.presentation else {
+            return Ok(DashLiveCaptureOutcome::Ended);
+        };
+        let deadline = Instant::now()
+            .checked_add(dynamic.minimum_update_period)
+            .ok_or_else(|| {
+                ManifestRunError::Failed(
+                    "The dynamic DASH update interval is outside the supported clock range"
+                        .to_string(),
+                )
+            })?;
+        tokio::select! {
+            biased;
+            stop = &mut *abort => {
+                return Ok(match stop.unwrap_or(crate::video::StopIntent::Discard) {
+                    crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
+                    crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
+                });
+            }
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
+        }
+
+        let lookup = tokio::select! {
+            biased;
+            stop = &mut *abort => {
+                return Ok(match stop.unwrap_or(crate::video::StopIntent::Discard) {
+                    crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
+                    crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
+                });
+            }
+            result = crate::manifest_intake::lookup_with_client(client, source_url) => result,
+        };
+        let lookup = match lookup {
+            Ok(Some(lookup)) if lookup.kind() == ManifestKind::Dash => lookup,
+            Ok(Some(_)) | Ok(None) => {
+                tracing::warn!("dynamic DASH MPD is no longer supported; preserving committed media");
+                return Ok(if video.state.segments.is_empty() {
+                    DashLiveCaptureOutcome::Discard
+                } else {
+                    DashLiveCaptureOutcome::PreserveVideoOnly
+                });
+            }
+            Err(crate::manifest_intake::ManifestIntakeError::Retryable(error)) => {
+                return Err(ManifestRunError::Retryable(error));
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "dynamic DASH MPD refresh failed; preserving committed media");
+                return Ok(if video.state.segments.is_empty() {
+                    DashLiveCaptureOutcome::Discard
+                } else {
+                    DashLiveCaptureOutcome::PreserveVideoOnly
+                });
+            }
+        };
+        let refreshed = resolve_tracks(client, lookup, &ManifestSource {
+            url: source_url.to_string(),
+            kind: ManifestKind::Dash,
+            representation_key: representation_key.to_string(),
+            audio_key: audio_key.map(str::to_string),
+        });
+        let refreshed = match refreshed {
+            Ok(Tracks::Dash { video, audio }) => (video, audio.map(|audio| *audio)),
+            Ok(_) => {
+                return Ok(if video.state.segments.is_empty() {
+                    DashLiveCaptureOutcome::Discard
+                } else {
+                    DashLiveCaptureOutcome::PreserveVideoOnly
+                });
+            }
+            Err(ManifestRunError::Unsupported(error)) => {
+                tracing::warn!(error = %error, "dynamic DASH track selection disappeared; preserving committed media");
+                return Ok(if video.state.segments.is_empty() {
+                    DashLiveCaptureOutcome::Discard
+                } else {
+                    DashLiveCaptureOutcome::PreserveVideoOnly
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        current_video_plan = refreshed.0;
+        current_audio_plan = refreshed.1;
+        let current_audio_bytes = audio
+            .as_ref()
+            .map(|(track, _)| dash_live_track_bytes(&track.state, &track.directory))
+            .transpose()
+            .await?
+            .unwrap_or(0);
+
+        match apply_dash_live_snapshot(
+            client,
+            &current_video_plan,
+            &mut video,
+            connections,
+            tx,
+            downloaded,
+            abort,
+            current_audio_bytes,
+        )
+        .await?
+        {
+            DashLiveUpdateOutcome::Committed => {}
+            DashLiveUpdateOutcome::Stopped(intent) => {
+                return Ok(match intent {
+                    crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
+                    crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
+                });
+            }
+            DashLiveUpdateOutcome::ContinuityLost => {
+                return Ok(if video.state.segments.is_empty() {
+                    DashLiveCaptureOutcome::Discard
+                } else {
+                    DashLiveCaptureOutcome::PreserveVideoOnly
+                });
+            }
+        }
+
+        match (&mut audio, current_audio_plan.as_ref()) {
+            (Some((track, _)), Some(plan)) => {
+                let video_bytes = dash_live_track_bytes(&video.state, &video.directory).await?;
+                match apply_dash_live_snapshot(
+                    client,
+                    plan,
+                    track,
+                    connections,
+                    tx,
+                    downloaded,
+                    abort,
+                    video_bytes,
+                )
+                .await?
+                {
+                    DashLiveUpdateOutcome::Committed => {}
+                    DashLiveUpdateOutcome::Stopped(intent) => {
+                        return Ok(match intent {
+                            crate::video::StopIntent::Preserve => {
+                                DashLiveCaptureOutcome::PreserveVideoOnly
+                            }
+                            crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
+                        });
+                    }
+                    DashLiveUpdateOutcome::ContinuityLost => {
+                        return Ok(if video.state.segments.is_empty() {
+                            DashLiveCaptureOutcome::Discard
+                        } else {
+                            DashLiveCaptureOutcome::PreserveVideoOnly
+                        });
+                    }
+                }
+            }
+            (None, Some(plan)) => {
+                let key = audio_key.ok_or_else(|| {
+                    ManifestRunError::Failed(
+                        "A live DASH audio plan has no stable selection key".to_string(),
+                    )
+                })?;
+                let (mut track, _) = load_dash_live_track(key, audio_dir, Some(plan)).await?;
+                let video_bytes = dash_live_track_bytes(&video.state, &video.directory).await?;
+                match apply_dash_live_snapshot(
+                    client,
+                    plan,
+                    &mut track,
+                    connections,
+                    tx,
+                    downloaded,
+                    abort,
+                    video_bytes,
+                )
+                .await?
+                {
+                    DashLiveUpdateOutcome::Committed => {
+                        let bytes = dash_live_track_bytes(&track.state, &track.directory).await?;
+                        audio = Some((track, bytes));
+                    }
+                    DashLiveUpdateOutcome::Stopped(intent) => {
+                        return Ok(match intent {
+                            crate::video::StopIntent::Preserve => {
+                                DashLiveCaptureOutcome::PreserveVideoOnly
+                            }
+                            crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
+                        });
+                    }
+                    DashLiveUpdateOutcome::ContinuityLost => {
+                        return Ok(DashLiveCaptureOutcome::PreserveVideoOnly);
+                    }
+                }
+            }
+            (Some(_), None) => {
+                return Ok(if video.state.segments.is_empty() {
+                    DashLiveCaptureOutcome::Discard
+                } else {
+                    DashLiveCaptureOutcome::PreserveVideoOnly
+                });
+            }
+            (None, None) => {}
+        }
+
+        if dash_presentation_ended(&current_video_plan.presentation) {
+            return Ok(DashLiveCaptureOutcome::Ended);
+        }
+    }
+}
+
 async fn concat_dash_track(
     plan: &DashRepresentationPlan,
     directory: &Path,

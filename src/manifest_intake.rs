@@ -766,7 +766,10 @@ highest.m3u8
         assert_eq!(preferred_choice.height, Some(1080));
         assert_eq!(best_choice.height, Some(1440));
         assert_eq!(
-            choices.iter().map(|choice| choice.height).collect::<Vec<_>>(),
+            choices
+                .iter()
+                .map(|choice| choice.height)
+                .collect::<Vec<_>>(),
             vec![Some(1440), Some(1080), Some(720)]
         );
     }
@@ -796,12 +799,18 @@ second.m3u8
 
         let choices = lookup.choices();
         assert_eq!(
-            choices.iter().map(|choice| choice.height).collect::<Vec<_>>(),
+            choices
+                .iter()
+                .map(|choice| choice.height)
+                .collect::<Vec<_>>(),
             vec![Some(1080), Some(1080), Some(1080), Some(720)],
             "choices should be ordered by descending height"
         );
         assert_eq!(
-            choices.iter().map(|choice| choice.key.as_str()).collect::<Vec<_>>(),
+            choices
+                .iter()
+                .map(|choice| choice.key.as_str())
+                .collect::<Vec<_>>(),
             vec![
                 original_keys[2].as_str(),
                 original_keys[0].as_str(),

@@ -839,6 +839,7 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
         }
         crate::media_types::ManifestKind::Dash => {
             has_hex_fingerprint(&source.representation_key, "dash-", 32)
+                || has_hex_fingerprint(&source.representation_key, "dash-live-", 32)
         }
     };
     let audio_key_is_valid = source
@@ -846,7 +847,10 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
         .as_deref()
         .is_none_or(|key| match source.kind {
             crate::media_types::ManifestKind::Hls => has_hex_fingerprint(key, "hls-audio-", 32),
-            crate::media_types::ManifestKind::Dash => has_hex_fingerprint(key, "dash-", 32),
+            crate::media_types::ManifestKind::Dash => {
+                has_hex_fingerprint(key, "dash-", 32)
+                    || has_hex_fingerprint(key, "dash-live-", 32)
+            },
         });
     video_key_is_valid && audio_key_is_valid
 }

@@ -411,7 +411,7 @@ pub(crate) async fn lookup(
     }
     tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
         let client = client_for_manifest(raw_url, cookies_browser, proxy).await?;
-        lookup_with_client(&client, raw_url)
+        lookup_preview_with_client(&client, raw_url)
             .await
             .map_err(|error| error.to_string())
     })
@@ -500,25 +500,61 @@ async fn client_for_manifest_with_policy(
 
 /// Fetch a manifest with an existing per-attempt client so manifests and media
 /// resources share the same proxy and DNS policy.
+/// Resolve a manifest for a queued download, retaining the download-time
+/// network timeout and retry policy.
 pub(crate) async fn lookup_with_client(
     client: &reqwest::Client,
     raw_url: &str,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
-    lookup_with_client_policy(client, raw_url, ManifestTransportPolicy::HttpsOnly).await
+    lookup_with_client_policy(
+        client,
+        raw_url,
+        ManifestTransportPolicy::HttpsOnly,
+        ManifestFetchMode::Download,
+    )
+    .await
+}
+
+/// Resolve a manifest for the Add-card preview using its shorter fallback budget.
+pub(crate) async fn lookup_preview_with_client(
+    client: &reqwest::Client,
+    raw_url: &str,
+) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
+    lookup_with_client_policy(
+        client,
+        raw_url,
+        ManifestTransportPolicy::HttpsOnly,
+        ManifestFetchMode::Preview,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestFetchMode {
+    Preview,
+    Download,
 }
 
 async fn lookup_with_client_policy(
     client: &reqwest::Client,
     raw_url: &str,
     transport_policy: ManifestTransportPolicy,
+    fetch_mode: ManifestFetchMode,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
     let requested_url = Url::parse(raw_url)
         .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
     let Some(kind) = manifest_kind_for_transport(&requested_url, transport_policy) else {
         return Ok(None);
     };
-    let (final_url, body, server_now) =
-        fetch_bounded_preview_manifest_with_policy(client, requested_url, transport_policy).await?;
+    let (final_url, body, server_now) = match fetch_mode {
+        ManifestFetchMode::Preview => {
+            fetch_bounded_preview_manifest_with_policy(client, requested_url, transport_policy)
+                .await?
+        }
+        ManifestFetchMode::Download => {
+            fetch_bounded_manifest_with_policy(client, requested_url, transport_policy).await?
+        }
+    };
     let final_url = transport_policy.planning_url(final_url)?;
     let manifest = match kind {
         crate::media_types::ManifestKind::Hls => {
@@ -568,7 +604,13 @@ async fn lookup_with_http_fixture_client(
     client: &reqwest::Client,
     raw_url: &str,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
-    lookup_with_client_policy(client, raw_url, ManifestTransportPolicy::HttpFixture).await
+    lookup_with_client_policy(
+        client,
+        raw_url,
+        ManifestTransportPolicy::HttpFixture,
+        ManifestFetchMode::Preview,
+    )
+    .await
 }
 
 /// Fetch and parse an HLS child media playlist using the caller's guarded client.

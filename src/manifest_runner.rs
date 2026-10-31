@@ -2241,6 +2241,23 @@ async fn concat_dash_track(
     filename: &str,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, String> {
+    let resources = plan
+        .resources
+        .iter()
+        .map(|resource| resource.filename.clone())
+        .collect::<Vec<_>>();
+    concat_dash_resource_names(&resources, directory, filename, abort).await
+}
+
+async fn concat_dash_resource_names(
+    resources: &[String],
+    directory: &Path,
+    filename: &str,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<bool, String> {
+    if resources.is_empty() {
+        return Err("The DASH recording contains no media resources".to_string());
+    }
     let target = directory.join(filename);
     let part = directory.join(format!("{filename}.part"));
     remove_regular_file_if_present(&target).await?;
@@ -2251,8 +2268,8 @@ async fn concat_dash_track(
         .open(&part)
         .await
         .map_err(|error| format!("Could not create a DASH track file: {error}"))?;
-    for resource in plan.resources.iter() {
-        let input_path = directory.join(&resource.filename);
+    for filename in resources {
+        let input_path = directory.join(filename);
         let mut input = tokio::fs::File::open(&input_path)
             .await
             .map_err(|error| format!("Could not open a DASH segment: {error}"))?;

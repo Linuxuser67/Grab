@@ -1093,6 +1093,7 @@ mod tests {
                 url: "https://cdn.example.test/master.m3u8".to_string(),
                 kind: ManifestKind::Hls,
                 representation_key: "hls-media".to_string(),
+                audio_key: None,
             },
             dest: PathBuf::new(),
             proxy: None,

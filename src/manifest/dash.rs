@@ -652,7 +652,6 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
         hasher.update(b"template");
         hasher.update(template.media.as_bytes());
         hash_optional_number(&mut hasher, Some(template.timescale));
-        hash_optional_number(&mut hasher, template.duration_ticks);
         match &template.initialization {
             Some(DashInitialization::Template(value)) => {
                 hasher.update(b"init-template");
@@ -813,13 +812,23 @@ fn effective_addressing(
     if is_dynamic && (!has_template || has_list) {
         return Err(DashError::UnsupportedAddressing);
     }
-    match (has_template, has_list) {
+    let addressing = match (has_template, has_list) {
         (true, false) => {
-            effective_template(&templates, period_duration).map(DashAddressing::Template)
+            effective_template(&templates, period_duration).map(DashAddressing::Template)?
         }
-        (false, true) => effective_list(&lists).map(DashAddressing::List),
-        _ => Err(DashError::UnsupportedAddressing),
+        (false, true) => effective_list(&lists).map(DashAddressing::List)?,
+        _ => return Err(DashError::UnsupportedAddressing),
+    };
+    if is_dynamic
+        && matches!(
+            &addressing,
+            DashAddressing::Template(template)
+                if !template.media.contains("$Number") && !template.media.contains("$Time")
+        )
+    {
+        return Err(DashError::UnsupportedAddressing);
     }
+    Ok(addressing)
 }
 
 fn effective_template(
@@ -1063,12 +1072,30 @@ fn expand_dynamic_template(
         .and_then(|elapsed| elapsed.checked_sub(dynamic.period_start))
         .ok_or(DashError::NoAvailableSegments)?;
     let elapsed_ticks = duration_to_ticks(elapsed, template.timescale)?;
-    let window_depth = dynamic
-        .time_shift_buffer_depth
-        .unwrap_or(dynamic.minimum_update_period);
-    let window_start_ticks = elapsed
-        .saturating_sub(window_depth);
-    let window_start_ticks = duration_to_ticks(window_start_ticks, template.timescale)?;
+    let window_depth = match dynamic.time_shift_buffer_depth {
+        Some(depth) => depth,
+        None => {
+            // When the MPD omits TSBD, retain at least one complete segment
+            // beyond the advertised update interval so the next poll overlaps
+            // the previous window instead of losing media between refreshes.
+            let segment_ticks = template
+                .duration_ticks
+                .into_iter()
+                .chain(
+                    template
+                        .timeline
+                        .iter()
+                        .flat_map(|entries| entries.iter().map(|entry| entry.duration)),
+                )
+                .max()
+                .ok_or(DashError::UnsupportedAddressing)?;
+            dynamic
+                .minimum_update_period
+                .saturating_add(ticks_to_duration(segment_ticks, template.timescale)?)
+        }
+    };
+    let window_start_ticks =
+        duration_to_ticks(elapsed.saturating_sub(window_depth), template.timescale)?;
     let segments = dynamic_segment_times(template, elapsed_ticks, window_start_ticks)?;
 
     let mut resources = Vec::with_capacity(
@@ -1141,6 +1168,21 @@ fn expand_static_live_template(
         };
     }
     Ok(resources)
+}
+
+fn ticks_to_duration(ticks: u64, timescale: u64) -> Result<Duration, DashError> {
+    if timescale == 0 {
+        return Err(DashError::InvalidSegment);
+    }
+    let nanos = u128::from(ticks)
+        .checked_mul(1_000_000_000)
+        .ok_or(DashError::InvalidSegment)?
+        / u128::from(timescale);
+    let seconds = u64::try_from(nanos / 1_000_000_000)
+        .map_err(|_| DashError::LimitExceeded)?;
+    let subsecond_nanos = u32::try_from(nanos % 1_000_000_000)
+        .map_err(|_| DashError::InvalidSegment)?;
+    Ok(Duration::new(seconds, subsecond_nanos))
 }
 
 fn duration_to_ticks(duration: Duration, timescale: u64) -> Result<u64, DashError> {

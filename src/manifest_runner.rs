@@ -202,7 +202,6 @@ impl DashLiveState {
 struct DashLiveTrack {
     directory: PathBuf,
     state: DashLiveState,
-    ended: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,7 +255,7 @@ pub(crate) async fn run_manifest_download(
     let mut offline_tracks = if live_marker_exists && job.source.kind == ManifestKind::Hls {
         restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
     } else if dash_live_requested && dash_live_state_exists(&video_dir).await? {
-        let has_audio = job.source.audio_key.is_some() && dash_live_state_exists(&audio_dir).await?;
+        let has_audio = dash_live_state_exists(&audio_dir).await?;
         Some(Tracks::DashLiveOffline { has_audio })
     } else {
         None
@@ -2082,6 +2081,37 @@ async fn dash_live_state_exists(directory: &Path) -> Result<bool, ManifestRunErr
     }
 }
 
+async fn read_dash_live_representation_key(
+    directory: &Path,
+) -> Result<String, ManifestRunError> {
+    let path = directory.join(DASH_LIVE_STATE_NAME);
+    let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|error| {
+        ManifestRunError::Failed(format!(
+            "Could not inspect saved dynamic DASH audio state: {error}"
+        ))
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_DASH_LIVE_STATE_BYTES as u64
+    {
+        return Err(ManifestRunError::Failed(
+            "The saved dynamic DASH audio state is not a valid regular file".to_string(),
+        ));
+    }
+    let bytes = tokio::fs::read(&path).await.map_err(|error| {
+        ManifestRunError::Failed(format!(
+            "Could not read saved dynamic DASH audio state: {error}"
+        ))
+    })?;
+    let state: DashLiveState = serde_json::from_slice(&bytes).map_err(|error| {
+        ManifestRunError::Failed(format!(
+            "Could not parse saved dynamic DASH audio state: {error}"
+        ))
+    })?;
+    validate_dash_live_state(&state, &state.representation_key)?;
+    Ok(state.representation_key)
+}
+
 async fn load_dash_live_track(
     representation_key: &str,
     directory: &Path,
@@ -2189,7 +2219,6 @@ async fn load_dash_live_track(
         DashLiveTrack {
             directory: directory.to_path_buf(),
             state,
-            ended: false,
         },
         retained_bytes,
     ))
@@ -2523,7 +2552,6 @@ async fn apply_dash_live_snapshot(
         let next_track = DashLiveTrack {
             directory: track.directory.clone(),
             state: candidate,
-            ended: false,
         };
         write_dash_live_state(&next_track).await?;
         track.state = next_track.state;
@@ -2555,15 +2583,24 @@ async fn run_live_dash_tracks(
 ) -> Result<DashLiveCapture, ManifestRunError> {
     let (mut video, video_bytes) =
         load_dash_live_track(representation_key, video_dir, video_plan).await?;
-    let audio_key = audio_key.or_else(|| {
-        audio_plan.map(|plan| plan.representation.live_key.as_str())
-    });
-    let mut audio = match (audio_key, audio_plan) {
-        (Some(key), Some(plan)) => Some(load_dash_live_track(key, audio_dir, Some(plan)).await?),
-        (Some(key), None) if dash_live_state_exists(audio_dir).await? => {
-            Some(load_dash_live_track(key, audio_dir, None).await?)
+    let mut audio_key = audio_key
+        .map(str::to_string)
+        .or_else(|| audio_plan.map(|plan| plan.representation.live_key.clone()));
+    let mut audio = match audio_plan {
+        Some(plan) => {
+            let key = audio_key.as_deref().unwrap_or(&plan.representation.live_key);
+            audio_key = Some(key.to_string());
+            Some(load_dash_live_track(key, audio_dir, Some(plan)).await?)
         }
-        _ => None,
+        None if dash_live_state_exists(audio_dir).await? => {
+            let key = match audio_key.as_deref() {
+                Some(key) => key.to_string(),
+                None => read_dash_live_representation_key(audio_dir).await?,
+            };
+            audio_key = Some(key.clone());
+            Some(load_dash_live_track(&key, audio_dir, None).await?)
+        }
+        None => None,
     };
     macro_rules! finish_capture {
         ($outcome:expr) => {{
@@ -2679,6 +2716,35 @@ async fn run_live_dash_tracks(
             }
         }
     }
+    if let Some(audio) = audio.as_mut() {
+        let Some(plan) = current_audio_plan.as_ref() else {
+            finish_capture!(DashLiveCaptureOutcome::PreserveVideoOnly);
+        };
+        let updated_video_bytes = dash_live_track_bytes(&video.state, &video.directory).await?;
+        match apply_dash_live_snapshot(
+            client,
+            plan,
+            &mut audio.0,
+            connections,
+            tx,
+            downloaded,
+            abort,
+            updated_video_bytes,
+        )
+        .await?
+        {
+            DashLiveUpdateOutcome::Committed => {}
+            DashLiveUpdateOutcome::Stopped(intent) => {
+                finish_capture!(match intent {
+                    crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::PreserveVideoOnly,
+                    crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
+                });
+            }
+            DashLiveUpdateOutcome::ContinuityLost => {
+                finish_capture!(DashLiveCaptureOutcome::PreserveVideoOnly);
+            }
+        }
+    }
 
     loop {
         if dash_presentation_ended(&current_video_plan.presentation) {
@@ -2742,7 +2808,7 @@ async fn run_live_dash_tracks(
             url: source_url.to_string(),
             kind: ManifestKind::Dash,
             representation_key: representation_key.to_string(),
-            audio_key: audio_key.map(str::to_string),
+            audio_key: audio_key.clone(),
         });
         let refreshed = match refreshed {
             Ok(Tracks::Dash { video, audio }) => (video, audio.map(|audio| *audio)),
@@ -2834,12 +2900,10 @@ async fn run_live_dash_tracks(
                 }
             }
             (None, Some(plan)) => {
-                let key = audio_key.ok_or_else(|| {
-                    ManifestRunError::Failed(
-                        "A live DASH audio plan has no stable selection key".to_string(),
-                    )
-                })?;
-                let (mut track, _) = load_dash_live_track(key, audio_dir, Some(plan)).await?;
+                let key = audio_key
+                    .clone()
+                    .unwrap_or_else(|| plan.representation.live_key.clone());
+                let (mut track, _) = load_dash_live_track(&key, audio_dir, Some(plan)).await?;
                 let video_bytes = dash_live_track_bytes(&video.state, &video.directory).await?;
                 match apply_dash_live_snapshot(
                     client,
@@ -2855,6 +2919,7 @@ async fn run_live_dash_tracks(
                 {
                     DashLiveUpdateOutcome::Committed => {
                         let bytes = dash_live_track_bytes(&track.state, &track.directory).await?;
+                        audio_key = Some(key);
                         audio = Some((track, bytes));
                     }
                     DashLiveUpdateOutcome::Stopped(intent) => {

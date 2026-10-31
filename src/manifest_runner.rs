@@ -99,8 +99,10 @@ fn byte_range_chunk_exceeds(
     written: u64,
     chunk_len: usize,
 ) -> bool {
-    u64::try_from(chunk_len)
-        .map_or(true, |chunk_len| chunk_len > range.length.saturating_sub(written))
+    match u64::try_from(chunk_len) {
+        Ok(chunk_len) => chunk_len > range.length.saturating_sub(written),
+        Err(_) => true,
+    }
 }
 
 fn ffmpeg_log_indicates_storage_full(log: &str) -> bool {
@@ -3462,7 +3464,10 @@ mod tests {
             let dash = crate::manifest::dash::parse_dash_manifest_at(
                 manifest_url,
                 body,
-                std::time::UNIX_EPOCH + Duration::from_secs(120 + refresh as u64),
+                std::time::UNIX_EPOCH
+                    + Duration::from_secs(
+                        120 + u64::try_from(refresh).expect("refresh index fits in u64"),
+                    ),
             )
             .expect("refreshed dynamic MPD should parse");
             assert_eq!(dash.video_representations[0].live_key, representation_key);

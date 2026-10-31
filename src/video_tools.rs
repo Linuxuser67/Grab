@@ -2698,7 +2698,7 @@ mod tests {
 
         assert_eq!(
             system_ffmpeg_search_dirs_from(&path),
-            [PathBuf::from("/usr/bin")]
+            vec![PathBuf::from("/usr/bin")]
         );
     }
 

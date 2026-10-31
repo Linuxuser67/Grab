@@ -469,8 +469,22 @@ fn claim_and_rename(old: &std::path::Path, new: &std::path::Path) -> std::io::Re
     })
 }
 
-/// Rename without clobbering: `renameat2(RENAME_NOREPLACE)`, else hard-link claim, else atomic-claim rename, else `create_new` copy cross-device.
+/// Rename without clobbering, copying only when the filesystems differ.
 pub(crate) fn rename_noreplace(
+    old: &std::path::Path,
+    new: &std::path::Path,
+) -> std::io::Result<()> {
+    match rename_noreplace_same_device(old, new) {
+        Err(error) if error.raw_os_error() == Some(libc::EXDEV) => copy_noreplace(old, new),
+        result => result,
+    }
+}
+
+/// Perform an atomic same-filesystem no-clobber rename or link.
+///
+/// Unlike rename_noreplace, this helper returns EXDEV without copying.
+/// Callers that need a cross-device move can prepare it asynchronously.
+pub(crate) fn rename_noreplace_same_device(
     old: &std::path::Path,
     new: &std::path::Path,
 ) -> std::io::Result<()> {
@@ -478,64 +492,56 @@ pub(crate) fn rename_noreplace(
     match rename_noreplace_sys(old, new) {
         // Old kernels (< 3.15) lack renameat2 (ENOSYS); some filesystems
         // reject the flag with EINVAL/EOPNOTSUPP: use the portable path.
-        Err(e) if noreplace_unsupported(&e) => {}
-        // Cross-device (EXDEV): copy through a `create_new` claim.
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => return copy_noreplace(old, new),
-        r => return r,
+        Err(error) if noreplace_unsupported(&error) => {}
+        result => return result,
     }
-    // Claim `new` via link: `exists()` + rename is a TOCTOU; the errno arms below pick the fallback.
+
+    // Claim new via link: exists() + rename is a TOCTOU; errno arms pick the fallback.
     loop {
         match std::fs::hard_link(old, new) {
             Ok(()) => {
-                if let Err(e) = std::fs::remove_file(old) {
-                    tracing::warn!("rename_noreplace: linked but could not unlink source: {e}");
+                if let Err(error) = std::fs::remove_file(old) {
+                    tracing::warn!("rename_noreplace: linked but could not unlink source: {error}");
                 }
                 return Ok(());
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-                return copy_noreplace(old, new);
-            }
-            Err(e) if link_unsupported(&e) => {
-                // Filesystem doesn't support hard links: claim `new`
-                // atomically, then rename over our own placeholder.
-                // AlreadyExists propagates; cleanup on failure.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Err(error),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.raw_os_error() == Some(libc::EXDEV) => return Err(error),
+            Err(error) if link_unsupported(&error) => {
                 tracing::warn!(
                     "rename_noreplace: hard link unsupported (errno {}), using atomic claim",
-                    e.raw_os_error().unwrap_or(-1)
+                    error.raw_os_error().unwrap_or(-1)
                 );
                 return claim_and_rename(old, new);
             }
-            Err(e) => return Err(e),
+            Err(error) => return Err(error),
         }
     }
 }
 
-/// Copy without replacing (cross-device fallback): `create_new` claim, unlink source after landing; failed copy removes partial dest.
+/// Copy through a destination-local temporary and publish without replacing an existing file.
 fn copy_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
-    let mut src = std::fs::File::open(old)?;
-    let permissions = src.metadata().map(|m| m.permissions()).ok();
-    let mut dst = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(new)?;
-    // chmod via the open fd (fchmod): set_permissions(new) after drop would
-    // re-resolve the path and chmod a swapped-in symlink instead.
-    let copy = std::io::copy(&mut src, &mut dst).and_then(|_| {
-        if let Some(p) = permissions {
-            dst.set_permissions(p)?;
-        }
-        dst.sync_all()
-    });
-    if copy.is_err() {
-        let _ = std::fs::remove_file(new);
-        return copy.map(|_| ());
-    }
-    drop(dst);
-    // The copy landed: a failed unlink is a warning, not a failed rename.
-    if let Err(e) = std::fs::remove_file(old) {
-        tracing::warn!("copy_noreplace: copied but could not unlink source: {e}");
+    let parent = new.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination has no parent directory",
+        )
+    })?;
+    let mut source = std::fs::File::open(old)?;
+    let permissions = source.metadata()?.permissions();
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::copy(&mut source, temporary.as_file_mut())?;
+    temporary.as_file().set_permissions(permissions)?;
+    temporary.as_file().sync_all()?;
+
+    let published_file = temporary
+        .persist_noclobber(new)
+        .map_err(|error| error.error)?;
+    drop(published_file);
+
+    if let Err(error) = std::fs::remove_file(old) {
+        tracing::warn!("copy_noreplace: published but could not unlink source: {error}");
     }
     Ok(())
 }
@@ -837,6 +843,37 @@ mod tests {
         assert!(!old.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
+    #[test]
+    fn same_device_rename_noreplace_moves_without_copy_fallback() {
+        let dir = unique_dir("same-device-noreplace");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("source");
+        let new = dir.join("target");
+        std::fs::write(&old, b"complete payload").unwrap();
+
+        rename_noreplace_same_device(&old, &new).unwrap();
+
+        assert_eq!(std::fs::read(&new).unwrap(), b"complete payload");
+        assert!(!old.exists(), "same-filesystem publication moves the source");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cross_device_copy_helper_uses_a_complete_no_clobber_publication() {
+        let dir = unique_dir("copy-noreplace");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("source");
+        let new = dir.join("target");
+        let contents = vec![0x5a; 512 * 1024];
+        std::fs::write(&old, &contents).unwrap();
+
+        copy_noreplace(&old, &new).unwrap();
+
+        assert_eq!(std::fs::read(&new).unwrap(), contents);
+        assert!(!old.exists(), "source is removed only after publication");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
 }
 
 #[cfg(test)]

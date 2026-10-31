@@ -741,12 +741,11 @@ pub(crate) async fn run_manifest_download(
     }
     let size = output_metadata.len();
 
-    if !gate.try_commit() {
-        return Ok(ManifestOutcome::Aborted);
-    }
-    match crate::file_names::rename_noreplace(&output_part, &job.dest) {
-        Ok(()) => {
-            gate.mark_delivered();
+    match crate::manifest_publish::publish(&output_part, &job.dest, &gate).await {
+        Ok(crate::manifest_publish::ManifestPublishOutcome::Aborted) => {
+            return Ok(ManifestOutcome::Aborted);
+        }
+        Ok(crate::manifest_publish::ManifestPublishOutcome::Published) => {
             crate::extension_server::discard_handoff_cookies(&job.source.url);
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -756,7 +755,7 @@ pub(crate) async fn run_manifest_download(
         }
         Err(error) => {
             return Err(manifest_storage_error(
-                "Could not move the finished stream into place",
+                "Could not publish the finished stream into place",
                 error,
             ));
         }

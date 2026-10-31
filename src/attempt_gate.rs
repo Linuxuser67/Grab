@@ -32,6 +32,12 @@ impl AttemptGate {
             .is_ok()
     }
 
+    /// Whether the attempt still accepts work before its delivery decision.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.state.load(Ordering::Acquire) == ACTIVE
+    }
+
     /// Claim discard; true only on winning ACTIVE->DISCARDED.
     #[must_use]
     pub fn discard(&self) -> bool {

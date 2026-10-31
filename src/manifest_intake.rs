@@ -151,9 +151,23 @@ fn has_manifest_endpoint_name(url: &Url) -> bool {
         })
 }
 
+fn preview_cookie_browser<'a>(
+    url: &Url,
+    cookies_browser: &'a str,
+    transport_policy: ManifestTransportPolicy,
+) -> &'a str {
+    if manifest_kind_for_transport(url, transport_policy).is_some() {
+        cookies_browser
+    } else {
+        ""
+    }
+}
+
 fn is_native_manifest_candidate(url: &Url, transport_policy: ManifestTransportPolicy) -> bool {
     manifest_kind_for_transport(url, transport_policy).is_some()
-        || (transport_policy.accepts_url(url) && has_manifest_endpoint_name(url))
+        || (transport_policy.accepts_url(url)
+            && !crate::video_tools::is_youtube_url(url.as_str())
+            && has_manifest_endpoint_name(url))
 }
 
 /// Inspect only the bounded response body; arbitrary HTML pages never enter
@@ -478,6 +492,8 @@ pub(crate) async fn lookup(
     if !is_native_manifest_candidate(&requested_url, ManifestTransportPolicy::HttpsOnly) {
         return Ok(None);
     }
+    let cookies_browser =
+        preview_cookie_browser(&requested_url, cookies_browser, ManifestTransportPolicy::HttpsOnly);
     tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
         let client = client_for_manifest(raw_url, cookies_browser, proxy).await?;
         lookup_preview_with_client(&client, raw_url)
@@ -1173,6 +1189,39 @@ mod tests {
         assert!(supports("https://cdn.example.test/manifest"));
         assert!(!supports("https://cdn.example.test/watch"));
         assert!(!supports("https://cdn.example.test/index"));
+    }
+
+    #[test]
+    fn endpoint_only_preview_candidates_skip_browser_cookie_export() {
+        let browser = "firefox";
+        let endpoint = Url::parse("https://cdn.example.test/playlist").unwrap();
+        let explicit_hint = Url::parse("https://cdn.example.test/stream?format=m3u8").unwrap();
+
+        assert_eq!(
+            preview_cookie_browser(&endpoint, browser, ManifestTransportPolicy::HttpsOnly),
+            "",
+            "endpoint-only URLs are sniffed without decrypting browser cookies"
+        );
+        assert_eq!(
+            preview_cookie_browser(&explicit_hint, browser, ManifestTransportPolicy::HttpsOnly),
+            browser,
+            "explicit manifest hints retain authenticated preview support"
+        );
+    }
+
+    #[tokio::test]
+    async fn youtube_playlist_page_skips_native_preview_before_cookie_export() {
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            lookup("https://www.youtube.com/playlist?list=PL_test", "firefox", None),
+        )
+        .await
+        .expect("YouTube playlist URLs must be rejected before browser-cookie export");
+
+        assert!(
+            result.expect("ordinary YouTube playlist pages do not enter native intake").is_none(),
+            "the endpoint-name heuristic must not route YouTube pages to native intake"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

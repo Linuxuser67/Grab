@@ -19,6 +19,7 @@ mod install_help;
 mod install_progress;
 mod manifest;
 mod manifest_intake;
+mod manifest_publish;
 mod manifest_runner;
 mod media_types;
 mod net_types;

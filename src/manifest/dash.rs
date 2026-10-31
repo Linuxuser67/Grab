@@ -1219,7 +1219,7 @@ fn dynamic_segment_times(
                                 .checked_sub(start)
                                 .filter(|distance| *distance > 0)
                                 .ok_or(DashError::InvalidSegment)?;
-                            distance / entry.duration
+                            ceil_div_u64(distance, entry.duration)?
                         }
                         None => elapsed_ticks
                             .checked_sub(start)
@@ -1985,6 +1985,50 @@ mod tests {
                 .map(|resource| resource.url.path().to_string())
                 .collect::<Vec<_>>(),
             ["/path/seg-4-6.m4s", "/path/seg-5-8.m4s"]
+        );
+    }
+
+    #[test]
+    fn dynamic_timeline_negative_repeat_uses_ceiling_before_next_explicit_start() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="10" media="seg-$Number$-$Time$.m4s">
+  <SegmentTimeline>
+    <S t="0" d="2" r="-1"/>
+    <S t="5" d="2"/>
+  </SegmentTimeline>
+</SegmentTemplate>"#,
+            r#"timeShiftBufferDepth="PT20S""#,
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(9))
+            .expect("dynamic timeline MPD should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.live_key)
+            .expect("expand complete dynamic timeline segments");
+        let segments = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            segments
+                .iter()
+                .map(|resource| resource.segment_number.expect("segment number"))
+                .collect::<Vec<_>>(),
+            [10, 11, 12, 13],
+            "the negative repeat includes the final segment that overlaps the next S@t"
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .map(|resource| resource.url.path().to_string())
+                .collect::<Vec<_>>(),
+            [
+                "/path/seg-10-0.m4s",
+                "/path/seg-11-2.m4s",
+                "/path/seg-12-4.m4s",
+                "/path/seg-13-5.m4s",
+            ]
         );
     }
 

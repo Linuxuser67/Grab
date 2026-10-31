@@ -1406,7 +1406,9 @@ mod tests {
             None,
             std::collections::HashMap::from([(
                 target_host.to_string(),
-                vec!["127.0.0.1:0".parse().expect("loopback socket address")],
+                vec![format!("127.0.0.1:{port}")
+                    .parse()
+                    .expect("loopback socket address")],
             )]),
         )
         .expect("build guarded client with deterministic DNS");

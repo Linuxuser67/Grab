@@ -60,6 +60,8 @@ psl = "=2.1.241"
 # Safe wrappers for Linux no-replace renameat2 operations.
 rustix = { version = "1.1.6", features = ["fs"] }
 thiserror = "2"
+# Secure destination-local temporary file for atomic no-clobber publication.
+tempfile = "3.27.0"
 
 [dev-dependencies]
 pretty_assertions = "1"

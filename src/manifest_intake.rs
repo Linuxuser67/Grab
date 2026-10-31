@@ -15,8 +15,13 @@ use crate::manifest::{
     HlsMasterPlan, HlsPlan, HlsVariant, MAX_MANIFEST_BYTES, dash::DashManifestPlan,
 };
 
+/// Download-time manifest requests retain their normal network tolerance.
 const MANIFEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// Native preview yields to yt-dlp quickly when its transport is unsuitable.
+const MANIFEST_PREVIEW_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+const MANIFEST_LOOKUP_BUDGET: Duration = Duration::from_secs(10);
 const MAX_MANIFEST_ATTEMPTS: u32 = 3;
+const MAX_PREVIEW_MANIFEST_ATTEMPTS: u32 = 2;
 const MANIFEST_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 
 #[must_use]
@@ -43,19 +48,6 @@ impl std::error::Error for ManifestIntakeError {}
 impl From<String> for ManifestIntakeError {
     fn from(error: String) -> Self {
         Self::Failed(error)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BrowserCookiePolicy {
-    HandoffOnly,
-    ExportConfiguredBrowser,
-}
-
-impl BrowserCookiePolicy {
-    #[must_use]
-    const fn allows_browser_export(self) -> bool {
-        matches!(self, Self::ExportConfiguredBrowser)
     }
 }
 
@@ -94,8 +86,7 @@ impl ManifestTransportPolicy {
     }
 }
 
-/// This is narrower than video::is_stream_manifest_url: native intake accepts
-/// HTTPS .m3u8/.mpd only; the generic guard also reserves HTTP, .m3u and .pls.
+/// Manifest URL hints accepted for native intake before the response is read.
 fn native_manifest_kind(url: &Url) -> Option<crate::media_types::ManifestKind> {
     manifest_kind_for_transport(url, ManifestTransportPolicy::HttpsOnly)
 }
@@ -108,23 +99,96 @@ fn manifest_kind_for_transport(
         return None;
     }
 
-    let extension = url.path().rsplit('/').next()?.rsplit_once('.')?.1;
-    if extension.eq_ignore_ascii_case("m3u8") {
-        Some(crate::media_types::ManifestKind::Hls)
-    } else if extension.eq_ignore_ascii_case("mpd") {
-        Some(crate::media_types::ManifestKind::Dash)
-    } else {
-        None
+    let extension = url
+        .path()
+        .rsplit('/')
+        .next()
+        .and_then(|segment| segment.rsplit_once('.').map(|(_, extension)| extension));
+    let from_extension = match extension {
+        Some(extension) if extension.eq_ignore_ascii_case("m3u8") => {
+            Some(crate::media_types::ManifestKind::Hls)
+        }
+        Some(extension) if extension.eq_ignore_ascii_case("mpd") => {
+            Some(crate::media_types::ManifestKind::Dash)
+        }
+        _ => None,
+    };
+    from_extension.or_else(|| manifest_kind_from_query(url))
+}
+
+fn manifest_kind_from_query(url: &Url) -> Option<crate::media_types::ManifestKind> {
+    url.query_pairs().find_map(|(key, value)| {
+        if !matches!(
+            key.to_ascii_lowercase().as_str(),
+            "format" | "type" | "ext" | "manifest"
+        ) {
+            return None;
+        }
+        if matches!(
+            value.to_ascii_lowercase().as_str(),
+            "m3u8" | "hls" | "application/vnd.apple.mpegurl" | "application/x-mpegurl"
+        ) {
+            Some(crate::media_types::ManifestKind::Hls)
+        } else if matches!(
+            value.to_ascii_lowercase().as_str(),
+            "mpd" | "dash" | "application/dash+xml"
+        ) {
+            Some(crate::media_types::ManifestKind::Dash)
+        } else {
+            None
+        }
+    })
+}
+
+/// Only common manifest endpoint names are probed without a file extension.
+fn has_manifest_endpoint_name(url: &Url) -> bool {
+    url.path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .is_some_and(|segment| {
+            ["master", "playlist", "manifest"]
+                .iter()
+                .any(|name| segment.eq_ignore_ascii_case(name))
+        })
+}
+
+fn is_native_manifest_candidate(url: &Url, transport_policy: ManifestTransportPolicy) -> bool {
+    manifest_kind_for_transport(url, transport_policy).is_some()
+        || (transport_policy.accepts_url(url) && has_manifest_endpoint_name(url))
+}
+
+/// Inspect only the bounded response body; arbitrary HTML pages never enter
+/// this path because the URL must already have a manifest hint or endpoint.
+fn sniff_manifest_kind(body: &[u8]) -> Option<crate::media_types::ManifestKind> {
+    let body = std::str::from_utf8(body).ok()?;
+    let mut body = body.trim_start_matches('\u{feff}').trim_start();
+    if body.starts_with("#EXTM3U") {
+        return Some(crate::media_types::ManifestKind::Hls);
     }
+
+    // Allow the ordinary XML declaration and comments before the MPD root,
+    // but do not classify HTML or arbitrary text containing an MPD fragment.
+    loop {
+        body = body.trim_start();
+        if let Some(rest) = body.strip_prefix("<?xml") {
+            body = rest.split_once("?>")?.1;
+        } else if let Some(rest) = body.strip_prefix("<!--") {
+            body = rest.split_once("-->")?.1;
+        } else {
+            break;
+        }
+    }
+    body.starts_with("<MPD")
+        .then_some(crate::media_types::ManifestKind::Dash)
 }
 
 /// Whether a URL is eligible for the native HTTPS manifest lookup.
 ///
-/// Other schemes and extensions remain on the established yt-dlp path.
+/// HTTPS manifest extensions, explicit format query hints, and common
+/// manifest endpoints are eligible; ordinary pages remain on yt-dlp.
 pub(crate) fn supports(raw_url: &str) -> bool {
     Url::parse(raw_url)
         .ok()
-        .is_some_and(|url| native_manifest_kind(&url).is_some())
+        .is_some_and(|url| is_native_manifest_candidate(&url, ManifestTransportPolicy::HttpsOnly))
 }
 
 /// One selectable video choice from a parsed native manifest.
@@ -399,30 +463,34 @@ impl ManifestLookup {
     }
 }
 
-/// Fetch and parse a supported manifest. Unsupported or malformed manifests
-/// return None so the established yt-dlp resolver can handle them.
+/// Preview a candidate HLS/DASH manifest using the configured browser's cookies.
 ///
-/// The response is streamed into a bounded buffer; an untrusted Content-Length
-/// is only an early rejection hint, never the memory bound.
+/// The response is streamed into a bounded buffer. Unsupported manifest
+/// responses preserve their reason so it can be shown if yt-dlp also fails.
+/// The total preview budget includes browser-cookie export and manifest intake,
+/// then yields to the established yt-dlp fallback.
 pub(crate) async fn lookup(
     raw_url: &str,
     cookies_browser: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Result<Option<ManifestLookup>, String> {
     let requested_url = Url::parse(raw_url).map_err(|_| gettext("Invalid stream manifest URL"))?;
-    if native_manifest_kind(&requested_url).is_none() {
+    if !is_native_manifest_candidate(&requested_url, ManifestTransportPolicy::HttpsOnly) {
         return Ok(None);
     }
-    let client = client_for_manifest_with_policy(
-        raw_url,
-        cookies_browser,
-        proxy,
-        BrowserCookiePolicy::HandoffOnly,
-    )
-    .await?;
-    lookup_with_client(&client, raw_url)
-        .await
-        .map_err(|error| error.to_string())
+    tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
+        let client = client_for_manifest(raw_url, cookies_browser, proxy).await?;
+        lookup_preview_with_client(&client, raw_url)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(format!(
+            "Native manifest lookup exceeded its {} second preview budget",
+            MANIFEST_LOOKUP_BUDGET.as_secs()
+        ))
+    })
 }
 
 /// Build an attempt-scoped client, preferring a valid extension handoff jar and
@@ -432,20 +500,13 @@ pub(crate) async fn client_for_manifest(
     cookies_browser: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Result<reqwest::Client, String> {
-    client_for_manifest_with_policy(
-        raw_url,
-        cookies_browser,
-        proxy,
-        BrowserCookiePolicy::ExportConfiguredBrowser,
-    )
-    .await
+    client_for_manifest_with_policy(raw_url, cookies_browser, proxy).await
 }
 
 async fn client_for_manifest_with_policy(
     raw_url: &str,
     cookies_browser: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
-    cookie_policy: BrowserCookiePolicy,
 ) -> Result<reqwest::Client, String> {
     // A browser handoff is public-only. An upstream proxy resolves the target
     // remotely and would bypass the local guarded DNS resolver, so reject it
@@ -474,8 +535,7 @@ async fn client_for_manifest_with_policy(
         }
     }
 
-    if cookie_policy.allows_browser_export()
-        && !cookies_browser.is_empty()
+    if !cookies_browser.is_empty()
         && cookies_browser != "none"
         && let Ok(youtube_bin) = crate::video_tools::resolve_ytdlp()
     {
@@ -509,48 +569,103 @@ async fn client_for_manifest_with_policy(
 
 /// Fetch a manifest with an existing per-attempt client so manifests and media
 /// resources share the same proxy and DNS policy.
+/// Resolve a manifest for a queued download, retaining the download-time
+/// network timeout and retry policy.
 pub(crate) async fn lookup_with_client(
     client: &reqwest::Client,
     raw_url: &str,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
-    lookup_with_client_policy(client, raw_url, ManifestTransportPolicy::HttpsOnly).await
+    lookup_with_client_policy(
+        client,
+        raw_url,
+        ManifestTransportPolicy::HttpsOnly,
+        ManifestFetchMode::Download,
+    )
+    .await
+}
+
+/// Resolve a manifest for the Add-card preview using its shorter fallback budget.
+pub(crate) async fn lookup_preview_with_client(
+    client: &reqwest::Client,
+    raw_url: &str,
+) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
+    lookup_with_client_policy(
+        client,
+        raw_url,
+        ManifestTransportPolicy::HttpsOnly,
+        ManifestFetchMode::Preview,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestFetchMode {
+    Preview,
+    Download,
 }
 
 async fn lookup_with_client_policy(
     client: &reqwest::Client,
     raw_url: &str,
     transport_policy: ManifestTransportPolicy,
+    fetch_mode: ManifestFetchMode,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
     let requested_url = Url::parse(raw_url)
         .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
-    let Some(kind) = manifest_kind_for_transport(&requested_url, transport_policy) else {
+    if !is_native_manifest_candidate(&requested_url, transport_policy) {
         return Ok(None);
+    }
+    let manifest_kind_hint = manifest_kind_for_transport(&requested_url, transport_policy);
+    let (final_url, body, server_now) = match fetch_mode {
+        ManifestFetchMode::Preview => {
+            fetch_bounded_preview_manifest_with_policy(client, requested_url, transport_policy)
+                .await?
+        }
+        ManifestFetchMode::Download => {
+            fetch_bounded_manifest_with_policy(client, requested_url, transport_policy).await?
+        }
     };
-    let (final_url, body, server_now) =
-        fetch_bounded_manifest_with_policy(client, requested_url, transport_policy).await?;
     let final_url = transport_policy.planning_url(final_url)?;
+    let kind = manifest_kind_hint
+        .or_else(|| sniff_manifest_kind(&body))
+        .ok_or_else(|| {
+            ManifestIntakeError::Unsupported(
+                "The response is not an HLS playlist or DASH MPD".to_string(),
+            )
+        })?;
     let manifest = match kind {
         crate::media_types::ManifestKind::Hls => {
             match crate::manifest::parse_hls_master_playlist(final_url.as_str(), &body) {
                 Ok(master) => NativeManifest::HlsMaster(master),
                 Err(crate::manifest::ManifestError::ExpectedMasterPlaylist) => {
-                    match crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body) {
-                        Ok(plan) => NativeManifest::HlsMedia(Box::new(plan)),
-                        Err(_) => return Ok(None),
-                    }
+                    let plan = crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
+                        .map_err(|error| {
+                            ManifestIntakeError::Unsupported(format!(
+                                "The HLS media playlist is not supported: {error}"
+                            ))
+                        })?;
+                    NativeManifest::HlsMedia(Box::new(plan))
                 }
-                Err(_) => return Ok(None),
+                Err(error) => {
+                    return Err(ManifestIntakeError::Unsupported(format!(
+                        "The HLS master playlist is not supported: {error}"
+                    )));
+                }
             }
         }
         crate::media_types::ManifestKind::Dash => {
-            let Ok(body) = std::str::from_utf8(&body) else {
-                return Ok(None);
-            };
-            let Ok(plan) =
+            let body = std::str::from_utf8(&body).map_err(|error| {
+                ManifestIntakeError::Unsupported(format!(
+                    "The DASH manifest is not valid UTF-8: {error}"
+                ))
+            })?;
+            let plan =
                 crate::manifest::dash::parse_dash_manifest_at(final_url.as_str(), body, server_now)
-            else {
-                return Ok(None);
-            };
+                    .map_err(|error| {
+                        ManifestIntakeError::Unsupported(format!(
+                            "The DASH presentation is not supported: {error}"
+                        ))
+                    })?;
             NativeManifest::Dash(plan)
         }
     };
@@ -565,7 +680,13 @@ async fn lookup_with_http_fixture_client(
     client: &reqwest::Client,
     raw_url: &str,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
-    lookup_with_client_policy(client, raw_url, ManifestTransportPolicy::HttpFixture).await
+    lookup_with_client_policy(
+        client,
+        raw_url,
+        ManifestTransportPolicy::HttpFixture,
+        ManifestFetchMode::Preview,
+    )
+    .await
 }
 
 /// Fetch and parse an HLS child media playlist using the caller's guarded client.
@@ -593,6 +714,69 @@ async fn fetch_bounded_manifest_with_policy(
     requested_url: Url,
     transport_policy: ManifestTransportPolicy,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
+    fetch_bounded_manifest_with_limits(
+        client,
+        requested_url,
+        transport_policy,
+        MANIFEST_REQUEST_TIMEOUT,
+        MAX_MANIFEST_ATTEMPTS,
+        ManifestFetchMode::Download,
+    )
+    .await
+}
+
+async fn fetch_bounded_preview_manifest_with_policy(
+    client: &reqwest::Client,
+    requested_url: Url,
+    transport_policy: ManifestTransportPolicy,
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
+    fetch_bounded_preview_manifest_with_limits(
+        client,
+        requested_url,
+        transport_policy,
+        MANIFEST_LOOKUP_BUDGET,
+        MANIFEST_PREVIEW_REQUEST_TIMEOUT,
+        MAX_PREVIEW_MANIFEST_ATTEMPTS,
+    )
+    .await
+}
+
+async fn fetch_bounded_preview_manifest_with_limits(
+    client: &reqwest::Client,
+    requested_url: Url,
+    transport_policy: ManifestTransportPolicy,
+    preview_budget: Duration,
+    request_timeout: Duration,
+    max_attempts: u32,
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
+    tokio::time::timeout(
+        preview_budget,
+        fetch_bounded_manifest_with_limits(
+            client,
+            requested_url,
+            transport_policy,
+            request_timeout,
+            max_attempts,
+            ManifestFetchMode::Preview,
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(ManifestIntakeError::Unsupported(format!(
+            "Native manifest lookup exceeded its {} ms preview budget",
+            preview_budget.as_millis()
+        )))
+    })
+}
+
+async fn fetch_bounded_manifest_with_limits(
+    client: &reqwest::Client,
+    requested_url: Url,
+    transport_policy: ManifestTransportPolicy,
+    request_timeout: Duration,
+    max_attempts: u32,
+    fetch_mode: ManifestFetchMode,
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     if !transport_policy.accepts_url(&requested_url) {
         return Err(ManifestIntakeError::Failed(gettext(
             "Invalid stream manifest URL",
@@ -602,8 +786,16 @@ async fn fetch_bounded_manifest_with_policy(
     let mut attempt = 0_u32;
     loop {
         attempt += 1;
-        match fetch_bounded_manifest_once(client, &requested_url, transport_policy).await {
-            Err(ManifestIntakeError::Retryable(error)) if attempt < MAX_MANIFEST_ATTEMPTS => {
+        match fetch_bounded_manifest_once(
+            client,
+            &requested_url,
+            transport_policy,
+            request_timeout,
+            fetch_mode,
+        )
+        .await
+        {
+            Err(ManifestIntakeError::Retryable(error)) if attempt < max_attempts => {
                 let delay = MANIFEST_RETRY_BASE_DELAY * attempt;
                 tracing::debug!(
                     attempt,
@@ -618,12 +810,55 @@ async fn fetch_bounded_manifest_with_policy(
     }
 }
 
-fn manifest_status_error(status: reqwest::StatusCode) -> ManifestIntakeError {
+/// Only request timeouts and connection resets are worth retrying. DNS guard,
+/// TLS, redirect-policy and other deterministic failures fall back immediately.
+fn manifest_request_error(context: &str, error: reqwest::Error) -> ManifestIntakeError {
+    let timed_out = error.is_timeout();
+    let connection_reset = has_connection_reset_cause(&error);
+    let retryable = timed_out || connection_reset;
+    let detail = if timed_out {
+        "the request timed out".to_string()
+    } else if connection_reset {
+        "the connection was reset".to_string()
+    } else if error.is_dns() {
+        "DNS resolution failed".to_string()
+    } else {
+        // Reqwest errors may carry the full signed manifest URL. Strip it
+        // before using the transport's detailed diagnostic.
+        error.without_url().to_string()
+    };
+    let message = format!("{context}: {detail}");
+    if retryable {
+        ManifestIntakeError::Retryable(message)
+    } else {
+        ManifestIntakeError::Unsupported(message)
+    }
+}
+
+fn has_connection_reset_cause(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        if cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset)
+        {
+            return true;
+        }
+        current = std::error::Error::source(cause);
+    }
+    false
+}
+
+fn manifest_status_error(
+    status: reqwest::StatusCode,
+    fetch_mode: ManifestFetchMode,
+) -> ManifestIntakeError {
     let message = format!("The stream server returned HTTP {}", status.as_u16());
-    if status == reqwest::StatusCode::REQUEST_TIMEOUT
-        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        || status.is_server_error()
-    {
+    let retryable = fetch_mode == ManifestFetchMode::Download
+        && (status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status.is_server_error());
+    if retryable {
         ManifestIntakeError::Retryable(message)
     } else {
         ManifestIntakeError::Unsupported(message)
@@ -634,20 +869,18 @@ async fn fetch_bounded_manifest_once(
     client: &reqwest::Client,
     requested_url: &Url,
     transport_policy: ManifestTransportPolicy,
+    request_timeout: Duration,
+    fetch_mode: ManifestFetchMode,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     let response = client
         .get(requested_url.clone())
-        .timeout(MANIFEST_REQUEST_TIMEOUT)
+        .timeout(request_timeout)
         .send()
         .await
-        .map_err(|error| {
-            ManifestIntakeError::Retryable(format!(
-                "Could not retrieve the stream manifest: {error}"
-            ))
-        })?;
+        .map_err(|error| manifest_request_error("Could not retrieve the stream manifest", error))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(manifest_status_error(status));
+        return Err(manifest_status_error(status, fetch_mode));
     }
     let final_url = response.url().clone();
     if !transport_policy.accepts_url(&final_url) {
@@ -826,7 +1059,10 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
     let Ok(url) = Url::parse(&source.url) else {
         return false;
     };
-    if native_manifest_kind(&url) != Some(source.kind) || source.representation_key.is_empty() {
+    if !is_native_manifest_candidate(&url, ManifestTransportPolicy::HttpsOnly)
+        || native_manifest_kind(&url).is_some_and(|kind| kind != source.kind)
+        || source.representation_key.is_empty()
+    {
         return false;
     }
     let video_key_is_valid = match source.kind {
@@ -866,9 +1102,11 @@ async fn read_bounded_response(
     }
 
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|error| {
-        ManifestIntakeError::Retryable(format!("Could not read the stream manifest: {error}"))
-    })? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| manifest_request_error("Could not read the stream manifest", error))?
+    {
         if body.len().saturating_add(chunk.len()) > MAX_MANIFEST_BYTES {
             return Err(ManifestIntakeError::Unsupported(format!(
                 "The stream manifest exceeds the {} MiB size limit",
@@ -919,33 +1157,232 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_http_status_retries_rate_limits_and_server_errors_only() {
-        assert!(matches!(
-            manifest_status_error(reqwest::StatusCode::REQUEST_TIMEOUT),
-            ManifestIntakeError::Retryable(_)
+    fn native_manifest_gate_accepts_explicit_format_query_hints() {
+        assert!(supports("https://cdn.example.test/stream?format=m3u8"));
+        assert!(supports(
+            "https://cdn.example.test/stream?type=application/dash%2Bxml"
         ));
-        assert!(matches!(
-            manifest_status_error(reqwest::StatusCode::TOO_MANY_REQUESTS),
-            ManifestIntakeError::Retryable(_)
-        ));
-        assert!(matches!(
-            manifest_status_error(reqwest::StatusCode::SERVICE_UNAVAILABLE),
-            ManifestIntakeError::Retryable(_)
-        ));
-        assert!(matches!(
-            manifest_status_error(reqwest::StatusCode::NOT_FOUND),
-            ManifestIntakeError::Unsupported(_)
-        ));
-        assert!(matches!(
-            manifest_status_error(reqwest::StatusCode::FORBIDDEN),
-            ManifestIntakeError::Unsupported(_)
-        ));
+        assert!(!supports("https://cdn.example.test/watch?v=video"));
+        assert!(!supports("http://cdn.example.test/stream?format=m3u8"));
     }
 
     #[test]
-    fn preview_cookie_policy_does_not_export_browser_profiles() {
-        assert!(!BrowserCookiePolicy::HandoffOnly.allows_browser_export());
-        assert!(BrowserCookiePolicy::ExportConfiguredBrowser.allows_browser_export());
+    fn native_manifest_gate_accepts_only_named_extensionless_endpoints() {
+        assert!(supports("https://cdn.example.test/master"));
+        assert!(supports("https://cdn.example.test/live/playlist?token=x"));
+        assert!(supports("https://cdn.example.test/manifest"));
+        assert!(!supports("https://cdn.example.test/watch"));
+        assert!(!supports("https://cdn.example.test/index"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn extensionless_master_endpoint_is_sniffed_as_hls() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind extensionless manifest fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let body = concat!(
+            "#EXTM3U\n",
+            "#EXT-X-VERSION:3\n",
+            "#EXT-X-TARGETDURATION:4\n",
+            "#EXT-X-MEDIA-SEQUENCE:0\n",
+            "#EXTINF:4.0,\n",
+            "segment0.ts\n",
+            "#EXT-X-ENDLIST\n"
+        );
+        let response_body = body.to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept manifest request");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let read = socket
+                    .read(&mut chunk)
+                    .await
+                    .expect("read manifest request");
+                assert_ne!(read, 0, "request ended before HTTP headers");
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+                assert!(request.len() < 16 * 1024, "request headers stay bounded");
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write manifest response");
+        });
+
+        let url = format!("http://{address}/master");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build local manifest client");
+        let lookup = lookup_with_http_fixture_client(&client, &url)
+            .await
+            .expect("extensionless manifest lookup")
+            .expect("HLS signature should select native parsing");
+        server.await.expect("fixture server task");
+
+        let NativeManifest::HlsMedia(plan) = lookup.manifest else {
+            panic!("extensionless HLS body should produce a media playlist");
+        };
+        assert_eq!(plan.resources.len(), 1);
+        assert_eq!(
+            plan.resources[0].url.as_str(),
+            format!("https://{address}/segment0.ts")
+        );
+    }
+
+    #[test]
+    fn manifest_body_sniffing_requires_a_manifest_signature() {
+        assert_eq!(
+            sniff_manifest_kind(b"\xef\xbb\xbf  #EXTM3U\n#EXT-X-ENDLIST"),
+            Some(crate::media_types::ManifestKind::Hls)
+        );
+        assert_eq!(
+            sniff_manifest_kind(
+                br#"<?xml version="1.0" encoding="UTF-8"?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011"/>"#
+            ),
+            Some(crate::media_types::ManifestKind::Dash)
+        );
+        assert_eq!(
+            sniff_manifest_kind(
+                br#"<!-- generated MPD --><!-- another comment --><?xml version="1.0"?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011"/>"#
+            ),
+            Some(crate::media_types::ManifestKind::Dash)
+        );
+        assert_eq!(
+            sniff_manifest_kind(b"<!doctype html><html><body>video</body></html>"),
+            None
+        );
+        assert_eq!(sniff_manifest_kind(b"not a manifest"), None);
+    }
+
+    #[test]
+    fn manifest_preview_http_statuses_fall_back_without_retry() {
+        for status in [
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
+            assert!(
+                matches!(
+                    manifest_status_error(status, ManifestFetchMode::Preview),
+                    ManifestIntakeError::Unsupported(_)
+                ),
+                "preview HTTP {status} should yield immediately to yt-dlp"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_download_retries_only_transient_http_statuses() {
+        for status in [
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(
+                matches!(
+                    manifest_status_error(status, ManifestFetchMode::Download),
+                    ManifestIntakeError::Retryable(_)
+                ),
+                "download HTTP {status} should retain transient retries"
+            );
+        }
+        for status in [
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
+            assert!(matches!(
+                manifest_status_error(status, ManifestFetchMode::Download),
+                ManifestIntakeError::Unsupported(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn manifest_transport_retries_only_timeouts_and_connection_resets() {
+        let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert!(has_connection_reset_cause(&reset));
+        assert!(!has_connection_reset_cause(&refused));
+        assert!(!has_connection_reset_cause(&std::io::Error::other(
+            "DNS resolution was refused by the guarded resolver"
+        )));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn manifest_preview_budget_cancels_a_slow_server_request() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind slow manifest fixture");
+        let port = listener
+            .local_addr()
+            .expect("read slow manifest fixture address")
+            .port();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept manifest request");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(socket);
+        });
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/master.m3u8"))
+            .expect("fixture manifest URL");
+        let started = tokio::time::Instant::now();
+
+        let result = fetch_bounded_preview_manifest_with_limits(
+            &reqwest::Client::new(),
+            url,
+            ManifestTransportPolicy::HttpFixture,
+            Duration::from_millis(20),
+            Duration::from_secs(1),
+            1,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(ManifestIntakeError::Unsupported(message))
+                    if message.contains("20 ms preview budget")
+            ),
+            "slow preview should yield to the extractor fallback: {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "preview should stop at its deadline instead of waiting for the request timeout"
+        );
+        server.await.expect("slow manifest fixture task");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn manifest_transport_failure_does_not_disclose_signed_url() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve a local port");
+        let port = listener.local_addr().expect("read reserved port").port();
+        drop(listener);
+        let url = format!("http://127.0.0.1:{port}/master.m3u8?sig=secret-token");
+        let error = reqwest::Client::new()
+            .get(&url)
+            .timeout(Duration::from_secs(1))
+            .send()
+            .await
+            .expect_err("the reserved port is no longer listening");
+
+        let classified = manifest_request_error("Could not retrieve the stream manifest", error);
+        let message = classified.to_string();
+        assert!(matches!(classified, ManifestIntakeError::Unsupported(_)));
+        assert!(message.contains("Could not retrieve the stream manifest"));
+        assert!(!message.contains("secret-token"));
     }
 
     #[test]
@@ -1217,6 +1654,12 @@ video/es.m3u8
             audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".to_string()),
         };
         assert!(valid_source(&source));
+        source.url = "https://cdn.example.test/master".to_string();
+        assert!(
+            valid_source(&source),
+            "extensionless endpoint kind is carried by the persisted source"
+        );
+        source.url = "https://cdn.example.test/master.m3u8".to_string();
         source.audio_key = Some("not-a-stable-audio-key".to_string());
         assert!(!valid_source(&source));
         source.representation_key = "hls-media".to_string();

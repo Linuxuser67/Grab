@@ -318,6 +318,8 @@ pub(crate) async fn run_manifest_download(
     .await
     .map_err(|error| format!("Could not prepare manifest staging: {error}"))??;
 
+    let output_part = staging.join("output.part.mp4");
+    remove_regular_file_if_present(&output_part).await?;
     let video_dir = staging.join("video");
     ensure_track_dir(&video_dir).await?;
     let audio_dir = staging.join("audio");
@@ -683,9 +685,7 @@ pub(crate) async fn run_manifest_download(
         ManifestKind::Hls => audio_dir.join("local.m3u8"),
         ManifestKind::Dash => audio_dir.join("audio-track.mp4"),
     });
-    let output_part = staging.join("output.part.mp4");
     ensure_manifest_mux_space(dest_dir, downloaded.load(Ordering::Relaxed))?;
-    remove_regular_file_if_present(&output_part).await?;
     if !run_ffmpeg(
         &ffmpeg,
         &video_input,
@@ -1552,7 +1552,10 @@ async fn run_live_hls_tracks(
     .await?
     {
         LiveHlsSnapshotOutcome::Committed => {
-            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+            ensure_manifest_mux_space(
+                        destination_dir,
+                        downloaded.load(Ordering::Relaxed),
+                    )?;
         }
         LiveHlsSnapshotOutcome::Stopped(intent) => {
             return Ok(match intent {
@@ -1594,7 +1597,10 @@ async fn run_live_hls_tracks(
         };
         match audio_outcome {
             LiveHlsSnapshotOutcome::Committed => {
-                ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+                ensure_manifest_mux_space(
+                        destination_dir,
+                        downloaded.load(Ordering::Relaxed),
+                    )?;
             }
             LiveHlsSnapshotOutcome::Stopped(intent) => {
                 return Ok(match intent {
@@ -1657,7 +1663,10 @@ async fn run_live_hls_tracks(
             .await?
             {
                 LiveHlsSnapshotOutcome::Committed => {
-                    ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+                    ensure_manifest_mux_space(
+                        destination_dir,
+                        downloaded.load(Ordering::Relaxed),
+                    )?;
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
@@ -1694,7 +1703,10 @@ async fn run_live_hls_tracks(
             .await?
             {
                 LiveHlsSnapshotOutcome::Committed => {
-                    ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+                    ensure_manifest_mux_space(
+                        destination_dir,
+                        downloaded.load(Ordering::Relaxed),
+                    )?;
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
@@ -2798,7 +2810,10 @@ async fn run_live_dash_tracks(
     .await?
     {
         DashLiveUpdateOutcome::Committed => {
-            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+            ensure_manifest_mux_space(
+                        destination_dir,
+                        downloaded.load(Ordering::Relaxed),
+                    )?;
         }
         DashLiveUpdateOutcome::Stopped(intent) => {
             finish_capture!(match intent {
@@ -2833,7 +2848,10 @@ async fn run_live_dash_tracks(
         .await?
         {
             DashLiveUpdateOutcome::Committed => {
-                ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+                ensure_manifest_mux_space(
+                        destination_dir,
+                        downloaded.load(Ordering::Relaxed),
+                    )?;
             }
             DashLiveUpdateOutcome::Stopped(intent) => {
                 finish_capture!(match intent {
@@ -2957,7 +2975,10 @@ async fn run_live_dash_tracks(
         .await?
         {
             DashLiveUpdateOutcome::Committed => {
-                ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+                ensure_manifest_mux_space(
+                        destination_dir,
+                        downloaded.load(Ordering::Relaxed),
+                    )?;
             }
             DashLiveUpdateOutcome::Stopped(intent) => {
                 finish_capture!(match intent {
@@ -2990,7 +3011,10 @@ async fn run_live_dash_tracks(
                 .await?
                 {
                     DashLiveUpdateOutcome::Committed => {
-                        ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+                        ensure_manifest_mux_space(
+                        destination_dir,
+                        downloaded.load(Ordering::Relaxed),
+                    )?;
                     }
                     DashLiveUpdateOutcome::Stopped(intent) => {
                         finish_capture!(match intent {
@@ -3028,7 +3052,10 @@ async fn run_live_dash_tracks(
                 .await?
                 {
                     DashLiveUpdateOutcome::Committed => {
-                        ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+                        ensure_manifest_mux_space(
+                        destination_dir,
+                        downloaded.load(Ordering::Relaxed),
+                    )?;
                         let bytes = dash_live_track_bytes(&track.state, &track.directory).await?;
                         audio_key = Some(key);
                         audio = Some((track, bytes));

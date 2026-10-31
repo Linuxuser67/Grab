@@ -15,8 +15,11 @@ use crate::manifest::{
     HlsMasterPlan, HlsPlan, HlsVariant, MAX_MANIFEST_BYTES, dash::DashManifestPlan,
 };
 
-const MANIFEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const MAX_MANIFEST_ATTEMPTS: u32 = 3;
+/// Per-attempt transport ceiling; the complete native preview has a stricter budget below.
+const MANIFEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+/// Native preview should yield to yt-dlp quickly when its transport is unsuitable.
+const MANIFEST_LOOKUP_BUDGET: Duration = Duration::from_secs(10);
+const MAX_MANIFEST_ATTEMPTS: u32 = 2;
 const MANIFEST_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 
 #[must_use]
@@ -404,6 +407,10 @@ impl ManifestLookup {
 ///
 /// The response is streamed into a bounded buffer; an untrusted Content-Length
 /// is only an early rejection hint, never the memory bound.
+/// Preview native manifests with extension handoff cookies only.
+ ///
+ /// Do not export the configured browser profile during a background preview:
+ /// browser-cookie export is reserved for the user-started download attempt.
 pub(crate) async fn lookup(
     raw_url: &str,
     cookies_browser: &str,
@@ -534,23 +541,35 @@ async fn lookup_with_client_policy(
             match crate::manifest::parse_hls_master_playlist(final_url.as_str(), &body) {
                 Ok(master) => NativeManifest::HlsMaster(master),
                 Err(crate::manifest::ManifestError::ExpectedMasterPlaylist) => {
-                    match crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body) {
-                        Ok(plan) => NativeManifest::HlsMedia(Box::new(plan)),
-                        Err(_) => return Ok(None),
-                    }
+                    let plan =
+                        crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
+                            .map_err(|error| {
+                                ManifestIntakeError::Unsupported(format!(
+                                    "The HLS media playlist is not supported: {error}"
+                                ))
+                            })?;
+                    NativeManifest::HlsMedia(Box::new(plan))
                 }
-                Err(_) => return Ok(None),
+                Err(error) => {
+                    return Err(ManifestIntakeError::Unsupported(format!(
+                        "The HLS master playlist is not supported: {error}"
+                    )));
+                }
             }
         }
         crate::media_types::ManifestKind::Dash => {
-            let Ok(body) = std::str::from_utf8(&body) else {
-                return Ok(None);
-            };
-            let Ok(plan) =
+            let body = std::str::from_utf8(&body).map_err(|error| {
+                ManifestIntakeError::Unsupported(format!(
+                    "The DASH manifest is not valid UTF-8: {error}"
+                ))
+            })?;
+            let plan =
                 crate::manifest::dash::parse_dash_manifest_at(final_url.as_str(), body, server_now)
-            else {
-                return Ok(None);
-            };
+                    .map_err(|error| {
+                        ManifestIntakeError::Unsupported(format!(
+                            "The DASH presentation is not supported: {error}"
+                        ))
+                    })?;
             NativeManifest::Dash(plan)
         }
     };
@@ -599,35 +618,70 @@ async fn fetch_bounded_manifest_with_policy(
         )));
     }
 
-    let mut attempt = 0_u32;
-    loop {
-        attempt += 1;
-        match fetch_bounded_manifest_once(client, &requested_url, transport_policy).await {
-            Err(ManifestIntakeError::Retryable(error)) if attempt < MAX_MANIFEST_ATTEMPTS => {
-                let delay = MANIFEST_RETRY_BASE_DELAY * attempt;
-                tracing::debug!(
-                    attempt,
-                    delay_ms = delay.as_millis() as u64,
-                    error = %error,
-                    "retrying transient native manifest request"
-                );
-                tokio::time::sleep(delay).await;
+    tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
+        let mut attempt = 0_u32;
+        loop {
+            attempt += 1;
+            match fetch_bounded_manifest_once(client, &requested_url, transport_policy).await {
+                Err(ManifestIntakeError::Retryable(error))
+                    if attempt < MAX_MANIFEST_ATTEMPTS =>
+                {
+                    let delay = MANIFEST_RETRY_BASE_DELAY * attempt;
+                    tracing::debug!(
+                        attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %error,
+                        "retrying transient native manifest request"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                result => return result,
             }
-            result => return result,
         }
-    }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(ManifestIntakeError::Unsupported(format!(
+            "Native manifest lookup exceeded its {} second preview budget",
+            MANIFEST_LOOKUP_BUDGET.as_secs()
+        )))
+    })
 }
 
-fn manifest_status_error(status: reqwest::StatusCode) -> ManifestIntakeError {
-    let message = format!("The stream server returned HTTP {}", status.as_u16());
-    if status == reqwest::StatusCode::REQUEST_TIMEOUT
-        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        || status.is_server_error()
-    {
+/// Only request timeouts and connection resets are worth retrying. DNS guard,
+/// TLS, redirect-policy and other deterministic failures fall back immediately.
+fn manifest_request_error(
+    context: &str,
+    error: reqwest::Error,
+) -> ManifestIntakeError {
+    let retryable = error.is_timeout() || has_connection_reset_cause(&error);
+    let message = format!("{context}: {error}");
+    if retryable {
         ManifestIntakeError::Retryable(message)
     } else {
         ManifestIntakeError::Unsupported(message)
     }
+}
+
+fn has_connection_reset_cause(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        if cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset)
+        {
+            return true;
+        }
+        current = std::error::Error::source(cause);
+    }
+    false
+}
+
+fn manifest_status_error(status: reqwest::StatusCode) -> ManifestIntakeError {
+    ManifestIntakeError::Unsupported(format!(
+        "The stream server returned HTTP {}",
+        status.as_u16()
+    ))
 }
 
 async fn fetch_bounded_manifest_once(
@@ -641,9 +695,7 @@ async fn fetch_bounded_manifest_once(
         .send()
         .await
         .map_err(|error| {
-            ManifestIntakeError::Retryable(format!(
-                "Could not retrieve the stream manifest: {error}"
-            ))
+            manifest_request_error("Could not retrieve the stream manifest", error)
         })?;
     let status = response.status();
     if !status.is_success() {
@@ -866,9 +918,11 @@ async fn read_bounded_response(
     }
 
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|error| {
-        ManifestIntakeError::Retryable(format!("Could not read the stream manifest: {error}"))
-    })? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| manifest_request_error("Could not read the stream manifest", error))?
+    {
         if body.len().saturating_add(chunk.len()) > MAX_MANIFEST_BYTES {
             return Err(ManifestIntakeError::Unsupported(format!(
                 "The stream manifest exceeds the {} MiB size limit",
@@ -919,27 +973,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_http_status_retries_rate_limits_and_server_errors_only() {
-        assert!(matches!(
-            manifest_status_error(reqwest::StatusCode::REQUEST_TIMEOUT),
-            ManifestIntakeError::Retryable(_)
-        ));
-        assert!(matches!(
-            manifest_status_error(reqwest::StatusCode::TOO_MANY_REQUESTS),
-            ManifestIntakeError::Retryable(_)
-        ));
-        assert!(matches!(
-            manifest_status_error(reqwest::StatusCode::SERVICE_UNAVAILABLE),
-            ManifestIntakeError::Retryable(_)
-        ));
-        assert!(matches!(
-            manifest_status_error(reqwest::StatusCode::NOT_FOUND),
-            ManifestIntakeError::Unsupported(_)
-        ));
-        assert!(matches!(
-            manifest_status_error(reqwest::StatusCode::FORBIDDEN),
-            ManifestIntakeError::Unsupported(_)
-        ));
+    fn manifest_http_statuses_are_not_retried() {
+        for status in [
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
+            assert!(
+                matches!(manifest_status_error(status), ManifestIntakeError::Unsupported(_)),
+                "HTTP {status} is an explicit response and should fall back immediately"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_transport_retries_only_timeouts_and_connection_resets() {
+        let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert!(has_connection_reset_cause(&reset));
+        assert!(!has_connection_reset_cause(&refused));
+        assert!(!has_connection_reset_cause(&std::io::Error::other(
+            "DNS resolution was refused by the guarded resolver"
+        )));
+    }
+
+    #[test]
+    fn manifest_preview_budget_is_shorter_than_one_old_request_timeout() {
+        assert!(MANIFEST_LOOKUP_BUDGET < Duration::from_secs(20));
+        assert!(MANIFEST_REQUEST_TIMEOUT < MANIFEST_LOOKUP_BUDGET);
+        assert!(MAX_MANIFEST_ATTEMPTS < 3);
     }
 
     #[test]

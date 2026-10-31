@@ -991,7 +991,6 @@ second.m3u8
     #[tokio::test(flavor = "current_thread")]
     async fn manifest_lookup_follows_signed_redirect_with_proxy_and_cookie_scope() {
         use std::sync::{Arc, Mutex};
-        use tokio::time::Duration;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -1006,7 +1005,7 @@ second.m3u8
         let manifest_body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1280x720\nvideo/720.m3u8?sig=child\n";
         let response_body = manifest_body.to_string();
 
-        let proxy_server = tokio::spawn(async move {
+        let mut proxy_server = tokio::spawn(async move {
             for request_index in 0..2 {
                 let (mut socket, _) = listener.accept().await.expect("accept proxy request");
                 let mut request = Vec::new();
@@ -1056,7 +1055,6 @@ second.m3u8
         let client = crate::download_net::http_client_with_jar(Some(&proxy), jar)
             .expect("build manifest client with proxy and cookie provider");
 
-        let mut proxy_server = proxy_server;
         let lookup_result = tokio::time::timeout(
             Duration::from_secs(5),
             lookup_with_http_fixture_client(

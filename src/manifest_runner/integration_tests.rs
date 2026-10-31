@@ -437,7 +437,7 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
         guard_manifest_child_url(source_url, &resource.url, &mut guarded_child_hosts)
             .expect("all planned DASH resources should pass the production host guard");
     }
-    drop(_policy_test_lock);
+    drop(_policy_test_guard);
 
     let mut urls: Vec<_> = video_plan
         .resources

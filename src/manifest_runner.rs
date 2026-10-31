@@ -1961,6 +1961,280 @@ fn content_range_matches(header: Option<&str>, range: ManifestByteRange) -> bool
         })
 }
 
+const DASH_LIVE_STATE_NAME: &str = "live-dash-state.json";
+const DASH_LIVE_STATE_VERSION: u32 = 1;
+
+async fn dash_live_state_exists(directory: &Path) -> Result<bool, ManifestRunError> {
+    let path = directory.join(DASH_LIVE_STATE_NAME);
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(ManifestRunError::Failed(
+                "The staged dynamic DASH state is not a regular file".to_string(),
+            ))
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(ManifestRunError::Failed(format!(
+            "Could not inspect dynamic DASH staging state: {error}"
+        ))),
+    }
+}
+
+async fn load_dash_live_track(
+    representation_key: &str,
+    directory: &Path,
+    current_plan: Option<&DashRepresentationPlan>,
+) -> Result<(DashLiveTrack, u64), ManifestRunError> {
+    if current_plan.is_some_and(|plan| plan.representation.live_key != representation_key) {
+        return Err(ManifestRunError::Failed(
+            "The refreshed DASH representation no longer matches the queued selection".to_string(),
+        ));
+    }
+    let path = directory.join(DASH_LIVE_STATE_NAME);
+    let state = match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(ManifestRunError::Failed(
+                "The staged dynamic DASH state is not a regular file".to_string(),
+            ));
+        }
+        Ok(metadata) if metadata.len() > MAX_DASH_LIVE_STATE_BYTES as u64 => {
+            return Err(ManifestRunError::Failed(
+                "The staged dynamic DASH state exceeds its size limit".to_string(),
+            ));
+        }
+        Ok(_) => {
+            let bytes = tokio::fs::read(&path).await.map_err(|error| {
+                ManifestRunError::Failed(format!(
+                    "Could not read dynamic DASH staging state: {error}"
+                ))
+            })?;
+            serde_json::from_slice::<DashLiveState>(&bytes).map_err(|error| {
+                ManifestRunError::Failed(format!(
+                    "Could not restore dynamic DASH staging state: {error}"
+                ))
+            })?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if current_plan.is_none() {
+                return Err(ManifestRunError::Failed(
+                    "No committed dynamic DASH recording is available".to_string(),
+                ));
+            }
+            DashLiveState::new(representation_key)
+        }
+        Err(error) => {
+            return Err(ManifestRunError::Failed(format!(
+                "Could not inspect dynamic DASH staging state: {error}"
+            )));
+        }
+    };
+    validate_dash_live_state(&state, representation_key)?;
+
+    let current_resources: std::collections::HashMap<&str, &DashResource> = current_plan
+        .into_iter()
+        .flat_map(|plan| plan.resources.iter())
+        .map(|resource| (resource.filename.as_str(), resource))
+        .collect();
+    let mut retained_bytes = 0_u64;
+    for filename in state.resource_names() {
+        let expected = current_resources.get(filename).copied();
+        let resource_path = directory.join(filename);
+        let metadata = match tokio::fs::symlink_metadata(&resource_path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(ManifestRunError::Failed(
+                    "A staged dynamic DASH resource is not a regular file".to_string(),
+                ));
+            }
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(ManifestRunError::Failed(format!(
+                    "Could not inspect a staged dynamic DASH resource: {error}"
+                )));
+            }
+        };
+        let cached_is_valid = metadata.as_ref().is_some_and(|metadata| {
+            metadata.len() > 0
+                && metadata.len() <= MAX_RESOURCE_BYTES
+                && expected.is_none_or(|resource| {
+                    resource.range.is_none_or(|range| metadata.len() == range.length)
+                })
+        });
+        if cached_is_valid {
+            if let Some(metadata) = metadata.as_ref() {
+                retained_bytes = retained_bytes
+                    .checked_add(metadata.len())
+                    .ok_or_else(|| {
+                        ManifestRunError::Failed(
+                            "The staged dynamic DASH byte total overflowed".to_string(),
+                        )
+                    })?;
+            }
+        } else if expected.is_none() {
+            return Err(ManifestRunError::Failed(
+                "A captured dynamic DASH resource is missing or invalid and no longer appears in the current MPD"
+                    .to_string(),
+            ));
+        }
+    }
+    if retained_bytes > MAX_MANIFEST_DOWNLOAD_BYTES {
+        return Err(ManifestRunError::Failed(
+            "The staged dynamic DASH recording exceeds Grab's 1 TiB limit".to_string(),
+        ));
+    }
+
+    Ok((
+        DashLiveTrack {
+            directory: directory.to_path_buf(),
+            state,
+            ended: false,
+        },
+        retained_bytes,
+    ))
+}
+
+fn validate_dash_live_state(
+    state: &DashLiveState,
+    representation_key: &str,
+) -> Result<(), ManifestRunError> {
+    if state.version != DASH_LIVE_STATE_VERSION
+        || state.representation_key != representation_key
+        || !representation_key.starts_with("dash-live-")
+        || state.segments.len() > MAX_DASH_LIVE_SEGMENTS
+    {
+        return Err(ManifestRunError::Failed(
+            "The saved dynamic DASH state is incompatible with this queue item".to_string(),
+        ));
+    }
+    if state
+        .initialization
+        .as_deref()
+        .is_some_and(|name| {
+            !safe_resource_filename(name)
+                || !name.starts_with("dash-live-init-")
+                || !name.ends_with(".bin")
+        })
+    {
+        return Err(ManifestRunError::Failed(
+            "The saved dynamic DASH initialization name is invalid".to_string(),
+        ));
+    }
+    let mut seen_names = std::collections::HashSet::new();
+    if let Some(initialization) = state.initialization.as_deref() {
+        seen_names.insert(initialization);
+    }
+    let mut previous_number = None;
+    for segment in &state.segments {
+        if !safe_resource_filename(&segment.filename)
+            || !segment.filename.starts_with("dash-live-segment-")
+            || !segment.filename.ends_with(".bin")
+            || !seen_names.insert(segment.filename.as_str())
+            || previous_number.is_some_and(|previous: u64| {
+                previous.checked_add(1) != Some(segment.number)
+            })
+        {
+            return Err(ManifestRunError::Failed(
+                "The saved dynamic DASH segment index is invalid".to_string(),
+            ));
+        }
+        previous_number = Some(segment.number);
+    }
+    Ok(())
+}
+
+async fn write_dash_live_state(track: &DashLiveTrack) -> Result<(), ManifestRunError> {
+    validate_dash_live_state(&track.state, &track.state.representation_key)?;
+    let bytes = serde_json::to_vec(&track.state)
+        .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
+    if bytes.len() > MAX_DASH_LIVE_STATE_BYTES {
+        return Err(ManifestRunError::Failed(
+            "The dynamic DASH state exceeds its serialization limit".to_string(),
+        ));
+    }
+
+    let target = track.directory.join(DASH_LIVE_STATE_NAME);
+    match tokio::fs::symlink_metadata(&target).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(ManifestRunError::Failed(
+                "The staged dynamic DASH state is not a regular file".to_string(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ManifestRunError::Failed(format!(
+                "Could not inspect dynamic DASH staging state: {error}"
+            )));
+        }
+    }
+
+    let part = track.directory.join(format!("{DASH_LIVE_STATE_NAME}.next.part"));
+    remove_regular_file_if_present(&part)
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&part)
+        .await
+        .map_err(|error| {
+            ManifestRunError::Failed(format!("Could not create dynamic DASH state: {error}"))
+        })?;
+    if let Err(error) = file.write_all(&bytes).await {
+        drop(file);
+        let _ = remove_regular_file_if_present(&part).await;
+        return Err(ManifestRunError::Failed(format!(
+            "Could not write dynamic DASH state: {error}"
+        )));
+    }
+    if let Err(error) = file.sync_all().await {
+        drop(file);
+        let _ = remove_regular_file_if_present(&part).await;
+        return Err(ManifestRunError::Failed(format!(
+            "Could not flush dynamic DASH state: {error}"
+        )));
+    }
+    drop(file);
+    tokio::fs::rename(&part, &target).await.map_err(|error| {
+        ManifestRunError::Failed(format!("Could not publish dynamic DASH state: {error}"))
+    })
+}
+
+async fn dash_live_track_bytes(state: &DashLiveState, directory: &Path) -> Result<u64, ManifestRunError> {
+    let mut total = 0_u64;
+    for filename in state.resource_names() {
+        let metadata = tokio::fs::symlink_metadata(directory.join(filename))
+            .await
+            .map_err(|error| {
+                ManifestRunError::Failed(format!(
+                    "Could not inspect a committed dynamic DASH resource: {error}"
+                ))
+            })?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > MAX_RESOURCE_BYTES
+        {
+            return Err(ManifestRunError::Failed(
+                "A committed dynamic DASH resource has an invalid file type or size".to_string(),
+            ));
+        }
+        total = total.checked_add(metadata.len()).ok_or_else(|| {
+            ManifestRunError::Failed("The dynamic DASH byte total overflowed".to_string())
+        })?;
+    }
+    Ok(total)
+}
+
+fn dash_presentation_ended(presentation: &DashPresentation) -> bool {
+    match presentation {
+        DashPresentation::Static => true,
+        DashPresentation::Dynamic(dynamic) => dynamic
+            .availability_end_time
+            .is_some_and(|end| dynamic.server_now >= end),
+    }
+}
+
 async fn concat_dash_track(
     plan: &DashRepresentationPlan,
     directory: &Path,

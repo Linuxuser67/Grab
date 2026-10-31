@@ -63,12 +63,9 @@ fn ensure_manifest_mux_space(
             destination_dir.display()
         ))
     })?;
-    let available_bytes = stats
-        .f_bavail
-        .checked_mul(stats.f_frsize)
-        .ok_or_else(|| {
-            ManifestRunError::Failed("The available disk-space count overflowed".to_string())
-        })?;
+    let available_bytes = stats.f_bavail.checked_mul(stats.f_frsize).ok_or_else(|| {
+        ManifestRunError::Failed("The available disk-space count overflowed".to_string())
+    })?;
     check_manifest_mux_space(available_bytes, staged_bytes)
 }
 
@@ -1557,10 +1554,7 @@ async fn run_live_hls_tracks(
     .await?
     {
         LiveHlsSnapshotOutcome::Committed => {
-            ensure_manifest_mux_space(
-                destination_dir,
-                downloaded.load(Ordering::Relaxed),
-            )?;
+            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
         }
         LiveHlsSnapshotOutcome::Stopped(intent) => {
             return Ok(match intent {
@@ -1602,10 +1596,7 @@ async fn run_live_hls_tracks(
         };
         match audio_outcome {
             LiveHlsSnapshotOutcome::Committed => {
-                ensure_manifest_mux_space(
-                    destination_dir,
-                    downloaded.load(Ordering::Relaxed),
-                )?;
+                ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
             }
             LiveHlsSnapshotOutcome::Stopped(intent) => {
                 return Ok(match intent {
@@ -1668,10 +1659,7 @@ async fn run_live_hls_tracks(
             .await?
             {
                 LiveHlsSnapshotOutcome::Committed => {
-                    ensure_manifest_mux_space(
-                        destination_dir,
-                        downloaded.load(Ordering::Relaxed),
-                    )?;
+                    ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
@@ -1708,10 +1696,7 @@ async fn run_live_hls_tracks(
             .await?
             {
                 LiveHlsSnapshotOutcome::Committed => {
-                    ensure_manifest_mux_space(
-                        destination_dir,
-                        downloaded.load(Ordering::Relaxed),
-                    )?;
+                    ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
@@ -2815,10 +2800,7 @@ async fn run_live_dash_tracks(
     .await?
     {
         DashLiveUpdateOutcome::Committed => {
-            ensure_manifest_mux_space(
-                destination_dir,
-                downloaded.load(Ordering::Relaxed),
-            )?;
+            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
         }
         DashLiveUpdateOutcome::Stopped(intent) => {
             finish_capture!(match intent {
@@ -2853,10 +2835,7 @@ async fn run_live_dash_tracks(
         .await?
         {
             DashLiveUpdateOutcome::Committed => {
-                ensure_manifest_mux_space(
-                    destination_dir,
-                    downloaded.load(Ordering::Relaxed),
-                )?;
+                ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
             }
             DashLiveUpdateOutcome::Stopped(intent) => {
                 finish_capture!(match intent {
@@ -2980,10 +2959,7 @@ async fn run_live_dash_tracks(
         .await?
         {
             DashLiveUpdateOutcome::Committed => {
-                ensure_manifest_mux_space(
-                    destination_dir,
-                    downloaded.load(Ordering::Relaxed),
-                )?;
+                ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
             }
             DashLiveUpdateOutcome::Stopped(intent) => {
                 finish_capture!(match intent {
@@ -3016,10 +2992,7 @@ async fn run_live_dash_tracks(
                 .await?
                 {
                     DashLiveUpdateOutcome::Committed => {
-                        ensure_manifest_mux_space(
-                            destination_dir,
-                            downloaded.load(Ordering::Relaxed),
-                        )?;
+                        ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
                     }
                     DashLiveUpdateOutcome::Stopped(intent) => {
                         finish_capture!(match intent {
@@ -3057,10 +3030,7 @@ async fn run_live_dash_tracks(
                 .await?
                 {
                     DashLiveUpdateOutcome::Committed => {
-                        ensure_manifest_mux_space(
-                            destination_dir,
-                            downloaded.load(Ordering::Relaxed),
-                        )?;
+                        ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
                         let bytes = dash_live_track_bytes(&track.state, &track.directory).await?;
                         audio_key = Some(key);
                         audio = Some((track, bytes));
@@ -3314,7 +3284,9 @@ mod tests {
             "av_interleaved_write_frame(): No space left on device"
         ));
         assert!(ffmpeg_log_indicates_storage_full("Disk quota exceeded"));
-        assert!(!ffmpeg_log_indicates_storage_full("Invalid data found when processing input"));
+        assert!(!ffmpeg_log_indicates_storage_full(
+            "Invalid data found when processing input"
+        ));
     }
 
     #[tokio::test]
@@ -3421,7 +3393,9 @@ mod tests {
     #[tokio::test]
     async fn dynamic_dash_refreshes_share_the_collection_host_limit() {
         let _policy = crate::download_net::isolate_untrusted_handoff_policy_for_test();
-        assert!(crate::download_net::require_public_resolution("page.example.com"));
+        assert!(crate::download_net::require_public_resolution(
+            "page.example.com"
+        ));
 
         let manifest_url = "https://page.example.com/live.mpd";
         let body = r#"<?xml version="1.0"?>

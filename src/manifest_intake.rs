@@ -582,7 +582,6 @@ async fn fetch_bounded_manifest_once(
 }
 
 
-
 /// Stable base identity for an HLS variant, retained for queued-item compatibility.
 #[must_use]
 fn hls_variant_key(variant: &HlsVariant) -> String {
@@ -1018,7 +1017,10 @@ second.m3u8
                     if request.windows(4).any(|window| window == b"\r\n\r\n") {
                         break;
                     }
-                    assert!(request.len() <= 16 * 1024, "proxy request headers exceeded test limit");
+                    assert!(
+                        request.len() <= 16 * 1024,
+                        "proxy request headers exceeded test limit"
+                    );
                 }
                 requests
                     .lock()
@@ -1076,7 +1078,11 @@ second.m3u8
         );
 
         let requests = seen_requests.lock().expect("lock captured proxy requests");
-        assert_eq!(requests.len(), 2, "the proxy should receive both redirect hops");
+        assert_eq!(
+            requests.len(),
+            2,
+            "the proxy should receive both redirect hops"
+        );
         assert!(
             requests[0].starts_with("GET http://manifest.example.test/master.m3u8?sig=initial "),
             "first request should retain the original signed URL: {}",

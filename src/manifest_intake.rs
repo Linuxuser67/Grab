@@ -502,12 +502,8 @@ async fn fetch_bounded_manifest(
     client: &reqwest::Client,
     requested_url: Url,
 ) -> Result<(Url, Vec<u8>), ManifestIntakeError> {
-    fetch_bounded_manifest_with_policy(
-        client,
-        requested_url,
-        ManifestTransportPolicy::HttpsOnly,
-    )
-    .await
+    fetch_bounded_manifest_with_policy(client, requested_url, ManifestTransportPolicy::HttpsOnly)
+        .await
 }
 
 async fn fetch_bounded_manifest_with_policy(
@@ -580,7 +576,6 @@ async fn fetch_bounded_manifest_once(
     let body = read_bounded_response(response).await?;
     Ok((final_url, body))
 }
-
 
 /// Stable base identity for an HLS variant, retained for queued-item compatibility.
 #[must_use]
@@ -1064,8 +1059,7 @@ second.m3u8
         )
         .await;
 
-        let server_result =
-            tokio::time::timeout(Duration::from_secs(5), &mut proxy_server).await;
+        let server_result = tokio::time::timeout(Duration::from_secs(5), &mut proxy_server).await;
         if server_result.is_err() {
             proxy_server.abort();
         }
@@ -1106,7 +1100,8 @@ second.m3u8
                 .unwrap_or("<missing request line>")
         );
         assert!(
-            requests[1].starts_with("GET http://manifest.example.test/signed/master.m3u8?sig=rotated "),
+            requests[1]
+                .starts_with("GET http://manifest.example.test/signed/master.m3u8?sig=rotated "),
             "redirect request should use the refreshed signed URL: {}",
             requests[1]
                 .lines()

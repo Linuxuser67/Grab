@@ -1087,6 +1087,184 @@ async fn live_hls_preserve_stop_does_not_commit_an_interrupted_window() {
     assert_eq!(downloaded.load(Ordering::Relaxed), 0);
 }
 
+fn dynamic_dash_fixture_plan(server_seconds: u64) -> DashRepresentationPlan {
+    let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+     type="dynamic"
+     availabilityStartTime="1970-01-01T00:00:00Z"
+     minimumUpdatePeriod="PT4S"
+     timeShiftBufferDepth="PT20S">
+  <Period start="PT0S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" startNumber="1" duration="4" media="seg-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000" width="1280" height="720"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+    let manifest = crate::manifest::dash::parse_dash_manifest_at(
+        "https://cdn.fixture.test/path/manifest.mpd",
+        body,
+        UNIX_EPOCH + Duration::from_secs(server_seconds),
+    )
+    .expect("parse dynamic DASH fixture MPD");
+    let representation = manifest
+        .video_representations
+        .first()
+        .expect("dynamic video representation");
+    crate::manifest::dash::plan_dash_representation(&manifest, &representation.live_key)
+        .expect("plan dynamic DASH fixture segments")
+}
+
+#[tokio::test]
+async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_segment() {
+    let root = TempRoot::new("dynamic-dash-resume");
+    let fixture_dir = root.path().join("fixture");
+    let video_dir = root.path().join("video");
+    std::fs::create_dir_all(&fixture_dir).expect("create DASH fixture files");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create dynamic DASH staging");
+
+    let mut initial = dynamic_dash_fixture_plan(120);
+    let mut next = dynamic_dash_fixture_plan(124);
+    let initial_numbers = initial
+        .resources
+        .iter()
+        .filter_map(|resource| resource.segment_number)
+        .collect::<Vec<_>>();
+    let next_numbers = next
+        .resources
+        .iter()
+        .filter_map(|resource| resource.segment_number)
+        .collect::<Vec<_>>();
+    assert_eq!(initial_numbers, [26, 27, 28, 29, 30]);
+    assert_eq!(next_numbers, [27, 28, 29, 30, 31]);
+    assert_eq!(
+        initial.representation.live_key,
+        next.representation.live_key,
+        "the selected representation identity must survive a sliding MPD window"
+    );
+
+    let mut urls = initial
+        .resources
+        .iter()
+        .chain(next.resources.iter())
+        .map(|resource| resource.url.clone())
+        .collect::<Vec<_>>();
+    urls.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    urls.dedup_by(|left, right| left.as_str() == right.as_str());
+    for number in 26..=31 {
+        std::fs::write(
+            fixture_dir.join(format!("seg-{number}.m4s")),
+            format!("complete-segment-{number}"),
+        )
+        .expect("write dynamic DASH fixture segment");
+    }
+    let files = fixture_files(&fixture_dir, &urls);
+    let (fixture_base, server) = spawn_fixture_server(files, 7).await;
+    for plan in [&mut initial, &mut next] {
+        for resource in plan.resources.iter_mut() {
+            resource.url = loopback_resource_url(&fixture_base, &resource.url);
+        }
+    }
+
+    let representation_key = initial.representation.live_key.clone();
+    let mut track = load_dash_live_track(&representation_key, &video_dir, Some(&initial))
+        .await
+        .expect("create first dynamic DASH capture state");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+
+    assert_eq!(
+        apply_dash_live_snapshot(
+            &client,
+            &initial,
+            &mut track,
+            3,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await
+        .expect("download and commit first dynamic DASH window"),
+        DashLiveUpdateOutcome::Committed
+    );
+    assert_eq!(
+        track
+            .state
+            .segments
+            .iter()
+            .map(|segment| segment.number)
+            .collect::<Vec<_>>(),
+        initial_numbers
+    );
+
+    let missing = track.state.segments[2].filename.clone();
+    tokio::fs::remove_file(video_dir.join(&missing))
+        .await
+        .expect("remove one overlapping media segment to exercise repair");
+    let (mut restored, retained_bytes) =
+        load_dash_live_track(&representation_key, &video_dir, Some(&next))
+            .await
+            .expect("restore dynamic DASH state with one missing cache file");
+    assert!(retained_bytes > 0);
+    assert_eq!(restored.state.segments.len(), 5);
+
+    assert_eq!(
+        apply_dash_live_snapshot(
+            &client,
+            &next,
+            &mut restored,
+            3,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await
+        .expect("repair missing overlap and append the new sequence"),
+        DashLiveUpdateOutcome::Committed
+    );
+    wait_for_fixture_server(server).await;
+
+    assert_eq!(
+        restored
+            .state
+            .segments
+            .iter()
+            .map(|segment| segment.number)
+            .collect::<Vec<_>>(),
+        [26, 27, 28, 29, 30, 31]
+    );
+    assert_eq!(
+        downloaded.load(Ordering::Relaxed),
+        (26..=31)
+            .map(|number| format!("complete-segment-{number}").len() as u64)
+            .sum::<u64>(),
+        "only new media and the deliberately missing overlap should be fetched"
+    );
+    for segment in &restored.state.segments {
+        assert_eq!(
+            tokio::fs::read(video_dir.join(&segment.filename))
+                .await
+                .expect("read captured dynamic DASH resource"),
+            format!("complete-segment-{}", segment.number).as_bytes()
+        );
+    }
+    let state_path = video_dir.join(DASH_LIVE_STATE_NAME);
+    let state_bytes = tokio::fs::read(&state_path)
+        .await
+        .expect("read committed dynamic DASH state");
+    let state_text = String::from_utf8(state_bytes).expect("state file is UTF-8 JSON");
+    assert!(
+        !state_text.contains("https://"),
+        "signed resource URLs must not be persisted in the live resume state"
+    );
+}
+
 #[tokio::test]
 async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
     if !tools_available() {

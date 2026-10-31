@@ -918,10 +918,14 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             .media_sequence
             .checked_add(sequence_index)
             .ok_or(ManifestError::DurationOverflow)?;
-        // Completed playlists retain their established zero-based staging
-        // names. Live windows use absolute sequence identities so overlapping
-        // snapshots resolve to the same local resource names.
-        let resource_index = if is_live {
+        // Static VOD playlists retain their established zero-based staging
+        // names. Live and EVENT/unspecified-type playlists use absolute media
+        // sequence identities, including a final ENDLIST snapshot, so retry
+        // windows continue to resolve to the same local resource names.
+        let stable_live_identity = is_live
+            || (playlist.playlist_type != Some(MediaPlaylistType::Vod)
+                && playlist.media_sequence > 0);
+        let resource_index = if stable_live_identity {
             usize::try_from(media_sequence).map_err(|_| ManifestError::DurationOverflow)?
         } else {
             index

@@ -366,26 +366,29 @@ async fn resolve_tracks(
                 })?;
             let video_url = variant.url.clone();
             let selected_audio = match source.audio_key.as_deref() {
-                Some(audio_key) => master
-                    .audio_renditions
-                    .iter()
-                    .zip(crate::manifest_intake::hls_audio_rendition_keys(
-                        &master.audio_renditions,
-                    ))
-                    .find_map(|(rendition, key)| {
-                        (key == audio_key).then_some(rendition)
-                    })
-                    .filter(|rendition| {
-                        variant
-                            .audio_group
-                            .as_deref()
-                            .is_some_and(|group| rendition.group_id == group)
-                    })
-                    .ok_or_else(|| {
-                        ManifestRunError::Unsupported(
-                            "The selected HLS audio rendition is no longer available".to_string(),
-                        )
-                    })?,
+                Some(audio_key) => Some(
+                    master
+                        .audio_renditions
+                        .iter()
+                        .zip(crate::manifest_intake::hls_audio_rendition_keys(
+                            &master.audio_renditions,
+                        ))
+                        .find_map(|(rendition, key)| {
+                            (key == audio_key).then_some(rendition)
+                        })
+                        .filter(|rendition| {
+                            variant
+                                .audio_group
+                                .as_deref()
+                                .is_some_and(|group| rendition.group_id == group)
+                        })
+                        .ok_or_else(|| {
+                            ManifestRunError::Unsupported(
+                                "The selected HLS audio rendition is no longer available"
+                                    .to_string(),
+                            )
+                        })?,
+                ),
                 None => variant.audio_group.as_deref().and_then(|group| {
                     master
                         .audio_renditions

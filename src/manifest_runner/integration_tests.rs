@@ -1585,7 +1585,6 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
     assert_mp4_has_audio_and_video(Path::new("ffprobe"), &output);
 }
 
-
 #[tokio::test]
 async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4() {
     if !tools_available() {

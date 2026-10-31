@@ -2363,13 +2363,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     {
         let choices = Rc::clone(&step.manifest_audio_choices);
         let selection = Rc::clone(&step.manifest_audio_selection);
-        step.manifest_audio_format.connect_selected_notify(move |row| {
-            let selected_key = choices
-                .borrow()
-                .get(row.selected() as usize)
-                .map(|choice| choice.key.clone());
-            selection.replace(selected_key);
-        });
+        step.manifest_audio_format
+            .connect_selected_notify(move |row| {
+                let selected_key = choices
+                    .borrow()
+                    .get(row.selected() as usize)
+                    .map(|choice| choice.key.clone());
+                selection.replace(selected_key);
+            });
     }
     // "Select files…" invokes the opener set below (where the picker context
     // lives). Connected once; the opener is set once at build time.

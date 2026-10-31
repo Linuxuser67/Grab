@@ -2902,7 +2902,6 @@ async fn run_live_dash_tracks(
                     DashLiveUpdateOutcome::Committed => {
                         let bytes = dash_live_track_bytes(&track.state, &track.directory).await?;
                         audio_key = Some(key);
-                        audio_key = Some(key);
                         audio = Some((track, bytes));
                     }
                     DashLiveUpdateOutcome::Stopped(intent) => {

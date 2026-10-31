@@ -544,15 +544,6 @@ impl HlsLiveAccumulator {
         })
     }
 
-    /// Commit an update after every newly referenced resource has been fetched.
-    ///
-    /// # Errors
-    /// Returns an error if the sequence count overflows or the update has no
-    /// playlist template for an empty accumulator.
-    pub(crate) fn commit_update(&mut self, update: HlsLiveUpdate) -> Result<(), ManifestError> {
-        self.commit_update_with_bytes(update, 0)
-    }
-
     /// Restore the byte total from the validated files referenced by a staged playlist.
     pub(crate) fn restore_resource_bytes(&mut self, total_bytes: u64) -> Result<(), ManifestError> {
         if total_bytes > MAX_HLS_LIVE_CAPTURE_BYTES {
@@ -560,15 +551,6 @@ impl HlsLiveAccumulator {
         }
         self.total_resource_bytes = total_bytes;
         Ok(())
-    }
-
-    /// Commit an update after adding the bytes of newly staged resources.
-    pub(crate) fn commit_update_with_bytes(
-        &mut self,
-        update: HlsLiveUpdate,
-        added_resource_bytes: u64,
-    ) -> Result<(), ManifestError> {
-        self.commit_update_with_budget(update, added_resource_bytes, 0)
     }
 
     /// Commit while accounting for the already-staged resources of another rendition.
@@ -659,7 +641,6 @@ impl HlsLiveAccumulator {
     }
 
     /// Resource basenames referenced by the committed local playlist.
-    #[must_use]
     pub(crate) fn resource_names(&self) -> impl Iterator<Item = &str> {
         self.seen_resources.iter().map(String::as_str)
     }
@@ -1353,7 +1334,7 @@ media.mp4
             .prepare_update(&source)
             .expect("prepare first live window");
         accumulator
-            .commit_update(update)
+            .commit_update_with_budget(update, 0, 0)
             .expect("commit first live window");
 
         let local_bytes = accumulator
@@ -1427,7 +1408,7 @@ media.mp4
         assert_eq!(update.resources.len(), 2);
         assert!(update.changed);
         accumulator
-            .commit_update(update)
+            .commit_update_with_budget(update, 0, 0)
             .expect("commit initial media resources");
         assert_eq!(accumulator.segment_count(), 2);
 
@@ -1452,7 +1433,7 @@ media.mp4
             "only the unseen sequence should be fetched"
         );
         restored
-            .commit_update(update)
+            .commit_update_with_budget(update, 0, 0)
             .expect("append unseen media sequence");
         assert_eq!(restored.segment_count(), 3);
 
@@ -1462,7 +1443,7 @@ media.mp4
         assert!(!repeated.changed);
         assert!(repeated.resources.is_empty());
         restored
-            .commit_update(repeated)
+            .commit_update_with_budget(repeated, 0, 0)
             .expect("commit no-op playlist reload");
         assert_eq!(restored.segment_count(), 3);
     }
@@ -1479,7 +1460,7 @@ media.mp4
             .prepare_update(&initial)
             .expect("prepare initial live playlist");
         accumulator
-            .commit_update(update)
+            .commit_update_with_budget(update, 0, 0)
             .expect("commit initial live playlist");
         accumulator
             .restore_resource_bytes(MAX_HLS_LIVE_CAPTURE_BYTES - 1)
@@ -1524,7 +1505,7 @@ media.mp4
             .prepare_update(&initial)
             .expect("prepare initial live playlist");
         accumulator
-            .commit_update(initial_update)
+            .commit_update_with_budget(initial_update, 0, 0)
             .expect("commit initial live playlist");
         let first = m3u8_rs::parse_media_playlist_res(
             &accumulator
@@ -1543,7 +1524,7 @@ media.mp4
             .prepare_update(&later)
             .expect("prepare later init-map window");
         accumulator
-            .commit_update(later_update)
+            .commit_update_with_budget(later_update, 0, 0)
             .expect("commit later init-map window");
         let accumulated = m3u8_rs::parse_media_playlist_res(
             &accumulator
@@ -1572,7 +1553,7 @@ media.mp4
             .prepare_update(&initial)
             .expect("prepare initial snapshot");
         accumulator
-            .commit_update(update)
+            .commit_update_with_budget(update, 0, 0)
             .expect("commit initial snapshot");
 
         let gap = plan_hls_media_playlist(
@@ -1610,7 +1591,7 @@ media.mp4
             .prepare_update(&initial)
             .expect("prepare initial snapshot");
         accumulator
-            .commit_update(update)
+            .commit_update_with_budget(update, 0, 0)
             .expect("commit initial snapshot");
 
         let changed_target = plan_hls_media_playlist(
@@ -1637,7 +1618,7 @@ media.mp4
             .expect("final snapshot can be committed");
         assert!(update.end_list);
         accumulator
-            .commit_update(update)
+            .commit_update_with_budget(update, 0, 0)
             .expect("commit final media sequence");
         assert_eq!(accumulator.segment_count(), 1);
     }

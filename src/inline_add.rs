@@ -86,6 +86,12 @@ impl SubmitSource {
 /// Multi-file torrent picker opener: file name, raw bytes, parsed entries.
 type TorrentPickerOpener = Rc<dyn Fn(String, Vec<u8>, Vec<crate::torrent::TorrentFileEntry>)>;
 
+#[derive(Clone)]
+enum TorrentPickerSource {
+    File { bytes: Vec<u8> },
+    Magnet { url: String },
+}
+
 /// Lowercase hex SHA-256 of a pasted link: what the "paste once" check stores
 /// instead of the link (dconf is plain text and often synced or backed up).
 fn paste_fingerprint(url: &str) -> String {
@@ -1679,7 +1685,7 @@ fn push_torrent_picker_page(
     dest_dir: Rc<RefCell<String>>,
     close_card: Rc<dyn Fn()>,
     file_name: String,
-    bytes: Vec<u8>,
+    source: TorrentPickerSource,
     entries: Vec<crate::torrent::TorrentFileEntry>,
     scheduled_at: Rc<Cell<Option<i64>>>,
 ) {
@@ -1760,21 +1766,43 @@ fn push_torrent_picker_page(
             add_btn_click.set_sensitive(false);
             let add_btn_on_error = add_btn_click.clone();
             let enqueue_manager = Rc::clone(&manager);
-            let enqueue_bytes = bytes.clone();
             let enqueue_name = file_name.clone();
+            let enqueue_source = source.clone();
             enqueue_and_close_async(
                 &dest_dir,
                 &close_card,
                 scheduled_at.get(),
                 move |d| async move {
-                    enqueue_manager
-                        .enqueue_torrent_file_async_batched(
-                            enqueue_bytes,
-                            &enqueue_name,
-                            d.as_deref(),
-                            only,
-                        )
-                        .await
+                    match enqueue_source {
+                        TorrentPickerSource::File { bytes } => {
+                            enqueue_manager
+                                .enqueue_torrent_file_async_batched(
+                                    bytes,
+                                    &enqueue_name,
+                                    d.as_deref(),
+                                    only,
+                                )
+                                .await
+                        }
+                        TorrentPickerSource::Magnet { url } => {
+                            if enqueue_manager.has_nonterminal_url(&url) {
+                                return Err(gettext("Torrent is already in the queue"));
+                            }
+                            // A removed row can leave a staged filter behind;
+                            // clear it before applying this confirmation's choice.
+                            crate::torrent::drop_selection(&url);
+                            if let Some(selection) = only {
+                                crate::torrent::stage_selection(&url, selection);
+                            }
+                            let result = enqueue_manager
+                                .enqueue_async_batched(&url, d.as_deref(), Some(&enqueue_name))
+                                .await;
+                            if result.is_err() {
+                                crate::torrent::drop_selection(&url);
+                            }
+                            result
+                        }
+                    }
                 },
                 move |e| {
                     add_btn_on_error.set_sensitive(true);
@@ -1876,7 +1904,16 @@ fn wire_torrent_picker(
                 );
                 return;
             }
-            push_torrent_picker_page(&nav, m, dd, close_card, name, bytes, entries, scheduled_at);
+            push_torrent_picker_page(
+                &nav,
+                m,
+                dd,
+                close_card,
+                name,
+                TorrentPickerSource::File { bytes },
+                entries,
+                scheduled_at,
+            );
         });
     });
 }
@@ -3297,6 +3334,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let lookup_add_submit = lookup_add.clone();
         let nav2 = nav.clone();
         let scheduled_at = Rc::clone(&scheduled_at);
+        let magnet_lookup_in_flight = Rc::new(Cell::new(false));
+        let magnet_lookup_state = Rc::clone(&magnet_lookup_in_flight);
         Rc::new(move |source: SubmitSource| {
             let from_activate = matches!(source, SubmitSource::Enter | SubmitSource::Auto);
             // Add queues the whole gallery. The separate "Select files…"
@@ -3313,6 +3352,88 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 return;
             }
             let url = url_entry.text().trim().to_string();
+            if crate::torrent::is_magnet(&url) {
+                let Some(lookup_guard) = TorrentPickerGuard::acquire(&magnet_lookup_state) else {
+                    show_video_error(
+                        &step2,
+                        &gettext("Still resolving torrent metadata — wait for the file list."),
+                    );
+                    return;
+                };
+                let lookup_manager = Rc::clone(&m);
+                let lookup_url = url.clone();
+                let lookup_nav = nav2.clone();
+                let lookup_dest = Rc::clone(&dd);
+                let lookup_close = Rc::clone(&close_card);
+                let lookup_step = Rc::clone(&step2);
+                let lookup_scheduled = Rc::clone(&scheduled_at);
+                let lookup_entry = url_entry.clone();
+                set_looking_up(&step2, true);
+                sync_entry_icon(&step2);
+                let lookup = glib::spawn_future_local(async move {
+                    let _lookup_guard = lookup_guard;
+                    let resolved = match lookup_manager.prepare_magnet_metadata_lookup(&lookup_url)
+                    {
+                        Ok((magnet, config)) => {
+                            let resolved_magnet = magnet.clone();
+                            let task = crate::runtime::tokio_rt().spawn(async move {
+                                crate::torrent::list_magnet_files(&magnet, config).await
+                            });
+                            let abort_task = AbortTaskOnDrop(task.abort_handle());
+                            let result = match task.await {
+                                Ok(Ok((name, entries))) => Ok((resolved_magnet, name, entries)),
+                                Ok(Err(error)) => Err(error),
+                                Err(error) => {
+                                    Err(format!("Torrent metadata lookup task failed: {error}"))
+                                }
+                            };
+                            drop(abort_task);
+                            result
+                        }
+                        Err(error) => Err(error),
+                    };
+                    set_looking_up(&lookup_step, false);
+                    sync_entry_icon(&lookup_step);
+                    match resolved {
+                        Ok((magnet, name, entries)) if entries.len() > 1 => {
+                            push_torrent_picker_page(
+                                &lookup_nav,
+                                lookup_manager,
+                                lookup_dest,
+                                lookup_close,
+                                name,
+                                TorrentPickerSource::Magnet { url: magnet },
+                                entries,
+                                lookup_scheduled,
+                            );
+                        }
+                        Ok((magnet, name, _entries)) => {
+                            let enqueue_manager = Rc::clone(&lookup_manager);
+                            let enqueue_url = magnet;
+                            enqueue_and_close_async(
+                                &lookup_dest,
+                                &lookup_close,
+                                lookup_scheduled.get(),
+                                move |directory| async move {
+                                    enqueue_manager
+                                        .enqueue_async_batched(
+                                            &enqueue_url,
+                                            directory.as_deref(),
+                                            Some(&name),
+                                        )
+                                        .await
+                                },
+                                move |message| set_field_error(&lookup_entry, message),
+                            );
+                        }
+                        Err(message) => set_field_error(&lookup_entry, &message),
+                    }
+                });
+                if let Some(previous) = step2.lookup_abort.borrow_mut().replace(lookup) {
+                    previous.abort();
+                }
+                return;
+            }
             if crate::manifest_intake::supports(&url) {
                 let selected_source = {
                     let manifest = step2.manifest.borrow();
@@ -3887,7 +4008,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     dest_dir.clone(),
                     close_card.clone(),
                     file_name,
-                    bytes,
+                    TorrentPickerSource::File { bytes },
                     entries,
                     Rc::clone(&scheduled_at),
                 );
@@ -4172,10 +4293,7 @@ mod tests {
         }
 
         let store = gio::ListStore::new::<DownloadItem>();
-        let manager = Rc::new(DownloadManager::new(
-            store.clone(),
-            crate::settings::AppSettings::new(),
-        ));
+        let manager = DownloadManager::new(store.clone(), crate::settings::AppSettings::new());
         let nav = adw::NavigationView::new();
         let form = adw::NavigationPage::builder()
             .tag("form")
@@ -4218,10 +4336,10 @@ mod tests {
         push_torrent_picker_page(
             &torrent_nav,
             Rc::clone(&manager),
-            destination,
-            close_card,
+            Rc::clone(&destination),
+            Rc::clone(&close_card),
             "archive.torrent".into(),
-            vec![0],
+            TorrentPickerSource::File { bytes: vec![0] },
             vec![crate::torrent::TorrentFileEntry {
                 raw_path: "folder/file.txt".into(),
                 display_path: "folder/file.txt".into(),
@@ -4230,6 +4348,31 @@ mod tests {
         );
         assert_eq!(torrent_nav.visible_page_tag().as_deref(), Some("torrent"));
         assert_eq!(store.n_items(), 0, "torrent must wait for Add");
+
+        let magnet_nav = adw::NavigationView::new();
+        let magnet_form = adw::NavigationPage::builder()
+            .tag("form")
+            .title("New Download")
+            .child(&gtk4::Box::new(gtk4::Orientation::Vertical, 0))
+            .build();
+        magnet_nav.push(&magnet_form);
+        push_torrent_picker_page(
+            &magnet_nav,
+            manager,
+            destination,
+            close_card,
+            "Magnet archive".into(),
+            TorrentPickerSource::Magnet {
+                url: "magnet:?xt=urn:btih:0123456789012345678901234567890123456789".into(),
+            },
+            vec![crate::torrent::TorrentFileEntry {
+                raw_path: "folder/file.txt".into(),
+                display_path: "folder/file.txt".into(),
+            }],
+            Rc::new(Cell::new(None)),
+        );
+        assert_eq!(magnet_nav.visible_page_tag().as_deref(), Some("torrent"));
+        assert_eq!(store.n_items(), 0, "magnet must wait for Add");
     }
 
     #[test]

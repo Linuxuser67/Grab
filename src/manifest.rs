@@ -875,7 +875,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     let is_live = !playlist.end_list;
     let end_list = playlist.end_list;
     let source_target_duration = playlist.target_duration;
-    if playlist.i_frames_only || source_target_duration == 0 {
+    if playlist.i_frames_only || (is_live && source_target_duration == 0) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
@@ -918,13 +918,13 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             .media_sequence
             .checked_add(sequence_index)
             .ok_or(ManifestError::DurationOverflow)?;
-        // Explicit VOD playlists retain their established zero-based staging
-        // names. Live and EVENT playlists use absolute sequence identities so
-        // overlapping windows resolve to the same local resource names.
-        let resource_index = if playlist.playlist_type == Some(MediaPlaylistType::Vod) {
-            index
-        } else {
+        // Completed playlists retain their established zero-based staging
+        // names. Live windows use absolute sequence identities so overlapping
+        // snapshots resolve to the same local resource names.
+        let resource_index = if is_live {
             usize::try_from(media_sequence).map_err(|_| ManifestError::DurationOverflow)?
+        } else {
+            index
         };
         if segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY") {
             // A key tag the parser could not decode must never pass through

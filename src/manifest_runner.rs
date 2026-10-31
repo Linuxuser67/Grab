@@ -816,7 +816,7 @@ async fn load_live_hls_track(
     directory: &Path,
 ) -> Result<LiveHlsTrack, ManifestRunError> {
     let local_playlist = directory.join("local.m3u8");
-    let accumulator = match tokio::fs::symlink_metadata(&local_playlist).await {
+    let mut accumulator = match tokio::fs::symlink_metadata(&local_playlist).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             return Err(ManifestRunError::Failed(
                 "The staged live HLS playlist is not a regular file".to_string(),

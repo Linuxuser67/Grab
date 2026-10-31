@@ -15,11 +15,13 @@ use crate::manifest::{
     HlsMasterPlan, HlsPlan, HlsVariant, MAX_MANIFEST_BYTES, dash::DashManifestPlan,
 };
 
-/// Per-attempt transport ceiling; the complete native preview has a stricter budget below.
-const MANIFEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
-/// Native preview should yield to yt-dlp quickly when its transport is unsuitable.
+/// Download-time manifest requests retain their normal network tolerance.
+const MANIFEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// Native preview yields to yt-dlp quickly when its transport is unsuitable.
+const MANIFEST_PREVIEW_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 const MANIFEST_LOOKUP_BUDGET: Duration = Duration::from_secs(10);
-const MAX_MANIFEST_ATTEMPTS: u32 = 2;
+const MAX_MANIFEST_ATTEMPTS: u32 = 3;
+const MAX_PREVIEW_MANIFEST_ATTEMPTS: u32 = 2;
 const MANIFEST_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 
 #[must_use]
@@ -516,7 +518,7 @@ async fn lookup_with_client_policy(
         return Ok(None);
     };
     let (final_url, body, server_now) =
-        fetch_bounded_manifest_with_policy(client, requested_url, transport_policy).await?;
+        fetch_bounded_preview_manifest_with_policy(client, requested_url, transport_policy).await?;
     let final_url = transport_policy.planning_url(final_url)?;
     let manifest = match kind {
         crate::media_types::ManifestKind::Hls => {
@@ -594,33 +596,31 @@ async fn fetch_bounded_manifest_with_policy(
     requested_url: Url,
     transport_policy: ManifestTransportPolicy,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
-    if !transport_policy.accepts_url(&requested_url) {
-        return Err(ManifestIntakeError::Failed(gettext(
-            "Invalid stream manifest URL",
-        )));
-    }
+    fetch_bounded_manifest_with_limits(
+        client,
+        requested_url,
+        transport_policy,
+        MANIFEST_REQUEST_TIMEOUT,
+        MAX_MANIFEST_ATTEMPTS,
+    )
+    .await
+}
 
-    tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
-        let mut attempt = 0_u32;
-        loop {
-            attempt += 1;
-            match fetch_bounded_manifest_once(client, &requested_url, transport_policy).await {
-                Err(ManifestIntakeError::Retryable(error))
-                    if attempt < MAX_MANIFEST_ATTEMPTS =>
-                {
-                    let delay = MANIFEST_RETRY_BASE_DELAY * attempt;
-                    tracing::debug!(
-                        attempt,
-                        delay_ms = delay.as_millis() as u64,
-                        error = %error,
-                        "retrying transient native manifest request"
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-                result => return result,
-            }
-        }
-    })
+async fn fetch_bounded_preview_manifest_with_policy(
+    client: &reqwest::Client,
+    requested_url: Url,
+    transport_policy: ManifestTransportPolicy,
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
+    tokio::time::timeout(
+        MANIFEST_LOOKUP_BUDGET,
+        fetch_bounded_manifest_with_limits(
+            client,
+            requested_url,
+            transport_policy,
+            MANIFEST_PREVIEW_REQUEST_TIMEOUT,
+            MAX_PREVIEW_MANIFEST_ATTEMPTS,
+        ),
+    )
     .await
     .unwrap_or_else(|_| {
         Err(ManifestIntakeError::Unsupported(format!(
@@ -628,6 +628,45 @@ async fn fetch_bounded_manifest_with_policy(
             MANIFEST_LOOKUP_BUDGET.as_secs()
         )))
     })
+}
+
+async fn fetch_bounded_manifest_with_limits(
+    client: &reqwest::Client,
+    requested_url: Url,
+    transport_policy: ManifestTransportPolicy,
+    request_timeout: Duration,
+    max_attempts: u32,
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
+    if !transport_policy.accepts_url(&requested_url) {
+        return Err(ManifestIntakeError::Failed(gettext(
+            "Invalid stream manifest URL",
+        )));
+    }
+
+    let mut attempt = 0_u32;
+    loop {
+        attempt += 1;
+        match fetch_bounded_manifest_once(
+            client,
+            &requested_url,
+            transport_policy,
+            request_timeout,
+        )
+        .await
+        {
+            Err(ManifestIntakeError::Retryable(error)) if attempt < max_attempts => {
+                let delay = MANIFEST_RETRY_BASE_DELAY * attempt;
+                tracing::debug!(
+                    attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    error = %error,
+                    "retrying transient native manifest request"
+                );
+                tokio::time::sleep(delay).await;
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Only request timeouts and connection resets are worth retrying. DNS guard,
@@ -670,10 +709,11 @@ async fn fetch_bounded_manifest_once(
     client: &reqwest::Client,
     requested_url: &Url,
     transport_policy: ManifestTransportPolicy,
+    request_timeout: Duration,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     let response = client
         .get(requested_url.clone())
-        .timeout(MANIFEST_REQUEST_TIMEOUT)
+        .timeout(request_timeout)
         .send()
         .await
         .map_err(|error| {
@@ -982,10 +1022,11 @@ mod tests {
     }
 
     #[test]
-    fn manifest_preview_budget_is_shorter_than_one_old_request_timeout() {
-        assert!(MANIFEST_LOOKUP_BUDGET < Duration::from_secs(20));
-        assert!(MANIFEST_REQUEST_TIMEOUT < MANIFEST_LOOKUP_BUDGET);
-        assert!(MAX_MANIFEST_ATTEMPTS < 3);
+    fn manifest_preview_budget_is_bounded_without_reducing_download_tolerance() {
+        assert!(MANIFEST_PREVIEW_REQUEST_TIMEOUT < MANIFEST_LOOKUP_BUDGET);
+        assert!(MANIFEST_LOOKUP_BUDGET < MANIFEST_REQUEST_TIMEOUT);
+        assert!(MAX_PREVIEW_MANIFEST_ATTEMPTS < MAX_MANIFEST_ATTEMPTS);
+        assert_eq!(MAX_MANIFEST_ATTEMPTS, 3);
     }
 
     #[test]

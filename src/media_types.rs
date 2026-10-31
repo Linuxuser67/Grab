@@ -53,6 +53,12 @@ pub(crate) struct ManifestSource {
     pub(crate) url: String,
     pub(crate) kind: ManifestKind,
     pub(crate) representation_key: String,
+    /// Stable selected HLS rendition or DASH audio representation.
+    ///
+    /// Missing values preserve the automatic default/first-track behavior of
+    /// queue entries created before audio selection was introduced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_key: Option<String>,
 }
 
 /// Where a resource comes from; serialized into the queue file, stable across releases.

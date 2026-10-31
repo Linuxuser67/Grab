@@ -1040,6 +1040,208 @@ fn parse_byte_range(raw: &str) -> Result<ManifestByteRange, DashError> {
     Ok(ManifestByteRange { offset, length })
 }
 
+fn expand_dynamic_template(
+    representation: &DashRepresentation,
+    media_template: &str,
+    template: &DashTemplate,
+    dynamic: &DashDynamicPresentation,
+) -> Result<Vec<DashResource>, DashError> {
+    let clock = dynamic
+        .server_now
+        .min(dynamic.availability_end_time.unwrap_or(dynamic.server_now));
+    let elapsed = clock
+        .duration_since(dynamic.availability_start_time)
+        .ok()
+        .and_then(|elapsed| elapsed.checked_sub(dynamic.period_start))
+        .ok_or(DashError::NoAvailableSegments)?;
+    let elapsed_ticks = duration_to_ticks(elapsed, template.timescale)?;
+    let window_depth = dynamic
+        .time_shift_buffer_depth
+        .unwrap_or(dynamic.minimum_update_period);
+    let window_start_ticks = elapsed
+        .saturating_sub(window_depth);
+    let window_start_ticks = duration_to_ticks(window_start_ticks, template.timescale)?;
+    let segments = dynamic_segment_times(template, elapsed_ticks, window_start_ticks)?;
+    if segments.is_empty() {
+        return Err(DashError::NoAvailableSegments);
+    }
+
+    let mut resources = Vec::with_capacity(
+        segments.len() + usize::from(template.initialization.is_some()),
+    );
+    if let Some(initialization) = &template.initialization {
+        let (url, range) = match initialization {
+            DashInitialization::Template(uri_template) => {
+                let uri = substitute_template(
+                    uri_template,
+                    representation,
+                    template.start_number,
+                    0,
+                    false,
+                )?;
+                (
+                    resolve_resource(&representation.source.base_url, &uri)?,
+                    None,
+                )
+            }
+            DashInitialization::Resource { url, range } => {
+                let resolved = match url.as_deref() {
+                    Some(uri) => resolve_resource(&representation.source.base_url, uri)?,
+                    None => representation.source.base_url.clone(),
+                };
+                (resolved, *range)
+            }
+        };
+        let filename = super::resource_filename("dash-live-init", None, &url, range);
+        resources.push(DashResource {
+            url,
+            range,
+            filename,
+            kind: DashResourceKind::Initialization,
+            segment_number: None,
+        });
+    }
+
+    for (number, time) in segments {
+        let uri = substitute_template(media_template, representation, number, time, true)?;
+        let url = resolve_resource(&representation.source.base_url, &uri)?;
+        // URL identity is stable across sliding MPD windows and includes the
+        // Number/Time-expanded URI; do not include the window-relative index.
+        let filename = super::resource_filename("dash-live-segment", None, &url, None);
+        resources.push(DashResource {
+            url,
+            range: None,
+            filename,
+            kind: DashResourceKind::Segment,
+            segment_number: Some(number),
+        });
+    }
+    Ok(resources)
+}
+
+fn duration_to_ticks(duration: Duration, timescale: u64) -> Result<u64, DashError> {
+    let ticks = duration
+        .as_nanos()
+        .checked_mul(u128::from(timescale))
+        .ok_or(DashError::InvalidSegment)?
+        / 1_000_000_000;
+    u64::try_from(ticks).map_err(|_| DashError::LimitExceeded)
+}
+
+fn dynamic_segment_times(
+    template: &DashTemplate,
+    elapsed_ticks: u64,
+    window_start_ticks: u64,
+) -> Result<Vec<(u64, u64)>, DashError> {
+    let mut available = Vec::new();
+    let mut number = template.start_number;
+
+    if let Some(timeline) = template.timeline.as_deref() {
+        let mut next_start = 0_u64;
+        for (index, entry) in timeline.iter().enumerate() {
+            let start = entry.start.unwrap_or(next_start);
+            let total_count = match entry.repeat {
+                repeat if repeat >= 0 => u64::try_from(repeat)
+                    .ok()
+                    .and_then(|repeat| repeat.checked_add(1))
+                    .ok_or(DashError::InvalidSegment)?,
+                -1 => {
+                    let next_explicit_start = timeline.get(index + 1).and_then(|next| next.start);
+                    match next_explicit_start {
+                        Some(end) => {
+                            let distance = end
+                                .checked_sub(start)
+                                .filter(|distance| *distance > 0)
+                                .ok_or(DashError::InvalidSegment)?;
+                            ceil_div_u64(distance, entry.duration)?
+                        }
+                        None => elapsed_ticks
+                            .checked_sub(start)
+                            .map_or(0, |remaining| remaining / entry.duration),
+                    }
+                }
+                _ => return Err(DashError::InvalidSegment),
+            };
+            let total_count = total_count.min(
+                template
+                    .end_number
+                    .map_or(u64::MAX, |end| end.saturating_sub(number).saturating_add(1)),
+            );
+            if total_count > MAX_SEGMENTS as u64 {
+                return Err(DashError::LimitExceeded);
+            }
+
+            for offset in 0..total_count {
+                let time = offset
+                    .checked_mul(entry.duration)
+                    .and_then(|offset| start.checked_add(offset))
+                    .ok_or(DashError::InvalidSegment)?;
+                let end = time
+                    .checked_add(entry.duration)
+                    .ok_or(DashError::InvalidSegment)?;
+                if end <= elapsed_ticks && end > window_start_ticks {
+                    available.push((number, time));
+                    if available.len() > MAX_SEGMENTS {
+                        return Err(DashError::LimitExceeded);
+                    }
+                }
+                number = number.checked_add(1).ok_or(DashError::InvalidSegment)?;
+            }
+
+            let span = total_count
+                .checked_mul(entry.duration)
+                .ok_or(DashError::InvalidSegment)?;
+            next_start = start.checked_add(span).ok_or(DashError::InvalidSegment)?;
+        }
+    } else {
+        let duration = template
+            .duration_ticks
+            .filter(|duration| *duration > 0)
+            .ok_or(DashError::UnsupportedAddressing)?;
+        let complete_count = elapsed_ticks / duration;
+        let bounded_count = template
+            .end_number
+            .map_or(complete_count, |end| {
+                complete_count.min(end.saturating_sub(number).saturating_add(1))
+            });
+        let first_available = (window_start_ticks / duration).min(bounded_count);
+        let first_index = if bounded_count == 0 {
+            0
+        } else {
+            first_available.min(bounded_count.saturating_sub(1))
+        };
+        let start_index = if bounded_count == 0 {
+            0
+        } else {
+            first_index
+        };
+        let start_number = number
+            .checked_add(start_index)
+            .ok_or(DashError::InvalidSegment)?;
+        let mut index = start_index;
+        while index < bounded_count {
+            if available.len() >= MAX_SEGMENTS {
+                return Err(DashError::LimitExceeded);
+            }
+            let time = index
+                .checked_mul(duration)
+                .ok_or(DashError::InvalidSegment)?;
+            available.push((
+                start_number
+                    .checked_add(index - start_index)
+                    .ok_or(DashError::InvalidSegment)?,
+                time,
+            ));
+            index += 1;
+        }
+    }
+
+    if available.is_empty() {
+        return Err(DashError::NoAvailableSegments);
+    }
+    Ok(available)
+}
+
 fn expand_template(
     representation: &DashRepresentation,
     media_template: &str,

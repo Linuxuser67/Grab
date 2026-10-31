@@ -199,36 +199,11 @@ impl ManifestLookup {
                     let resolution = resolution_label(variant.width, variant.height);
                     let bitrate =
                         bitrate_label(Some(variant.average_bandwidth.unwrap_or(variant.bandwidth)));
-                    let mut label = join_label_parts(
+                    let label = join_label_parts(
                         resolution,
                         bitrate,
                         codec_label(variant.codecs.as_deref()),
                     );
-
-                    if let Some(group_id) = variant.audio_group.as_deref() {
-                        let rendition = master
-                            .audio_renditions
-                            .iter()
-                            .filter(|rendition| rendition.group_id == group_id)
-                            .find(|rendition| rendition.is_default)
-                            .or_else(|| {
-                                master
-                                    .audio_renditions
-                                    .iter()
-                                    .find(|rendition| rendition.group_id == group_id)
-                            });
-                        if let Some(rendition) = rendition {
-                            let audio = rendition
-                                .language
-                                .as_deref()
-                                .filter(|language| !language.is_empty())
-                                .unwrap_or(&rendition.name);
-                            if !audio.is_empty() {
-                                label.push_str(" · ");
-                                label.push_str(&short_label(audio));
-                            }
-                        }
-                    }
 
                     ManifestChoice {
                         key,
@@ -681,11 +656,15 @@ async fn fetch_bounded_manifest_once(
 
 fn hls_audio_rendition_key(rendition: &crate::manifest::HlsAudioRendition) -> String {
     let mut hasher = Sha256::new();
+    let resource_identity = rendition
+        .url
+        .as_ref()
+        .map(crate::manifest::resource_cache_key);
     for value in [
         Some(rendition.group_id.as_str()),
         Some(rendition.name.as_str()),
         rendition.language.as_deref(),
-        rendition.url.as_ref().map(crate::manifest::resource_cache_key).as_deref(),
+        resource_identity.as_deref(),
     ] {
         if let Some(value) = value {
             hasher.update([1]);

@@ -1349,6 +1349,7 @@ mod tests {
         );
         reset_proxy(&s);
     }
+
     #[tokio::test(flavor = "current_thread")]
     async fn guarded_resolver_rejects_private_dns_answers_before_connecting() {
         use tokio::time::{Duration, timeout};
@@ -1357,7 +1358,10 @@ mod tests {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind resolver test listener");
-        let port = listener.local_addr().expect("read resolver test port").port();
+        let port = listener
+            .local_addr()
+            .expect("read resolver test port")
+            .port();
         let host = "manifest-rebinding.example.test";
         assert!(require_public_resolution(host));
 
@@ -1365,7 +1369,7 @@ mod tests {
             None,
             std::collections::HashMap::from([(
                 host.to_string(),
-                vec!["127.0.0.1:0".parse().expect("loopback socket address")],
+                vec![format!("127.0.0.1:{port}").parse().expect("loopback socket address")],
             )]),
         )
         .expect("build guarded client with deterministic DNS");
@@ -1377,7 +1381,7 @@ mod tests {
         assert!(result.is_err(), "private DNS answer must be rejected");
 
         assert!(
-            timeout(Duration::from_millis(150), listener.accept())
+            timeout(Duration::from_millis(300), listener.accept())
                 .await
                 .is_err(),
             "the guarded client must reject the DNS answer before opening a socket"
@@ -1393,7 +1397,10 @@ mod tests {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind redirect test listener");
-        let port = listener.local_addr().expect("read redirect test port").port();
+        let port = listener
+            .local_addr()
+            .expect("read redirect test port")
+            .port();
         let target_host = "redirect-rebinding.example.test";
         let client = http_client_for_with_dns_overrides_for_test(
             None,
@@ -1415,7 +1422,10 @@ mod tests {
                 if request.windows(4).any(|window| window == b"\r\n\r\n") {
                     break;
                 }
-                assert!(request.len() <= 16 * 1024, "request headers exceeded test limit");
+                assert!(
+                    request.len() <= 16 * 1024,
+                    "request headers exceeded test limit"
+                );
             }
             let response = format!(
                 "HTTP/1.1 302 Found\r\nLocation: http://{target_host}:{port}/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -1426,7 +1436,7 @@ mod tests {
                 .expect("write redirect response");
             drop(socket);
 
-            timeout(Duration::from_millis(250), listener.accept())
+            timeout(Duration::from_millis(300), listener.accept())
                 .await
                 .is_err()
         });
@@ -1435,7 +1445,10 @@ mod tests {
             .get(format!("http://127.0.0.1:{port}/start"))
             .send()
             .await;
-        assert!(result.is_err(), "redirect target resolving to loopback must be rejected");
+        assert!(
+            result.is_err(),
+            "redirect target resolving to loopback must be rejected"
+        );
         assert!(
             server.await.expect("redirect fixture task"),
             "the redirected request must be rejected before a second socket is opened"

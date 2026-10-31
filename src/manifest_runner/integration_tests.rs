@@ -1140,8 +1140,7 @@ async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_se
     assert_eq!(initial_numbers, [26, 27, 28, 29, 30]);
     assert_eq!(next_numbers, [27, 28, 29, 30, 31]);
     assert_eq!(
-        initial.representation.live_key,
-        next.representation.live_key,
+        initial.representation.live_key, next.representation.live_key,
         "the selected representation identity must survive a sliding MPD window"
     );
 
@@ -1640,12 +1639,15 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
         .arg(fixture_dir.join("manifest.mpd"))
         .output()
         .expect("generate dynamic DASH fMP4 fixture");
-    assert_command_succeeded(&generated, "FFmpeg failed to generate the dynamic DASH fixture");
+    assert_command_succeeded(
+        &generated,
+        "FFmpeg failed to generate the dynamic DASH fixture",
+    );
 
     let source_url = "https://manifest-origin.fixture.invalid/master.mpd";
     let manifest_url = "https://cdn.fixture.invalid/manifest.mpd";
-    let manifest = std::fs::read_to_string(fixture_dir.join("manifest.mpd"))
-        .expect("read generated DASH MPD");
+    let manifest =
+        std::fs::read_to_string(fixture_dir.join("manifest.mpd")).expect("read generated DASH MPD");
     let dynamic_manifest = if manifest.contains("type=\"static\"") {
         manifest.replacen("type=\"static\"", "type=\"dynamic\"", 1)
     } else {
@@ -1663,7 +1665,10 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
     )
     .expect("parse generated dynamic DASH MPD");
     assert!(
-        matches!(&parsed.presentation, crate::manifest::dash::DashPresentation::Dynamic(_)),
+        matches!(
+            &parsed.presentation,
+            crate::manifest::dash::DashPresentation::Dynamic(_)
+        ),
         "generated fixture must use the native dynamic DASH path"
     );
 
@@ -1773,14 +1778,9 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
         "dynamic DASH video assembly unexpectedly aborted"
     );
     assert!(
-        concat_dash_resource_names(
-            audio_resources,
-            &audio_dir,
-            "audio-track.mp4",
-            &mut abort,
-        )
-        .await
-        .expect("assemble captured dynamic DASH audio"),
+        concat_dash_resource_names(audio_resources, &audio_dir, "audio-track.mp4", &mut abort,)
+            .await
+            .expect("assemble captured dynamic DASH audio"),
         "dynamic DASH audio assembly unexpectedly aborted"
     );
 
@@ -1890,10 +1890,9 @@ async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
         5,
         "preserve stop must return the committed segment set"
     );
-    let (restored, retained_bytes) =
-        load_dash_live_track(&representation_key, &video_dir, None)
-            .await
-            .expect("restore the preserved dynamic DASH capture");
+    let (restored, retained_bytes) = load_dash_live_track(&representation_key, &video_dir, None)
+        .await
+        .expect("restore the preserved dynamic DASH capture");
     assert_eq!(restored.state.segments.len(), 5);
     assert_eq!(
         retained_bytes,

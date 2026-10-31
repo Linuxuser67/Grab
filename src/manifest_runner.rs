@@ -73,9 +73,12 @@ fn ensure_manifest_mux_space(
 }
 
 fn manifest_storage_error(context: &str, error: std::io::Error) -> ManifestRunError {
-    if error.kind() == std::io::ErrorKind::StorageFull {
+    let storage_exhausted = rustix::io::Errno::from_io_error(&error).is_some_and(|errno| {
+        errno == rustix::io::Errno::NOSPC || errno == rustix::io::Errno::DQUOT
+    });
+    if storage_exhausted {
         ManifestRunError::Failed(
-            "Not enough free disk space to save this stream".to_string(),
+            "Not enough free disk space or storage quota to save this stream".to_string(),
         )
     } else {
         ManifestRunError::Failed(format!("{context}: {error}"))
@@ -3289,6 +3292,18 @@ mod tests {
         assert!(!byte_range_chunk_exceeds(range, 3, 5));
         assert!(byte_range_chunk_exceeds(range, 3, 6));
         assert!(byte_range_chunk_exceeds(range, 8, 1));
+    }
+
+    #[test]
+    fn manifest_storage_errors_classify_enospc_and_edquot() {
+        for errno in [rustix::io::Errno::NOSPC, rustix::io::Errno::DQUOT] {
+            let error = std::io::Error::from_raw_os_error(errno.raw_os_error());
+            assert!(matches!(
+                manifest_storage_error("could not write media", error),
+                ManifestRunError::Failed(message)
+                    if message.contains("Not enough free disk space or storage quota")
+            ));
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Static, single-period DASH parsing and segment resource planning.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -9,6 +9,8 @@ use url::Url;
 use super::{MAX_MANIFEST_BYTES, ManifestByteRange};
 const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
+const MIN_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_millis(500);
+const MAX_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_secs(300);
 const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
 // DASH-IF's current HTTPS identifier, the HTTP identifier emitted by FFmpeg,
 // and the ISO trick-mode URN used by other DASH packagers.
@@ -35,6 +37,8 @@ pub(crate) enum DashError {
     NoVideoRepresentations,
     #[error("DASH manifest contains too many representations or segments")]
     LimitExceeded,
+    #[error("dynamic DASH has no currently available complete media segments")]
+    NoAvailableSegments,
 }
 
 /// Whether a DASH representation carries video or audio.
@@ -48,6 +52,8 @@ pub(crate) enum DashTrackKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DashRepresentation {
     pub(crate) key: String,
+    /// Stable live key also recognized when a dynamic MPD becomes static.
+    pub(crate) live_key: String,
     pub(crate) representation_id: Option<String>,
     pub(crate) bandwidth: Option<u64>,
     pub(crate) width: Option<u64>,
@@ -60,10 +66,29 @@ pub(crate) struct DashRepresentation {
     source: DashRepresentationSource,
 }
 
-/// Parsed static DASH presentation and its selectable representations.
+/// Timing model shared by all representations in a single-period DASH presentation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DashPresentation {
+    Static,
+    Dynamic(DashDynamicPresentation),
+}
+
+/// Server-clock information required to bound and refresh an ordinary live MPD.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DashDynamicPresentation {
+    pub(crate) availability_start_time: SystemTime,
+    pub(crate) availability_end_time: Option<SystemTime>,
+    pub(crate) server_now: SystemTime,
+    pub(crate) period_start: Duration,
+    pub(crate) minimum_update_period: Duration,
+    pub(crate) time_shift_buffer_depth: Option<Duration>,
+}
+
+/// Parsed static or supported dynamic DASH presentation and its representations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DashManifestPlan {
     pub(crate) duration: Duration,
+    pub(crate) presentation: DashPresentation,
     pub(crate) video_representations: Box<[DashRepresentation]>,
     pub(crate) audio_representations: Box<[DashRepresentation]>,
 }
@@ -93,6 +118,8 @@ pub(crate) struct DashResource {
     pub(crate) range: Option<ManifestByteRange>,
     pub(crate) filename: String,
     pub(crate) kind: DashResourceKind,
+    /// SegmentTemplate Number or SegmentList index; initialization resources use None.
+    pub(crate) segment_number: Option<u64>,
 }
 
 /// Expanded initialization and media resources for one representation.
@@ -100,6 +127,7 @@ pub(crate) struct DashResource {
 pub(crate) struct DashRepresentationPlan {
     pub(crate) representation: DashRepresentation,
     pub(crate) duration: Duration,
+    pub(crate) presentation: DashPresentation,
     pub(crate) resources: Box<[DashResource]>,
 }
 
@@ -169,12 +197,13 @@ struct DashListSegment {
     range: Option<ManifestByteRange>,
 }
 
-/// Parse a static, single-period DASH MPD into video and audio representations.
+#[cfg(test)]
+/// Parse a static or bounded single-period dynamic DASH MPD into selectable representations.
 ///
-/// The native v1 path supports SegmentTemplate and SegmentList. Dynamic
-/// presentations, multiple periods, DRM, XLink, SegmentBase, indexed
-/// addressing, non-zero presentation-time offsets, and WebM representations
-/// remain on the existing yt-dlp fallback path.
+/// Dynamic support is limited to HTTPS SegmentTemplate presentations with a
+/// finite MPD update interval and complete segments. Multiple periods, DRM,
+/// XLink, dynamic SegmentList, LL-DASH, SegmentBase, indexed addressing,
+/// non-zero presentation-time offsets, and WebM remain on yt-dlp fallback.
 ///
 /// # Errors
 /// Returns an error when the MPD is malformed, exceeds the input limit, uses
@@ -183,6 +212,15 @@ pub(crate) fn parse_dash_manifest(
     manifest_url: &str,
     body: &str,
 ) -> Result<DashManifestPlan, DashError> {
+    parse_dash_manifest_at(manifest_url, body, SystemTime::now())
+}
+
+/// Parse a DASH MPD using the HTTP server's Date header as the availability clock.
+pub(crate) fn parse_dash_manifest_at(
+    manifest_url: &str,
+    body: &str,
+    server_now: SystemTime,
+) -> Result<DashManifestPlan, DashError> {
     if body.len() > MAX_MANIFEST_BYTES {
         return Err(DashError::Parse);
     }
@@ -190,13 +228,53 @@ pub(crate) fn parse_dash_manifest(
     let manifest_url = parse_manifest_url(manifest_url)?;
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
 
-    if !matches!(mpd.mpdtype.as_deref(), None | Some("static"))
-        || mpd.minimumUpdatePeriod.is_some()
-        || mpd.availabilityStartTime.is_some()
-        || mpd.timeShiftBufferDepth.is_some()
-        || !mpd.PatchLocation.is_empty()
-        || mpd.periods.len() != 1
-        || !mpd.ContentProtection.is_empty()
+    let presentation = match mpd.mpdtype.as_deref() {
+        None | Some("static") => {
+            if mpd.minimumUpdatePeriod.is_some()
+                || mpd.availabilityStartTime.is_some()
+                || mpd.availabilityEndTime.is_some()
+                || mpd.timeShiftBufferDepth.is_some()
+            {
+                return Err(DashError::UnsupportedPresentation);
+            }
+            DashPresentation::Static
+        }
+        Some("dynamic") => {
+            let availability_start_time = mpd
+                .availabilityStartTime
+                .as_ref()
+                .cloned()
+                .map(SystemTime::from)
+                .ok_or(DashError::UnsupportedPresentation)?;
+            let minimum_update_period = mpd
+                .minimumUpdatePeriod
+                .filter(|period| {
+                    *period >= MIN_DYNAMIC_UPDATE_PERIOD && *period <= MAX_DYNAMIC_UPDATE_PERIOD
+                })
+                .ok_or(DashError::UnsupportedPresentation)?;
+            let time_shift_buffer_depth = mpd.timeShiftBufferDepth;
+            if time_shift_buffer_depth.is_some_and(|depth| depth.is_zero()) {
+                return Err(DashError::UnsupportedPresentation);
+            }
+            let availability_end_time = mpd
+                .availabilityEndTime
+                .as_ref()
+                .cloned()
+                .map(SystemTime::from);
+            DashPresentation::Dynamic(DashDynamicPresentation {
+                availability_start_time,
+                availability_end_time,
+                server_now,
+                period_start: Duration::ZERO,
+                minimum_update_period,
+                time_shift_buffer_depth,
+            })
+        }
+        Some(_) => return Err(DashError::UnsupportedPresentation),
+    };
+
+    let is_dynamic = matches!(presentation, DashPresentation::Dynamic(_));
+    if !mpd.PatchLocation.is_empty() || mpd.periods.len() != 1 || !mpd.ContentProtection.is_empty()
     {
         return Err(DashError::UnsupportedPresentation);
     }
@@ -206,15 +284,26 @@ pub(crate) fn parse_dash_manifest(
         return Err(DashError::UnsupportedPresentation);
     }
 
+    let period_start = period.start.unwrap_or(Duration::ZERO);
     let duration = period
         .duration
         .or_else(|| {
-            mpd.mediaPresentationDuration.and_then(|whole_duration| {
-                whole_duration.checked_sub(period.start.unwrap_or(Duration::ZERO))
-            })
+            mpd.mediaPresentationDuration
+                .and_then(|whole_duration| whole_duration.checked_sub(period_start))
         })
         .filter(|duration| !duration.is_zero())
-        .ok_or(DashError::UnsupportedPresentation)?;
+        .unwrap_or(Duration::ZERO);
+    if !is_dynamic && duration.is_zero() {
+        return Err(DashError::UnsupportedPresentation);
+    }
+    let presentation = match presentation {
+        DashPresentation::Dynamic(mut dynamic) => {
+            dynamic.period_start = period_start;
+            DashPresentation::Dynamic(dynamic)
+        }
+        DashPresentation::Static => DashPresentation::Static,
+    };
+    let addressing_duration = if is_dynamic { Duration::MAX } else { duration };
 
     let mpd_base = resolve_base_url(manifest_url, &mpd.base_url)?;
     let period_base = resolve_base_url(mpd_base, &period.BaseURL)?;
@@ -277,7 +366,13 @@ pub(crate) fn parse_dash_manifest(
 
             let representation_base =
                 resolve_base_url(adaptation_base.clone(), &representation.BaseURL)?;
-            let addressing = effective_addressing(period, adaptation, representation, duration)?;
+            let addressing = effective_addressing(
+                period,
+                adaptation,
+                representation,
+                addressing_duration,
+                is_dynamic,
+            )?;
             let representation_id = representation.id.clone();
             let bandwidth = representation.bandwidth;
             let width = representation.width.or(adaptation.width);
@@ -290,7 +385,7 @@ pub(crate) fn parse_dash_manifest(
                 .lang
                 .clone()
                 .or_else(|| adaptation.lang.clone());
-            let key = stable_representation_key(RepresentationIdentity {
+            let identity = RepresentationIdentity {
                 id: representation_id.as_deref(),
                 kind,
                 bandwidth,
@@ -301,10 +396,17 @@ pub(crate) fn parse_dash_manifest(
                 language: language.as_deref(),
                 base_url: &representation_base,
                 addressing: &addressing,
-            });
+            };
+            let live_key = stable_live_representation_key(identity);
+            let key = if is_dynamic {
+                live_key.clone()
+            } else {
+                stable_representation_key(identity)
+            };
 
             let choice = DashRepresentation {
                 key,
+                live_key,
                 representation_id,
                 bandwidth,
                 width,
@@ -337,6 +439,7 @@ pub(crate) fn parse_dash_manifest(
 
     Ok(DashManifestPlan {
         duration,
+        presentation,
         video_representations: video_representations.into_boxed_slice(),
         audio_representations: audio_representations.into_boxed_slice(),
     })
@@ -355,20 +458,38 @@ pub(crate) fn plan_dash_representation(
         .video_representations
         .iter()
         .chain(manifest.audio_representations.iter())
-        .find(|candidate| candidate.key == representation_key)
+        .find(|candidate| {
+            candidate.key == representation_key || candidate.live_key == representation_key
+        })
         .cloned()
         .ok_or(DashError::UnsupportedAddressing)?;
 
-    let resources = match &representation.source.addressing {
-        DashAddressing::Template(template) => {
+    let live_selection = representation_key == representation.live_key;
+    let resources = match (&manifest.presentation, &representation.source.addressing) {
+        (DashPresentation::Dynamic(dynamic), DashAddressing::Template(template)) => {
+            expand_dynamic_template(&representation, &template.media, template, dynamic)?
+        }
+        (DashPresentation::Dynamic(_), DashAddressing::List(_)) => {
+            return Err(DashError::UnsupportedAddressing);
+        }
+        (DashPresentation::Static, DashAddressing::Template(template)) if live_selection => {
+            expand_static_live_template(&representation, &template.media, template)?
+        }
+        (DashPresentation::Static, DashAddressing::Template(template)) => {
             expand_template(&representation, &template.media, template)?
         }
-        DashAddressing::List(list) => expand_list(&representation, list)?,
+        (DashPresentation::Static, DashAddressing::List(_)) if live_selection => {
+            return Err(DashError::UnsupportedAddressing);
+        }
+        (DashPresentation::Static, DashAddressing::List(list)) => {
+            expand_list(&representation, list)?
+        }
     };
 
-    if !resources
-        .iter()
-        .any(|resource| resource.kind == DashResourceKind::Segment)
+    if !matches!(&manifest.presentation, DashPresentation::Dynamic(_))
+        && !resources
+            .iter()
+            .any(|resource| resource.kind == DashResourceKind::Segment)
     {
         return Err(DashError::InvalidSegment);
     }
@@ -376,6 +497,7 @@ pub(crate) fn plan_dash_representation(
     Ok(DashRepresentationPlan {
         representation,
         duration: manifest.duration,
+        presentation: manifest.presentation.clone(),
         resources: resources.into_boxed_slice(),
     })
 }
@@ -488,6 +610,60 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     format!("dash-{fingerprint}")
+}
+
+/// Stable representation identity excluding the changing live segment window.
+fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> String {
+    let RepresentationIdentity {
+        id,
+        kind,
+        bandwidth,
+        width,
+        height,
+        mime_type,
+        codecs,
+        language,
+        base_url,
+        addressing,
+    } = identity;
+    let mut hasher = Sha256::new();
+    hasher.update(match kind {
+        DashTrackKind::Video => b"video".as_slice(),
+        DashTrackKind::Audio => b"audio".as_slice(),
+    });
+    hash_optional_text(&mut hasher, id);
+    hash_optional_text(&mut hasher, base_url.host_str());
+    hash_optional_number(&mut hasher, base_url.port_or_known_default().map(u64::from));
+    hash_optional_text(&mut hasher, Some(base_url.path()));
+    hash_optional_text(&mut hasher, mime_type);
+    hash_optional_text(&mut hasher, codecs);
+    hash_optional_text(&mut hasher, language);
+    hash_optional_number(&mut hasher, bandwidth);
+    hash_optional_number(&mut hasher, width);
+    hash_optional_number(&mut hasher, height);
+    if let DashAddressing::Template(template) = addressing {
+        hasher.update(b"template");
+        hasher.update(template.media.as_bytes());
+        hash_optional_number(&mut hasher, Some(template.timescale));
+        match &template.initialization {
+            Some(DashInitialization::Template(value)) => {
+                hasher.update(b"init-template");
+                hasher.update(value.as_bytes());
+            }
+            Some(DashInitialization::Resource { url, range }) => {
+                hasher.update(b"init-resource");
+                hash_optional_text(&mut hasher, url.as_deref());
+                hash_optional_range(&mut hasher, *range);
+            }
+            None => hasher.update(b"no-init"),
+        }
+    }
+    let digest = hasher.finalize();
+    let fingerprint: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("dash-live-{fingerprint}")
 }
 
 fn hash_optional_text(hasher: &mut Sha256, value: Option<&str>) {
@@ -604,6 +780,7 @@ fn effective_addressing(
     adaptation: &dash_mpd_core::AdaptationSet,
     representation: &dash_mpd_core::Representation,
     period_duration: Duration,
+    is_dynamic: bool,
 ) -> Result<DashAddressing, DashError> {
     let templates = [
         period.SegmentTemplate.as_ref(),
@@ -625,13 +802,26 @@ fn effective_addressing(
 
     let has_template = templates.iter().any(Option::is_some);
     let has_list = lists.iter().any(Option::is_some);
-    match (has_template, has_list) {
-        (true, false) => {
-            effective_template(&templates, period_duration).map(DashAddressing::Template)
-        }
-        (false, true) => effective_list(&lists).map(DashAddressing::List),
-        _ => Err(DashError::UnsupportedAddressing),
+    if is_dynamic && (!has_template || has_list) {
+        return Err(DashError::UnsupportedAddressing);
     }
+    let addressing = match (has_template, has_list) {
+        (true, false) => {
+            effective_template(&templates, period_duration).map(DashAddressing::Template)?
+        }
+        (false, true) => effective_list(&lists).map(DashAddressing::List)?,
+        _ => return Err(DashError::UnsupportedAddressing),
+    };
+    if is_dynamic
+        && matches!(
+            &addressing,
+            DashAddressing::Template(template)
+                if !template.media.contains("$Number") && !template.media.contains("$Time")
+        )
+    {
+        return Err(DashError::UnsupportedAddressing);
+    }
+    Ok(addressing)
 }
 
 fn effective_template(
@@ -860,6 +1050,257 @@ fn parse_byte_range(raw: &str) -> Result<ManifestByteRange, DashError> {
     Ok(ManifestByteRange { offset, length })
 }
 
+fn expand_dynamic_template(
+    representation: &DashRepresentation,
+    media_template: &str,
+    template: &DashTemplate,
+    dynamic: &DashDynamicPresentation,
+) -> Result<Vec<DashResource>, DashError> {
+    let clock = dynamic
+        .server_now
+        .min(dynamic.availability_end_time.unwrap_or(dynamic.server_now));
+    let elapsed = clock
+        .duration_since(dynamic.availability_start_time)
+        .ok()
+        .and_then(|elapsed| elapsed.checked_sub(dynamic.period_start))
+        .ok_or(DashError::NoAvailableSegments)?;
+    let elapsed_ticks = duration_to_ticks(elapsed, template.timescale)?;
+    let window_depth = match dynamic.time_shift_buffer_depth {
+        Some(depth) => depth,
+        None => {
+            // When the MPD omits TSBD, retain at least one complete segment
+            // beyond the advertised update interval so the next poll overlaps
+            // the previous window instead of losing media between refreshes.
+            let segment_ticks = template
+                .duration_ticks
+                .into_iter()
+                .chain(
+                    template
+                        .timeline
+                        .iter()
+                        .flat_map(|entries| entries.iter().map(|entry| entry.duration)),
+                )
+                .max()
+                .ok_or(DashError::UnsupportedAddressing)?;
+            dynamic
+                .minimum_update_period
+                .saturating_add(ticks_to_duration(segment_ticks, template.timescale)?)
+        }
+    };
+    let window_start_ticks =
+        duration_to_ticks(elapsed.saturating_sub(window_depth), template.timescale)?;
+    let segments = dynamic_segment_times(template, elapsed_ticks, window_start_ticks)?;
+
+    let mut resources =
+        Vec::with_capacity(segments.len() + usize::from(template.initialization.is_some()));
+    if let Some(initialization) = &template.initialization {
+        let (url, range) = match initialization {
+            DashInitialization::Template(uri_template) => {
+                let uri = substitute_template(
+                    uri_template,
+                    representation,
+                    template.start_number,
+                    0,
+                    false,
+                )?;
+                (
+                    resolve_resource(&representation.source.base_url, &uri)?,
+                    None,
+                )
+            }
+            DashInitialization::Resource { url, range } => {
+                let resolved = match url.as_deref() {
+                    Some(uri) => resolve_resource(&representation.source.base_url, uri)?,
+                    None => representation.source.base_url.clone(),
+                };
+                (resolved, *range)
+            }
+        };
+        let filename = super::resource_filename("dash-live-init", None, &url, range);
+        resources.push(DashResource {
+            url,
+            range,
+            filename,
+            kind: DashResourceKind::Initialization,
+            segment_number: None,
+        });
+    }
+
+    for (number, time) in segments {
+        let uri = substitute_template(media_template, representation, number, time, true)?;
+        let url = resolve_resource(&representation.source.base_url, &uri)?;
+        // URL identity is stable across sliding MPD windows and includes the
+        // Number/Time-expanded URI; do not include the window-relative index.
+        let filename = super::resource_filename("dash-live-segment", None, &url, None);
+        resources.push(DashResource {
+            url,
+            range: None,
+            filename,
+            kind: DashResourceKind::Segment,
+            segment_number: Some(number),
+        });
+    }
+    Ok(resources)
+}
+
+fn expand_static_live_template(
+    representation: &DashRepresentation,
+    media_template: &str,
+    template: &DashTemplate,
+) -> Result<Vec<DashResource>, DashError> {
+    let mut resources = expand_template(representation, media_template, template)?;
+    for resource in &mut resources {
+        resource.filename = match resource.kind {
+            DashResourceKind::Initialization => {
+                super::resource_filename("dash-live-init", None, &resource.url, resource.range)
+            }
+            DashResourceKind::Segment => {
+                super::resource_filename("dash-live-segment", None, &resource.url, None)
+            }
+        };
+    }
+    Ok(resources)
+}
+
+fn ticks_to_duration(ticks: u64, timescale: u64) -> Result<Duration, DashError> {
+    if timescale == 0 {
+        return Err(DashError::InvalidSegment);
+    }
+    let nanos = u128::from(ticks)
+        .checked_mul(1_000_000_000)
+        .ok_or(DashError::InvalidSegment)?
+        / u128::from(timescale);
+    let seconds = u64::try_from(nanos / 1_000_000_000).map_err(|_| DashError::LimitExceeded)?;
+    let subsecond_nanos =
+        u32::try_from(nanos % 1_000_000_000).map_err(|_| DashError::InvalidSegment)?;
+    Ok(Duration::new(seconds, subsecond_nanos))
+}
+
+fn duration_to_ticks(duration: Duration, timescale: u64) -> Result<u64, DashError> {
+    let ticks = duration
+        .as_nanos()
+        .checked_mul(u128::from(timescale))
+        .ok_or(DashError::InvalidSegment)?
+        / 1_000_000_000;
+    u64::try_from(ticks).map_err(|_| DashError::LimitExceeded)
+}
+
+fn dynamic_segment_times(
+    template: &DashTemplate,
+    elapsed_ticks: u64,
+    window_start_ticks: u64,
+) -> Result<Vec<(u64, u64)>, DashError> {
+    let mut available = Vec::new();
+    let mut number = template.start_number;
+
+    if let Some(timeline) = template.timeline.as_deref() {
+        let mut next_start = 0_u64;
+        let mut previous_start = None;
+        let mut previous_run_uses_negative_repeat = false;
+        for (index, entry) in timeline.iter().enumerate() {
+            let start = entry.start.unwrap_or(next_start);
+            let starts_before_previous = previous_start.is_some_and(|previous| start < previous);
+            let overlaps_previous_run =
+                entry.start.is_some() && !previous_run_uses_negative_repeat && start < next_start;
+            if starts_before_previous || overlaps_previous_run {
+                return Err(DashError::InvalidSegment);
+            }
+
+            let total_count = match entry.repeat {
+                repeat if repeat >= 0 => u64::try_from(repeat)
+                    .ok()
+                    .and_then(|repeat| repeat.checked_add(1))
+                    .ok_or(DashError::InvalidSegment)?,
+                -1 => {
+                    let next_explicit_start = timeline.get(index + 1).and_then(|next| next.start);
+                    match next_explicit_start {
+                        Some(end) => {
+                            let distance = end
+                                .checked_sub(start)
+                                .filter(|distance| *distance > 0)
+                                .ok_or(DashError::InvalidSegment)?;
+                            ceil_div_u64(distance, entry.duration)?
+                        }
+                        None => elapsed_ticks
+                            .checked_sub(start)
+                            .map_or(0, |remaining| remaining / entry.duration),
+                    }
+                }
+                _ => return Err(DashError::InvalidSegment),
+            };
+            let total_count = total_count.min(
+                template
+                    .end_number
+                    .map_or(u64::MAX, |end| end.saturating_sub(number).saturating_add(1)),
+            );
+            if total_count > MAX_SEGMENTS as u64 {
+                return Err(DashError::LimitExceeded);
+            }
+
+            for offset in 0..total_count {
+                let time = offset
+                    .checked_mul(entry.duration)
+                    .and_then(|offset| start.checked_add(offset))
+                    .ok_or(DashError::InvalidSegment)?;
+                let end = time
+                    .checked_add(entry.duration)
+                    .ok_or(DashError::InvalidSegment)?;
+                if end <= elapsed_ticks && end > window_start_ticks {
+                    available.push((number, time));
+                    if available.len() > MAX_SEGMENTS {
+                        return Err(DashError::LimitExceeded);
+                    }
+                }
+                number = number.checked_add(1).ok_or(DashError::InvalidSegment)?;
+            }
+
+            let span = total_count
+                .checked_mul(entry.duration)
+                .ok_or(DashError::InvalidSegment)?;
+            next_start = start.checked_add(span).ok_or(DashError::InvalidSegment)?;
+            previous_start = Some(start);
+            previous_run_uses_negative_repeat = entry.repeat == -1;
+        }
+    } else {
+        let duration = template
+            .duration_ticks
+            .filter(|duration| *duration > 0)
+            .ok_or(DashError::UnsupportedAddressing)?;
+        let complete_count = elapsed_ticks / duration;
+        let bounded_count = template.end_number.map_or(complete_count, |end| {
+            complete_count.min(end.saturating_sub(number).saturating_add(1))
+        });
+        let first_available = (window_start_ticks / duration).min(bounded_count);
+        let first_index = if bounded_count == 0 {
+            0
+        } else {
+            first_available.min(bounded_count.saturating_sub(1))
+        };
+        let start_index = if bounded_count == 0 { 0 } else { first_index };
+        let start_number = number
+            .checked_add(start_index)
+            .ok_or(DashError::InvalidSegment)?;
+        let mut index = start_index;
+        while index < bounded_count {
+            if available.len() >= MAX_SEGMENTS {
+                return Err(DashError::LimitExceeded);
+            }
+            let time = index
+                .checked_mul(duration)
+                .ok_or(DashError::InvalidSegment)?;
+            available.push((
+                start_number
+                    .checked_add(index - start_index)
+                    .ok_or(DashError::InvalidSegment)?,
+                time,
+            ));
+            index += 1;
+        }
+    }
+
+    Ok(available)
+}
+
 fn expand_template(
     representation: &DashRepresentation,
     media_template: &str,
@@ -910,6 +1351,7 @@ fn expand_template(
             range,
             filename,
             kind: DashResourceKind::Initialization,
+            segment_number: None,
         });
     }
 
@@ -922,6 +1364,7 @@ fn expand_template(
             range: None,
             filename,
             kind: DashResourceKind::Segment,
+            segment_number: Some(number),
         });
     }
 
@@ -1221,6 +1664,7 @@ fn expand_list(
             range,
             filename,
             kind: DashResourceKind::Initialization,
+            segment_number: None,
         });
     }
 
@@ -1232,6 +1676,7 @@ fn expand_list(
             range: segment.range,
             filename,
             kind: DashResourceKind::Segment,
+            segment_number: Some(u64::try_from(index).map_err(|_| DashError::LimitExceeded)?),
         });
     }
 
@@ -1431,6 +1876,272 @@ mod tests {
                 "{element} with {scheme_id_uri} must exclude only its Representation"
             );
         }
+    }
+
+    fn dynamic_mpd(addressing: &str, extra_attributes: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+     type="dynamic"
+     availabilityStartTime="1970-01-01T00:00:00Z"
+     minimumUpdatePeriod="PT4S"
+     {extra_attributes}>
+  <Period start="PT0S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      {addressing}
+      <Representation id="v1" bandwidth="1000000" width="1280" height="720"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#
+        )
+    }
+
+    fn dynamic_test_clock(seconds: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn dynamic_duration_template_selects_only_complete_segments_inside_time_shift_window() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="1" duration="4" initialization="init.mp4" media="seg-$Number$.m4s"/>"#,
+            r#"timeShiftBufferDepth="PT20S""#,
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(120))
+            .expect("bounded dynamic MPD should parse");
+        let video = manifest.video_representations.first().expect("video track");
+        assert!(matches!(
+            manifest.presentation,
+            DashPresentation::Dynamic(_)
+        ));
+
+        let plan = plan_dash_representation(&manifest, &video.key)
+            .expect("expand current complete live segments");
+        let numbers = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.segment_number.expect("media segment number"))
+            .collect::<Vec<_>>();
+        assert_eq!(numbers, [26, 27, 28, 29, 30]);
+        assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
+        assert!(
+            plan.resources[1..]
+                .iter()
+                .all(|resource| resource.filename.starts_with("dash-live-segment-"))
+        );
+    }
+
+    #[test]
+    fn dynamic_without_time_shift_depth_starts_at_the_newest_complete_segment() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="10" duration="4" media="seg-$Number$.m4s"/>"#,
+            "",
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(120))
+            .expect("dynamic MPD without TSBD should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.live_key)
+            .expect("plan newest complete live segment");
+        let numbers = plan
+            .resources
+            .iter()
+            .filter_map(|resource| resource.segment_number)
+            .collect::<Vec<_>>();
+        assert_eq!(numbers, [38, 39]);
+    }
+
+    #[test]
+    fn dynamic_timeline_negative_repeat_uses_only_complete_segments_in_window() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="1" media="seg-$Number$-$Time$.m4s">
+  <SegmentTimeline><S t="0" d="2" r="-1"/></SegmentTimeline>
+</SegmentTemplate>"#,
+            r#"timeShiftBufferDepth="PT4S""#,
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(11))
+            .expect("dynamic timeline MPD should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("expand complete timeline window");
+        let segments = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|resource| resource.segment_number.expect("segment number"))
+                .collect::<Vec<_>>(),
+            [4, 5]
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .map(|resource| resource.url.path().to_string())
+                .collect::<Vec<_>>(),
+            ["/path/seg-4-6.m4s", "/path/seg-5-8.m4s"]
+        );
+    }
+
+    #[test]
+    fn dynamic_timeline_negative_repeat_uses_ceiling_before_next_explicit_start() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="10" media="seg-$Number$-$Time$.m4s">
+  <SegmentTimeline>
+    <S t="0" d="2" r="-1"/>
+    <S t="5" d="2"/>
+  </SegmentTimeline>
+</SegmentTemplate>"#,
+            r#"timeShiftBufferDepth="PT20S""#,
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(9))
+            .expect("dynamic timeline MPD should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.live_key)
+            .expect("expand complete dynamic timeline segments");
+        let segments = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            segments
+                .iter()
+                .map(|resource| resource.segment_number.expect("segment number"))
+                .collect::<Vec<_>>(),
+            [10, 11, 12, 13],
+            "the negative repeat includes the final segment that overlaps the next S@t"
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .map(|resource| resource.url.path().to_string())
+                .collect::<Vec<_>>(),
+            [
+                "/path/seg-10-0.m4s",
+                "/path/seg-11-2.m4s",
+                "/path/seg-12-4.m4s",
+                "/path/seg-13-5.m4s",
+            ]
+        );
+    }
+
+    #[test]
+    fn dynamic_timeline_rejects_overlap_after_positive_repeat() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="1" media="seg-$Time$.m4s">
+  <SegmentTimeline>
+    <S t="0" d="4" r="2"/>
+    <S t="4" d="4"/>
+  </SegmentTimeline>
+</SegmentTemplate>"#,
+            r#"timeShiftBufferDepth="PT20S""#,
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(20))
+            .expect("dynamic timeline MPD syntax should parse");
+        let representation = &manifest.video_representations[0];
+
+        assert_eq!(
+            plan_dash_representation(&manifest, &representation.live_key).err(),
+            Some(DashError::InvalidSegment),
+            "an explicit start inside a positive-repeat run must be rejected"
+        );
+    }
+
+    #[test]
+    fn dynamic_representation_key_survives_timeline_growth_and_static_finalization() {
+        let dynamic = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="1" duration="4" media="seg-$Number$.m4s"/>"#,
+            r#"timeShiftBufferDepth="PT20S""#,
+        );
+        let static_mpd = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT120S">
+  <Period duration="PT120S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" startNumber="1" duration="4" media="seg-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000" width="1280" height="720"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let live = parse_dash_manifest_at(BASE_URL, &dynamic, dynamic_test_clock(120))
+            .expect("parse dynamic representation");
+        let finalized = parse_dash_manifest(BASE_URL, static_mpd)
+            .expect("parse equivalent static presentation");
+        let live_representation = &live.video_representations[0];
+        let static_representation = &finalized.video_representations[0];
+        assert_eq!(live_representation.live_key, static_representation.live_key);
+        assert_ne!(live_representation.key, static_representation.key);
+        let live_plan = plan_dash_representation(&live, &live_representation.live_key)
+            .expect("plan current dynamic window");
+        let finalized_plan = plan_dash_representation(&finalized, &live_representation.live_key)
+            .expect("plan final static presentation with the queued live key");
+        let dynamic_resource = live_plan
+            .resources
+            .iter()
+            .find(|resource| resource.segment_number == Some(26))
+            .expect("dynamic window starts with segment 26");
+        let final_resource = finalized_plan
+            .resources
+            .iter()
+            .find(|resource| resource.segment_number == Some(26))
+            .expect("final MPD includes captured segment 26");
+        assert_eq!(
+            dynamic_resource.filename, final_resource.filename,
+            "dynamic and static finalization must retain the same staged resource identity"
+        );
+
+        let later = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="1" duration="4" media="seg-$Number$.m4s">
+  <SegmentTimeline><S t="0" d="4" r="-1"/></SegmentTimeline>
+</SegmentTemplate>"#,
+            r#"timeShiftBufferDepth="PT20S""#,
+        );
+        let refreshed = parse_dash_manifest_at(BASE_URL, &later, dynamic_test_clock(124))
+            .expect("parse refreshed dynamic timeline");
+        assert_eq!(
+            refreshed.video_representations[0].live_key,
+            live_representation.live_key
+        );
+    }
+
+    #[test]
+    fn dynamic_dash_requires_bounded_update_metadata_and_rejects_segment_list() {
+        let missing_ast = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" minimumUpdatePeriod="PT4S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate duration="4" media="s-$Number$.m4s"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#;
+        let missing_update = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate duration="4" media="s-$Number$.m4s"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#;
+        let list = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z" minimumUpdatePeriod="PT4S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentList><SegmentURL media="segment.m4s"/></SegmentList><Representation id="v1"/></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            parse_dash_manifest_at(BASE_URL, missing_ast, dynamic_test_clock(20)).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+        assert_eq!(
+            parse_dash_manifest_at(BASE_URL, missing_update, dynamic_test_clock(20)).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+        assert_eq!(
+            parse_dash_manifest_at(BASE_URL, list, dynamic_test_clock(20)).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn dynamic_dash_does_not_plan_a_segment_before_it_is_complete() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" duration="4" media="seg-$Number$.m4s"/>"#,
+            "",
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(3))
+            .expect("dynamic presentation can arrive before its first complete segment");
+        let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].live_key)
+            .expect("an empty first live window remains refreshable");
+        assert!(
+            !plan
+                .resources
+                .iter()
+                .any(|resource| resource.kind == DashResourceKind::Segment),
+            "a segment is not exposed until its whole duration is available"
+        );
     }
 
     #[test]

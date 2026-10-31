@@ -5,7 +5,7 @@
 //! representation.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use gettextrs::gettext;
 use sha2::{Digest, Sha256};
@@ -526,7 +526,7 @@ async fn lookup_with_client_policy(
     let Some(kind) = manifest_kind_for_transport(&requested_url, transport_policy) else {
         return Ok(None);
     };
-    let (final_url, body) =
+    let (final_url, body, server_now) =
         fetch_bounded_manifest_with_policy(client, requested_url, transport_policy).await?;
     let final_url = transport_policy.planning_url(final_url)?;
     let manifest = match kind {
@@ -546,7 +546,8 @@ async fn lookup_with_client_policy(
             let Ok(body) = std::str::from_utf8(&body) else {
                 return Ok(None);
             };
-            let Ok(plan) = crate::manifest::dash::parse_dash_manifest(final_url.as_str(), body)
+            let Ok(plan) =
+                crate::manifest::dash::parse_dash_manifest_at(final_url.as_str(), body, server_now)
             else {
                 return Ok(None);
             };
@@ -574,7 +575,7 @@ pub(crate) async fn lookup_hls_media(
 ) -> Result<HlsPlan, ManifestIntakeError> {
     let requested_url = Url::parse(raw_url)
         .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
-    let (final_url, body) = fetch_bounded_manifest(client, requested_url).await?;
+    let (final_url, body, _) = fetch_bounded_manifest(client, requested_url).await?;
     crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
         .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
 }
@@ -582,7 +583,7 @@ pub(crate) async fn lookup_hls_media(
 async fn fetch_bounded_manifest(
     client: &reqwest::Client,
     requested_url: Url,
-) -> Result<(Url, Vec<u8>), ManifestIntakeError> {
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     fetch_bounded_manifest_with_policy(client, requested_url, ManifestTransportPolicy::HttpsOnly)
         .await
 }
@@ -591,7 +592,7 @@ async fn fetch_bounded_manifest_with_policy(
     client: &reqwest::Client,
     requested_url: Url,
     transport_policy: ManifestTransportPolicy,
-) -> Result<(Url, Vec<u8>), ManifestIntakeError> {
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     if !transport_policy.accepts_url(&requested_url) {
         return Err(ManifestIntakeError::Failed(gettext(
             "Invalid stream manifest URL",
@@ -633,7 +634,7 @@ async fn fetch_bounded_manifest_once(
     client: &reqwest::Client,
     requested_url: &Url,
     transport_policy: ManifestTransportPolicy,
-) -> Result<(Url, Vec<u8>), ManifestIntakeError> {
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     let response = client
         .get(requested_url.clone())
         .timeout(MANIFEST_REQUEST_TIMEOUT)
@@ -654,8 +655,17 @@ async fn fetch_bounded_manifest_once(
             "The stream manifest redirected to an unsafe URL",
         )));
     }
+    // DASH availability is defined against the server's wall clock. Using its
+    // Date header avoids local clock skew turning future segments into misses
+    // or not-yet-complete segments into premature fetches.
+    let server_now = response
+        .headers()
+        .get(reqwest::header::DATE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| httpdate::parse_http_date(value).ok())
+        .unwrap_or_else(SystemTime::now);
     let body = read_bounded_response(response).await?;
-    Ok((final_url, body))
+    Ok((final_url, body, server_now))
 }
 
 fn hls_audio_rendition_key(rendition: &crate::manifest::HlsAudioRendition) -> String {
@@ -827,6 +837,7 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
         }
         crate::media_types::ManifestKind::Dash => {
             has_hex_fingerprint(&source.representation_key, "dash-", 32)
+                || has_hex_fingerprint(&source.representation_key, "dash-live-", 32)
         }
     };
     let audio_key_is_valid = source
@@ -834,7 +845,9 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
         .as_deref()
         .is_none_or(|key| match source.kind {
             crate::media_types::ManifestKind::Hls => has_hex_fingerprint(key, "hls-audio-", 32),
-            crate::media_types::ManifestKind::Dash => has_hex_fingerprint(key, "dash-", 32),
+            crate::media_types::ManifestKind::Dash => {
+                has_hex_fingerprint(key, "dash-", 32) || has_hex_fingerprint(key, "dash-live-", 32)
+            }
         });
     video_key_is_valid && audio_key_is_valid
 }

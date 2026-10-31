@@ -172,9 +172,9 @@ pub(crate) async fn publish(
         return Ok(ManifestPublishOutcome::Aborted);
     }
 
-    let mut pending = PendingDestination::new(destination, Arc::clone(gate));
     match crate::file_names::rename_noreplace_same_device(source, destination) {
         Ok(()) => {
+            let mut pending = PendingDestination::new(destination, Arc::clone(gate));
             return Ok(commit_renamed_destination(gate, &mut pending));
         }
         Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {}
@@ -259,6 +259,15 @@ mod tests {
     }
 
     #[test]
+    fn dropping_the_async_owner_guard_discards_the_attempt() {
+        let gate = crate::attempt_gate::AttemptGate::new();
+
+        drop(DiscardOnDrop::new(Arc::clone(&gate)));
+
+        assert!(!gate.is_active(), "dropping the owner cancels future copy work");
+    }
+
+    #[test]
     fn discarded_gate_stops_the_copy_and_preserves_the_source() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.part");
@@ -284,14 +293,21 @@ mod tests {
         std::fs::write(&source, vec![0x31; 1024 * 1024]).unwrap();
         let gate = crate::attempt_gate::AttemptGate::new();
         let checks = AtomicUsize::new(0);
+        let cancel_gate = Arc::clone(&gate);
 
         let temporary = prepare_destination_copy(&source, &destination, &gate, || {
-            checks.fetch_add(1, Ordering::Relaxed) >= 1
+            if checks.fetch_add(1, Ordering::Relaxed) >= 1 {
+                let _ = cancel_gate.discard();
+                true
+            } else {
+                false
+            }
         })
         .expect("cancellation is not a storage error");
 
         assert!(temporary.is_none());
         assert!(!destination.exists());
+        assert!(!gate.is_active(), "the row discard stops the next copy chunk");
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
         assert!(source.exists());
     }

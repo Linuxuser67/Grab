@@ -991,6 +991,7 @@ second.m3u8
     #[tokio::test(flavor = "current_thread")]
     async fn manifest_lookup_follows_signed_redirect_with_proxy_and_cookie_scope() {
         use std::sync::{Arc, Mutex};
+        use tokio::time::Duration;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -1055,14 +1056,29 @@ second.m3u8
         let client = crate::download_net::http_client_with_jar(Some(&proxy), jar)
             .expect("build manifest client with proxy and cookie provider");
 
-        let lookup = lookup_with_http_fixture_client(
-            &client,
-            "http://manifest.example.test/master.m3u8?sig=initial",
+        let mut proxy_server = proxy_server;
+        let lookup_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            lookup_with_http_fixture_client(
+                &client,
+                "http://manifest.example.test/master.m3u8?sig=initial",
+            ),
         )
-        .await
-        .expect("manifest lookup request")
-        .expect("fixture manifest should be supported");
-        proxy_server.await.expect("proxy fixture server task");
+        .await;
+
+        let server_result =
+            tokio::time::timeout(Duration::from_secs(5), &mut proxy_server).await;
+        if server_result.is_err() {
+            proxy_server.abort();
+        }
+        server_result
+            .expect("proxy fixture server timed out")
+            .expect("proxy fixture server task failed");
+
+        let lookup = lookup_result
+            .expect("manifest lookup timed out")
+            .expect("manifest lookup request")
+            .expect("fixture manifest should be supported");
 
         let NativeManifest::HlsMaster(master) = lookup.manifest else {
             panic!("fixture should parse as an HLS master playlist");
@@ -1108,5 +1124,4 @@ second.m3u8
             );
         }
     }
-
 }

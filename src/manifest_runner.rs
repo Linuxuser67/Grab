@@ -184,9 +184,7 @@ pub(crate) async fn run_manifest_download(
     let live_marker_exists = read_live_hls_marker(&staging)
         .await
         .map_err(ManifestRunError::Failed)?;
-    let mut offline_tracks = if live_marker_exists
-        && job.source.kind == ManifestKind::Hls
-    {
+    let mut offline_tracks = if live_marker_exists && job.source.kind == ManifestKind::Hls {
         restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
     } else {
         None
@@ -768,7 +766,11 @@ async fn read_live_hls_marker(directory: &Path) -> Result<bool, String> {
     let metadata = match tokio::fs::symlink_metadata(&marker).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("Could not inspect live HLS staging marker: {error}")),
+        Err(error) => {
+            return Err(format!(
+                "Could not inspect live HLS staging marker: {error}"
+            ));
+        }
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err("The live HLS staging marker is not a regular file".to_string());
@@ -820,10 +822,7 @@ async fn load_live_hls_track(
                 "The staged live HLS playlist is not a regular file".to_string(),
             ));
         }
-        Ok(metadata)
-            if metadata.len()
-                > crate::manifest::MAX_HLS_LOCAL_PLAYLIST_BYTES as u64 =>
-        {
+        Ok(metadata) if metadata.len() > crate::manifest::MAX_HLS_LOCAL_PLAYLIST_BYTES as u64 => {
             return Err(ManifestRunError::Failed(
                 "The staged live HLS playlist exceeds its size limit".to_string(),
             ));
@@ -840,9 +839,7 @@ async fn load_live_hls_track(
                 ))
             })?
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            HlsLiveAccumulator::new()
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HlsLiveAccumulator::new(),
         Err(error) => {
             return Err(ManifestRunError::Failed(format!(
                 "Could not inspect the staged live HLS recording: {error}"
@@ -884,7 +881,9 @@ async fn load_live_hls_track(
                 && metadata.len() <= MAX_RESOURCE_BYTES
                 && (!is_key || metadata.len() == 16)
                 && expected.is_none_or(|resource| {
-                    resource.range.is_none_or(|range| metadata.len() == range.length)
+                    resource
+                        .range
+                        .is_none_or(|range| metadata.len() == range.length)
                 })
         });
         if cached_is_valid {
@@ -923,11 +922,7 @@ async fn load_live_hls_track(
 
 fn live_hls_poll_interval(target_duration: u64, changed: bool) -> Duration {
     let target = Duration::from_secs(target_duration);
-    if changed {
-        target
-    } else {
-        target.div_f32(2.0)
-    }
+    if changed { target } else { target.div_f32(2.0) }
 }
 
 async fn staged_regular_file_exists(path: &Path) -> bool {
@@ -967,7 +962,9 @@ async fn write_live_playlist(
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            return Err(format!("Could not inspect the staged live HLS playlist: {error}"));
+            return Err(format!(
+                "Could not inspect the staged live HLS playlist: {error}"
+            ));
         }
     }
     tokio::fs::rename(&part, &target)
@@ -1063,10 +1060,10 @@ async fn apply_live_hls_snapshot(
     let next_poll_at = if end_list {
         None
     } else {
-        match track.snapshot_at.checked_add(live_hls_poll_interval(
-            plan.source_target_duration,
-            changed,
-        )) {
+        match track
+            .snapshot_at
+            .checked_add(live_hls_poll_interval(plan.source_target_duration, changed))
+        {
             Some(deadline) => Some(deadline),
             None if track.accumulator.segment_count() > 0 => {
                 tracing::warn!(
@@ -1094,9 +1091,7 @@ async fn apply_live_hls_snapshot(
     )
     .await;
     let fetch_outcome = match fetch_outcome {
-        Err(ManifestRunError::Unsupported(error))
-            if track.accumulator.segment_count() > 0 =>
-        {
+        Err(ManifestRunError::Unsupported(error)) if track.accumulator.segment_count() > 0 => {
             tracing::warn!(
                 playlist = %playlist_url,
                 error = %error,
@@ -1116,14 +1111,11 @@ async fn apply_live_hls_snapshot(
 
     let added_resource_bytes =
         fetched_hls_resource_bytes(&track.directory, &update.resources).await?;
-    match track
-        .accumulator
-        .commit_update_with_budget(
-            update,
-            added_resource_bytes,
-            other_rendition_bytes,
-        )
-    {
+    match track.accumulator.commit_update_with_budget(
+        update,
+        added_resource_bytes,
+        other_rendition_bytes,
+    ) {
         Ok(()) => {}
         Err(crate::manifest::ManifestError::LiveCaptureLimit) => {
             tracing::warn!(
@@ -1284,11 +1276,14 @@ async fn run_live_hls_tracks(
         });
     }
 
-    let all_tracks_ended =
-        video_plan.end_list && audio_plan.is_none_or(|plan| plan.end_list);
+    let all_tracks_ended = video_plan.end_list && audio_plan.is_none_or(|plan| plan.end_list);
     if !all_tracks_ended {
-        guard_manifest_child_url(source_url, &video_plan.playlist_url, &mut guarded_child_hosts)
-            .map_err(ManifestRunError::Unsupported)?;
+        guard_manifest_child_url(
+            source_url,
+            &video_plan.playlist_url,
+            &mut guarded_child_hosts,
+        )
+        .map_err(ManifestRunError::Unsupported)?;
         if let Some(plan) = audio_plan {
             guard_manifest_child_url(source_url, &plan.playlist_url, &mut guarded_child_hosts)
                 .map_err(ManifestRunError::Unsupported)?;
@@ -1402,7 +1397,9 @@ async fn run_live_hls_tracks(
                 downloaded,
                 abort,
                 &mut guarded_child_hosts,
-                audio.as_ref().map_or(0, |track| track.accumulator.resource_bytes()),
+                audio
+                    .as_ref()
+                    .map_or(0, |track| track.accumulator.resource_bytes()),
             )
             .await?
             {
@@ -1424,7 +1421,9 @@ async fn run_live_hls_tracks(
         }
         if let Some(audio) = audio.as_mut()
             && !audio.ended
-            && audio.next_poll_at.is_some_and(|deadline| deadline <= Instant::now())
+            && audio
+                .next_poll_at
+                .is_some_and(|deadline| deadline <= Instant::now())
         {
             match poll_live_hls_track(
                 client,
@@ -1442,7 +1441,9 @@ async fn run_live_hls_tracks(
                 LiveHlsSnapshotOutcome::Committed => {}
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
-                        crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::PreserveVideoOnly,
+                        crate::video::StopIntent::Preserve => {
+                            LiveHlsCaptureOutcome::PreserveVideoOnly
+                        }
                         crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                     });
                 }
@@ -1495,7 +1496,13 @@ async fn fetch_resources(
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
     match fetch_resources_with_stop(
-        client, resources, directory, connections, tx, downloaded, abort,
+        client,
+        resources,
+        directory,
+        connections,
+        tx,
+        downloaded,
+        abort,
     )
     .await?
     {

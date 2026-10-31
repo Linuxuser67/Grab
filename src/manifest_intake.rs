@@ -1113,6 +1113,7 @@ second.m3u8
                 url: "https://cdn.example.test/master.m3u8".to_string(),
                 kind: crate::media_types::ManifestKind::Hls,
                 representation_key: key.clone(),
+                audio_key: None,
             })
         }));
 

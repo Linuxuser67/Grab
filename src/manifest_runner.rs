@@ -2512,7 +2512,7 @@ async fn run_live_dash_tracks(
     let (Some(mut current_video_plan), mut current_audio_plan) =
         (video_plan.cloned(), audio_plan.cloned())
     else {
-        return Ok(if video.state.segments.is_empty() {
+        finish_capture!(if video.state.segments.is_empty() {
             DashLiveCaptureOutcome::Discard
         } else {
             DashLiveCaptureOutcome::Preserve
@@ -2581,10 +2581,10 @@ async fn run_live_dash_tracks(
 
     loop {
         if dash_presentation_ended(&current_video_plan.presentation) {
-            return Ok(DashLiveCaptureOutcome::Ended);
+            finish_capture!(DashLiveCaptureOutcome::Ended);
         }
         let DashPresentation::Dynamic(dynamic) = &current_video_plan.presentation else {
-            return Ok(DashLiveCaptureOutcome::Ended);
+            finish_capture!(DashLiveCaptureOutcome::Ended);
         };
         let deadline = Instant::now()
             .checked_add(dynamic.minimum_update_period)
@@ -2597,7 +2597,7 @@ async fn run_live_dash_tracks(
         tokio::select! {
             biased;
             stop = &mut *abort => {
-                return Ok(match stop.unwrap_or(crate::video::StopIntent::Discard) {
+                finish_capture!(match stop.unwrap_or(crate::video::StopIntent::Discard) {
                     crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                 });
@@ -2608,7 +2608,7 @@ async fn run_live_dash_tracks(
         let lookup = tokio::select! {
             biased;
             stop = &mut *abort => {
-                return Ok(match stop.unwrap_or(crate::video::StopIntent::Discard) {
+                finish_capture!(match stop.unwrap_or(crate::video::StopIntent::Discard) {
                     crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                 });
@@ -2619,7 +2619,7 @@ async fn run_live_dash_tracks(
             Ok(Some(lookup)) if lookup.kind() == ManifestKind::Dash => lookup,
             Ok(Some(_)) | Ok(None) => {
                 tracing::warn!("dynamic DASH MPD is no longer supported; preserving committed media");
-                return Ok(if video.state.segments.is_empty() {
+                finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
                     DashLiveCaptureOutcome::PreserveVideoOnly
@@ -2630,7 +2630,7 @@ async fn run_live_dash_tracks(
             }
             Err(error) => {
                 tracing::warn!(error = %error, "dynamic DASH MPD refresh failed; preserving committed media");
-                return Ok(if video.state.segments.is_empty() {
+                finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
                     DashLiveCaptureOutcome::PreserveVideoOnly
@@ -2646,7 +2646,7 @@ async fn run_live_dash_tracks(
         let refreshed = match refreshed {
             Ok(Tracks::Dash { video, audio }) => (video, audio.map(|audio| *audio)),
             Ok(_) => {
-                return Ok(if video.state.segments.is_empty() {
+                finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
                     DashLiveCaptureOutcome::PreserveVideoOnly
@@ -2654,7 +2654,7 @@ async fn run_live_dash_tracks(
             }
             Err(ManifestRunError::Unsupported(error)) => {
                 tracing::warn!(error = %error, "dynamic DASH track selection disappeared; preserving committed media");
-                return Ok(if video.state.segments.is_empty() {
+                finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
                     DashLiveCaptureOutcome::PreserveVideoOnly
@@ -2685,13 +2685,13 @@ async fn run_live_dash_tracks(
         {
             DashLiveUpdateOutcome::Committed => {}
             DashLiveUpdateOutcome::Stopped(intent) => {
-                return Ok(match intent {
+                finish_capture!(match intent {
                     crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                 });
             }
             DashLiveUpdateOutcome::ContinuityLost => {
-                return Ok(if video.state.segments.is_empty() {
+                finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
                     DashLiveCaptureOutcome::PreserveVideoOnly
@@ -2716,7 +2716,7 @@ async fn run_live_dash_tracks(
                 {
                     DashLiveUpdateOutcome::Committed => {}
                     DashLiveUpdateOutcome::Stopped(intent) => {
-                        return Ok(match intent {
+                        finish_capture!(match intent {
                             crate::video::StopIntent::Preserve => {
                                 DashLiveCaptureOutcome::PreserveVideoOnly
                             }
@@ -2724,7 +2724,7 @@ async fn run_live_dash_tracks(
                         });
                     }
                     DashLiveUpdateOutcome::ContinuityLost => {
-                        return Ok(if video.state.segments.is_empty() {
+                        finish_capture!(if video.state.segments.is_empty() {
                             DashLiveCaptureOutcome::Discard
                         } else {
                             DashLiveCaptureOutcome::PreserveVideoOnly
@@ -2757,7 +2757,7 @@ async fn run_live_dash_tracks(
                         audio = Some((track, bytes));
                     }
                     DashLiveUpdateOutcome::Stopped(intent) => {
-                        return Ok(match intent {
+                        finish_capture!(match intent {
                             crate::video::StopIntent::Preserve => {
                                 DashLiveCaptureOutcome::PreserveVideoOnly
                             }
@@ -2765,12 +2765,12 @@ async fn run_live_dash_tracks(
                         });
                     }
                     DashLiveUpdateOutcome::ContinuityLost => {
-                        return Ok(DashLiveCaptureOutcome::PreserveVideoOnly);
+                        finish_capture!(DashLiveCaptureOutcome::PreserveVideoOnly);
                     }
                 }
             }
             (Some(_), None) => {
-                return Ok(if video.state.segments.is_empty() {
+                finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
                     DashLiveCaptureOutcome::PreserveVideoOnly
@@ -2780,7 +2780,7 @@ async fn run_live_dash_tracks(
         }
 
         if dash_presentation_ended(&current_video_plan.presentation) {
-            return Ok(DashLiveCaptureOutcome::Ended);
+            finish_capture!(DashLiveCaptureOutcome::Ended);
         }
     }
 }

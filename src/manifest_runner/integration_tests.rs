@@ -563,6 +563,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let client = fixture_client();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let downloaded = Arc::new(AtomicU64::new(0));
+    let mut guarded_child_hosts = std::collections::HashSet::new();
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
     let outcome = run_live_hls_tracks(
         &client,
@@ -575,6 +576,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         1,
         &tx,
         &downloaded,
+        &mut guarded_child_hosts,
         &mut abort,
     )
     .await

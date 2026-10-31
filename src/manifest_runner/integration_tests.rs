@@ -511,6 +511,578 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
     );
 }
 
+fn localize_live_plan_resources(plan: &mut HlsPlan, fixture_base: &Url) {
+    plan.playlist_url = fixture_base
+        .join("live.m3u8")
+        .expect("build fixture live playlist URL");
+    for resource in plan.resources.iter_mut() {
+        resource.url = loopback_resource_url(fixture_base, &resource.url);
+    }
+}
+
+#[tokio::test]
+async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
+    let root = TempRoot::new("live-offline");
+    let video_dir = root.path().join("video");
+    let audio_dir = root.path().join("audio");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create offline live video staging");
+
+    let remote = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:950\n#EXTINF:4,\n950.ts\n",
+    )
+    .expect("plan remote live playlist");
+    let resource = remote.resources.first().expect("one initial segment");
+    let segment_bytes = b"offline-committed-live-segment";
+    tokio::fs::write(video_dir.join(&resource.filename), segment_bytes)
+        .await
+        .expect("write completed segment into owned staging");
+
+    let mut accumulator = HlsLiveAccumulator::new();
+    let update = accumulator
+        .prepare_update(&remote)
+        .expect("prepare initial live capture");
+    accumulator
+        .commit_update_with_bytes(update, segment_bytes.len() as u64)
+        .expect("commit initial segment and byte count");
+    write_live_playlist(&video_dir, &accumulator)
+        .await
+        .expect("persist committed local live playlist");
+
+    let local_bytes = tokio::fs::read(video_dir.join("local.m3u8"))
+        .await
+        .expect("read committed local live playlist");
+    let local_plan = HlsPlan::from_local_capture(
+        "https://origin.example.test/live.m3u8",
+        &local_bytes,
+    )
+    .expect("rebuild completed local plan");
+    assert!(local_plan.end_list);
+    assert!(local_plan.resources.is_empty());
+
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+    let outcome = run_live_hls_tracks(
+        &client,
+        "https://origin.example.test/master.m3u8",
+        &local_plan,
+        None,
+        &video_dir,
+        &audio_dir,
+        1,
+        &tx,
+        &downloaded,
+        &mut abort,
+    )
+    .await
+    .expect("finalize stored capture without a network request");
+
+    assert_eq!(outcome, LiveHlsCaptureOutcome::Ended);
+    assert_eq!(downloaded.load(Ordering::Relaxed), 0);
+    let final_playlist = m3u8_rs::parse_media_playlist_res(
+        &tokio::fs::read(video_dir.join("local.m3u8"))
+            .await
+            .expect("read finalized local playlist"),
+    )
+    .expect("parse finalized local playlist");
+    assert_eq!(final_playlist.segments.len(), 1);
+    assert!(final_playlist.end_list);
+    assert_eq!(
+        tokio::fs::read(video_dir.join(&final_playlist.segments[0].uri))
+            .await
+            .expect("read original committed segment"),
+        segment_bytes
+    );
+}
+
+#[tokio::test]
+async fn live_hls_snapshots_append_only_new_media_sequences_and_resume() {
+    let root = TempRoot::new("live-hls");
+    let video_dir = root.path().join("video");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create live HLS video staging");
+    let initial_body = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4,\n100.ts\n#EXTINF:4,\n101.ts\n";
+    let next_body = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:101\n#EXTINF:4,\n101.ts\n#EXTINF:4,\n102.ts\n#EXT-X-ENDLIST\n";
+    let mut initial = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        initial_body,
+    )
+    .expect("plan initial live HLS window");
+    let mut next = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        next_body,
+    )
+    .expect("plan overlapping live HLS window");
+    let files = HashMap::from([
+        ("/100.ts".to_string(), b"segment-100".to_vec()),
+        ("/101.ts".to_string(), b"segment-101".to_vec()),
+        ("/102.ts".to_string(), b"segment-102".to_vec()),
+    ]);
+    let (fixture_base, server) = spawn_fixture_server(files, 4).await;
+    localize_live_plan_resources(&mut initial, &fixture_base);
+    localize_live_plan_resources(&mut next, &fixture_base);
+
+    let mut track = load_live_hls_track(&initial, &video_dir)
+        .await
+        .expect("initialize live HLS accumulator");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+    assert_eq!(
+        apply_live_hls_snapshot(
+            &client,
+            &initial,
+            &mut track,
+            2,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await
+        .expect("fetch and commit initial live window"),
+        LiveHlsSnapshotOutcome::Committed
+    );
+    assert_eq!(track.accumulator.segment_count(), 2);
+    tokio::fs::remove_file(
+        video_dir.join(
+            m3u8_rs::parse_media_playlist_res(
+                &tokio::fs::read(video_dir.join("local.m3u8"))
+                    .await
+                    .expect("read initial local live playlist"),
+            )
+            .expect("parse initial local live playlist")
+            .segments[1]
+                .uri
+                .as_str(),
+        ),
+    )
+    .await
+    .expect("remove one cached overlapping segment to exercise resume repair");
+    assert!(
+        tokio::fs::symlink_metadata(video_dir.join("local.m3u8"))
+            .await
+            .is_ok(),
+        "the committed local playlist must be durable before the next reload"
+    );
+
+    // A new attempt reconstructs the accumulator from the committed local
+    // playlist. Its overlapping sequence must not be downloaded twice.
+    let mut restored = load_live_hls_track(&next, &video_dir)
+        .await
+        .expect("restore live HLS accumulator from staging");
+    assert_eq!(
+        apply_live_hls_snapshot(
+            &client,
+            &next,
+            &mut restored,
+            2,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await
+        .expect("fetch and commit next live window"),
+        LiveHlsSnapshotOutcome::Committed
+    );
+    wait_for_fixture_server(server).await;
+
+    assert_eq!(restored.accumulator.segment_count(), 3);
+    assert!(restored.ended, "the ENDLIST snapshot must stop further polling");
+    assert!(restored.next_poll_at.is_none());
+    assert_eq!(
+        downloaded.load(Ordering::Relaxed),
+        b"segment-100".len() as u64
+            + b"segment-101".len() as u64 * 2
+            + b"segment-102".len() as u64,
+        "the missing overlapping resource is repaired; all other cached segments are reused"
+    );
+    let local = tokio::fs::read(video_dir.join("local.m3u8"))
+        .await
+        .expect("read accumulated local playlist");
+    let playlist = m3u8_rs::parse_media_playlist_res(&local)
+        .expect("accumulated local playlist parses");
+    assert_eq!(playlist.media_sequence, 100);
+    assert_eq!(playlist.segments.len(), 3);
+    assert!(playlist.end_list);
+    for (segment, expected) in playlist
+        .segments
+        .iter()
+        .zip([b"segment-100".as_slice(), b"segment-101".as_slice(), b"segment-102".as_slice()])
+    {
+        assert_eq!(
+            tokio::fs::read(video_dir.join(&segment.uri))
+                .await
+                .expect("read committed live segment"),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
+    if !tools_available() {
+        return;
+    }
+
+    let root = TempRoot::new("live-finalize");
+    let fixture_dir = root.path().join("fixture");
+    std::fs::create_dir_all(&fixture_dir).expect("create live HLS fixture directory");
+    let source_playlist_path = fixture_dir.join("source.m3u8");
+    let generated = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=96x64:rate=12",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=48000",
+            "-t",
+            "4",
+            "-shortest",
+            "-c:v",
+            "mpeg4",
+            "-g",
+            "12",
+            "-q:v",
+            "5",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "64k",
+            "-f",
+            "hls",
+            "-hls_time",
+            "1",
+            "-hls_list_size",
+            "0",
+            "-hls_segment_filename",
+        ])
+        .arg(fixture_dir.join("segment%03d.ts"))
+        .arg(&source_playlist_path)
+        .output()
+        .expect("generate MPEG-TS HLS source fixture");
+    assert_command_succeeded(&generated, "FFmpeg could not generate the live HLS fixture");
+
+    let source_bytes =
+        std::fs::read(&source_playlist_path).expect("read generated VOD HLS playlist");
+    let source = m3u8_rs::parse_media_playlist_res(&source_bytes)
+        .expect("parse generated VOD HLS playlist");
+    assert!(
+        source.segments.len() >= 3,
+        "fixture generation must produce at least three media segments"
+    );
+
+    let mut initial = source.clone();
+    initial.segments.truncate(2);
+    initial.playlist_type = None;
+    initial.end_list = false;
+    let mut initial_bytes = Vec::new();
+    initial
+        .write_to(&mut initial_bytes)
+        .expect("serialize first live HLS window");
+
+    let final_bytes = source_bytes;
+    let mut initial_plan = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        &initial_bytes,
+    )
+    .expect("plan first live HLS window");
+    let mut final_plan = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        &final_bytes,
+    )
+    .expect("plan final ENDLIST snapshot");
+
+    let mut resource_urls = initial_plan
+        .resources
+        .iter()
+        .chain(final_plan.resources.iter())
+        .map(|resource| resource.url.clone())
+        .collect::<Vec<_>>();
+    resource_urls.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    resource_urls.dedup_by(|left, right| left.as_str() == right.as_str());
+    let files = fixture_files(&fixture_dir, &resource_urls);
+    let expected_requests = files.len();
+    let (fixture_base, server) = spawn_fixture_server(files, expected_requests).await;
+    localize_live_plan_resources(&mut initial_plan, &fixture_base);
+    localize_live_plan_resources(&mut final_plan, &fixture_base);
+
+    let video_dir = root.path().join("video");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create live HLS staging");
+    let mut track = load_live_hls_track(&initial_plan, &video_dir)
+        .await
+        .expect("initialize live HLS accumulator");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+    assert_eq!(
+        apply_live_hls_snapshot(
+            &client,
+            &initial_plan,
+            &mut track,
+            4,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await
+        .expect("fetch first live HLS window"),
+        LiveHlsSnapshotOutcome::Committed
+    );
+    assert_eq!(
+        apply_live_hls_snapshot(
+            &client,
+            &final_plan,
+            &mut track,
+            4,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await
+        .expect("fetch final ENDLIST HLS window"),
+        LiveHlsSnapshotOutcome::Committed
+    );
+    wait_for_fixture_server(server).await;
+
+    assert!(track.ended, "the ENDLIST snapshot closes the capture");
+    assert_eq!(track.accumulator.segment_count(), source.segments.len());
+
+    let ffmpeg = Path::new("ffmpeg");
+    let ffprobe = Path::new("ffprobe");
+    let output = root.path().join("live-capture.mp4.part");
+    assert!(
+        tokio::time::timeout(
+            FIXTURE_TIMEOUT,
+            run_ffmpeg(
+                ffmpeg,
+                &video_dir.join("local.m3u8"),
+                None,
+                &output,
+                &mut abort,
+            ),
+        )
+        .await
+        .expect("FFmpeg finalization timed out")
+        .expect("FFmpeg live HLS finalization returned an error"),
+        "FFmpeg finalization should complete without an abort"
+    );
+    assert_mp4_has_audio_and_video(ffprobe, &output);
+}
+
+#[tokio::test]
+async fn live_hls_sequence_gap_preserves_already_committed_media() {
+    let root = TempRoot::new("live-gap");
+    let video_dir = root.path().join("video");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create live gap staging");
+    let first = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:700\n#EXTINF:4,\n700.ts\n#EXTINF:4,\n701.ts\n",
+    )
+    .expect("plan first live window");
+    let mut track = load_live_hls_track(&first, &video_dir)
+        .await
+        .expect("initialize live accumulator");
+    let update = track
+        .accumulator
+        .prepare_update(&first)
+        .expect("prepare first live window");
+    track
+        .accumulator
+        .commit_update(update)
+        .expect("commit first live window");
+    write_live_playlist(&video_dir, &track.accumulator)
+        .await
+        .expect("persist first live window");
+
+    let gap = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:704\n#EXTINF:4,\n704.ts\n#EXTINF:4,\n705.ts\n",
+    )
+    .expect("plan live window after a gap");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+    let outcome = apply_live_hls_snapshot(
+        &client,
+        &gap,
+        &mut track,
+        1,
+        &tx,
+        &downloaded,
+        &mut abort,
+        0,
+    )
+    .await
+    .expect("continuity loss is a partial capture, not extractor fallback");
+
+    assert_eq!(outcome, LiveHlsSnapshotOutcome::ContinuityLost);
+    assert_eq!(track.accumulator.segment_count(), 2);
+    assert!(
+        tokio::fs::symlink_metadata(video_dir.join("local.m3u8"))
+            .await
+            .is_ok(),
+        "the last complete playlist window remains available for finalization"
+    );
+}
+
+#[tokio::test]
+async fn live_hls_preserve_stop_keeps_the_last_committed_window() {
+    let root = TempRoot::new("live-preserve");
+    let video_dir = root.path().join("video");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create live preserve staging");
+    let first_body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:550\n#EXTINF:4,\n550.ts\n";
+    let next_body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:550\n#EXTINF:4,\n550.ts\n#EXTINF:4,\n551.ts\n";
+    let mut first = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        first_body,
+    )
+    .expect("plan first live window");
+    let mut next = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        next_body,
+    )
+    .expect("plan next live window");
+    let (fixture_base, server) = spawn_fixture_server(
+        HashMap::from([("/550.ts".to_string(), b"committed-segment".to_vec())]),
+        1,
+    )
+    .await;
+    localize_live_plan_resources(&mut first, &fixture_base);
+    localize_live_plan_resources(&mut next, &fixture_base);
+
+    let mut track = load_live_hls_track(&first, &video_dir)
+        .await
+        .expect("initialize live HLS accumulator");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_first_stop_tx, mut first_abort) = tokio::sync::oneshot::channel();
+    assert_eq!(
+        apply_live_hls_snapshot(
+            &client,
+            &first,
+            &mut track,
+            1,
+            &tx,
+            &downloaded,
+            &mut first_abort,
+            0,
+        )
+        .await
+        .expect("fetch and commit first live window"),
+        LiveHlsSnapshotOutcome::Committed
+    );
+    wait_for_fixture_server(server).await;
+
+    let (stop_tx, mut stop_abort) = tokio::sync::oneshot::channel();
+    stop_tx
+        .send(crate::video::StopIntent::Preserve)
+        .expect("queue preserve stop before the next window");
+    assert_eq!(
+        apply_live_hls_snapshot(
+            &client,
+            &next,
+            &mut track,
+            1,
+            &tx,
+            &downloaded,
+            &mut stop_abort,
+            0,
+        )
+        .await
+        .expect("preserve stop during the next live window"),
+        LiveHlsSnapshotOutcome::Stopped(crate::video::StopIntent::Preserve)
+    );
+
+    let local = tokio::fs::read(video_dir.join("local.m3u8"))
+        .await
+        .expect("read last committed live playlist");
+    let playlist = m3u8_rs::parse_media_playlist_res(&local)
+        .expect("parse last committed live playlist");
+    assert_eq!(playlist.segments.len(), 1);
+    assert_eq!(track.accumulator.segment_count(), 1);
+    assert_eq!(
+        tokio::fs::read(video_dir.join(&playlist.segments[0].uri))
+            .await
+            .expect("read last committed live segment"),
+        b"committed-segment"
+    );
+}
+
+#[tokio::test]
+async fn live_hls_preserve_stop_does_not_commit_an_interrupted_window() {
+    let root = TempRoot::new("live-stop");
+    let video_dir = root.path().join("video");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create live stop staging");
+    let plan = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:500\n#EXTINF:4,\n500.ts\n",
+    )
+    .expect("plan a live media window");
+    let mut track = load_live_hls_track(&plan, &video_dir)
+        .await
+        .expect("initialize live HLS accumulator");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (stop_tx, mut abort) = tokio::sync::oneshot::channel();
+    stop_tx
+        .send(crate::video::StopIntent::Preserve)
+        .expect("queue preserve stop");
+    let stopped = apply_live_hls_snapshot(
+        &client,
+        &plan,
+        &mut track,
+        1,
+        &tx,
+        &downloaded,
+        &mut abort,
+        0,
+    )
+    .await
+    .expect("a stop before fetching is not a manifest error");
+
+    assert_eq!(
+        stopped,
+        LiveHlsSnapshotOutcome::Stopped(crate::video::StopIntent::Preserve)
+    );
+    assert_eq!(track.accumulator.segment_count(), 0);
+    assert!(
+        tokio::fs::symlink_metadata(video_dir.join("local.m3u8"))
+            .await
+            .is_err(),
+        "an incomplete first window must never become the FFmpeg input"
+    );
+    assert_eq!(downloaded.load(Ordering::Relaxed), 0);
+}
+
 #[tokio::test]
 async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
     if !tools_available() {

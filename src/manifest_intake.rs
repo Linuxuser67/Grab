@@ -50,19 +50,6 @@ impl From<String> for ManifestIntakeError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BrowserCookiePolicy {
-    HandoffOnly,
-    ExportConfiguredBrowser,
-}
-
-impl BrowserCookiePolicy {
-    #[must_use]
-    const fn allows_browser_export(self) -> bool {
-        matches!(self, Self::ExportConfiguredBrowser)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ManifestTransportPolicy {
     HttpsOnly,
     #[cfg(test)]
@@ -407,10 +394,10 @@ impl ManifestLookup {
 ///
 /// The response is streamed into a bounded buffer; an untrusted Content-Length
 /// is only an early rejection hint, never the memory bound.
-/// Preview native manifests with extension handoff cookies only.
- ///
- /// Do not export the configured browser profile during a background preview:
- /// browser-cookie export is reserved for the user-started download attempt.
+/// Preview native manifests using the configured browser's cookies when available.
+///
+/// The complete preview is bounded so a slow cookie export or manifest server
+/// yields promptly to the established yt-dlp fallback.
 pub(crate) async fn lookup(
     raw_url: &str,
     cookies_browser: &str,
@@ -420,16 +407,19 @@ pub(crate) async fn lookup(
     if native_manifest_kind(&requested_url).is_none() {
         return Ok(None);
     }
-    let client = client_for_manifest_with_policy(
-        raw_url,
-        cookies_browser,
-        proxy,
-        BrowserCookiePolicy::HandoffOnly,
-    )
-    .await?;
-    lookup_with_client(&client, raw_url)
-        .await
-        .map_err(|error| error.to_string())
+    tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
+        let client = client_for_manifest(raw_url, cookies_browser, proxy).await?;
+        lookup_with_client(&client, raw_url)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(format!(
+            "Native manifest lookup exceeded its {} second preview budget",
+            MANIFEST_LOOKUP_BUDGET.as_secs()
+        ))
+    })
 }
 
 /// Build an attempt-scoped client, preferring a valid extension handoff jar and
@@ -439,20 +429,13 @@ pub(crate) async fn client_for_manifest(
     cookies_browser: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Result<reqwest::Client, String> {
-    client_for_manifest_with_policy(
-        raw_url,
-        cookies_browser,
-        proxy,
-        BrowserCookiePolicy::ExportConfiguredBrowser,
-    )
-    .await
+    client_for_manifest_with_policy(raw_url, cookies_browser, proxy).await
 }
 
 async fn client_for_manifest_with_policy(
     raw_url: &str,
     cookies_browser: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
-    cookie_policy: BrowserCookiePolicy,
 ) -> Result<reqwest::Client, String> {
     // A browser handoff is public-only. An upstream proxy resolves the target
     // remotely and would bypass the local guarded DNS resolver, so reject it
@@ -481,8 +464,7 @@ async fn client_for_manifest_with_policy(
         }
     }
 
-    if cookie_policy.allows_browser_export()
-        && !cookies_browser.is_empty()
+    if !cookies_browser.is_empty()
         && cookies_browser != "none"
         && let Ok(youtube_bin) = crate::video_tools::resolve_ytdlp()
     {
@@ -1007,9 +989,16 @@ mod tests {
     }
 
     #[test]
-    fn preview_cookie_policy_does_not_export_browser_profiles() {
-        assert!(!BrowserCookiePolicy::HandoffOnly.allows_browser_export());
-        assert!(BrowserCookiePolicy::ExportConfiguredBrowser.allows_browser_export());
+    fn native_preview_uses_configured_browser_cookie_export() {
+        let source = include_str!("manifest_intake.rs");
+        assert!(
+            source.contains("let client = client_for_manifest(raw_url, cookies_browser, proxy).await?;"),
+            "native previews must use the same configured-cookie client as downloads"
+        );
+        assert!(
+            source.contains("timeout(MANIFEST_LOOKUP_BUDGET"),
+            "browser-cookie export and manifest retrieval must share the preview budget"
+        );
     }
 
     #[test]

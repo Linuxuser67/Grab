@@ -276,17 +276,18 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
     let mut plan = crate::manifest::plan_hls_media_playlist(media_manifest_url, &manifest)
         .expect("parse generated HLS media playlist");
 
-    let _policy_test_guard = crate::download_net::isolate_untrusted_handoff_policy_for_test();
-    assert!(crate::download_net::require_public_resolution(
-        "manifest-origin.fixture.invalid"
-    ));
-    let mut guarded_child_hosts = std::collections::HashSet::new();
-    let media_url = Url::parse(media_manifest_url).expect("HLS media manifest URL is valid");
-    guard_manifest_child_url(source_url, &media_url, &mut guarded_child_hosts)
-        .expect("the selected HLS media playlist host should be guarded");
-    guard_hls_resources(source_url, &plan, &mut guarded_child_hosts)
-        .expect("all planned HLS resources should pass the production host guard");
-    drop(_policy_test_guard);
+    {
+        let _policy_test_guard = crate::download_net::isolate_untrusted_handoff_policy_for_test();
+        assert!(crate::download_net::require_public_resolution(
+            "manifest-origin.fixture.invalid"
+        ));
+        let mut guarded_child_hosts = std::collections::HashSet::new();
+        let media_url = Url::parse(media_manifest_url).expect("HLS media manifest URL is valid");
+        guard_manifest_child_url(source_url, &media_url, &mut guarded_child_hosts)
+            .expect("the selected HLS media playlist host should be guarded");
+        guard_hls_resources(source_url, &plan, &mut guarded_child_hosts)
+            .expect("all planned HLS resources should pass the production host guard");
+    }
     let urls: Vec<_> = plan
         .resources
         .iter()
@@ -424,20 +425,21 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
     let mut audio_plan = crate::manifest::dash::plan_dash_representation(&parsed, &audio_key)
         .expect("plan generated DASH audio representation");
 
-    let _policy_test_guard = crate::download_net::isolate_untrusted_handoff_policy_for_test();
-    assert!(crate::download_net::require_public_resolution(
-        "manifest-origin.fixture.invalid"
-    ));
-    let mut guarded_child_hosts = std::collections::HashSet::new();
-    for resource in video_plan
-        .resources
-        .iter()
-        .chain(audio_plan.resources.iter())
     {
-        guard_manifest_child_url(source_url, &resource.url, &mut guarded_child_hosts)
-            .expect("all planned DASH resources should pass the production host guard");
+        let _policy_test_guard = crate::download_net::isolate_untrusted_handoff_policy_for_test();
+        assert!(crate::download_net::require_public_resolution(
+            "manifest-origin.fixture.invalid"
+        ));
+        let mut guarded_child_hosts = std::collections::HashSet::new();
+        for resource in video_plan
+            .resources
+            .iter()
+            .chain(audio_plan.resources.iter())
+        {
+            guard_manifest_child_url(source_url, &resource.url, &mut guarded_child_hosts)
+                .expect("all planned DASH resources should pass the production host guard");
+        }
     }
-    drop(_policy_test_guard);
 
     let mut urls: Vec<_> = video_plan
         .resources

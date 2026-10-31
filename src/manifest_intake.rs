@@ -713,12 +713,20 @@ async fn fetch_bounded_manifest_with_limits(
 
 /// Only request timeouts and connection resets are worth retrying. DNS guard,
 /// TLS, redirect-policy and other deterministic failures fall back immediately.
-fn manifest_request_error(
-    context: &str,
-    error: reqwest::Error,
-) -> ManifestIntakeError {
+fn manifest_request_error(context: &str, error: reqwest::Error) -> ManifestIntakeError {
     let retryable = error.is_timeout() || has_connection_reset_cause(&error);
-    let message = format!("{context}: {error}");
+    // Do not format reqwest::Error here: it can include the complete signed
+    // manifest URL, including credentials carried in query parameters.
+    let detail = if error.is_timeout() {
+        "the request timed out"
+    } else if has_connection_reset_cause(&error) {
+        "the connection was reset"
+    } else if error.is_connect() {
+        "the manifest server connection could not be established"
+    } else {
+        "the manifest network request failed"
+    };
+    let message = format!("{context}: {detail}");
     if retryable {
         ManifestIntakeError::Retryable(message)
     } else {

@@ -85,7 +85,7 @@ fn manifest_storage_error(context: &str, error: std::io::Error) -> ManifestRunEr
     }
 }
 
-/// Reject a byte-range chunk before it is written if it exceeds the requested extent.
+/// Reject a response whose declared length exceeds the requested byte range.
 fn byte_range_content_length_exceeds(
     range: crate::manifest::ManifestByteRange,
     content_length: Option<u64>,

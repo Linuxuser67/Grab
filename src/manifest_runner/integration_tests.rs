@@ -219,7 +219,7 @@ fn fixture_client() -> reqwest::Client {
 
 async fn read_fixture_request_path(socket: &mut tokio::net::TcpStream) -> String {
     let mut request = Vec::with_capacity(512);
-    while !request.windows(4).any(|window| window == b"\\r\\n\\r\\n") {
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
         let mut buffer = [0_u8; 1024];
         let length = socket
             .read(&mut buffer)
@@ -274,7 +274,7 @@ async fn spawn_interrupted_resource_server(
         paths.push(read_fixture_request_path(&mut first).await);
 
         let headers = format!(
-            "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         first

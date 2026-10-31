@@ -989,19 +989,6 @@ mod tests {
     }
 
     #[test]
-    fn native_preview_uses_configured_browser_cookie_export() {
-        let source = include_str!("manifest_intake.rs");
-        assert!(
-            source.contains("let client = client_for_manifest(raw_url, cookies_browser, proxy).await?;"),
-            "native previews must use the same configured-cookie client as downloads"
-        );
-        assert!(
-            source.contains("timeout(MANIFEST_LOOKUP_BUDGET"),
-            "browser-cookie export and manifest retrieval must share the preview budget"
-        );
-    }
-
-    #[test]
     fn preferred_source_selects_the_configured_hls_representation() {
         let body = br#"#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720

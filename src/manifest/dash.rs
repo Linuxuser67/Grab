@@ -199,6 +199,7 @@ struct DashListSegment {
 
 /// Parse a static or bounded single-period dynamic DASH MPD into selectable representations.
 ///
+#[cfg(test)]
 /// Dynamic support is limited to HTTPS SegmentTemplate presentations with a
 /// finite MPD update interval and complete segments. Multiple periods, DRM,
 /// XLink, dynamic SegmentList, LL-DASH, SegmentBase, indexed addressing,

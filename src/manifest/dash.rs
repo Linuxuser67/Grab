@@ -1219,7 +1219,7 @@ fn dynamic_segment_times(
                                 .checked_sub(start)
                                 .filter(|distance| *distance > 0)
                                 .ok_or(DashError::InvalidSegment)?;
-                            ceil_div_u64(distance, entry.duration)?
+                            distance / entry.duration
                         }
                         None => elapsed_ticks
                             .checked_sub(start)
@@ -1951,7 +1951,7 @@ mod tests {
             .iter()
             .filter_map(|resource| resource.segment_number)
             .collect::<Vec<_>>();
-        assert_eq!(numbers, [39]);
+        assert_eq!(numbers, [38, 39]);
     }
 
     #[test]

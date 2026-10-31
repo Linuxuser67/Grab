@@ -1,9 +1,22 @@
 use crate::attempt_gate::AttemptGate;
 
 #[test]
-fn a_fresh_gate_allows_a_commit() {
+fn a_fresh_gate_is_active_until_commit_or_discard() {
     let gate = AttemptGate::new();
+    assert!(gate.is_active(), "a new attempt can continue");
     assert!(gate.try_commit(), "nothing has claimed the attempt yet");
+    assert!(
+        !gate.is_active(),
+        "a committing attempt no longer accepts work"
+    );
+
+    let discarded = AttemptGate::new();
+    assert!(discarded.is_active());
+    assert!(discarded.discard());
+    assert!(
+        !discarded.is_active(),
+        "a discarded attempt no longer accepts work"
+    );
 }
 
 #[test]

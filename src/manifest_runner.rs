@@ -1170,11 +1170,16 @@ mod tests {
         assert_eq!(
             audio
                 .as_deref()
-                .and_then(|plan| plan.representation.representation_id.as_deref()),
-            Some("a-en"),
+                .map(|plan| plan.representation.key.as_str()),
+            Some(main_audio_key.as_str()),
             "queue entries without an audio key must preserve main/first fallback"
         );
-        assert!(!main_audio_key.is_empty());
+        assert_eq!(
+            audio
+                .as_deref()
+                .and_then(|plan| plan.representation.representation_id.as_deref()),
+            Some("a-en")
+        );
     }
 
     #[tokio::test]

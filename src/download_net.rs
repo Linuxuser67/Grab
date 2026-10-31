@@ -441,6 +441,7 @@ pub(crate) fn lock_untrusted_handoff_policy_for_test() -> std::sync::MutexGuard<
 
 /// Restore the process-global handoff policy when a test finishes.
 #[cfg(test)]
+#[derive(Debug)]
 pub(crate) struct IsolatedUntrustedHandoffPolicy {
     _lock: std::sync::MutexGuard<'static, ()>,
     previous: std::collections::BTreeMap<String, usize>,

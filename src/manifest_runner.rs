@@ -741,7 +741,7 @@ async fn resolve_tracks(
 ) -> Result<Tracks, ManifestRunError> {
     match lookup.manifest {
         NativeManifest::HlsMedia(plan) if source.representation_key == "hls-media" => {
-            guard_hls_resources(&source.url, &plan, &mut guarded_child_hosts)?;
+            guard_hls_resources(&source.url, &plan, guarded_child_hosts)?;
             Ok(Tracks::Hls {
                 video: *plan,
                 audio: None,
@@ -796,18 +796,18 @@ async fn resolve_tracks(
                 }),
             };
             let audio_url = selected_audio.and_then(|rendition| rendition.url.clone());
-            guard_manifest_child_url(&source.url, &video_url, &mut guarded_child_hosts)?;
+            guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
             if let Some(audio_url) = audio_url.as_ref() {
-                guard_manifest_child_url(&source.url, audio_url, &mut guarded_child_hosts)?;
+                guard_manifest_child_url(&source.url, audio_url, guarded_child_hosts)?;
             }
             let video =
                 crate::manifest_intake::lookup_hls_media(client, video_url.as_str()).await?;
-            guard_hls_resources(&source.url, &video, &mut guarded_child_hosts)?;
+            guard_hls_resources(&source.url, &video, guarded_child_hosts)?;
             let audio = match audio_url {
                 Some(url) => {
                     let plan =
                         crate::manifest_intake::lookup_hls_media(client, url.as_str()).await?;
-                    guard_hls_resources(&source.url, &plan, &mut guarded_child_hosts)?;
+                    guard_hls_resources(&source.url, &plan, guarded_child_hosts)?;
                     Some(plan)
                 }
                 None => None,
@@ -847,11 +847,11 @@ async fn resolve_tracks(
                 })
                 .transpose()?;
             for resource in video.resources.iter() {
-                guard_manifest_child_url(&source.url, &resource.url, &mut guarded_child_hosts)?;
+                guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
             }
             if let Some(audio) = audio.as_ref() {
                 for resource in audio.resources.iter() {
-                    guard_manifest_child_url(&source.url, &resource.url, &mut guarded_child_hosts)?;
+                    guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
                 }
             }
             Ok(Tracks::Dash { video, audio })
@@ -1583,8 +1583,8 @@ async fn run_live_hls_tracks(
         };
         match audio_outcome {
             LiveHlsSnapshotOutcome::Committed => {
-            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
-        }
+                ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+            }
             LiveHlsSnapshotOutcome::Stopped(intent) => {
                 return Ok(match intent {
                     crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::PreserveVideoOnly,
@@ -1646,8 +1646,8 @@ async fn run_live_hls_tracks(
             .await?
             {
                 LiveHlsSnapshotOutcome::Committed => {
-            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
-        }
+                    ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+                }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
                         crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
@@ -1683,8 +1683,8 @@ async fn run_live_hls_tracks(
             .await?
             {
                 LiveHlsSnapshotOutcome::Committed => {
-            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
-        }
+                    ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+                }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
                         crate::video::StopIntent::Preserve => {
@@ -2823,8 +2823,8 @@ async fn run_live_dash_tracks(
         .await?
         {
             DashLiveUpdateOutcome::Committed => {
-            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
-        }
+                ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+            }
             DashLiveUpdateOutcome::Stopped(intent) => {
                 finish_capture!(match intent {
                     crate::video::StopIntent::Preserve => {
@@ -2947,8 +2947,8 @@ async fn run_live_dash_tracks(
         .await?
         {
             DashLiveUpdateOutcome::Committed => {
-            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
-        }
+                ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+            }
             DashLiveUpdateOutcome::Stopped(intent) => {
                 finish_capture!(match intent {
                     crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
@@ -2980,8 +2980,8 @@ async fn run_live_dash_tracks(
                 .await?
                 {
                     DashLiveUpdateOutcome::Committed => {
-            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
-        }
+                        ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+                    }
                     DashLiveUpdateOutcome::Stopped(intent) => {
                         finish_capture!(match intent {
                             crate::video::StopIntent::Preserve => {

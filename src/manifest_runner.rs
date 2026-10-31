@@ -1097,6 +1097,76 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn parsed_manifest_child_is_dns_filtered_before_resource_connection() {
+        use tokio::time::{Duration, timeout};
+
+        let _test_policy = crate::download_net::isolate_untrusted_handoff_policy_for_test();
+        let parent_url = "https://manifest-origin.example.test/master.m3u8";
+        assert!(crate::download_net::require_public_resolution(
+            "manifest-origin.example.test"
+        ));
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind hostile DNS fixture");
+        let port = listener
+            .local_addr()
+            .expect("read hostile DNS fixture port")
+            .port();
+        let media_url = format!("https://cdn.example.test:{port}/media.m3u8?sig=media");
+        let media_body = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nsegment.ts?sig=segment\n#EXT-X-ENDLIST\n";
+        let plan = crate::manifest::plan_hls_media_playlist(&media_url, media_body)
+            .expect("parse HLS media playlist fixture");
+        let child = &plan.resources[0].url;
+        let mut seen_hosts = std::collections::HashSet::new();
+        guard_manifest_child_url(parent_url, child, &mut seen_hosts)
+            .expect("register the manifest-derived segment host");
+        assert_eq!(seen_hosts.len(), 1);
+
+        let (client, dns_override_hits) =
+            crate::download_net::http_client_for_with_dns_overrides_for_test(
+                None,
+                std::collections::HashMap::from([(
+                    "cdn.example.test".to_string(),
+                    vec![
+                        format!("127.0.0.1:{port}")
+                            .parse()
+                            .expect("private loopback address"),
+                    ],
+                )]),
+            )
+            .expect("build the production guarded HTTP client with fixture DNS");
+
+        let child_url = (*child).clone();
+        let mut request = tokio::spawn(async move { client.get(child_url).send().await });
+        match timeout(Duration::from_millis(300), listener.accept()).await {
+            Ok(Ok((socket, _))) => {
+                drop(socket);
+                request.abort();
+                panic!("a manifest-derived resource connected to a private DNS answer");
+            }
+            Ok(Err(error)) => {
+                request.abort();
+                panic!("the resolver fixture failed to accept: {error}");
+            }
+            Err(_) => {}
+        }
+        let response = match timeout(Duration::from_secs(2), &mut request).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => panic!("manifest resource request task failed: {error}"),
+            Err(_) => {
+                request.abort();
+                panic!("manifest resource request did not finish after DNS rejection");
+            }
+        };
+        assert!(dns_override_hits.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            response.is_err(),
+            "a public manifest's child hostname must not connect when DNS resolves privately"
+        );
+    }
+
     #[test]
     fn manifest_child_guard_enforces_the_distinct_host_limit() {
         let _test_policy = crate::download_net::isolate_untrusted_handoff_policy_for_test();

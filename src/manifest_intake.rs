@@ -59,14 +59,52 @@ impl BrowserCookiePolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestTransportPolicy {
+    HttpsOnly,
+    #[cfg(test)]
+    HttpFixture,
+}
+
+impl ManifestTransportPolicy {
+    fn accepts_url(self, url: &Url) -> bool {
+        let expected_scheme = match self {
+            Self::HttpsOnly => "https",
+            #[cfg(test)]
+            Self::HttpFixture => "http",
+        };
+        url.scheme() == expected_scheme
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+    }
+
+    fn planning_url(self, url: Url) -> Result<Url, ManifestIntakeError> {
+        match self {
+            Self::HttpsOnly => Ok(url),
+            #[cfg(test)]
+            Self::HttpFixture => {
+                let mut url = url;
+                url.set_scheme("https").map_err(|_| {
+                    ManifestIntakeError::Failed(gettext("Invalid stream manifest URL"))
+                })?;
+                Ok(url)
+            }
+        }
+    }
+}
+
 /// This is narrower than video::is_stream_manifest_url: native intake accepts
 /// HTTPS .m3u8/.mpd only; the generic guard also reserves HTTP, .m3u and .pls.
 fn native_manifest_kind(url: &Url) -> Option<crate::media_types::ManifestKind> {
-    if url.scheme() != "https"
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
+    manifest_kind_for_transport(url, ManifestTransportPolicy::HttpsOnly)
+}
+
+fn manifest_kind_for_transport(
+    url: &Url,
+    transport_policy: ManifestTransportPolicy,
+) -> Option<crate::media_types::ManifestKind> {
+    if !transport_policy.accepts_url(url) {
         return None;
     }
 
@@ -394,12 +432,22 @@ pub(crate) async fn lookup_with_client(
     client: &reqwest::Client,
     raw_url: &str,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
+    lookup_with_client_policy(client, raw_url, ManifestTransportPolicy::HttpsOnly).await
+}
+
+async fn lookup_with_client_policy(
+    client: &reqwest::Client,
+    raw_url: &str,
+    transport_policy: ManifestTransportPolicy,
+) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
     let requested_url = Url::parse(raw_url)
         .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
-    let Some(kind) = native_manifest_kind(&requested_url) else {
+    let Some(kind) = manifest_kind_for_transport(&requested_url, transport_policy) else {
         return Ok(None);
     };
-    let (final_url, body) = fetch_bounded_manifest(client, requested_url).await?;
+    let (final_url, body) =
+        fetch_bounded_manifest_with_policy(client, requested_url, transport_policy).await?;
+    let final_url = transport_policy.planning_url(final_url)?;
     let manifest = match kind {
         crate::media_types::ManifestKind::Hls => {
             match crate::manifest::parse_hls_master_playlist(final_url.as_str(), &body) {
@@ -430,6 +478,14 @@ pub(crate) async fn lookup_with_client(
     }))
 }
 
+#[cfg(test)]
+async fn lookup_with_http_fixture_client(
+    client: &reqwest::Client,
+    raw_url: &str,
+) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
+    lookup_with_client_policy(client, raw_url, ManifestTransportPolicy::HttpFixture).await
+}
+
 /// Fetch and parse an HLS child media playlist using the caller's guarded client.
 pub(crate) async fn lookup_hls_media(
     client: &reqwest::Client,
@@ -446,7 +502,16 @@ async fn fetch_bounded_manifest(
     client: &reqwest::Client,
     requested_url: Url,
 ) -> Result<(Url, Vec<u8>), ManifestIntakeError> {
-    if !is_secure_manifest_url(&requested_url) {
+    fetch_bounded_manifest_with_policy(client, requested_url, ManifestTransportPolicy::HttpsOnly)
+        .await
+}
+
+async fn fetch_bounded_manifest_with_policy(
+    client: &reqwest::Client,
+    requested_url: Url,
+    transport_policy: ManifestTransportPolicy,
+) -> Result<(Url, Vec<u8>), ManifestIntakeError> {
+    if !transport_policy.accepts_url(&requested_url) {
         return Err(ManifestIntakeError::Failed(gettext(
             "Invalid stream manifest URL",
         )));
@@ -455,7 +520,7 @@ async fn fetch_bounded_manifest(
     let mut attempt = 0_u32;
     loop {
         attempt += 1;
-        match fetch_bounded_manifest_once(client, &requested_url).await {
+        match fetch_bounded_manifest_once(client, &requested_url, transport_policy).await {
             Err(ManifestIntakeError::Retryable(error)) if attempt < MAX_MANIFEST_ATTEMPTS => {
                 let delay = MANIFEST_RETRY_BASE_DELAY * attempt;
                 tracing::debug!(
@@ -486,6 +551,7 @@ fn manifest_status_error(status: reqwest::StatusCode) -> ManifestIntakeError {
 async fn fetch_bounded_manifest_once(
     client: &reqwest::Client,
     requested_url: &Url,
+    transport_policy: ManifestTransportPolicy,
 ) -> Result<(Url, Vec<u8>), ManifestIntakeError> {
     let response = client
         .get(requested_url.clone())
@@ -502,20 +568,13 @@ async fn fetch_bounded_manifest_once(
         return Err(manifest_status_error(status));
     }
     let final_url = response.url().clone();
-    if !is_secure_manifest_url(&final_url) {
+    if !transport_policy.accepts_url(&final_url) {
         return Err(ManifestIntakeError::Failed(gettext(
             "The stream manifest redirected to an unsafe URL",
         )));
     }
     let body = read_bounded_response(response).await?;
     Ok((final_url, body))
-}
-
-fn is_secure_manifest_url(url: &Url) -> bool {
-    url.scheme() == "https"
-        && url.host_str().is_some()
-        && url.username().is_empty()
-        && url.password().is_none()
 }
 
 /// Stable base identity for an HLS variant, retained for queued-item compatibility.
@@ -922,5 +981,140 @@ second.m3u8
             "https://cdn.example.test/master.m3u8?expires=1&signature=x"
         ));
         assert!(supports("https://cdn.example.test/manifest.mpd#fragment"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn manifest_lookup_follows_signed_redirect_with_proxy_and_cookie_scope() {
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind manifest proxy fixture");
+        let proxy_port = listener
+            .local_addr()
+            .expect("read manifest proxy address")
+            .port();
+        let seen_requests = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::clone(&seen_requests);
+        let manifest_body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1280x720\nvideo/720.m3u8?sig=child\n";
+        let response_body = manifest_body.to_string();
+
+        let mut proxy_server = tokio::spawn(async move {
+            for request_index in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept proxy request");
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0_u8; 1024];
+                    let read = socket.read(&mut chunk).await.expect("read proxy request");
+                    assert_ne!(read, 0, "proxy request ended before its headers");
+                    request.extend_from_slice(&chunk[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                    assert!(
+                        request.len() <= 16 * 1024,
+                        "proxy request headers exceeded test limit"
+                    );
+                }
+                requests
+                    .lock()
+                    .expect("lock captured proxy requests")
+                    .push(String::from_utf8_lossy(&request).into_owned());
+
+                let response = if request_index == 0 {
+                    "HTTP/1.1 302 Found\r\nLocation: /signed/master.m3u8?sig=rotated\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        response_body.len(),
+                        response_body
+                    )
+                };
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write proxy response");
+            }
+        });
+
+        let proxy_url = format!("http://127.0.0.1:{proxy_port}");
+        let proxy = crate::net_types::ResolvedProxy {
+            proxies: vec![reqwest::Proxy::http(&proxy_url).expect("valid test proxy")],
+            cli_url: proxy_url,
+            no_proxy_env: String::new(),
+        };
+        let cookie_url = Url::parse("http://manifest.example.test/").expect("cookie origin URL");
+        let jar = Arc::new(reqwest::cookie::Jar::default());
+        jar.add_cookie_str("sid=manifest-fixture", &cookie_url);
+        let client = crate::download_net::http_client_with_jar(Some(&proxy), jar)
+            .expect("build manifest client with proxy and cookie provider");
+
+        let lookup_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            lookup_with_http_fixture_client(
+                &client,
+                "http://manifest.example.test/master.m3u8?sig=initial",
+            ),
+        )
+        .await;
+
+        let server_result = tokio::time::timeout(Duration::from_secs(5), &mut proxy_server).await;
+        if server_result.is_err() {
+            proxy_server.abort();
+        }
+        server_result
+            .expect("proxy fixture server timed out")
+            .expect("proxy fixture server task failed");
+
+        let lookup = lookup_result
+            .expect("manifest lookup timed out")
+            .expect("manifest lookup request")
+            .expect("fixture manifest should be supported");
+
+        let NativeManifest::HlsMaster(master) = lookup.manifest else {
+            panic!("fixture should parse as an HLS master playlist");
+        };
+        let variant = master
+            .variants
+            .first()
+            .expect("fixture master contains a variant");
+        assert_eq!(
+            variant.url.as_str(),
+            "https://manifest.example.test/signed/video/720.m3u8?sig=child",
+            "relative child resources must resolve from the redirected, signed manifest URL"
+        );
+
+        let requests = seen_requests.lock().expect("lock captured proxy requests");
+        assert_eq!(
+            requests.len(),
+            2,
+            "the proxy should receive both redirect hops"
+        );
+        assert!(
+            requests[0].starts_with("GET http://manifest.example.test/master.m3u8?sig=initial "),
+            "first request should retain the original signed URL: {}",
+            requests[0]
+                .lines()
+                .next()
+                .unwrap_or("<missing request line>")
+        );
+        assert!(
+            requests[1]
+                .starts_with("GET http://manifest.example.test/signed/master.m3u8?sig=rotated "),
+            "redirect request should use the refreshed signed URL: {}",
+            requests[1]
+                .lines()
+                .next()
+                .unwrap_or("<missing request line>")
+        );
+        for request in requests.iter() {
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("cookie: sid=manifest-fixture")),
+                "the cookie provider must apply the in-scope cookie on every redirect hop: {request}"
+            );
+        }
     }
 }

@@ -160,13 +160,13 @@ enum LiveHlsSnapshotOutcome {
     ContinuityLost,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct DashLiveSegment {
     number: u64,
     filename: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct DashLiveState {
     version: u32,
     representation_key: String,
@@ -2230,7 +2230,12 @@ fn validate_dash_live_state(
 ) -> Result<(), ManifestRunError> {
     if state.version != DASH_LIVE_STATE_VERSION
         || state.representation_key != representation_key
-        || !representation_key.starts_with("dash-live-")
+        || !representation_key
+            .strip_prefix("dash-live-")
+            .is_some_and(|fingerprint| {
+                fingerprint.len() == 32
+                    && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
         || state.segments.len() > MAX_DASH_LIVE_SEGMENTS
     {
         return Err(ManifestRunError::Failed(

@@ -21,7 +21,7 @@ url = "2"
 # HLS playlist parsing and local media-playlist serialization.
 m3u8-rs = "6.0.1"
 # DASH MPD parsing and serialization for native VOD downloads.
-dash-mpd-core = "=0.1.0"
+dash-mpd-core = "0.1.0"
 # Read the single verified Deno executable from the official release ZIP.
 zip = { version = "9.1.3", default-features = false, features = ["deflate", "deflate-flate2-zlib-rs"] }
 percent-encoding = "2"

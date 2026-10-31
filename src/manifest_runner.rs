@@ -2074,12 +2074,12 @@ async fn fetch_resource_once(
             last_progress = Instant::now();
         }
     }
-    if let Some(range) = resource.range {
-        if size < range.length {
-            return Err(ManifestRunError::Retryable(
-                "The stream server ended a byte-range segment before all bytes arrived".to_string(),
-            ));
-        }
+    if let Some(range) = resource.range
+        && size < range.length
+    {
+        return Err(ManifestRunError::Retryable(
+            "The stream server ended a byte-range segment before all bytes arrived".to_string(),
+        ));
     }
     if size == 0 || (resource.key && size != 16) {
         return Err(ManifestRunError::Unsupported(if resource.key {
@@ -3474,7 +3474,7 @@ mod tests {
                 {
                     saw_host_limit = true;
                 }
-                other => panic!("unexpected dynamic DASH refresh result: {other:?}"),
+                _ => panic!("unexpected dynamic DASH refresh result"),
             }
         }
 

@@ -252,7 +252,7 @@ pub(crate) fn parse_dash_manifest_at(
                 })
                 .ok_or(DashError::UnsupportedPresentation)?;
             let time_shift_buffer_depth = mpd.timeShiftBufferDepth;
-            if time_shift_buffer_depth.is_some_and(Duration::is_zero) {
+            if time_shift_buffer_depth.is_some_and(|depth| depth.is_zero()) {
                 return Err(DashError::UnsupportedPresentation);
             }
             let availability_end_time = mpd

@@ -291,7 +291,10 @@ async fn spawn_interrupted_resource_server(
             .write_all(&body[..partial_size])
             .await
             .expect("write interrupted resource prefix");
-        first.flush().await.expect("flush interrupted resource prefix");
+        first
+            .flush()
+            .await
+            .expect("flush interrupted resource prefix");
         partial_sent_tx
             .send(())
             .expect("notify test after sending resource prefix");
@@ -314,8 +317,8 @@ async fn spawn_interrupted_resource_server(
             .expect("write resumed resource response");
         paths
     });
-    let base_url = Url::parse(&format!("http://{address}/"))
-        .expect("build resumable resource fixture URL");
+    let base_url =
+        Url::parse(&format!("http://{address}/")).expect("build resumable resource fixture URL");
 
     InterruptedResourceServer {
         base_url,

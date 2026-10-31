@@ -63,9 +63,12 @@ fn ensure_manifest_mux_space(
             destination_dir.display()
         ))
     })?;
-    let available_bytes = stats.f_bavail.checked_mul(stats.f_frsize).ok_or_else(|| {
-        ManifestRunError::Failed("The available disk-space count overflowed".to_string())
-    })?;
+    let available_bytes = stats
+        .f_bavail
+        .checked_mul(stats.f_frsize)
+        .ok_or_else(|| {
+            ManifestRunError::Failed("The available disk-space count overflowed".to_string())
+        })?;
     check_manifest_mux_space(available_bytes, staged_bytes)
 }
 
@@ -77,6 +80,14 @@ fn manifest_storage_error(context: &str, error: std::io::Error) -> ManifestRunEr
     } else {
         ManifestRunError::Failed(format!("{context}: {error}"))
     }
+}
+
+/// Reject a byte-range chunk before it is written if it exceeds the requested extent.
+fn byte_range_content_length_exceeds(
+    range: crate::manifest::ManifestByteRange,
+    content_length: Option<u64>,
+) -> bool {
+    content_length.is_some_and(|content_length| content_length > range.length)
 }
 
 /// Reject a byte-range chunk before it is written if it exceeds the requested extent.
@@ -1981,14 +1992,13 @@ async fn fetch_resource_once(
         return Err(resource_status_error(status));
     }
     let content_length = response.content_length();
-    if content_length.is_some_and(|length| length > MAX_RESOURCE_BYTES)
-    {
+    if content_length.is_some_and(|length| length > MAX_RESOURCE_BYTES) {
         return Err(ManifestRunError::Unsupported(
             "A stream segment exceeds the size limit".to_string(),
         ));
     }
     if let Some(range) = resource.range
-        && content_length.is_some_and(|length| length > range.length)
+        && byte_range_content_length_exceeds(range, content_length)
     {
         return Err(ManifestRunError::Unsupported(
             "The stream server returned more bytes than the requested range".to_string(),
@@ -3246,6 +3256,9 @@ mod tests {
             offset: 10,
             length: 8,
         };
+        assert!(!byte_range_content_length_exceeds(range, None));
+        assert!(!byte_range_content_length_exceeds(range, Some(8)));
+        assert!(byte_range_content_length_exceeds(range, Some(9)));
         assert!(!byte_range_chunk_exceeds(range, 3, 5));
         assert!(byte_range_chunk_exceeds(range, 3, 6));
         assert!(byte_range_chunk_exceeds(range, 8, 1));

@@ -2815,7 +2815,8 @@ async fn run_live_dash_tracks(
                 representation_key: representation_key.to_string(),
                 audio_key: audio_key.clone(),
             },
-        );.await
+        )
+        .await;
         let refreshed = match refreshed {
             Ok(Tracks::Dash { video, audio }) => (video, audio.map(|audio| *audio)),
             Ok(_) => {

@@ -545,7 +545,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         .prepare_update(&remote)
         .expect("prepare initial live capture");
     accumulator
-        .commit_update_with_bytes(update, segment_bytes.len() as u64)
+        .commit_update_with_budget(update, segment_bytes.len() as u64, 0)
         .expect("commit initial segment and byte count");
     write_live_playlist(&video_dir, &accumulator)
         .await
@@ -909,7 +909,7 @@ async fn live_hls_sequence_gap_preserves_already_committed_media() {
         .expect("prepare first live window");
     track
         .accumulator
-        .commit_update(update)
+        .commit_update_with_budget(update, 0, 0)
         .expect("commit first live window");
     write_live_playlist(&video_dir, &track.accumulator)
         .await

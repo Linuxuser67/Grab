@@ -1521,7 +1521,7 @@ fn native_manifest_source_survives_queue_restore() {
         url: "https://cdn.example.test/master.m3u8?token=rotating".to_string(),
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
-                audio_key: None,
+        audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".to_string()),
     };
 
     let id = {
@@ -1541,6 +1541,7 @@ fn native_manifest_source_survives_queue_restore() {
         assert!(saved.contains("\"Manifest\""));
         assert!(saved.contains("master.m3u8"));
         assert!(saved.contains(&source.representation_key));
+        assert!(saved.contains(source.audio_key.as_deref().expect("selected audio key")));
         id
     };
 
@@ -1571,7 +1572,7 @@ fn native_manifest_queue_deduplicates_repeated_requested_filenames() {
         url: "https://cdn.example.test/master.m3u8".to_string(),
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
-                audio_key: None,
+        audio_key: None,
     };
 
     let first = manager
@@ -1600,7 +1601,7 @@ fn native_manifest_rejects_filename_extension_that_disagrees_with_mp4_muxer() {
         url: "https://cdn.example.test/master.m3u8".to_string(),
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
-                audio_key: None,
+        audio_key: None,
     };
 
     let result = manager.enqueue_manifest_staged(source, &directory, Some("Stream.mkv"), &[]);

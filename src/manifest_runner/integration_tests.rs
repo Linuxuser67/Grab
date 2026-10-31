@@ -1168,7 +1168,7 @@ async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_se
     }
 
     let representation_key = initial.representation.live_key.clone();
-    let mut track = load_dash_live_track(&representation_key, &video_dir, Some(&initial))
+    let (mut track, _) = load_dash_live_track(&representation_key, &video_dir, Some(&initial))
         .await
         .expect("create first dynamic DASH capture state");
     let client = fixture_client();

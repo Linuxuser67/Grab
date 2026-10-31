@@ -15,7 +15,7 @@ use url::Url;
 use crate::engine_msg::EngineMsg;
 use crate::manifest::{
     HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
-    dash::DashRepresentationPlan,
+    dash::{DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind},
 };
 use crate::manifest_intake::{ManifestLookup, NativeManifest};
 use crate::media_types::{ManifestKind, ManifestSource};
@@ -34,6 +34,10 @@ const FFMPEG_LOG_LINES: usize = 32;
 const MAX_RESOURCE_ATTEMPTS: u32 = 3;
 /// Short linear backoff between transient resource requests.
 const RESOURCE_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+/// Upper bound on the persisted dynamic DASH segment index.
+const MAX_DASH_LIVE_SEGMENTS: usize = 100_000;
+/// Bound for a serialized dynamic DASH resume index.
+const MAX_DASH_LIVE_STATE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Inputs retained by the queue; URLs for individual segments are resolved again on every attempt.
 #[derive(Clone, Debug)]
@@ -120,6 +124,9 @@ enum Tracks {
         video: DashRepresentationPlan,
         audio: Option<Box<DashRepresentationPlan>>,
     },
+    DashLiveOffline {
+        has_audio: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -151,6 +158,66 @@ enum LiveHlsSnapshotOutcome {
     Committed,
     Stopped(crate::video::StopIntent),
     ContinuityLost,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct DashLiveSegment {
+    number: u64,
+    filename: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct DashLiveState {
+    version: u32,
+    representation_key: String,
+    initialization: Option<String>,
+    segments: Vec<DashLiveSegment>,
+}
+
+impl DashLiveState {
+    fn new(representation_key: &str) -> Self {
+        Self {
+            version: 1,
+            representation_key: representation_key.to_string(),
+            initialization: None,
+            segments: Vec::new(),
+        }
+    }
+
+    fn resource_names(&self) -> impl Iterator<Item = &str> {
+        self.initialization
+            .iter()
+            .map(String::as_str)
+            .chain(self.segments.iter().map(|segment| segment.filename.as_str()))
+    }
+
+    fn next_number(&self) -> Option<u64> {
+        self.segments
+            .last()
+            .and_then(|segment| segment.number.checked_add(1))
+    }
+}
+
+#[derive(Debug)]
+struct DashLiveTrack {
+    directory: PathBuf,
+    state: DashLiveState,
+    ended: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DashLiveUpdateOutcome {
+    Committed,
+    ContinuityLost,
+    Stopped(crate::video::StopIntent),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DashLiveCaptureOutcome {
+    Ended,
+    Preserve,
+    PreserveVideoOnly,
+    Discard,
 }
 
 /// Run one HLS or static-DASH attempt, keeping completed resources for retry.

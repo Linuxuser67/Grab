@@ -554,11 +554,9 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let local_bytes = tokio::fs::read(video_dir.join("local.m3u8"))
         .await
         .expect("read committed local live playlist");
-    let local_plan = HlsPlan::from_local_capture(
-        "https://origin.example.test/live.m3u8",
-        &local_bytes,
-    )
-    .expect("rebuild completed local plan");
+    let local_plan =
+        HlsPlan::from_local_capture("https://origin.example.test/live.m3u8", &local_bytes)
+            .expect("rebuild completed local plan");
     assert!(local_plan.end_list);
     assert!(local_plan.resources.is_empty());
 
@@ -695,28 +693,29 @@ async fn live_hls_snapshots_append_only_new_media_sequences_and_resume() {
     wait_for_fixture_server(server).await;
 
     assert_eq!(restored.accumulator.segment_count(), 3);
-    assert!(restored.ended, "the ENDLIST snapshot must stop further polling");
+    assert!(
+        restored.ended,
+        "the ENDLIST snapshot must stop further polling"
+    );
     assert!(restored.next_poll_at.is_none());
     assert_eq!(
         downloaded.load(Ordering::Relaxed),
-        b"segment-100".len() as u64
-            + b"segment-101".len() as u64 * 2
-            + b"segment-102".len() as u64,
+        b"segment-100".len() as u64 + b"segment-101".len() as u64 * 2 + b"segment-102".len() as u64,
         "the missing overlapping resource is repaired; all other cached segments are reused"
     );
     let local = tokio::fs::read(video_dir.join("local.m3u8"))
         .await
         .expect("read accumulated local playlist");
-    let playlist = m3u8_rs::parse_media_playlist_res(&local)
-        .expect("accumulated local playlist parses");
+    let playlist =
+        m3u8_rs::parse_media_playlist_res(&local).expect("accumulated local playlist parses");
     assert_eq!(playlist.media_sequence, 100);
     assert_eq!(playlist.segments.len(), 3);
     assert!(playlist.end_list);
-    for (segment, expected) in playlist
-        .segments
-        .iter()
-        .zip([b"segment-100".as_slice(), b"segment-101".as_slice(), b"segment-102".as_slice()])
-    {
+    for (segment, expected) in playlist.segments.iter().zip([
+        b"segment-100".as_slice(),
+        b"segment-101".as_slice(),
+        b"segment-102".as_slice(),
+    ]) {
         assert_eq!(
             tokio::fs::read(video_dir.join(&segment.uri))
                 .await
@@ -779,8 +778,8 @@ async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
 
     let source_bytes =
         std::fs::read(&source_playlist_path).expect("read generated VOD HLS playlist");
-    let source = m3u8_rs::parse_media_playlist_res(&source_bytes)
-        .expect("parse generated VOD HLS playlist");
+    let source =
+        m3u8_rs::parse_media_playlist_res(&source_bytes).expect("parse generated VOD HLS playlist");
     assert!(
         source.segments.len() >= 3,
         "fixture generation must produce at least three media segments"
@@ -955,7 +954,8 @@ async fn live_hls_preserve_stop_keeps_the_last_committed_window() {
     tokio::fs::create_dir_all(&video_dir)
         .await
         .expect("create live preserve staging");
-    let first_body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:550\n#EXTINF:4,\n550.ts\n";
+    let first_body =
+        b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:550\n#EXTINF:4,\n550.ts\n";
     let next_body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:550\n#EXTINF:4,\n550.ts\n#EXTINF:4,\n551.ts\n";
     let mut first = crate::manifest::plan_hls_media_playlist(
         "https://origin.example.test/live.m3u8",
@@ -1022,8 +1022,8 @@ async fn live_hls_preserve_stop_keeps_the_last_committed_window() {
     let local = tokio::fs::read(video_dir.join("local.m3u8"))
         .await
         .expect("read last committed live playlist");
-    let playlist = m3u8_rs::parse_media_playlist_res(&local)
-        .expect("parse last committed live playlist");
+    let playlist =
+        m3u8_rs::parse_media_playlist_res(&local).expect("parse last committed live playlist");
     assert_eq!(playlist.segments.len(), 1);
     assert_eq!(track.accumulator.segment_count(), 1);
     assert_eq!(

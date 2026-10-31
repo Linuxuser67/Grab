@@ -185,10 +185,11 @@ impl DashLiveState {
     }
 
     fn resource_names(&self) -> impl Iterator<Item = &str> {
-        self.initialization
-            .iter()
-            .map(String::as_str)
-            .chain(self.segments.iter().map(|segment| segment.filename.as_str()))
+        self.initialization.iter().map(String::as_str).chain(
+            self.segments
+                .iter()
+                .map(|segment| segment.filename.as_str()),
+        )
     }
 
     fn next_number(&self) -> Option<u64> {
@@ -353,7 +354,10 @@ pub(crate) async fn run_manifest_download(
     );
     let live_hls = matches!(&tracks, Tracks::Hls { .. }) && (live_source || live_marker_exists);
     let live_dash = dash_live_requested
-        && matches!(&tracks, Tracks::Dash { .. } | Tracks::DashLiveOffline { .. });
+        && matches!(
+            &tracks,
+            Tracks::Dash { .. } | Tracks::DashLiveOffline { .. }
+        );
     if live_source {
         ensure_live_hls_marker(&staging)
             .await
@@ -447,8 +451,7 @@ pub(crate) async fn run_manifest_download(
         .await?;
         match capture.outcome {
             DashLiveCaptureOutcome::Discard => return Ok(ManifestOutcome::Aborted),
-            DashLiveCaptureOutcome::Preserve
-            | DashLiveCaptureOutcome::PreserveVideoOnly => {
+            DashLiveCaptureOutcome::Preserve | DashLiveCaptureOutcome::PreserveVideoOnly => {
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 _preserve_stop_sender = Some(sender);
                 abort = receiver;
@@ -597,9 +600,7 @@ pub(crate) async fn run_manifest_download(
 
     let video_input = match tracks {
         Tracks::Hls { .. } => video_dir.join("local.m3u8"),
-        Tracks::Dash { .. } | Tracks::DashLiveOffline { .. } => {
-            video_dir.join("video-track.mp4")
-        }
+        Tracks::Dash { .. } | Tracks::DashLiveOffline { .. } => video_dir.join("video-track.mp4"),
     };
     let audio_input = has_audio.then(|| match job.source.kind {
         ManifestKind::Hls => audio_dir.join("local.m3u8"),
@@ -2081,9 +2082,7 @@ async fn dash_live_state_exists(directory: &Path) -> Result<bool, ManifestRunErr
     }
 }
 
-async fn read_dash_live_representation_key(
-    directory: &Path,
-) -> Result<String, ManifestRunError> {
+async fn read_dash_live_representation_key(directory: &Path) -> Result<String, ManifestRunError> {
     let path = directory.join(DASH_LIVE_STATE_NAME);
     let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|error| {
         ManifestRunError::Failed(format!(
@@ -2189,18 +2188,18 @@ async fn load_dash_live_track(
             metadata.len() > 0
                 && metadata.len() <= MAX_RESOURCE_BYTES
                 && expected.is_none_or(|resource| {
-                    resource.range.is_none_or(|range| metadata.len() == range.length)
+                    resource
+                        .range
+                        .is_none_or(|range| metadata.len() == range.length)
                 })
         });
         if cached_is_valid {
             if let Some(metadata) = metadata.as_ref() {
-                retained_bytes = retained_bytes
-                    .checked_add(metadata.len())
-                    .ok_or_else(|| {
-                        ManifestRunError::Failed(
-                            "The staged dynamic DASH byte total overflowed".to_string(),
-                        )
-                    })?;
+                retained_bytes = retained_bytes.checked_add(metadata.len()).ok_or_else(|| {
+                    ManifestRunError::Failed(
+                        "The staged dynamic DASH byte total overflowed".to_string(),
+                    )
+                })?;
             }
         } else if expected.is_none() {
             return Err(ManifestRunError::Failed(
@@ -2233,8 +2232,7 @@ fn validate_dash_live_state(
         || !representation_key
             .strip_prefix("dash-live-")
             .is_some_and(|fingerprint| {
-                fingerprint.len() == 32
-                    && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+                fingerprint.len() == 32 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
         || state.segments.len() > MAX_DASH_LIVE_SEGMENTS
     {
@@ -2242,15 +2240,11 @@ fn validate_dash_live_state(
             "The saved dynamic DASH state is incompatible with this queue item".to_string(),
         ));
     }
-    if state
-        .initialization
-        .as_deref()
-        .is_some_and(|name| {
-            !safe_resource_filename(name)
-                || !name.starts_with("dash-live-init-")
-                || !name.ends_with(".bin")
-        })
-    {
+    if state.initialization.as_deref().is_some_and(|name| {
+        !safe_resource_filename(name)
+            || !name.starts_with("dash-live-init-")
+            || !name.ends_with(".bin")
+    }) {
         return Err(ManifestRunError::Failed(
             "The saved dynamic DASH initialization name is invalid".to_string(),
         ));
@@ -2265,9 +2259,8 @@ fn validate_dash_live_state(
             || !segment.filename.starts_with("dash-live-segment-")
             || !segment.filename.ends_with(".bin")
             || !seen_names.insert(segment.filename.as_str())
-            || previous_number.is_some_and(|previous: u64| {
-                previous.checked_add(1) != Some(segment.number)
-            })
+            || previous_number
+                .is_some_and(|previous: u64| previous.checked_add(1) != Some(segment.number))
         {
             return Err(ManifestRunError::Failed(
                 "The saved dynamic DASH segment index is invalid".to_string(),
@@ -2304,7 +2297,9 @@ async fn write_dash_live_state(track: &DashLiveTrack) -> Result<(), ManifestRunE
         }
     }
 
-    let part = track.directory.join(format!("{DASH_LIVE_STATE_NAME}.next.part"));
+    let part = track
+        .directory
+        .join(format!("{DASH_LIVE_STATE_NAME}.next.part"));
     remove_regular_file_if_present(&part)
         .await
         .map_err(ManifestRunError::Failed)?;
@@ -2336,7 +2331,10 @@ async fn write_dash_live_state(track: &DashLiveTrack) -> Result<(), ManifestRunE
     })
 }
 
-async fn dash_live_track_bytes(state: &DashLiveState, directory: &Path) -> Result<u64, ManifestRunError> {
+async fn dash_live_track_bytes(
+    state: &DashLiveState,
+    directory: &Path,
+) -> Result<u64, ManifestRunError> {
     let mut total = 0_u64;
     for filename in state.resource_names() {
         let metadata = tokio::fs::symlink_metadata(directory.join(filename))
@@ -2399,13 +2397,11 @@ async fn dash_live_resource_needs_fetch(
                 "A dynamic DASH resource path is not a regular file".to_string(),
             ))
         }
-        Ok(metadata) => Ok(
-            metadata.len() == 0
-                || metadata.len() > MAX_RESOURCE_BYTES
-                || resource
-                    .range
-                    .is_some_and(|range| metadata.len() != range.length),
-        ),
+        Ok(metadata) => Ok(metadata.len() == 0
+            || metadata.len() > MAX_RESOURCE_BYTES
+            || resource
+                .range
+                .is_some_and(|range| metadata.len() != range.length)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(ManifestRunError::Failed(format!(
             "Could not inspect a dynamic DASH resource: {error}"
@@ -2617,7 +2613,9 @@ async fn run_live_dash_tracks(
         .or_else(|| audio_plan.map(|plan| plan.representation.live_key.clone()));
     let mut audio = match audio_plan {
         Some(plan) => {
-            let key = audio_key.as_deref().unwrap_or(&plan.representation.live_key);
+            let key = audio_key
+                .as_deref()
+                .unwrap_or(&plan.representation.live_key);
             audio_key = Some(key.to_string());
             Some(load_dash_live_track(key, audio_dir, Some(plan)).await?)
         }
@@ -2658,12 +2656,10 @@ async fn run_live_dash_tracks(
         }};
     }
 
-    let audio_bytes = audio
-        .as_ref()
-        .map_or(0, |(track, bytes)| {
-            let _ = track;
-            *bytes
-        });
+    let audio_bytes = audio.as_ref().map_or(0, |(track, bytes)| {
+        let _ = track;
+        *bytes
+    });
     let total_bytes = video_bytes.checked_add(audio_bytes).ok_or_else(|| {
         ManifestRunError::Failed("The staged dynamic DASH byte total overflowed".to_string())
     })?;
@@ -2782,7 +2778,9 @@ async fn run_live_dash_tracks(
         let lookup = match lookup {
             Ok(Some(lookup)) if lookup.kind() == ManifestKind::Dash => lookup,
             Ok(Some(_)) | Ok(None) => {
-                tracing::warn!("dynamic DASH MPD is no longer supported; preserving committed media");
+                tracing::warn!(
+                    "dynamic DASH MPD is no longer supported; preserving committed media"
+                );
                 finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
@@ -2801,12 +2799,16 @@ async fn run_live_dash_tracks(
                 });
             }
         };
-        let refreshed = resolve_tracks(client, lookup, &ManifestSource {
-            url: source_url.to_string(),
-            kind: ManifestKind::Dash,
-            representation_key: representation_key.to_string(),
-            audio_key: audio_key.clone(),
-        });
+        let refreshed = resolve_tracks(
+            client,
+            lookup,
+            &ManifestSource {
+                url: source_url.to_string(),
+                kind: ManifestKind::Dash,
+                representation_key: representation_key.to_string(),
+                audio_key: audio_key.clone(),
+            },
+        );
         let refreshed = match refreshed {
             Ok(Tracks::Dash { video, audio }) => (video, audio.map(|audio| *audio)),
             Ok(_) => {
@@ -3571,19 +3573,15 @@ mod tests {
         let valid = DashLiveState {
             version: DASH_LIVE_STATE_VERSION,
             representation_key: key.to_string(),
-            initialization: Some(
-                "dash-live-init-0123456789abcdef0123456789abcdef.bin".to_string(),
-            ),
+            initialization: Some("dash-live-init-0123456789abcdef0123456789abcdef.bin".to_string()),
             segments: vec![
                 DashLiveSegment {
                     number: 100,
-                    filename: "dash-live-segment-0123456789abcdef0123456789abcdef.bin"
-                        .to_string(),
+                    filename: "dash-live-segment-0123456789abcdef0123456789abcdef.bin".to_string(),
                 },
                 DashLiveSegment {
                     number: 101,
-                    filename: "dash-live-segment-1123456789abcdef0123456789abcdef.bin"
-                        .to_string(),
+                    filename: "dash-live-segment-1123456789abcdef0123456789abcdef.bin".to_string(),
                 },
             ],
         };
@@ -3597,7 +3595,9 @@ mod tests {
         gap.segments[1].number = 102;
         assert!(validate_dash_live_state(&gap, key).is_err());
 
-        assert!(validate_dash_live_state(&valid, "dash-live-ffffffffffffffffffffffffffffffff").is_err());
+        assert!(
+            validate_dash_live_state(&valid, "dash-live-ffffffffffffffffffffffffffffffff").is_err()
+        );
     }
 
     #[tokio::test]
@@ -3654,10 +3654,9 @@ mod tests {
             representation_key
         );
 
-        let (restored, total_bytes) =
-            load_dash_live_track(representation_key, &directory, None)
-                .await
-                .expect("restore persisted dynamic DASH track");
+        let (restored, total_bytes) = load_dash_live_track(representation_key, &directory, None)
+            .await
+            .expect("restore persisted dynamic DASH track");
         assert_eq!(restored.state, track.state);
         assert_eq!(
             restored.state.resource_names().collect::<Vec<_>>(),

@@ -1664,7 +1664,7 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
     )
     .expect("parse generated dynamic DASH MPD");
     assert!(
-        matches!(&parsed.presentation, crate::manifest::DashPresentation::Dynamic(_)),
+        matches!(&parsed.presentation, crate::manifest::dash::DashPresentation::Dynamic(_)),
         "generated fixture must use the native dynamic DASH path"
     );
 

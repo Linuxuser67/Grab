@@ -434,7 +434,6 @@ static UNTRUSTED_HANDOFF_POLICY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Serialize tests that temporarily replace the process-global handoff policy.
 #[cfg(test)]
-#[must_use]
 pub(crate) fn lock_untrusted_handoff_policy_for_test() -> std::sync::MutexGuard<'static, ()> {
     lock_recover(&UNTRUSTED_HANDOFF_POLICY_TEST_LOCK)
 }

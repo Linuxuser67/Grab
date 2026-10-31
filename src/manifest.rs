@@ -671,9 +671,11 @@ video/720.m3u8
     #[test]
     fn rejects_media_playlist_when_cumulative_duration_overflows() {
         let body = br#"#EXTM3U
-#EXTINF:10000000000000000000,
+#EXT-X-TARGETDURATION:10000000000000000000
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXTINF:9500000000000000000,
 first.ts
-#EXTINF:10000000000000000000,
+#EXTINF:9500000000000000000,
 second.ts
 #EXT-X-ENDLIST
 "#;

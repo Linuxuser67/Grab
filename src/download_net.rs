@@ -8,6 +8,8 @@ use gtk4::gio::prelude::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Default)]
 pub struct DownloadOptions {
@@ -681,6 +683,8 @@ struct GuardedResolver {
     public_dns_hosts: PublicDnsPolicy,
     #[cfg(test)]
     dns_overrides: Arc<std::collections::HashMap<String, Vec<SocketAddr>>>,
+    #[cfg(test)]
+    dns_override_hits: Arc<AtomicBool>,
 }
 
 impl reqwest::dns::Resolve for GuardedResolver {
@@ -688,7 +692,13 @@ impl reqwest::dns::Resolve for GuardedResolver {
         let host = name.as_str().to_owned();
         let public_dns_hosts = Arc::clone(&self.public_dns_hosts);
         #[cfg(test)]
-        let override_addrs = self.dns_overrides.get(&host_key(&host)).cloned();
+        let override_addrs = {
+            let addresses = self.dns_overrides.get(&host_key(&host)).cloned();
+            if addresses.is_some() {
+                self.dns_override_hits.store(true, Ordering::Relaxed);
+            }
+            addresses
+        };
         #[cfg(not(test))]
         let override_addrs: Option<Vec<SocketAddr>> = None;
 
@@ -711,6 +721,8 @@ fn guarded_network_policy() -> (reqwest::redirect::Policy, GuardedResolver) {
             public_dns_hosts,
             #[cfg(test)]
             dns_overrides: Arc::new(std::collections::HashMap::new()),
+            #[cfg(test)]
+            dns_override_hits: Arc::new(AtomicBool::new(false)),
         },
     )
 }
@@ -729,6 +741,7 @@ fn guarded_network_policy_with_dns_overrides(
         GuardedResolver {
             public_dns_hosts,
             dns_overrides: Arc::new(overrides),
+            dns_override_hits: Arc::new(AtomicBool::new(false)),
         },
     )
 }
@@ -798,15 +811,17 @@ pub(crate) fn client_builder() -> reqwest::ClientBuilder {
 pub(crate) fn http_client_for_with_dns_overrides_for_test(
     proxy: Option<&ResolvedProxy>,
     overrides: std::collections::HashMap<String, Vec<SocketAddr>>,
-) -> Result<reqwest::Client, String> {
+) -> Result<(reqwest::Client, Arc<AtomicBool>), String> {
     let (redirect, resolver) = guarded_network_policy_with_dns_overrides(overrides);
+    let dns_override_hits = Arc::clone(&resolver.dns_override_hits);
     let mut builder = client_builder_with_policy(redirect, resolver);
     if let Some(proxy) = proxy {
         for resolved in &proxy.proxies {
             builder = builder.proxy(resolved.clone());
         }
     }
-    builder.build().map_err(|error| error.to_string())
+    let client = builder.build().map_err(|error| error.to_string())?;
+    Ok((client, dns_override_hits))
 }
 
 /// Current Unix UID. libc marks getuid unsafe despite its async-signal-safe semantics;
@@ -1365,7 +1380,7 @@ mod tests {
         let host = "manifest-rebinding.example.test";
         assert!(require_public_resolution(host));
 
-        let client = http_client_for_with_dns_overrides_for_test(
+        let (client, dns_override_hits) = http_client_for_with_dns_overrides_for_test(
             None,
             std::collections::HashMap::from([(
                 host.to_string(),
@@ -1404,6 +1419,7 @@ mod tests {
                 panic!("guarded request did not finish after DNS rejection");
             }
         };
+        assert!(dns_override_hits.load(Ordering::Relaxed));
         assert!(result.is_err(), "private DNS answer must be rejected");
     }
 
@@ -1421,7 +1437,7 @@ mod tests {
             .expect("read redirect test port")
             .port();
         let target_host = "redirect-rebinding.example.test";
-        let client = http_client_for_with_dns_overrides_for_test(
+        let (client, dns_override_hits) = http_client_for_with_dns_overrides_for_test(
             None,
             std::collections::HashMap::from([(
                 target_host.to_string(),
@@ -1476,5 +1492,6 @@ mod tests {
             server.await.expect("redirect fixture task"),
             "the redirected request must be rejected before a second socket is opened"
         );
+        assert!(dns_override_hits.load(Ordering::Relaxed));
     }
 }

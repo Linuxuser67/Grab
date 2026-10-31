@@ -3534,6 +3534,131 @@ mod tests {
         assert_eq!(downloaded.load(Ordering::Relaxed), 8);
     }
 
+    fn dynamic_dash_test_directory(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock must follow the Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "grab-dash-live-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn dynamic_dash_resume_state_rejects_path_traversal_and_sequence_gaps() {
+        let key = "dash-live-0123456789abcdef0123456789abcdef";
+        let valid = DashLiveState {
+            version: DASH_LIVE_STATE_VERSION,
+            representation_key: key.to_string(),
+            initialization: Some(
+                "dash-live-init-0123456789abcdef0123456789abcdef.bin".to_string(),
+            ),
+            segments: vec![
+                DashLiveSegment {
+                    number: 100,
+                    filename: "dash-live-segment-0123456789abcdef0123456789abcdef.bin"
+                        .to_string(),
+                },
+                DashLiveSegment {
+                    number: 101,
+                    filename: "dash-live-segment-1123456789abcdef0123456789abcdef.bin"
+                        .to_string(),
+                },
+            ],
+        };
+        assert!(validate_dash_live_state(&valid, key).is_ok());
+
+        let mut traversal = valid.clone();
+        traversal.segments[0].filename = "../outside.bin".to_string();
+        assert!(validate_dash_live_state(&traversal, key).is_err());
+
+        let mut gap = valid.clone();
+        gap.segments[1].number = 102;
+        assert!(validate_dash_live_state(&gap, key).is_err());
+
+        assert!(validate_dash_live_state(&valid, "dash-live-ffffffffffffffffffffffffffffffff").is_err());
+    }
+
+    #[tokio::test]
+    async fn dynamic_dash_resume_state_persists_resource_order_and_restores_byte_total() {
+        let directory = dynamic_dash_test_directory("restore");
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .expect("create dynamic DASH state directory");
+        let representation_key = "dash-live-0123456789abcdef0123456789abcdef";
+        let initialization = "dash-live-init-0123456789abcdef0123456789abcdef.bin";
+        let first = "dash-live-segment-0123456789abcdef0123456789abcdef.bin";
+        let second = "dash-live-segment-1123456789abcdef0123456789abcdef.bin";
+        tokio::fs::write(directory.join(initialization), b"init")
+            .await
+            .expect("write staged initialization");
+        tokio::fs::write(directory.join(first), b"segment-100")
+            .await
+            .expect("write first staged segment");
+        tokio::fs::write(directory.join(second), b"segment-101")
+            .await
+            .expect("write second staged segment");
+
+        let track = DashLiveTrack {
+            directory: directory.clone(),
+            state: DashLiveState {
+                version: DASH_LIVE_STATE_VERSION,
+                representation_key: representation_key.to_string(),
+                initialization: Some(initialization.to_string()),
+                segments: vec![
+                    DashLiveSegment {
+                        number: 100,
+                        filename: first.to_string(),
+                    },
+                    DashLiveSegment {
+                        number: 101,
+                        filename: second.to_string(),
+                    },
+                ],
+            },
+        };
+        write_dash_live_state(&track)
+            .await
+            .expect("persist dynamic DASH resume state");
+
+        let saved = tokio::fs::read(directory.join(DASH_LIVE_STATE_NAME))
+            .await
+            .expect("read dynamic DASH state file");
+        let saved_text = String::from_utf8(saved).expect("DASH state is JSON text");
+        assert!(!saved_text.contains("https://"));
+        assert_eq!(
+            read_dash_live_representation_key(&directory)
+                .await
+                .expect("read persisted representation key"),
+            representation_key
+        );
+
+        let (restored, total_bytes) =
+            load_dash_live_track(representation_key, &directory, None)
+                .await
+                .expect("restore persisted dynamic DASH track");
+        assert_eq!(restored.state, track.state);
+        assert_eq!(
+            restored.state.resource_names().collect::<Vec<_>>(),
+            [initialization, first, second]
+        );
+        assert_eq!(
+            total_bytes,
+            (b"init".len() + b"segment-100".len() + b"segment-101".len()) as u64
+        );
+        assert_eq!(
+            dash_live_track_bytes(&restored.state, &directory)
+                .await
+                .expect("sum restored staged resources"),
+            total_bytes
+        );
+
+        tokio::fs::remove_dir_all(directory)
+            .await
+            .expect("remove dynamic DASH test directory");
+    }
+
     #[test]
     fn content_range_must_match_exact_requested_range_and_total() {
         let range = ManifestByteRange {

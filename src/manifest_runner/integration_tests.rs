@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use url::Url;
 
 struct TempRoot(PathBuf);
@@ -215,6 +215,273 @@ fn fixture_client() -> reqwest::Client {
         .no_proxy()
         .build()
         .expect("build direct loopback HTTP client")
+}
+
+async fn read_fixture_request_path(socket: &mut tokio::net::TcpStream) -> String {
+    let mut request = Vec::with_capacity(512);
+    while !request.windows(4).any(|window| window == b"\\r\\n\\r\\n") {
+        let mut buffer = [0_u8; 1024];
+        let length = socket
+            .read(&mut buffer)
+            .await
+            .expect("read fixture request");
+        assert_ne!(length, 0, "fixture request ended before its headers");
+        request.extend_from_slice(&buffer[..length]);
+        assert!(
+            request.len() <= 16 * 1024,
+            "fixture request headers exceeded the test limit"
+        );
+    }
+
+    String::from_utf8_lossy(&request)
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/")
+        .split('?')
+        .next()
+        .unwrap_or("/")
+        .to_string()
+}
+
+async fn spawn_interrupted_resource_server(
+    body: Vec<u8>,
+    partial_size: usize,
+) -> (
+    Url,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Vec<String>>,
+) {
+    assert!(
+        partial_size > 0 && partial_size < body.len(),
+        "partial response must contain fewer bytes than the complete resource"
+    );
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind resumable resource fixture server");
+    let address = listener
+        .local_addr()
+        .expect("read resumable fixture server address");
+    let (partial_sent_tx, partial_sent_rx) = tokio::sync::oneshot::channel();
+    let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut paths = Vec::with_capacity(2);
+        let (mut first, _) = listener
+            .accept()
+            .await
+            .expect("accept interrupted resource request");
+        paths.push(read_fixture_request_path(&mut first).await);
+
+        let headers = format!(
+            "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n",
+            body.len()
+        );
+        first
+            .write_all(headers.as_bytes())
+            .await
+            .expect("write interrupted resource headers");
+        first
+            .write_all(&body[..partial_size])
+            .await
+            .expect("write interrupted resource prefix");
+        first.flush().await.expect("flush interrupted resource prefix");
+        partial_sent_tx
+            .send(())
+            .expect("notify test after sending resource prefix");
+
+        let _ = release_first_rx.await;
+        // The client has cancelled this response; a closed socket is expected.
+        let _ = first.write_all(&body[partial_size..]).await;
+        drop(first);
+
+        let (mut resumed, _) = listener
+            .accept()
+            .await
+            .expect("accept resumed resource request");
+        paths.push(read_fixture_request_path(&mut resumed).await);
+        let mut response = headers.into_bytes();
+        response.extend_from_slice(&body);
+        resumed
+            .write_all(&response)
+            .await
+            .expect("write resumed resource response");
+        paths
+    });
+    let base_url = Url::parse(&format!("http://{address}/"))
+        .expect("build resumable resource fixture URL");
+
+    (base_url, partial_sent_rx, release_first_tx, server)
+}
+
+#[tokio::test]
+async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resume() {
+    let root = TempRoot::new("resume");
+    let staging = root.path().join("staging");
+    tokio::fs::create_dir_all(&staging)
+        .await
+        .expect("create manifest resume staging directory");
+
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let complete_bytes = b"completed manifest initialization resource".to_vec();
+    let (complete_base_url, complete_server) = spawn_fixture_server(
+        HashMap::from([("/complete.bin".to_string(), complete_bytes.clone())]),
+        1,
+    )
+    .await;
+    let complete_resource = Resource {
+        url: complete_base_url
+            .join("complete.bin")
+            .expect("build completed resource URL"),
+        range: None,
+        filename: "complete.bin".to_string(),
+        key: false,
+    };
+    let (_complete_abort_tx, mut complete_abort) = tokio::sync::oneshot::channel();
+    assert!(
+        fetch_resources(
+            &client,
+            vec![complete_resource.clone()],
+            &staging,
+            1,
+            &tx,
+            &downloaded,
+            &mut complete_abort,
+        )
+        .await
+        .expect("fetch completed resource"),
+        "completed resource fetch unexpectedly aborted"
+    );
+    wait_for_fixture_server(complete_server).await;
+    assert_eq!(
+        tokio::fs::read(staging.join("complete.bin"))
+            .await
+            .expect("read completed resource"),
+        complete_bytes
+    );
+
+    let slow_bytes = vec![0x5a; 32 * 1024];
+    let partial_size = 1024;
+    let (slow_base_url, partial_sent, release_first, slow_server) =
+        spawn_interrupted_resource_server(slow_bytes.clone(), partial_size).await;
+    let slow_resource = Resource {
+        url: slow_base_url
+            .join("slow.bin")
+            .expect("build interrupted resource URL"),
+        range: None,
+        filename: "slow.bin".to_string(),
+        key: false,
+    };
+    let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let attempt_client = client.clone();
+    let attempt_directory = staging.clone();
+    let attempt_tx = tx.clone();
+    let attempt_downloaded = std::sync::Arc::clone(&downloaded);
+    let attempt = tokio::spawn(async move {
+        let mut abort = abort_rx;
+        fetch_resources(
+            &attempt_client,
+            vec![slow_resource.clone()],
+            &attempt_directory,
+            1,
+            &attempt_tx,
+            &attempt_downloaded,
+            &mut abort,
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), partial_sent)
+        .await
+        .expect("fixture server did not send the resource prefix")
+        .expect("fixture server task ended before sending the prefix");
+    let partial_path = staging.join("slow.bin.part");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if tokio::fs::metadata(&partial_path)
+                .await
+                .is_ok_and(|metadata| metadata.len() == partial_size as u64)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("resource prefix was not written to its staging file");
+
+    abort_tx
+        .send(crate::video::StopIntent::Preserve)
+        .expect("signal pause to the manifest resource fetch");
+    let aborted = tokio::time::timeout(Duration::from_secs(5), attempt)
+        .await
+        .expect("interrupted resource fetch did not stop")
+        .expect("interrupted resource fetch task panicked")
+        .expect("interrupted resource fetch failed");
+    assert!(!aborted, "interrupted resource fetch must report an abort");
+    assert!(
+        !staging.join("slow.bin").exists(),
+        "an incomplete resource must not be published as complete"
+    );
+    assert_eq!(
+        downloaded.load(std::sync::atomic::Ordering::Relaxed),
+        complete_bytes.len() as u64,
+        "aborting a partial resource must refund its byte reservation"
+    );
+    release_first
+        .send(())
+        .expect("release the cancelled fixture response");
+
+    // A new attempt starts its progress accounting from zero; complete files are
+    // recognized from staging and the interrupted .part is replaced from byte 0.
+    downloaded.store(0, std::sync::atomic::Ordering::Relaxed);
+    let (_resume_abort_tx, mut resume_abort) = tokio::sync::oneshot::channel();
+    assert!(
+        fetch_resources(
+            &client,
+            vec![complete_resource, slow_resource],
+            &staging,
+            1,
+            &tx,
+            &downloaded,
+            &mut resume_abort,
+        )
+        .await
+        .expect("resume manifest resource fetch"),
+        "resumed manifest resource fetch unexpectedly aborted"
+    );
+    let requests = tokio::time::timeout(Duration::from_secs(5), slow_server)
+        .await
+        .expect("resumable fixture server did not finish")
+        .expect("resumable fixture server task panicked");
+    assert_eq!(
+        requests,
+        vec!["/slow.bin", "/slow.bin"],
+        "resume must reuse complete resources and retry the partial resource"
+    );
+    assert_eq!(
+        tokio::fs::read(staging.join("complete.bin"))
+            .await
+            .expect("read preserved complete resource"),
+        complete_bytes
+    );
+    assert_eq!(
+        tokio::fs::read(staging.join("slow.bin"))
+            .await
+            .expect("read resumed resource"),
+        slow_bytes
+    );
+    assert!(
+        !partial_path.exists(),
+        "successful retry must remove the stale partial file"
+    );
+    assert_eq!(
+        downloaded.load(std::sync::atomic::Ordering::Relaxed),
+        complete_bytes.len() as u64 + 32 * 1024,
+        "resumed progress must include each completed resource exactly once"
+    );
 }
 
 #[tokio::test]

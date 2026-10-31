@@ -16,6 +16,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use url::Url;
 
+const FIXTURE_TIMEOUT: Duration = Duration::from_secs(20);
+const INTERRUPTED_RESOURCE_BYTES: usize = 32 * 1024;
+const INTERRUPTED_RESOURCE_PREFIX_BYTES: usize = 1024;
+
 struct TempRoot(PathBuf);
 
 impl TempRoot {
@@ -191,7 +195,7 @@ async fn spawn_fixture_server(
 }
 
 async fn wait_for_fixture_server(server: tokio::task::JoinHandle<()>) {
-    tokio::time::timeout(Duration::from_secs(20), server)
+    tokio::time::timeout(FIXTURE_TIMEOUT, server)
         .await
         .expect("fixture server timed out waiting for resource requests")
         .expect("fixture server task failed");
@@ -244,15 +248,17 @@ async fn read_fixture_request_path(socket: &mut tokio::net::TcpStream) -> String
         .to_string()
 }
 
+struct InterruptedResourceServer {
+    base_url: Url,
+    partial_sent: tokio::sync::oneshot::Receiver<()>,
+    release_first: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<Vec<String>>,
+}
+
 async fn spawn_interrupted_resource_server(
     body: Vec<u8>,
     partial_size: usize,
-) -> (
-    Url,
-    tokio::sync::oneshot::Receiver<()>,
-    tokio::sync::oneshot::Sender<()>,
-    tokio::task::JoinHandle<Vec<String>>,
-) {
+) -> InterruptedResourceServer {
     assert!(
         partial_size > 0 && partial_size < body.len(),
         "partial response must contain fewer bytes than the complete resource"
@@ -311,7 +317,12 @@ async fn spawn_interrupted_resource_server(
     let base_url = Url::parse(&format!("http://{address}/"))
         .expect("build resumable resource fixture URL");
 
-    (base_url, partial_sent_rx, release_first_tx, server)
+    InterruptedResourceServer {
+        base_url,
+        partial_sent: partial_sent_rx,
+        release_first: release_first_tx,
+        task: server,
+    }
 }
 
 #[tokio::test]
@@ -362,10 +373,14 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
         complete_bytes
     );
 
-    let slow_bytes = vec![0x5a; 32 * 1024];
-    let partial_size = 1024;
-    let (slow_base_url, partial_sent, release_first, slow_server) =
-        spawn_interrupted_resource_server(slow_bytes.clone(), partial_size).await;
+    let slow_bytes = vec![0x5a; INTERRUPTED_RESOURCE_BYTES];
+    let partial_size = INTERRUPTED_RESOURCE_PREFIX_BYTES;
+    let InterruptedResourceServer {
+        base_url: slow_base_url,
+        partial_sent,
+        release_first,
+        task: slow_server,
+    } = spawn_interrupted_resource_server(slow_bytes.clone(), partial_size).await;
     let slow_resource = Resource {
         url: slow_base_url
             .join("slow.bin")
@@ -394,12 +409,12 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
         .await
     });
 
-    tokio::time::timeout(Duration::from_secs(20), partial_sent)
+    tokio::time::timeout(FIXTURE_TIMEOUT, partial_sent)
         .await
         .expect("fixture server did not send the resource prefix")
         .expect("fixture server task ended before sending the prefix");
     let partial_path = staging.join("slow.bin.part");
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(FIXTURE_TIMEOUT, async {
         loop {
             if tokio::fs::metadata(&partial_path)
                 .await
@@ -413,7 +428,7 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
     .await
     .expect("resource prefix was not written to its staging file");
     let expected_partial_total = complete_bytes.len() as u64 + partial_size as u64;
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(FIXTURE_TIMEOUT, async {
         while downloaded.load(std::sync::atomic::Ordering::Relaxed) < expected_partial_total {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -424,7 +439,7 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
     abort_tx
         .send(crate::video::StopIntent::Preserve)
         .expect("signal pause to the manifest resource fetch");
-    let aborted = tokio::time::timeout(Duration::from_secs(20), attempt)
+    let aborted = tokio::time::timeout(FIXTURE_TIMEOUT, attempt)
         .await
         .expect("interrupted resource fetch did not stop")
         .expect("interrupted resource fetch task panicked")
@@ -461,7 +476,7 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
         .expect("resume manifest resource fetch"),
         "resumed manifest resource fetch unexpectedly aborted"
     );
-    let requests = tokio::time::timeout(Duration::from_secs(20), slow_server)
+    let requests = tokio::time::timeout(FIXTURE_TIMEOUT, slow_server)
         .await
         .expect("resumable fixture server did not finish")
         .expect("resumable fixture server task panicked");

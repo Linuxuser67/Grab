@@ -518,7 +518,7 @@ async fn resolve_tracks(
         NativeManifest::HlsMedia(plan) if source.representation_key == "hls-media" => {
             guard_hls_resources(&source.url, &plan, &mut guarded_child_hosts)?;
             Ok(Tracks::Hls {
-                video: plan,
+                video: *plan,
                 audio: None,
             })
         }

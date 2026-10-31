@@ -1074,6 +1074,68 @@ mod tests {
     }
 
     #[test]
+    fn manifest_child_guard_rejects_private_hosts_for_untrusted_sources() {
+        let _test_policy = crate::download_net::isolate_untrusted_handoff_policy_for_test();
+        let parent_url = "https://manifest-private-guard.fixture.invalid/master.m3u8";
+        assert!(crate::download_net::require_public_resolution(
+            "manifest-private-guard.fixture.invalid"
+        ));
+
+        let child_url = Url::parse("https://127.0.0.1/segment.m4s")
+            .expect("private manifest child URL is valid");
+        let mut seen_hosts = std::collections::HashSet::new();
+        let error = guard_manifest_child_url(parent_url, &child_url, &mut seen_hosts)
+            .expect_err("untrusted manifests must not reach private hosts");
+
+        assert_eq!(
+            error,
+            "The stream manifest references a local or private network resource"
+        );
+        assert!(
+            seen_hosts.is_empty(),
+            "rejected hosts must not consume a slot"
+        );
+    }
+
+    #[test]
+    fn manifest_child_guard_enforces_the_distinct_host_limit() {
+        let _test_policy = crate::download_net::isolate_untrusted_handoff_policy_for_test();
+        let parent_url = "https://manifest-limit-origin.fixture.invalid/master.m3u8";
+        assert!(crate::download_net::require_public_resolution(
+            "manifest-limit-origin.fixture.invalid"
+        ));
+
+        let mut seen_hosts = std::collections::HashSet::new();
+        for index in 0..crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
+            let child_url = Url::parse(&format!("https://cdn-{index}.fixture.invalid/segment.m4s"))
+                .expect("public manifest child URL is valid");
+            guard_manifest_child_url(parent_url, &child_url, &mut seen_hosts)
+                .expect("each child host below the limit should be accepted");
+        }
+
+        let overflow_url = Url::parse("https://overflow.fixture.invalid/segment.m4s")
+            .expect("overflow manifest child URL is valid");
+        let error = guard_manifest_child_url(parent_url, &overflow_url, &mut seen_hosts)
+            .expect_err("the manifest host limit must fail closed");
+
+        assert_eq!(
+            error,
+            format!(
+                "The stream manifest exceeds the limit of {} distinct resource hosts",
+                crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+            )
+        );
+        assert_eq!(
+            seen_hosts.len(),
+            crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+        );
+        assert!(
+            !crate::download_net::is_untrusted_handoff_host("overflow.fixture.invalid"),
+            "a rejected child host must not enter the public-only policy"
+        );
+    }
+
+    #[test]
     fn only_http_rate_limits_and_server_errors_are_retryable_for_resources() {
         assert!(matches!(
             resource_status_error(reqwest::StatusCode::REQUEST_TIMEOUT),

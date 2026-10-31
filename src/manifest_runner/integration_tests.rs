@@ -269,11 +269,25 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
         .expect("generate HLS fMP4 fixture");
     assert_command_succeeded(&generated, "FFmpeg failed to generate the HLS fixture");
 
-    let manifest_url = "https://fixture.invalid/media.m3u8";
+    let source_url = "https://manifest-origin.fixture.invalid/master.m3u8";
+    let media_manifest_url = "https://cdn.fixture.invalid/media.m3u8";
     let manifest =
         std::fs::read(fixture_dir.join("media.m3u8")).expect("read generated HLS media playlist");
-    let mut plan = crate::manifest::plan_hls_media_playlist(manifest_url, &manifest)
+    let mut plan = crate::manifest::plan_hls_media_playlist(media_manifest_url, &manifest)
         .expect("parse generated HLS media playlist");
+
+    {
+        let _policy_test_guard = crate::download_net::isolate_untrusted_handoff_policy_for_test();
+        assert!(crate::download_net::require_public_resolution(
+            "manifest-origin.fixture.invalid"
+        ));
+        let mut guarded_child_hosts = std::collections::HashSet::new();
+        let media_url = Url::parse(media_manifest_url).expect("HLS media manifest URL is valid");
+        guard_manifest_child_url(source_url, &media_url, &mut guarded_child_hosts)
+            .expect("the selected HLS media playlist host should be guarded");
+        guard_hls_resources(source_url, &plan, &mut guarded_child_hosts)
+            .expect("all planned HLS resources should pass the production host guard");
+    }
     let urls: Vec<_> = plan
         .resources
         .iter()
@@ -389,7 +403,8 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
         .expect("generate DASH fMP4 fixture");
     assert_command_succeeded(&generated, "FFmpeg failed to generate the DASH fixture");
 
-    let manifest_url = "https://fixture.invalid/manifest.mpd";
+    let source_url = "https://manifest-origin.fixture.invalid/master.mpd";
+    let manifest_url = "https://cdn.fixture.invalid/manifest.mpd";
     let manifest =
         std::fs::read_to_string(fixture_dir.join("manifest.mpd")).expect("read generated DASH MPD");
     let parsed = crate::manifest::dash::parse_dash_manifest(manifest_url, &manifest)
@@ -409,6 +424,22 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
         .expect("plan generated DASH video representation");
     let mut audio_plan = crate::manifest::dash::plan_dash_representation(&parsed, &audio_key)
         .expect("plan generated DASH audio representation");
+
+    {
+        let _policy_test_guard = crate::download_net::isolate_untrusted_handoff_policy_for_test();
+        assert!(crate::download_net::require_public_resolution(
+            "manifest-origin.fixture.invalid"
+        ));
+        let mut guarded_child_hosts = std::collections::HashSet::new();
+        for resource in video_plan
+            .resources
+            .iter()
+            .chain(audio_plan.resources.iter())
+        {
+            guard_manifest_child_url(source_url, &resource.url, &mut guarded_child_hosts)
+                .expect("all planned DASH resources should pass the production host guard");
+        }
+    }
 
     let mut urls: Vec<_> = video_plan
         .resources

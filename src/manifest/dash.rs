@@ -2011,9 +2011,25 @@ mod tests {
         let static_representation = &finalized.video_representations[0];
         assert_eq!(live_representation.live_key, static_representation.live_key);
         assert_ne!(live_representation.key, static_representation.key);
-        assert!(
-            plan_dash_representation(&finalized, &live_representation.live_key).is_ok(),
-            "a queued dynamic selection must still resolve after MPD finalization"
+        let live_plan = plan_dash_representation(&live, &live_representation.live_key)
+            .expect("plan current dynamic window");
+        let finalized_plan =
+            plan_dash_representation(&finalized, &live_representation.live_key)
+                .expect("plan final static presentation with the queued live key");
+        let dynamic_resource = live_plan
+            .resources
+            .iter()
+            .find(|resource| resource.segment_number == Some(26))
+            .expect("dynamic window starts with segment 26");
+        let final_resource = finalized_plan
+            .resources
+            .iter()
+            .find(|resource| resource.segment_number == Some(26))
+            .expect("final MPD includes captured segment 26");
+        assert_eq!(
+            dynamic_resource.filename,
+            final_resource.filename,
+            "dynamic and static finalization must retain the same staged resource identity"
         );
 
         let later = dynamic_mpd(
@@ -2055,16 +2071,19 @@ mod tests {
             r#"<SegmentTemplate timescale="1" duration="4" media="seg-$Number$.m4s"/>"#,
             "",
         );
-        assert_eq!(
-            parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(3))
-                .and_then(|manifest| {
-                    plan_dash_representation(
-                        &manifest,
-                        &manifest.video_representations[0].key,
-                    )
-                })
-                .err(),
-            Some(DashError::NoAvailableSegments)
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(3))
+            .expect("dynamic presentation can arrive before its first complete segment");
+        let plan = plan_dash_representation(
+            &manifest,
+            &manifest.video_representations[0].live_key,
+        )
+        .expect("an empty first live window remains refreshable");
+        assert!(
+            !plan
+                .resources
+                .iter()
+                .any(|resource| resource.kind == DashResourceKind::Segment),
+            "a segment is not exposed until its whole duration is available"
         );
     }
 

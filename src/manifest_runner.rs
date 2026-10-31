@@ -1124,18 +1124,19 @@ mod tests {
             .expect("register the manifest-derived segment host");
         assert_eq!(seen_hosts.len(), 1);
 
-        let client = crate::download_net::http_client_for_with_dns_overrides_for_test(
-            None,
-            std::collections::HashMap::from([(
-                "cdn.example.test".to_string(),
-                vec![
-                    format!("127.0.0.1:{port}")
-                        .parse()
-                        .expect("private loopback address"),
-                ],
-            )]),
-        )
-        .expect("build the production guarded HTTP client with fixture DNS");
+        let (client, dns_override_hits) =
+            crate::download_net::http_client_for_with_dns_overrides_for_test(
+                None,
+                std::collections::HashMap::from([(
+                    "cdn.example.test".to_string(),
+                    vec![
+                        format!("127.0.0.1:{port}")
+                            .parse()
+                            .expect("private loopback address"),
+                    ],
+                )]),
+            )
+            .expect("build the production guarded HTTP client with fixture DNS");
 
         let child_url = (*child).clone();
         let mut request = tokio::spawn(async move { client.get(child_url).send().await });
@@ -1159,6 +1160,7 @@ mod tests {
                 panic!("manifest resource request did not finish after DNS rejection");
             }
         };
+        assert!(dns_override_hits.load(std::sync::atomic::Ordering::Relaxed));
         assert!(
             response.is_err(),
             "a public manifest's child hostname must not connect when DNS resolves privately"

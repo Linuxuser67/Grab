@@ -7,9 +7,9 @@ use gtk4::gio;
 use gtk4::gio::prelude::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Default)]
 pub struct DownloadOptions {

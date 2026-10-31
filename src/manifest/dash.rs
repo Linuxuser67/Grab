@@ -493,7 +493,7 @@ pub(crate) fn plan_dash_representation(
         }
     };
 
-    if !matches!(manifest.presentation, DashPresentation::Dynamic(_))
+    if !matches!(&manifest.presentation, DashPresentation::Dynamic(_))
         && !resources
             .iter()
             .any(|resource| resource.kind == DashResourceKind::Segment)
@@ -1070,9 +1070,6 @@ fn expand_dynamic_template(
         .saturating_sub(window_depth);
     let window_start_ticks = duration_to_ticks(window_start_ticks, template.timescale)?;
     let segments = dynamic_segment_times(template, elapsed_ticks, window_start_ticks)?;
-    if segments.is_empty() {
-        return Err(DashError::NoAvailableSegments);
-    }
 
     let mut resources = Vec::with_capacity(
         segments.len() + usize::from(template.initialization.is_some()),

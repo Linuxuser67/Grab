@@ -2371,6 +2371,23 @@ fn dash_presentation_ended(presentation: &DashPresentation) -> bool {
     }
 }
 
+fn dash_next_refresh_deadline(
+    presentation: &DashPresentation,
+) -> Result<Option<Instant>, ManifestRunError> {
+    match presentation {
+        DashPresentation::Static => Ok(None),
+        DashPresentation::Dynamic(dynamic) => Instant::now()
+            .checked_add(dynamic.minimum_update_period)
+            .map(Some)
+            .ok_or_else(|| {
+                ManifestRunError::Failed(
+                    "The dynamic DASH update interval is outside the supported clock range"
+                        .to_string(),
+                )
+            }),
+    }
+}
+
 async fn dash_live_resource_needs_fetch(
     directory: &Path,
     resource: &DashResource,
@@ -2668,6 +2685,7 @@ async fn run_live_dash_tracks(
             DashLiveCaptureOutcome::Preserve
         });
     };
+    let mut next_refresh_at = dash_next_refresh_deadline(&current_video_plan.presentation)?;
 
     match apply_dash_live_snapshot(
         client,
@@ -2735,14 +2753,11 @@ async fn run_live_dash_tracks(
         let DashPresentation::Dynamic(dynamic) = &current_video_plan.presentation else {
             finish_capture!(DashLiveCaptureOutcome::Ended);
         };
-        let deadline = Instant::now()
-            .checked_add(dynamic.minimum_update_period)
-            .ok_or_else(|| {
-                ManifestRunError::Failed(
-                    "The dynamic DASH update interval is outside the supported clock range"
-                        .to_string(),
-                )
-            })?;
+        let deadline = next_refresh_at.ok_or_else(|| {
+            ManifestRunError::Failed(
+                "A static DASH presentation unexpectedly entered the refresh loop".to_string(),
+            )
+        })?;
         tokio::select! {
             biased;
             stop = &mut *abort => {
@@ -2813,6 +2828,7 @@ async fn run_live_dash_tracks(
         };
         current_video_plan = refreshed.0;
         current_audio_plan = refreshed.1;
+        next_refresh_at = dash_next_refresh_deadline(&current_video_plan.presentation)?;
         let current_audio_bytes = audio
             .as_ref()
             .map(|(track, _)| dash_live_track_bytes(&track.state, &track.directory))

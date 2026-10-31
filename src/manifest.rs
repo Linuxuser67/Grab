@@ -3,7 +3,7 @@
 //! The parser layer owns no network or filesystem access. It turns a manifest
 //! body into validated remote resources and a local playlist description.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use m3u8_rs::{AlternativeMediaType, KeyMethod, MediaPlaylist, MediaPlaylistType, Playlist};
@@ -47,6 +47,10 @@ pub(crate) enum ManifestError {
     DurationOverflow,
     #[error("could not serialize the local HLS playlist")]
     Serialize,
+    #[error("the live HLS recording reached a bounded capture limit")]
+    LiveCaptureLimit,
+    #[error("the live HLS playlist can no longer be continued without losing media")]
+    LiveSequenceGap,
 }
 
 /// A checked byte range in a remote HLS resource.
@@ -206,14 +210,48 @@ pub(crate) struct HlsMasterPlan {
     pub(crate) audio_renditions: Box<[HlsAudioRendition]>,
 }
 
-/// Validated media playlist, ordered resources, and local FFmpeg input.
+/// Validated HLS media playlist, ordered resources, and local FFmpeg input.
 #[derive(Clone, Debug)]
 pub(crate) struct HlsPlan {
     pub(crate) resources: Box<[HlsResource]>,
+    pub(crate) playlist_url: Url,
+    pub(crate) is_live: bool,
+    pub(crate) end_list: bool,
+    pub(crate) source_target_duration: u64,
     local_playlist: MediaPlaylist,
 }
 
 impl HlsPlan {
+    /// Rebuild a completed local HLS plan from a previously committed live capture.
+    ///
+    /// The local playlist is validated as Grab-owned staging metadata and its
+    /// resource list is intentionally empty: the accumulator already knows
+    /// which staged resources belong to the recording.
+    ///
+    /// # Errors
+    /// Returns an error if the saved playlist is malformed, unsafe, or exceeds
+    /// the live capture limits.
+    pub(crate) fn from_local_capture(
+        manifest_url: &str,
+        body: &[u8],
+    ) -> Result<Self, ManifestError> {
+        let _validated = HlsLiveAccumulator::from_local_playlist_bytes(body)?;
+        let playlist_url = parse_manifest_url(manifest_url)?;
+        let mut local_playlist =
+            m3u8_rs::parse_media_playlist_res(body).map_err(|_| ManifestError::Parse)?;
+        local_playlist.end_list = true;
+        local_playlist.playlist_type = Some(MediaPlaylistType::Vod);
+
+        Ok(Self {
+            resources: Vec::new().into_boxed_slice(),
+            playlist_url,
+            is_live: false,
+            end_list: true,
+            source_target_duration: local_playlist.target_duration,
+            local_playlist,
+        })
+    }
+
     /// Serialize the rewritten VOD playlist consumed by FFmpeg after fetch.
     ///
     /// # Errors
@@ -225,6 +263,486 @@ impl HlsPlan {
             .map_err(|_| ManifestError::Serialize)?;
         Ok(output)
     }
+}
+
+/// Bound the number of segments retained by one native live-HLS recording.
+pub(crate) const MAX_HLS_LIVE_SEGMENTS: usize = 100_000;
+pub(crate) const MAX_HLS_LOCAL_PLAYLIST_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_HLS_LIVE_CAPTURE_BYTES: u64 = 1 << 40;
+
+struct BoundedPlaylistWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl BoundedPlaylistWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl std::io::Write for BoundedPlaylistWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len().saturating_add(bytes.len()) > self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "serialized live HLS playlist exceeds its size limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Accumulated, locally rewritten playlist for one live HLS rendition.
+#[derive(Debug, Default)]
+pub(crate) struct HlsLiveAccumulator {
+    local_playlist: Option<MediaPlaylist>,
+    first_sequence: Option<u64>,
+    next_sequence: Option<u64>,
+    target_duration: Option<u64>,
+    segment_identities: Vec<String>,
+    seen_resources: HashSet<String>,
+    seen_key_resources: HashSet<String>,
+    total_resource_bytes: u64,
+}
+
+/// A validated playlist update whose media is committed only after its resources finish fetching.
+#[derive(Debug)]
+pub(crate) struct HlsLiveUpdate {
+    pub(crate) resources: Vec<HlsResource>,
+    pub(crate) changed: bool,
+    pub(crate) end_list: bool,
+    initial_playlist: Option<MediaPlaylist>,
+    new_segments: Vec<m3u8_rs::MediaSegment>,
+    referenced_resources: Vec<String>,
+    media_sequence: u64,
+    target_duration: u64,
+}
+
+impl HlsLiveAccumulator {
+    /// Create an empty live-HLS recording accumulator.
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Restore a previously committed local playlist after a retry.
+    ///
+    /// Only playlists written by Grab are accepted: they must be VOD-style,
+    /// end-listed, and reference generated single-component resource names.
+    ///
+    /// # Errors
+    /// Returns an error for malformed or unsafe staging metadata.
+    pub(crate) fn from_local_playlist_bytes(body: &[u8]) -> Result<Self, ManifestError> {
+        if body.len() > MAX_HLS_LOCAL_PLAYLIST_BYTES {
+            return Err(ManifestError::Parse);
+        }
+        let mut playlist =
+            m3u8_rs::parse_media_playlist_res(body).map_err(|_| ManifestError::Parse)?;
+        if !playlist.end_list
+            || playlist.playlist_type != Some(MediaPlaylistType::Vod)
+            || playlist.segments.is_empty()
+            || playlist.segments.len() > MAX_HLS_LIVE_SEGMENTS
+            || playlist.target_duration == 0
+            || playlist
+                .unknown_tags
+                .iter()
+                .any(|tag| is_unsupported_hls_tag(&tag.tag))
+        {
+            return Err(ManifestError::UnsupportedPlaylist);
+        }
+
+        let mut seen_resources = HashSet::new();
+        let mut seen_key_resources = HashSet::new();
+        let mut segment_identities = Vec::with_capacity(playlist.segments.len());
+        for segment in &playlist.segments {
+            if segment.byte_range.is_some()
+                || segment
+                    .unknown_tags
+                    .iter()
+                    .any(|tag| is_unsupported_hls_tag(&tag.tag))
+                || segment
+                    .map
+                    .as_ref()
+                    .is_some_and(|map| map.byte_range.is_some())
+                || !segment.duration.is_finite()
+                || segment.duration <= 0.0
+            {
+                return Err(ManifestError::UnsupportedPlaylist);
+            }
+            if let Some(key) = segment.key.as_ref() {
+                if key.method != KeyMethod::AES128
+                    || (segment.map.is_some() && key.iv.is_none())
+                    || key
+                        .keyformat
+                        .as_deref()
+                        .is_some_and(|format| format != "identity")
+                    || key
+                        .keyformatversions
+                        .as_deref()
+                        .is_some_and(|versions| versions != "1")
+                {
+                    return Err(ManifestError::UnsupportedEncryption);
+                }
+                let key_uri = key
+                    .uri
+                    .as_deref()
+                    .ok_or(ManifestError::UnsupportedEncryption)?;
+                seen_key_resources.insert(key_uri.to_string());
+            }
+            for filename in segment_resource_filenames(segment) {
+                if !is_safe_staged_resource_name(filename) {
+                    return Err(ManifestError::UnsupportedResourceUrl);
+                }
+                seen_resources.insert(filename.to_string());
+            }
+            segment_identities.push(hls_segment_identity(segment));
+        }
+
+        let first_sequence = playlist.media_sequence;
+        let target_duration = playlist.target_duration;
+        let segment_count =
+            u64::try_from(playlist.segments.len()).map_err(|_| ManifestError::DurationOverflow)?;
+        let next_sequence = first_sequence
+            .checked_add(segment_count)
+            .ok_or(ManifestError::DurationOverflow)?;
+        // A staged local playlist is always rewritten as a complete VOD
+        // presentation. The next remote snapshot determines whether capture
+        // should continue.
+        playlist.end_list = true;
+
+        Ok(Self {
+            local_playlist: Some(playlist),
+            first_sequence: Some(first_sequence),
+            next_sequence: Some(next_sequence),
+            target_duration: Some(target_duration),
+            segment_identities,
+            seen_resources,
+            seen_key_resources,
+            total_resource_bytes: 0,
+        })
+    }
+
+    /// Prepare the resources and segments newly advertised by one live snapshot.
+    ///
+    /// Overlapping media sequence numbers must keep the same segment identity.
+    /// A missing sequence is rejected rather than silently producing a broken
+    /// recording.
+    ///
+    /// # Errors
+    /// Returns an error for sequence gaps, changed overlapping segments, target
+    /// duration changes, unsafe updates, or recording-size limits.
+    pub(crate) fn prepare_update(
+        &self,
+        snapshot: &HlsPlan,
+    ) -> Result<HlsLiveUpdate, ManifestError> {
+        let target_duration = snapshot.source_target_duration;
+        if target_duration == 0
+            || self
+                .target_duration
+                .is_some_and(|current| current != target_duration)
+        {
+            return Err(ManifestError::LiveSequenceGap);
+        }
+
+        let first_sequence = self
+            .first_sequence
+            .unwrap_or(snapshot.local_playlist.media_sequence);
+        if snapshot.local_playlist.media_sequence < first_sequence {
+            return Err(ManifestError::LiveSequenceGap);
+        }
+        let mut next_sequence = self.next_sequence.unwrap_or(first_sequence);
+        if snapshot.local_playlist.media_sequence > next_sequence {
+            return Err(ManifestError::LiveSequenceGap);
+        }
+
+        let mut new_segments = Vec::new();
+        let mut referenced_resources = Vec::new();
+        let mut referenced_resource_set = HashSet::new();
+        for (index, segment) in snapshot.local_playlist.segments.iter().enumerate() {
+            let index = u64::try_from(index).map_err(|_| ManifestError::DurationOverflow)?;
+            let sequence = snapshot
+                .local_playlist
+                .media_sequence
+                .checked_add(index)
+                .ok_or(ManifestError::DurationOverflow)?;
+            let identity = hls_segment_identity(segment);
+            if sequence < next_sequence {
+                let existing_index = usize::try_from(sequence - first_sequence)
+                    .map_err(|_| ManifestError::DurationOverflow)?;
+                if self.segment_identities.get(existing_index) != Some(&identity) {
+                    return Err(ManifestError::LiveSequenceGap);
+                }
+            } else if sequence == next_sequence {
+                new_segments.push(segment.clone());
+                next_sequence = next_sequence
+                    .checked_add(1)
+                    .ok_or(ManifestError::DurationOverflow)?;
+            } else {
+                return Err(ManifestError::LiveSequenceGap);
+            }
+
+            // Include resources for overlapping segments as well: a restored
+            // recording may have lost a staged file that remains in this window.
+            for filename in segment_resource_filenames(segment) {
+                let filename = filename.to_string();
+                if referenced_resource_set.insert(filename.clone()) {
+                    referenced_resources.push(filename);
+                }
+            }
+        }
+
+        if self
+            .segment_identities
+            .len()
+            .saturating_add(new_segments.len())
+            > MAX_HLS_LIVE_SEGMENTS
+        {
+            return Err(ManifestError::LiveCaptureLimit);
+        }
+
+        let resources_by_name: HashMap<&str, &HlsResource> = snapshot
+            .resources
+            .iter()
+            .map(|resource| (resource.filename.as_str(), resource))
+            .collect();
+        let mut resources = Vec::new();
+        for filename in &referenced_resources {
+            if self.seen_resources.contains(filename) {
+                continue;
+            }
+            let resource = resources_by_name
+                .get(filename.as_str())
+                .ok_or(ManifestError::UnsupportedPlaylist)?;
+            resources.push((*resource).clone());
+        }
+
+        Ok(HlsLiveUpdate {
+            resources,
+            changed: !new_segments.is_empty(),
+            end_list: snapshot.end_list,
+            initial_playlist: self
+                .local_playlist
+                .is_none()
+                .then(|| snapshot.local_playlist.clone()),
+            new_segments,
+            referenced_resources,
+            media_sequence: snapshot.local_playlist.media_sequence,
+            target_duration,
+        })
+    }
+
+    /// Restore the byte total from the validated files referenced by a staged playlist.
+    pub(crate) fn restore_resource_bytes(&mut self, total_bytes: u64) -> Result<(), ManifestError> {
+        if total_bytes > MAX_HLS_LIVE_CAPTURE_BYTES {
+            return Err(ManifestError::LiveCaptureLimit);
+        }
+        self.total_resource_bytes = total_bytes;
+        Ok(())
+    }
+
+    /// Commit while accounting for the already-staged resources of another rendition.
+    pub(crate) fn commit_update_with_budget(
+        &mut self,
+        update: HlsLiveUpdate,
+        added_resource_bytes: u64,
+        other_rendition_bytes: u64,
+    ) -> Result<(), ManifestError> {
+        let next_resource_bytes = self
+            .total_resource_bytes
+            .checked_add(added_resource_bytes)
+            .and_then(|total| total.checked_add(other_rendition_bytes))
+            .filter(|total| *total <= MAX_HLS_LIVE_CAPTURE_BYTES)
+            .ok_or(ManifestError::LiveCaptureLimit)?;
+
+        let mut playlist = match self.local_playlist.as_ref() {
+            Some(playlist) => playlist.clone(),
+            None => {
+                let Some(mut playlist) = update.initial_playlist.clone() else {
+                    return Err(ManifestError::UnsupportedPlaylist);
+                };
+                playlist.segments.clear();
+                playlist.media_sequence = update.media_sequence;
+                playlist.target_duration = update.target_duration;
+                playlist.playlist_type = Some(MediaPlaylistType::Vod);
+                playlist.end_list = true;
+                playlist
+            }
+        };
+
+        if playlist
+            .segments
+            .len()
+            .saturating_add(update.new_segments.len())
+            > MAX_HLS_LIVE_SEGMENTS
+        {
+            return Err(ManifestError::LiveCaptureLimit);
+        }
+        let next_sequence = self
+            .next_sequence
+            .unwrap_or(update.media_sequence)
+            .checked_add(
+                u64::try_from(update.new_segments.len())
+                    .map_err(|_| ManifestError::DurationOverflow)?,
+            )
+            .ok_or(ManifestError::DurationOverflow)?;
+        playlist
+            .segments
+            .extend(update.new_segments.iter().cloned());
+        let required_version = minimum_hls_playlist_version(&playlist);
+        playlist.version = Some(playlist.version.unwrap_or_default().max(required_version));
+        let key_resources: HashSet<String> = playlist
+            .segments
+            .iter()
+            .filter_map(|segment| segment.key.as_ref()?.uri.as_deref())
+            .map(str::to_string)
+            .collect();
+
+        // Validate the bounded serialized result before mutating the accumulator.
+        let mut output = BoundedPlaylistWriter::new(MAX_HLS_LOCAL_PLAYLIST_BYTES);
+        playlist.write_to(&mut output).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                ManifestError::LiveCaptureLimit
+            } else {
+                ManifestError::Serialize
+            }
+        })?;
+
+        if self.first_sequence.is_none() {
+            self.first_sequence = Some(update.media_sequence);
+        }
+        self.target_duration = Some(update.target_duration);
+        self.local_playlist = Some(playlist);
+        self.segment_identities
+            .extend(update.new_segments.iter().map(hls_segment_identity));
+        self.seen_resources.extend(update.referenced_resources);
+        self.seen_key_resources = key_resources;
+        self.next_sequence = Some(next_sequence);
+        self.total_resource_bytes = next_resource_bytes - other_rendition_bytes;
+        Ok(())
+    }
+
+    /// Total bytes retained by this rendition, including resources restored from staging.
+    #[must_use]
+    pub(crate) fn resource_bytes(&self) -> u64 {
+        self.total_resource_bytes
+    }
+
+    /// Resource basenames referenced by the committed local playlist.
+    pub(crate) fn resource_names(&self) -> impl Iterator<Item = &str> {
+        self.seen_resources.iter().map(String::as_str)
+    }
+
+    /// Forget a staged resource that is missing but may still appear in a remote window.
+    pub(crate) fn forget_resource(&mut self, filename: &str) {
+        self.seen_resources.remove(filename);
+        self.seen_key_resources.remove(filename);
+    }
+
+    /// Whether the staged resource is an AES-128 identity key.
+    #[must_use]
+    pub(crate) fn is_key_resource(&self, filename: &str) -> bool {
+        self.seen_key_resources.contains(filename)
+    }
+
+    /// Serialize the committed recording as a complete local VOD playlist.
+    ///
+    /// # Errors
+    /// Returns an error if no segments have been committed or serialization fails.
+    pub(crate) fn local_playlist_bytes(&self) -> Result<Vec<u8>, ManifestError> {
+        let Some(playlist) = self.local_playlist.as_ref() else {
+            return Err(ManifestError::EmptyPlaylist);
+        };
+        if playlist.segments.is_empty() {
+            return Err(ManifestError::EmptyPlaylist);
+        }
+        let mut output = BoundedPlaylistWriter::new(MAX_HLS_LOCAL_PLAYLIST_BYTES);
+        playlist.write_to(&mut output).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                ManifestError::LiveCaptureLimit
+            } else {
+                ManifestError::Serialize
+            }
+        })?;
+        Ok(output.into_inner())
+    }
+
+    /// Number of media segments committed to this recording.
+    #[must_use]
+    pub(crate) fn segment_count(&self) -> usize {
+        self.segment_identities.len()
+    }
+}
+
+fn segment_resource_filenames(segment: &m3u8_rs::MediaSegment) -> Vec<&str> {
+    let mut filenames = Vec::with_capacity(3);
+    filenames.push(segment.uri.as_str());
+    if let Some(map) = segment.map.as_ref() {
+        filenames.push(map.uri.as_str());
+    }
+    if let Some(key) = segment.key.as_ref()
+        && let Some(uri) = key.uri.as_deref()
+    {
+        filenames.push(uri);
+    }
+    filenames
+}
+
+fn is_safe_staged_resource_name(filename: &str) -> bool {
+    !filename.is_empty()
+        && !filename.contains('/')
+        && !filename.contains('\\')
+        && std::path::Path::new(filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(filename)
+        && (filename.starts_with("segment-")
+            || filename.starts_with("init-")
+            || filename.starts_with("key-"))
+        && filename.ends_with(".bin")
+}
+
+fn hls_segment_identity(segment: &m3u8_rs::MediaSegment) -> String {
+    let map_uri = segment
+        .map
+        .as_ref()
+        .map(|map| map.uri.as_str())
+        .unwrap_or_default();
+    let key_identity = segment
+        .key
+        .as_ref()
+        .map(|key| {
+            format!(
+                "{:?}|{}|{:?}|{:?}|{:?}",
+                key.method,
+                key.uri.as_deref().unwrap_or_default(),
+                key.iv,
+                key.keyformat,
+                key.keyformatversions
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "{}|{}|{}|{}|{}|{}",
+        segment.uri,
+        segment.duration.to_bits(),
+        segment.title.as_deref().unwrap_or_default(),
+        segment.discontinuity,
+        map_uri,
+        key_identity
+    )
 }
 
 /// Parse an HLS master playlist into user-selectable video and audio choices.
@@ -329,16 +847,17 @@ pub(crate) fn parse_hls_master_playlist(
     })
 }
 
-/// Parse a selected HLS media playlist and construct its deterministic fetch plan.
+/// Parse an HLS media playlist and construct its deterministic fetch plan.
 ///
 /// Byte ranges are converted to explicit offsets, init maps are fetched once per
-/// distinct URI/range pair, and every media segment gets its own local filename.
-/// AES-128 identity keys are included in the local fetch plan and the
-/// rewritten playlist points FFmpeg at the staged key file; other encryption
-/// methods are deliberately rejected.
+/// distinct URI/range pair, and every media sequence gets a stable local filename.
+/// AES-128 identity keys are included in the local fetch plan and the rewritten
+/// playlist points FFmpeg at the staged key file; other encryption methods are
+/// deliberately rejected. Non-low-latency live playlists are accepted for
+/// incremental capture; the runner polls them until ENDLIST or user stop.
 ///
 /// # Errors
-/// Returns an error for live or unsupported playlists, invalid URLs or ranges,
+/// Returns an error for unsupported playlist features, invalid URLs or ranges,
 /// unsupported encryption, invalid durations, or an empty media playlist.
 pub(crate) fn plan_hls_media_playlist(
     manifest_url: &str,
@@ -353,15 +872,19 @@ pub(crate) fn plan_hls_media_playlist(
 }
 
 fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan, ManifestError> {
-    if !playlist.end_list || playlist.i_frames_only {
+    let is_live = !playlist.end_list;
+    let end_list = playlist.end_list;
+    let source_target_duration = playlist.target_duration;
+    if playlist.i_frames_only || (is_live && source_target_duration == 0) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
     match playlist.playlist_type.as_ref() {
-        Some(MediaPlaylistType::Event) | Some(MediaPlaylistType::Other(_)) => {
+        Some(MediaPlaylistType::Other(_)) => return Err(ManifestError::UnsupportedPlaylist),
+        Some(MediaPlaylistType::Vod) if is_live => {
             return Err(ManifestError::UnsupportedPlaylist);
         }
-        Some(MediaPlaylistType::Vod) | None => {}
+        Some(MediaPlaylistType::Vod) | Some(MediaPlaylistType::Event) | None => {}
     }
 
     if playlist.segments.is_empty() {
@@ -390,6 +913,23 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     let mut maximum_segment_duration = 0.0_f64;
 
     for (index, segment) in playlist.segments.iter_mut().enumerate() {
+        let sequence_index = u64::try_from(index).map_err(|_| ManifestError::DurationOverflow)?;
+        let media_sequence = playlist
+            .media_sequence
+            .checked_add(sequence_index)
+            .ok_or(ManifestError::DurationOverflow)?;
+        // Static VOD playlists retain their established zero-based staging
+        // names. Live and EVENT/unspecified-type playlists use absolute media
+        // sequence identities, including a final ENDLIST snapshot, so retry
+        // windows continue to resolve to the same local resource names.
+        let stable_live_identity = is_live
+            || (playlist.playlist_type != Some(MediaPlaylistType::Vod)
+                && playlist.media_sequence > 0);
+        let resource_index = if stable_live_identity {
+            usize::try_from(media_sequence).map_err(|_| ManifestError::DurationOverflow)?
+        } else {
+            index
+        };
         if segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY") {
             // A key tag the parser could not decode must never pass through
             // into FFmpeg, where it could bypass our encryption policy.
@@ -524,7 +1064,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                 None
             }
         };
-        let filename = resource_filename("segment", Some(index), &segment_url, range);
+        let filename = resource_filename("segment", Some(resource_index), &segment_url, range);
         resources.push(HlsResource {
             url: segment_url,
             range,
@@ -543,7 +1083,31 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     if rounded_target_duration > u64::MAX as f64 {
         return Err(ManifestError::DurationOverflow);
     }
-    playlist.target_duration = rounded_target_duration as u64;
+    if is_live {
+        // RFC 8216 validates the rounded EXTINF duration against the stable
+        // target duration. Keep the source target unchanged across reloads.
+        if maximum_segment_duration.round() > source_target_duration as f64 {
+            return Err(ManifestError::InvalidDuration);
+        }
+        playlist.target_duration = source_target_duration;
+    } else {
+        playlist.target_duration = rounded_target_duration as u64;
+    }
+    playlist.version = Some(minimum_hls_playlist_version(&playlist));
+    playlist.playlist_type = Some(MediaPlaylistType::Vod);
+    playlist.end_list = true;
+
+    Ok(HlsPlan {
+        resources: resources.into_boxed_slice(),
+        playlist_url: base_url,
+        is_live,
+        end_list,
+        source_target_duration,
+        local_playlist: playlist,
+    })
+}
+
+fn minimum_hls_playlist_version(playlist: &MediaPlaylist) -> usize {
     let has_initialization_map = playlist
         .segments
         .iter()
@@ -554,20 +1118,13 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             .as_ref()
             .is_some_and(|key| key.keyformat.is_some() || key.keyformatversions.is_some())
     });
-    playlist.version = Some(if has_initialization_map {
+    if has_initialization_map {
         6
     } else if has_key_format_attributes {
         5
     } else {
         3
-    });
-    playlist.playlist_type = Some(MediaPlaylistType::Vod);
-    playlist.end_list = true;
-
-    Ok(HlsPlan {
-        resources: resources.into_boxed_slice(),
-        local_playlist: playlist,
-    })
+    }
 }
 
 fn is_unsupported_hls_tag(tag: &str) -> bool {
@@ -767,6 +1324,307 @@ media.mp4
                 .as_ref()
                 .is_some_and(|map| map.byte_range.is_none())
         );
+    }
+
+    #[test]
+    fn completed_local_live_capture_rebuilds_without_remote_resources() {
+        let source = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:900\n#EXTINF:4,\n900.ts\n",
+        )
+        .expect("plan initial live playlist");
+        let mut accumulator = HlsLiveAccumulator::new();
+        let update = accumulator
+            .prepare_update(&source)
+            .expect("prepare first live window");
+        accumulator
+            .commit_update_with_budget(update, 0, 0)
+            .expect("commit first live window");
+
+        let local_bytes = accumulator
+            .local_playlist_bytes()
+            .expect("serialize committed local capture");
+        let restored =
+            HlsPlan::from_local_capture(BASE_URL, &local_bytes).expect("rebuild local plan");
+
+        assert!(!restored.is_live);
+        assert!(restored.end_list);
+        assert!(restored.resources.is_empty());
+        let local = m3u8_rs::parse_media_playlist_res(
+            &restored
+                .local_playlist_bytes()
+                .expect("serialize rebuilt local plan"),
+        )
+        .expect("parse rebuilt local plan");
+        assert_eq!(local.segments.len(), 1);
+        assert_eq!(local.segments[0].uri, source.resources[0].filename);
+        assert_eq!(local.playlist_type, Some(MediaPlaylistType::Vod));
+        assert!(local.end_list);
+    }
+
+    #[test]
+    fn ordinary_live_playlist_is_planned_with_absolute_media_sequence_names() {
+        let body = br#"#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:4
+#EXT-X-MEDIA-SEQUENCE:100
+#EXTINF:3.7,
+100.ts
+#EXTINF:4,
+101.ts
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("ordinary live media playlist should be accepted");
+
+        assert!(plan.is_live);
+        assert!(!plan.end_list);
+        assert_eq!(plan.source_target_duration, 4);
+        assert_eq!(plan.resources.len(), 2);
+        assert!(plan.resources[0].filename.starts_with("segment-000100-"));
+        assert!(plan.resources[1].filename.starts_with("segment-000101-"));
+
+        let local = m3u8_rs::parse_media_playlist_res(
+            &plan
+                .local_playlist_bytes()
+                .expect("serialize local VOD snapshot"),
+        )
+        .expect("local snapshot parses");
+        assert_eq!(local.media_sequence, 100);
+        assert_eq!(local.target_duration, 4);
+        assert_eq!(local.playlist_type, Some(MediaPlaylistType::Vod));
+        assert!(
+            local.end_list,
+            "the local snapshot is always finalized VOD syntax"
+        );
+    }
+
+    #[test]
+    fn live_accumulator_appends_only_new_sequences_and_restores_from_staging() {
+        let mut accumulator = HlsLiveAccumulator::new();
+        let first = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4,\n100.ts\n#EXTINF:4,\n101.ts\n",
+        )
+        .expect("initial live snapshot");
+        let update = accumulator
+            .prepare_update(&first)
+            .expect("initial live snapshot can be committed");
+        assert_eq!(update.resources.len(), 2);
+        assert!(update.changed);
+        accumulator
+            .commit_update_with_budget(update, 0, 0)
+            .expect("commit initial media resources");
+        assert_eq!(accumulator.segment_count(), 2);
+
+        let staged = accumulator
+            .local_playlist_bytes()
+            .expect("serialize resumable local playlist");
+        let mut restored = HlsLiveAccumulator::from_local_playlist_bytes(&staged)
+            .expect("restore staged live recording");
+
+        let next = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:101\n#EXTINF:4,\n101.ts\n#EXTINF:4,\n102.ts\n",
+        )
+        .expect("overlapping live snapshot");
+        let update = restored
+            .prepare_update(&next)
+            .expect("overlapping segments remain stable");
+        assert!(update.changed);
+        assert_eq!(update.resources.len(), 1);
+        assert!(
+            update.resources[0].filename.starts_with("segment-000102-"),
+            "only the unseen sequence should be fetched"
+        );
+        restored
+            .commit_update_with_budget(update, 0, 0)
+            .expect("append unseen media sequence");
+        assert_eq!(restored.segment_count(), 3);
+
+        let repeated = restored
+            .prepare_update(&next)
+            .expect("repeated playlist remains valid");
+        assert!(!repeated.changed);
+        assert!(repeated.resources.is_empty());
+        restored
+            .commit_update_with_budget(repeated, 0, 0)
+            .expect("commit no-op playlist reload");
+        assert_eq!(restored.segment_count(), 3);
+    }
+
+    #[test]
+    fn live_accumulator_preserves_last_commit_when_byte_limit_is_reached() {
+        let mut accumulator = HlsLiveAccumulator::new();
+        let initial = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:650\n#EXTINF:4,\n650.ts\n",
+        )
+        .expect("initial live playlist");
+        let update = accumulator
+            .prepare_update(&initial)
+            .expect("prepare initial live playlist");
+        accumulator
+            .commit_update_with_budget(update, 0, 0)
+            .expect("commit initial live playlist");
+        accumulator
+            .restore_resource_bytes(MAX_HLS_LIVE_CAPTURE_BYTES - 1)
+            .expect("restore a capture just below the byte limit");
+
+        let next = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:651\n#EXTINF:4,\n651.ts\n",
+        )
+        .expect("next live playlist");
+        let update = accumulator
+            .prepare_update(&next)
+            .expect("prepare the next live window");
+        assert_eq!(
+            accumulator.commit_update_with_budget(update, 0, 2),
+            Err(ManifestError::LiveCaptureLimit)
+        );
+        assert_eq!(accumulator.segment_count(), 1);
+        assert_eq!(
+            accumulator.resource_bytes(),
+            MAX_HLS_LIVE_CAPTURE_BYTES - 1,
+            "the failed aggregate commit must not mutate the video track byte total"
+        );
+        let bytes = accumulator
+            .local_playlist_bytes()
+            .expect("serialize the last committed playlist");
+        let playlist =
+            m3u8_rs::parse_media_playlist_res(&bytes).expect("parse last committed playlist");
+        assert_eq!(playlist.segments.len(), 1);
+        assert!(playlist.segments[0].uri.starts_with("segment-000650-"));
+    }
+
+    #[test]
+    fn live_accumulator_upgrades_playlist_version_for_later_init_maps() {
+        let mut accumulator = HlsLiveAccumulator::new();
+        let initial = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:600\n#EXTINF:4,\n600.ts\n",
+        )
+        .expect("initial MPEG-TS live playlist");
+        let initial_update = accumulator
+            .prepare_update(&initial)
+            .expect("prepare initial live playlist");
+        accumulator
+            .commit_update_with_budget(initial_update, 0, 0)
+            .expect("commit initial live playlist");
+        let first = m3u8_rs::parse_media_playlist_res(
+            &accumulator
+                .local_playlist_bytes()
+                .expect("serialize initial local playlist"),
+        )
+        .expect("parse initial local playlist");
+        assert_eq!(first.version, Some(3));
+
+        let later = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:601\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4,\n601.m4s\n",
+        )
+        .expect("later fMP4 live playlist with init map");
+        let later_update = accumulator
+            .prepare_update(&later)
+            .expect("prepare later init-map window");
+        accumulator
+            .commit_update_with_budget(later_update, 0, 0)
+            .expect("commit later init-map window");
+        let accumulated = m3u8_rs::parse_media_playlist_res(
+            &accumulator
+                .local_playlist_bytes()
+                .expect("serialize upgraded local playlist"),
+        )
+        .expect("parse upgraded local playlist");
+        assert_eq!(accumulated.version, Some(6));
+        assert!(
+            accumulated.segments[1]
+                .map
+                .as_ref()
+                .is_some_and(|map| map.uri.starts_with("init-"))
+        );
+    }
+
+    #[test]
+    fn live_accumulator_rejects_sequence_gaps_and_changed_overlap() {
+        let mut accumulator = HlsLiveAccumulator::new();
+        let initial = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:200\n#EXTINF:4,\n200.ts\n#EXTINF:4,\n201.ts\n",
+        )
+        .expect("initial live snapshot");
+        let update = accumulator
+            .prepare_update(&initial)
+            .expect("prepare initial snapshot");
+        accumulator
+            .commit_update_with_budget(update, 0, 0)
+            .expect("commit initial snapshot");
+
+        let gap = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:203\n#EXTINF:4,\n203.ts\n",
+        )
+        .expect("playlist with later media sequence is structurally valid");
+        assert_eq!(
+            accumulator.prepare_update(&gap).err(),
+            Some(ManifestError::LiveSequenceGap),
+            "missing media sequences must never be silently skipped"
+        );
+
+        let changed_overlap = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:200\n#EXTINF:4,\nreplacement.ts\n#EXTINF:4,\n201.ts\n",
+        )
+        .expect("playlist with changed overlapping URI is structurally valid");
+        assert_eq!(
+            accumulator.prepare_update(&changed_overlap).err(),
+            Some(ManifestError::LiveSequenceGap),
+            "the same media sequence cannot silently change resource identity"
+        );
+    }
+
+    #[test]
+    fn live_accumulator_rejects_target_duration_changes() {
+        let mut accumulator = HlsLiveAccumulator::new();
+        let initial = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:300\n#EXTINF:4,\n300.ts\n",
+        )
+        .expect("initial live snapshot");
+        let update = accumulator
+            .prepare_update(&initial)
+            .expect("prepare initial snapshot");
+        accumulator
+            .commit_update_with_budget(update, 0, 0)
+            .expect("commit initial snapshot");
+
+        let changed_target = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:5\n#EXT-X-MEDIA-SEQUENCE:300\n#EXTINF:4,\n300.ts\n",
+        )
+        .expect("new target duration is syntactically valid");
+        assert_eq!(
+            accumulator.prepare_update(&changed_target).err(),
+            Some(ManifestError::LiveSequenceGap)
+        );
+    }
+
+    #[test]
+    fn end_list_snapshot_marks_live_capture_complete() {
+        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:400\n#EXTINF:4,\n400.ts\n#EXT-X-ENDLIST\n";
+        let plan = plan_hls_media_playlist(BASE_URL, body).expect("ended live event playlist");
+        assert!(!plan.is_live);
+        assert!(plan.end_list);
+
+        let mut accumulator = HlsLiveAccumulator::new();
+        let update = accumulator
+            .prepare_update(&plan)
+            .expect("final snapshot can be committed");
+        assert!(update.end_list);
+        accumulator
+            .commit_update_with_budget(update, 0, 0)
+            .expect("commit final media sequence");
+        assert_eq!(accumulator.segment_count(), 1);
     }
 
     #[test]

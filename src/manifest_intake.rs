@@ -147,7 +147,7 @@ pub(crate) struct ManifestAudioChoice {
 #[derive(Debug)]
 pub(crate) enum NativeManifest {
     HlsMaster(HlsMasterPlan),
-    HlsMedia(HlsPlan),
+    HlsMedia(Box<HlsPlan>),
     Dash(DashManifestPlan),
 }
 
@@ -535,7 +535,7 @@ async fn lookup_with_client_policy(
                 Ok(master) => NativeManifest::HlsMaster(master),
                 Err(crate::manifest::ManifestError::ExpectedMasterPlaylist) => {
                     match crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body) {
-                        Ok(plan) => NativeManifest::HlsMedia(plan),
+                        Ok(plan) => NativeManifest::HlsMedia(Box::new(plan)),
                         Err(_) => return Ok(None),
                     }
                 }

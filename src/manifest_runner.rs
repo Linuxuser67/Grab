@@ -13,7 +13,10 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 use url::Url;
 
 use crate::engine_msg::EngineMsg;
-use crate::manifest::{HlsPlan, HlsResourceKind, ManifestByteRange, dash::DashRepresentationPlan};
+use crate::manifest::{
+    HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
+    dash::DashRepresentationPlan,
+};
 use crate::manifest_intake::{ManifestLookup, NativeManifest};
 use crate::media_types::{ManifestKind, ManifestSource};
 
@@ -119,6 +122,37 @@ enum Tracks {
     },
 }
 
+#[derive(Debug)]
+struct LiveHlsTrack {
+    playlist_url: Url,
+    directory: PathBuf,
+    accumulator: HlsLiveAccumulator,
+    snapshot_at: Instant,
+    ended: bool,
+    next_poll_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveHlsCaptureOutcome {
+    Ended,
+    Preserve,
+    PreserveVideoOnly,
+    Discard,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResourceFetchOutcome {
+    Complete,
+    Stopped(crate::video::StopIntent),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveHlsSnapshotOutcome {
+    Committed,
+    Stopped(crate::video::StopIntent),
+    ContinuityLost,
+}
+
 /// Run one HLS or static-DASH attempt, keeping completed resources for retry.
 ///
 /// # Errors
@@ -144,97 +178,181 @@ pub(crate) async fn run_manifest_download(
     .await
     .map_err(|error| format!("Could not prepare manifest staging: {error}"))??;
 
-    let client = crate::manifest_intake::client_for_manifest(
+    let video_dir = staging.join("video");
+    ensure_track_dir(&video_dir).await?;
+    let audio_dir = staging.join("audio");
+    let live_marker_exists = read_live_hls_marker(&staging)
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    let mut offline_tracks = if live_marker_exists && job.source.kind == ManifestKind::Hls {
+        restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
+    } else {
+        None
+    };
+
+    let (client, force_offline) = match crate::manifest_intake::client_for_manifest(
         &job.source.url,
         &job.cookies_browser,
         job.proxy.as_ref(),
     )
     .await
-    .map_err(|error| format!("Could not configure manifest networking: {error}"))?;
-    let lookup = crate::manifest_intake::lookup_with_client(&client, &job.source.url)
-        .await?
-        .ok_or_else(|| {
-            ManifestRunError::Unsupported("The stream manifest is no longer supported".to_string())
-        })?;
-    if lookup.kind() != job.source.kind {
-        return Err(ManifestRunError::Unsupported(
-            "The stream manifest changed protocol".to_string(),
-        ));
-    }
+    {
+        Ok(client) => (client, false),
+        Err(error) if offline_tracks.is_some() => {
+            tracing::warn!(
+                item_id = job.item_id,
+                error = %error,
+                "live HLS source is unavailable; finalizing the committed local capture"
+            );
+            (reqwest::Client::new(), true)
+        }
+        Err(error) => {
+            return Err(ManifestRunError::Failed(format!(
+                "Could not configure manifest networking: {error}"
+            )));
+        }
+    };
 
-    let tracks = resolve_tracks(&client, lookup, &job.source).await?;
-    let video_dir = staging.join("video");
-    ensure_track_dir(&video_dir).await?;
-    let audio_dir = staging.join("audio");
-    let has_audio = match &tracks {
+    let tracks = if force_offline {
+        offline_tracks.take().ok_or_else(|| {
+            ManifestRunError::Failed(
+                "The saved live HLS recording is no longer available".to_string(),
+            )
+        })?
+    } else {
+        match crate::manifest_intake::lookup_with_client(&client, &job.source.url).await {
+            Ok(Some(lookup)) if lookup.kind() == job.source.kind => {
+                match resolve_tracks(&client, lookup, &job.source).await {
+                    Ok(tracks) => tracks,
+                    Err(error) if offline_tracks.is_some() => {
+                        tracing::warn!(
+                            item_id = job.item_id,
+                            error = %error,
+                            "live HLS source no longer resolves; finalizing the committed local capture"
+                        );
+                        offline_tracks.take().ok_or_else(|| {
+                            ManifestRunError::Failed(
+                                "The saved live HLS recording is no longer available".to_string(),
+                            )
+                        })?
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(Some(_)) | Ok(None) => {
+                if let Some(tracks) = offline_tracks.take() {
+                    tracing::warn!(
+                        item_id = job.item_id,
+                        "live HLS source changed or is no longer supported; finalizing the committed local capture"
+                    );
+                    tracks
+                } else {
+                    return Err(ManifestRunError::Unsupported(
+                        "The stream manifest is no longer supported".to_string(),
+                    ));
+                }
+            }
+            Err(error) if offline_tracks.is_some() => {
+                tracing::warn!(
+                    item_id = job.item_id,
+                    error = %error,
+                    "live HLS source is unavailable; finalizing the committed local capture"
+                );
+                offline_tracks.take().ok_or_else(|| {
+                    ManifestRunError::Failed(
+                        "The saved live HLS recording is no longer available".to_string(),
+                    )
+                })?
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let mut has_audio = match &tracks {
         Tracks::Hls { audio, .. } => audio.is_some(),
         Tracks::Dash { audio, .. } => audio.is_some(),
     };
     if has_audio {
         ensure_track_dir(&audio_dir).await?;
     }
-
-    tx.send(EngineMsg::Phase("Downloading stream segments…".to_string()))
-        .ok();
+    let live_source = matches!(
+        &tracks,
+        Tracks::Hls { video, audio }
+            if video.is_live || audio.as_ref().is_some_and(|track| track.is_live)
+    );
+    let live_hls = matches!(&tracks, Tracks::Hls { .. }) && (live_source || live_marker_exists);
+    if live_source {
+        ensure_live_hls_marker(&staging)
+            .await
+            .map_err(ManifestRunError::Failed)?;
+    } else if live_marker_exists && !matches!(&tracks, Tracks::Hls { .. }) {
+        return Err(ManifestRunError::Failed(
+            "A live HLS staging marker belongs to a non-HLS queue item".to_string(),
+        ));
+    }
+    tx.send(EngineMsg::Phase(if live_source {
+        "Recording live stream…".to_string()
+    } else if live_hls {
+        "Finalizing live stream…".to_string()
+    } else {
+        "Downloading stream segments…".to_string()
+    }))
+    .ok();
     let concurrency = job.connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
     let downloaded = Arc::new(AtomicU64::new(0));
-
-    match &tracks {
-        Tracks::Hls { video, audio } => {
-            if !fetch_resources(
-                &client,
-                hls_resources(video),
-                &video_dir,
-                concurrency,
-                &tx,
-                &downloaded,
-                &mut abort,
-            )
-            .await?
-            {
-                return Ok(ManifestOutcome::Aborted);
+    let mut _preserve_stop_sender = None;
+    if live_hls {
+        let Tracks::Hls { video, audio } = &tracks else {
+            return Err(ManifestRunError::Failed(
+                "Live HLS capture requires HLS media tracks".to_string(),
+            ));
+        };
+        let capture = run_live_hls_tracks(
+            &client,
+            &job.source.url,
+            video,
+            audio.as_ref(),
+            &video_dir,
+            &audio_dir,
+            concurrency,
+            &tx,
+            &downloaded,
+            &mut abort,
+        )
+        .await?;
+        match capture {
+            LiveHlsCaptureOutcome::Ended => {}
+            LiveHlsCaptureOutcome::Preserve | LiveHlsCaptureOutcome::PreserveVideoOnly => {
+                // A preserved stop ends recording but still needs a live
+                // receiver during FFmpeg finalization. Removal remains guarded
+                // by AttemptGate::try_commit at the final delivery boundary.
+                if !staged_regular_file_exists(&video_dir.join("local.m3u8")).await {
+                    return Ok(ManifestOutcome::Aborted);
+                }
+                if matches!(capture, LiveHlsCaptureOutcome::PreserveVideoOnly) {
+                    // Keep a video-only recovery decision across process restarts:
+                    // an old audio playlist must not be restored on the next retry.
+                    remove_regular_file_if_present(&audio_dir.join("local.m3u8"))
+                        .await
+                        .map_err(ManifestRunError::Failed)?;
+                    has_audio = false;
+                } else if has_audio
+                    && !staged_regular_file_exists(&audio_dir.join("local.m3u8")).await
+                {
+                    has_audio = false;
+                }
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                _preserve_stop_sender = Some(sender);
+                abort = receiver;
             }
-            if let Some(audio) = audio
-                && !fetch_resources(
-                    &client,
-                    hls_resources(audio),
-                    &audio_dir,
-                    concurrency,
-                    &tx,
-                    &downloaded,
-                    &mut abort,
-                )
-                .await?
-            {
-                return Ok(ManifestOutcome::Aborted);
-            }
-            write_playlist(&video_dir, video).await?;
-            if let Some(audio) = audio {
-                write_playlist(&audio_dir, audio).await?;
-            }
+            LiveHlsCaptureOutcome::Discard => return Ok(ManifestOutcome::Aborted),
         }
-        Tracks::Dash { video, audio } => {
-            if !fetch_resources(
-                &client,
-                dash_resources(video),
-                &video_dir,
-                concurrency,
-                &tx,
-                &downloaded,
-                &mut abort,
-            )
-            .await?
-            {
-                return Ok(ManifestOutcome::Aborted);
-            }
-            if !concat_dash_track(video, &video_dir, "video-track.mp4", &mut abort).await? {
-                return Ok(ManifestOutcome::Aborted);
-            }
-            if let Some(audio) = audio {
+    } else {
+        match &tracks {
+            Tracks::Hls { video, audio } => {
                 if !fetch_resources(
                     &client,
-                    dash_resources(audio),
-                    &audio_dir,
+                    hls_resources(video),
+                    &video_dir,
                     concurrency,
                     &tx,
                     &downloaded,
@@ -244,8 +362,59 @@ pub(crate) async fn run_manifest_download(
                 {
                     return Ok(ManifestOutcome::Aborted);
                 }
-                if !concat_dash_track(audio, &audio_dir, "audio-track.mp4", &mut abort).await? {
+                if let Some(audio) = audio
+                    && !fetch_resources(
+                        &client,
+                        hls_resources(audio),
+                        &audio_dir,
+                        concurrency,
+                        &tx,
+                        &downloaded,
+                        &mut abort,
+                    )
+                    .await?
+                {
                     return Ok(ManifestOutcome::Aborted);
+                }
+                write_playlist(&video_dir, video).await?;
+                if let Some(audio) = audio {
+                    write_playlist(&audio_dir, audio).await?;
+                }
+            }
+            Tracks::Dash { video, audio } => {
+                if !fetch_resources(
+                    &client,
+                    dash_resources(video),
+                    &video_dir,
+                    concurrency,
+                    &tx,
+                    &downloaded,
+                    &mut abort,
+                )
+                .await?
+                {
+                    return Ok(ManifestOutcome::Aborted);
+                }
+                if !concat_dash_track(video, &video_dir, "video-track.mp4", &mut abort).await? {
+                    return Ok(ManifestOutcome::Aborted);
+                }
+                if let Some(audio) = audio {
+                    if !fetch_resources(
+                        &client,
+                        dash_resources(audio),
+                        &audio_dir,
+                        concurrency,
+                        &tx,
+                        &downloaded,
+                        &mut abort,
+                    )
+                    .await?
+                    {
+                        return Ok(ManifestOutcome::Aborted);
+                    }
+                    if !concat_dash_track(audio, &audio_dir, "audio-track.mp4", &mut abort).await? {
+                        return Ok(ManifestOutcome::Aborted);
+                    }
                 }
             }
         }
@@ -349,7 +518,7 @@ async fn resolve_tracks(
         NativeManifest::HlsMedia(plan) if source.representation_key == "hls-media" => {
             guard_hls_resources(&source.url, &plan, &mut guarded_child_hosts)?;
             Ok(Tracks::Hls {
-                video: plan,
+                video: *plan,
                 audio: None,
             })
         }
@@ -496,7 +665,11 @@ fn guard_manifest_child_url(
 }
 
 fn hls_resources(plan: &HlsPlan) -> Vec<Resource> {
-    plan.resources
+    hls_resources_from(&plan.resources)
+}
+
+fn hls_resources_from(resources: &[HlsResource]) -> Vec<Resource> {
+    resources
         .iter()
         .map(|resource| Resource {
             url: resource.url.clone(),
@@ -535,6 +708,759 @@ async fn ensure_track_dir(path: &Path) -> Result<(), String> {
     }
 }
 
+async fn read_local_live_hls_plan(
+    source_url: &str,
+    directory: &Path,
+) -> Result<Option<HlsPlan>, ManifestRunError> {
+    let path = directory.join("local.m3u8");
+    let metadata = match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(ManifestRunError::Failed(format!(
+                "Could not inspect the staged live HLS playlist: {error}"
+            )));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ManifestRunError::Failed(
+            "The staged live HLS playlist is not a regular file".to_string(),
+        ));
+    }
+    if metadata.len() > crate::manifest::MAX_HLS_LOCAL_PLAYLIST_BYTES as u64 {
+        return Err(ManifestRunError::Failed(
+            "The staged live HLS playlist exceeds its size limit".to_string(),
+        ));
+    }
+    let bytes = tokio::fs::read(&path).await.map_err(|error| {
+        ManifestRunError::Failed(format!(
+            "Could not read the staged live HLS recording: {error}"
+        ))
+    })?;
+    HlsPlan::from_local_capture(source_url, &bytes)
+        .map(Some)
+        .map_err(|error| {
+            ManifestRunError::Failed(format!(
+                "Could not restore the staged live HLS recording: {error}"
+            ))
+        })
+}
+
+async fn restore_local_live_hls_tracks(
+    source_url: &str,
+    video_dir: &Path,
+    audio_dir: &Path,
+) -> Result<Option<Tracks>, ManifestRunError> {
+    let Some(video) = read_local_live_hls_plan(source_url, video_dir).await? else {
+        return Ok(None);
+    };
+    let audio = read_local_live_hls_plan(source_url, audio_dir).await?;
+    Ok(Some(Tracks::Hls { video, audio }))
+}
+
+const LIVE_HLS_MARKER_NAME: &str = "live-hls.capture";
+const LIVE_HLS_MARKER_CONTENT: &[u8] = b"grab-live-hls-v1\n";
+
+async fn read_live_hls_marker(directory: &Path) -> Result<bool, String> {
+    let marker = directory.join(LIVE_HLS_MARKER_NAME);
+    let metadata = match tokio::fs::symlink_metadata(&marker).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "Could not inspect live HLS staging marker: {error}"
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("The live HLS staging marker is not a regular file".to_string());
+    }
+    if metadata.len() != LIVE_HLS_MARKER_CONTENT.len() as u64 {
+        return Err("The live HLS staging marker has an unsupported version".to_string());
+    }
+    let contents = tokio::fs::read(&marker)
+        .await
+        .map_err(|error| format!("Could not read live HLS staging marker: {error}"))?;
+    if contents != LIVE_HLS_MARKER_CONTENT {
+        return Err("The live HLS staging marker has an unsupported version".to_string());
+    }
+    Ok(true)
+}
+
+async fn ensure_live_hls_marker(directory: &Path) -> Result<(), String> {
+    if read_live_hls_marker(directory).await? {
+        return Ok(());
+    }
+    let marker = directory.join(LIVE_HLS_MARKER_NAME);
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+        .await
+        .map_err(|error| format!("Could not create live HLS staging marker: {error}"))?;
+    if let Err(error) = file.write_all(LIVE_HLS_MARKER_CONTENT).await {
+        drop(file);
+        let _ = remove_regular_file_if_present(&marker).await;
+        return Err(format!("Could not write live HLS staging marker: {error}"));
+    }
+    if let Err(error) = file.sync_all().await {
+        drop(file);
+        let _ = remove_regular_file_if_present(&marker).await;
+        return Err(format!("Could not flush live HLS staging marker: {error}"));
+    }
+    Ok(())
+}
+
+async fn load_live_hls_track(
+    plan: &HlsPlan,
+    directory: &Path,
+) -> Result<LiveHlsTrack, ManifestRunError> {
+    let local_playlist = directory.join("local.m3u8");
+    let mut accumulator = match tokio::fs::symlink_metadata(&local_playlist).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(ManifestRunError::Failed(
+                "The staged live HLS playlist is not a regular file".to_string(),
+            ));
+        }
+        Ok(metadata) if metadata.len() > crate::manifest::MAX_HLS_LOCAL_PLAYLIST_BYTES as u64 => {
+            return Err(ManifestRunError::Failed(
+                "The staged live HLS playlist exceeds its size limit".to_string(),
+            ));
+        }
+        Ok(_) => {
+            let bytes = tokio::fs::read(&local_playlist).await.map_err(|error| {
+                ManifestRunError::Failed(format!(
+                    "Could not read the staged live HLS recording: {error}"
+                ))
+            })?;
+            HlsLiveAccumulator::from_local_playlist_bytes(&bytes).map_err(|error| {
+                ManifestRunError::Failed(format!(
+                    "Could not restore the staged live HLS recording: {error}"
+                ))
+            })?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HlsLiveAccumulator::new(),
+        Err(error) => {
+            return Err(ManifestRunError::Failed(format!(
+                "Could not inspect the staged live HLS recording: {error}"
+            )));
+        }
+    };
+
+    let current_resources: std::collections::HashMap<&str, &HlsResource> = plan
+        .resources
+        .iter()
+        .map(|resource| (resource.filename.as_str(), resource))
+        .collect();
+    let restored_names = accumulator
+        .resource_names()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut total_resource_bytes = 0_u64;
+    for filename in restored_names {
+        let path = directory.join(&filename);
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(ManifestRunError::Failed(
+                    "A staged live HLS resource is not a regular file".to_string(),
+                ));
+            }
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(ManifestRunError::Failed(format!(
+                    "Could not inspect a staged live HLS resource: {error}"
+                )));
+            }
+        };
+        let expected = current_resources.get(filename.as_str()).copied();
+        let is_key = accumulator.is_key_resource(&filename)
+            || expected.is_some_and(|resource| resource.kind == HlsResourceKind::Key);
+        let cached_is_valid = metadata.as_ref().is_some_and(|metadata| {
+            metadata.len() > 0
+                && metadata.len() <= MAX_RESOURCE_BYTES
+                && (!is_key || metadata.len() == 16)
+                && expected.is_none_or(|resource| {
+                    resource
+                        .range
+                        .is_none_or(|range| metadata.len() == range.length)
+                })
+        });
+        if cached_is_valid {
+            if let Some(metadata) = metadata.as_ref() {
+                total_resource_bytes = total_resource_bytes
+                    .checked_add(metadata.len())
+                    .ok_or_else(|| {
+                        ManifestRunError::Failed(
+                            "The staged live HLS recording byte total overflowed".to_string(),
+                        )
+                    })?;
+            }
+        } else {
+            if expected.is_none() {
+                return Err(ManifestRunError::Failed(
+                    "A captured live HLS resource is missing or invalid and no longer appears in the current playlist"
+                        .to_string(),
+                ));
+            }
+            accumulator.forget_resource(&filename);
+        }
+    }
+    accumulator
+        .restore_resource_bytes(total_resource_bytes)
+        .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
+
+    Ok(LiveHlsTrack {
+        playlist_url: plan.playlist_url.clone(),
+        directory: directory.to_path_buf(),
+        accumulator,
+        snapshot_at: Instant::now(),
+        ended: false,
+        next_poll_at: None,
+    })
+}
+
+fn live_hls_poll_interval(target_duration: u64, changed: bool) -> Duration {
+    let target = Duration::from_secs(target_duration);
+    if changed { target } else { target.div_f32(2.0) }
+}
+
+async fn staged_regular_file_exists(path: &Path) -> bool {
+    tokio::fs::symlink_metadata(path)
+        .await
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+}
+
+async fn write_live_playlist(
+    directory: &Path,
+    accumulator: &HlsLiveAccumulator,
+) -> Result<(), String> {
+    let bytes = accumulator
+        .local_playlist_bytes()
+        .map_err(|error| error.to_string())?;
+    let target = directory.join("local.m3u8");
+    let part = directory.join("local.m3u8.next.part");
+    remove_regular_file_if_present(&part).await?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&part)
+        .await
+        .map_err(|error| format!("Could not create the live HLS playlist: {error}"))?;
+    file.write_all(&bytes)
+        .await
+        .map_err(|error| format!("Could not write the live HLS playlist: {error}"))?;
+    file.sync_all()
+        .await
+        .map_err(|error| format!("Could not flush the live HLS playlist: {error}"))?;
+    drop(file);
+
+    match tokio::fs::symlink_metadata(&target).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err("The staged live HLS playlist is not a regular file".to_string());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Could not inspect the staged live HLS playlist: {error}"
+            ));
+        }
+    }
+    tokio::fs::rename(&part, &target)
+        .await
+        .map_err(|error| format!("Could not publish the live HLS playlist: {error}"))
+}
+
+async fn fetched_hls_resource_bytes(
+    directory: &Path,
+    resources: &[HlsResource],
+) -> Result<u64, ManifestRunError> {
+    let mut total = 0_u64;
+    for resource in resources {
+        let path = directory.join(&resource.filename);
+        let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|error| {
+            ManifestRunError::Failed(format!(
+                "Could not inspect a fetched live HLS resource: {error}"
+            ))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ManifestRunError::Failed(
+                "A fetched live HLS resource is not a regular file".to_string(),
+            ));
+        }
+        let size = metadata.len();
+        if size == 0
+            || size > MAX_RESOURCE_BYTES
+            || resource.range.is_some_and(|range| size != range.length)
+            || (resource.kind == HlsResourceKind::Key && size != 16)
+        {
+            return Err(ManifestRunError::Failed(
+                "A fetched live HLS resource has an invalid size".to_string(),
+            ));
+        }
+        total = total.checked_add(size).ok_or_else(|| {
+            ManifestRunError::Failed("The live HLS resource byte total overflowed".to_string())
+        })?;
+    }
+    Ok(total)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one rendition update shares its client, cancellation, progress and aggregate byte-budget context"
+)]
+async fn apply_live_hls_snapshot(
+    client: &reqwest::Client,
+    plan: &HlsPlan,
+    track: &mut LiveHlsTrack,
+    connections: usize,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &Arc<AtomicU64>,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    other_rendition_bytes: u64,
+) -> Result<LiveHlsSnapshotOutcome, ManifestRunError> {
+    if plan.is_live == plan.end_list {
+        if track.accumulator.segment_count() > 0 {
+            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+        }
+        return Err(ManifestRunError::Unsupported(
+            "The live HLS playlist state is inconsistent".to_string(),
+        ));
+    }
+    let playlist_url = plan.playlist_url.clone();
+    let update = match track.accumulator.prepare_update(plan) {
+        Ok(update) => update,
+        Err(crate::manifest::ManifestError::LiveSequenceGap) => {
+            tracing::warn!(
+                playlist = %playlist_url,
+                "live HLS playlist continuity was lost; preserving captured media"
+            );
+            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+        }
+        Err(crate::manifest::ManifestError::LiveCaptureLimit) => {
+            tracing::warn!(
+                playlist = %playlist_url,
+                "live HLS capture reached a configured resource limit; preserving captured media"
+            );
+            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+        }
+        Err(error) if track.accumulator.segment_count() > 0 => {
+            tracing::warn!(
+                playlist = %playlist_url,
+                error = %error,
+                "live HLS update is no longer supported; preserving captured media"
+            );
+            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+        }
+        Err(error) => return Err(ManifestRunError::Unsupported(error.to_string())),
+    };
+    let changed = update.changed;
+    let end_list = update.end_list;
+    let next_poll_at = if end_list {
+        None
+    } else {
+        match track
+            .snapshot_at
+            .checked_add(live_hls_poll_interval(plan.source_target_duration, changed))
+        {
+            Some(deadline) => Some(deadline),
+            None if track.accumulator.segment_count() > 0 => {
+                tracing::warn!(
+                    playlist = %playlist_url,
+                    "live HLS reload deadline is out of range; preserving captured media"
+                );
+                return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+            }
+            None => {
+                return Err(ManifestRunError::Unsupported(
+                    "The live HLS target duration is too large".to_string(),
+                ));
+            }
+        }
+    };
+    let resources = hls_resources_from(&update.resources);
+    let fetch_outcome = fetch_resources_with_stop(
+        client,
+        resources,
+        &track.directory,
+        connections,
+        tx,
+        downloaded,
+        abort,
+    )
+    .await;
+    let fetch_outcome = match fetch_outcome {
+        Err(ManifestRunError::Unsupported(error)) if track.accumulator.segment_count() > 0 => {
+            tracing::warn!(
+                playlist = %playlist_url,
+                error = %error,
+                "live HLS resource update is no longer supported; preserving captured media"
+            );
+            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+        }
+        Err(error) => return Err(error),
+        Ok(outcome) => outcome,
+    };
+    match fetch_outcome {
+        ResourceFetchOutcome::Complete => {}
+        ResourceFetchOutcome::Stopped(intent) => {
+            return Ok(LiveHlsSnapshotOutcome::Stopped(intent));
+        }
+    }
+
+    let added_resource_bytes =
+        fetched_hls_resource_bytes(&track.directory, &update.resources).await?;
+    match track.accumulator.commit_update_with_budget(
+        update,
+        added_resource_bytes,
+        other_rendition_bytes,
+    ) {
+        Ok(()) => {}
+        Err(crate::manifest::ManifestError::LiveCaptureLimit) => {
+            tracing::warn!(
+                playlist = %playlist_url,
+                "live HLS capture reached a configured resource limit; preserving captured media"
+            );
+            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+        }
+        Err(error) if track.accumulator.segment_count() > 0 => {
+            tracing::warn!(
+                playlist = %playlist_url,
+                error = %error,
+                "live HLS commit is no longer supported; preserving captured media"
+            );
+            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+        }
+        Err(error) => return Err(ManifestRunError::Unsupported(error.to_string())),
+    }
+    write_live_playlist(&track.directory, &track.accumulator)
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    track.playlist_url = playlist_url;
+    track.ended = end_list;
+    track.next_poll_at = next_poll_at;
+    Ok(LiveHlsSnapshotOutcome::Committed)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one rendition poll carries the same guarded-network and cancellation context into its update"
+)]
+async fn poll_live_hls_track(
+    client: &reqwest::Client,
+    source_url: &str,
+    track: &mut LiveHlsTrack,
+    connections: usize,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &Arc<AtomicU64>,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    guarded_child_hosts: &mut std::collections::HashSet<String>,
+    other_rendition_bytes: u64,
+) -> Result<LiveHlsSnapshotOutcome, ManifestRunError> {
+    let result = tokio::select! {
+        biased;
+        stop = &mut *abort => {
+            return Ok(LiveHlsSnapshotOutcome::Stopped(
+                stop.unwrap_or(crate::video::StopIntent::Discard),
+            ));
+        }
+        result = crate::manifest_intake::lookup_hls_media(
+            client,
+            track.playlist_url.as_str(),
+        ) => result,
+    };
+    let plan = match result {
+        Ok(plan) => plan,
+        Err(crate::manifest_intake::ManifestIntakeError::Unsupported(error))
+            if track.accumulator.segment_count() > 0 =>
+        {
+            tracing::warn!(
+                playlist = %track.playlist_url,
+                error = %error,
+                "live HLS playlist is no longer supported; preserving captured media"
+            );
+            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    track.snapshot_at = Instant::now();
+    if let Err(error) =
+        guard_manifest_child_url(source_url, &plan.playlist_url, guarded_child_hosts)
+    {
+        if track.accumulator.segment_count() > 0 {
+            tracing::warn!(
+                playlist = %plan.playlist_url,
+                error = %error,
+                "live HLS playlist host is no longer eligible; preserving captured media"
+            );
+            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+        }
+        return Err(ManifestRunError::Unsupported(error));
+    }
+    if let Err(error) = guard_hls_resources(source_url, &plan, guarded_child_hosts) {
+        if track.accumulator.segment_count() > 0 {
+            tracing::warn!(
+                playlist = %plan.playlist_url,
+                error = %error,
+                "live HLS resource host is no longer eligible; preserving captured media"
+            );
+            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+        }
+        return Err(ManifestRunError::Unsupported(error));
+    }
+    apply_live_hls_snapshot(
+        client,
+        &plan,
+        track,
+        connections,
+        tx,
+        downloaded,
+        abort,
+        other_rendition_bytes,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the paired live renditions share one bounded capture session and cancellation signal"
+)]
+async fn run_live_hls_tracks(
+    client: &reqwest::Client,
+    source_url: &str,
+    video_plan: &HlsPlan,
+    audio_plan: Option<&HlsPlan>,
+    video_dir: &Path,
+    audio_dir: &Path,
+    connections: usize,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &Arc<AtomicU64>,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<LiveHlsCaptureOutcome, ManifestRunError> {
+    let mut video = load_live_hls_track(video_plan, video_dir).await?;
+    let mut audio = match audio_plan {
+        Some(plan) => Some(load_live_hls_track(plan, audio_dir).await?),
+        None => None,
+    };
+    let retained_bytes = video
+        .accumulator
+        .resource_bytes()
+        .checked_add(
+            audio
+                .as_ref()
+                .map_or(0, |track| track.accumulator.resource_bytes()),
+        )
+        .filter(|total| *total <= crate::manifest::MAX_HLS_LIVE_CAPTURE_BYTES)
+        .ok_or_else(|| {
+            ManifestRunError::Failed(
+                "The staged live HLS recording exceeds Grab's native byte limit".to_string(),
+            )
+        })?;
+    downloaded.store(retained_bytes, Ordering::Relaxed);
+    let mut guarded_child_hosts = std::collections::HashSet::new();
+
+    let audio_resource_bytes = audio
+        .as_ref()
+        .map_or(0, |track| track.accumulator.resource_bytes());
+    if video
+        .accumulator
+        .resource_bytes()
+        .checked_add(audio_resource_bytes)
+        .is_none_or(|total| total > crate::manifest::MAX_HLS_LIVE_CAPTURE_BYTES)
+    {
+        return Ok(if video.accumulator.segment_count() > 0 {
+            LiveHlsCaptureOutcome::PreserveVideoOnly
+        } else {
+            LiveHlsCaptureOutcome::Discard
+        });
+    }
+
+    let all_tracks_ended = video_plan.end_list && audio_plan.is_none_or(|plan| plan.end_list);
+    if !all_tracks_ended {
+        guard_manifest_child_url(
+            source_url,
+            &video_plan.playlist_url,
+            &mut guarded_child_hosts,
+        )
+        .map_err(ManifestRunError::Unsupported)?;
+        if let Some(plan) = audio_plan {
+            guard_manifest_child_url(source_url, &plan.playlist_url, &mut guarded_child_hosts)
+                .map_err(ManifestRunError::Unsupported)?;
+        }
+    }
+
+    match apply_live_hls_snapshot(
+        client,
+        video_plan,
+        &mut video,
+        connections,
+        tx,
+        downloaded,
+        abort,
+        audio_resource_bytes,
+    )
+    .await?
+    {
+        LiveHlsSnapshotOutcome::Committed => {}
+        LiveHlsSnapshotOutcome::Stopped(intent) => {
+            return Ok(match intent {
+                crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
+                crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+            });
+        }
+        LiveHlsSnapshotOutcome::ContinuityLost => {
+            return Ok(if video.accumulator.segment_count() > 0 {
+                LiveHlsCaptureOutcome::PreserveVideoOnly
+            } else {
+                LiveHlsCaptureOutcome::Discard
+            });
+        }
+    }
+    if let (Some(plan), Some(track)) = (audio_plan, audio.as_mut()) {
+        let audio_outcome = apply_live_hls_snapshot(
+            client,
+            plan,
+            track,
+            connections,
+            tx,
+            downloaded,
+            abort,
+            video.accumulator.resource_bytes(),
+        )
+        .await;
+        let audio_outcome = match audio_outcome {
+            Err(ManifestRunError::Unsupported(error)) => {
+                tracing::warn!(
+                    playlist = %plan.playlist_url,
+                    error = %error,
+                    "live HLS audio rendition is no longer supported; preserving video capture"
+                );
+                return Ok(LiveHlsCaptureOutcome::PreserveVideoOnly);
+            }
+            Err(error) => return Err(error),
+            Ok(outcome) => outcome,
+        };
+        match audio_outcome {
+            LiveHlsSnapshotOutcome::Committed => {}
+            LiveHlsSnapshotOutcome::Stopped(intent) => {
+                return Ok(match intent {
+                    crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::PreserveVideoOnly,
+                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                });
+            }
+            LiveHlsSnapshotOutcome::ContinuityLost => {
+                return Ok(if video.accumulator.segment_count() > 0 {
+                    LiveHlsCaptureOutcome::PreserveVideoOnly
+                } else {
+                    LiveHlsCaptureOutcome::Discard
+                });
+            }
+        }
+    }
+
+    while !video.ended || audio.as_ref().is_some_and(|track| !track.ended) {
+        let next_poll = [
+            (!video.ended).then_some(video.next_poll_at).flatten(),
+            audio
+                .as_ref()
+                .filter(|track| !track.ended)
+                .and_then(|track| track.next_poll_at),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let Some(next_poll) = next_poll else {
+            return Err(ManifestRunError::Failed(
+                "A live HLS playlist has no next reload deadline".to_string(),
+            ));
+        };
+        tokio::select! {
+            biased;
+            stop = &mut *abort => {
+                return Ok(match stop.unwrap_or(crate::video::StopIntent::Discard) {
+                    crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
+                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                });
+            }
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_poll)) => {}
+        }
+
+        let now = Instant::now();
+        if !video.ended && video.next_poll_at.is_some_and(|deadline| deadline <= now) {
+            match poll_live_hls_track(
+                client,
+                source_url,
+                &mut video,
+                connections,
+                tx,
+                downloaded,
+                abort,
+                &mut guarded_child_hosts,
+                audio
+                    .as_ref()
+                    .map_or(0, |track| track.accumulator.resource_bytes()),
+            )
+            .await?
+            {
+                LiveHlsSnapshotOutcome::Committed => {}
+                LiveHlsSnapshotOutcome::Stopped(intent) => {
+                    return Ok(match intent {
+                        crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
+                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                    });
+                }
+                LiveHlsSnapshotOutcome::ContinuityLost => {
+                    return Ok(if video.accumulator.segment_count() > 0 {
+                        LiveHlsCaptureOutcome::PreserveVideoOnly
+                    } else {
+                        LiveHlsCaptureOutcome::Discard
+                    });
+                }
+            }
+        }
+        if let Some(audio) = audio.as_mut()
+            && !audio.ended
+            && audio
+                .next_poll_at
+                .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            match poll_live_hls_track(
+                client,
+                source_url,
+                audio,
+                connections,
+                tx,
+                downloaded,
+                abort,
+                &mut guarded_child_hosts,
+                video.accumulator.resource_bytes(),
+            )
+            .await?
+            {
+                LiveHlsSnapshotOutcome::Committed => {}
+                LiveHlsSnapshotOutcome::Stopped(intent) => {
+                    return Ok(match intent {
+                        crate::video::StopIntent::Preserve => {
+                            LiveHlsCaptureOutcome::PreserveVideoOnly
+                        }
+                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                    });
+                }
+                LiveHlsSnapshotOutcome::ContinuityLost => {
+                    return Ok(if video.accumulator.segment_count() > 0 {
+                        LiveHlsCaptureOutcome::PreserveVideoOnly
+                    } else {
+                        LiveHlsCaptureOutcome::Discard
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(LiveHlsCaptureOutcome::Ended)
+}
+
 async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> {
     let bytes = plan
         .local_playlist_bytes()
@@ -569,6 +1495,31 @@ async fn fetch_resources(
     downloaded: &Arc<AtomicU64>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
+    match fetch_resources_with_stop(
+        client,
+        resources,
+        directory,
+        connections,
+        tx,
+        downloaded,
+        abort,
+    )
+    .await?
+    {
+        ResourceFetchOutcome::Complete => Ok(true),
+        ResourceFetchOutcome::Stopped(_) => Ok(false),
+    }
+}
+
+async fn fetch_resources_with_stop(
+    client: &reqwest::Client,
+    resources: Vec<Resource>,
+    directory: &Path,
+    connections: usize,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &Arc<AtomicU64>,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<ResourceFetchOutcome, ManifestRunError> {
     let result = {
         let jobs = futures_util::stream::iter(resources.into_iter().map(|resource| {
             let client = client.clone();
@@ -581,26 +1532,39 @@ async fn fetch_resources(
         tokio::pin!(jobs);
         tokio::select! {
             biased;
-            _ = abort => None,
-            result = jobs.try_for_each(|_| async { Ok(()) }) => Some(result),
+            stop = &mut *abort => ResourceFetchResult::Stopped(
+                stop.unwrap_or(crate::video::StopIntent::Discard),
+            ),
+            result = jobs.try_for_each(|_| async { Ok(()) }) => {
+                result.map_or_else(
+                    ResourceFetchResult::Failed,
+                    |_| ResourceFetchResult::Complete,
+                )
+            }
         }
     };
 
     // The scoped stream has dropped its remaining futures and refunded their
     // partial byte reservations before the corrected total is sent.
     match result {
-        None => {
+        ResourceFetchResult::Complete => Ok(ResourceFetchOutcome::Complete),
+        ResourceFetchResult::Stopped(intent) => {
             tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
                 .ok();
-            Ok(false)
+            Ok(ResourceFetchOutcome::Stopped(intent))
         }
-        Some(Ok(())) => Ok(true),
-        Some(Err(error)) => {
+        ResourceFetchResult::Failed(error) => {
             tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
                 .ok();
             Err(error)
         }
     }
+}
+
+enum ResourceFetchResult {
+    Complete,
+    Stopped(crate::video::StopIntent),
+    Failed(ManifestRunError),
 }
 
 fn reserve_download_bytes(downloaded: &AtomicU64, bytes: u64) -> Result<u64, String> {

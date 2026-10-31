@@ -1128,7 +1128,9 @@ mod tests {
             None,
             std::collections::HashMap::from([(
                 "cdn.example.test".to_string(),
-                vec!["127.0.0.1:0".parse().expect("private loopback address")],
+                vec![format!("127.0.0.1:{port}")
+                    .parse()
+                    .expect("private loopback address")],
             )]),
         )
         .expect("build the production guarded HTTP client with fixture DNS");
@@ -1139,7 +1141,7 @@ mod tests {
             "a public manifest's child hostname must not connect when DNS resolves privately"
         );
         assert!(
-            timeout(Duration::from_millis(150), listener.accept())
+            timeout(Duration::from_millis(300), listener.accept())
                 .await
                 .is_err(),
             "the private destination must be rejected before a TCP connection is opened"

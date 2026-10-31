@@ -594,7 +594,7 @@ async fn fetch_bounded_manifest_with_policy(
     client: &reqwest::Client,
     requested_url: Url,
     transport_policy: ManifestTransportPolicy,
- ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     if !transport_policy.accepts_url(&requested_url) {
         return Err(ManifestIntakeError::Failed(gettext(
             "Invalid stream manifest URL",

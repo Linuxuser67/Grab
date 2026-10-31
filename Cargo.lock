@@ -1371,6 +1371,7 @@ dependencies = [
  "url",
  "yt-dlp",
  "zip",
+ "tempfile",
 ]
 
 [[package]]

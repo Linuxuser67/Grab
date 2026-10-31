@@ -273,6 +273,7 @@ struct VideoLookupResult {
     >,
     gallery_error: Option<String>,
     toggle_items: Option<ToggleItems>,
+    native_fallback_reason: Option<String>,
 }
 
 enum MediaLookupOutcome {
@@ -317,7 +318,19 @@ fn should_auto_add_lookup(auto_add_enabled: bool, url: &str) -> bool {
 
 /// A manifest URL must never be queued as a raw file when extraction fails.
 fn plain_fallback_allowed(url: &str) -> bool {
-    !crate::video::is_video_page(url) && !crate::video::is_stream_manifest_url(url)
+    !crate::video::is_video_page(url)
+        && !crate::video::is_stream_manifest_url(url)
+        && !crate::manifest_intake::supports(url)
+}
+
+fn append_native_fallback_reason(message: &str, native_reason: Option<&str>) -> String {
+    match native_reason.filter(|reason| !reason.is_empty()) {
+        Some(reason) => format!(
+            "{message}\n\n{}: {reason}",
+            gettext("Native HLS/DASH fallback")
+        ),
+        None => message.to_string(),
+    }
 }
 
 /// Resolve tool paths and run the appropriate extractor probe(s). Cancellation
@@ -354,6 +367,7 @@ async fn lookup_media_inner(
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     // Native HLS/DASH intake runs before extraction. Unsupported or malformed
     // manifests continue through the established yt-dlp/gallery fallback.
+    let mut native_fallback_reason = None;
     if crate::manifest_intake::supports(&url) {
         let manifest_url = url.clone();
         let manifest_browser = browser.clone();
@@ -375,13 +389,31 @@ async fn lookup_media_inner(
                 return Ok(MediaLookupOutcome::Manifest(Box::new(manifest)));
             }
             Ok(Ok(None)) => {
-                tracing::debug!("native manifest unsupported; falling back to yt-dlp");
+                let reason = gettext("The URL did not resolve to a supported HLS or DASH manifest");
+                tracing::info!(
+                    url_host = %crate::video_probe::page_host(&url),
+                    error = %reason,
+                    "native manifest preview fell back to yt-dlp"
+                );
+                native_fallback_reason = Some(reason);
             }
-            Ok(Err(_)) => {
-                tracing::debug!("native manifest retrieval failed; falling back to yt-dlp");
+            Ok(Err(error)) => {
+                let reason = error;
+                tracing::info!(
+                    url_host = %crate::video_probe::page_host(&url),
+                    error = %reason,
+                    "native manifest preview fell back to yt-dlp"
+                );
+                native_fallback_reason = Some(reason);
             }
-            Err(_) => {
-                tracing::debug!("native manifest task failed; falling back to yt-dlp");
+            Err(error) => {
+                let reason = error.to_string();
+                tracing::info!(
+                    url_host = %crate::video_probe::page_host(&url),
+                    error = %reason,
+                    "native manifest preview task failed; falling back to yt-dlp"
+                );
+                native_fallback_reason = Some(reason);
             }
         }
     }
@@ -406,8 +438,9 @@ async fn lookup_media_inner(
                 "lookup tool resolution timing"
             );
             tracing::error!(error = %error, "lookup tool resolution task failed");
-            return Err(MediaLookupFailure::Failed(gettext(
-                "The lookup failed unexpectedly. Please try again.",
+            return Err(MediaLookupFailure::Failed(append_native_fallback_reason(
+                &gettext("The lookup failed unexpectedly. Please try again."),
+                native_fallback_reason.as_deref(),
             )));
         }
     };
@@ -424,8 +457,12 @@ async fn lookup_media_inner(
         },
         "lookup tool resolution timing"
     );
-    let youtube_bin =
-        youtube_result.map_err(|error| MediaLookupFailure::MissingTools(error.to_string()))?;
+    let youtube_bin = youtube_result.map_err(|error| {
+        MediaLookupFailure::MissingTools(append_native_fallback_reason(
+            &error.to_string(),
+            native_fallback_reason.as_deref(),
+        ))
+    })?;
     let gallery_tool = match gallery_result {
         Some(Ok(path)) => Some(path),
         Some(Err(error)) => {
@@ -463,7 +500,10 @@ async fn lookup_media_inner(
         let _abort_probe_on_drop = AbortTaskOnDrop(probe_handle.abort_handle());
         let outcome = probe_handle.await.map_err(|error| {
             tracing::error!(error = %error, "dual-backend probe task failed");
-            MediaLookupFailure::Failed(gettext("The lookup failed unexpectedly. Please try again."))
+            MediaLookupFailure::Failed(append_native_fallback_reason(
+                &gettext("The lookup failed unexpectedly. Please try again."),
+                native_fallback_reason.as_deref(),
+            ))
         })?;
         let crate::inline_gallery::DualProbeOutcome::Complete { gallery, ytdlp } = outcome;
 
@@ -515,6 +555,7 @@ async fn lookup_media_inner(
         ytdlp_result,
         gallery_error,
         toggle_items,
+        native_fallback_reason,
     })))
 }
 
@@ -2977,8 +3018,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 if probe_b.borrow().generation != my {
                     return;
                 }
-                let (ytdlp_result, gallery_error, mut toggle_items, probe_json_key) = match outcome
-                {
+                let (
+                    ytdlp_result,
+                    gallery_error,
+                    mut toggle_items,
+                    probe_json_key,
+                    native_fallback_reason,
+                ) = match outcome {
                     MediaLookupOutcome::Manifest(manifest) => {
                         let manifest = *manifest;
                         let preferred_quality = settings_b.video_quality();
@@ -3058,8 +3104,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             ytdlp_result,
                             gallery_error,
                             toggle_items,
+                            native_fallback_reason,
                         } = *result;
-                        (ytdlp_result, gallery_error, toggle_items, probe_json_key)
+                        (
+                            ytdlp_result,
+                            gallery_error,
+                            toggle_items,
+                            probe_json_key,
+                            native_fallback_reason,
+                        )
                     }
                 };
                 match ytdlp_result {
@@ -3135,6 +3188,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             .as_ref()
                             .map(|ge| ge.to_string())
                             .unwrap_or_else(|| e.to_string());
+                        let msg =
+                            append_native_fallback_reason(&msg, native_fallback_reason.as_deref());
                         tracing::warn!(
                             host = %crate::video_probe::page_host(&url),
                             error = %msg,
@@ -3191,6 +3246,27 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     return;
                                 }
                             }
+                        }
+                        if !probe.fetchable()
+                            && let Some(native_reason) = native_fallback_reason.as_deref()
+                        {
+                            let extractor_error =
+                                gallery_error.clone().unwrap_or_else(|| match &probe {
+                                    crate::video::ProbeResult::Single(_) => {
+                                        gettext("yt-dlp did not find a downloadable stream")
+                                    }
+                                    crate::video::ProbeResult::Playlist(_) => {
+                                        gettext("No items found in this playlist")
+                                    }
+                                });
+                            let message = append_native_fallback_reason(
+                                &extractor_error,
+                                Some(native_reason),
+                            );
+                            probe_b.borrow_mut().info.take();
+                            show_video_error(&step_b, &message);
+                            set_lookup_add(&lookup_add_b, true);
+                            return;
                         }
                         match probe {
                             crate::video::ProbeResult::Single(v) => {
@@ -4499,6 +4575,32 @@ mod tests {
         assert!(!st.is_open());
         st.set(true);
         assert_eq!(*seen.borrow(), vec![true, false, true]);
+    }
+
+    #[test]
+    fn native_manifest_fallback_reason_is_appended_to_extractor_errors() {
+        let message = append_native_fallback_reason(
+            "yt-dlp returned HTTP 403",
+            Some("The stream server returned HTTP 401"),
+        );
+        assert!(message.contains("yt-dlp returned HTTP 403"));
+        assert!(message.contains("The stream server returned HTTP 401"));
+        assert_eq!(
+            append_native_fallback_reason("yt-dlp failed", None),
+            "yt-dlp failed"
+        );
+    }
+
+    #[test]
+    fn extensionless_native_manifest_candidates_never_use_plain_file_fallback() {
+        for url in [
+            "https://cdn.example.test/master",
+            "https://cdn.example.test/playlist?token=x",
+            "https://cdn.example.test/stream?format=m3u8",
+            "https://cdn.example.test/stream?type=application/dash%2Bxml",
+        ] {
+            assert!(!plain_fallback_allowed(url), "{url}");
+        }
     }
 
     #[test]

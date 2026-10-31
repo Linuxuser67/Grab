@@ -1,30 +1,23 @@
 //! Video staging/parts/manifest/resume scratch dirs and templates.
 //! Consumed by the runner/engine through the `video` facade.
 //!
-//! # Ownership invariant (enforced by all cleanup paths)
+//! # Ownership invariant
 //!
-//! ```text
-//! Manifest exact-match:  destructive delete (authoritative)
-//! Filename inference:    occupancy only, never deletion
-//! No manifest:           preserve everything
-//! ```
-//!
-//! All staging cleanup functions (`clean_staging_files`,
-//! `sweep_staging_preserving_recordings`, `sweep_dest_staging`) follow this
-//! single model. No filename pattern may delete a staging file: ownership
-//! must be recorded in a manifest (`staging_name` exact-match or
-//! `staging_prefix`). (Separate stem-based helpers like `clean_dest_parts`
-//! handle files beside the finished download, not staging.)
+//! Destination-side yt-dlp files are deleted only when a state manifest records
+//! their exact name or owned prefix. Native HLS/DASH resource directories live
+//! under the XDG state root and carry a marker bound to the queue ID and
+//! canonical destination. Filename patterns alone never authorize deletion.
 
 use crate::video_prefs::subtitle_content_languages;
 use crate::video_tools::VideoError;
 use gettextrs::gettext;
 use std::path::{Component, Path, PathBuf};
 
-/// Shared root for tiny engine scratch (cookie dumps, probe output). Stays on
-/// tmpfs: only small files ever land here. Bulky download parts stage beside
-/// the destination instead — `/tmp` is RAM-backed on many systems, so staging
-/// there fills memory and fails large downloads with "no space left".
+/// Shared root for tiny, single-use engine scratch.
+///
+/// Cookie dumps and probe output stay under the runtime directory. Ordinary
+/// yt-dlp parts stage beside the destination; native HLS/DASH segments use the
+/// persistent XDG state directory so large streams never depend on tmpfs.
 pub fn staging_root() -> PathBuf {
     std::env::temp_dir().join("grab-video")
 }
@@ -114,19 +107,19 @@ fn test_root(kind: &str) -> PathBuf {
     .join(kind)
 }
 
-/// Staging files live directly in the destination dir, visible like other download managers:
-/// A resolved per-item staging dir plus the root it is guarded under: the
-/// dest-side root for current staging, the tmp root for legacy dirs still
-/// draining from before dest-side staging.
+/// Destination-side staging used by the existing yt-dlp download path.
+///
+/// Native HLS/DASH resources use `manifest_staging_root` instead, because
+/// they are large, resumable application state rather than user download files.
 #[derive(Debug, Clone)]
 pub struct StagingLocation {
     pub dir: PathBuf,
     pub root: PathBuf,
 }
 
-/// Resolve the staging location: the destination dir itself. Staging files
-/// are named via [`staging_file`]; there is no subfolder and no
-/// legacy tmp fallback.
+/// Resolve the existing yt-dlp staging location to the destination directory.
+///
+/// Native HLS/DASH staging is separate and lives under the XDG state directory.
 pub fn staging_location(dest_dir: &Path, _item_id: u64) -> StagingLocation {
     StagingLocation {
         dir: dest_dir.to_path_buf(),
@@ -347,77 +340,301 @@ pub fn clean_staging(dir: &Path) {
     clean_staging_in(&staging_root(), dir);
 }
 
-/// Prepare a private, item-scoped staging directory for native manifest resources.
-pub(crate) fn ensure_manifest_staging_dir(
-    dest_dir: &Path,
-    item_id: u64,
-) -> Result<PathBuf, VideoError> {
-    let dest_dir = std::fs::canonicalize(dest_dir).map_err(VideoError::staging)?;
-    let dir = dest_dir.join(format!(".grab-manifest-{item_id}"));
-    let marker = dir.join(".grab-manifest-owner");
-    let expected = format!("grab-manifest-v1\n{item_id}\n{}", dest_dir.display());
-
-    match create_private_dir(&dir) {
-        Ok(()) => {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&marker)
-                .map_err(VideoError::staging)?;
-            use std::io::Write as _;
-            file.write_all(expected.as_bytes())
-                .and_then(|()| file.sync_all())
-                .map_err(VideoError::staging)?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            ensure_real_staging_leaf(&dir)?;
-            let metadata = std::fs::symlink_metadata(&marker).map_err(VideoError::staging)?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(VideoError::staging(
-                    "manifest staging directory has no valid ownership marker",
-                ));
-            }
-            let owner = std::fs::read_to_string(&marker).map_err(VideoError::staging)?;
-            if owner != expected {
-                return Err(VideoError::staging(
-                    "manifest staging directory belongs to another attempt",
-                ));
-            }
-        }
-        Err(error) => return Err(VideoError::staging(error)),
-    }
-    Ok(dir)
+/// Persistent, private root for bulky native HLS/DASH resources.
+///
+/// Parts must survive pauses and restarts, so they belong under the app's
+/// XDG state directory rather than the download directory or tmpfs.
+fn manifest_staging_root() -> PathBuf {
+    state_root().join("video").join("staging")
 }
 
-/// Remove only a native-manifest staging directory carrying this row's marker.
-pub(crate) fn clean_manifest_staging_files(dest_dir: &Path, item_id: u64) {
-    let Ok(dest_dir) = std::fs::canonicalize(dest_dir) else {
-        return;
-    };
-    let dir = dest_dir.join(format!(".grab-manifest-{item_id}"));
+fn manifest_staging_name(item_id: u64, destination_key: &str) -> String {
+    format!("{item_id}-{destination_key}")
+}
+
+fn manifest_staging_owner_v2(item_id: u64, destination_key: &str, dest_dir: &Path) -> String {
+    format!(
+        "grab-manifest-v2\n{item_id}\n{destination_key}\n{}\n",
+        dest_dir.display()
+    )
+}
+
+fn write_manifest_staging_owner(
+    dir: &Path,
+    item_id: u64,
+    destination_key: &str,
+    dest_dir: &Path,
+) -> Result<(), VideoError> {
     let marker = dir.join(".grab-manifest-owner");
-    let expected = format!("grab-manifest-v1\n{item_id}\n{}", dest_dir.display());
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(marker).map_err(VideoError::staging)?;
+    use std::io::Write as _;
+    file.write_all(manifest_staging_owner_v2(item_id, destination_key, dest_dir).as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(VideoError::staging)
+}
+
+/// Verify both the item identity and destination binding before adopting or
+/// deleting a stage. Version 1 markers remain readable for upgrade migration.
+fn manifest_staging_is_owned(
+    dir: &Path,
+    root: &Path,
+    item_id: u64,
+    destination_key: &str,
+    dest_dir: Option<&Path>,
+) -> bool {
+    if !staging_root_is_real(root) {
+        return false;
+    }
+    let marker = dir.join(".grab-manifest-owner");
     let (Ok(dir_metadata), Ok(marker_metadata), Ok(owner)) = (
-        std::fs::symlink_metadata(&dir),
+        std::fs::symlink_metadata(dir),
         std::fs::symlink_metadata(&marker),
         std::fs::read_to_string(&marker),
     ) else {
-        return;
+        return false;
     };
     if dir_metadata.file_type().is_symlink()
         || !dir_metadata.is_dir()
         || marker_metadata.file_type().is_symlink()
         || !marker_metadata.is_file()
-        || owner != expected
     {
-        return;
+        return false;
     }
-    let Ok(canonical_dir) = std::fs::canonicalize(&dir) else {
+    let Some(canonical_root) = std::fs::canonicalize(root).ok() else {
+        return false;
+    };
+    let Some(canonical_dir) = std::fs::canonicalize(dir).ok() else {
+        return false;
+    };
+    if canonical_dir.parent() != Some(canonical_root.as_path()) {
+        return false;
+    }
+
+    let v2_prefix = format!("grab-manifest-v2\n{item_id}\n{destination_key}\n");
+    if let Some(marker_dest) = owner
+        .strip_prefix(&v2_prefix)
+        .and_then(|value| value.strip_suffix('\n'))
+    {
+        let path = Path::new(marker_dest);
+        return path.is_absolute()
+            && dest_key(path) == destination_key
+            && dest_dir.is_none_or(|dest| marker_dest == dest.to_string_lossy());
+    }
+
+    // Legacy markers used the canonical destination path after this prefix.
+    // Strip the fixed header instead of splitting on newlines: valid Unix
+    // paths may themselves contain newline characters.
+    let v1_prefix = format!("grab-manifest-v1\n{item_id}\n");
+    let Some(marker_dest) = owner.strip_prefix(&v1_prefix) else {
+        return false;
+    };
+    Path::new(marker_dest).is_absolute()
+        && dest_key(Path::new(marker_dest)) == destination_key
+        && dest_dir.is_none_or(|dest| marker_dest == dest.to_string_lossy())
+}
+
+/// Copy legacy staging contents only when rename cannot cross filesystems.
+/// The owner marker is recreated at the target; symlinks and special files
+/// are rejected rather than followed.
+fn copy_manifest_staging_contents(source: &Path, target: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".grab-manifest-owner" {
+            continue;
+        }
+        let source_path = entry.path();
+        let target_path = target.join(&name);
+        let metadata = std::fs::symlink_metadata(&source_path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(std::io::Error::other(
+                "legacy manifest staging contains a symbolic link",
+            ));
+        }
+        if metadata.is_dir() {
+            create_private_dir(&target_path)?;
+            copy_manifest_staging_contents(&source_path, &target_path)?;
+        } else if metadata.is_file() {
+            let mut input_options = std::fs::OpenOptions::new();
+            input_options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                input_options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            }
+            let mut input = input_options.open(&source_path)?;
+            if !input.metadata()?.is_file() {
+                return Err(std::io::Error::other(
+                    "legacy manifest staging entry changed during migration",
+                ));
+            }
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let mut output = options.open(&target_path)?;
+            std::io::copy(&mut input, &mut output)?;
+            output.sync_all()?;
+        } else {
+            return Err(std::io::Error::other(
+                "legacy manifest staging contains an unsupported file type",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn legacy_manifest_staging_is_owned(dest_dir: &Path, item_id: u64, dir: &Path) -> bool {
+    let marker = dir.join(".grab-manifest-owner");
+    let expected = format!("grab-manifest-v1\n{item_id}\n{}", dest_dir.display());
+    let (Ok(dir_metadata), Ok(marker_metadata), Ok(owner)) = (
+        std::fs::symlink_metadata(dir),
+        std::fs::symlink_metadata(&marker),
+        std::fs::read_to_string(&marker),
+    ) else {
+        return false;
+    };
+    !dir_metadata.file_type().is_symlink()
+        && dir_metadata.is_dir()
+        && !marker_metadata.file_type().is_symlink()
+        && marker_metadata.is_file()
+        && owner == expected
+        && std::fs::canonicalize(dir)
+            .ok()
+            .is_some_and(|canonical| canonical.parent() == Some(dest_dir))
+}
+
+fn migrate_legacy_manifest_staging(
+    dest_dir: &Path,
+    item_id: u64,
+    destination_key: &str,
+    target: &Path,
+) -> Result<bool, VideoError> {
+    let legacy = dest_dir.join(format!(".grab-manifest-{item_id}"));
+    match std::fs::symlink_metadata(&legacy) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(VideoError::staging(error)),
+        Ok(_) => {}
+    }
+    if !legacy_manifest_staging_is_owned(dest_dir, item_id, &legacy) {
+        return Err(VideoError::staging(
+            "legacy manifest staging directory has no valid ownership marker",
+        ));
+    }
+
+    match rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        &legacy,
+        rustix::fs::CWD,
+        target,
+        rustix::fs::RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => return Ok(true),
+        Err(error) if error == rustix::io::Errno::XDEV => {}
+        Err(error) => {
+            return Err(VideoError::staging(std::io::Error::from_raw_os_error(
+                error.raw_os_error(),
+            )));
+        }
+    }
+
+    create_manifest_staging_directory(target, item_id, destination_key, dest_dir)?;
+    if let Err(error) = copy_manifest_staging_contents(&legacy, target) {
+        let _ = std::fs::remove_dir_all(target);
+        return Err(VideoError::staging(error));
+    }
+    // Remove the old copy only after every staged file has been copied and
+    // flushed successfully. On failure the original resumable data survives.
+    if !legacy_manifest_staging_is_owned(dest_dir, item_id, &legacy) {
+        let _ = std::fs::remove_dir_all(target);
+        return Err(VideoError::staging(
+            "legacy manifest staging ownership changed during migration",
+        ));
+    }
+    std::fs::remove_dir_all(&legacy).map_err(VideoError::staging)?;
+    Ok(true)
+}
+
+fn create_manifest_staging_directory(
+    dir: &Path,
+    item_id: u64,
+    destination_key: &str,
+    dest_dir: &Path,
+) -> Result<(), VideoError> {
+    ensure_real_staging_leaf(dir)?;
+    if let Err(error) = write_manifest_staging_owner(dir, item_id, destination_key, dest_dir) {
+        // The directory was created by this call; never leave an unowned leaf
+        // that would prevent the next attempt from resuming.
+        let _ = std::fs::remove_dir_all(dir);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Prepare a private, item-scoped staging directory in the app's XDG state
+/// directory. Existing destination-side staging is migrated before new work.
+pub(crate) fn ensure_manifest_staging_dir(
+    dest_dir: &Path,
+    item_id: u64,
+) -> Result<PathBuf, VideoError> {
+    let dest_dir = std::fs::canonicalize(dest_dir).map_err(VideoError::staging)?;
+    let destination_key = dest_key(&dest_dir);
+    let root = manifest_staging_root();
+    ensure_private_dir(&root).map_err(VideoError::staging)?;
+    let dir = root.join(manifest_staging_name(item_id, &destination_key));
+
+    match std::fs::symlink_metadata(&dir) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !migrate_legacy_manifest_staging(&dest_dir, item_id, &destination_key, &dir)? {
+                create_manifest_staging_directory(&dir, item_id, &destination_key, &dest_dir)?;
+            }
+        }
+        Err(error) => return Err(VideoError::staging(error)),
+    }
+    if !manifest_staging_is_owned(&dir, &root, item_id, &destination_key, Some(&dest_dir)) {
+        return Err(VideoError::staging(
+            "manifest staging directory belongs to another attempt",
+        ));
+    }
+    Ok(dir)
+}
+
+fn clean_legacy_manifest_staging_files(dest_dir: &Path, item_id: u64) {
+    let dir = dest_dir.join(format!(".grab-manifest-{item_id}"));
+    if legacy_manifest_staging_is_owned(dest_dir, item_id, &dir) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Remove only a native-manifest staging directory carrying this row's marker.
+/// The new state-dir path and the legacy destination-side path are both handled
+/// so row removal also reclaims staging created by the previous release.
+pub(crate) fn clean_manifest_staging_files(dest_dir: &Path, item_id: u64) {
+    let Ok(dest_dir) = std::fs::canonicalize(dest_dir) else {
         return;
     };
-    if canonical_dir.parent() == Some(dest_dir.as_path()) {
+    let destination_key = dest_key(&dest_dir);
+    let root = manifest_staging_root();
+    let dir = root.join(manifest_staging_name(item_id, &destination_key));
+    if manifest_staging_is_owned(&dir, &root, item_id, &destination_key, Some(&dest_dir))
+        && let Ok(canonical_dir) = std::fs::canonicalize(&dir)
+        && let Ok(canonical_root) = std::fs::canonicalize(&root)
+        && canonical_dir.parent() == Some(canonical_root.as_path())
+    {
         let _ = std::fs::remove_dir_all(canonical_dir);
     }
+    clean_legacy_manifest_staging_files(&dest_dir, item_id);
 }
 
 /// Remove Grab staging files for an item in the destination dir.
@@ -583,7 +800,49 @@ pub fn sweep_state_staging(keep: &std::collections::HashSet<(String, u64)>) {
             remove_manifest_files(dest, id);
         }
     }
+    sweep_manifest_staging_directories(&keep);
     sweep_private_temps();
+}
+
+/// Reclaim orphan native-manifest stage directories from the XDG state root.
+/// Only a real child directory with a valid owner marker is eligible.
+fn sweep_manifest_staging_directories(keep: &std::collections::HashSet<(String, u64)>) {
+    let root = manifest_staging_root();
+    if !staging_root_is_real(&root) {
+        return;
+    }
+    let (Ok(canonical_root), Ok(entries)) =
+        (std::fs::canonicalize(&root), std::fs::read_dir(&root))
+    else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some((id, key)) = name.split_once('-') else {
+            continue;
+        };
+        let (Ok(item_id), true) = (
+            id.parse::<u64>(),
+            key.len() == 16 && key.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        ) else {
+            continue;
+        };
+        if keep.contains(&(key.to_string(), item_id)) {
+            continue;
+        }
+        let dir = entry.path();
+        if !manifest_staging_is_owned(&dir, &root, item_id, key, None) {
+            continue;
+        }
+        let Ok(canonical_dir) = std::fs::canonicalize(&dir) else {
+            continue;
+        };
+        if canonical_dir.parent() == Some(canonical_root.as_path()) {
+            let _ = std::fs::remove_dir_all(canonical_dir);
+        }
+    }
 }
 
 /// `{id}-{key}.manifest.json` -> id.
@@ -1356,7 +1615,14 @@ mod tests {
         let stage = ensure_manifest_staging_dir(&dest, id).expect("private manifest staging");
         let marker = stage.join(".grab-manifest-owner");
         assert!(marker.is_file());
-        assert!(stage.join("video").parent().is_some());
+        assert!(
+            stage.starts_with(manifest_staging_root()),
+            "bulk manifest resources belong under the app's XDG state directory"
+        );
+        assert!(
+            !stage.starts_with(&dest),
+            "download directories must contain no native staging directory"
+        );
         std::fs::write(stage.join("video-segment.bin"), b"segment").expect("staged segment");
 
         clean_manifest_staging_files(&dest, id);
@@ -1379,17 +1645,87 @@ mod tests {
         std::fs::write(live.join("segment.bin"), b"live").expect("live resource");
         std::fs::write(orphan.join("segment.bin"), b"orphan").expect("orphan resource");
 
-        sweep_dest_staging(&dest, &std::collections::HashSet::from([live_id]));
+        let keep =
+            std::collections::HashSet::from([(dest.to_string_lossy().into_owned(), live_id)]);
+        sweep_state_staging(&keep);
 
         assert!(
             live.join("segment.bin").is_file(),
-            "queued row keeps its stage"
+            "queued row keeps its state-dir stage"
         );
         assert!(
             !orphan.exists(),
-            "unreferenced marker-owned stage is reclaimed"
+            "unreferenced marker-owned state-dir stage is reclaimed"
         );
         let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn legacy_native_manifest_stage_is_moved_out_of_the_download_directory() {
+        let dest = unique_dir("native-manifest-legacy-migration");
+        std::fs::create_dir_all(&dest).expect("destination directory");
+        let id = 8_000_025;
+        let legacy = dest.join(format!(".grab-manifest-{id}"));
+        create_private_dir(&legacy).expect("legacy stage directory");
+        std::fs::write(
+            legacy.join(".grab-manifest-owner"),
+            format!("grab-manifest-v1\n{id}\n{}", dest.display()),
+        )
+        .expect("legacy owner marker");
+        std::fs::create_dir(legacy.join("video")).expect("legacy video directory");
+        std::fs::write(legacy.join("video/segment.bin"), b"resume me").expect("legacy segment");
+
+        let migrated =
+            ensure_manifest_staging_dir(&dest, id).expect("migrate legacy resumable parts");
+
+        assert!(!legacy.exists(), "old destination-side stage is removed");
+        assert!(migrated.starts_with(manifest_staging_root()));
+        assert!(!migrated.starts_with(&dest));
+        assert_eq!(
+            std::fs::read(migrated.join("video/segment.bin")).expect("migrated segment"),
+            b"resume me"
+        );
+        clean_manifest_staging_files(&dest, id);
+        assert!(!migrated.exists(), "new state-dir stage is owner-cleaned");
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn legacy_stage_copy_rejects_symlinks_and_preserves_source() {
+        let source = unique_dir("legacy-stage-copy-source");
+        let target = unique_dir("legacy-stage-copy-target");
+        std::fs::create_dir_all(&source).expect("legacy source");
+        std::fs::create_dir_all(&target).expect("state target");
+        std::fs::write(source.join(".grab-manifest-owner"), b"legacy marker")
+            .expect("legacy marker");
+        std::fs::write(source.join("segment.bin"), b"segment").expect("legacy segment");
+        copy_manifest_staging_contents(&source, &target).expect("copy regular staging files");
+        assert_eq!(
+            std::fs::read(target.join("segment.bin")).expect("copied segment"),
+            b"segment"
+        );
+        assert!(!target.join(".grab-manifest-owner").exists());
+
+        #[cfg(unix)]
+        {
+            let symlink_source = unique_dir("legacy-stage-symlink-source");
+            let symlink_target = unique_dir("legacy-stage-symlink-target");
+            std::fs::create_dir_all(&symlink_source).expect("symlink source");
+            std::fs::create_dir_all(&symlink_target).expect("symlink target");
+            let victim = symlink_source.join("victim");
+            std::fs::write(&victim, b"keep").expect("symlink victim");
+            std::os::unix::fs::symlink(&victim, symlink_source.join("unsafe-link"))
+                .expect("symlink source file");
+            assert!(
+                copy_manifest_staging_contents(&symlink_source, &symlink_target).is_err(),
+                "symbolic links are not migrated"
+            );
+            assert_eq!(std::fs::read(victim).expect("victim remains"), b"keep");
+            let _ = std::fs::remove_dir_all(symlink_source);
+            let _ = std::fs::remove_dir_all(symlink_target);
+        }
+        let _ = std::fs::remove_dir_all(source);
+        let _ = std::fs::remove_dir_all(target);
     }
 
     #[test]

@@ -636,7 +636,7 @@ async fn fetch_bounded_manifest_once(
     client: &reqwest::Client,
     requested_url: &Url,
     transport_policy: ManifestTransportPolicy,
- ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     let response = client
         .get(requested_url.clone())
         .timeout(MANIFEST_REQUEST_TIMEOUT)

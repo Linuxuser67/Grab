@@ -2348,16 +2348,19 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     // Keep both selections aligned with their ComboRows. Changing video
     // representation resets audio to that representation's default rendition.
     {
-        let step = Rc::clone(&step);
+        let step_weak = Rc::downgrade(&step);
+        let manifest_format = step.manifest_format.clone();
         let choices = Rc::clone(&step.manifest_choices);
         let selection = Rc::clone(&step.manifest_selection);
-        step.manifest_format.connect_selected_notify(move |row| {
+        manifest_format.connect_selected_notify(move |row| {
             let selected_key = choices
                 .borrow()
                 .get(row.selected() as usize)
                 .map(|choice| choice.key.clone());
             selection.replace(selected_key.clone());
-            refresh_manifest_audio_picker(&step, selected_key.as_deref());
+            if let Some(step) = step_weak.upgrade() {
+                refresh_manifest_audio_picker(&step, selected_key.as_deref());
+            }
         });
     }
     {

@@ -373,7 +373,10 @@ impl HlsLiveAccumulator {
                     .unknown_tags
                     .iter()
                     .any(|tag| is_unsupported_hls_tag(&tag.tag))
-                || segment.map.as_ref().is_some_and(|map| map.byte_range.is_some())
+                || segment
+                    .map
+                    .as_ref()
+                    .is_some_and(|map| map.byte_range.is_some())
                 || !segment.duration.is_finite()
                 || segment.duration <= 0.0
             {
@@ -454,7 +457,9 @@ impl HlsLiveAccumulator {
             return Err(ManifestError::LiveSequenceGap);
         }
 
-        let first_sequence = self.first_sequence.unwrap_or(snapshot.local_playlist.media_sequence);
+        let first_sequence = self
+            .first_sequence
+            .unwrap_or(snapshot.local_playlist.media_sequence);
         if snapshot.local_playlist.media_sequence < first_sequence {
             return Err(ManifestError::LiveSequenceGap);
         }
@@ -499,7 +504,10 @@ impl HlsLiveAccumulator {
             }
         }
 
-        if self.segment_identities.len().saturating_add(new_segments.len())
+        if self
+            .segment_identities
+            .len()
+            .saturating_add(new_segments.len())
             > MAX_HLS_LIVE_SEGMENTS
         {
             return Err(ManifestError::LiveCaptureLimit);
@@ -541,18 +549,12 @@ impl HlsLiveAccumulator {
     /// # Errors
     /// Returns an error if the sequence count overflows or the update has no
     /// playlist template for an empty accumulator.
-    pub(crate) fn commit_update(
-        &mut self,
-        update: HlsLiveUpdate,
-    ) -> Result<(), ManifestError> {
+    pub(crate) fn commit_update(&mut self, update: HlsLiveUpdate) -> Result<(), ManifestError> {
         self.commit_update_with_bytes(update, 0)
     }
 
     /// Restore the byte total from the validated files referenced by a staged playlist.
-    pub(crate) fn restore_resource_bytes(
-        &mut self,
-        total_bytes: u64,
-    ) -> Result<(), ManifestError> {
+    pub(crate) fn restore_resource_bytes(&mut self, total_bytes: u64) -> Result<(), ManifestError> {
         if total_bytes > MAX_HLS_LIVE_CAPTURE_BYTES {
             return Err(ManifestError::LiveCaptureLimit);
         }
@@ -598,7 +600,10 @@ impl HlsLiveAccumulator {
             }
         };
 
-        if playlist.segments.len().saturating_add(update.new_segments.len())
+        if playlist
+            .segments
+            .len()
+            .saturating_add(update.new_segments.len())
             > MAX_HLS_LIVE_SEGMENTS
         {
             return Err(ManifestError::LiveCaptureLimit);
@@ -611,7 +616,9 @@ impl HlsLiveAccumulator {
                     .map_err(|_| ManifestError::DurationOverflow)?,
             )
             .ok_or(ManifestError::DurationOverflow)?;
-        playlist.segments.extend(update.new_segments.iter().cloned());
+        playlist
+            .segments
+            .extend(update.new_segments.iter().cloned());
         let required_version = minimum_hls_playlist_version(&playlist);
         playlist.version = Some(playlist.version.unwrap_or_default().max(required_version));
         let key_resources: HashSet<String> = playlist
@@ -696,7 +703,6 @@ impl HlsLiveAccumulator {
     pub(crate) fn segment_count(&self) -> usize {
         self.segment_identities.len()
     }
-
 }
 
 fn segment_resource_filenames(segment: &m3u8_rs::MediaSegment) -> Vec<&str> {
@@ -757,7 +763,6 @@ fn hls_segment_identity(segment: &m3u8_rs::MediaSegment) -> String {
         key_identity
     )
 }
-
 
 /// Parse an HLS master playlist into user-selectable video and audio choices.
 ///
@@ -1394,13 +1399,18 @@ media.mp4
         assert!(plan.resources[1].filename.starts_with("segment-000101-"));
 
         let local = m3u8_rs::parse_media_playlist_res(
-            &plan.local_playlist_bytes().expect("serialize local VOD snapshot"),
+            &plan
+                .local_playlist_bytes()
+                .expect("serialize local VOD snapshot"),
         )
         .expect("local snapshot parses");
         assert_eq!(local.media_sequence, 100);
         assert_eq!(local.target_duration, 4);
         assert_eq!(local.playlist_type, Some(MediaPlaylistType::Vod));
-        assert!(local.end_list, "the local snapshot is always finalized VOD syntax");
+        assert!(
+            local.end_list,
+            "the local snapshot is always finalized VOD syntax"
+        );
     }
 
     #[test]

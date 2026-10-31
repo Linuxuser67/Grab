@@ -245,9 +245,9 @@ impl ManifestLookup {
 
     /// List the audio renditions belonging to one selected video representation.
     ///
-    /// The default track is sorted first but every supported audio choice remains
-    /// available. HLS renditions without a URI represent audio embedded in the
-    /// selected video playlist.
+    /// Every supported audio choice remains available. HLS order follows the
+    /// playlist; the default choice is selected by `preferred_audio_choice_index`. Renditions
+    /// without a URI represent audio embedded in the selected video playlist.
     pub(crate) fn audio_choices(&self, video_key: &str) -> Vec<ManifestAudioChoice> {
         match &self.manifest {
             NativeManifest::HlsMaster(master) => {

@@ -580,7 +580,11 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     .expect("finalize stored capture without a network request");
 
     assert_eq!(outcome, LiveHlsCaptureOutcome::Ended);
-    assert_eq!(downloaded.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        downloaded.load(Ordering::Relaxed),
+        segment_bytes.len() as u64,
+        "restoring a saved capture restores its retained-byte progress without a new fetch"
+    );
     let final_playlist = m3u8_rs::parse_media_playlist_res(
         &tokio::fs::read(video_dir.join("local.m3u8"))
             .await
@@ -753,11 +757,15 @@ async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
             "4",
             "-shortest",
             "-c:v",
-            "mpeg4",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
             "-g",
             "12",
-            "-q:v",
-            "5",
             "-c:a",
             "aac",
             "-b:a",

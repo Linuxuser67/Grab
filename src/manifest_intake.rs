@@ -653,21 +653,40 @@ async fn fetch_bounded_preview_manifest_with_policy(
     requested_url: Url,
     transport_policy: ManifestTransportPolicy,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
-    tokio::time::timeout(
+    fetch_bounded_preview_manifest_with_limits(
+        client,
+        requested_url,
+        transport_policy,
         MANIFEST_LOOKUP_BUDGET,
+        MANIFEST_PREVIEW_REQUEST_TIMEOUT,
+        MAX_PREVIEW_MANIFEST_ATTEMPTS,
+    )
+    .await
+}
+
+async fn fetch_bounded_preview_manifest_with_limits(
+    client: &reqwest::Client,
+    requested_url: Url,
+    transport_policy: ManifestTransportPolicy,
+    preview_budget: Duration,
+    request_timeout: Duration,
+    max_attempts: u32,
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
+    tokio::time::timeout(
+        preview_budget,
         fetch_bounded_manifest_with_limits(
             client,
             requested_url,
             transport_policy,
-            MANIFEST_PREVIEW_REQUEST_TIMEOUT,
-            MAX_PREVIEW_MANIFEST_ATTEMPTS,
+            request_timeout,
+            max_attempts,
         ),
     )
     .await
     .unwrap_or_else(|_| {
         Err(ManifestIntakeError::Unsupported(format!(
-            "Native manifest lookup exceeded its {} second preview budget",
-            MANIFEST_LOOKUP_BUDGET.as_secs()
+            "Native manifest lookup exceeded its {} ms preview budget",
+            preview_budget.as_millis()
         )))
     })
 }
@@ -714,12 +733,14 @@ async fn fetch_bounded_manifest_with_limits(
 /// Only request timeouts and connection resets are worth retrying. DNS guard,
 /// TLS, redirect-policy and other deterministic failures fall back immediately.
 fn manifest_request_error(context: &str, error: reqwest::Error) -> ManifestIntakeError {
-    let retryable = error.is_timeout() || has_connection_reset_cause(&error);
+    let timed_out = error.is_timeout();
+    let connection_reset = has_connection_reset_cause(&error);
+    let retryable = timed_out || connection_reset;
     // Do not format reqwest::Error here: it can include the complete signed
     // manifest URL, including credentials carried in query parameters.
-    let detail = if error.is_timeout() {
+    let detail = if timed_out {
         "the request timed out"
-    } else if has_connection_reset_cause(&error) {
+    } else if connection_reset {
         "the connection was reset"
     } else if error.is_connect() {
         "the manifest server connection could not be established"
@@ -1071,12 +1092,68 @@ mod tests {
         )));
     }
 
-    #[test]
-    fn manifest_preview_budget_is_bounded_without_reducing_download_tolerance() {
-        assert!(MANIFEST_PREVIEW_REQUEST_TIMEOUT < MANIFEST_LOOKUP_BUDGET);
-        assert!(MANIFEST_LOOKUP_BUDGET < MANIFEST_REQUEST_TIMEOUT);
-        assert!(MAX_PREVIEW_MANIFEST_ATTEMPTS < MAX_MANIFEST_ATTEMPTS);
-        assert_eq!(MAX_MANIFEST_ATTEMPTS, 3);
+    #[tokio::test(flavor = "current_thread")]
+    async fn manifest_preview_budget_cancels_a_slow_server_request() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind slow manifest fixture");
+        let port = listener
+            .local_addr()
+            .expect("read slow manifest fixture address")
+            .port();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept manifest request");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(socket);
+        });
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/master.m3u8"))
+            .expect("fixture manifest URL");
+        let started = tokio::time::Instant::now();
+
+        let result = fetch_bounded_preview_manifest_with_limits(
+            &reqwest::Client::new(),
+            url,
+            ManifestTransportPolicy::HttpFixture,
+            Duration::from_millis(20),
+            Duration::from_secs(1),
+            1,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(ManifestIntakeError::Unsupported(message))
+                    if message.contains("20 ms preview budget")
+            ),
+            "slow preview should yield to the extractor fallback: {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(80),
+            "preview should stop at its deadline instead of waiting for the request timeout"
+        );
+        server.await.expect("slow manifest fixture task");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn manifest_transport_failure_does_not_disclose_signed_url() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("reserve a local port");
+        let port = listener.local_addr().expect("read reserved port").port();
+        drop(listener);
+        let url = format!("http://127.0.0.1:{port}/master.m3u8?sig=secret-token");
+        let error = reqwest::Client::new()
+            .get(&url)
+            .timeout(Duration::from_secs(1))
+            .send()
+            .await
+            .expect_err("the reserved port is no longer listening");
+
+        let classified = manifest_request_error("Could not retrieve the stream manifest", error);
+        let message = classified.to_string();
+        assert!(matches!(classified, ManifestIntakeError::Unsupported(_)));
+        assert!(message.contains("connection could not be established"));
+        assert!(!message.contains("secret-token"));
     }
 
     #[test]

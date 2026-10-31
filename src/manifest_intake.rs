@@ -136,6 +136,14 @@ pub(crate) struct ManifestChoice {
     bandwidth: Option<u64>,
 }
 
+/// One selectable audio rendition associated with a selected video representation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ManifestAudioChoice {
+    pub(crate) key: String,
+    pub(crate) label: String,
+    pub(crate) is_default: bool,
+}
+
 #[derive(Debug)]
 pub(crate) enum NativeManifest {
     HlsMaster(HlsMasterPlan),
@@ -191,36 +199,11 @@ impl ManifestLookup {
                     let resolution = resolution_label(variant.width, variant.height);
                     let bitrate =
                         bitrate_label(Some(variant.average_bandwidth.unwrap_or(variant.bandwidth)));
-                    let mut label = join_label_parts(
+                    let label = join_label_parts(
                         resolution,
                         bitrate,
                         codec_label(variant.codecs.as_deref()),
                     );
-
-                    if let Some(group_id) = variant.audio_group.as_deref() {
-                        let rendition = master
-                            .audio_renditions
-                            .iter()
-                            .filter(|rendition| rendition.group_id == group_id)
-                            .find(|rendition| rendition.is_default)
-                            .or_else(|| {
-                                master
-                                    .audio_renditions
-                                    .iter()
-                                    .find(|rendition| rendition.group_id == group_id)
-                            });
-                        if let Some(rendition) = rendition {
-                            let audio = rendition
-                                .language
-                                .as_deref()
-                                .filter(|language| !language.is_empty())
-                                .unwrap_or(&rendition.name);
-                            if !audio.is_empty() {
-                                label.push_str(" · ");
-                                label.push_str(&short_label(audio));
-                            }
-                        }
-                    }
 
                     ManifestChoice {
                         key,
@@ -260,6 +243,89 @@ impl ManifestLookup {
         choices
     }
 
+    /// List the audio renditions belonging to one selected video representation.
+    ///
+    /// Every supported audio choice remains available. HLS order follows the
+    /// playlist; the default choice is selected by `preferred_audio_choice_index`. Renditions
+    /// without a URI represent audio embedded in the selected video playlist.
+    pub(crate) fn audio_choices(&self, video_key: &str) -> Vec<ManifestAudioChoice> {
+        match &self.manifest {
+            NativeManifest::HlsMaster(master) => {
+                let group_id = master
+                    .variants
+                    .iter()
+                    .zip(hls_variant_keys(&master.variants))
+                    .find_map(|(variant, key)| {
+                        (key == video_key)
+                            .then_some(variant.audio_group.as_deref())
+                            .flatten()
+                    });
+                let Some(group_id) = group_id else {
+                    return Vec::new();
+                };
+                master
+                    .audio_renditions
+                    .iter()
+                    .zip(hls_audio_rendition_keys(&master.audio_renditions))
+                    .filter(|(rendition, _)| rendition.group_id == group_id)
+                    .map(|(rendition, key)| ManifestAudioChoice {
+                        key,
+                        label: hls_audio_rendition_label(rendition),
+                        is_default: rendition.is_default,
+                    })
+                    .collect()
+            }
+            NativeManifest::HlsMedia(_) => Vec::new(),
+            NativeManifest::Dash(dash) => {
+                if !dash
+                    .video_representations
+                    .iter()
+                    .any(|representation| representation.key == video_key)
+                {
+                    return Vec::new();
+                }
+                let mut choices = dash
+                    .audio_representations
+                    .iter()
+                    .map(|representation| {
+                        let title = representation
+                            .language
+                            .as_deref()
+                            .filter(|language| !language.is_empty())
+                            .or(representation.representation_id.as_deref())
+                            .map(short_label)
+                            .unwrap_or_else(|| gettext("Audio track"));
+                        let mut label = join_label_parts(
+                            title,
+                            bitrate_label(representation.bandwidth),
+                            codec_label(representation.codecs.as_deref()),
+                        );
+                        if representation.is_default_audio {
+                            label.push_str(" · ");
+                            label.push_str(&gettext("Default"));
+                        }
+                        ManifestAudioChoice {
+                            key: representation.key.clone(),
+                            label,
+                            is_default: representation.is_default_audio,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                choices.sort_by_key(|choice| !choice.is_default);
+                choices
+            }
+        }
+    }
+
+    /// Return the default audio choice, or the first available choice.
+    #[must_use]
+    pub(crate) fn preferred_audio_choice_index(choices: &[ManifestAudioChoice]) -> usize {
+        choices
+            .iter()
+            .position(|choice| choice.is_default)
+            .unwrap_or(0)
+    }
+
     /// Return the representation closest to the configured video-quality preference.
     pub(crate) fn preferred_source(
         &self,
@@ -267,15 +333,21 @@ impl ManifestLookup {
     ) -> Option<crate::media_types::ManifestSource> {
         let choices = self.choices();
         let index = preferred_choice_index(&choices, quality);
-        choices
-            .get(index)
-            .and_then(|choice| self.selected_source(&choice.key))
+        choices.get(index).and_then(|choice| {
+            let audio_choices = self.audio_choices(&choice.key);
+            let audio_index = Self::preferred_audio_choice_index(&audio_choices);
+            let audio_key = audio_choices
+                .get(audio_index)
+                .map(|audio| audio.key.as_str());
+            self.selected_source(&choice.key, audio_key)
+        })
     }
 
-    /// Validate and capture the exact representation selected in the picker.
+    /// Validate and capture the exact video and optional audio selections.
     pub(crate) fn selected_source(
         &self,
         representation_key: &str,
+        audio_key: Option<&str>,
     ) -> Option<crate::media_types::ManifestSource> {
         let kind = match &self.manifest {
             NativeManifest::HlsMaster(master) => {
@@ -300,10 +372,19 @@ impl ManifestLookup {
                 crate::media_types::ManifestKind::Dash
             }
         };
+        if audio_key.is_some_and(|selected| {
+            !self
+                .audio_choices(representation_key)
+                .iter()
+                .any(|choice| choice.key == selected)
+        }) {
+            return None;
+        }
         Some(crate::media_types::ManifestSource {
             url: self.source_url.clone(),
             kind,
             representation_key: representation_key.to_string(),
+            audio_key: audio_key.map(str::to_string),
         })
     }
 
@@ -577,6 +658,68 @@ async fn fetch_bounded_manifest_once(
     Ok((final_url, body))
 }
 
+fn hls_audio_rendition_key(rendition: &crate::manifest::HlsAudioRendition) -> String {
+    let mut hasher = Sha256::new();
+    let resource_identity = rendition
+        .url
+        .as_ref()
+        .map(crate::manifest::resource_cache_key);
+    for value in [
+        Some(rendition.group_id.as_str()),
+        Some(rendition.name.as_str()),
+        rendition.language.as_deref(),
+        resource_identity.as_deref(),
+    ] {
+        if let Some(value) = value {
+            hasher.update([1]);
+            hasher.update((value.len() as u64).to_le_bytes());
+            hasher.update(value.as_bytes());
+        } else {
+            hasher.update([0]);
+        }
+    }
+    let digest = hasher.finalize();
+    let fingerprint: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("hls-audio-{fingerprint}")
+}
+
+/// Stable HLS audio identities ignore rotating signature query parameters.
+#[must_use]
+pub(crate) fn hls_audio_rendition_keys(
+    renditions: &[crate::manifest::HlsAudioRendition],
+) -> Vec<String> {
+    renditions.iter().map(hls_audio_rendition_key).collect()
+}
+
+fn hls_audio_rendition_label(rendition: &crate::manifest::HlsAudioRendition) -> String {
+    let language = rendition
+        .language
+        .as_deref()
+        .filter(|language| !language.is_empty());
+    let name = (!rendition.name.is_empty()).then_some(rendition.name.as_str());
+    let mut parts = Vec::with_capacity(3);
+    if let Some(language) = language {
+        parts.push(short_label(language));
+    }
+    if let Some(name) = name.filter(|name| Some(*name) != language) {
+        parts.push(short_label(name));
+    }
+    if rendition.url.is_none() {
+        parts.push(gettext("Embedded audio"));
+    }
+    if rendition.is_default {
+        parts.push(gettext("Default"));
+    }
+    if parts.is_empty() {
+        gettext("Audio track")
+    } else {
+        parts.join(" · ")
+    }
+}
+
 /// Stable base identity for an HLS variant, retained for queued-item compatibility.
 #[must_use]
 fn hls_variant_key(variant: &HlsVariant) -> String {
@@ -662,6 +805,12 @@ pub(crate) fn hls_variant_keys(variants: &[HlsVariant]) -> Vec<String> {
         .collect()
 }
 
+fn has_hex_fingerprint(value: &str, prefix: &str, length: usize) -> bool {
+    value.strip_prefix(prefix).is_some_and(|fingerprint| {
+        fingerprint.len() == length && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 /// Check persisted source metadata before restoring a native queue row.
 pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool {
     let Ok(url) = Url::parse(&source.url) else {
@@ -670,24 +819,24 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
     if native_manifest_kind(&url) != Some(source.kind) || source.representation_key.is_empty() {
         return false;
     }
-    match source.kind {
+    let video_key_is_valid = match source.kind {
         crate::media_types::ManifestKind::Hls => {
-            source.representation_key == "hls-media"
-                || source
-                    .representation_key
-                    .strip_prefix("hls-variant-")
-                    .is_some_and(|fingerprint| {
-                        matches!(fingerprint.len(), 32 | 64)
-                            && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    })
+            (source.representation_key == "hls-media" && source.audio_key.is_none())
+                || has_hex_fingerprint(&source.representation_key, "hls-variant-", 32)
+                || has_hex_fingerprint(&source.representation_key, "hls-variant-", 64)
         }
-        crate::media_types::ManifestKind::Dash => source
-            .representation_key
-            .strip_prefix("dash-")
-            .is_some_and(|fingerprint| {
-                fingerprint.len() == 32 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
-            }),
-    }
+        crate::media_types::ManifestKind::Dash => {
+            has_hex_fingerprint(&source.representation_key, "dash-", 32)
+        }
+    };
+    let audio_key_is_valid = source
+        .audio_key
+        .as_deref()
+        .is_none_or(|key| match source.kind {
+            crate::media_types::ManifestKind::Hls => has_hex_fingerprint(key, "hls-audio-", 32),
+            crate::media_types::ManifestKind::Dash => has_hex_fingerprint(key, "dash-", 32),
+        });
+    video_key_is_valid && audio_key_is_valid
 }
 
 async fn read_bounded_response(
@@ -909,6 +1058,160 @@ second.m3u8
     }
 
     #[test]
+    fn hls_audio_choices_are_scoped_to_variant_and_preselect_default() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-en",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8?sig=old"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-en",NAME="French",LANGUAGE="fr",DEFAULT=NO,AUTOSELECT=YES,URI="audio/fr.m3u8?sig=old"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-es",NAME="Spanish",LANGUAGE="es",DEFAULT=YES,AUTOSELECT=YES,URI="audio/es.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080,AUDIO="audio-en"
+video/en.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720,AUDIO="audio-es"
+video/es.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("valid HLS master playlist");
+        let video_keys = hls_variant_keys(&master.variants);
+        let lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/master.m3u8".to_string(),
+            manifest: NativeManifest::HlsMaster(master),
+        };
+
+        let english_choices = lookup.audio_choices(&video_keys[0]);
+        assert_eq!(english_choices.len(), 2);
+        assert!(english_choices[0].is_default);
+        assert!(
+            english_choices
+                .iter()
+                .any(|choice| choice.label.contains("French"))
+        );
+        assert_eq!(lookup.audio_choices(&video_keys[1]).len(), 1);
+
+        let default_source = lookup
+            .preferred_source("1080p")
+            .expect("preferred HLS video and default audio");
+        assert_eq!(default_source.representation_key, video_keys[0]);
+        assert_eq!(
+            default_source.audio_key.as_deref(),
+            Some(english_choices[0].key.as_str())
+        );
+
+        let selected = lookup
+            .selected_source(&video_keys[0], Some(&english_choices[1].key))
+            .expect("selected alternate audio rendition");
+        assert_eq!(
+            selected.audio_key.as_deref(),
+            Some(english_choices[1].key.as_str())
+        );
+        assert!(
+            lookup
+                .selected_source(&video_keys[1], Some(&english_choices[1].key))
+                .is_none(),
+            "an audio rendition must not be selectable from another variant's group"
+        );
+    }
+
+    #[test]
+    fn hls_audio_keys_ignore_rotating_signature_query_parameters() {
+        let rendition = |url: &str| crate::manifest::HlsAudioRendition {
+            url: Some(Url::parse(url).expect("valid audio rendition URL")),
+            group_id: "audio-main".to_string(),
+            name: "English".to_string(),
+            language: Some("en".to_string()),
+            is_default: true,
+        };
+        let original = rendition("https://cdn.example.test/audio/en.m3u8?sig=old");
+        let refreshed = rendition("https://cdn.example.test/audio/en.m3u8?sig=new");
+
+        assert_eq!(
+            hls_audio_rendition_key(&original),
+            hls_audio_rendition_key(&refreshed)
+        );
+    }
+
+    #[test]
+    fn dash_audio_choices_include_every_track_and_pin_the_main_role() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="5" media="video-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000" width="1280" height="720" codecs="avc1.64001f"/>
+    </AdaptationSet>
+    <AdaptationSet id="audio-en" contentType="audio" mimeType="audio/mp4" lang="en">
+      <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      <SegmentTemplate duration="5" media="audio-en-$Number$.m4s"/>
+      <Representation id="a-en" bandwidth="128000" codecs="mp4a.40.2"/>
+    </AdaptationSet>
+    <AdaptationSet id="audio-fr" contentType="audio" mimeType="audio/mp4" lang="fr">
+      <SegmentTemplate duration="5" media="audio-fr-$Number$.m4s"/>
+      <Representation id="a-fr" bandwidth="192000" codecs="mp4a.40.2"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let dash = crate::manifest::dash::parse_dash_manifest(
+            "https://cdn.example.test/manifest.mpd",
+            body,
+        )
+        .expect("valid static DASH presentation");
+        let video_key = dash.video_representations[0].key.clone();
+        let main_audio_key = dash
+            .default_audio()
+            .expect("DASH main audio representation")
+            .key
+            .clone();
+        let lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/manifest.mpd".to_string(),
+            manifest: NativeManifest::Dash(dash),
+        };
+
+        let choices = lookup.audio_choices(&video_key);
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0].key, main_audio_key);
+        assert!(choices[0].is_default);
+        assert!(choices.iter().any(|choice| choice.label.contains("fr")));
+
+        let selected = lookup
+            .selected_source(&video_key, Some(&choices[1].key))
+            .expect("select the alternate DASH audio representation");
+        assert_eq!(selected.audio_key.as_deref(), Some(choices[1].key.as_str()));
+        let preferred = lookup
+            .preferred_source("720p")
+            .expect("default DASH audio is selected automatically");
+        assert_eq!(
+            preferred.audio_key.as_deref(),
+            Some(main_audio_key.as_str())
+        );
+    }
+
+    #[test]
+    fn manifest_source_audio_key_is_optional_and_validated() {
+        let legacy: crate::media_types::ManifestSource =
+            serde_json::from_value(serde_json::json!({
+                "url": "https://cdn.example.test/master.m3u8",
+                "kind": "Hls",
+                "representation_key": "hls-media"
+            }))
+            .expect("legacy manifest source without an audio key remains compatible");
+        assert_eq!(legacy.audio_key, None);
+
+        let mut source = crate::media_types::ManifestSource {
+            url: "https://cdn.example.test/master.m3u8".to_string(),
+            kind: crate::media_types::ManifestKind::Hls,
+            representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
+            audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".to_string()),
+        };
+        assert!(valid_source(&source));
+        source.audio_key = Some("not-a-stable-audio-key".to_string());
+        assert!(!valid_source(&source));
+        source.representation_key = "hls-media".to_string();
+        source.audio_key = None;
+        assert!(valid_source(&source));
+    }
+
+    #[test]
     fn accepts_only_https_hls_and_dash_manifest_paths() {
         assert!(supports("https://cdn.example.test/master.m3u8?token=abc"));
         assert!(supports("https://cdn.example.test/path/manifest.MPD"));
@@ -968,6 +1271,7 @@ second.m3u8
                 url: "https://cdn.example.test/master.m3u8".to_string(),
                 kind: crate::media_types::ManifestKind::Hls,
                 representation_key: key.clone(),
+                audio_key: None,
             })
         }));
 

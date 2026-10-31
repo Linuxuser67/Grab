@@ -365,20 +365,43 @@ async fn resolve_tracks(
                     )
                 })?;
             let video_url = variant.url.clone();
-            let audio_url = variant.audio_group.as_deref().and_then(|group| {
-                master
-                    .audio_renditions
-                    .iter()
-                    .filter(|rendition| rendition.group_id == group)
-                    .find(|rendition| rendition.is_default)
-                    .or_else(|| {
-                        master
-                            .audio_renditions
-                            .iter()
-                            .find(|rendition| rendition.group_id == group)
-                    })
-                    .and_then(|rendition| rendition.url.clone())
-            });
+            let selected_audio = match source.audio_key.as_deref() {
+                Some(audio_key) => Some(
+                    master
+                        .audio_renditions
+                        .iter()
+                        .zip(crate::manifest_intake::hls_audio_rendition_keys(
+                            &master.audio_renditions,
+                        ))
+                        .find_map(|(rendition, key)| (key == audio_key).then_some(rendition))
+                        .filter(|rendition| {
+                            variant
+                                .audio_group
+                                .as_deref()
+                                .is_some_and(|group| rendition.group_id == group)
+                        })
+                        .ok_or_else(|| {
+                            ManifestRunError::Unsupported(
+                                "The selected HLS audio rendition is no longer available"
+                                    .to_string(),
+                            )
+                        })?,
+                ),
+                None => variant.audio_group.as_deref().and_then(|group| {
+                    master
+                        .audio_renditions
+                        .iter()
+                        .filter(|rendition| rendition.group_id == group)
+                        .find(|rendition| rendition.is_default)
+                        .or_else(|| {
+                            master
+                                .audio_renditions
+                                .iter()
+                                .find(|rendition| rendition.group_id == group)
+                        })
+                }),
+            };
+            let audio_url = selected_audio.and_then(|rendition| rendition.url.clone());
             guard_manifest_child_url(&source.url, &video_url, &mut guarded_child_hosts)?;
             if let Some(audio_url) = audio_url.as_ref() {
                 guard_manifest_child_url(&source.url, audio_url, &mut guarded_child_hosts)?;
@@ -401,8 +424,21 @@ async fn resolve_tracks(
             let video =
                 crate::manifest::dash::plan_dash_representation(&dash, &source.representation_key)
                     .map_err(|error| ManifestRunError::Unsupported(error.to_string()))?;
-            let audio = dash
-                .default_audio()
+            let selected_audio = match source.audio_key.as_deref() {
+                Some(audio_key) => Some(
+                    dash.audio_representations
+                        .iter()
+                        .find(|track| track.key == audio_key)
+                        .ok_or_else(|| {
+                            ManifestRunError::Unsupported(
+                                "The selected DASH audio representation is no longer available"
+                                    .to_string(),
+                            )
+                        })?,
+                ),
+                None => dash.default_audio(),
+            };
+            let audio = selected_audio
                 .map(|track| {
                     crate::manifest::dash::plan_dash_representation(&dash, &track.key)
                         .map(Box::new)
@@ -1051,6 +1087,103 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn selected_dash_audio_representation_is_used_for_track_planning() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="5" media="video-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000" width="1280" height="720" codecs="avc1.64001f"/>
+    </AdaptationSet>
+    <AdaptationSet id="audio-en" contentType="audio" mimeType="audio/mp4" lang="en">
+      <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      <SegmentTemplate duration="5" media="audio-en-$Number$.m4s"/>
+      <Representation id="a-en" bandwidth="128000" codecs="mp4a.40.2"/>
+    </AdaptationSet>
+    <AdaptationSet id="audio-fr" contentType="audio" mimeType="audio/mp4" lang="fr">
+      <SegmentTemplate duration="5" media="audio-fr-$Number$.m4s"/>
+      <Representation id="a-fr" bandwidth="192000" codecs="mp4a.40.2"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest_url = "https://cdn.example.test/manifest.mpd";
+        let dash = crate::manifest::dash::parse_dash_manifest(manifest_url, body)
+            .expect("valid static DASH presentation");
+        let video_key = dash.video_representations[0].key.clone();
+        let main_audio_key = dash
+            .default_audio()
+            .expect("main DASH audio track")
+            .key
+            .clone();
+        let alternate_audio_key = dash
+            .audio_representations
+            .iter()
+            .find(|track| track.representation_id.as_deref() == Some("a-fr"))
+            .expect("alternate language audio track")
+            .key
+            .clone();
+        let client = reqwest::Client::new();
+
+        let selected_source = ManifestSource {
+            url: manifest_url.to_string(),
+            kind: ManifestKind::Dash,
+            representation_key: video_key.clone(),
+            audio_key: Some(alternate_audio_key),
+        };
+        let selected = resolve_tracks(
+            &client,
+            ManifestLookup {
+                source_url: manifest_url.to_string(),
+                manifest: NativeManifest::Dash(dash.clone()),
+            },
+            &selected_source,
+        )
+        .await
+        .expect("selected audio representation should be planned");
+        let Tracks::Dash { audio, .. } = selected else {
+            panic!("DASH manifest must resolve to DASH tracks");
+        };
+        assert_eq!(
+            audio
+                .as_deref()
+                .and_then(|plan| plan.representation.representation_id.as_deref()),
+            Some("a-fr"),
+            "the queued audio key must select the matching representation"
+        );
+
+        let automatic_source = ManifestSource {
+            audio_key: None,
+            ..selected_source
+        };
+        let automatic = resolve_tracks(
+            &client,
+            ManifestLookup {
+                source_url: manifest_url.to_string(),
+                manifest: NativeManifest::Dash(dash),
+            },
+            &automatic_source,
+        )
+        .await
+        .expect("legacy automatic audio choice should remain supported");
+        let Tracks::Dash { audio, .. } = automatic else {
+            panic!("DASH manifest must resolve to DASH tracks");
+        };
+        assert_eq!(
+            audio
+                .as_deref()
+                .map(|plan| plan.representation.key.as_str()),
+            Some(main_audio_key.as_str()),
+            "queue entries without an audio key must preserve main/first fallback"
+        );
+        assert_eq!(
+            audio
+                .as_deref()
+                .and_then(|plan| plan.representation.representation_id.as_deref()),
+            Some("a-en")
+        );
+    }
+
+    #[tokio::test]
     async fn run_manifest_download_rejects_a_destination_without_a_parent() {
         let job = ManifestJob {
             item_id: 7,
@@ -1058,6 +1191,7 @@ mod tests {
                 url: "https://cdn.example.test/master.m3u8".to_string(),
                 kind: ManifestKind::Hls,
                 representation_key: "hls-media".to_string(),
+                audio_key: None,
             },
             dest: PathBuf::new(),
             proxy: None,

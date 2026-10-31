@@ -553,6 +553,11 @@ pub(crate) struct VideoStep {
     pub(crate) manifest_choices: Rc<RefCell<Vec<crate::manifest_intake::ManifestChoice>>>,
     pub(crate) manifest_selection: Rc<RefCell<Option<String>>>,
     pub(crate) manifest_format: adw::ComboRow,
+    /// Audio choices and selected audio key for the active static presentation.
+    pub(crate) manifest_audio_choices:
+        Rc<RefCell<Vec<crate::manifest_intake::ManifestAudioChoice>>>,
+    pub(crate) manifest_audio_selection: Rc<RefCell<Option<String>>>,
+    pub(crate) manifest_audio_format: adw::ComboRow,
     /// Index-aligned with the combo's model. Reset on every resolve.
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
     pub(crate) tools: adw::ActionRow,
@@ -712,6 +717,7 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.revert.set_visible(false);
     v.format.set_visible(false);
     v.manifest_format.set_visible(false);
+    v.manifest_audio_format.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
     v.gallery_info.set_visible(false);
@@ -732,6 +738,45 @@ fn clear_manifest_preview(step: &VideoStep) {
     step.manifest_selection.borrow_mut().take();
     step.manifest_format
         .set_model(Some(&gtk4::StringList::new(&[])));
+    step.manifest_audio_choices.borrow_mut().clear();
+    step.manifest_audio_selection.borrow_mut().take();
+    step.manifest_audio_format
+        .set_model(Some(&gtk4::StringList::new(&[])));
+    step.manifest_audio_format.set_visible(false);
+}
+
+/// Refresh the audio picker for the selected video representation.
+fn refresh_manifest_audio_picker(step: &VideoStep, video_key: Option<&str>) {
+    let choices = video_key
+        .and_then(|key| {
+            step.manifest
+                .borrow()
+                .as_ref()
+                .map(|manifest| manifest.audio_choices(key))
+        })
+        .unwrap_or_default();
+    let selected_index =
+        crate::manifest_intake::ManifestLookup::preferred_audio_choice_index(&choices);
+    step.manifest_audio_choices.replace(choices);
+    step.manifest_audio_selection.replace(
+        step.manifest_audio_choices
+            .borrow()
+            .get(selected_index)
+            .map(|choice| choice.key.clone()),
+    );
+    let labels = step
+        .manifest_audio_choices
+        .borrow()
+        .iter()
+        .map(|choice| choice.label.clone())
+        .collect::<Vec<_>>();
+    let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    step.manifest_audio_format
+        .set_model(Some(&gtk4::StringList::new(&label_refs)));
+    step.manifest_audio_format
+        .set_selected(u32::try_from(selected_index).unwrap_or_default());
+    step.manifest_audio_format
+        .set_visible(step.manifest_audio_choices.borrow().len() > 1);
 }
 
 /// Show a parsed manifest and enable Add for the validated representation.
@@ -753,8 +798,8 @@ fn show_manifest_ready(
     let choices = manifest.choices();
     let selected_index =
         crate::manifest_intake::preferred_choice_index(&choices, preferred_quality);
-    step.manifest_selection
-        .replace(choices.get(selected_index).map(|choice| choice.key.clone()));
+    let selected_video_key = choices.get(selected_index).map(|choice| choice.key.clone());
+    step.manifest_selection.replace(selected_video_key.clone());
     step.manifest_choices.replace(choices);
 
     let labels = step
@@ -769,6 +814,8 @@ fn show_manifest_ready(
     step.manifest_format
         .set_selected(u32::try_from(selected_index).unwrap_or_default());
     step.manifest_format.set_visible(true);
+    drop(manifest_state);
+    refresh_manifest_audio_picker(step, selected_video_key.as_deref());
     if step.name.text().trim().is_empty() {
         step.name.set_text("Stream.mp4");
     }
@@ -2178,6 +2225,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     manifest_format.set_visible(false);
     video_group.add(&manifest_format);
+    let manifest_audio_format = adw::ComboRow::builder()
+        .title(gettext("Audio track"))
+        .build();
+    manifest_audio_format.set_visible(false);
+    video_group.add(&manifest_audio_format);
 
     let video_format = adw::ComboRow::builder()
         .title(gettext("Media format"))
@@ -2272,6 +2324,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         manifest_choices: Rc::new(RefCell::new(Vec::new())),
         manifest_selection: Rc::new(RefCell::new(None)),
         manifest_format,
+        manifest_audio_choices: Rc::new(RefCell::new(Vec::new())),
+        manifest_audio_selection: Rc::new(RefCell::new(None)),
+        manifest_audio_format,
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
         error: video_error,
@@ -2290,17 +2345,35 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         lookup_abort: Rc::new(RefCell::new(None)),
         add_btn: add_btn.clone(),
     });
-    // Keep the selected representation key aligned with the ComboRow.
+    // Keep both selections aligned with their ComboRows. Changing video
+    // representation resets audio to that representation's default rendition.
     {
+        let step_weak = Rc::downgrade(&step);
+        let manifest_format = step.manifest_format.clone();
         let choices = Rc::clone(&step.manifest_choices);
         let selection = Rc::clone(&step.manifest_selection);
-        step.manifest_format.connect_selected_notify(move |row| {
+        manifest_format.connect_selected_notify(move |row| {
             let selected_key = choices
                 .borrow()
                 .get(row.selected() as usize)
                 .map(|choice| choice.key.clone());
-            selection.replace(selected_key);
+            selection.replace(selected_key.clone());
+            if let Some(step) = step_weak.upgrade() {
+                refresh_manifest_audio_picker(&step, selected_key.as_deref());
+            }
         });
+    }
+    {
+        let choices = Rc::clone(&step.manifest_audio_choices);
+        let selection = Rc::clone(&step.manifest_audio_selection);
+        step.manifest_audio_format
+            .connect_selected_notify(move |row| {
+                let selected_key = choices
+                    .borrow()
+                    .get(row.selected() as usize)
+                    .map(|choice| choice.key.clone());
+                selection.replace(selected_key);
+            });
     }
     // "Select files…" invokes the opener set below (where the picker context
     // lives). Connected once; the opener is set once at build time.
@@ -3233,13 +3306,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 let selected_source = {
                     let manifest = step2.manifest.borrow();
                     let selected = step2.manifest_selection.borrow();
+                    let selected_audio = step2.manifest_audio_selection.borrow();
                     manifest
                         .as_ref()
                         .filter(|manifest| manifest.source_url == url)
                         .and_then(|manifest| {
-                            selected
-                                .as_deref()
-                                .and_then(|key| manifest.selected_source(key))
+                            selected.as_deref().and_then(|key| {
+                                manifest.selected_source(key, selected_audio.as_deref())
+                            })
                         })
                 };
                 if let Some(source) = selected_source {

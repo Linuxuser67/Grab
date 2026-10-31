@@ -1530,12 +1530,8 @@ async fn run_live_hls_tracks(
 
     let all_tracks_ended = video_plan.end_list && audio_plan.is_none_or(|plan| plan.end_list);
     if !all_tracks_ended {
-        guard_manifest_child_url(
-            source_url,
-            &video_plan.playlist_url,
-            guarded_child_hosts,
-        )
-        .map_err(ManifestRunError::Unsupported)?;
+        guard_manifest_child_url(source_url, &video_plan.playlist_url, guarded_child_hosts)
+            .map_err(ManifestRunError::Unsupported)?;
         if let Some(plan) = audio_plan {
             guard_manifest_child_url(source_url, &plan.playlist_url, guarded_child_hosts)
                 .map_err(ManifestRunError::Unsupported)?;

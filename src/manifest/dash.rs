@@ -611,6 +611,61 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
     format!("dash-{fingerprint}")
 }
 
+/// Stable representation identity excluding the changing live segment window.
+fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> String {
+    let RepresentationIdentity {
+        id,
+        kind,
+        bandwidth,
+        width,
+        height,
+        mime_type,
+        codecs,
+        language,
+        base_url,
+        addressing,
+    } = identity;
+    let mut hasher = Sha256::new();
+    hasher.update(match kind {
+        DashTrackKind::Video => b"video".as_slice(),
+        DashTrackKind::Audio => b"audio".as_slice(),
+    });
+    hash_optional_text(&mut hasher, id);
+    hash_optional_text(&mut hasher, base_url.host_str());
+    hash_optional_number(&mut hasher, base_url.port_or_known_default().map(u64::from));
+    hash_optional_text(&mut hasher, Some(base_url.path()));
+    hash_optional_text(&mut hasher, mime_type);
+    hash_optional_text(&mut hasher, codecs);
+    hash_optional_text(&mut hasher, language);
+    hash_optional_number(&mut hasher, bandwidth);
+    hash_optional_number(&mut hasher, width);
+    hash_optional_number(&mut hasher, height);
+    if let DashAddressing::Template(template) = addressing {
+        hasher.update(b"template");
+        hasher.update(template.media.as_bytes());
+        hash_optional_number(&mut hasher, Some(template.timescale));
+        hash_optional_number(&mut hasher, template.duration_ticks);
+        match &template.initialization {
+            Some(DashInitialization::Template(value)) => {
+                hasher.update(b"init-template");
+                hasher.update(value.as_bytes());
+            }
+            Some(DashInitialization::Resource { url, range }) => {
+                hasher.update(b"init-resource");
+                hash_optional_text(&mut hasher, url.as_deref());
+                hash_optional_range(&mut hasher, *range);
+            }
+            None => hasher.update(b"no-init"),
+        }
+    }
+    let digest = hasher.finalize();
+    let fingerprint: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("dash-live-{fingerprint}")
+}
+
 fn hash_optional_text(hasher: &mut Sha256, value: Option<&str>) {
     if let Some(value) = value {
         hasher.update([1]);
@@ -725,6 +780,7 @@ fn effective_addressing(
     adaptation: &dash_mpd_core::AdaptationSet,
     representation: &dash_mpd_core::Representation,
     period_duration: Duration,
+    is_dynamic: bool,
 ) -> Result<DashAddressing, DashError> {
     let templates = [
         period.SegmentTemplate.as_ref(),
@@ -746,6 +802,9 @@ fn effective_addressing(
 
     let has_template = templates.iter().any(Option::is_some);
     let has_list = lists.iter().any(Option::is_some);
+    if is_dynamic && (!has_template || has_list) {
+        return Err(DashError::UnsupportedAddressing);
+    }
     match (has_template, has_list) {
         (true, false) => {
             effective_template(&templates, period_duration).map(DashAddressing::Template)
@@ -1031,6 +1090,7 @@ fn expand_template(
             range,
             filename,
             kind: DashResourceKind::Initialization,
+            segment_number: None,
         });
     }
 
@@ -1043,6 +1103,7 @@ fn expand_template(
             range: None,
             filename,
             kind: DashResourceKind::Segment,
+            segment_number: Some(number),
         });
     }
 
@@ -1342,6 +1403,7 @@ fn expand_list(
             range,
             filename,
             kind: DashResourceKind::Initialization,
+            segment_number: None,
         });
     }
 
@@ -1353,6 +1415,7 @@ fn expand_list(
             range: segment.range,
             filename,
             kind: DashResourceKind::Segment,
+            segment_number: Some(u64::try_from(index).map_err(|_| DashError::LimitExceeded)?),
         });
     }
 

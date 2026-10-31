@@ -2621,10 +2621,10 @@ async fn run_live_dash_tracks(
     let mut audio = match audio_plan {
         Some(plan) => {
             let key = audio_key
-                .as_deref()
-                .unwrap_or(&plan.representation.live_key);
-            audio_key = Some(key.to_string());
-            Some(load_dash_live_track(key, audio_dir, Some(plan)).await?)
+                .clone()
+                .unwrap_or_else(|| plan.representation.live_key.clone());
+            audio_key = Some(key.clone());
+            Some(load_dash_live_track(&key, audio_dir, Some(plan)).await?)
         }
         None if dash_live_state_exists(audio_dir).await? => {
             let key = match audio_key.as_deref() {

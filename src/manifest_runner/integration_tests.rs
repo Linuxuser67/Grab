@@ -563,10 +563,12 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let client = fixture_client();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let downloaded = Arc::new(AtomicU64::new(0));
+    let mut guarded_child_hosts = std::collections::HashSet::new();
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
     let outcome = run_live_hls_tracks(
         &client,
         "https://origin.example.test/master.m3u8",
+        root.path(),
         &local_plan,
         None,
         &video_dir,
@@ -574,6 +576,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         1,
         &tx,
         &downloaded,
+        &mut guarded_child_hosts,
         &mut abort,
     )
     .await
@@ -1735,9 +1738,11 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
     let downloaded = Arc::new(AtomicU64::new(0));
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
 
+    let mut guarded_child_hosts = std::collections::HashSet::new();
     let capture = run_live_dash_tracks(
         &client,
         source_url,
+        root.path(),
         &video_key,
         Some(&audio_key),
         Some(&video_plan),
@@ -1747,6 +1752,7 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
         3,
         &tx,
         &downloaded,
+        &mut guarded_child_hosts,
         &mut abort,
     )
     .await
@@ -1861,9 +1867,11 @@ async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
             .expect("send preserve stop after committed dynamic DASH window");
     });
 
+    let mut guarded_child_hosts = std::collections::HashSet::new();
     let capture = run_live_dash_tracks(
         &client,
         "https://origin.example.test/live.mpd",
+        root.path(),
         &representation_key,
         None,
         Some(&video_plan),
@@ -1873,6 +1881,7 @@ async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
         3,
         &tx,
         &downloaded,
+        &mut guarded_child_hosts,
         &mut abort,
     )
     .await

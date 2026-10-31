@@ -251,8 +251,13 @@ pub(crate) async fn run_manifest_download(
     let live_marker_exists = read_live_hls_marker(&staging)
         .await
         .map_err(ManifestRunError::Failed)?;
+    let dash_live_requested = job.source.kind == ManifestKind::Dash
+        && job.source.representation_key.starts_with("dash-live-");
     let mut offline_tracks = if live_marker_exists && job.source.kind == ManifestKind::Hls {
         restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
+    } else if dash_live_requested && dash_live_state_exists(&video_dir).await? {
+        let has_audio = job.source.audio_key.is_some() && dash_live_state_exists(&audio_dir).await?;
+        Some(Tracks::DashLiveOffline { has_audio })
     } else {
         None
     };
@@ -269,7 +274,7 @@ pub(crate) async fn run_manifest_download(
             tracing::warn!(
                 item_id = job.item_id,
                 error = %error,
-                "live HLS source is unavailable; finalizing the committed local capture"
+                "live stream source is unavailable; finalizing the committed local capture"
             );
             (reqwest::Client::new(), true)
         }
@@ -295,7 +300,7 @@ pub(crate) async fn run_manifest_download(
                         tracing::warn!(
                             item_id = job.item_id,
                             error = %error,
-                            "live HLS source no longer resolves; finalizing the committed local capture"
+                            "live stream source no longer resolves; finalizing the committed local capture"
                         );
                         offline_tracks.take().ok_or_else(|| {
                             ManifestRunError::Failed(
@@ -310,7 +315,7 @@ pub(crate) async fn run_manifest_download(
                 if let Some(tracks) = offline_tracks.take() {
                     tracing::warn!(
                         item_id = job.item_id,
-                        "live HLS source changed or is no longer supported; finalizing the committed local capture"
+                        "live stream source changed or is no longer supported; finalizing the committed local capture"
                     );
                     tracks
                 } else {
@@ -337,6 +342,7 @@ pub(crate) async fn run_manifest_download(
     let mut has_audio = match &tracks {
         Tracks::Hls { audio, .. } => audio.is_some(),
         Tracks::Dash { audio, .. } => audio.is_some(),
+        Tracks::DashLiveOffline { has_audio } => *has_audio,
     };
     if has_audio {
         ensure_track_dir(&audio_dir).await?;
@@ -347,6 +353,8 @@ pub(crate) async fn run_manifest_download(
             if video.is_live || audio.as_ref().is_some_and(|track| track.is_live)
     );
     let live_hls = matches!(&tracks, Tracks::Hls { .. }) && (live_source || live_marker_exists);
+    let live_dash = dash_live_requested
+        && matches!(&tracks, Tracks::Dash { .. } | Tracks::DashLiveOffline { .. });
     if live_source {
         ensure_live_hls_marker(&staging)
             .await
@@ -356,7 +364,7 @@ pub(crate) async fn run_manifest_download(
             "A live HLS staging marker belongs to a non-HLS queue item".to_string(),
         ));
     }
-    tx.send(EngineMsg::Phase(if live_source {
+    tx.send(EngineMsg::Phase(if live_source || live_dash {
         "Recording live stream…".to_string()
     } else if live_hls {
         "Finalizing live stream…".to_string()
@@ -412,6 +420,82 @@ pub(crate) async fn run_manifest_download(
                 abort = receiver;
             }
             LiveHlsCaptureOutcome::Discard => return Ok(ManifestOutcome::Aborted),
+        }
+    } else if live_dash {
+        let (video_plan, audio_plan) = match &tracks {
+            Tracks::Dash { video, audio } => (Some(video), audio.as_deref()),
+            Tracks::DashLiveOffline { .. } => (None, None),
+            Tracks::Hls { .. } => {
+                return Err(ManifestRunError::Failed(
+                    "A live DASH queue item resolved to HLS tracks".to_string(),
+                ));
+            }
+        };
+        let capture = run_live_dash_tracks(
+            &client,
+            &job.source.url,
+            &job.source.representation_key,
+            job.source.audio_key.as_deref(),
+            video_plan,
+            audio_plan,
+            &video_dir,
+            &audio_dir,
+            concurrency,
+            &tx,
+            &downloaded,
+            &mut abort,
+        )
+        .await?;
+        match capture.outcome {
+            DashLiveCaptureOutcome::Discard => return Ok(ManifestOutcome::Aborted),
+            DashLiveCaptureOutcome::Preserve
+            | DashLiveCaptureOutcome::PreserveVideoOnly => {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                _preserve_stop_sender = Some(sender);
+                abort = receiver;
+            }
+            DashLiveCaptureOutcome::Ended => {}
+        }
+        if !capture
+            .video_resources
+            .iter()
+            .any(|name| name.starts_with("dash-live-segment-"))
+        {
+            return Ok(ManifestOutcome::Aborted);
+        }
+        if matches!(capture.outcome, DashLiveCaptureOutcome::PreserveVideoOnly) {
+            remove_regular_file_if_present(&audio_dir.join(DASH_LIVE_STATE_NAME))
+                .await
+                .map_err(ManifestRunError::Failed)?;
+            has_audio = false;
+        } else {
+            has_audio = capture.audio_resources.as_ref().is_some_and(|resources| {
+                resources
+                    .iter()
+                    .any(|name| name.starts_with("dash-live-segment-"))
+            });
+        }
+        if !concat_dash_resource_names(
+            &capture.video_resources,
+            &video_dir,
+            "video-track.mp4",
+            &mut abort,
+        )
+        .await?
+        {
+            return Ok(ManifestOutcome::Aborted);
+        }
+        if has_audio
+            && let Some(audio_resources) = capture.audio_resources.as_ref()
+            && !concat_dash_resource_names(
+                audio_resources,
+                &audio_dir,
+                "audio-track.mp4",
+                &mut abort,
+            )
+            .await?
+        {
+            return Ok(ManifestOutcome::Aborted);
         }
     } else {
         match &tracks {
@@ -484,6 +568,11 @@ pub(crate) async fn run_manifest_download(
                     }
                 }
             }
+            Tracks::DashLiveOffline { .. } => {
+                return Err(ManifestRunError::Failed(
+                    "A restored live DASH item bypassed the native live capture path".to_string(),
+                ));
+            }
         }
     }
 
@@ -509,7 +598,9 @@ pub(crate) async fn run_manifest_download(
 
     let video_input = match tracks {
         Tracks::Hls { .. } => video_dir.join("local.m3u8"),
-        Tracks::Dash { .. } => video_dir.join("video-track.mp4"),
+        Tracks::Dash { .. } | Tracks::DashLiveOffline { .. } => {
+            video_dir.join("video-track.mp4")
+        }
     };
     let audio_input = has_audio.then(|| match job.source.kind {
         ManifestKind::Hls => audio_dir.join("local.m3u8"),

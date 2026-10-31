@@ -650,11 +650,11 @@ fn retain_public(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
         .collect()
 }
 
-async fn lookup_filtered(host: &str, public_only: bool) -> Result<Vec<SocketAddr>, String> {
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, 0))
-        .await
-        .map_err(|e| e.to_string())?
-        .collect();
+fn filter_public_addresses(
+    host: &str,
+    public_only: bool,
+    addrs: Vec<SocketAddr>,
+) -> Result<Vec<SocketAddr>, String> {
     if !public_only || addrs.is_empty() {
         return Ok(addrs);
     }
@@ -667,19 +667,37 @@ async fn lookup_filtered(host: &str, public_only: bool) -> Result<Vec<SocketAddr
     Ok(kept)
 }
 
+async fn lookup_filtered(host: &str, public_only: bool) -> Result<Vec<SocketAddr>, String> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, 0))
+        .await
+        .map_err(|error| error.to_string())?
+        .collect();
+    filter_public_addresses(host, public_only, addrs)
+}
+
 /// DNS resolver used by each client. Filtering the answer that the socket
 /// then connects to leaves no check/connect gap for DNS rebinding.
 struct GuardedResolver {
     public_dns_hosts: PublicDnsPolicy,
+    #[cfg(test)]
+    dns_overrides: Arc<std::collections::HashMap<String, Vec<SocketAddr>>>,
 }
 
 impl reqwest::dns::Resolve for GuardedResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let host = name.as_str().to_owned();
         let public_dns_hosts = Arc::clone(&self.public_dns_hosts);
+        #[cfg(test)]
+        let override_addrs = self.dns_overrides.get(&host_key(&host)).cloned();
+        #[cfg(not(test))]
+        let override_addrs: Option<Vec<SocketAddr>> = None;
+
         Box::pin(async move {
             let public_only = requires_public_dns_filter(&host, &public_dns_hosts);
-            let addrs = lookup_filtered(&host, public_only).await?;
+            let addrs = match override_addrs {
+                Some(addrs) => filter_public_addresses(&host, public_only, addrs)?,
+                None => lookup_filtered(&host, public_only).await?,
+            };
             Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
         })
     }
@@ -689,8 +707,41 @@ fn guarded_network_policy() -> (reqwest::redirect::Policy, GuardedResolver) {
     let public_dns_hosts = public_dns_policy();
     (
         redirect_policy(Arc::clone(&public_dns_hosts)),
-        GuardedResolver { public_dns_hosts },
+        GuardedResolver {
+            public_dns_hosts,
+            #[cfg(test)]
+            dns_overrides: Arc::new(std::collections::HashMap::new()),
+        },
     )
+}
+
+#[cfg(test)]
+fn guarded_network_policy_with_dns_overrides(
+    overrides: std::collections::HashMap<String, Vec<SocketAddr>>,
+) -> (reqwest::redirect::Policy, GuardedResolver) {
+    let public_dns_hosts = public_dns_policy();
+    let overrides = overrides
+        .into_iter()
+        .map(|(host, addrs)| (host_key(&host), addrs))
+        .collect();
+    (
+        redirect_policy(Arc::clone(&public_dns_hosts)),
+        GuardedResolver {
+            public_dns_hosts,
+            dns_overrides: Arc::new(overrides),
+        },
+    )
+}
+
+fn client_builder_with_policy(
+    redirect: reqwest::redirect::Policy,
+    resolver: GuardedResolver,
+) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .no_proxy()
+        .referer(false)
+        .redirect(redirect)
+        .dns_resolver(Arc::new(resolver))
 }
 
 /// Shared redirect policy: bounded hops, no https->http downgrades.
@@ -740,11 +791,22 @@ fn redirect_policy(public_dns_hosts: PublicDnsPolicy) -> reqwest::redirect::Poli
 pub(crate) fn client_builder() -> reqwest::ClientBuilder {
     // Bounded hops; refuse https->http downgrades; no ambient proxy (explicit settings or nothing); no automatic Referer (leaks URLs/tokens).
     let (redirect, resolver) = guarded_network_policy();
-    reqwest::Client::builder()
-        .no_proxy()
-        .referer(false)
-        .redirect(redirect)
-        .dns_resolver(Arc::new(resolver))
+    client_builder_with_policy(redirect, resolver)
+}
+
+#[cfg(test)]
+pub(crate) fn http_client_for_with_dns_overrides_for_test(
+    proxy: Option<&ResolvedProxy>,
+    overrides: std::collections::HashMap<String, Vec<SocketAddr>>,
+) -> Result<reqwest::Client, String> {
+    let (redirect, resolver) = guarded_network_policy_with_dns_overrides(overrides);
+    let mut builder = client_builder_with_policy(redirect, resolver);
+    if let Some(proxy) = proxy {
+        for resolved in &proxy.proxies {
+            builder = builder.proxy(resolved.clone());
+        }
+    }
+    builder.build().map_err(|error| error.to_string())
 }
 
 /// Current Unix UID. libc marks getuid unsafe despite its async-signal-safe semantics;
@@ -1287,4 +1349,97 @@ mod tests {
         );
         reset_proxy(&s);
     }
+    #[tokio::test(flavor = "current_thread")]
+    async fn guarded_resolver_rejects_private_dns_answers_before_connecting() {
+        use tokio::time::{Duration, timeout};
+
+        let _policy = isolate_untrusted_handoff_policy_for_test();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind resolver test listener");
+        let port = listener.local_addr().expect("read resolver test port").port();
+        let host = "manifest-rebinding.example.test";
+        assert!(require_public_resolution(host));
+
+        let client = http_client_for_with_dns_overrides_for_test(
+            None,
+            std::collections::HashMap::from([(
+                host.to_string(),
+                vec!["127.0.0.1:0".parse().expect("loopback socket address")],
+            )]),
+        )
+        .expect("build guarded client with deterministic DNS");
+
+        let result = client
+            .get(format!("http://{host}:{port}/master.m3u8"))
+            .send()
+            .await;
+        assert!(result.is_err(), "private DNS answer must be rejected");
+
+        assert!(
+            timeout(Duration::from_millis(150), listener.accept())
+                .await
+                .is_err(),
+            "the guarded client must reject the DNS answer before opening a socket"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn redirect_target_dns_is_filtered_by_the_same_client_resolver() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::time::{Duration, timeout};
+
+        let _policy = isolate_untrusted_handoff_policy_for_test();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind redirect test listener");
+        let port = listener.local_addr().expect("read redirect test port").port();
+        let target_host = "redirect-rebinding.example.test";
+        let client = http_client_for_with_dns_overrides_for_test(
+            None,
+            std::collections::HashMap::from([(
+                target_host.to_string(),
+                vec!["127.0.0.1:0".parse().expect("loopback socket address")],
+            )]),
+        )
+        .expect("build guarded client with deterministic DNS");
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept initial request");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let read = socket.read(&mut chunk).await.expect("read initial request");
+                assert_ne!(read, 0, "initial request ended before its headers");
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+                assert!(request.len() <= 16 * 1024, "request headers exceeded test limit");
+            }
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_host}:{port}/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write redirect response");
+            drop(socket);
+
+            timeout(Duration::from_millis(250), listener.accept())
+                .await
+                .is_err()
+        });
+
+        let result = client
+            .get(format!("http://127.0.0.1:{port}/start"))
+            .send()
+            .await;
+        assert!(result.is_err(), "redirect target resolving to loopback must be rejected");
+        assert!(
+            server.await.expect("redirect fixture task"),
+            "the redirected request must be rejected before a second socket is opened"
+        );
+    }
+
 }

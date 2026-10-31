@@ -248,8 +248,7 @@ pub(crate) fn parse_dash_manifest_at(
             let minimum_update_period = mpd
                 .minimumUpdatePeriod
                 .filter(|period| {
-                    *period >= MIN_DYNAMIC_UPDATE_PERIOD
-                        && *period <= MAX_DYNAMIC_UPDATE_PERIOD
+                    *period >= MIN_DYNAMIC_UPDATE_PERIOD && *period <= MAX_DYNAMIC_UPDATE_PERIOD
                 })
                 .ok_or(DashError::UnsupportedPresentation)?;
             let time_shift_buffer_depth = mpd.timeShiftBufferDepth;
@@ -274,9 +273,7 @@ pub(crate) fn parse_dash_manifest_at(
     };
 
     let is_dynamic = matches!(presentation, DashPresentation::Dynamic(_));
-    if !mpd.PatchLocation.is_empty()
-        || mpd.periods.len() != 1
-        || !mpd.ContentProtection.is_empty()
+    if !mpd.PatchLocation.is_empty() || mpd.periods.len() != 1 || !mpd.ContentProtection.is_empty()
     {
         return Err(DashError::UnsupportedPresentation);
     }
@@ -290,9 +287,8 @@ pub(crate) fn parse_dash_manifest_at(
     let duration = period
         .duration
         .or_else(|| {
-            mpd.mediaPresentationDuration.and_then(|whole_duration| {
-                whole_duration.checked_sub(period_start)
-            })
+            mpd.mediaPresentationDuration
+                .and_then(|whole_duration| whole_duration.checked_sub(period_start))
         })
         .filter(|duration| !duration.is_zero())
         .unwrap_or(Duration::ZERO);
@@ -306,11 +302,7 @@ pub(crate) fn parse_dash_manifest_at(
         }
         DashPresentation::Static => DashPresentation::Static,
     };
-    let addressing_duration = if is_dynamic {
-        Duration::MAX
-    } else {
-        duration
-    };
+    let addressing_duration = if is_dynamic { Duration::MAX } else { duration };
 
     let mpd_base = resolve_base_url(manifest_url, &mpd.base_url)?;
     let period_base = resolve_base_url(mpd_base, &period.BaseURL)?;
@@ -1098,9 +1090,8 @@ fn expand_dynamic_template(
         duration_to_ticks(elapsed.saturating_sub(window_depth), template.timescale)?;
     let segments = dynamic_segment_times(template, elapsed_ticks, window_start_ticks)?;
 
-    let mut resources = Vec::with_capacity(
-        segments.len() + usize::from(template.initialization.is_some()),
-    );
+    let mut resources =
+        Vec::with_capacity(segments.len() + usize::from(template.initialization.is_some()));
     if let Some(initialization) = &template.initialization {
         let (url, range) = match initialization {
             DashInitialization::Template(uri_template) => {
@@ -1178,10 +1169,9 @@ fn ticks_to_duration(ticks: u64, timescale: u64) -> Result<Duration, DashError> 
         .checked_mul(1_000_000_000)
         .ok_or(DashError::InvalidSegment)?
         / u128::from(timescale);
-    let seconds = u64::try_from(nanos / 1_000_000_000)
-        .map_err(|_| DashError::LimitExceeded)?;
-    let subsecond_nanos = u32::try_from(nanos % 1_000_000_000)
-        .map_err(|_| DashError::InvalidSegment)?;
+    let seconds = u64::try_from(nanos / 1_000_000_000).map_err(|_| DashError::LimitExceeded)?;
+    let subsecond_nanos =
+        u32::try_from(nanos % 1_000_000_000).map_err(|_| DashError::InvalidSegment)?;
     Ok(Duration::new(seconds, subsecond_nanos))
 }
 
@@ -1276,22 +1266,16 @@ fn dynamic_segment_times(
             .filter(|duration| *duration > 0)
             .ok_or(DashError::UnsupportedAddressing)?;
         let complete_count = elapsed_ticks / duration;
-        let bounded_count = template
-            .end_number
-            .map_or(complete_count, |end| {
-                complete_count.min(end.saturating_sub(number).saturating_add(1))
-            });
+        let bounded_count = template.end_number.map_or(complete_count, |end| {
+            complete_count.min(end.saturating_sub(number).saturating_add(1))
+        });
         let first_available = (window_start_ticks / duration).min(bounded_count);
         let first_index = if bounded_count == 0 {
             0
         } else {
             first_available.min(bounded_count.saturating_sub(1))
         };
-        let start_index = if bounded_count == 0 {
-            0
-        } else {
-            first_index
-        };
+        let start_index = if bounded_count == 0 { 0 } else { first_index };
         let start_number = number
             .checked_add(start_index)
             .ok_or(DashError::InvalidSegment)?;
@@ -1924,7 +1908,10 @@ mod tests {
         let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(120))
             .expect("bounded dynamic MPD should parse");
         let video = manifest.video_representations.first().expect("video track");
-        assert!(matches!(manifest.presentation, DashPresentation::Dynamic(_)));
+        assert!(matches!(
+            manifest.presentation,
+            DashPresentation::Dynamic(_)
+        ));
 
         let plan = plan_dash_representation(&manifest, &video.key)
             .expect("expand current complete live segments");
@@ -1935,10 +1922,7 @@ mod tests {
             .map(|resource| resource.segment_number.expect("media segment number"))
             .collect::<Vec<_>>();
         assert_eq!(numbers, [26, 27, 28, 29, 30]);
-        assert_eq!(
-            plan.resources[0].kind,
-            DashResourceKind::Initialization
-        );
+        assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
         assert!(
             plan.resources[1..]
                 .iter()
@@ -2090,9 +2074,8 @@ mod tests {
         assert_ne!(live_representation.key, static_representation.key);
         let live_plan = plan_dash_representation(&live, &live_representation.live_key)
             .expect("plan current dynamic window");
-        let finalized_plan =
-            plan_dash_representation(&finalized, &live_representation.live_key)
-                .expect("plan final static presentation with the queued live key");
+        let finalized_plan = plan_dash_representation(&finalized, &live_representation.live_key)
+            .expect("plan final static presentation with the queued live key");
         let dynamic_resource = live_plan
             .resources
             .iter()
@@ -2104,8 +2087,7 @@ mod tests {
             .find(|resource| resource.segment_number == Some(26))
             .expect("final MPD includes captured segment 26");
         assert_eq!(
-            dynamic_resource.filename,
-            final_resource.filename,
+            dynamic_resource.filename, final_resource.filename,
             "dynamic and static finalization must retain the same staged resource identity"
         );
 
@@ -2150,11 +2132,8 @@ mod tests {
         );
         let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(3))
             .expect("dynamic presentation can arrive before its first complete segment");
-        let plan = plan_dash_representation(
-            &manifest,
-            &manifest.video_representations[0].live_key,
-        )
-        .expect("an empty first live window remains refreshable");
+        let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].live_key)
+            .expect("an empty first live window remains refreshable");
         assert!(
             !plan
                 .resources

@@ -1,6 +1,6 @@
 //! Static, single-period DASH parsing and segment resource planning.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -9,6 +9,8 @@ use url::Url;
 use super::{MAX_MANIFEST_BYTES, ManifestByteRange};
 const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
+const MIN_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_millis(500);
+const MAX_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_secs(300);
 const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
 // DASH-IF's current HTTPS identifier, the HTTP identifier emitted by FFmpeg,
 // and the ISO trick-mode URN used by other DASH packagers.
@@ -35,6 +37,8 @@ pub(crate) enum DashError {
     NoVideoRepresentations,
     #[error("DASH manifest contains too many representations or segments")]
     LimitExceeded,
+    #[error("dynamic DASH has no currently available complete media segments")]
+    NoAvailableSegments,
 }
 
 /// Whether a DASH representation carries video or audio.
@@ -48,6 +52,8 @@ pub(crate) enum DashTrackKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DashRepresentation {
     pub(crate) key: String,
+    /// Stable live key also recognized when a dynamic MPD becomes static.
+    pub(crate) live_key: String,
     pub(crate) representation_id: Option<String>,
     pub(crate) bandwidth: Option<u64>,
     pub(crate) width: Option<u64>,
@@ -60,10 +66,29 @@ pub(crate) struct DashRepresentation {
     source: DashRepresentationSource,
 }
 
-/// Parsed static DASH presentation and its selectable representations.
+/// Timing model shared by all representations in a single-period DASH presentation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DashPresentation {
+    Static,
+    Dynamic(DashDynamicPresentation),
+}
+
+/// Server-clock information required to bound and refresh an ordinary live MPD.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DashDynamicPresentation {
+    pub(crate) availability_start_time: SystemTime,
+    pub(crate) availability_end_time: Option<SystemTime>,
+    pub(crate) server_now: SystemTime,
+    pub(crate) period_start: Duration,
+    pub(crate) minimum_update_period: Duration,
+    pub(crate) time_shift_buffer_depth: Option<Duration>,
+}
+
+/// Parsed static or supported dynamic DASH presentation and its representations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DashManifestPlan {
     pub(crate) duration: Duration,
+    pub(crate) presentation: DashPresentation,
     pub(crate) video_representations: Box<[DashRepresentation]>,
     pub(crate) audio_representations: Box<[DashRepresentation]>,
 }
@@ -93,6 +118,8 @@ pub(crate) struct DashResource {
     pub(crate) range: Option<ManifestByteRange>,
     pub(crate) filename: String,
     pub(crate) kind: DashResourceKind,
+    /// SegmentTemplate Number or SegmentList index; initialization resources use None.
+    pub(crate) segment_number: Option<u64>,
 }
 
 /// Expanded initialization and media resources for one representation.
@@ -100,6 +127,7 @@ pub(crate) struct DashResource {
 pub(crate) struct DashRepresentationPlan {
     pub(crate) representation: DashRepresentation,
     pub(crate) duration: Duration,
+    pub(crate) presentation: DashPresentation,
     pub(crate) resources: Box<[DashResource]>,
 }
 
@@ -169,12 +197,12 @@ struct DashListSegment {
     range: Option<ManifestByteRange>,
 }
 
-/// Parse a static, single-period DASH MPD into video and audio representations.
+/// Parse a static or bounded single-period dynamic DASH MPD into selectable representations.
 ///
-/// The native v1 path supports SegmentTemplate and SegmentList. Dynamic
-/// presentations, multiple periods, DRM, XLink, SegmentBase, indexed
-/// addressing, non-zero presentation-time offsets, and WebM representations
-/// remain on the existing yt-dlp fallback path.
+/// Dynamic support is limited to HTTPS SegmentTemplate presentations with a
+/// finite MPD update interval and complete segments. Multiple periods, DRM,
+/// XLink, dynamic SegmentList, LL-DASH, SegmentBase, indexed addressing,
+/// non-zero presentation-time offsets, and WebM remain on yt-dlp fallback.
 ///
 /// # Errors
 /// Returns an error when the MPD is malformed, exceeds the input limit, uses
@@ -183,6 +211,15 @@ pub(crate) fn parse_dash_manifest(
     manifest_url: &str,
     body: &str,
 ) -> Result<DashManifestPlan, DashError> {
+    parse_dash_manifest_at(manifest_url, body, SystemTime::now())
+}
+
+/// Parse a DASH MPD using the HTTP server's Date header as the availability clock.
+pub(crate) fn parse_dash_manifest_at(
+    manifest_url: &str,
+    body: &str,
+    server_now: SystemTime,
+) -> Result<DashManifestPlan, DashError> {
     if body.len() > MAX_MANIFEST_BYTES {
         return Err(DashError::Parse);
     }
@@ -190,11 +227,54 @@ pub(crate) fn parse_dash_manifest(
     let manifest_url = parse_manifest_url(manifest_url)?;
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
 
-    if !matches!(mpd.mpdtype.as_deref(), None | Some("static"))
-        || mpd.minimumUpdatePeriod.is_some()
-        || mpd.availabilityStartTime.is_some()
-        || mpd.timeShiftBufferDepth.is_some()
-        || !mpd.PatchLocation.is_empty()
+    let presentation = match mpd.mpdtype.as_deref() {
+        None | Some("static") => {
+            if mpd.minimumUpdatePeriod.is_some()
+                || mpd.availabilityStartTime.is_some()
+                || mpd.availabilityEndTime.is_some()
+                || mpd.timeShiftBufferDepth.is_some()
+            {
+                return Err(DashError::UnsupportedPresentation);
+            }
+            DashPresentation::Static
+        }
+        Some("dynamic") => {
+            let availability_start_time = mpd
+                .availabilityStartTime
+                .as_ref()
+                .cloned()
+                .map(SystemTime::from)
+                .ok_or(DashError::UnsupportedPresentation)?;
+            let minimum_update_period = mpd
+                .minimumUpdatePeriod
+                .filter(|period| {
+                    *period >= MIN_DYNAMIC_UPDATE_PERIOD
+                        && *period <= MAX_DYNAMIC_UPDATE_PERIOD
+                })
+                .ok_or(DashError::UnsupportedPresentation)?;
+            let time_shift_buffer_depth = mpd.timeShiftBufferDepth;
+            if time_shift_buffer_depth.is_some_and(Duration::is_zero) {
+                return Err(DashError::UnsupportedPresentation);
+            }
+            let availability_end_time = mpd
+                .availabilityEndTime
+                .as_ref()
+                .cloned()
+                .map(SystemTime::from);
+            DashPresentation::Dynamic(DashDynamicPresentation {
+                availability_start_time,
+                availability_end_time,
+                server_now,
+                period_start: Duration::ZERO,
+                minimum_update_period,
+                time_shift_buffer_depth,
+            })
+        }
+        Some(_) => return Err(DashError::UnsupportedPresentation),
+    };
+
+    let is_dynamic = matches!(presentation, DashPresentation::Dynamic(_));
+    if !mpd.PatchLocation.is_empty()
         || mpd.periods.len() != 1
         || !mpd.ContentProtection.is_empty()
     {
@@ -206,15 +286,31 @@ pub(crate) fn parse_dash_manifest(
         return Err(DashError::UnsupportedPresentation);
     }
 
+    let period_start = period.start.unwrap_or(Duration::ZERO);
     let duration = period
         .duration
         .or_else(|| {
             mpd.mediaPresentationDuration.and_then(|whole_duration| {
-                whole_duration.checked_sub(period.start.unwrap_or(Duration::ZERO))
+                whole_duration.checked_sub(period_start)
             })
         })
         .filter(|duration| !duration.is_zero())
-        .ok_or(DashError::UnsupportedPresentation)?;
+        .unwrap_or(Duration::ZERO);
+    if !is_dynamic && duration.is_zero() {
+        return Err(DashError::UnsupportedPresentation);
+    }
+    let presentation = match presentation {
+        DashPresentation::Dynamic(mut dynamic) => {
+            dynamic.period_start = period_start;
+            DashPresentation::Dynamic(dynamic)
+        }
+        DashPresentation::Static => DashPresentation::Static,
+    };
+    let addressing_duration = if is_dynamic {
+        Duration::MAX
+    } else {
+        duration
+    };
 
     let mpd_base = resolve_base_url(manifest_url, &mpd.base_url)?;
     let period_base = resolve_base_url(mpd_base, &period.BaseURL)?;
@@ -277,7 +373,13 @@ pub(crate) fn parse_dash_manifest(
 
             let representation_base =
                 resolve_base_url(adaptation_base.clone(), &representation.BaseURL)?;
-            let addressing = effective_addressing(period, adaptation, representation, duration)?;
+            let addressing = effective_addressing(
+                period,
+                adaptation,
+                representation,
+                addressing_duration,
+                is_dynamic,
+            )?;
             let representation_id = representation.id.clone();
             let bandwidth = representation.bandwidth;
             let width = representation.width.or(adaptation.width);
@@ -290,7 +392,7 @@ pub(crate) fn parse_dash_manifest(
                 .lang
                 .clone()
                 .or_else(|| adaptation.lang.clone());
-            let key = stable_representation_key(RepresentationIdentity {
+            let identity = RepresentationIdentity {
                 id: representation_id.as_deref(),
                 kind,
                 bandwidth,
@@ -301,10 +403,17 @@ pub(crate) fn parse_dash_manifest(
                 language: language.as_deref(),
                 base_url: &representation_base,
                 addressing: &addressing,
-            });
+            };
+            let live_key = stable_live_representation_key(identity);
+            let key = if is_dynamic {
+                live_key.clone()
+            } else {
+                stable_representation_key(identity)
+            };
 
             let choice = DashRepresentation {
                 key,
+                live_key,
                 representation_id,
                 bandwidth,
                 width,
@@ -337,6 +446,7 @@ pub(crate) fn parse_dash_manifest(
 
     Ok(DashManifestPlan {
         duration,
+        presentation,
         video_representations: video_representations.into_boxed_slice(),
         audio_representations: audio_representations.into_boxed_slice(),
     })
@@ -355,15 +465,25 @@ pub(crate) fn plan_dash_representation(
         .video_representations
         .iter()
         .chain(manifest.audio_representations.iter())
-        .find(|candidate| candidate.key == representation_key)
+        .find(|candidate| {
+            candidate.key == representation_key || candidate.live_key == representation_key
+        })
         .cloned()
         .ok_or(DashError::UnsupportedAddressing)?;
 
-    let resources = match &representation.source.addressing {
-        DashAddressing::Template(template) => {
+    let resources = match (&manifest.presentation, &representation.source.addressing) {
+        (DashPresentation::Dynamic(dynamic), DashAddressing::Template(template)) => {
+            expand_dynamic_template(&representation, &template.media, template, dynamic)?
+        }
+        (DashPresentation::Dynamic(_), DashAddressing::List(_)) => {
+            return Err(DashError::UnsupportedAddressing);
+        }
+        (DashPresentation::Static, DashAddressing::Template(template)) => {
             expand_template(&representation, &template.media, template)?
         }
-        DashAddressing::List(list) => expand_list(&representation, list)?,
+        (DashPresentation::Static, DashAddressing::List(list)) => {
+            expand_list(&representation, list)?
+        }
     };
 
     if !resources
@@ -376,6 +496,7 @@ pub(crate) fn plan_dash_representation(
     Ok(DashRepresentationPlan {
         representation,
         duration: manifest.duration,
+        presentation: manifest.presentation.clone(),
         resources: resources.into_boxed_slice(),
     })
 }

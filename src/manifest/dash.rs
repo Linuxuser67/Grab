@@ -471,6 +471,7 @@ pub(crate) fn plan_dash_representation(
         .cloned()
         .ok_or(DashError::UnsupportedAddressing)?;
 
+    let live_selection = representation_key == representation.live_key;
     let resources = match (&manifest.presentation, &representation.source.addressing) {
         (DashPresentation::Dynamic(dynamic), DashAddressing::Template(template)) => {
             expand_dynamic_template(&representation, &template.media, template, dynamic)?
@@ -478,17 +479,24 @@ pub(crate) fn plan_dash_representation(
         (DashPresentation::Dynamic(_), DashAddressing::List(_)) => {
             return Err(DashError::UnsupportedAddressing);
         }
+        (DashPresentation::Static, DashAddressing::Template(template)) if live_selection => {
+            expand_static_live_template(&representation, &template.media, template)?
+        }
         (DashPresentation::Static, DashAddressing::Template(template)) => {
             expand_template(&representation, &template.media, template)?
+        }
+        (DashPresentation::Static, DashAddressing::List(_)) if live_selection => {
+            return Err(DashError::UnsupportedAddressing);
         }
         (DashPresentation::Static, DashAddressing::List(list)) => {
             expand_list(&representation, list)?
         }
     };
 
-    if !resources
-        .iter()
-        .any(|resource| resource.kind == DashResourceKind::Segment)
+    if !matches!(manifest.presentation, DashPresentation::Dynamic(_))
+        && !resources
+            .iter()
+            .any(|resource| resource.kind == DashResourceKind::Segment)
     {
         return Err(DashError::InvalidSegment);
     }
@@ -1119,6 +1127,25 @@ fn expand_dynamic_template(
     Ok(resources)
 }
 
+fn expand_static_live_template(
+    representation: &DashRepresentation,
+    media_template: &str,
+    template: &DashTemplate,
+) -> Result<Vec<DashResource>, DashError> {
+    let mut resources = expand_template(representation, media_template, template)?;
+    for resource in &mut resources {
+        resource.filename = match resource.kind {
+            DashResourceKind::Initialization => {
+                super::resource_filename("dash-live-init", None, &resource.url, resource.range)
+            }
+            DashResourceKind::Segment => {
+                super::resource_filename("dash-live-segment", None, &resource.url, None)
+            }
+        };
+    }
+    Ok(resources)
+}
+
 fn duration_to_ticks(duration: Duration, timescale: u64) -> Result<u64, DashError> {
     let ticks = duration
         .as_nanos()
@@ -1236,9 +1263,6 @@ fn dynamic_segment_times(
         }
     }
 
-    if available.is_empty() {
-        return Err(DashError::NoAvailableSegments);
-    }
     Ok(available)
 }
 

@@ -1374,18 +1374,33 @@ mod tests {
         )
         .expect("build guarded client with deterministic DNS");
 
-        let result = client
-            .get(format!("http://{host}:{port}/master.m3u8"))
-            .send()
-            .await;
-        assert!(result.is_err(), "private DNS answer must be rejected");
-
-        assert!(
-            timeout(Duration::from_millis(300), listener.accept())
+        let mut request = tokio::spawn(async move {
+            client
+                .get(format!("http://{host}:{port}/master.m3u8"))
+                .send()
                 .await
-                .is_err(),
-            "the guarded client must reject the DNS answer before opening a socket"
-        );
+        });
+        match timeout(Duration::from_millis(300), listener.accept()).await {
+            Ok(Ok((socket, _))) => {
+                drop(socket);
+                request.abort();
+                panic!("the guarded client connected to a private DNS answer");
+            }
+            Ok(Err(error)) => {
+                request.abort();
+                panic!("the resolver fixture failed to accept: {error}");
+            }
+            Err(_) => {}
+        }
+        let result = match timeout(Duration::from_secs(2), &mut request).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => panic!("guarded request task failed: {error}"),
+            Err(_) => {
+                request.abort();
+                panic!("guarded request did not finish after DNS rejection");
+            }
+        };
+        assert!(result.is_err(), "private DNS answer must be rejected");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1438,7 +1453,7 @@ mod tests {
                 .expect("write redirect response");
             drop(socket);
 
-            timeout(Duration::from_millis(300), listener.accept())
+            timeout(Duration::from_secs(1), listener.accept())
                 .await
                 .is_err()
         });

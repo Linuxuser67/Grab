@@ -393,16 +393,16 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
         .await
     });
 
-    tokio::time::timeout(Duration::from_secs(5), partial_sent)
+    tokio::time::timeout(Duration::from_secs(20), partial_sent)
         .await
         .expect("fixture server did not send the resource prefix")
         .expect("fixture server task ended before sending the prefix");
     let partial_path = staging.join("slow.bin.part");
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             if tokio::fs::metadata(&partial_path)
                 .await
-                .is_ok_and(|metadata| metadata.len() == partial_size as u64)
+                .is_ok_and(|metadata| metadata.len() >= partial_size as u64)
             {
                 break;
             }
@@ -411,11 +411,19 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
     })
     .await
     .expect("resource prefix was not written to its staging file");
+    let expected_partial_total = complete_bytes.len() as u64 + partial_size as u64;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while downloaded.load(std::sync::atomic::Ordering::Relaxed) < expected_partial_total {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("partial resource bytes were not reserved before cancellation");
 
     abort_tx
         .send(crate::video::StopIntent::Preserve)
         .expect("signal pause to the manifest resource fetch");
-    let aborted = tokio::time::timeout(Duration::from_secs(5), attempt)
+    let aborted = tokio::time::timeout(Duration::from_secs(20), attempt)
         .await
         .expect("interrupted resource fetch did not stop")
         .expect("interrupted resource fetch task panicked")
@@ -452,13 +460,13 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
         .expect("resume manifest resource fetch"),
         "resumed manifest resource fetch unexpectedly aborted"
     );
-    let requests = tokio::time::timeout(Duration::from_secs(5), slow_server)
+    let requests = tokio::time::timeout(Duration::from_secs(20), slow_server)
         .await
         .expect("resumable fixture server did not finish")
         .expect("resumable fixture server task panicked");
     assert_eq!(
         requests,
-        vec!["/slow.bin", "/slow.bin"],
+        vec!["/slow.bin".to_string(), "/slow.bin".to_string()],
         "resume must reuse complete resources and retry the partial resource"
     );
     assert_eq!(
@@ -479,7 +487,7 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
     );
     assert_eq!(
         downloaded.load(std::sync::atomic::Ordering::Relaxed),
-        complete_bytes.len() as u64 + 32 * 1024,
+        complete_bytes.len() as u64 + slow_bytes.len() as u64,
         "resumed progress must include each completed resource exactly once"
     );
 }

@@ -2428,6 +2428,13 @@ async fn apply_dash_live_snapshot(
                 }
                 candidate.initialization = Some(initialization.filename.clone());
             }
+            None if !candidate.segments.is_empty() => {
+                tracing::warn!(
+                    representation = %plan.representation.live_key,
+                    "dynamic DASH introduced an initialization resource after media was captured"
+                );
+                return Ok(DashLiveUpdateOutcome::ContinuityLost);
+            }
             None => {
                 candidate.initialization = Some(initialization.filename.clone());
             }
@@ -2889,6 +2896,7 @@ async fn run_live_dash_tracks(
                 {
                     DashLiveUpdateOutcome::Committed => {
                         let bytes = dash_live_track_bytes(&track.state, &track.directory).await?;
+                        audio_key = Some(key);
                         audio_key = Some(key);
                         audio = Some((track, bytes));
                     }

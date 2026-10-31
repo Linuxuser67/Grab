@@ -1819,6 +1819,192 @@ mod tests {
         }
     }
 
+    fn dynamic_mpd(addressing: &str, extra_attributes: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+     type="dynamic"
+     availabilityStartTime="1970-01-01T00:00:00Z"
+     minimumUpdatePeriod="PT4S"
+     {extra_attributes}>
+  <Period start="PT0S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      {addressing}
+      <Representation id="v1" bandwidth="1000000" width="1280" height="720"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#
+        )
+    }
+
+    fn dynamic_test_clock(seconds: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn dynamic_duration_template_selects_only_complete_segments_inside_time_shift_window() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="1" duration="4" initialization="init.mp4" media="seg-$Number$.m4s"/>"#,
+            r#"timeShiftBufferDepth="PT20S""#,
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(120))
+            .expect("bounded dynamic MPD should parse");
+        let video = manifest.video_representations.first().expect("video track");
+        assert!(matches!(manifest.presentation, DashPresentation::Dynamic(_)));
+
+        let plan = plan_dash_representation(&manifest, &video.key)
+            .expect("expand current complete live segments");
+        let numbers = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.segment_number.expect("media segment number"))
+            .collect::<Vec<_>>();
+        assert_eq!(numbers, [26, 27, 28, 29, 30]);
+        assert_eq!(
+            plan.resources[0].kind,
+            DashResourceKind::Initialization
+        );
+        assert!(
+            plan.resources[1..]
+                .iter()
+                .all(|resource| resource.filename.starts_with("dash-live-segment-"))
+        );
+    }
+
+    #[test]
+    fn dynamic_without_time_shift_depth_starts_at_the_newest_complete_segment() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="10" duration="4" media="seg-$Number$.m4s"/>"#,
+            "",
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(120))
+            .expect("dynamic MPD without TSBD should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.live_key)
+            .expect("plan newest complete live segment");
+        let numbers = plan
+            .resources
+            .iter()
+            .filter_map(|resource| resource.segment_number)
+            .collect::<Vec<_>>();
+        assert_eq!(numbers, [39]);
+    }
+
+    #[test]
+    fn dynamic_timeline_negative_repeat_uses_only_complete_segments_in_window() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="1" media="seg-$Number$-$Time$.m4s">
+  <SegmentTimeline><S t="0" d="2" r="-1"/></SegmentTimeline>
+</SegmentTemplate>"#,
+            r#"timeShiftBufferDepth="PT4S""#,
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(11))
+            .expect("dynamic timeline MPD should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("expand complete timeline window");
+        let segments = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|resource| resource.segment_number.expect("segment number"))
+                .collect::<Vec<_>>(),
+            [4, 5]
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .map(|resource| resource.url.path().to_string())
+                .collect::<Vec<_>>(),
+            ["/path/seg-4-6.m4s", "/path/seg-5-8.m4s"]
+        );
+    }
+
+    #[test]
+    fn dynamic_representation_key_survives_timeline_growth_and_static_finalization() {
+        let dynamic = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="1" duration="4" media="seg-$Number$.m4s"/>"#,
+            r#"timeShiftBufferDepth="PT20S""#,
+        );
+        let static_mpd = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT120S">
+  <Period duration="PT120S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" startNumber="1" duration="4" media="seg-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000" width="1280" height="720"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let live = parse_dash_manifest_at(BASE_URL, &dynamic, dynamic_test_clock(120))
+            .expect("parse dynamic representation");
+        let finalized = parse_dash_manifest(BASE_URL, static_mpd)
+            .expect("parse equivalent static presentation");
+        let live_representation = &live.video_representations[0];
+        let static_representation = &finalized.video_representations[0];
+        assert_eq!(live_representation.live_key, static_representation.live_key);
+        assert_ne!(live_representation.key, static_representation.key);
+        assert!(
+            plan_dash_representation(&finalized, &live_representation.live_key).is_ok(),
+            "a queued dynamic selection must still resolve after MPD finalization"
+        );
+
+        let later = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="1" duration="4" media="seg-$Number$.m4s">
+  <SegmentTimeline><S t="0" d="4" r="-1"/></SegmentTimeline>
+</SegmentTemplate>"#,
+            r#"timeShiftBufferDepth="PT20S""#,
+        );
+        let refreshed = parse_dash_manifest_at(BASE_URL, &later, dynamic_test_clock(124))
+            .expect("parse refreshed dynamic timeline");
+        assert_eq!(
+            refreshed.video_representations[0].live_key,
+            live_representation.live_key
+        );
+    }
+
+    #[test]
+    fn dynamic_dash_requires_bounded_update_metadata_and_rejects_segment_list() {
+        let missing_ast = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" minimumUpdatePeriod="PT4S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate duration="4" media="s-$Number$.m4s"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#;
+        let missing_update = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate duration="4" media="s-$Number$.m4s"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#;
+        let list = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z" minimumUpdatePeriod="PT4S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentList><SegmentURL media="segment.m4s"/></SegmentList><Representation id="v1"/></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            parse_dash_manifest_at(BASE_URL, missing_ast, dynamic_test_clock(20)).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+        assert_eq!(
+            parse_dash_manifest_at(BASE_URL, missing_update, dynamic_test_clock(20)).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+        assert_eq!(
+            parse_dash_manifest_at(BASE_URL, list, dynamic_test_clock(20)).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn dynamic_dash_does_not_plan_a_segment_before_it_is_complete() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" duration="4" media="seg-$Number$.m4s"/>"#,
+            "",
+        );
+        assert_eq!(
+            parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(3))
+                .and_then(|manifest| {
+                    plan_dash_representation(
+                        &manifest,
+                        &manifest.video_representations[0].key,
+                    )
+                })
+                .err(),
+            Some(DashError::NoAvailableSegments)
+        );
+    }
+
     #[test]
     fn expands_duration_template_with_initialization_and_padded_numbers() {
         let plan =

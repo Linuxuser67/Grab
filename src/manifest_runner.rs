@@ -2716,36 +2716,6 @@ async fn run_live_dash_tracks(
             }
         }
     }
-    if let Some(audio) = audio.as_mut() {
-        let Some(plan) = current_audio_plan.as_ref() else {
-            finish_capture!(DashLiveCaptureOutcome::PreserveVideoOnly);
-        };
-        let updated_video_bytes = dash_live_track_bytes(&video.state, &video.directory).await?;
-        match apply_dash_live_snapshot(
-            client,
-            plan,
-            &mut audio.0,
-            connections,
-            tx,
-            downloaded,
-            abort,
-            updated_video_bytes,
-        )
-        .await?
-        {
-            DashLiveUpdateOutcome::Committed => {}
-            DashLiveUpdateOutcome::Stopped(intent) => {
-                finish_capture!(match intent {
-                    crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::PreserveVideoOnly,
-                    crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
-                });
-            }
-            DashLiveUpdateOutcome::ContinuityLost => {
-                finish_capture!(DashLiveCaptureOutcome::PreserveVideoOnly);
-            }
-        }
-    }
-
     loop {
         if dash_presentation_ended(&current_video_plan.presentation) {
             finish_capture!(DashLiveCaptureOutcome::Ended);

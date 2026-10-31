@@ -2750,7 +2750,7 @@ async fn run_live_dash_tracks(
         if dash_presentation_ended(&current_video_plan.presentation) {
             finish_capture!(DashLiveCaptureOutcome::Ended);
         }
-        let DashPresentation::Dynamic(dynamic) = &current_video_plan.presentation else {
+        let DashPresentation::Dynamic(_) = &current_video_plan.presentation else {
             finish_capture!(DashLiveCaptureOutcome::Ended);
         };
         let deadline = next_refresh_at.ok_or_else(|| {

@@ -74,6 +74,7 @@ pub fn is_torrent(s: &str) -> bool {
 /// Case-insensitive ASCII prefix check (`get`, not slicing: non-ASCII input must never panic).
 fn has_prefix_ci(s: &str, prefix: &str) -> bool {
     s.trim_start()
+        .trim_start_matches('\u{feff}')
         .get(..prefix.len())
         .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
 }
@@ -297,6 +298,66 @@ pub fn torrent_file_list(bytes: &[u8]) -> Result<(String, Vec<TorrentFileEntry>)
                 })
                 .collect()
         });
+    Ok((name, entries))
+}
+
+/// Resolve a magnet's metadata without adding a downloading torrent to the session.
+pub(crate) async fn list_magnet_files(
+    magnet: &str,
+    config: SessionConfig,
+) -> Result<(String, Vec<TorrentFileEntry>), String> {
+    let parsed = parse_magnet(magnet)?;
+    let session = ensure_session(config).await?;
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        session.add_torrent(
+            AddTorrent::from_url(magnet.trim().to_string()),
+            Some(AddTorrentOptions {
+                list_only: true,
+                ..Default::default()
+            }),
+        ),
+    )
+    .await
+    .map_err(|_| gettext("Timed out while resolving torrent metadata"))?
+    .map_err(|error| format!("Cannot resolve magnet link: {error}"))?;
+
+    let AddTorrentResponse::ListOnly(listing) = response else {
+        return Err(gettext(
+            "Torrent metadata lookup did not return a file list",
+        ));
+    };
+
+    let hash_name = parsed.as_id20().map(|id| id.as_string());
+    let magnet_name = parsed.name.filter(|name| sane_filename(name));
+    let name = listing
+        .info
+        .name()
+        .map(|name| name.into_owned())
+        .filter(|name| sane_filename(name))
+        .or(magnet_name)
+        .or(hash_name)
+        .unwrap_or_else(|| "torrent".to_string());
+    let entries: Vec<TorrentFileEntry> = listing
+        .info
+        .iter_file_details()
+        .enumerate()
+        .map(|(index, file)| {
+            let raw_path = file.filename.to_vec().join("/");
+            let display_path = sanitize_display_path(&raw_path);
+            TorrentFileEntry {
+                raw_path,
+                display_path: if display_path.is_empty() {
+                    format!("file {index}")
+                } else {
+                    display_path
+                },
+            }
+        })
+        .collect();
+    if entries.is_empty() {
+        return Err(gettext("Torrent contains no files"));
+    }
     Ok((name, entries))
 }
 

@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use gettextrs::{gettext, ngettext};
+use gettextrs::gettext;
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -141,9 +141,10 @@ pub(crate) fn preferred_choice_index(choices: &[ManifestChoice], quality: &str) 
 }
 
 impl ManifestLookup {
-    /// Build the visible choices in manifest order, retaining representation quality data.
+    /// Build visible choices from highest to lowest quality, retaining representation data.
+    /// Equal-quality choices keep their original manifest order.
     pub(crate) fn choices(&self) -> Vec<ManifestChoice> {
-        match &self.manifest {
+        let mut choices = match &self.manifest {
             NativeManifest::HlsMaster(master) => master
                 .variants
                 .iter()
@@ -211,7 +212,14 @@ impl ManifestLookup {
                     bandwidth: representation.bandwidth,
                 })
                 .collect(),
-        }
+        };
+        choices.sort_by(|left, right| {
+            right
+                .height
+                .cmp(&left.height)
+                .then_with(|| right.bandwidth.cmp(&left.bandwidth))
+        });
+        choices
     }
 
     /// Return the representation closest to the configured video-quality preference.
@@ -268,44 +276,6 @@ impl ManifestLookup {
                 crate::media_types::ManifestKind::Hls
             }
             NativeManifest::Dash(_) => crate::media_types::ManifestKind::Dash,
-        }
-    }
-
-    /// A short summary for the native manifest preview row.
-    pub(crate) fn summary(&self) -> String {
-        match &self.manifest {
-            NativeManifest::HlsMaster(master) => format!(
-                "{} · {}",
-                count_label(
-                    master.variants.len(),
-                    "{} video variant",
-                    "{} video variants"
-                ),
-                count_label(
-                    master.audio_renditions.len(),
-                    "{} alternate audio track",
-                    "{} alternate audio tracks"
-                )
-            ),
-            NativeManifest::HlsMedia(plan) => format!(
-                "{} · {}",
-                gettext("HLS media playlist"),
-                format_duration(plan.duration)
-            ),
-            NativeManifest::Dash(dash) => format!(
-                "{} · {} · {}",
-                count_label(
-                    dash.video_representations.len(),
-                    "{} video representation",
-                    "{} video representations"
-                ),
-                count_label(
-                    dash.audio_representations.len(),
-                    "{} audio representation",
-                    "{} audio representations"
-                ),
-                format_duration(dash.duration)
-            ),
         }
     }
 }
@@ -689,23 +659,6 @@ async fn read_bounded_response(
     Ok(body)
 }
 
-fn count_label(count: usize, singular: &str, plural: &str) -> String {
-    ngettext(singular, plural, count as u32).replace("{}", &count.to_string())
-}
-
-fn format_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    let hours = seconds / 3_600;
-    let minutes = (seconds % 3_600) / 60;
-    let remaining_seconds = seconds % 60;
-
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{remaining_seconds:02}")
-    } else {
-        format!("{minutes}:{remaining_seconds:02}")
-    }
-}
-
 fn resolution_label(width: Option<u64>, height: Option<u64>) -> String {
     match (width, height) {
         (_, Some(height)) if height > 0 => format!("{height}p"),
@@ -812,6 +765,51 @@ highest.m3u8
             .expect("best choice exists");
         assert_eq!(preferred_choice.height, Some(1080));
         assert_eq!(best_choice.height, Some(1440));
+        assert_eq!(
+            choices.iter().map(|choice| choice.height).collect::<Vec<_>>(),
+            vec![Some(1440), Some(1080), Some(720)]
+        );
+    }
+
+    #[test]
+    fn choices_sort_by_height_then_bandwidth_and_keep_ties_stable() {
+        let body = br#"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080
+first.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720
+low.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1920x1080
+higher-bandwidth.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080
+second.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("valid HLS master playlist");
+        let original_keys = hls_variant_keys(&master.variants);
+        let lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/master.m3u8".to_string(),
+            manifest: NativeManifest::HlsMaster(master),
+        };
+
+        let choices = lookup.choices();
+        assert_eq!(
+            choices.iter().map(|choice| choice.height).collect::<Vec<_>>(),
+            vec![Some(1080), Some(1080), Some(1080), Some(720)],
+            "choices should be ordered by descending height"
+        );
+        assert_eq!(
+            choices.iter().map(|choice| choice.key.as_str()).collect::<Vec<_>>(),
+            vec![
+                original_keys[2].as_str(),
+                original_keys[0].as_str(),
+                original_keys[3].as_str(),
+                original_keys[1].as_str(),
+            ],
+            "bandwidth should break height ties, and equal ties should keep manifest order"
+        );
     }
 
     #[test]
@@ -915,11 +913,5 @@ highest.m3u8
             "https://cdn.example.test/master.m3u8?expires=1&signature=x"
         ));
         assert!(supports("https://cdn.example.test/manifest.mpd#fragment"));
-    }
-
-    #[test]
-    fn duration_labels_include_hours_without_losing_minutes() {
-        assert_eq!(format_duration(Duration::from_secs(125)), "2:05");
-        assert_eq!(format_duration(Duration::from_secs(3_661)), "1:01:01");
     }
 }

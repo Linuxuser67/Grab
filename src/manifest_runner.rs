@@ -1135,7 +1135,8 @@ mod tests {
         )
         .expect("build the production guarded HTTP client with fixture DNS");
 
-        let mut request = tokio::spawn(async move { client.get(child.clone()).send().await });
+        let child_url = child.clone();
+        let mut request = tokio::spawn(async move { client.get(child_url).send().await });
         match timeout(Duration::from_millis(300), listener.accept()).await {
             Ok(Ok((socket, _))) => {
                 drop(socket);

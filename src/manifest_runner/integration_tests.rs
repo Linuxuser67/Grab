@@ -424,7 +424,7 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
     let mut audio_plan = crate::manifest::dash::plan_dash_representation(&parsed, &audio_key)
         .expect("plan generated DASH audio representation");
 
-    let _policy_test_lock = crate::download_net::lock_untrusted_handoff_policy_for_test();
+    let _policy_test_guard = crate::download_net::isolate_untrusted_handoff_policy_for_test();
     assert!(crate::download_net::require_public_resolution(
         "manifest-origin.fixture.invalid"
     ));

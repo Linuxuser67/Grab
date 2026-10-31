@@ -1099,7 +1099,7 @@ mod tests {
 
     #[test]
     fn manifest_child_guard_enforces_the_distinct_host_limit() {
-        let _test_lock = crate::download_net::lock_untrusted_handoff_policy_for_test();
+        let _test_policy = crate::download_net::isolate_untrusted_handoff_policy_for_test();
         let parent_url = "https://manifest-limit-origin.fixture.invalid/master.m3u8";
         assert!(crate::download_net::require_public_resolution(
             "manifest-limit-origin.fixture.invalid"

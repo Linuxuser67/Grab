@@ -2454,7 +2454,7 @@ async fn run_live_dash_tracks(
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &Arc<AtomicU64>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-) -> Result<DashLiveCaptureOutcome, ManifestRunError> {
+) -> Result<DashLiveCapture, ManifestRunError> {
     let (mut video, video_bytes) =
         load_dash_live_track(representation_key, video_dir, video_plan).await?;
     let mut audio = match (audio_key, audio_plan) {
@@ -2464,6 +2464,33 @@ async fn run_live_dash_tracks(
         }
         _ => None,
     };
+    macro_rules! finish_capture {
+        ($outcome:expr) => {{
+            let outcome = $outcome;
+            let video_resources = video
+                .state
+                .resource_names()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let audio_resources = if outcome == DashLiveCaptureOutcome::PreserveVideoOnly {
+                None
+            } else {
+                audio.as_ref().map(|(track, _)| {
+                    track
+                        .state
+                        .resource_names()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+            };
+            return Ok(DashLiveCapture {
+                outcome,
+                video_resources,
+                audio_resources,
+            });
+        }};
+    }
+
     let audio_bytes = audio
         .as_ref()
         .map_or(0, |(track, bytes)| {
@@ -2474,7 +2501,7 @@ async fn run_live_dash_tracks(
         ManifestRunError::Failed("The staged dynamic DASH byte total overflowed".to_string())
     })?;
     if total_bytes > MAX_MANIFEST_DOWNLOAD_BYTES {
-        return Ok(if !video.state.segments.is_empty() {
+        finish_capture!(if !video.state.segments.is_empty() {
             DashLiveCaptureOutcome::PreserveVideoOnly
         } else {
             DashLiveCaptureOutcome::Discard
@@ -2492,41 +2519,6 @@ async fn run_live_dash_tracks(
         });
     };
 
-    let initial_audio = if let Some(audio) = audio.as_mut() {
-        match apply_dash_live_snapshot(
-            client,
-            &current_audio_plan
-                .as_ref()
-                .ok_or_else(|| {
-                    ManifestRunError::Failed(
-                        "The selected live DASH audio plan is missing".to_string(),
-                    )
-                })?,
-            &mut audio.0,
-            connections,
-            tx,
-            downloaded,
-            abort,
-            video_bytes,
-        )
-        .await?
-        {
-            DashLiveUpdateOutcome::Committed => None,
-            DashLiveUpdateOutcome::Stopped(intent) => Some(intent),
-            DashLiveUpdateOutcome::ContinuityLost => {
-                return Ok(DashLiveCaptureOutcome::PreserveVideoOnly);
-            }
-        }
-    } else {
-        None
-    };
-    if let Some(intent) = initial_audio {
-        return Ok(match intent {
-            crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::PreserveVideoOnly,
-            crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
-        });
-    }
-
     match apply_dash_live_snapshot(
         client,
         &current_video_plan,
@@ -2541,17 +2533,49 @@ async fn run_live_dash_tracks(
     {
         DashLiveUpdateOutcome::Committed => {}
         DashLiveUpdateOutcome::Stopped(intent) => {
-            return Ok(match intent {
+            finish_capture!(match intent {
                 crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
                 crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
             });
         }
         DashLiveUpdateOutcome::ContinuityLost => {
-            return Ok(if video.state.segments.is_empty() {
+            finish_capture!(if video.state.segments.is_empty() {
                 DashLiveCaptureOutcome::Discard
             } else {
                 DashLiveCaptureOutcome::PreserveVideoOnly
             });
+        }
+    }
+
+    if let Some(audio) = audio.as_mut() {
+        let Some(plan) = current_audio_plan.as_ref() else {
+            finish_capture!(DashLiveCaptureOutcome::PreserveVideoOnly);
+        };
+        let updated_video_bytes = dash_live_track_bytes(&video.state, &video.directory).await?;
+        match apply_dash_live_snapshot(
+            client,
+            plan,
+            &mut audio.0,
+            connections,
+            tx,
+            downloaded,
+            abort,
+            updated_video_bytes,
+        )
+        .await?
+        {
+            DashLiveUpdateOutcome::Committed => {}
+            DashLiveUpdateOutcome::Stopped(intent) => {
+                finish_capture!(match intent {
+                    crate::video::StopIntent::Preserve => {
+                        DashLiveCaptureOutcome::PreserveVideoOnly
+                    }
+                    crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
+                });
+            }
+            DashLiveUpdateOutcome::ContinuityLost => {
+                finish_capture!(DashLiveCaptureOutcome::PreserveVideoOnly);
+            }
         }
     }
 

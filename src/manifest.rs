@@ -1122,7 +1122,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     })
 }
 
-fn minimum_hls_playlist_version(playlist: &MediaPlaylist) -> u8 {
+fn minimum_hls_playlist_version(playlist: &MediaPlaylist) -> usize {
     let has_initialization_map = playlist
         .segments
         .iter()

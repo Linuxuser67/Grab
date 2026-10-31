@@ -39,6 +39,61 @@ const MAX_DASH_LIVE_SEGMENTS: usize = 100_000;
 /// Bound for a serialized dynamic DASH resume index.
 const MAX_DASH_LIVE_STATE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Require room for a second copy of the staged media while FFmpeg muxes it.
+fn check_manifest_mux_space(
+    available_bytes: u64,
+    staged_bytes: u64,
+) -> Result<(), ManifestRunError> {
+    if available_bytes < staged_bytes {
+        return Err(ManifestRunError::Failed(format!(
+            "Not enough free disk space to finalize this stream (about {staged_bytes} bytes are needed; {available_bytes} bytes are available)"
+        )));
+    }
+    Ok(())
+}
+
+/// Check the destination filesystem, using space available to this unprivileged process.
+fn ensure_manifest_mux_space(
+    destination_dir: &Path,
+    staged_bytes: u64,
+) -> Result<(), ManifestRunError> {
+    let stats = rustix::fs::statvfs(destination_dir).map_err(|error| {
+        ManifestRunError::Failed(format!(
+            "Could not check available disk space for the stream destination {}: {error}",
+            destination_dir.display()
+        ))
+    })?;
+    let available_bytes = stats.f_bavail.checked_mul(stats.f_frsize).ok_or_else(|| {
+        ManifestRunError::Failed("The available disk-space count overflowed".to_string())
+    })?;
+    check_manifest_mux_space(available_bytes, staged_bytes)
+}
+
+fn manifest_storage_error(context: &str, error: std::io::Error) -> ManifestRunError {
+    if error.kind() == std::io::ErrorKind::StorageFull {
+        ManifestRunError::Failed(
+            "Not enough free disk space to save this stream".to_string(),
+        )
+    } else {
+        ManifestRunError::Failed(format!("{context}: {error}"))
+    }
+}
+
+/// Reject a byte-range chunk before it is written if it exceeds the requested extent.
+fn byte_range_chunk_exceeds(
+    range: crate::manifest::ManifestByteRange,
+    written: u64,
+    chunk_len: usize,
+) -> bool {
+    u64::try_from(chunk_len)
+        .map_or(true, |chunk_len| chunk_len > range.length.saturating_sub(written))
+}
+
+fn ffmpeg_log_indicates_storage_full(log: &str) -> bool {
+    let log = log.to_ascii_lowercase();
+    log.contains("no space left on device") || log.contains("disk quota exceeded")
+}
+
 /// Inputs retained by the queue; URLs for individual segments are resolved again on every attempt.
 #[derive(Clone, Debug)]
 pub(crate) struct ManifestJob {
@@ -292,6 +347,7 @@ pub(crate) async fn run_manifest_download(
         }
     };
 
+    let mut guarded_child_hosts = std::collections::HashSet::new();
     let tracks = if force_offline {
         offline_tracks.take().ok_or_else(|| {
             ManifestRunError::Failed(
@@ -301,7 +357,7 @@ pub(crate) async fn run_manifest_download(
     } else {
         match crate::manifest_intake::lookup_with_client(&client, &job.source.url).await {
             Ok(Some(lookup)) if lookup.kind() == job.source.kind => {
-                match resolve_tracks(&client, lookup, &job.source).await {
+                match resolve_tracks(&client, lookup, &job.source, &mut guarded_child_hosts).await {
                     Ok(tracks) => tracks,
                     Err(error) if offline_tracks.is_some() => {
                         tracing::warn!(
@@ -394,6 +450,7 @@ pub(crate) async fn run_manifest_download(
         let capture = run_live_hls_tracks(
             &client,
             &job.source.url,
+            dest_dir,
             video,
             audio.as_ref(),
             &video_dir,
@@ -444,6 +501,7 @@ pub(crate) async fn run_manifest_download(
         let capture = run_live_dash_tracks(
             &client,
             &job.source.url,
+            dest_dir,
             &job.source.representation_key,
             job.source.audio_key.as_deref(),
             video_plan,
@@ -453,6 +511,7 @@ pub(crate) async fn run_manifest_download(
             concurrency,
             &tx,
             &downloaded,
+            &mut guarded_child_hosts,
             &mut abort,
         )
         .await?;
@@ -614,6 +673,7 @@ pub(crate) async fn run_manifest_download(
         ManifestKind::Dash => audio_dir.join("audio-track.mp4"),
     });
     let output_part = staging.join("output.part.mp4");
+    ensure_manifest_mux_space(dest_dir, downloaded.load(Ordering::Relaxed))?;
     remove_regular_file_if_present(&output_part).await?;
     if !run_ffmpeg(
         &ffmpeg,
@@ -677,8 +737,8 @@ async fn resolve_tracks(
     client: &reqwest::Client,
     lookup: ManifestLookup,
     source: &ManifestSource,
+    guarded_child_hosts: &mut std::collections::HashSet<String>,
 ) -> Result<Tracks, ManifestRunError> {
-    let mut guarded_child_hosts = std::collections::HashSet::new();
     match lookup.manifest {
         NativeManifest::HlsMedia(plan) if source.representation_key == "hls-media" => {
             guard_hls_resources(&source.url, &plan, &mut guarded_child_hosts)?;
@@ -1405,6 +1465,7 @@ async fn poll_live_hls_track(
 async fn run_live_hls_tracks(
     client: &reqwest::Client,
     source_url: &str,
+    destination_dir: &Path,
     video_plan: &HlsPlan,
     audio_plan: Option<&HlsPlan>,
     video_dir: &Path,
@@ -1434,6 +1495,7 @@ async fn run_live_hls_tracks(
             )
         })?;
     downloaded.store(retained_bytes, Ordering::Relaxed);
+    ensure_manifest_mux_space(destination_dir, retained_bytes)?;
     let mut guarded_child_hosts = std::collections::HashSet::new();
 
     let audio_resource_bytes = audio
@@ -1478,7 +1540,9 @@ async fn run_live_hls_tracks(
     )
     .await?
     {
-        LiveHlsSnapshotOutcome::Committed => {}
+        LiveHlsSnapshotOutcome::Committed => {
+            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+        }
         LiveHlsSnapshotOutcome::Stopped(intent) => {
             return Ok(match intent {
                 crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
@@ -1518,7 +1582,9 @@ async fn run_live_hls_tracks(
             Ok(outcome) => outcome,
         };
         match audio_outcome {
-            LiveHlsSnapshotOutcome::Committed => {}
+            LiveHlsSnapshotOutcome::Committed => {
+            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+        }
             LiveHlsSnapshotOutcome::Stopped(intent) => {
                 return Ok(match intent {
                     crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::PreserveVideoOnly,
@@ -1579,7 +1645,9 @@ async fn run_live_hls_tracks(
             )
             .await?
             {
-                LiveHlsSnapshotOutcome::Committed => {}
+                LiveHlsSnapshotOutcome::Committed => {
+            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+        }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
                         crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
@@ -1614,7 +1682,9 @@ async fn run_live_hls_tracks(
             )
             .await?
             {
-                LiveHlsSnapshotOutcome::Committed => {}
+                LiveHlsSnapshotOutcome::Committed => {
+            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+        }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
                         crate::video::StopIntent::Preserve => {
@@ -1910,15 +1980,21 @@ async fn fetch_resource_once(
     } else if !status.is_success() {
         return Err(resource_status_error(status));
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RESOURCE_BYTES)
+    let content_length = response.content_length();
+    if content_length.is_some_and(|length| length > MAX_RESOURCE_BYTES)
     {
         return Err(ManifestRunError::Unsupported(
             "A stream segment exceeds the size limit".to_string(),
         ));
     }
-    if resource.key && response.content_length().is_some_and(|length| length != 16) {
+    if let Some(range) = resource.range
+        && content_length.is_some_and(|length| length > range.length)
+    {
+        return Err(ManifestRunError::Unsupported(
+            "The stream server returned more bytes than the requested range".to_string(),
+        ));
+    }
+    if resource.key && content_length.is_some_and(|length| length != 16) {
         return Err(ManifestRunError::Unsupported(
             "The HLS AES-128 key is not 16 bytes".to_string(),
         ));
@@ -1930,7 +2006,7 @@ async fn fetch_resource_once(
         .create_new(true)
         .open(&part)
         .await
-        .map_err(|error| format!("Could not create a segment file: {error}"))?;
+        .map_err(|error| manifest_storage_error("Could not create a segment file", error))?;
     let mut stream = response.bytes_stream();
     let mut size = 0_u64;
     let pace_start = Instant::now();
@@ -1948,8 +2024,19 @@ async fn fetch_resource_once(
         let chunk = chunk.map_err(|error| {
             ManifestRunError::Retryable(format!("A stream segment transfer failed: {error}"))
         })?;
+        if resource
+            .range
+            .is_some_and(|range| byte_range_chunk_exceeds(range, size, chunk.len()))
+        {
+            return Err(ManifestRunError::Unsupported(
+                "The stream server returned more bytes than the requested range".to_string(),
+            ));
+        }
+        let chunk_len = u64::try_from(chunk.len()).map_err(|_| {
+            ManifestRunError::Unsupported("A stream segment exceeds the size limit".to_string())
+        })?;
         size = size
-            .checked_add(chunk.len() as u64)
+            .checked_add(chunk_len)
             .filter(|size| *size <= MAX_RESOURCE_BYTES)
             .ok_or_else(|| {
                 ManifestRunError::Unsupported("A stream segment exceeds the size limit".to_string())
@@ -1961,7 +2048,7 @@ async fn fetch_resource_once(
         }
         file.write_all(&chunk)
             .await
-            .map_err(|error| format!("Could not save a stream segment: {error}"))?;
+            .map_err(|error| manifest_storage_error("Could not save a stream segment", error))?;
         crate::download_rate::pace_chunk(
             &mut paced,
             pace_start,
@@ -1981,11 +2068,6 @@ async fn fetch_resource_once(
                 "The stream server ended a byte-range segment before all bytes arrived".to_string(),
             ));
         }
-        if size > range.length {
-            return Err(ManifestRunError::Unsupported(
-                "The stream server returned more bytes than the requested range".to_string(),
-            ));
-        }
     }
     if size == 0 || (resource.key && size != 16) {
         return Err(ManifestRunError::Unsupported(if resource.key {
@@ -1996,10 +2078,10 @@ async fn fetch_resource_once(
     }
     file.sync_all()
         .await
-        .map_err(|error| format!("Could not flush a stream segment: {error}"))?;
+        .map_err(|error| manifest_storage_error("Could not flush a stream segment", error))?;
     drop(file);
     crate::file_names::rename_noreplace(&part, &target)
-        .map_err(|error| format!("Could not publish a stream segment: {error}"))?;
+        .map_err(|error| manifest_storage_error("Could not publish a stream segment", error))?;
     reservation.commit();
     tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
         .ok();
@@ -2602,6 +2684,7 @@ async fn apply_dash_live_snapshot(
 async fn run_live_dash_tracks(
     client: &reqwest::Client,
     source_url: &str,
+    destination_dir: &Path,
     representation_key: &str,
     audio_key: Option<&str>,
     video_plan: Option<&DashRepresentationPlan>,
@@ -2611,6 +2694,7 @@ async fn run_live_dash_tracks(
     connections: usize,
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &Arc<AtomicU64>,
+    guarded_child_hosts: &mut std::collections::HashSet<String>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<DashLiveCapture, ManifestRunError> {
     let (mut video, video_bytes) =
@@ -2678,6 +2762,7 @@ async fn run_live_dash_tracks(
         });
     }
     downloaded.store(total_bytes, Ordering::Relaxed);
+    ensure_manifest_mux_space(destination_dir, total_bytes)?;
 
     let (Some(mut current_video_plan), mut current_audio_plan) =
         (video_plan.cloned(), audio_plan.cloned())
@@ -2702,7 +2787,9 @@ async fn run_live_dash_tracks(
     )
     .await?
     {
-        DashLiveUpdateOutcome::Committed => {}
+        DashLiveUpdateOutcome::Committed => {
+            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+        }
         DashLiveUpdateOutcome::Stopped(intent) => {
             finish_capture!(match intent {
                 crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
@@ -2735,7 +2822,9 @@ async fn run_live_dash_tracks(
         )
         .await?
         {
-            DashLiveUpdateOutcome::Committed => {}
+            DashLiveUpdateOutcome::Committed => {
+            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+        }
             DashLiveUpdateOutcome::Stopped(intent) => {
                 finish_capture!(match intent {
                     crate::video::StopIntent::Preserve => {
@@ -2815,6 +2904,7 @@ async fn run_live_dash_tracks(
                 representation_key: representation_key.to_string(),
                 audio_key: audio_key.clone(),
             },
+            guarded_child_hosts,
         )
         .await;
         let refreshed = match refreshed {
@@ -2856,7 +2946,9 @@ async fn run_live_dash_tracks(
         )
         .await?
         {
-            DashLiveUpdateOutcome::Committed => {}
+            DashLiveUpdateOutcome::Committed => {
+            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+        }
             DashLiveUpdateOutcome::Stopped(intent) => {
                 finish_capture!(match intent {
                     crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
@@ -2887,7 +2979,9 @@ async fn run_live_dash_tracks(
                 )
                 .await?
                 {
-                    DashLiveUpdateOutcome::Committed => {}
+                    DashLiveUpdateOutcome::Committed => {
+            ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
+        }
                     DashLiveUpdateOutcome::Stopped(intent) => {
                         finish_capture!(match intent {
                             crate::video::StopIntent::Preserve => {
@@ -2924,6 +3018,7 @@ async fn run_live_dash_tracks(
                 .await?
                 {
                     DashLiveUpdateOutcome::Committed => {
+                        ensure_manifest_mux_space(destination_dir, downloaded.load(Ordering::Relaxed))?;
                         let bytes = dash_live_track_bytes(&track.state, &track.directory).await?;
                         audio_key = Some(key);
                         audio = Some((track, bytes));
@@ -3114,6 +3209,11 @@ async fn run_ffmpeg(
     };
     let log = stderr_task.await.unwrap_or_default();
     if !status.success() {
+        if ffmpeg_log_indicates_storage_full(&log) {
+            return Err(ManifestRunError::Failed(
+                "Not enough free disk space to finalize this stream".to_string(),
+            ));
+        }
         let detail = log
             .lines()
             .rev()
@@ -3129,6 +3229,36 @@ async fn run_ffmpeg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mux_space_check_reserves_room_for_ffmpeg_output() {
+        assert!(check_manifest_mux_space(100, 100).is_ok());
+        let error = check_manifest_mux_space(99, 100).expect_err("one byte short must fail");
+        assert!(matches!(
+            error,
+            ManifestRunError::Failed(message) if message.contains("Not enough free disk space")
+        ));
+    }
+
+    #[test]
+    fn byte_range_overshoot_is_rejected_before_writing() {
+        let range = crate::manifest::ManifestByteRange {
+            offset: 10,
+            length: 8,
+        };
+        assert!(!byte_range_chunk_exceeds(range, 3, 5));
+        assert!(byte_range_chunk_exceeds(range, 3, 6));
+        assert!(byte_range_chunk_exceeds(range, 8, 1));
+    }
+
+    #[test]
+    fn ffmpeg_storage_full_errors_are_not_classified_as_unsupported_media() {
+        assert!(ffmpeg_log_indicates_storage_full(
+            "av_interleaved_write_frame(): No space left on device"
+        ));
+        assert!(ffmpeg_log_indicates_storage_full("Disk quota exceeded"));
+        assert!(!ffmpeg_log_indicates_storage_full("Invalid data found when processing input"));
+    }
 
     #[tokio::test]
     async fn selected_dash_audio_representation_is_used_for_track_planning() {
@@ -3174,6 +3304,7 @@ mod tests {
             representation_key: video_key.clone(),
             audio_key: Some(alternate_audio_key),
         };
+        let mut selected_hosts = std::collections::HashSet::new();
         let selected = resolve_tracks(
             &client,
             ManifestLookup {
@@ -3181,6 +3312,7 @@ mod tests {
                 manifest: NativeManifest::Dash(dash.clone()),
             },
             &selected_source,
+            &mut selected_hosts,
         )
         .await
         .expect("selected audio representation should be planned");
@@ -3199,6 +3331,7 @@ mod tests {
             audio_key: None,
             ..selected_source
         };
+        let mut automatic_hosts = std::collections::HashSet::new();
         let automatic = resolve_tracks(
             &client,
             ManifestLookup {
@@ -3206,6 +3339,7 @@ mod tests {
                 manifest: NativeManifest::Dash(dash),
             },
             &automatic_source,
+            &mut automatic_hosts,
         )
         .await
         .expect("legacy automatic audio choice should remain supported");
@@ -3225,6 +3359,90 @@ mod tests {
                 .and_then(|plan| plan.representation.representation_id.as_deref()),
             Some("a-en")
         );
+    }
+
+    #[tokio::test]
+    async fn dynamic_dash_refreshes_share_the_collection_host_limit() {
+        let _policy = crate::download_net::isolate_untrusted_handoff_policy_for_test();
+        assert!(crate::download_net::require_public_resolution("page.example.com"));
+
+        let manifest_url = "https://page.example.com/live.mpd";
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+     type="dynamic"
+     availabilityStartTime="1970-01-01T00:00:00Z"
+     minimumUpdatePeriod="PT1S"
+     timeShiftBufferDepth="PT1S">
+  <BaseURL>https://origin.example.com/</BaseURL>
+  <Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="1"
+                       media="https://cdn-$Number$.example.com/segment-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+
+        let first = crate::manifest::dash::parse_dash_manifest_at(
+            manifest_url,
+            body,
+            std::time::UNIX_EPOCH + Duration::from_secs(120),
+        )
+        .expect("initial dynamic MPD should parse");
+        let representation_key = first.video_representations[0].live_key.clone();
+        let source = ManifestSource {
+            url: manifest_url.to_string(),
+            kind: ManifestKind::Dash,
+            representation_key: representation_key.clone(),
+            audio_key: None,
+        };
+        let client = reqwest::Client::new();
+        let mut guarded_child_hosts = std::collections::HashSet::new();
+        let limit = crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION;
+        let mut saw_host_limit = false;
+
+        // Every MPD uses the same representation template, but the expanded
+        // segment URL rotates to a new public hostname as the live window advances.
+        for refresh in 0..=limit {
+            let dash = crate::manifest::dash::parse_dash_manifest_at(
+                manifest_url,
+                body,
+                std::time::UNIX_EPOCH + Duration::from_secs(120 + refresh as u64),
+            )
+            .expect("refreshed dynamic MPD should parse");
+            assert_eq!(dash.video_representations[0].live_key, representation_key);
+            let lookup = ManifestLookup {
+                source_url: manifest_url.to_string(),
+                manifest: NativeManifest::Dash(dash),
+            };
+
+            match resolve_tracks(&client, lookup, &source, &mut guarded_child_hosts).await {
+                Ok(Tracks::Dash { video, .. }) => {
+                    assert!(
+                        video.resources.iter().any(|resource| {
+                            resource.kind == crate::manifest::dash::DashResourceKind::Segment
+                        }),
+                        "each live refresh should expose a complete segment"
+                    );
+                    assert!(
+                        !saw_host_limit,
+                        "a collection that exceeded its host budget must remain blocked"
+                    );
+                }
+                Err(ManifestRunError::Unsupported(message))
+                    if message.contains("distinct resource hosts") =>
+                {
+                    saw_host_limit = true;
+                }
+                other => panic!("unexpected dynamic DASH refresh result: {other:?}"),
+            }
+        }
+
+        assert!(
+            saw_host_limit,
+            "a rotating-host stream must hit the limit after repeated MPD refreshes"
+        );
+        assert_eq!(guarded_child_hosts.len(), limit);
     }
 
     #[tokio::test]

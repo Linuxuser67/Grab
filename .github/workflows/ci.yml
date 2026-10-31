@@ -89,7 +89,10 @@ jobs:
           test -S /tmp/.X11-unix/X99
           export DISPLAY=:99
           export GSK_RENDERER=cairo
+          # GTK initialization is thread-bound. Keep each ignored UI test
+          # in its own process because the Rust test harness changes workers.
           cargo test picker_grid -- --ignored --test-threads=1 --nocapture | tee /tmp/ui-tests.log
+          cargo test playlist_and_torrent_picker_wait_for_confirmation -- --ignored --test-threads=1 --nocapture | tee -a /tmp/ui-tests.log
           cargo test queue_row_resynced_after_picker_returns_to_form -- --ignored --test-threads=1 --nocapture | tee -a /tmp/ui-tests.log
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' /tmp/ui-tests.log
           # A stray Gtk-CRITICAL (e.g. the measure flood from the drawn

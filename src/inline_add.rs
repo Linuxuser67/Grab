@@ -4163,7 +4163,7 @@ mod tests {
     // page builders and proves neither queues anything before user input.
     #[test]
     #[ignore = "needs a display; run under Xvfb (see ci.yml)"]
-    fn picker_grid_playlist_and_torrent_wait_for_confirmation() {
+    fn playlist_and_torrent_picker_wait_for_confirmation() {
         gtk4::init().expect("gtk::init (run under Xvfb)");
         // SAFETY: test setup runs serially before constructing GSettings.
         unsafe {

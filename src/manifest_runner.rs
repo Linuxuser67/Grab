@@ -1128,9 +1128,11 @@ mod tests {
             None,
             std::collections::HashMap::from([(
                 "cdn.example.test".to_string(),
-                vec![format!("127.0.0.1:{port}")
-                    .parse()
-                    .expect("private loopback address")],
+                vec![
+                    format!("127.0.0.1:{port}")
+                        .parse()
+                        .expect("private loopback address"),
+                ],
             )]),
         )
         .expect("build the production guarded HTTP client with fixture DNS");

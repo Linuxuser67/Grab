@@ -373,9 +373,7 @@ async fn resolve_tracks(
                         .zip(crate::manifest_intake::hls_audio_rendition_keys(
                             &master.audio_renditions,
                         ))
-                        .find_map(|(rendition, key)| {
-                            (key == audio_key).then_some(rendition)
-                        })
+                        .find_map(|(rendition, key)| (key == audio_key).then_some(rendition))
                         .filter(|rendition| {
                             variant
                                 .audio_group

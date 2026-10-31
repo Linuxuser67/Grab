@@ -79,11 +79,12 @@ impl ManifestTransportPolicy {
             && url.password().is_none()
     }
 
-    fn planning_url(self, mut url: Url) -> Result<Url, ManifestIntakeError> {
+    fn planning_url(self, url: Url) -> Result<Url, ManifestIntakeError> {
         match self {
             Self::HttpsOnly => Ok(url),
             #[cfg(test)]
             Self::HttpFixture => {
+                let mut url = url;
                 url.set_scheme("https").map_err(|_| {
                     ManifestIntakeError::Failed(gettext("Invalid stream manifest URL"))
                 })?;

@@ -1204,8 +1204,17 @@ fn dynamic_segment_times(
 
     if let Some(timeline) = template.timeline.as_deref() {
         let mut next_start = 0_u64;
+        let mut previous_start = None;
+        let mut previous_run_uses_negative_repeat = false;
         for (index, entry) in timeline.iter().enumerate() {
             let start = entry.start.unwrap_or(next_start);
+            let starts_before_previous = previous_start.is_some_and(|previous| start < previous);
+            let overlaps_previous_run =
+                entry.start.is_some() && !previous_run_uses_negative_repeat && start < next_start;
+            if starts_before_previous || overlaps_previous_run {
+                return Err(DashError::InvalidSegment);
+            }
+
             let total_count = match entry.repeat {
                 repeat if repeat >= 0 => u64::try_from(repeat)
                     .ok()
@@ -1258,6 +1267,8 @@ fn dynamic_segment_times(
                 .checked_mul(entry.duration)
                 .ok_or(DashError::InvalidSegment)?;
             next_start = start.checked_add(span).ok_or(DashError::InvalidSegment)?;
+            previous_start = Some(start);
+            previous_run_uses_negative_repeat = entry.repeat == -1;
         }
     } else {
         let duration = template
@@ -2029,6 +2040,28 @@ mod tests {
                 "/path/seg-12-4.m4s",
                 "/path/seg-13-5.m4s",
             ]
+        );
+    }
+
+    #[test]
+    fn dynamic_timeline_rejects_overlap_after_positive_repeat() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="1" media="seg-$Time$.m4s">
+  <SegmentTimeline>
+    <S t="0" d="4" r="2"/>
+    <S t="4" d="4"/>
+  </SegmentTimeline>
+</SegmentTemplate>"#,
+            r#"timeShiftBufferDepth="PT20S""#,
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(20))
+            .expect("dynamic timeline MPD syntax should parse");
+        let representation = &manifest.video_representations[0];
+
+        assert_eq!(
+            plan_dash_representation(&manifest, &representation.live_key).err(),
+            Some(DashError::InvalidSegment),
+            "an explicit start inside a positive-repeat run must be rejected"
         );
     }
 

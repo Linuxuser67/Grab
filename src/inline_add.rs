@@ -552,7 +552,6 @@ pub(crate) struct VideoStep {
     pub(crate) manifest: Rc<RefCell<Option<crate::manifest_intake::ManifestLookup>>>,
     pub(crate) manifest_choices: Rc<RefCell<Vec<crate::manifest_intake::ManifestChoice>>>,
     pub(crate) manifest_selection: Rc<RefCell<Option<String>>>,
-    pub(crate) manifest_info: adw::ActionRow,
     pub(crate) manifest_format: adw::ComboRow,
     /// Index-aligned with the combo's model. Reset on every resolve.
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
@@ -670,7 +669,7 @@ pub(crate) fn sync_entry_icon(v: &VideoStep) {
         !v.url_entry.text().trim().is_empty(),
         v.looking_up.get(),
         v.action_revealer.reveals_child(),
-        v.error.is_visible() || v.tools.is_visible() || v.manifest_info.is_visible(),
+        v.error.is_visible() || v.tools.is_visible(),
     );
     let pos = gtk4::EntryIconPosition::Secondary;
     match icon {
@@ -712,7 +711,6 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
-    v.manifest_info.set_visible(false);
     v.manifest_format.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
@@ -734,7 +732,6 @@ fn clear_manifest_preview(step: &VideoStep) {
     step.manifest_selection.borrow_mut().take();
     step.manifest_format
         .set_model(Some(&gtk4::StringList::new(&[])));
-    step.manifest_info.set_subtitle("");
 }
 
 /// Show a parsed manifest and enable Add for the validated representation.
@@ -759,7 +756,6 @@ fn show_manifest_ready(
     step.manifest_selection
         .replace(choices.get(selected_index).map(|choice| choice.key.clone()));
     step.manifest_choices.replace(choices);
-    step.manifest_info.set_subtitle(&manifest.summary());
 
     let labels = step
         .manifest_choices
@@ -772,7 +768,6 @@ fn show_manifest_ready(
         .set_model(Some(&gtk4::StringList::new(&label_refs)));
     step.manifest_format
         .set_selected(u32::try_from(selected_index).unwrap_or_default());
-    step.manifest_info.set_visible(true);
     step.manifest_format.set_visible(true);
     if step.name.text().trim().is_empty() {
         step.name.set_text("Stream.mp4");
@@ -782,7 +777,11 @@ fn show_manifest_ready(
     step.revert.set_visible(false);
 
     // Native rows keep the source URL and selected key as durable queue metadata.
+    step.action_revealer.set_visible(true);
     step.action_revealer.set_reveal_child(true);
+    step.add_btn.set_icon_name("");
+    step.add_btn.remove_css_class("circular");
+    step.add_btn.set_label(&gettext("Add"));
     set_looking_up(step, false);
     set_lookup_add(lookup_add, true);
 
@@ -2172,15 +2171,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     ))]);
     video_name.add_suffix(&video_revert_btn);
     video_group.add(&video_name);
-    // Media-format selector, filled per video on resolve: exact pinnable
-    // formats, tallest first (the preference preselects the closest row), or a
-    // single Automatic row when nothing is pinnable.
-    let manifest_info = adw::ActionRow::builder()
-        .title(gettext("Native stream manifest"))
-        .use_markup(false)
-        .build();
-    manifest_info.set_visible(false);
-    video_group.add(&manifest_info);
+    // Native manifest representation selector. Choices are ordered highest-first;
+    // the configured quality preference selects the closest representation.
     let manifest_format = adw::ComboRow::builder()
         .title(gettext("Video variant"))
         .build();
@@ -2279,7 +2271,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         manifest: Rc::new(RefCell::new(None)),
         manifest_choices: Rc::new(RefCell::new(Vec::new())),
         manifest_selection: Rc::new(RefCell::new(None)),
-        manifest_info,
         manifest_format,
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
@@ -2303,14 +2294,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     {
         let choices = Rc::clone(&step.manifest_choices);
         let selection = Rc::clone(&step.manifest_selection);
-        let manifest = Rc::clone(&step.manifest);
-        let info = step.manifest_info.clone();
         step.manifest_format.connect_selected_notify(move |row| {
-            let selected = choices.borrow().get(row.selected() as usize).cloned();
-            selection.replace(selected.as_ref().map(|choice| choice.key.clone()));
-            if let (Some(selected), Some(manifest)) = (selected, manifest.borrow().as_ref()) {
-                info.set_subtitle(&format!("{} · {}", manifest.summary(), selected.label));
-            }
+            let selected_key = choices
+                .borrow()
+                .get(row.selected() as usize)
+                .map(|choice| choice.key.clone());
+            selection.replace(selected_key);
         });
     }
     // "Select files…" invokes the opener set below (where the picker context

@@ -210,7 +210,6 @@ pub(crate) struct HlsMasterPlan {
 #[derive(Clone, Debug)]
 pub(crate) struct HlsPlan {
     pub(crate) resources: Box<[HlsResource]>,
-    pub(crate) duration: Duration,
     local_playlist: MediaPlaylist,
 }
 
@@ -536,6 +535,10 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         segment.byte_range = None;
     }
 
+    // Preserve checked cumulative-duration validation without storing an
+    // aggregate that the fetch plan and UI no longer consume.
+    let _ = total_duration;
+
     let rounded_target_duration = maximum_segment_duration.ceil();
     if rounded_target_duration > u64::MAX as f64 {
         return Err(ManifestError::DurationOverflow);
@@ -563,7 +566,6 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
 
     Ok(HlsPlan {
         resources: resources.into_boxed_slice(),
-        duration: total_duration,
         local_playlist: playlist,
     })
 }
@@ -667,6 +669,24 @@ video/720.m3u8
     }
 
     #[test]
+    fn rejects_media_playlist_when_cumulative_duration_overflows() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:10000000000000000000
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXTINF:9500000000000000000,
+first.ts
+#EXTINF:9500000000000000000,
+second.ts
+#EXT-X-ENDLIST
+"#;
+
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, body).err(),
+            Some(ManifestError::DurationOverflow)
+        );
+    }
+
+    #[test]
     fn local_playlist_round_trips_with_map_and_preserves_sequence_and_target() {
         let body = br#"#EXTM3U
 #EXT-X-VERSION:4
@@ -685,7 +705,6 @@ media.mp4
         let plan = plan_hls_media_playlist(BASE_URL, body)
             .expect("valid VOD playlist should produce a local fetch plan");
 
-        assert!((plan.duration.as_secs_f64() - 7.2).abs() < 0.000_001);
         assert_eq!(plan.resources.len(), 3);
         assert_eq!(plan.resources[0].kind, HlsResourceKind::InitMap);
         assert_eq!(
@@ -721,6 +740,11 @@ media.mp4
         assert_eq!(parsed.playlist_type, Some(MediaPlaylistType::Vod));
         assert!(parsed.end_list);
         assert_eq!(parsed.segments.len(), 2);
+        assert!(
+            (f64::from(parsed.segments[0].duration) - 3.2).abs() < 0.000_001,
+            "the serialized first segment retains its source duration"
+        );
+        assert_eq!(parsed.segments[1].duration, 4.0);
         assert!(
             parsed.segments[0].uri.starts_with("segment-000000-"),
             "local segment names include their remote resource identity"

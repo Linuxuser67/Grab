@@ -1086,6 +1086,98 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn selected_dash_audio_representation_is_used_for_track_planning() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="5" media="video-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000" width="1280" height="720" codecs="avc1.64001f"/>
+    </AdaptationSet>
+    <AdaptationSet id="audio-en" contentType="audio" mimeType="audio/mp4" lang="en">
+      <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      <SegmentTemplate duration="5" media="audio-en-$Number$.m4s"/>
+      <Representation id="a-en" bandwidth="128000" codecs="mp4a.40.2"/>
+    </AdaptationSet>
+    <AdaptationSet id="audio-fr" contentType="audio" mimeType="audio/mp4" lang="fr">
+      <SegmentTemplate duration="5" media="audio-fr-$Number$.m4s"/>
+      <Representation id="a-fr" bandwidth="192000" codecs="mp4a.40.2"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest_url = "https://cdn.example.test/manifest.mpd";
+        let dash = crate::manifest::dash::parse_dash_manifest(manifest_url, body)
+            .expect("valid static DASH presentation");
+        let video_key = dash.video_representations[0].key.clone();
+        let main_audio_key = dash
+            .default_audio()
+            .expect("main DASH audio track")
+            .key
+            .clone();
+        let alternate_audio_key = dash
+            .audio_representations
+            .iter()
+            .find(|track| track.representation_id.as_deref() == Some("a-fr"))
+            .expect("alternate language audio track")
+            .key
+            .clone();
+        let client = reqwest::Client::new();
+
+        let selected_source = ManifestSource {
+            url: manifest_url.to_string(),
+            kind: ManifestKind::Dash,
+            representation_key: video_key.clone(),
+            audio_key: Some(alternate_audio_key),
+        };
+        let selected = resolve_tracks(
+            &client,
+            ManifestLookup {
+                source_url: manifest_url.to_string(),
+                manifest: NativeManifest::Dash(dash.clone()),
+            },
+            &selected_source,
+        )
+        .await
+        .expect("selected audio representation should be planned");
+        let Tracks::Dash { audio, .. } = selected else {
+            panic!("DASH manifest must resolve to DASH tracks");
+        };
+        assert_eq!(
+            audio
+                .as_deref()
+                .and_then(|plan| plan.representation.representation_id.as_deref()),
+            Some("a-fr"),
+            "the queued audio key must select the matching representation"
+        );
+
+        let automatic_source = ManifestSource {
+            audio_key: None,
+            ..selected_source
+        };
+        let automatic = resolve_tracks(
+            &client,
+            ManifestLookup {
+                source_url: manifest_url.to_string(),
+                manifest: NativeManifest::Dash(dash),
+            },
+            &automatic_source,
+        )
+        .await
+        .expect("legacy automatic audio choice should remain supported");
+        let Tracks::Dash { audio, .. } = automatic else {
+            panic!("DASH manifest must resolve to DASH tracks");
+        };
+        assert_eq!(
+            audio
+                .as_deref()
+                .and_then(|plan| plan.representation.representation_id.as_deref()),
+            Some("a-en"),
+            "queue entries without an audio key must preserve main/first fallback"
+        );
+        assert!(!main_audio_key.is_empty());
+    }
+
+    #[tokio::test]
     async fn run_manifest_download_rejects_a_destination_without_a_parent() {
         let job = ManifestJob {
             item_id: 7,

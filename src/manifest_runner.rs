@@ -3469,12 +3469,13 @@ mod tests {
                         "a collection that exceeded its host budget must remain blocked"
                     );
                 }
-                Err(ManifestRunError::Unsupported(message))
+                Err(ManifestRunError::Failed(message))
                     if message.contains("distinct resource hosts") =>
                 {
                     saw_host_limit = true;
                 }
-                _ => panic!("unexpected dynamic DASH refresh result"),
+                Err(error) => panic!("unexpected dynamic DASH refresh error: {error}"),
+                Ok(_) => panic!("dynamic DASH refresh returned an unexpected track type"),
             }
         }
 

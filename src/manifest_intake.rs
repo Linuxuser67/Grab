@@ -492,8 +492,11 @@ pub(crate) async fn lookup(
     if !is_native_manifest_candidate(&requested_url, ManifestTransportPolicy::HttpsOnly) {
         return Ok(None);
     }
-    let cookies_browser =
-        preview_cookie_browser(&requested_url, cookies_browser, ManifestTransportPolicy::HttpsOnly);
+    let cookies_browser = preview_cookie_browser(
+        &requested_url,
+        cookies_browser,
+        ManifestTransportPolicy::HttpsOnly,
+    );
     tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
         let client = client_for_manifest(raw_url, cookies_browser, proxy).await?;
         lookup_preview_with_client(&client, raw_url)
@@ -1213,13 +1216,19 @@ mod tests {
     async fn youtube_playlist_page_skips_native_preview_before_cookie_export() {
         let result = tokio::time::timeout(
             Duration::from_secs(1),
-            lookup("https://www.youtube.com/playlist?list=PL_test", "firefox", None),
+            lookup(
+                "https://www.youtube.com/playlist?list=PL_test",
+                "firefox",
+                None,
+            ),
         )
         .await
         .expect("YouTube playlist URLs must be rejected before browser-cookie export");
 
         assert!(
-            result.expect("ordinary YouTube playlist pages do not enter native intake").is_none(),
+            result
+                .expect("ordinary YouTube playlist pages do not enter native intake")
+                .is_none(),
             "the endpoint-name heuristic must not route YouTube pages to native intake"
         );
     }

@@ -854,7 +854,10 @@ mod tests {
         rename_noreplace_same_device(&old, &new).unwrap();
 
         assert_eq!(std::fs::read(&new).unwrap(), b"complete payload");
-        assert!(!old.exists(), "same-filesystem publication moves the source");
+        assert!(
+            !old.exists(),
+            "same-filesystem publication moves the source"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -873,7 +876,6 @@ mod tests {
         assert!(!old.exists(), "source is removed only after publication");
         std::fs::remove_dir_all(dir).unwrap();
     }
-
 }
 
 #[cfg(test)]

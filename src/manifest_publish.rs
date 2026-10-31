@@ -186,12 +186,9 @@ pub(crate) async fn publish(
     let destination_for_copy = destination.to_path_buf();
     let copy_gate = Arc::clone(gate);
     let temporary = tokio::task::spawn_blocking(move || {
-        prepare_destination_copy(
-            &source_for_copy,
-            &destination_for_copy,
-            &copy_gate,
-            || false,
-        )
+        prepare_destination_copy(&source_for_copy, &destination_for_copy, &copy_gate, || {
+            false
+        })
     })
     .await
     .map_err(std::io::Error::other)??;
@@ -226,7 +223,10 @@ mod tests {
             .unwrap()
             .expect("copy should prepare while the gate is active");
 
-        assert!(!destination.exists(), "the final name stays absent before persist");
+        assert!(
+            !destination.exists(),
+            "the final name stays absent before persist"
+        );
         assert_eq!(temporary.path().parent(), destination.parent());
         assert_eq!(std::fs::read(temporary.path()).unwrap(), contents);
 
@@ -234,7 +234,10 @@ mod tests {
         assert_eq!(outcome, ManifestPublishOutcome::Published);
         assert!(gate.was_delivered());
         assert_eq!(std::fs::read(&destination).unwrap(), contents);
-        assert!(source.exists(), "the source remains for normal staging cleanup");
+        assert!(
+            source.exists(),
+            "the source remains for normal staging cleanup"
+        );
     }
 
     #[test]
@@ -264,7 +267,10 @@ mod tests {
 
         drop(DiscardOnDrop::new(Arc::clone(&gate)));
 
-        assert!(!gate.is_active(), "dropping the owner cancels future copy work");
+        assert!(
+            !gate.is_active(),
+            "dropping the owner cancels future copy work"
+        );
     }
 
     #[test]
@@ -307,7 +313,10 @@ mod tests {
 
         assert!(temporary.is_none());
         assert!(!destination.exists());
-        assert!(!gate.is_active(), "the row discard stops the next copy chunk");
+        assert!(
+            !gate.is_active(),
+            "the row discard stops the next copy chunk"
+        );
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
         assert!(source.exists());
     }

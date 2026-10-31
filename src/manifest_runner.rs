@@ -1533,11 +1533,11 @@ async fn run_live_hls_tracks(
         guard_manifest_child_url(
             source_url,
             &video_plan.playlist_url,
-            &mut guarded_child_hosts,
+            guarded_child_hosts,
         )
         .map_err(ManifestRunError::Unsupported)?;
         if let Some(plan) = audio_plan {
-            guard_manifest_child_url(source_url, &plan.playlist_url, &mut guarded_child_hosts)
+            guard_manifest_child_url(source_url, &plan.playlist_url, guarded_child_hosts)
                 .map_err(ManifestRunError::Unsupported)?;
         }
     }
@@ -1652,7 +1652,7 @@ async fn run_live_hls_tracks(
                 tx,
                 downloaded,
                 abort,
-                &mut guarded_child_hosts,
+                guarded_child_hosts,
                 audio
                     .as_ref()
                     .map_or(0, |track| track.accumulator.resource_bytes()),
@@ -1691,7 +1691,7 @@ async fn run_live_hls_tracks(
                 tx,
                 downloaded,
                 abort,
-                &mut guarded_child_hosts,
+                guarded_child_hosts,
                 video.accumulator.resource_bytes(),
             )
             .await?

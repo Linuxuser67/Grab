@@ -674,7 +674,6 @@ fn hls_audio_rendition_key(rendition: &crate::manifest::HlsAudioRendition) -> St
             hasher.update([0]);
         }
     }
-    hasher.update([u8::from(rendition.is_default)]);
     let digest = hasher.finalize();
     let fingerprint: String = digest[..16]
         .iter()
@@ -820,7 +819,7 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
     }
     let video_key_is_valid = match source.kind {
         crate::media_types::ManifestKind::Hls => {
-            source.representation_key == "hls-media"
+            (source.representation_key == "hls-media" && source.audio_key.is_none())
                 || has_hex_fingerprint(&source.representation_key, "hls-variant-", 32)
                 || has_hex_fingerprint(&source.representation_key, "hls-variant-", 64)
         }
@@ -1051,6 +1050,151 @@ second.m3u8
         assert_eq!(preferred_choice_index(&choices, "1080p"), 1);
         assert_eq!(preferred_choice_index(&choices, "best"), 2);
         assert_eq!(preferred_choice_index(&choices, "720p"), 0);
+    }
+
+    #[test]
+    fn hls_audio_choices_are_scoped_to_variant_and_preselect_default() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-en",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8?sig=old"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-en",NAME="French",LANGUAGE="fr",DEFAULT=NO,AUTOSELECT=YES,URI="audio/fr.m3u8?sig=old"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-es",NAME="Spanish",LANGUAGE="es",DEFAULT=YES,AUTOSELECT=YES,URI="audio/es.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080,AUDIO="audio-en"
+video/en.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720,AUDIO="audio-es"
+video/es.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("valid HLS master playlist");
+        let video_keys = hls_variant_keys(&master.variants);
+        let lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/master.m3u8".to_string(),
+            manifest: NativeManifest::HlsMaster(master),
+        };
+
+        let english_choices = lookup.audio_choices(&video_keys[0]);
+        assert_eq!(english_choices.len(), 2);
+        assert!(english_choices[0].is_default);
+        assert!(english_choices.iter().any(|choice| choice.label.contains("French")));
+        assert_eq!(lookup.audio_choices(&video_keys[1]).len(), 1);
+
+        let default_source = lookup
+            .preferred_source("1080p")
+            .expect("preferred HLS video and default audio");
+        assert_eq!(default_source.representation_key, video_keys[0]);
+        assert_eq!(
+            default_source.audio_key.as_deref(),
+            Some(english_choices[0].key.as_str())
+        );
+
+        let selected = lookup
+            .selected_source(&video_keys[0], Some(&english_choices[1].key))
+            .expect("selected alternate audio rendition");
+        assert_eq!(selected.audio_key.as_deref(), Some(english_choices[1].key.as_str()));
+        assert!(
+            lookup
+                .selected_source(&video_keys[1], Some(&english_choices[1].key))
+                .is_none(),
+            "an audio rendition must not be selectable from another variant's group"
+        );
+    }
+
+    #[test]
+    fn hls_audio_keys_ignore_rotating_signature_query_parameters() {
+        let rendition = |url: &str| crate::manifest::HlsAudioRendition {
+            url: Some(Url::parse(url).expect("valid audio rendition URL")),
+            group_id: "audio-main".to_string(),
+            name: "English".to_string(),
+            language: Some("en".to_string()),
+            is_default: true,
+        };
+        let original = rendition("https://cdn.example.test/audio/en.m3u8?sig=old");
+        let refreshed = rendition("https://cdn.example.test/audio/en.m3u8?sig=new");
+
+        assert_eq!(
+            hls_audio_rendition_key(&original),
+            hls_audio_rendition_key(&refreshed)
+        );
+    }
+
+    #[test]
+    fn dash_audio_choices_include_every_track_and_pin_the_main_role() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="5" media="video-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000" width="1280" height="720" codecs="avc1.64001f"/>
+    </AdaptationSet>
+    <AdaptationSet id="audio-en" contentType="audio" mimeType="audio/mp4" lang="en">
+      <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      <SegmentTemplate duration="5" media="audio-en-$Number$.m4s"/>
+      <Representation id="a-en" bandwidth="128000" codecs="mp4a.40.2"/>
+    </AdaptationSet>
+    <AdaptationSet id="audio-fr" contentType="audio" mimeType="audio/mp4" lang="fr">
+      <SegmentTemplate duration="5" media="audio-fr-$Number$.m4s"/>
+      <Representation id="a-fr" bandwidth="192000" codecs="mp4a.40.2"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let dash = crate::manifest::dash::parse_dash_manifest(
+            "https://cdn.example.test/manifest.mpd",
+            body,
+        )
+        .expect("valid static DASH presentation");
+        let video_key = dash.video_representations[0].key.clone();
+        let main_audio_key = dash
+            .default_audio()
+            .expect("DASH main audio representation")
+            .key
+            .clone();
+        let lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/manifest.mpd".to_string(),
+            manifest: NativeManifest::Dash(dash),
+        };
+
+        let choices = lookup.audio_choices(&video_key);
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0].key, main_audio_key);
+        assert!(choices[0].is_default);
+        assert!(choices.iter().any(|choice| choice.label.contains("fr")));
+
+        let selected = lookup
+            .selected_source(&video_key, Some(&choices[1].key))
+            .expect("select the alternate DASH audio representation");
+        assert_eq!(selected.audio_key.as_deref(), Some(choices[1].key.as_str()));
+        let preferred = lookup
+            .preferred_source("720p")
+            .expect("default DASH audio is selected automatically");
+        assert_eq!(preferred.audio_key.as_deref(), Some(main_audio_key.as_str()));
+    }
+
+    #[test]
+    fn manifest_source_audio_key_is_optional_and_validated() {
+        let legacy: crate::media_types::ManifestSource = serde_json::from_value(
+            serde_json::json!({
+                "url": "https://cdn.example.test/master.m3u8",
+                "kind": "Hls",
+                "representation_key": "hls-media"
+            }),
+        )
+        .expect("legacy manifest source without an audio key remains compatible");
+        assert_eq!(legacy.audio_key, None);
+
+        let mut source = crate::media_types::ManifestSource {
+            url: "https://cdn.example.test/master.m3u8".to_string(),
+            kind: crate::media_types::ManifestKind::Hls,
+            representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
+            audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".to_string()),
+        };
+        assert!(valid_source(&source));
+        source.audio_key = Some("not-a-stable-audio-key".to_string());
+        assert!(!valid_source(&source));
+        source.representation_key = "hls-media".to_string();
+        source.audio_key = None;
+        assert!(valid_source(&source));
     }
 
     #[test]

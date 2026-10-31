@@ -748,7 +748,11 @@ fn hls_resources_from(resources: &[HlsResource]) -> Vec<Resource> {
 }
 
 fn dash_resources(plan: &DashRepresentationPlan) -> Vec<Resource> {
-    plan.resources
+    dash_resources_from(&plan.resources)
+}
+
+fn dash_resources_from(resources: &[DashResource]) -> Vec<Resource> {
+    resources
         .iter()
         .map(|resource| Resource {
             url: resource.url.clone(),

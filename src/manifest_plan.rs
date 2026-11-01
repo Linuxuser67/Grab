@@ -696,6 +696,58 @@ video/720.m3u8
     }
 
     #[test]
+    fn dash_subtitle_selection_resolves_the_selected_text_representation() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="5" media="video-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000" codecs="avc1.64001f"/>
+    </AdaptationSet>
+    <AdaptationSet contentType="text" mimeType="application/mp4" lang="en">
+      <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      <SegmentTemplate timescale="1" duration="5" initialization="sub-init.mp4" media="sub-$Number$.m4s"/>
+      <Representation id="sub-en" bandwidth="1000" codecs="wvtt"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let dash = crate::manifest::dash::parse_dash_manifest(
+            "https://cdn.example.test/manifest.mpd",
+            body,
+        )
+        .expect("valid static DASH presentation");
+        let video_key = dash.video_representations[0].key.clone();
+        let subtitle_key = dash.subtitle_representations[0].key.clone();
+        let lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/manifest.mpd".to_string(),
+            manifest: NativeManifest::Dash(dash),
+        };
+
+        let choices = lookup.subtitle_choices(&video_key);
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].language.as_deref(), Some("en"));
+        assert_eq!(
+            ManifestLookup::preferred_subtitle_choice_index(&choices, Some("en")),
+            Some(0)
+        );
+        let source = lookup
+            .selected_source(&video_key, None, Some(&subtitle_key))
+            .expect("selected DASH subtitle should be validated");
+        let plan = download_plan(lookup, &source).expect("selected DASH subtitle plan");
+        let ManifestDownloadPlan::Dash {
+            subtitle: Some(subtitle),
+            ..
+        } = plan
+        else {
+            panic!("expected a DASH subtitle plan");
+        };
+        assert_eq!(
+            subtitle.representation.representation_id.as_deref(),
+            Some("sub-en")
+        );
+    }
+
+    #[test]
     fn hls_download_plan_uses_the_selected_stable_video_and_audio_ids() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",STABLE-RENDITION-ID="rendition-en",URI="audio/en.m3u8"

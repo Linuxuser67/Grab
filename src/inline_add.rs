@@ -605,10 +605,9 @@ pub(crate) struct VideoStep {
         Rc<RefCell<Vec<crate::manifest_intake::ManifestAudioChoice>>>,
     pub(crate) manifest_audio_selection: Rc<RefCell<Option<String>>>,
     pub(crate) manifest_audio_format: adw::ComboRow,
-    pub(crate) manifest_subtitle_choices: Rc<RefCell<Vec<crate::manifest_intake::ManifestSubtitleChoice>>>,
+    /// Native subtitle rendition selected automatically from the global preference.
     pub(crate) manifest_subtitle_selection: Rc<RefCell<Option<String>>>,
     pub(crate) manifest_subtitle_preference: Rc<RefCell<Option<String>>>,
-    pub(crate) manifest_subtitle_format: adw::ComboRow,
     /// Index-aligned with the combo's model. Reset on every resolve.
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
     pub(crate) tools: adw::ActionRow,
@@ -769,7 +768,6 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.format.set_visible(false);
     v.manifest_format.set_visible(false);
     v.manifest_audio_format.set_visible(false);
-    v.manifest_subtitle_format.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
     v.gallery_info.set_visible(false);
@@ -795,11 +793,8 @@ fn clear_manifest_preview(step: &VideoStep) {
     step.manifest_audio_format
         .set_model(Some(&gtk4::StringList::new(&[])));
     step.manifest_audio_format.set_visible(false);
-    step.manifest_subtitle_choices.borrow_mut().clear();
     step.manifest_subtitle_selection.borrow_mut().take();
     step.manifest_subtitle_preference.borrow_mut().take();
-    step.manifest_subtitle_format.set_model(Some(&gtk4::StringList::new(&[])));
-    step.manifest_subtitle_format.set_visible(false);
 }
 
 /// Refresh the audio picker for the selected video representation.
@@ -836,44 +831,22 @@ fn refresh_manifest_audio_picker(step: &VideoStep, video_key: Option<&str>) {
         .set_visible(step.manifest_audio_choices.borrow().len() > 1);
 }
 
-/// Refresh the subtitle picker for the selected video representation.
-fn refresh_manifest_subtitle_picker(
+/// Resolve the native subtitle rendition from the global Media → Subtitles preference.
+/// There is deliberately no per-download subtitle control: changing the video
+/// representation only recalculates the matching rendition for the same preference.
+fn refresh_manifest_subtitle_selection(
     step: &VideoStep,
     video_key: Option<&str>,
     preferred_language: Option<&str>,
 ) {
-    let choices = video_key
-        .and_then(|key| {
-            step.manifest
-                .borrow()
-                .as_ref()
-                .map(|manifest| manifest.subtitle_choices(key))
-        })
-        .unwrap_or_default();
-    let preferred_choice_index = crate::manifest_plan::ManifestLookup::preferred_subtitle_choice_index(
-        &choices,
-        preferred_language,
-    );
-    let selected_index = preferred_choice_index.map_or(0, |index| index + 1);
-    step.manifest_subtitle_selection.replace(
-        preferred_choice_index.and_then(|index| choices.get(index).map(|choice| choice.key.clone())),
-    );
-    step.manifest_subtitle_preference.replace(preferred_language.map(str::to_string));
-    step.manifest_subtitle_choices.replace(choices);
-    let mut labels = vec![gettext("Off")];
-    labels.extend(
-        step.manifest_subtitle_choices
+    let selected_key = video_key.and_then(|key| {
+        step.manifest
             .borrow()
-            .iter()
-            .map(|choice| choice.label.clone()),
-    );
-    let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
-    step.manifest_subtitle_format
-        .set_model(Some(&gtk4::StringList::new(&label_refs)));
-    step.manifest_subtitle_format
-        .set_selected(u32::try_from(selected_index).unwrap_or_default());
-    step.manifest_subtitle_format
-        .set_visible(!step.manifest_subtitle_choices.borrow().is_empty());
+            .as_ref()
+            .and_then(|manifest| manifest.preferred_subtitle_key(key, preferred_language))
+    });
+    step.manifest_subtitle_selection.replace(selected_key);
+    step.manifest_subtitle_preference.replace(preferred_language.map(str::to_string));
 }
 
 /// Show a parsed manifest and enable Add for the validated representation.
@@ -915,7 +888,7 @@ fn show_manifest_ready(
     step.manifest_format.set_visible(true);
     drop(manifest_state);
     refresh_manifest_audio_picker(step, selected_video_key.as_deref());
-    refresh_manifest_subtitle_picker(step, selected_video_key.as_deref(), preferred_subtitle_language);
+    refresh_manifest_subtitle_selection(step, selected_video_key.as_deref(), preferred_subtitle_language);
     if step.name.text().trim().is_empty() {
         step.name.set_text("Stream.mp4");
     }
@@ -2305,12 +2278,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     manifest_audio_format.set_visible(false);
     video_group.add(&manifest_audio_format);
-    let manifest_subtitle_format = adw::ComboRow::builder()
-        .title(gettext("Subtitles"))
-        .build();
-    manifest_subtitle_format.set_visible(false);
-    video_group.add(&manifest_subtitle_format);
-
     let video_format = adw::ComboRow::builder()
         .title(gettext("Media format"))
         .build();
@@ -2407,10 +2374,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         manifest_audio_choices: Rc::new(RefCell::new(Vec::new())),
         manifest_audio_selection: Rc::new(RefCell::new(None)),
         manifest_audio_format,
-        manifest_subtitle_choices: Rc::new(RefCell::new(Vec::new())),
         manifest_subtitle_selection: Rc::new(RefCell::new(None)),
         manifest_subtitle_preference: Rc::new(RefCell::new(None)),
-        manifest_subtitle_format,
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
         error: video_error,
@@ -2446,7 +2411,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if let Some(step) = step_weak.upgrade() {
                 refresh_manifest_audio_picker(&step, selected_key.as_deref());
                 let subtitle_language = subtitle_preference.borrow().clone();
-                refresh_manifest_subtitle_picker(&step, selected_key.as_deref(), subtitle_language.as_deref());
+                refresh_manifest_subtitle_selection(&step, selected_key.as_deref(), subtitle_language.as_deref());
             }
         });
     }
@@ -2461,15 +2426,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     .map(|choice| choice.key.clone());
                 selection.replace(selected_key);
             });
-    }
-    {
-        let choices = Rc::clone(&step.manifest_subtitle_choices);
-        let selection = Rc::clone(&step.manifest_subtitle_selection);
-        step.manifest_subtitle_format.connect_selected_notify(move |row| {
-            let selected_key = row.selected().checked_sub(1)
-                .and_then(|index| choices.borrow().get(index as usize).map(|choice| choice.key.clone()));
-            selection.replace(selected_key);
-        });
     }
     // "Select files…" invokes the opener set below (where the picker context
     // lives). Connected once; the opener is set once at build time.

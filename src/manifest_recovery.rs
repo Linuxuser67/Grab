@@ -1,0 +1,284 @@
+//! Plan-bound recovery metadata for native manifest staging.
+
+use std::fmt::Write as _;
+use std::fs::{self, File};
+use std::io::Write as _;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::media_types::{ManifestKind, ManifestSource};
+
+const RECOVERY_FILE: &str = "manifest-recovery.json";
+const RECOVERY_VERSION: u32 = 1;
+
+#[derive(Serialize)]
+struct FingerprintInput<'a> {
+    version: u32,
+    manifest_kind: &'static str,
+    video_key: &'a str,
+    audio_key: Option<&'a str>,
+    subtitle_key: Option<&'a str>,
+    subtitle_language: Option<&'a str>,
+    output_container: &'a str,
+    embed_subtitles: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryMarker {
+    version: u32,
+    fingerprint: String,
+}
+
+/// Fingerprint only stable plan inputs. The manifest URL is intentionally excluded:
+/// signed URLs and credentials must never become durable recovery identifiers.
+pub(crate) fn fingerprint(
+    source: &ManifestSource,
+    output_container: &str,
+    embed_subtitles: bool,
+) -> Result<String, String> {
+    let input = FingerprintInput {
+        version: RECOVERY_VERSION,
+        manifest_kind: match source.kind {
+            ManifestKind::Hls => "hls",
+            ManifestKind::Dash => "dash",
+        },
+        video_key: &source.representation_key,
+        audio_key: source.audio_key.as_deref(),
+        subtitle_key: source.subtitle_key.as_deref(),
+        subtitle_language: source.subtitle_language.as_deref(),
+        output_container,
+        embed_subtitles,
+    };
+    let encoded = serde_json::to_vec(&input)
+        .map_err(|error| format!("Could not encode manifest recovery plan: {error}"))?;
+    let digest = Sha256::digest(encoded);
+    let mut result = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(&mut result, "{byte:02x}");
+    }
+    Ok(result)
+}
+
+/// Validate an existing staging plan, or initialize metadata before any media
+/// resources are written. Blocking filesystem work stays off the async executor.
+pub(crate) async fn validate_or_initialize(
+    staging: &Path,
+    fingerprint: String,
+) -> Result<(), String> {
+    let staging = staging.to_path_buf();
+    tokio::task::spawn_blocking(move || validate_or_initialize_sync(&staging, &fingerprint))
+        .await
+        .map_err(|error| format!("Manifest recovery validation task failed: {error}"))?
+}
+
+fn validate_or_initialize_sync(staging: &Path, fingerprint: &str) -> Result<(), String> {
+    let marker_path = staging.join(RECOVERY_FILE);
+    match fs::symlink_metadata(&marker_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("Manifest recovery metadata is not a regular file".to_string());
+            }
+            let bytes = fs::read(&marker_path)
+                .map_err(|error| format!("Could not read manifest recovery metadata: {error}"))?;
+            let marker: RecoveryMarker = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("Manifest recovery metadata is invalid: {error}"))?;
+            if marker.version != RECOVERY_VERSION {
+                return Err(format!(
+                    "Manifest recovery metadata version {} is unsupported",
+                    marker.version
+                ));
+            }
+            if marker.fingerprint != fingerprint {
+                return Err(
+                    "The selected manifest tracks or output container changed; existing staged data was preserved. Remove and add the download again to start a new plan."
+                        .to_string(),
+                );
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if directory_has_staged_data(staging)? {
+                return Err(
+                    "Existing manifest staging data has no plan fingerprint; refusing unsafe recovery and preserving the data. Remove and add the download again to start a new plan."
+                        .to_string(),
+                );
+            }
+            write_recovery_marker(staging, &marker_path, fingerprint)
+        }
+        Err(error) => Err(format!(
+            "Could not inspect manifest recovery metadata: {error}"
+        )),
+    }
+}
+
+/// Only the staging ownership marker and empty directories are harmless when
+/// adopting a fresh stage. Symlinks and special files are treated as data so
+/// an unrecognized entry can never be silently overwritten or discarded.
+fn directory_has_staged_data(directory: &Path) -> Result<bool, String> {
+    let entries = fs::read_dir(directory)
+        .map_err(|error| format!("Could not inspect manifest staging directory: {error}"))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("Could not inspect manifest staging entry: {error}"))?;
+        let name = entry.file_name();
+        if name == ".grab-manifest-owner" || name == RECOVERY_FILE {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Could not inspect manifest staging entry: {error}"))?;
+        if file_type.is_dir() {
+            if directory_has_staged_data(&entry.path())? {
+                return Ok(true);
+            }
+        } else {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn write_recovery_marker(
+    staging: &Path,
+    marker_path: &Path,
+    fingerprint: &str,
+) -> Result<(), String> {
+    let marker = RecoveryMarker {
+        version: RECOVERY_VERSION,
+        fingerprint: fingerprint.to_string(),
+    };
+    let contents = serde_json::to_vec(&marker)
+        .map_err(|error| format!("Could not encode manifest recovery metadata: {error}"))?;
+
+    // NamedTempFile creates a private file in the same directory, so persist()
+    // publishes it with an atomic same-filesystem rename.
+    let mut temporary = tempfile::NamedTempFile::new_in(staging)
+        .map_err(|error| format!("Could not create manifest recovery metadata: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Could not secure manifest recovery metadata: {error}"))?;
+    }
+    temporary
+        .write_all(&contents)
+        .map_err(|error| format!("Could not write manifest recovery metadata: {error}"))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("Could not sync manifest recovery metadata: {error}"))?;
+    temporary
+        .persist(marker_path)
+        .map_err(|error| format!("Could not publish manifest recovery metadata: {}", error.error))?;
+
+    // Persist the directory entry before the runner starts committing media data.
+    File::open(staging)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("Could not sync manifest staging directory: {error}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source() -> ManifestSource {
+        ManifestSource {
+            url: "https://origin.example.test/master.m3u8?token=secret".to_string(),
+            kind: ManifestKind::Hls,
+            representation_key: "hls-variant-stable".to_string(),
+            audio_key: Some("hls-audio-stable".to_string()),
+            subtitle_key: Some("hls-subtitle-stable".to_string()),
+            subtitle_language: Some("en".to_string()),
+        }
+    }
+
+    #[test]
+    fn fingerprint_excludes_manifest_url_and_credentials() {
+        let original = source();
+        let mut refreshed = original.clone();
+        refreshed.url = "https://cdn.example.test/master.m3u8?token=rotated".to_string();
+
+        assert_eq!(
+            fingerprint(&original, "mp4", true).expect("fingerprint original"),
+            fingerprint(&refreshed, "mp4", true).expect("fingerprint refreshed")
+        );
+    }
+
+    #[test]
+    fn fingerprint_changes_for_selection_and_output_options() {
+        let original = source();
+        let baseline = fingerprint(&original, "mp4", true).expect("baseline fingerprint");
+
+        let mut changed_video = original.clone();
+        changed_video.representation_key = "hls-variant-other".to_string();
+        assert_ne!(baseline, fingerprint(&changed_video, "mp4", true).unwrap());
+
+        let mut changed_audio = original.clone();
+        changed_audio.audio_key = None;
+        assert_ne!(baseline, fingerprint(&changed_audio, "mp4", true).unwrap());
+
+        let mut changed_subtitle = original.clone();
+        changed_subtitle.subtitle_key = None;
+        assert_ne!(baseline, fingerprint(&changed_subtitle, "mp4", true).unwrap());
+
+        assert_ne!(baseline, fingerprint(&original, "mkv", true).unwrap());
+        assert_ne!(baseline, fingerprint(&original, "mp4", false).unwrap());
+    }
+
+    #[tokio::test]
+    async fn matching_fingerprint_allows_staged_data_to_be_reused() {
+        let staging = tempfile::tempdir().expect("create staging directory");
+        let expected = fingerprint(&source(), "mp4", true).expect("fingerprint");
+
+        validate_or_initialize(staging.path(), expected.clone())
+            .await
+            .expect("initialize recovery marker");
+        fs::write(staging.path().join("video-track.part"), b"committed")
+            .expect("write staged resource");
+        validate_or_initialize(staging.path(), expected)
+            .await
+            .expect("validate matching recovery marker");
+    }
+
+    #[tokio::test]
+    async fn changed_fingerprint_rejects_recovery_without_deleting_staged_data() {
+        let staging = tempfile::tempdir().expect("create staging directory");
+        let original = fingerprint(&source(), "mp4", true).expect("fingerprint");
+        validate_or_initialize(staging.path(), original)
+            .await
+            .expect("initialize recovery marker");
+        let resource = staging.path().join("video-track.part");
+        fs::write(&resource, b"preserve me").expect("write staged resource");
+
+        let changed = fingerprint(&source(), "mkv", true).expect("changed fingerprint");
+        assert!(validate_or_initialize(staging.path(), changed).await.is_err());
+        assert_eq!(fs::read(resource).expect("read preserved resource"), b"preserve me");
+    }
+
+    #[tokio::test]
+    async fn legacy_staging_without_fingerprint_is_rejected_and_preserved() {
+        let staging = tempfile::tempdir().expect("create staging directory");
+        let resource = staging.path().join("video-track.part");
+        fs::write(&resource, b"legacy data").expect("write legacy resource");
+        let expected = fingerprint(&source(), "mp4", true).expect("fingerprint");
+
+        assert!(validate_or_initialize(staging.path(), expected).await.is_err());
+        assert_eq!(fs::read(resource).expect("read preserved resource"), b"legacy data");
+    }
+
+    #[tokio::test]
+    async fn malformed_recovery_metadata_is_rejected() {
+        let staging = tempfile::tempdir().expect("create staging directory");
+        fs::write(staging.path().join(RECOVERY_FILE), b"{")
+            .expect("write malformed metadata");
+        let expected = fingerprint(&source(), "mp4", true).expect("fingerprint");
+
+        assert!(validate_or_initialize(staging.path(), expected).await.is_err());
+    }
+}

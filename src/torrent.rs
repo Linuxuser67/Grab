@@ -382,12 +382,11 @@ fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), TorrentE
     })?;
     let path = magnet_metadata_path_in(&dir, info_hash)
         .ok_or_else(|| TorrentError::InvalidInfoHash(gettext("Invalid torrent info-hash")))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(&dir).map_err(|source| {
-        TorrentError::MetadataStorage {
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(&dir).map_err(|source| TorrentError::MetadataStorage {
             message: gettext("Cannot create magnet metadata file"),
             source,
-        }
-    })?;
+        })?;
     use std::io::Write as _;
     temporary
         .write_all(bytes)
@@ -396,10 +395,12 @@ fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), TorrentE
             message: gettext("Cannot write magnet metadata"),
             source,
         })?;
-    temporary.persist(&path).map_err(|error| TorrentError::MetadataStorage {
-        message: gettext("Cannot publish magnet metadata"),
-        source: error.error,
-    })?;
+    temporary
+        .persist(&path)
+        .map_err(|error| TorrentError::MetadataStorage {
+            message: gettext("Cannot publish magnet metadata"),
+            source: error.error,
+        })?;
     std::fs::File::open(&dir)
         .and_then(|directory| directory.sync_all())
         .map_err(|source| TorrentError::MetadataStorage {
@@ -498,9 +499,7 @@ pub(crate) async fn list_magnet_files(
     )
     .await
     .map_err(|_| {
-        TorrentError::MagnetResolutionTimeout(gettext(
-            "Timed out while resolving torrent metadata",
-        ))
+        TorrentError::MagnetResolutionTimeout(gettext("Timed out while resolving torrent metadata"))
     })?
     .map_err(|error| {
         TorrentError::MagnetResolution(format!(
@@ -515,14 +514,9 @@ pub(crate) async fn list_magnet_files(
         )));
     };
 
-    let info_hash = parsed
-        .as_id20()
-        .map(|id| id.as_string())
-        .ok_or_else(|| {
-            TorrentError::UnsupportedMagnetVersion(gettext(
-                "Only BitTorrent v1 magnets are supported",
-            ))
-        })?;
+    let info_hash = parsed.as_id20().map(|id| id.as_string()).ok_or_else(|| {
+        TorrentError::UnsupportedMagnetVersion(gettext("Only BitTorrent v1 magnets are supported"))
+    })?;
     if listing.info_hash.as_string() != info_hash {
         return Err(TorrentError::MetadataHashMismatch(gettext(
             "Resolved torrent metadata does not match the magnet link",
@@ -565,11 +559,9 @@ pub(crate) async fn list_magnet_files(
     let bytes = listing.torrent_bytes;
     tokio::task::spawn_blocking(move || persist_magnet_metadata(&info_hash, &bytes))
         .await
-        .map_err(|error| {
-            TorrentError::MetadataTask {
-                message: gettext("Could not persist magnet metadata"),
-                source: error,
-            }
+        .map_err(|error| TorrentError::MetadataTask {
+            message: gettext("Could not persist magnet metadata"),
+            source: error,
         })??;
 
     Ok((name, entries))
@@ -1124,11 +1116,9 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, TorrentError
                     ..Default::default()
                 });
             }
-            let session = Session::new_with_opts(dir, opts)
-                .await
-                .map_err(|error| {
-                    TorrentError::SessionStart(format!("Cannot start torrent engine: {error}"))
-                })?;
+            let session = Session::new_with_opts(dir, opts).await.map_err(|error| {
+                TorrentError::SessionStart(format!("Cannot start torrent engine: {error}"))
+            })?;
             session.ratelimits.set_download_bps(bps(download_bps));
             session.ratelimits.set_upload_bps(bps(upload_bps));
             Ok(session)

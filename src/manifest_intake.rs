@@ -1058,6 +1058,7 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
         crate::media_types::ManifestKind::Hls => {
             (source.representation_key == "hls-media" && source.audio_key.is_none())
                 || has_hex_fingerprint(&source.representation_key, "hls-variant-", 32)
+                || has_hex_fingerprint(&source.representation_key, "hls-variant-", 64)
         }
         crate::media_types::ManifestKind::Dash => {
             has_hex_fingerprint(&source.representation_key, "dash-", 32)
@@ -1712,6 +1713,12 @@ video/es.m3u8
         source.url = "https://cdn.example.test/master.m3u8".to_string();
         source.audio_key = Some("not-a-stable-audio-key".to_string());
         assert!(!valid_source(&source));
+        source.audio_key = None;
+        source.representation_key = format!("hls-variant-{}", "0".repeat(64));
+        assert!(
+            valid_source(&source),
+            "legacy queue keys remain restorable so the runner can fall back to yt-dlp"
+        );
         source.representation_key = "hls-media".to_string();
         source.audio_key = None;
         assert!(valid_source(&source));
@@ -1866,7 +1873,7 @@ video/720.m3u8
             .port();
         let seen_requests = Arc::new(Mutex::new(Vec::new()));
         let requests = Arc::clone(&seen_requests);
-        let manifest_body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1280x720,STABLE-VARIANT-ID="preview-variant"\nvideo/720.m3u8?sig=child\n";
+        let manifest_body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1280x720,STABLE-VARIANT-ID=\"preview-variant\"\nvideo/720.m3u8?sig=child\n";
         let response_body = manifest_body.to_string();
 
         let mut proxy_server = tokio::spawn(async move {

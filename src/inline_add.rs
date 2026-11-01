@@ -1875,7 +1875,7 @@ fn wire_torrent_picker(
 ) {
     let nav = nav.clone();
     let torrent_btn = torrent_btn.clone();
-    let scheduled_at_c = Rc::clone(&scheduled_at);
+    let scheduled_at_c = Rc::clone(scheduled_at);
     let picker_in_flight = Rc::new(Cell::new(false));
     let picker_in_flight_c = Rc::clone(&picker_in_flight);
     torrent_btn.clone().connect_clicked(move |_| {
@@ -2687,7 +2687,7 @@ fn build_download_options(
         let hour_spin_c = hour_spin.clone();
         let minute_spin_c = minute_spin.clone();
         let date_btn_c = date_btn.clone();
-        let scheduled_at_c = Rc::clone(&scheduled_at);
+        let scheduled_at_c = Rc::clone(scheduled_at);
         let update: Rc<dyn Fn()> = Rc::new(move || {
             let dt = calendar_c.date();
             let hour = hour_spin_c.value() as i32;
@@ -2720,7 +2720,7 @@ fn build_download_options(
             let update = Rc::clone(&update);
             minute_spin.connect_changed(move |_| update());
         }
-        let scheduled_at_c2 = Rc::clone(&scheduled_at);
+        let scheduled_at_c2 = Rc::clone(scheduled_at);
         let schedule_revealer_c = schedule_revealer.clone();
         schedule_switch.connect_active_notify(move |sw| {
             let active = sw.is_active();
@@ -2751,7 +2751,7 @@ fn build_download_options(
         let settings_w = manager.settings().downgrade();
         let switch_c = schedule_switch.clone();
         let revealer_c = schedule_revealer.clone();
-        let scheduled_at_c = Rc::clone(&scheduled_at);
+        let scheduled_at_c = Rc::clone(scheduled_at);
         let sync = Rc::new(move || {
             if let Some(s) = settings_w.upgrade() {
                 let enabled = crate::settings::AppSettings::from(s).scheduled_downloads_enabled();
@@ -2817,7 +2817,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
     // loop, started only by an explicit Add/Enter press. The probe state's
     // generation drops stale completions; every async touch re-checks the
     // generation.
-    let kick_video = {
+    {
         let probe = Rc::clone(&probe);
         let step2 = step.clone();
         let url_entry2 = url_entry.clone();
@@ -3333,9 +3333,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                 prev.abort();
             }
         })
-    };
-
-    kick_video
+    }
 }
 
 /// Shared state required by the single URL submission path.
@@ -3371,7 +3369,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
     // One submit path for the Add button and Enter: video pages go through the
     // media pipeline (a matching preview is required so the row stores the
     // resolved page, not a stale URL); everything else keeps direct enqueue.
-    let submit = {
+    {
         let m = manager.clone();
         let dd = dest_dir.clone();
         let url_entry = url_entry.clone();
@@ -3661,9 +3659,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                 move |message| set_field_error(&error_entry, message),
             );
         })
-    };
-
-    submit
+    }
 }
 
 /// Connect submit, keyboard, icon, and debounced URL-edit behavior.

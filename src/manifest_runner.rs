@@ -896,11 +896,6 @@ async fn resolve_tracks(
                 }
                 None => None,
             };
-            if subtitle.is_some() && (video.is_live || audio_url.as_ref().is_some_and(|_| false)) {
-                return Err(ManifestRunError::Unsupported(
-                    "Native live HLS subtitle renditions are not supported yet".to_string(),
-                ));
-            }
             let audio = match audio_url {
                 Some(url) => {
                     let plan =
@@ -3004,6 +2999,7 @@ async fn run_live_dash_tracks(
                 kind: ManifestKind::Dash,
                 representation_key: representation_key.to_string(),
                 audio_key: audio_key.clone(),
+                subtitle_key: None,
             },
             guarded_child_hosts,
         )

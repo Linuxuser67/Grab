@@ -3084,8 +3084,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     MediaLookupOutcome::Manifest(manifest) => {
                         let manifest = *manifest;
                         let preferred_quality = settings_b.video_quality();
-                        let subtitle_language = crate::video_prefs::subtitle_lang_active(&settings_b.subtitle_language());
-                        let preferred_source = manifest.preferred_source(&preferred_quality, subtitle_language.as_deref());
+                        let subtitle_language = settings_b.subtitle_language();
+                        let preferred_source = manifest.preferred_source(&preferred_quality, Some(&subtitle_language));
                         show_manifest_ready(
                             &step_b,
                             &lookup_add_b,

@@ -1548,7 +1548,7 @@ fn native_manifest_source_survives_queue_restore() {
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
         audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".to_string()),
-    subtitle_key: None,
+        subtitle_key: None,
     };
 
     let id = {
@@ -1600,7 +1600,6 @@ fn native_manifest_queue_deduplicates_repeated_requested_filenames() {
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
         audio_key: None,
-       subtitle_key: None,
         subtitle_key: None,
     };
 

@@ -1350,7 +1350,7 @@ video/es.m3u8
             kind: crate::media_types::ManifestKind::Hls,
             representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
             audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".to_string()),
-        subtitle_key: None,
+            subtitle_key: None,
         };
         assert!(valid_source(&source));
         source.url = "https://cdn.example.test/master".to_string();

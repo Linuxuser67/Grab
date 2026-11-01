@@ -622,7 +622,6 @@ async fn prepare_manifest_attempt(
     })
 }
 
-
 /// Resolved manifest tracks and the network client used to transfer them.
 struct ResolvedManifestTracks {
     client: reqwest::Client,

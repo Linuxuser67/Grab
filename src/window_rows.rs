@@ -1051,6 +1051,8 @@ pub(crate) fn build_row(
             &row.widgets,
             another_queued(&m_sync, it),
             m_sync.is_live_video(it.id()),
+            m_sync.can_pause_live_capture(it.id()),
+            m_sync.is_manifest_download(it.id()),
         );
     };
     let u1 = updater.clone();
@@ -1081,6 +1083,8 @@ pub(crate) fn build_row(
         },
         another_queued(manager, item),
         manager.is_live_video(item.id()),
+        manager.can_pause_live_capture(item.id()),
+        manager.is_manifest_download(item.id()),
     );
     // Indeterminate activity runs on wall-clock, not progress ticks:
     // resolving ("Resolving media…") emits no property changes, so a pulse
@@ -1131,8 +1135,8 @@ pub(crate) fn build_row(
             // touch, and this is the one control whose meaning inverts.
             // Progress, not completion: the remux can still fail, so promising
             // a finished save would be a promise the code cannot keep.
-            if copy == StopCopy::StopRecording {
-                t.add_toast(adw::Toast::new(&gettext("Saving recording…")));
+            if copy == StopCopy::FinishRecording {
+                t.add_toast(adw::Toast::new(&gettext("Finalizing recording…")));
             }
         });
     }
@@ -1170,6 +1174,20 @@ pub(crate) fn build_row(
         let m = Rc::clone(manager);
         let t = Rc::clone(toasts);
         delete_btn.connect_clicked(move |button| {
+            if m.is_live_video(id)
+                || m.find(id).is_some_and(|item| {
+                    item.status() == DownloadStatus::Paused && m.is_manifest_download(id)
+                })
+            {
+                let recording = m.is_live_video(id);
+                m.remove(id);
+                t.add_toast(adw::Toast::new(&if recording {
+                    gettext("Deleting recording…")
+                } else {
+                    gettext("Deleting download…")
+                }));
+                return;
+            }
             // Trash can involve directory walks or a cross-volume copy. Keep
             // the row responsive and prevent duplicate submissions while the
             // blocking operation is in flight.

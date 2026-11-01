@@ -32,7 +32,7 @@ type ManagedTorrentHandle = Arc<ManagedTorrent>;
 /// Variants retain the failure category while carrying localized display text;
 /// filesystem and task failures retain their underlying error sources.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum TorrentError {
+pub enum TorrentError {
     #[error("{0}")]
     InvalidMagnet(String),
     #[error("{0}")]
@@ -1539,7 +1539,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         Ok(s) => s,
         Err(e) => {
             ACTIVE.lock().await.remove(&id);
-            fail(e);
+            fail(e.to_string());
             return;
         }
     };

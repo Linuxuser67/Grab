@@ -401,8 +401,12 @@ fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestI
         .subtitle_renditions
         .iter()
         .filter(|rendition| subtitle_groups.contains(rendition.group_id.as_str()))
-        .all(|rendition| rendition.stable_rendition_id.as_deref()
-            .is_some_and(|stable_id| subtitle_ids.insert(stable_id)));
+        .all(|rendition| {
+            rendition
+                .stable_rendition_id
+                .as_deref()
+                .is_some_and(|stable_id| subtitle_ids.insert(stable_id))
+        });
     if !subtitles_have_unique_ids {
         return Err(ManifestIntakeError::Unsupported(gettext(
             "The HLS master playlist has missing or duplicate stable subtitle track IDs",
@@ -757,7 +761,8 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
                 has_hex_fingerprint(key, "hls-subtitle-", 32)
             }
             crate::media_types::ManifestKind::Dash => {
-                has_hex_fingerprint(key, "dash-", 32) || has_hex_fingerprint(key, "dash-live-", 32)
+                has_hex_fingerprint(key, "dash-", 32)
+                    || has_hex_fingerprint(key, "dash-live-", 32)
             }
         });
     video_key_is_valid && audio_key_is_valid && subtitle_key_is_valid
@@ -1495,7 +1500,7 @@ video/720.m3u8
                 .selected_source(
                     "hls-variant-00000000000000000000000000000000",
                     Some(&current_audio_key),
-                None,
+                    None,
                 )
                 .is_none()
         );
@@ -1504,7 +1509,7 @@ video/720.m3u8
                 .selected_source(
                     &current_video_key,
                     Some("hls-audio-00000000000000000000000000000000"),
-                None,
+                    None,
                 )
                 .is_none()
         );

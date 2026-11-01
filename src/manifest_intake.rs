@@ -206,7 +206,7 @@ pub(crate) fn supports(raw_url: &str) -> bool {
 
 pub(crate) use crate::manifest_plan::preferred_choice_index;
 pub(crate) use crate::manifest_types::{
-    ManifestAudioChoice, ManifestChoice, ManifestLookup, ManifestSubtitleChoice, NativeManifest,
+    ManifestAudioChoice, ManifestChoice, ManifestLookup, NativeManifest,
 };
 
 /// Preview a candidate HLS/DASH manifest using the configured browser's cookies.

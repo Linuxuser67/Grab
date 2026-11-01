@@ -3966,6 +3966,7 @@ async fn fetch_and_write_dash_track(
     // Each bounded window fetches out of order. Completed indices wait in a
     // small reorder set until the single writer can commit the next index.
     let window_size = connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
+    let resource_count = resources.len();
     let mut next_resource_index = writer.next_resource_index();
     let mut remaining_resources = resources.into_iter().enumerate().skip(next_resource_index);
     loop {
@@ -4039,7 +4040,7 @@ async fn fetch_and_write_dash_track(
     // partial byte reservations before publishing the corrected progress.
     tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
         .ok();
-    if next_resource_index != resources.len() {
+    if next_resource_index != resource_count {
         return Ok(false);
     }
     writer.finish().await?;

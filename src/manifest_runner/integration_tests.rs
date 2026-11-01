@@ -883,6 +883,7 @@ async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
                 ffmpeg,
                 &video_dir.join("local.m3u8"),
                 None,
+                SubtitleOutput::default(),
                 &output,
                 &mut abort,
             ),
@@ -1383,6 +1384,7 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
             Path::new("ffmpeg"),
             &video_dir.join("local.m3u8"),
             None,
+            SubtitleOutput::default(),
             &output_part,
             &mut abort,
         )
@@ -1574,6 +1576,7 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
             Path::new("ffmpeg"),
             &video_dir.join("video-track.mp4"),
             Some(&audio_dir.join("audio-track.mp4")),
+            SubtitleOutput::default(),
             &output_part,
             &mut abort,
         )
@@ -1796,6 +1799,7 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
             Path::new("ffmpeg"),
             &video_dir.join("video-track.mp4"),
             Some(&audio_dir.join("audio-track.mp4")),
+            SubtitleOutput::default(),
             &output_part,
             &mut abort,
         )

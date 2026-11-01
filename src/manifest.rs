@@ -31,6 +31,8 @@ pub(crate) enum ManifestError {
     NoVideoVariants,
     #[error("HLS variant references an unknown audio group")]
     InvalidAudioGroup,
+    #[error("HLS variant references an invalid subtitle rendition group")]
+    InvalidSubtitleGroup,
     #[error("unsupported HLS playlist type")]
     UnsupportedPlaylist,
     #[error("unsupported HLS encryption method")]
@@ -191,6 +193,7 @@ pub(crate) struct HlsVariant {
     pub(crate) codecs: Option<String>,
     pub(crate) frame_rate: Option<f64>,
     pub(crate) audio_group: Option<String>,
+    pub(crate) subtitles_group: Option<String>,
     /// Apple HLS STABLE-VARIANT-ID, when the origin provides one.
     pub(crate) stable_variant_id: Option<String>,
 }
@@ -207,11 +210,23 @@ pub(crate) struct HlsAudioRendition {
     pub(crate) stable_rendition_id: Option<String>,
 }
 
+/// An external subtitle rendition advertised by an HLS master playlist.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HlsSubtitleRendition {
+    pub(crate) url: Url,
+    pub(crate) group_id: String,
+    pub(crate) name: String,
+    pub(crate) language: Option<String>,
+    pub(crate) is_default: bool,
+    pub(crate) stable_rendition_id: Option<String>,
+}
+
 /// Master-playlist choices in manifest order; no variant is silently selected.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HlsMasterPlan {
     pub(crate) variants: Box<[HlsVariant]>,
     pub(crate) audio_renditions: Box<[HlsAudioRendition]>,
+    pub(crate) subtitle_renditions: Box<[HlsSubtitleRendition]>,
 }
 
 /// Validated HLS media playlist, ordered resources, and local FFmpeg input.
@@ -806,6 +821,7 @@ pub(crate) fn parse_hls_master_playlist(
                 codecs: variant.codecs,
                 frame_rate: variant.frame_rate,
                 audio_group: variant.audio,
+                subtitles_group: variant.subtitles,
                 stable_variant_id: variant
                     .other_attributes
                     .as_ref()
@@ -822,7 +838,7 @@ pub(crate) fn parse_hls_master_playlist(
 
     let audio_renditions = master
         .alternatives
-        .into_iter()
+        .iter()
         .filter(|alternative| alternative.media_type == AlternativeMediaType::Audio)
         .map(|alternative| {
             let url = alternative
@@ -832,9 +848,9 @@ pub(crate) fn parse_hls_master_playlist(
                 .transpose()?;
             Ok(HlsAudioRendition {
                 url,
-                group_id: alternative.group_id,
-                name: alternative.name,
-                language: alternative.language,
+                group_id: alternative.group_id.clone(),
+                name: alternative.name.clone(),
+                language: alternative.language.clone(),
                 is_default: alternative.default,
                 stable_rendition_id: alternative
                     .other_attributes
@@ -845,6 +861,43 @@ pub(crate) fn parse_hls_master_playlist(
             })
         })
         .collect::<Result<Vec<_>, ManifestError>>()?;
+
+    let subtitle_renditions = master
+        .alternatives
+        .iter()
+        .filter(|alternative| alternative.media_type == AlternativeMediaType::Subtitles)
+        .map(|alternative| {
+            let uri = alternative
+                .uri
+                .as_deref()
+                .ok_or(ManifestError::InvalidSubtitleGroup)?;
+            let url = resolve_resource_url(&base_url, uri)?;
+            Ok(HlsSubtitleRendition {
+                url,
+                group_id: alternative.group_id.clone(),
+                name: alternative.name.clone(),
+                language: alternative.language.clone(),
+                is_default: alternative.default,
+                stable_rendition_id: alternative
+                    .other_attributes
+                    .as_ref()
+                    .and_then(|attributes| attributes.get("STABLE-RENDITION-ID"))
+                    .map(|value| value.as_str().to_string())
+                    .filter(|value| !value.is_empty()),
+            })
+        })
+        .collect::<Result<Vec<_>, ManifestError>>()?;
+
+    let has_unmatched_subtitle_group = variants.iter().any(|variant| {
+        variant.subtitles_group.as_deref().is_some_and(|group_id| {
+            !subtitle_renditions
+                .iter()
+                .any(|rendition| rendition.group_id == group_id)
+        })
+    });
+    if has_unmatched_subtitle_group {
+        return Err(ManifestError::InvalidSubtitleGroup);
+    }
 
     let has_unmatched_audio_group = variants.iter().any(|variant| {
         variant.audio_group.as_deref().is_some_and(|group_id| {
@@ -860,6 +913,7 @@ pub(crate) fn parse_hls_master_playlist(
     Ok(HlsMasterPlan {
         variants: variants.into_boxed_slice(),
         audio_renditions: audio_renditions.into_boxed_slice(),
+        subtitle_renditions: subtitle_renditions.into_boxed_slice(),
     })
 }
 

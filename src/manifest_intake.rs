@@ -391,6 +391,28 @@ fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestI
         )));
     }
 
+    let subtitle_groups = master
+        .variants
+        .iter()
+        .filter_map(|variant| variant.subtitles_group.as_deref())
+        .collect::<HashSet<_>>();
+    let mut subtitle_ids = HashSet::with_capacity(master.subtitle_renditions.len());
+    let subtitles_have_unique_ids = master
+        .subtitle_renditions
+        .iter()
+        .filter(|rendition| subtitle_groups.contains(rendition.group_id.as_str()))
+        .all(|rendition| {
+            rendition
+                .stable_rendition_id
+                .as_deref()
+                .is_some_and(|stable_id| subtitle_ids.insert(stable_id))
+        });
+    if !subtitles_have_unique_ids {
+        return Err(ManifestIntakeError::Unsupported(gettext(
+            "The HLS master playlist has missing or duplicate stable subtitle track IDs",
+        )));
+    }
+
     Ok(())
 }
 
@@ -713,7 +735,9 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
     }
     let video_key_is_valid = match source.kind {
         crate::media_types::ManifestKind::Hls => {
-            (source.representation_key == "hls-media" && source.audio_key.is_none())
+            (source.representation_key == "hls-media"
+                && source.audio_key.is_none()
+                && source.subtitle_key.is_none())
                 || has_hex_fingerprint(&source.representation_key, "hls-variant-", 32)
                 || has_hex_fingerprint(&source.representation_key, "hls-variant-", 64)
         }
@@ -731,7 +755,20 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
                 has_hex_fingerprint(key, "dash-", 32) || has_hex_fingerprint(key, "dash-live-", 32)
             }
         });
-    video_key_is_valid && audio_key_is_valid
+    let subtitle_key_is_valid =
+        source
+            .subtitle_key
+            .as_deref()
+            .is_none_or(|key| match source.kind {
+                crate::media_types::ManifestKind::Hls => {
+                    has_hex_fingerprint(key, "hls-subtitle-", 32)
+                }
+                crate::media_types::ManifestKind::Dash => {
+                    has_hex_fingerprint(key, "dash-", 32)
+                        || has_hex_fingerprint(key, "dash-live-", 32)
+                }
+            });
+    video_key_is_valid && audio_key_is_valid && subtitle_key_is_valid
 }
 
 async fn read_bounded_response(
@@ -1060,10 +1097,10 @@ highest.m3u8
         };
 
         let preferred = lookup
-            .preferred_source("1080p")
+            .preferred_source("1080p", None)
             .expect("1080p HLS representation");
         let best = lookup
-            .preferred_source("best")
+            .preferred_source("best", None)
             .expect("best HLS representation");
 
         let choices = lookup.choices();
@@ -1196,7 +1233,7 @@ video/es.m3u8
         assert_eq!(lookup.audio_choices(spanish_video_key).len(), 1);
 
         let default_source = lookup
-            .preferred_source("1080p")
+            .preferred_source("1080p", None)
             .expect("preferred HLS video and default audio");
         assert_eq!(default_source.representation_key, english_video_key);
         assert_eq!(
@@ -1205,7 +1242,7 @@ video/es.m3u8
         );
 
         let selected = lookup
-            .selected_source(english_video_key, Some(&english_choices[1].key))
+            .selected_source(english_video_key, Some(&english_choices[1].key), None)
             .expect("selected alternate audio rendition");
         assert_eq!(
             selected.audio_key.as_deref(),
@@ -1213,7 +1250,7 @@ video/es.m3u8
         );
         assert!(
             lookup
-                .selected_source(spanish_video_key, Some(&english_choices[1].key))
+                .selected_source(spanish_video_key, Some(&english_choices[1].key), None)
                 .is_none(),
             "an audio rendition must not be selectable from another variant's group"
         );
@@ -1304,11 +1341,11 @@ video/es.m3u8
         assert!(choices.iter().any(|choice| choice.label.contains("fr")));
 
         let selected = lookup
-            .selected_source(&video_key, Some(&choices[1].key))
+            .selected_source(&video_key, Some(&choices[1].key), None)
             .expect("select the alternate DASH audio representation");
         assert_eq!(selected.audio_key.as_deref(), Some(choices[1].key.as_str()));
         let preferred = lookup
-            .preferred_source("720p")
+            .preferred_source("720p", None)
             .expect("default DASH audio is selected automatically");
         assert_eq!(
             preferred.audio_key.as_deref(),
@@ -1326,12 +1363,16 @@ video/es.m3u8
             }))
             .expect("legacy manifest source without an audio key remains compatible");
         assert_eq!(legacy.audio_key, None);
+        assert_eq!(legacy.subtitle_key, None);
+        assert_eq!(legacy.subtitle_language, None);
 
         let mut source = crate::media_types::ManifestSource {
             url: "https://cdn.example.test/master.m3u8".to_string(),
             kind: crate::media_types::ManifestKind::Hls,
             representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
             audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".to_string()),
+            subtitle_key: None,
+            subtitle_language: None,
         };
         assert!(valid_source(&source));
         source.url = "https://cdn.example.test/master".to_string();
@@ -1343,6 +1384,11 @@ video/es.m3u8
         source.audio_key = Some("not-a-stable-audio-key".to_string());
         assert!(!valid_source(&source));
         source.audio_key = None;
+        source.subtitle_key = Some("hls-audio-0123456789abcdef0123456789abcdef".to_string());
+        assert!(!valid_source(&source));
+        source.subtitle_key = Some("hls-subtitle-0123456789abcdef0123456789abcdef".to_string());
+        assert!(valid_source(&source));
+        source.subtitle_key = None;
         source.representation_key = format!("hls-variant-{}", "0".repeat(64));
         assert!(
             valid_source(&source),
@@ -1351,6 +1397,8 @@ video/es.m3u8
         source.representation_key = "hls-media".to_string();
         source.audio_key = None;
         assert!(valid_source(&source));
+        source.subtitle_key = Some("hls-subtitle-0123456789abcdef0123456789abcdef".to_string());
+        assert!(!valid_source(&source));
     }
 
     #[test]
@@ -1379,6 +1427,7 @@ video/es.m3u8
             codecs: Some("avc1.640028".to_string()),
             frame_rate: Some(30.0),
             audio_group: None,
+            subtitles_group: None,
             stable_variant_id: Some(stable_id.to_string()),
         };
         let original = variant(
@@ -1413,6 +1462,7 @@ video/es.m3u8
             codecs: Some("avc1.640028".to_string()),
             frame_rate: Some(30.0),
             audio_group: Some("audio-main".to_string()),
+            subtitles_group: None,
             stable_variant_id: Some("variant-1080".to_string()),
         };
         let original = variant("https://cdn.example.test/video/old.m3u8?sig=old");
@@ -1455,6 +1505,7 @@ video/720.m3u8
                 .selected_source(
                     "hls-variant-00000000000000000000000000000000",
                     Some(&current_audio_key),
+                    None,
                 )
                 .is_none()
         );
@@ -1463,6 +1514,7 @@ video/720.m3u8
                 .selected_source(
                     &current_video_key,
                     Some("hls-audio-00000000000000000000000000000000"),
+                    None,
                 )
                 .is_none()
         );
@@ -1500,6 +1552,24 @@ video/720.m3u8
         let duplicate = master.variants[0].clone();
         master.variants = vec![duplicate.clone(), duplicate].into_boxed_slice();
         assert!(validate_hls_stable_track_ids(&master).is_err());
+    }
+
+    #[test]
+    fn hls_master_requires_stable_ids_for_referenced_subtitle_renditions() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",URI="subs/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,SUBTITLES="subs",STABLE-VARIANT-ID="variant-720"
+video/720.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("HLS parser retains subtitle metadata");
+        assert!(matches!(
+            validate_hls_stable_track_ids(&master),
+            Err(ManifestIntakeError::Unsupported(_))
+        ));
     }
 
     #[test]

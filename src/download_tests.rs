@@ -1548,6 +1548,8 @@ fn native_manifest_source_survives_queue_restore() {
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
         audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".to_string()),
+        subtitle_key: Some("hls-subtitle-0123456789abcdef0123456789abcdef".to_string()),
+        subtitle_language: Some("en".to_string()),
     };
 
     let id = {
@@ -1568,6 +1570,22 @@ fn native_manifest_source_survives_queue_restore() {
         assert!(saved.contains("master.m3u8"));
         assert!(saved.contains(&source.representation_key));
         assert!(saved.contains(source.audio_key.as_deref().expect("selected audio key")));
+        assert!(
+            saved.contains(
+                source
+                    .subtitle_key
+                    .as_deref()
+                    .expect("selected subtitle key")
+            )
+        );
+        assert!(
+            saved.contains(
+                source
+                    .subtitle_language
+                    .as_deref()
+                    .expect("selected subtitle language")
+            )
+        );
         id
     };
 
@@ -1599,6 +1617,8 @@ fn native_manifest_queue_deduplicates_repeated_requested_filenames() {
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
         audio_key: None,
+        subtitle_key: None,
+        subtitle_language: None,
     };
 
     let first = manager
@@ -1628,6 +1648,8 @@ fn native_manifest_rejects_filename_extension_that_disagrees_with_mp4_muxer() {
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
         audio_key: None,
+        subtitle_key: None,
+        subtitle_language: None,
     };
 
     let result = manager.enqueue_manifest_staged(source, &directory, Some("Stream.mkv"), &[]);
@@ -1657,6 +1679,8 @@ fn invalid_native_manifest_source_is_skipped_on_restore() {
                 kind: crate::media_types::ManifestKind::Dash,
                 representation_key: "dash-0123456789abcdef0123456789abcdef".to_string(),
                 audio_key: None,
+                subtitle_key: None,
+                subtitle_language: None,
             },
         }),
         started: None,

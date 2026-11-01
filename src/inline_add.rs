@@ -2252,7 +2252,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     manifest_audio_format.set_visible(false);
     video_group.add(&manifest_audio_format);
-
     let video_format = adw::ComboRow::builder()
         .title(gettext("Media format"))
         .build();
@@ -3009,7 +3008,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     MediaLookupOutcome::Manifest(manifest) => {
                         let manifest = *manifest;
                         let preferred_quality = settings_b.video_quality();
-                        let preferred_source = manifest.preferred_source(&preferred_quality);
+                        let subtitle_language = settings_b.subtitle_language();
+                        let preferred_source =
+                            manifest.preferred_source(&preferred_quality, Some(&subtitle_language));
                         show_manifest_ready(
                             &step_b,
                             &lookup_add_b,
@@ -3448,12 +3449,19 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     let manifest = step2.manifest.borrow();
                     let selected = step2.manifest_selection.borrow();
                     let selected_audio = step2.manifest_audio_selection.borrow();
+                    let subtitle_language = m.settings().subtitle_language();
                     manifest
                         .as_ref()
                         .filter(|manifest| manifest.source_url == url)
                         .and_then(|manifest| {
                             selected.as_deref().and_then(|key| {
-                                manifest.selected_source(key, selected_audio.as_deref())
+                                let subtitle_key =
+                                    manifest.preferred_subtitle_key(key, Some(&subtitle_language));
+                                manifest.selected_source(
+                                    key,
+                                    selected_audio.as_deref(),
+                                    subtitle_key.as_deref(),
+                                )
                             })
                         })
                 };

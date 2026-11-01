@@ -41,14 +41,15 @@ pub(crate) enum DashError {
     NoAvailableSegments,
 }
 
-/// Whether a DASH representation carries video or audio.
+/// Whether a DASH representation carries video, audio, or supported text subtitles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DashTrackKind {
     Video,
     Audio,
+    Subtitle,
 }
 
-/// A user-selectable video or automatically-selectable audio representation.
+/// A selectable video, audio, or supported subtitle representation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DashRepresentation {
     pub(crate) key: String,
@@ -63,6 +64,7 @@ pub(crate) struct DashRepresentation {
     pub(crate) language: Option<String>,
     pub(crate) kind: DashTrackKind,
     pub(crate) is_default_audio: bool,
+    pub(crate) is_default_subtitle: bool,
     source: DashRepresentationSource,
 }
 
@@ -91,6 +93,7 @@ pub(crate) struct DashManifestPlan {
     pub(crate) presentation: DashPresentation,
     pub(crate) video_representations: Box<[DashRepresentation]>,
     pub(crate) audio_representations: Box<[DashRepresentation]>,
+    pub(crate) subtitle_representations: Box<[DashRepresentation]>,
 }
 
 impl DashManifestPlan {
@@ -310,6 +313,7 @@ pub(crate) fn parse_dash_manifest_at(
 
     let mut video_representations = Vec::new();
     let mut audio_representations = Vec::new();
+    let mut subtitle_representations = Vec::new();
 
     for adaptation in &period.adaptations {
         if adaptation.href.is_some() || !adaptation.ContentProtection.is_empty() {
@@ -350,6 +354,10 @@ pub(crate) fn parse_dash_manifest_at(
                 mime_type.as_deref(),
                 adaptation.contentType.as_deref(),
                 adaptation.mimeType.as_deref(),
+                representation
+                    .codecs
+                    .as_deref()
+                    .or(adaptation.codecs.as_deref()),
             );
             let Some(kind) = kind else {
                 // Text, metadata, and unknown adaptation sets are not media inputs.
@@ -416,6 +424,11 @@ pub(crate) fn parse_dash_manifest_at(
                 language,
                 kind,
                 is_default_audio: kind == DashTrackKind::Audio && is_default_audio,
+                is_default_subtitle: kind == DashTrackKind::Subtitle
+                    && adaptation.Role.iter().any(|role| {
+                        role.schemeIdUri == DASH_ROLE_SCHEME
+                            && role.value.as_deref() == Some("main")
+                    }),
                 source: DashRepresentationSource {
                     base_url: representation_base,
                     addressing,
@@ -425,9 +438,14 @@ pub(crate) fn parse_dash_manifest_at(
             match kind {
                 DashTrackKind::Video => video_representations.push(choice),
                 DashTrackKind::Audio => audio_representations.push(choice),
+                DashTrackKind::Subtitle => subtitle_representations.push(choice),
             }
 
-            if video_representations.len() + audio_representations.len() > MAX_REPRESENTATIONS {
+            if video_representations.len()
+                + audio_representations.len()
+                + subtitle_representations.len()
+                > MAX_REPRESENTATIONS
+            {
                 return Err(DashError::LimitExceeded);
             }
         }
@@ -442,6 +460,7 @@ pub(crate) fn parse_dash_manifest_at(
         presentation,
         video_representations: video_representations.into_boxed_slice(),
         audio_representations: audio_representations.into_boxed_slice(),
+        subtitle_representations: subtitle_representations.into_boxed_slice(),
     })
 }
 
@@ -458,6 +477,7 @@ pub(crate) fn plan_dash_representation(
         .video_representations
         .iter()
         .chain(manifest.audio_representations.iter())
+        .chain(manifest.subtitle_representations.iter())
         .find(|candidate| {
             candidate.key == representation_key || candidate.live_key == representation_key
         })
@@ -537,6 +557,7 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
     hasher.update(match kind {
         DashTrackKind::Video => b"video".as_slice(),
         DashTrackKind::Audio => b"audio".as_slice(),
+        DashTrackKind::Subtitle => b"subtitle".as_slice(),
     });
     hash_optional_text(&mut hasher, id);
     hash_optional_text(&mut hasher, base_url.host_str());
@@ -630,6 +651,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
     hasher.update(match kind {
         DashTrackKind::Video => b"video".as_slice(),
         DashTrackKind::Audio => b"audio".as_slice(),
+        DashTrackKind::Subtitle => b"subtitle".as_slice(),
     });
     hash_optional_text(&mut hasher, id);
     hash_optional_text(&mut hasher, base_url.host_str());
@@ -760,6 +782,7 @@ fn track_kind(
     representation_mime_type: Option<&str>,
     adaptation_content_type: Option<&str>,
     adaptation_mime_type: Option<&str>,
+    codecs: Option<&str>,
 ) -> Option<DashTrackKind> {
     let content_type = representation_content_type.or(adaptation_content_type);
     let mime_type = representation_mime_type.or(adaptation_mime_type);
@@ -770,6 +793,18 @@ fn track_kind(
         || mime_type.is_some_and(|mime| mime.starts_with("audio/"))
     {
         Some(DashTrackKind::Audio)
+    } else if mime_type.is_some_and(|mime| mime.eq_ignore_ascii_case("application/mp4"))
+        && codecs.is_some_and(|codecs| {
+            codecs.split(',').any(|codec| {
+                let codec = codec.trim().to_ascii_lowercase();
+                codec == "stpp"
+                    || codec.starts_with("stpp.")
+                    || codec == "wvtt"
+                    || codec.starts_with("wvtt.")
+            })
+        })
+    {
+        Some(DashTrackKind::Subtitle)
     } else {
         None
     }
@@ -1731,6 +1766,37 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
+
+    #[test]
+    fn parses_supported_mp4_subtitle_representations_only() {
+        let body = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="text" mimeType="application/mp4" lang="en">
+      <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      <SegmentTemplate timescale="1" duration="5" initialization="sub-init.mp4" media="sub-$Number$.m4s"/>
+      <Representation id="sub-en" bandwidth="1000" codecs="wvtt"/>
+    </AdaptationSet>
+    <AdaptationSet contentType="text" mimeType="text/vtt" lang="fr">
+      <SegmentTemplate duration="5" media="unsupported-$Number$.vtt"/>
+      <Representation id="sub-fr" bandwidth="1000"/>
+    </AdaptationSet>
+</Period>"#,
+        );
+        let plan = parse_dash_manifest(BASE_URL, &body)
+            .expect("supported DASH subtitle representation should parse");
+
+        assert_eq!(plan.subtitle_representations.len(), 1);
+        let subtitle = &plan.subtitle_representations[0];
+        assert_eq!(subtitle.representation_id.as_deref(), Some("sub-en"));
+        assert_eq!(subtitle.language.as_deref(), Some("en"));
+        assert!(subtitle.is_default_subtitle);
+        assert_eq!(subtitle.kind, DashTrackKind::Subtitle);
+        let download = plan_dash_representation(&plan, &subtitle.key)
+            .expect("subtitle representation should be plannable");
+        assert_eq!(download.representation.key, subtitle.key);
+        assert_eq!(download.resources.len(), 3);
+    }
 
     #[test]
     fn representation_level_main_role_falls_back_to_first_audio_track() {

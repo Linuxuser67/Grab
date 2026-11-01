@@ -120,6 +120,23 @@ fn ffmpeg_log_indicates_storage_full(log: &str) -> bool {
 }
 
 /// Classify mux failures as terminal so staged resources remain available for retry.
+fn subtitle_mux_unsupported(log: &str) -> bool {
+    let log = log.to_ascii_lowercase();
+    [
+        "matches no streams",
+        "unknown decoder",
+        "decoder not found",
+        "unknown encoder",
+        "encoder not found",
+        "could not find tag for codec",
+        "subtitle codec",
+        "unsupported codec",
+        "codec is not supported",
+    ]
+    .iter()
+    .any(|needle| log.contains(needle))
+}
+
 fn mux_failure_error(log: &str) -> ManifestRunError {
     if ffmpeg_log_indicates_storage_full(log) {
         return ManifestRunError::Failed(
@@ -144,6 +161,7 @@ pub(crate) struct ManifestJob {
     pub(crate) proxy: Option<crate::net_types::ResolvedProxy>,
     pub(crate) cookies_browser: String,
     pub(crate) connections: usize,
+    pub(crate) embed_subs: bool,
 }
 
 /// Classifies native manifest failures so transient transfers do not discard staged resources.
@@ -215,10 +233,14 @@ enum Tracks {
     Hls {
         video: HlsPlan,
         audio: Option<HlsPlan>,
+        subtitle: Option<Box<HlsPlan>>,
+        subtitle_language: Option<String>,
     },
     Dash {
         video: DashRepresentationPlan,
         audio: Option<Box<DashRepresentationPlan>>,
+        subtitle: Option<Box<DashRepresentationPlan>>,
+        subtitle_language: Option<String>,
     },
     DashLiveOffline {
         has_audio: bool,
@@ -457,7 +479,7 @@ pub(crate) async fn run_manifest_download(
     }
     let live_source = matches!(
         &tracks,
-        Tracks::Hls { video, audio }
+        Tracks::Hls { video, audio, .. }
             if video.is_live || audio.as_ref().is_some_and(|track| track.is_live)
     );
     let live_hls = matches!(&tracks, Tracks::Hls { .. }) && (live_source || live_marker_exists);
@@ -490,7 +512,7 @@ pub(crate) async fn run_manifest_download(
     let downloaded = Arc::new(AtomicU64::new(0));
     let mut _preserve_stop_sender = None;
     if live_hls {
-        let Tracks::Hls { video, audio } = &tracks else {
+        let Tracks::Hls { video, audio, .. } = &tracks else {
             return Err(ManifestRunError::Failed(
                 "Live HLS capture requires HLS media tracks".to_string(),
             ));
@@ -539,7 +561,7 @@ pub(crate) async fn run_manifest_download(
         }
     } else if live_dash {
         let (video_plan, audio_plan) = match &tracks {
-            Tracks::Dash { video, audio } => (Some(video), audio.as_deref()),
+            Tracks::Dash { video, audio, .. } => (Some(video), audio.as_deref()),
             Tracks::DashLiveOffline { .. } => (None, None),
             Tracks::Hls { .. } => {
                 return Err(ManifestRunError::Failed(
@@ -616,7 +638,12 @@ pub(crate) async fn run_manifest_download(
         }
     } else {
         match &tracks {
-            Tracks::Hls { video, audio } => {
+            Tracks::Hls {
+                video,
+                audio,
+                subtitle,
+                ..
+            } => {
                 if !fetch_resources(
                     &client,
                     hls_resources(video),
@@ -648,8 +675,31 @@ pub(crate) async fn run_manifest_download(
                 if let Some(audio) = audio {
                     write_playlist(&audio_dir, audio).await?;
                 }
+                if let Some(subtitle) = subtitle {
+                    let subtitle_dir = staging.join("subtitles");
+                    ensure_track_dir(&subtitle_dir).await?;
+                    if !fetch_resources(
+                        &client,
+                        hls_resources(subtitle),
+                        &subtitle_dir,
+                        concurrency,
+                        &tx,
+                        &downloaded,
+                        &mut abort,
+                    )
+                    .await?
+                    {
+                        return Ok(ManifestOutcome::Aborted);
+                    }
+                    write_playlist(&subtitle_dir, subtitle).await?;
+                }
             }
-            Tracks::Dash { video, audio } => {
+            Tracks::Dash {
+                video,
+                audio,
+                subtitle,
+                ..
+            } => {
                 if !fetch_resources(
                     &client,
                     dash_resources(video),
@@ -681,6 +731,28 @@ pub(crate) async fn run_manifest_download(
                         return Ok(ManifestOutcome::Aborted);
                     }
                     if !concat_dash_track(audio, &audio_dir, "audio-track.mp4", &mut abort).await? {
+                        return Ok(ManifestOutcome::Aborted);
+                    }
+                }
+                if let Some(subtitle) = subtitle {
+                    let subtitle_dir = staging.join("subtitles");
+                    ensure_track_dir(&subtitle_dir).await?;
+                    if !fetch_resources(
+                        &client,
+                        dash_resources(subtitle),
+                        &subtitle_dir,
+                        concurrency,
+                        &tx,
+                        &downloaded,
+                        &mut abort,
+                    )
+                    .await?
+                    {
+                        return Ok(ManifestOutcome::Aborted);
+                    }
+                    if !concat_dash_track(subtitle, &subtitle_dir, "subtitle-track.mp4", &mut abort)
+                        .await?
+                    {
                         return Ok(ManifestOutcome::Aborted);
                     }
                 }
@@ -721,6 +793,46 @@ pub(crate) async fn run_manifest_download(
         ManifestKind::Hls => audio_dir.join("local.m3u8"),
         ManifestKind::Dash => audio_dir.join("audio-track.mp4"),
     });
+    let subtitle_input = match &tracks {
+        Tracks::Hls {
+            subtitle: Some(_), ..
+        } => Some(staging.join("subtitles/local.m3u8")),
+        Tracks::Dash {
+            subtitle: Some(_), ..
+        } => Some(staging.join("subtitles/subtitle-track.mp4")),
+        _ => None,
+    };
+    let subtitle_language = match &tracks {
+        Tracks::Hls {
+            subtitle_language, ..
+        }
+        | Tracks::Dash {
+            subtitle_language, ..
+        } => subtitle_language.as_deref(),
+        Tracks::DashLiveOffline { .. } => None,
+    };
+    let subtitle_language = subtitle_language
+        .filter(|language| {
+            !language.is_empty()
+                && language.len() <= 35
+                && language
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .unwrap_or("und");
+    let subtitle_sidecar = if subtitle_input.is_some() && !job.embed_subs {
+        Some(crate::video_staging::sidecar_path_for(
+            &output_part,
+            subtitle_language,
+        ))
+    } else {
+        None
+    };
+    if let Some(sidecar) = subtitle_sidecar.as_deref() {
+        remove_regular_file_if_present(sidecar)
+            .await
+            .map_err(ManifestRunError::Failed)?;
+    }
     let staged_bytes = downloaded.load(Ordering::Relaxed);
     // FFmpeg writes beside the staged segments, so check both the XDG state
     // filesystem (staged inputs plus mux output) and destination filesystem
@@ -730,6 +842,11 @@ pub(crate) async fn run_manifest_download(
         &ffmpeg,
         &video_input,
         audio_input.as_deref(),
+        SubtitleOutput {
+            input: subtitle_input.as_deref(),
+            embed: job.embed_subs,
+            sidecar: subtitle_sidecar.as_deref(),
+        },
         &output_part,
         &mut abort,
     )
@@ -781,6 +898,9 @@ pub(crate) async fn run_manifest_download(
             ));
         }
     }
+    if let Some(sidecar) = subtitle_sidecar.as_deref() {
+        crate::video_staging::collect_sidecar(sidecar, &job.dest, subtitle_language);
+    }
     let parent = job.dest.parent().map(Path::to_path_buf);
     if let Some(parent) = parent {
         let id = job.item_id;
@@ -808,12 +928,17 @@ async fn resolve_tracks(
             Ok(Tracks::Hls {
                 video: *video,
                 audio: None,
+                subtitle: None,
+                subtitle_language: None,
             })
         }
-        ManifestDownloadPlan::HlsMaster {
-            video_url,
-            audio_url,
-        } => {
+        ManifestDownloadPlan::HlsMaster(plan) => {
+            let crate::manifest_plan::HlsMasterDownloadPlan {
+                video_url,
+                audio_url,
+                subtitle_url,
+                subtitle_language,
+            } = *plan;
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
             if let Some(audio_url) = audio_url.as_ref() {
                 guard_manifest_child_url(&source.url, audio_url, guarded_child_hosts)?;
@@ -821,6 +946,21 @@ async fn resolve_tracks(
             let video =
                 crate::manifest_intake::lookup_hls_media(client, video_url.as_str()).await?;
             guard_hls_resources(&source.url, &video, guarded_child_hosts)?;
+            let subtitle = match subtitle_url {
+                Some(url) => {
+                    guard_manifest_child_url(&source.url, &url, guarded_child_hosts)?;
+                    let plan =
+                        crate::manifest_intake::lookup_hls_media(client, url.as_str()).await?;
+                    if plan.is_live {
+                        return Err(ManifestRunError::Unsupported(
+                            "Native live HLS subtitle renditions are not supported yet".to_string(),
+                        ));
+                    }
+                    guard_hls_resources(&source.url, &plan, guarded_child_hosts)?;
+                    Some(Box::new(plan))
+                }
+                None => None,
+            };
             let audio = match audio_url {
                 Some(url) => {
                     let plan =
@@ -830,9 +970,25 @@ async fn resolve_tracks(
                 }
                 None => None,
             };
-            Ok(Tracks::Hls { video, audio })
+            if subtitle.is_some()
+                && (video.is_live || audio.as_ref().is_some_and(|track| track.is_live))
+            {
+                return Err(ManifestRunError::Unsupported(
+                    "Native live HLS subtitle renditions are not supported yet".to_string(),
+                ));
+            }
+            Ok(Tracks::Hls {
+                video,
+                audio,
+                subtitle,
+                subtitle_language,
+            })
         }
-        ManifestDownloadPlan::Dash { video, audio } => {
+        ManifestDownloadPlan::Dash {
+            video,
+            audio,
+            subtitle,
+        } => {
             for resource in video.resources.iter() {
                 guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
             }
@@ -841,9 +997,19 @@ async fn resolve_tracks(
                     guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
                 }
             }
+            if let Some(subtitle) = subtitle.as_ref() {
+                for resource in subtitle.resources.iter() {
+                    guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
+                }
+            }
+            let subtitle_language = subtitle
+                .as_ref()
+                .and_then(|track| track.representation.language.clone());
             Ok(Tracks::Dash {
                 video: *video,
                 audio,
+                subtitle,
+                subtitle_language,
             })
         }
     }
@@ -978,7 +1144,12 @@ async fn restore_local_live_hls_tracks(
         return Ok(None);
     };
     let audio = read_local_live_hls_plan(source_url, audio_dir).await?;
-    Ok(Some(Tracks::Hls { video, audio }))
+    Ok(Some(Tracks::Hls {
+        video,
+        audio,
+        subtitle: None,
+        subtitle_language: None,
+    }))
 }
 
 const LIVE_HLS_MARKER_NAME: &str = "live-hls.capture";
@@ -2911,12 +3082,14 @@ async fn run_live_dash_tracks(
                 kind: ManifestKind::Dash,
                 representation_key: representation_key.to_string(),
                 audio_key: audio_key.clone(),
+                subtitle_key: None,
+                subtitle_language: None,
             },
             guarded_child_hosts,
         )
         .await;
         let refreshed = match refreshed {
-            Ok(Tracks::Dash { video, audio }) => (video, audio.map(|audio| *audio)),
+            Ok(Tracks::Dash { video, audio, .. }) => (video, audio.map(|audio| *audio)),
             Ok(_) => {
                 finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
@@ -3164,10 +3337,18 @@ fn add_hls_staging_options(command: &mut tokio::process::Command) {
     ]);
 }
 
+#[derive(Clone, Copy, Default)]
+struct SubtitleOutput<'a> {
+    input: Option<&'a Path>,
+    embed: bool,
+    sidecar: Option<&'a Path>,
+}
+
 async fn run_ffmpeg(
     ffmpeg: &Path,
     video_input: &Path,
     audio_input: Option<&Path>,
+    subtitles: SubtitleOutput<'_>,
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
@@ -3186,13 +3367,46 @@ async fn run_ffmpeg(
             add_hls_staging_options(&mut command);
         }
         command.arg("-i").arg(audio_input);
-        command.arg("-map").arg("0:v:0").arg("-map").arg("1:a:0");
+        command.arg("-map").arg("0:v:0?").arg("-map").arg("1:a:0?");
     } else {
         command.arg("-map").arg("0:v:0?").arg("-map").arg("0:a:0?");
     }
+    if let Some(subtitle_input) = subtitles.input {
+        if is_hls_playlist_input(subtitle_input) {
+            add_hls_staging_options(&mut command);
+        }
+        command.arg("-i").arg(subtitle_input);
+    }
+    command.args(["-c", "copy"]);
+    if subtitles.input.is_some() && subtitles.embed {
+        let subtitle_stream = if audio_input.is_some() {
+            "2:s:0"
+        } else {
+            "1:s:0"
+        };
+        command
+            .arg("-map")
+            .arg(subtitle_stream)
+            .args(["-c:s", "mov_text"]);
+    }
     command
-        .args(["-c", "copy", "-movflags", "+faststart", "-f", "mp4"])
-        .arg(output)
+        .args(["-movflags", "+faststart", "-f", "mp4"])
+        .arg(output);
+    if subtitles.input.is_some() && !subtitles.embed {
+        let sidecar = subtitles.sidecar.ok_or_else(|| {
+            ManifestRunError::Failed("Subtitle sidecar destination is missing".to_string())
+        })?;
+        command
+            .arg("-map")
+            .arg(if audio_input.is_some() {
+                "2:s:0"
+            } else {
+                "1:s:0"
+            })
+            .args(["-c:s", "srt", "-f", "srt"])
+            .arg(sidecar);
+    }
+    command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -3229,6 +3443,11 @@ async fn run_ffmpeg(
     };
     let log = stderr_task.await.unwrap_or_default();
     if !status.success() {
+        if subtitles.input.is_some() && subtitle_mux_unsupported(&log) {
+            return Err(ManifestRunError::Unsupported(
+                "The selected subtitle format is not supported by the native finalizer".to_string(),
+            ));
+        }
         return Err(mux_failure_error(&log));
     }
     Ok(true)
@@ -3352,6 +3571,8 @@ mod tests {
             kind: ManifestKind::Dash,
             representation_key: video_key.clone(),
             audio_key: Some(alternate_audio_key),
+            subtitle_key: None,
+            subtitle_language: None,
         };
         let mut selected_hosts = std::collections::HashSet::new();
         let selected = resolve_tracks(
@@ -3378,6 +3599,7 @@ mod tests {
 
         let automatic_source = ManifestSource {
             audio_key: None,
+            subtitle_key: None,
             ..selected_source
         };
         let mut automatic_hosts = std::collections::HashSet::new();
@@ -3446,6 +3668,8 @@ mod tests {
             kind: ManifestKind::Dash,
             representation_key: representation_key.clone(),
             audio_key: None,
+            subtitle_key: None,
+            subtitle_language: None,
         };
         let client = reqwest::Client::new();
         let mut guarded_child_hosts = std::collections::HashSet::new();
@@ -3509,11 +3733,14 @@ mod tests {
                 kind: ManifestKind::Hls,
                 representation_key: "hls-media".to_string(),
                 audio_key: None,
+                subtitle_key: None,
+                subtitle_language: None,
             },
             dest: PathBuf::new(),
             proxy: None,
             cookies_browser: "none".to_string(),
             connections: 1,
+            embed_subs: false,
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();

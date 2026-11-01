@@ -264,6 +264,7 @@ enum LiveHlsCaptureOutcome {
     Paused,
     Finish,
     FinishVideoOnly,
+    Unrecoverable,
     Discard,
 }
 
@@ -338,6 +339,7 @@ enum DashLiveCaptureOutcome {
     Paused,
     Finish,
     FinishVideoOnly,
+    Unrecoverable,
     Discard,
 }
 
@@ -1838,7 +1840,7 @@ async fn run_live_hls_tracks(
         }
         LiveHlsSnapshotOutcome::ContinuityLost => {
             return Ok(if video.accumulator.segment_count() > 0 {
-                LiveHlsCaptureOutcome::FinishVideoOnly
+                LiveHlsCaptureOutcome::Unrecoverable
             } else {
                 LiveHlsCaptureOutcome::Discard
             });
@@ -1884,12 +1886,12 @@ async fn run_live_hls_tracks(
                 });
             }
             LiveHlsSnapshotOutcome::ContinuityLost => {
-                return Ok(if video.accumulator.segment_count() > 0 {
-                    LiveHlsCaptureOutcome::FinishVideoOnly
-                } else {
-                    LiveHlsCaptureOutcome::Discard
-                });
-            }
+            return Ok(if video.accumulator.segment_count() > 0 {
+                LiveHlsCaptureOutcome::Unrecoverable
+            } else {
+                LiveHlsCaptureOutcome::Discard
+            });
+        }
         }
     }
 
@@ -1953,12 +1955,12 @@ async fn run_live_hls_tracks(
                     });
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
-                    return Ok(if video.accumulator.segment_count() > 0 {
-                        LiveHlsCaptureOutcome::FinishVideoOnly
-                    } else {
-                        LiveHlsCaptureOutcome::Discard
-                    });
-                }
+            return Ok(if video.accumulator.segment_count() > 0 {
+                LiveHlsCaptureOutcome::Unrecoverable
+            } else {
+                LiveHlsCaptureOutcome::Discard
+            });
+        }
             }
         }
         if let Some(audio) = audio.as_mut()
@@ -1995,12 +1997,12 @@ async fn run_live_hls_tracks(
                     });
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
-                    return Ok(if video.accumulator.segment_count() > 0 {
-                        LiveHlsCaptureOutcome::FinishVideoOnly
-                    } else {
-                        LiveHlsCaptureOutcome::Discard
-                    });
-                }
+            return Ok(if video.accumulator.segment_count() > 0 {
+                LiveHlsCaptureOutcome::Unrecoverable
+            } else {
+                LiveHlsCaptureOutcome::Discard
+            });
+        }
             }
         }
     }
@@ -3128,12 +3130,12 @@ async fn run_live_dash_tracks(
             });
         }
         DashLiveUpdateOutcome::ContinuityLost => {
-            finish_capture!(if video.state.segments.is_empty() {
-                DashLiveCaptureOutcome::Discard
-            } else {
-                DashLiveCaptureOutcome::FinishVideoOnly
-            });
-        }
+                finish_capture!(if video.state.segments.is_empty() {
+                    DashLiveCaptureOutcome::Discard
+                } else {
+                    DashLiveCaptureOutcome::Unrecoverable
+                });
+            }
     }
 
     if let Some(audio) = audio.as_mut() {
@@ -3170,7 +3172,7 @@ async fn run_live_dash_tracks(
                 });
             }
             DashLiveUpdateOutcome::ContinuityLost => {
-                finish_capture!(DashLiveCaptureOutcome::FinishVideoOnly);
+                finish_capture!(DashLiveCaptureOutcome::Unrecoverable);
             }
         }
     }
@@ -3304,7 +3306,7 @@ async fn run_live_dash_tracks(
                 finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
-                    DashLiveCaptureOutcome::FinishVideoOnly
+                    DashLiveCaptureOutcome::Unrecoverable
                 });
             }
         }
@@ -3341,12 +3343,12 @@ async fn run_live_dash_tracks(
                         });
                     }
                     DashLiveUpdateOutcome::ContinuityLost => {
-                        finish_capture!(if video.state.segments.is_empty() {
-                            DashLiveCaptureOutcome::Discard
-                        } else {
-                            DashLiveCaptureOutcome::FinishVideoOnly
-                        });
-                    }
+                finish_capture!(if video.state.segments.is_empty() {
+                    DashLiveCaptureOutcome::Discard
+                } else {
+                    DashLiveCaptureOutcome::Unrecoverable
+                });
+            }
                 }
             }
             (None, Some(plan)) => {
@@ -3387,8 +3389,8 @@ async fn run_live_dash_tracks(
                         });
                     }
                     DashLiveUpdateOutcome::ContinuityLost => {
-                        finish_capture!(DashLiveCaptureOutcome::FinishVideoOnly);
-                    }
+                finish_capture!(DashLiveCaptureOutcome::Unrecoverable);
+            }
                 }
             }
             (Some(_), None) => {

@@ -6,7 +6,7 @@ use url::Url;
 
 use crate::manifest::{
     HlsAudioRendition, HlsPlan, HlsVariant,
-    dash::{DashManifestPlan, DashRepresentationPlan},
+    dash::DashRepresentationPlan,
 };
 use crate::manifest_types::{ManifestAudioChoice, ManifestChoice, ManifestLookup, NativeManifest};
 use crate::media_types::{ManifestKind, ManifestSource};

@@ -17,7 +17,9 @@ use crate::manifest::{
     HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
     dash::{DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind},
 };
-use crate::manifest_intake::{ManifestLookup, NativeManifest};
+use crate::manifest_intake::ManifestLookup;
+#[cfg(test)]
+use crate::manifest_intake::NativeManifest;
 use crate::media_types::{ManifestKind, ManifestSource};
 
 /// Upper bound for one media resource, independent of a server-supplied length.
@@ -796,67 +798,22 @@ async fn resolve_tracks(
     source: &ManifestSource,
     guarded_child_hosts: &mut std::collections::HashSet<String>,
 ) -> Result<Tracks, ManifestRunError> {
-    match lookup.manifest {
-        NativeManifest::HlsMedia(plan) if source.representation_key == "hls-media" => {
-            guard_hls_resources(&source.url, &plan, guarded_child_hosts)?;
+    use crate::manifest_plan::ManifestDownloadPlan;
+
+    let plan = crate::manifest_plan::download_plan(lookup, source)
+        .map_err(ManifestRunError::Unsupported)?;
+    match plan {
+        ManifestDownloadPlan::HlsMedia(video) => {
+            guard_hls_resources(&source.url, &video, guarded_child_hosts)?;
             Ok(Tracks::Hls {
-                video: *plan,
+                video: *video,
                 audio: None,
             })
         }
-        NativeManifest::HlsMaster(master) => {
-            let variant = master
-                .variants
-                .iter()
-                .zip(crate::manifest_intake::hls_variant_keys(&master.variants))
-                .find_map(|(variant, key)| {
-                    (key.as_deref() == Some(source.representation_key.as_str())).then_some(variant)
-                })
-                .ok_or_else(|| {
-                    ManifestRunError::Unsupported(
-                        "The selected HLS variant is no longer available".to_string(),
-                    )
-                })?;
-            let video_url = variant.url.clone();
-            let selected_audio = match source.audio_key.as_deref() {
-                Some(audio_key) => Some(
-                    master
-                        .audio_renditions
-                        .iter()
-                        .zip(crate::manifest_intake::hls_audio_rendition_keys(
-                            &master.audio_renditions,
-                        ))
-                        .find_map(|(rendition, key)| {
-                            (key.as_deref() == Some(audio_key)).then_some(rendition)
-                        })
-                        .filter(|rendition| {
-                            variant
-                                .audio_group
-                                .as_deref()
-                                .is_some_and(|group| rendition.group_id == group)
-                        })
-                        .ok_or_else(|| {
-                            ManifestRunError::Unsupported(
-                                "The selected HLS audio rendition is no longer available"
-                                    .to_string(),
-                            )
-                        })?,
-                ),
-                None => variant.audio_group.as_deref().and_then(|group| {
-                    master
-                        .audio_renditions
-                        .iter()
-                        .filter(|rendition| rendition.group_id == group)
-                        .find(|rendition| rendition.is_default)
-                        .or_else(|| {
-                            master
-                                .audio_renditions
-                                .iter()
-                                .find(|rendition| rendition.group_id == group)
-                        })
-                }),
-            };
-            let audio_url = selected_audio.and_then(|rendition| rendition.url.clone());
+        ManifestDownloadPlan::HlsMaster {
+            video_url,
+            audio_url,
+        } => {
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
             if let Some(audio_url) = audio_url.as_ref() {
                 guard_manifest_child_url(&source.url, audio_url, guarded_child_hosts)?;
@@ -875,38 +832,7 @@ async fn resolve_tracks(
             };
             Ok(Tracks::Hls { video, audio })
         }
-        NativeManifest::Dash(dash) => {
-            let video =
-                crate::manifest::dash::plan_dash_representation(&dash, &source.representation_key)
-                    .map_err(|error| ManifestRunError::Unsupported(error.to_string()))?;
-            let selected_audio = match source.audio_key.as_deref() {
-                Some(audio_key) => Some(
-                    dash.audio_representations
-                        .iter()
-                        .find(|track| track.key == audio_key || track.live_key == audio_key)
-                        .ok_or_else(|| {
-                            ManifestRunError::Unsupported(
-                                "The selected DASH audio representation is no longer available"
-                                    .to_string(),
-                            )
-                        })?,
-                ),
-                None => dash.default_audio(),
-            };
-            let audio = selected_audio
-                .map(|track| {
-                    let plan_key = if source.representation_key.starts_with("dash-live-")
-                        || source.audio_key.as_deref() == Some(track.live_key.as_str())
-                    {
-                        track.live_key.as_str()
-                    } else {
-                        track.key.as_str()
-                    };
-                    crate::manifest::dash::plan_dash_representation(&dash, plan_key)
-                        .map(Box::new)
-                        .map_err(|error| ManifestRunError::Unsupported(error.to_string()))
-                })
-                .transpose()?;
+        ManifestDownloadPlan::Dash { video, audio } => {
             for resource in video.resources.iter() {
                 guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
             }
@@ -915,11 +841,11 @@ async fn resolve_tracks(
                     guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
                 }
             }
-            Ok(Tracks::Dash { video, audio })
+            Ok(Tracks::Dash {
+                video: *video,
+                audio,
+            })
         }
-        NativeManifest::HlsMedia(_) => Err(ManifestRunError::Unsupported(
-            "The selected HLS media playlist is invalid".to_string(),
-        )),
     }
 }
 

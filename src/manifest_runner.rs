@@ -3963,60 +3963,75 @@ async fn fetch_and_write_dash_track(
         return Ok(true);
     };
 
-    // buffered() runs at most the configured number of fetches concurrently,
-    // while yielding them in manifest order for the single writer.
-    let remaining_resources = resources.into_iter().skip(writer.next_resource_index());
-    let fetches = futures_util::stream::iter(remaining_resources.map(|resource| {
-        let client = client.clone();
-        let directory = directory.to_path_buf();
-        let tx = tx.clone();
-        let downloaded = Arc::clone(downloaded);
-        async move {
-            fetch_resource(&client, resource, &directory, &tx, &downloaded)
-                .await
-                .map(|_| ())
+    // Each bounded window fetches out of order. Completed indices wait in a
+    // small reorder set until the single writer can commit the next index.
+    let window_size = connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
+    let mut next_resource_index = writer.next_resource_index();
+    let mut remaining_resources = resources.into_iter().enumerate().skip(next_resource_index);
+    loop {
+        let window = remaining_resources
+            .by_ref()
+            .take(window_size)
+            .collect::<Vec<_>>();
+        if window.is_empty() {
+            break;
         }
-    }))
-    .buffered(connections.clamp(1, MAX_RESOURCE_CONNECTIONS));
+        let window_end = next_resource_index + window.len();
+        let mut completed = std::collections::BTreeSet::new();
+        let fetches = futures_util::stream::iter(window.into_iter().map(|(index, resource)| {
+            let client = client.clone();
+            let directory = directory.to_path_buf();
+            let tx = tx.clone();
+            let downloaded = Arc::clone(downloaded);
+            async move {
+                fetch_resource(&client, resource, &directory, &tx, &downloaded)
+                    .await
+                    .map(|_| index)
+            }
+        }))
+        .buffer_unordered(window_size);
 
-    let outcome = {
-        tokio::pin!(fetches);
-        let mut outcome = Ok(true);
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut *abort => {
-                    outcome = Ok(false);
-                    break;
-                }
-                result = fetches.next() => match result {
-                    Some(Ok(())) => match writer.append_next(abort).await {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            outcome = Ok(false);
-                            break;
+        let window_outcome = {
+            tokio::pin!(fetches);
+            'window: loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut *abort => break Ok(false),
+                    result = fetches.next() => match result {
+                        Some(Ok(index)) => {
+                            completed.insert(index);
+                            while completed.remove(&next_resource_index) {
+                                match writer.append_next(abort).await {
+                                    Ok(true) => next_resource_index += 1,
+                                    Ok(false) => break 'window Ok(false),
+                                    Err(error) => {
+                                        break 'window Err(ManifestRunError::Failed(error));
+                                    }
+                                }
+                            }
                         }
-                        Err(error) => {
-                            outcome = Err(ManifestRunError::Failed(error));
-                            break;
-                        }
-                    },
-                    Some(Err(error)) => {
-                        outcome = Err(error);
-                        break;
+                        Some(Err(error)) => break Err(error),
+                        None => break Ok(true),
                     }
-                    None => break,
                 }
             }
+        };
+        if !window_outcome? {
+            break;
         }
-        outcome
-    };
+        if next_resource_index != window_end {
+            return Err(ManifestRunError::Failed(
+                "The ordered DASH fetch window ended before its resources were committed"
+                    .to_string(),
+            ));
+        }
+    }
 
-    // Dropping the bounded stream cancels later requests and refunds their
+    // Dropping each bounded window cancels outstanding requests and refunds
     // partial byte reservations before publishing the corrected progress.
     tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
         .ok();
-    if !outcome? {
+    if next_resource_index != resources.len() {
         return Ok(false);
     }
     writer.finish().await?;

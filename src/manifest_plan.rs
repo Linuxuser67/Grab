@@ -4,8 +4,8 @@ use gettextrs::gettext;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::manifest::{HlsAudioRendition, HlsPlan, HlsVariant, dash::DashRepresentationPlan};
-use crate::manifest_types::{ManifestAudioChoice, ManifestChoice, ManifestLookup, NativeManifest};
+use crate::manifest::{HlsAudioRendition, HlsPlan, HlsSubtitleRendition, HlsVariant, dash::{DashPresentation, DashRepresentationPlan}};
+use crate::manifest_types::{ManifestAudioChoice, ManifestChoice, ManifestLookup, ManifestSubtitleChoice, NativeManifest};
 use crate::media_types::{ManifestKind, ManifestSource};
 
 /// A validated protocol plan ready for the runner to materialize and execute.
@@ -15,10 +15,12 @@ pub(crate) enum ManifestDownloadPlan {
     HlsMaster {
         video_url: Url,
         audio_url: Option<Url>,
+        subtitle_url: Option<Url>,
     },
     Dash {
         video: Box<DashRepresentationPlan>,
         audio: Option<Box<DashRepresentationPlan>>,
+        subtitle: Option<Box<DashRepresentationPlan>>,
     },
 }
 
@@ -173,6 +175,104 @@ impl ManifestLookup {
         }
     }
 
+    /// List only subtitle renditions associated with the selected video representation.
+    pub(crate) fn subtitle_choices(&self, video_key: &str) -> Vec<ManifestSubtitleChoice> {
+        match &self.manifest {
+            NativeManifest::HlsMaster(master) => {
+                let group_id = master
+                    .variants
+                    .iter()
+                    .zip(hls_variant_keys(&master.variants))
+                    .find_map(|(variant, key)| {
+                        (key.as_deref() == Some(video_key))
+                            .then_some(variant.subtitles_group.as_deref())
+                            .flatten()
+                    });
+                let Some(group_id) = group_id else {
+                    return Vec::new();
+                };
+                master
+                    .subtitle_renditions
+                    .iter()
+                    .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
+                    .filter_map(|(rendition, key)| {
+                        let key = key?;
+                        (rendition.group_id == group_id).then(|| ManifestSubtitleChoice {
+                            key,
+                            label: hls_subtitle_rendition_label(rendition),
+                            language: rendition.language.clone(),
+                            is_default: rendition.is_default,
+                        })
+                    })
+                    .collect()
+            }
+            NativeManifest::HlsMedia(_) => Vec::new(),
+            NativeManifest::Dash(dash) => {
+                if !dash.video_representations.iter().any(|track| track.key == video_key) {
+                    return Vec::new();
+                }
+                let mut choices = dash
+                    .subtitle_representations
+                    .iter()
+                    .map(|track| {
+                        let title = track.language.as_deref()
+                            .filter(|language| !language.is_empty())
+                            .or(track.representation_id.as_deref())
+                            .map(short_label)
+                            .unwrap_or_else(|| gettext("Subtitle track"));
+                        let mut label = join_label_parts(
+                            title,
+                            bitrate_label(track.bandwidth),
+                            codec_label(track.codecs.as_deref()),
+                        );
+                        if track.is_default_subtitle {
+                            label.push_str(" · ");
+                            label.push_str(&gettext("Default"));
+                        }
+                        ManifestSubtitleChoice {
+                            key: track.key.clone(),
+                            label,
+                            language: track.language.clone(),
+                            is_default: track.is_default_subtitle,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                choices.sort_by_key(|choice| !choice.is_default);
+                choices
+            }
+        }
+    }
+
+    /// Choose a subtitle matching the requested language, then the manifest default.
+    #[must_use]
+    pub(crate) fn preferred_subtitle_choice_index(
+        choices: &[ManifestSubtitleChoice],
+        preferred_language: Option<&str>,
+    ) -> Option<usize> {
+        preferred_language
+            .filter(|language| !language.eq_ignore_ascii_case("off"))
+            .and_then(|preferred| {
+                choices.iter().position(|choice| {
+                    choice.language.as_deref().is_some_and(|language| {
+                        subtitle_language_matches(preferred, language)
+                    })
+                })
+            })
+            .or_else(|| choices.iter().position(|choice| choice.is_default))
+    }
+
+    /// Resolve the selected subtitle key using the same language preference as yt-dlp.
+    #[must_use]
+    pub(crate) fn preferred_subtitle_key(
+        &self,
+        video_key: &str,
+        preferred_language: Option<&str>,
+    ) -> Option<String> {
+        let choices = self.subtitle_choices(video_key);
+        let index = Self::preferred_subtitle_choice_index(&choices, preferred_language)?;
+        choices.get(index).map(|choice| choice.key.clone())
+    }
+
     /// Index of the default audio choice, or the first available choice.
     #[must_use]
     pub(crate) fn preferred_audio_choice_index(choices: &[ManifestAudioChoice]) -> usize {
@@ -183,7 +283,7 @@ impl ManifestLookup {
     }
 
     /// Return the representation closest to the configured video-quality preference.
-    pub(crate) fn preferred_source(&self, quality: &str) -> Option<ManifestSource> {
+    pub(crate) fn preferred_source(&self, quality: &str, subtitle_language: Option<&str>) -> Option<ManifestSource> {
         let choices = self.choices();
         let index = preferred_choice_index(&choices, quality);
         let choice = choices.get(index)?;
@@ -192,7 +292,8 @@ impl ManifestLookup {
         let audio_key = audio_choices
             .get(audio_index)
             .map(|audio| audio.key.as_str());
-        self.selected_source(&choice.key, audio_key)
+        let subtitle_key = self.preferred_subtitle_key(&choice.key, subtitle_language);
+        self.selected_source(&choice.key, audio_key, subtitle_key.as_deref())
     }
 
     /// Validate and capture the exact video and optional audio selections.
@@ -200,6 +301,7 @@ impl ManifestLookup {
         &self,
         representation_key: &str,
         audio_key: Option<&str>,
+        subtitle_key: Option<&str>,
     ) -> Option<ManifestSource> {
         let kind = match &self.manifest {
             NativeManifest::HlsMaster(master) => {
@@ -230,11 +332,17 @@ impl ManifestLookup {
         }) {
             return None;
         }
+        if subtitle_key.is_some_and(|selected| {
+            !self.subtitle_choices(representation_key).iter().any(|choice| choice.key == selected)
+        }) {
+            return None;
+        }
         Some(ManifestSource {
             url: self.source_url.clone(),
             kind,
             representation_key: representation_key.to_string(),
             audio_key: audio_key.map(str::to_string),
+            subtitle_key: subtitle_key.map(str::to_string),
         })
     }
 }
@@ -303,6 +411,15 @@ pub(crate) fn download_plan(
             Ok(ManifestDownloadPlan::HlsMaster {
                 video_url: variant.url.clone(),
                 audio_url: selected_audio.and_then(|rendition| rendition.url.clone()),
+                subtitle_url: match source.subtitle_key.as_deref() {
+                    Some(subtitle_key) => Some(master.subtitle_renditions.iter()
+                        .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
+                        .find_map(|(rendition, key)| (key.as_deref() == Some(subtitle_key)
+                            && variant.subtitles_group.as_deref() == Some(rendition.group_id.as_str()))
+                            .then_some(rendition.url.clone()))
+                        .ok_or_else(|| "The selected HLS subtitle rendition is no longer available".to_string())?),
+                    None => None,
+                },
             })
         }
         (NativeManifest::Dash(dash), ManifestKind::Dash) => {
@@ -335,9 +452,20 @@ pub(crate) fn download_plan(
                         .map_err(|error| error.to_string())
                 })
                 .transpose()?;
+            let subtitle = match source.subtitle_key.as_deref() {
+                Some(key) if matches!(dash.presentation, DashPresentation::Dynamic(_)) => {
+                    return Err("Native subtitles are not supported for live DASH presentations".to_string());
+                }
+                Some(key) => Some(Box::new(
+                    crate::manifest::dash::plan_dash_representation(&dash, key)
+                        .map_err(|error| error.to_string())?,
+                )),
+                None => None,
+            };
             Ok(ManifestDownloadPlan::Dash {
                 video: Box::new(video),
                 audio,
+                subtitle,
             })
         }
         _ => Err("The selected representation is not valid for this manifest".to_string()),
@@ -365,6 +493,56 @@ pub(crate) fn hls_audio_rendition_key(rendition: &HlsAudioRendition) -> Option<S
         .stable_rendition_id
         .as_deref()
         .map(|stable_id| stable_hls_track_key("hls-audio-", b"rendition", stable_id))
+}
+
+/// Build keys only for subtitle renditions with Apple stable rendition IDs.
+pub(crate) fn hls_subtitle_rendition_keys(
+    renditions: &[HlsSubtitleRendition],
+) -> Vec<Option<String>> {
+    renditions
+        .iter()
+        .map(|rendition| {
+            rendition.stable_rendition_id.as_deref()
+                .map(|stable_id| stable_hls_track_key("hls-subtitle-", b"subtitle", stable_id))
+        })
+        .collect()
+}
+
+fn hls_subtitle_rendition_label(rendition: &HlsSubtitleRendition) -> String {
+    let language = rendition.language.as_deref()
+        .filter(|language| !language.is_empty())
+        .map(short_label);
+    let name = (!rendition.name.is_empty()).then_some(rendition.name.as_str());
+    let mut label = join_label_parts(
+        language.unwrap_or_else(|| gettext("Subtitle track")),
+        name.map(str::to_string).unwrap_or_default(),
+        String::new(),
+    );
+    if rendition.is_default {
+        label.push_str(" · ");
+        label.push_str(&gettext("Default"));
+    }
+    label
+}
+
+fn subtitle_language_matches(preferred: &str, available: &str) -> bool {
+    let preferred = preferred.split(['-', '_']).next().unwrap_or(preferred).to_ascii_lowercase();
+    let available = available.split(['-', '_']).next().unwrap_or(available).to_ascii_lowercase();
+    if preferred == available {
+        return true;
+    }
+    const ALIASES: &[(&str, &str)] = &[
+        ("en", "eng"), ("ar", "ara"), ("de", "deu"), ("de", "ger"),
+        ("es", "spa"), ("fr", "fra"), ("fr", "fre"), ("hi", "hin"),
+        ("id", "ind"), ("it", "ita"), ("ja", "jpn"), ("ko", "kor"),
+        ("nl", "nld"), ("nl", "dut"), ("pl", "pol"), ("pt", "por"),
+        ("ru", "rus"), ("tr", "tur"), ("vi", "vie"), ("zh", "zho"),
+        ("zh", "chi"),
+    ];
+    ALIASES.iter().any(|(two, three)| {
+        (preferred == *two && available == *three)
+            || (preferred == *three && available == *two)
+    })
 }
 
 /// Build keys only for renditions with Apple stable rendition IDs.

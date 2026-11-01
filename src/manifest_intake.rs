@@ -206,7 +206,7 @@ pub(crate) fn supports(raw_url: &str) -> bool {
 
 pub(crate) use crate::manifest_plan::preferred_choice_index;
 pub(crate) use crate::manifest_types::{
-    ManifestAudioChoice, ManifestChoice, ManifestLookup, NativeManifest,
+    ManifestAudioChoice, ManifestChoice, ManifestLookup, ManifestSubtitleChoice, NativeManifest,
 };
 
 /// Preview a candidate HLS/DASH manifest using the configured browser's cookies.
@@ -388,6 +388,24 @@ fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestI
     if !renditions_have_unique_ids {
         return Err(ManifestIntakeError::Unsupported(gettext(
             "The HLS master playlist has missing or duplicate stable audio track IDs",
+        )));
+    }
+
+    let subtitle_groups = master
+        .variants
+        .iter()
+        .filter_map(|variant| variant.subtitles_group.as_deref())
+        .collect::<HashSet<_>>();
+    let mut subtitle_ids = HashSet::with_capacity(master.subtitle_renditions.len());
+    let subtitles_have_unique_ids = master
+        .subtitle_renditions
+        .iter()
+        .filter(|rendition| subtitle_groups.contains(rendition.group_id.as_str()))
+        .all(|rendition| rendition.stable_rendition_id.as_deref()
+            .is_some_and(|stable_id| subtitle_ids.insert(stable_id)));
+    if !subtitles_have_unique_ids {
+        return Err(ManifestIntakeError::Unsupported(gettext(
+            "The HLS master playlist has missing or duplicate stable subtitle track IDs",
         )));
     }
 

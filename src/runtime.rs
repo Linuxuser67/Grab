@@ -14,7 +14,7 @@ pub(crate) fn tokio_rt() -> &'static tokio::runtime::Runtime {
     })
 }
 
-/// Lock a worker-shared mutex, recovering on poison so one panic fails the item, not the app.
-pub(crate) fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+/// Lock worker-shared state, failing fast if a panic may have left it inconsistent.
+pub(crate) fn lock_or_panic<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().expect("worker-shared mutex poisoned")
 }

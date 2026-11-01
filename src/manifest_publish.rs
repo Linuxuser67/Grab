@@ -230,8 +230,7 @@ pub(crate) async fn publish(
 
     match crate::file_names::rename_noreplace_same_device(source, destination) {
         Ok(()) => {
-            let mut pending =
-                PendingDestination::new(destination, Arc::clone(gate), Some(source));
+            let mut pending = PendingDestination::new(destination, Arc::clone(gate), Some(source));
             return commit_renamed_destination(gate, &mut pending, destination).await;
         }
         Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {}

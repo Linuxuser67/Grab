@@ -605,9 +605,6 @@ pub(crate) struct VideoStep {
         Rc<RefCell<Vec<crate::manifest_intake::ManifestAudioChoice>>>,
     pub(crate) manifest_audio_selection: Rc<RefCell<Option<String>>>,
     pub(crate) manifest_audio_format: adw::ComboRow,
-    /// Native subtitle rendition selected automatically from the global preference.
-    pub(crate) manifest_subtitle_selection: Rc<RefCell<Option<String>>>,
-    pub(crate) manifest_subtitle_preference: Rc<RefCell<Option<String>>>,
     /// Index-aligned with the combo's model. Reset on every resolve.
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
     pub(crate) tools: adw::ActionRow,
@@ -793,8 +790,6 @@ fn clear_manifest_preview(step: &VideoStep) {
     step.manifest_audio_format
         .set_model(Some(&gtk4::StringList::new(&[])));
     step.manifest_audio_format.set_visible(false);
-    step.manifest_subtitle_selection.borrow_mut().take();
-    step.manifest_subtitle_preference.borrow_mut().take();
 }
 
 /// Refresh the audio picker for the selected video representation.
@@ -831,36 +826,16 @@ fn refresh_manifest_audio_picker(step: &VideoStep, video_key: Option<&str>) {
         .set_visible(step.manifest_audio_choices.borrow().len() > 1);
 }
 
-/// Resolve the native subtitle rendition from the global Media → Subtitles preference.
-/// There is deliberately no per-download subtitle control: changing the video
-/// representation only recalculates the matching rendition for the same preference.
-fn refresh_manifest_subtitle_selection(
-    step: &VideoStep,
-    video_key: Option<&str>,
-    preferred_language: Option<&str>,
-) {
-    let selected_key = video_key.and_then(|key| {
-        step.manifest
-            .borrow()
-            .as_ref()
-            .and_then(|manifest| manifest.preferred_subtitle_key(key, preferred_language))
-    });
-    step.manifest_subtitle_selection.replace(selected_key);
-    step.manifest_subtitle_preference.replace(preferred_language.map(str::to_string));
-}
-
 /// Show a parsed manifest and enable Add for the validated representation.
 fn show_manifest_ready(
     step: &VideoStep,
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     manifest: Option<crate::manifest_intake::ManifestLookup>,
     preferred_quality: &str,
-    preferred_subtitle_language: Option<&str>,
 ) {
     if let Some(manifest) = manifest {
         step.manifest.replace(Some(manifest));
     }
-    step.manifest_subtitle_preference.replace(preferred_subtitle_language.map(str::to_string));
     hide_video_step(step);
 
     let manifest_state = step.manifest.borrow();
@@ -888,7 +863,6 @@ fn show_manifest_ready(
     step.manifest_format.set_visible(true);
     drop(manifest_state);
     refresh_manifest_audio_picker(step, selected_video_key.as_deref());
-    refresh_manifest_subtitle_selection(step, selected_video_key.as_deref(), preferred_subtitle_language);
     if step.name.text().trim().is_empty() {
         step.name.set_text("Stream.mp4");
     }
@@ -2374,8 +2348,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         manifest_audio_choices: Rc::new(RefCell::new(Vec::new())),
         manifest_audio_selection: Rc::new(RefCell::new(None)),
         manifest_audio_format,
-        manifest_subtitle_selection: Rc::new(RefCell::new(None)),
-        manifest_subtitle_preference: Rc::new(RefCell::new(None)),
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
         error: video_error,
@@ -2401,7 +2373,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let manifest_format = step.manifest_format.clone();
         let choices = Rc::clone(&step.manifest_choices);
         let selection = Rc::clone(&step.manifest_selection);
-        let subtitle_preference = Rc::clone(&step.manifest_subtitle_preference);
         manifest_format.connect_selected_notify(move |row| {
             let selected_key = choices
                 .borrow()
@@ -2410,8 +2381,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             selection.replace(selected_key.clone());
             if let Some(step) = step_weak.upgrade() {
                 refresh_manifest_audio_picker(&step, selected_key.as_deref());
-                let subtitle_language = subtitle_preference.borrow().clone();
-                refresh_manifest_subtitle_selection(&step, selected_key.as_deref(), subtitle_language.as_deref());
             }
         });
     }
@@ -2944,8 +2913,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     .as_ref()
                     .is_some_and(|manifest| manifest.source_url == url);
                 if fresh_manifest {
-                    let subtitle_language = settings_b.subtitle_language();
-                    show_manifest_ready(&step_b, &lookup_add_b, None, &settings_b.video_quality(), Some(&subtitle_language));
+                    show_manifest_ready(&step_b, &lookup_add_b, None, &settings_b.video_quality());
                     return;
                 }
                 let fresh = {
@@ -3047,7 +3015,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             &lookup_add_b,
                             Some(manifest),
                             &preferred_quality,
-                            Some(&subtitle_language),
                         );
 
                         if submit_source.automatically_enqueues_manifest()
@@ -3481,13 +3448,21 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     let manifest = step2.manifest.borrow();
                     let selected = step2.manifest_selection.borrow();
                     let selected_audio = step2.manifest_audio_selection.borrow();
-                    let selected_subtitle = step2.manifest_subtitle_selection.borrow();
+                    let subtitle_language = m.settings().subtitle_language();
                     manifest
                         .as_ref()
                         .filter(|manifest| manifest.source_url == url)
                         .and_then(|manifest| {
                             selected.as_deref().and_then(|key| {
-                                manifest.selected_source(key, selected_audio.as_deref(), selected_subtitle.as_deref())
+                                let subtitle_key = manifest.preferred_subtitle_key(
+                                    key,
+                                    Some(&subtitle_language),
+                                );
+                                manifest.selected_source(
+                                    key,
+                                    selected_audio.as_deref(),
+                                    subtitle_key.as_deref(),
+                                )
                             })
                         })
                 };

@@ -59,6 +59,11 @@ pub(crate) struct ManifestSource {
     /// queue entries created before audio selection was introduced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) audio_key: Option<String>,
+    /// Stable selected subtitle rendition or DASH text representation.
+    ///
+    /// Missing values preserve the no-subtitle behavior of existing queue rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_key: Option<String>,
 }
 
 /// Where a resource comes from; serialized into the queue file, stable across releases.

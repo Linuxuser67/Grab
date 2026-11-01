@@ -46,6 +46,7 @@ pub(crate) enum DashError {
 pub(crate) enum DashTrackKind {
     Video,
     Audio,
+    Subtitle,
 }
 
 /// A user-selectable video or automatically-selectable audio representation.
@@ -63,6 +64,7 @@ pub(crate) struct DashRepresentation {
     pub(crate) language: Option<String>,
     pub(crate) kind: DashTrackKind,
     pub(crate) is_default_audio: bool,
+    pub(crate) is_default_subtitle: bool,
     source: DashRepresentationSource,
 }
 
@@ -91,6 +93,7 @@ pub(crate) struct DashManifestPlan {
     pub(crate) presentation: DashPresentation,
     pub(crate) video_representations: Box<[DashRepresentation]>,
     pub(crate) audio_representations: Box<[DashRepresentation]>,
+    pub(crate) subtitle_representations: Box<[DashRepresentation]>,
 }
 
 impl DashManifestPlan {
@@ -310,6 +313,7 @@ pub(crate) fn parse_dash_manifest_at(
 
     let mut video_representations = Vec::new();
     let mut audio_representations = Vec::new();
+    let mut subtitle_representations = Vec::new();
 
     for adaptation in &period.adaptations {
         if adaptation.href.is_some() || !adaptation.ContentProtection.is_empty() {
@@ -416,6 +420,9 @@ pub(crate) fn parse_dash_manifest_at(
                 language,
                 kind,
                 is_default_audio: kind == DashTrackKind::Audio && is_default_audio,
+                is_default_subtitle: kind == DashTrackKind::Subtitle && adaptation.Role.iter().any(|role| {
+                    role.schemeIdUri == DASH_ROLE_SCHEME && role.value.as_deref() == Some("main")
+                }),
                 source: DashRepresentationSource {
                     base_url: representation_base,
                     addressing,
@@ -425,9 +432,10 @@ pub(crate) fn parse_dash_manifest_at(
             match kind {
                 DashTrackKind::Video => video_representations.push(choice),
                 DashTrackKind::Audio => audio_representations.push(choice),
+                DashTrackKind::Subtitle => subtitle_representations.push(choice),
             }
 
-            if video_representations.len() + audio_representations.len() > MAX_REPRESENTATIONS {
+            if video_representations.len() + audio_representations.len() + subtitle_representations.len() > MAX_REPRESENTATIONS {
                 return Err(DashError::LimitExceeded);
             }
         }
@@ -442,6 +450,7 @@ pub(crate) fn parse_dash_manifest_at(
         presentation,
         video_representations: video_representations.into_boxed_slice(),
         audio_representations: audio_representations.into_boxed_slice(),
+        subtitle_representations: subtitle_representations.into_boxed_slice(),
     })
 }
 
@@ -458,6 +467,7 @@ pub(crate) fn plan_dash_representation(
         .video_representations
         .iter()
         .chain(manifest.audio_representations.iter())
+        .chain(manifest.subtitle_representations.iter())
         .find(|candidate| {
             candidate.key == representation_key || candidate.live_key == representation_key
         })
@@ -537,6 +547,7 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
     hasher.update(match kind {
         DashTrackKind::Video => b"video".as_slice(),
         DashTrackKind::Audio => b"audio".as_slice(),
+        DashTrackKind::Subtitle => b"subtitle".as_slice(),
     });
     hash_optional_text(&mut hasher, id);
     hash_optional_text(&mut hasher, base_url.host_str());
@@ -760,6 +771,7 @@ fn track_kind(
     representation_mime_type: Option<&str>,
     adaptation_content_type: Option<&str>,
     adaptation_mime_type: Option<&str>,
+    codecs: Option<&str>,
 ) -> Option<DashTrackKind> {
     let content_type = representation_content_type.or(adaptation_content_type);
     let mime_type = representation_mime_type.or(adaptation_mime_type);
@@ -770,6 +782,15 @@ fn track_kind(
         || mime_type.is_some_and(|mime| mime.starts_with("audio/"))
     {
         Some(DashTrackKind::Audio)
+    } else if mime_type.is_some_and(|mime| mime.eq_ignore_ascii_case("application/mp4"))
+        && codecs.is_some_and(|codecs| {
+            codecs.split(',').any(|codec| {
+                let codec = codec.trim().to_ascii_lowercase();
+                codec == "stpp" || codec.starts_with("stpp.") || codec == "wvtt" || codec.starts_with("wvtt.")
+            })
+        })
+    {
+        Some(DashTrackKind::Subtitle)
     } else {
         None
     }

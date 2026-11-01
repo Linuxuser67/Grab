@@ -6162,6 +6162,7 @@ fn video_proxy_failure_does_not_leave_live_state_or_stall_the_queue() {
         video_format_id: None,
         is_live: true,
         playlist_item_id: None,
+        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
     });
 
     assert_eq!(video.status(), DownloadStatus::Failed);

@@ -228,6 +228,7 @@ struct RowWidgets {
     retry_btn: gtk4::Button,
     reveal_btn: gtk4::Button,
     delete_btn: gtk4::Button,
+    remove_btn: gtk4::Button,
     map_revealer: gtk4::Revealer,
     blocks: gtk4::DrawingArea,
     expanded: Rc<Cell<bool>>,
@@ -285,7 +286,7 @@ pub(crate) enum StopCopy {
     /// A normal download: stopping it discards the bytes.
     Cancel,
     /// A live capture: stopping it keeps the recording.
-    StopRecording,
+    FinishRecording,
 }
 
 /// Which of the two meanings the row's stop button currently carries:
@@ -295,7 +296,7 @@ pub(crate) enum StopCopy {
 /// returning strings would put every label out of reach of translators.
 pub(crate) fn stop_copy(is_live: bool) -> StopCopy {
     if is_live {
-        StopCopy::StopRecording
+        StopCopy::FinishRecording
     } else {
         StopCopy::Cancel
     }
@@ -447,6 +448,8 @@ fn refresh_row(
     w: &RowWidgets,
     defer_available: bool,
     is_live: bool,
+    can_pause_live: bool,
+    is_manifest_download: bool,
 ) {
     let frac = item.progress().clamp(0.0, 1.0);
     let active = item.status() == DownloadStatus::Downloading;
@@ -476,15 +479,16 @@ fn refresh_row(
         item.status(),
         DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
     );
-    // Live captures can't pause or defer mid-flight: the buttons hide and Stop
-    // keeps what's recorded instead of discarding it.
+    // Native manifest live captures can pause at committed segment boundaries.
+    // Other live extractors retain their finish-only behavior.
     let live_capturing = active && is_live;
-    w.toggle_btn.set_visible(running && !live_capturing);
+    w.toggle_btn
+        .set_visible(running && (!live_capturing || can_pause_live));
     w.stop_btn.set_visible(running);
     // Header caps for the tooltip, sentence case for the spoken a11y name.
     let (stop_tip, stop_a11y) = match stop_copy(live_capturing) {
         StopCopy::Cancel => (gettext("Cancel"), gettext("Cancel")),
-        StopCopy::StopRecording => (gettext("Stop Recording"), gettext("Stop recording")),
+        StopCopy::FinishRecording => (gettext("Finish Recording"), gettext("Finish recording")),
     };
     w.stop_btn.set_tooltip_text(Some(&stop_tip));
     w.stop_btn
@@ -505,7 +509,21 @@ fn refresh_row(
     ));
     let done = item.status() == DownloadStatus::Done;
     w.reveal_btn.set_visible(done);
-    w.delete_btn.set_visible(done);
+    let paused_manifest = item.status() == DownloadStatus::Paused && is_manifest_download;
+    w.delete_btn
+        .set_visible(done || live_capturing || paused_manifest);
+    let delete_tip = if live_capturing {
+        gettext("Delete Recording")
+    } else if paused_manifest {
+        gettext("Delete Download")
+    } else {
+        gettext("Move to Trash")
+    };
+    w.delete_btn.set_tooltip_text(Some(&delete_tip));
+    w.delete_btn
+        .update_property(&[gtk4::accessible::Property::Label(&delete_tip)]);
+    w.remove_btn
+        .set_visible(!live_capturing && !paused_manifest);
     let (icon, tip) = if item.status() == DownloadStatus::Paused {
         ("media-playback-start-symbolic", gettext("Resume"))
     } else {
@@ -542,6 +560,7 @@ struct RowWeaks {
     retry_btn: glib::WeakRef<gtk4::Widget>,
     reveal_btn: glib::WeakRef<gtk4::Widget>,
     delete_btn: glib::WeakRef<gtk4::Widget>,
+    remove_btn: glib::WeakRef<gtk4::Widget>,
     map_revealer: glib::WeakRef<gtk4::Widget>,
     blocks: glib::WeakRef<gtk4::Widget>,
     status: glib::WeakRef<gtk4::Widget>,
@@ -569,6 +588,7 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
         retry_btn: w_retry,
         reveal_btn: w_reveal,
         delete_btn: w_del,
+        remove_btn: w_remove,
         map_revealer: w_rev,
         blocks: w_map,
         status: w_status,
@@ -585,6 +605,7 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
         Some(retry_w),
         Some(reveal_w),
         Some(del_w),
+        Some(remove_w),
         Some(rev_w),
         Some(map_w),
         Some(status_w),
@@ -600,6 +621,7 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
         w_retry.upgrade(),
         w_reveal.upgrade(),
         w_del.upgrade(),
+        w_remove.upgrade(),
         w_rev.upgrade(),
         w_map.upgrade(),
         w_status.upgrade(),
@@ -621,6 +643,7 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
         Ok(retry),
         Ok(reveal),
         Ok(delete),
+        Ok(remove),
         Ok(map),
         Ok(blocks),
     ) = (
@@ -636,6 +659,7 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
         retry_w.downcast::<gtk4::Button>(),
         reveal_w.downcast::<gtk4::Button>(),
         del_w.downcast::<gtk4::Button>(),
+        remove_w.downcast::<gtk4::Button>(),
         rev_w.downcast::<gtk4::Revealer>(),
         map_w.downcast::<gtk4::DrawingArea>(),
     )
@@ -657,6 +681,7 @@ fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
             retry_btn: retry,
             reveal_btn: reveal,
             delete_btn: delete,
+            remove_btn: remove,
             map_revealer: map,
             blocks,
             expanded: Rc::clone(expanded),
@@ -1007,6 +1032,7 @@ pub(crate) fn build_row(
         retry_btn: w(retry_btn.upcast_ref()),
         reveal_btn: w(reveal_btn.upcast_ref()),
         delete_btn: w(delete_btn.upcast_ref()),
+        remove_btn: w(remove_btn.upcast_ref()),
         map_revealer: w(map_revealer.upcast_ref()),
         blocks: w(blocks.upcast_ref()),
         status: w(status.upcast_ref()),
@@ -1048,6 +1074,7 @@ pub(crate) fn build_row(
             retry_btn: retry_btn.clone(),
             reveal_btn: reveal_btn.clone(),
             delete_btn: delete_btn.clone(),
+            remove_btn: remove_btn.clone(),
             map_revealer: map_revealer.clone(),
             blocks: blocks.clone(),
             expanded: Rc::clone(&expanded),

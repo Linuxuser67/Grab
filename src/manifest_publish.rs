@@ -37,14 +37,21 @@ impl Drop for DiscardOnDrop {
 struct PendingDestination {
     path: PathBuf,
     gate: Arc<crate::attempt_gate::AttemptGate>,
+    /// A same-filesystem rename can be restored here if the directory sync fails.
+    restore_to: Option<PathBuf>,
     armed: bool,
 }
 
 impl PendingDestination {
-    fn new(path: &Path, gate: Arc<crate::attempt_gate::AttemptGate>) -> Self {
+    fn new(
+        path: &Path,
+        gate: Arc<crate::attempt_gate::AttemptGate>,
+        restore_to: Option<&Path>,
+    ) -> Self {
         Self {
             path: path.to_path_buf(),
             gate,
+            restore_to: restore_to.map(Path::to_path_buf),
             armed: false,
         }
     }
@@ -60,8 +67,14 @@ impl PendingDestination {
 
 impl Drop for PendingDestination {
     fn drop(&mut self) {
-        if self.armed
-            && let Err(error) = std::fs::remove_file(&self.path)
+        if !self.armed {
+            return;
+        }
+        let rollback = match self.restore_to.as_deref() {
+            Some(source) => crate::file_names::rename_noreplace_same_device(&self.path, source),
+            None => std::fs::remove_file(&self.path),
+        };
+        if let Err(error) = rollback
             && error.kind() != std::io::ErrorKind::NotFound
         {
             tracing::warn!(
@@ -71,6 +84,28 @@ impl Drop for PendingDestination {
             );
             // The discard finalizer checks this after joining the async owner.
             self.gate.mark_delivered();
+            return;
+        }
+        if let Some(source) = self.restore_to.as_deref() {
+            for path in [source, self.path.as_path()] {
+                if let Some(parent) = path.parent()
+                    && let Err(error) = std::fs::File::open(parent).and_then(|dir| dir.sync_all())
+                {
+                    tracing::warn!(
+                        path = %parent.display(),
+                        error = %error,
+                        "could not sync a rolled-back manifest directory"
+                    );
+                }
+            }
+        } else if let Some(parent) = self.path.parent()
+            && let Err(error) = std::fs::File::open(parent).and_then(|dir| dir.sync_all())
+        {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %error,
+                "could not sync a rolled-back manifest directory"
+            );
         }
     }
 }
@@ -134,18 +169,29 @@ fn prepare_destination_copy(
 }
 
 /// Persist a fully synced temporary and claim delivery only after its final name exists.
-fn persist_prepared_copy(
+async fn sync_parent_directory(destination: &Path) -> std::io::Result<()> {
+    let parent = destination.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination has no parent directory",
+        )
+    })?;
+    tokio::fs::File::open(parent).await?.sync_all().await
+}
+
+async fn persist_prepared_copy(
     temporary: tempfile::NamedTempFile,
     destination: &Path,
     gate: &Arc<crate::attempt_gate::AttemptGate>,
 ) -> std::io::Result<ManifestPublishOutcome> {
-    let mut pending = PendingDestination::new(destination, Arc::clone(gate));
+    let mut pending = PendingDestination::new(destination, Arc::clone(gate), None);
     let published_file = temporary
         .persist_noclobber(destination)
         .map_err(|error| error.error)?;
     drop(published_file);
 
     pending.arm();
+    sync_parent_directory(destination).await?;
     if !gate.try_commit() {
         return Ok(ManifestPublishOutcome::Aborted);
     }
@@ -156,18 +202,20 @@ fn persist_prepared_copy(
 }
 
 /// Commit a same-filesystem rename or link after installing a rollback guard.
-fn commit_renamed_destination(
+async fn commit_renamed_destination(
     gate: &Arc<crate::attempt_gate::AttemptGate>,
     pending: &mut PendingDestination,
-) -> ManifestPublishOutcome {
+    destination: &Path,
+) -> std::io::Result<ManifestPublishOutcome> {
     pending.arm();
+    sync_parent_directory(destination).await?;
     if !gate.try_commit() {
-        return ManifestPublishOutcome::Aborted;
+        return Ok(ManifestPublishOutcome::Aborted);
     }
 
     gate.mark_delivered();
     pending.disarm();
-    ManifestPublishOutcome::Published
+    Ok(ManifestPublishOutcome::Published)
 }
 
 /// Publish a finalized output without blocking Tokio workers during cross-device copies.
@@ -182,8 +230,9 @@ pub(crate) async fn publish(
 
     match crate::file_names::rename_noreplace_same_device(source, destination) {
         Ok(()) => {
-            let mut pending = PendingDestination::new(destination, Arc::clone(gate));
-            return Ok(commit_renamed_destination(gate, &mut pending));
+            let mut pending =
+                PendingDestination::new(destination, Arc::clone(gate), Some(source));
+            return commit_renamed_destination(gate, &mut pending, destination).await;
         }
         Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {}
         Err(error) => return Err(error),
@@ -206,7 +255,7 @@ pub(crate) async fn publish(
         return Ok(ManifestPublishOutcome::Aborted);
     }
 
-    let outcome = persist_prepared_copy(temporary, destination, gate)?;
+    let outcome = persist_prepared_copy(temporary, destination, gate).await?;
     cancellation.disarm();
     Ok(outcome)
 }

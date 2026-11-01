@@ -3529,8 +3529,8 @@ impl DownloadManager {
             self.changed();
             return;
         }
-        // Non-live downloads retain their existing stop-and-resume behavior.
-        if !self.stop_engine(id, crate::video::StopIntent::Pause) {
+        // Non-live downloads retain their existing preserve-partials behavior.
+        if !self.stop_engine(id, crate::video::StopIntent::Finish) {
             return;
         }
         if let Some(item) = self.find(id) {

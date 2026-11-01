@@ -2442,8 +2442,10 @@ impl DownloadManager {
                             // metadata reads and recursive walks; snapshot plain inputs and defer them.
                             let mtime = this.server_mtime.borrow_mut().remove(&id);
                             let keep_server_date = this.settings.keep_server_date();
-                            let cleanup_torrent = crate::torrent::is_torrent(&url)
-                                && !this.settings.torrent_seed_finished();
+                            // Finished is emitted only after seeding is disabled or its configured
+                            // limit is reached. At that point no peer needs boundary-piece bytes
+                            // in unselected files, so clean them for both modes.
+                            let cleanup_torrent = crate::torrent::is_torrent(&url);
                             // Snapshot the filter before dropping its row-scoped state; the
                             // filesystem cleanup runs later on a blocking worker.
                             let cleanup_selection = cleanup_torrent

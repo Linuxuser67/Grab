@@ -285,12 +285,12 @@ pub(crate) fn pulse_tick(status: DownloadStatus, is_live: bool, progress: f64) -
 pub(crate) enum StopCopy {
     /// A normal download: stopping it discards the bytes.
     Cancel,
-    /// A live capture: stopping it keeps the recording.
+    /// A live capture: finishing it saves the recording.
     FinishRecording,
 }
 
 /// Which of the two meanings the row's stop button currently carries:
-/// cancelling discards the bytes, stopping a live capture keeps the recording,
+/// cancelling discards the bytes, finishing a live capture saves the recording,
 /// so the copy follows the row's state. Pure and testable, but the wording
 /// stays here: `xgettext` only extracts literal `gettext("…")` arguments, so
 /// returning strings would put every label out of reach of translators.

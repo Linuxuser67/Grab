@@ -810,7 +810,7 @@ async fn transfer_static_manifest_tracks(
                 {
                     return Ok(false);
                 }
-                if !concat_dash_track(video, video_dir, "video-track.mp4", &mut abort).await? {
+                if !concat_dash_track(video, video_dir, "video-track.mp4", abort).await? {
                     return Ok(false);
                 }
                 if let Some(audio) = audio {
@@ -827,7 +827,7 @@ async fn transfer_static_manifest_tracks(
                     {
                         return Ok(false);
                     }
-                    if !concat_dash_track(audio, audio_dir, "audio-track.mp4", &mut abort).await? {
+                    if !concat_dash_track(audio, audio_dir, "audio-track.mp4", abort).await? {
                         return Ok(false);
                     }
                 }
@@ -847,7 +847,7 @@ async fn transfer_static_manifest_tracks(
                     {
                         return Ok(false);
                     }
-                    if !concat_dash_track(subtitle, &subtitle_dir, "subtitle-track.mp4", &mut abort)
+                    if !concat_dash_track(subtitle, &subtitle_dir, "subtitle-track.mp4", abort)
                         .await?
                     {
                         return Ok(false);

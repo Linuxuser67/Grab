@@ -946,7 +946,8 @@ impl DownloadManager {
     ) -> Result<(String, crate::torrent::SessionConfig), String> {
         let magnet = normalize_url(magnet)?;
         let settings = &self.settings;
-        let blocklist_url = crate::torrent::blocklist_url_of(&settings.torrent_blocklist_url())?;
+        let blocklist_url = crate::torrent::blocklist_url_of(&settings.torrent_blocklist_url())
+            .map_err(|error| error.to_string())?;
         let proxy = DownloadOptions::from_settings(settings).proxy_config()?;
         let (listen_port, upnp) = crate::torrent::resolve_listen_config(
             settings.torrent_seed_finished(),

@@ -400,9 +400,38 @@ pub(crate) async fn run_manifest_download(
     let live_marker_exists = read_live_hls_marker(&staging)
         .await
         .map_err(ManifestRunError::Failed)?;
-    let finish_marker_bytes = read_live_finish_marker(&staging)
+    let unrecoverable_state = crate::live_capture_state::read(&staging)
         .await
         .map_err(ManifestRunError::Failed)?;
+    if let Some(state) = unrecoverable_state.as_ref() {
+        let expected_protocol = match job.source.kind {
+            ManifestKind::Hls => "hls",
+            ManifestKind::Dash => "dash",
+        };
+        if state.protocol != expected_protocol {
+            return Err(ManifestRunError::Failed(
+                "The unrecoverable live-capture marker belongs to a different manifest protocol"
+                    .to_string(),
+            ));
+        }
+    }
+    let mut finish_marker_bytes = read_live_finish_marker(&staging)
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    if let Some(state) = unrecoverable_state.as_ref() {
+        if finish_marker_bytes.is_none() {
+            ensure_live_finish_marker(&staging, state.staged_bytes)
+                .await
+                .map_err(ManifestRunError::Failed)?;
+            finish_marker_bytes = Some(state.staged_bytes);
+        }
+        tracing::warn!(
+            item_id = job.item_id,
+            protocol = %state.protocol,
+            reason = %state.reason,
+            "resuming finalization of an unrecoverable live capture without polling its source"
+        );
+    }
     let finish_requested = finish_marker_bytes.is_some();
     let dash_live_requested = job.source.kind == ManifestKind::Dash
         && job.source.representation_key.starts_with("dash-live-");
@@ -573,14 +602,29 @@ pub(crate) async fn run_manifest_download(
         match capture {
             LiveHlsCaptureOutcome::Ended => {}
             LiveHlsCaptureOutcome::Paused => return Ok(ManifestOutcome::Paused),
-            LiveHlsCaptureOutcome::Finish | LiveHlsCaptureOutcome::FinishVideoOnly => {
+            LiveHlsCaptureOutcome::Finish
+            | LiveHlsCaptureOutcome::FinishVideoOnly
+            | LiveHlsCaptureOutcome::Unrecoverable => {
+                if matches!(capture, LiveHlsCaptureOutcome::Unrecoverable) {
+                    crate::live_capture_state::persist(
+                        &staging,
+                        "hls",
+                        "HLS playlist continuity could not be verified",
+                        downloaded.load(Ordering::Relaxed),
+                    )
+                    .await
+                    .map_err(ManifestRunError::Failed)?;
+                }
                 // A Finish ends recording but still needs a live
                 // receiver during FFmpeg finalization. Removal remains guarded
                 // by AttemptGate::try_commit at the final delivery boundary.
                 if !staged_regular_file_exists(&video_dir.join("local.m3u8")).await {
                     return Ok(ManifestOutcome::Aborted);
                 }
-                if matches!(capture, LiveHlsCaptureOutcome::FinishVideoOnly) {
+                if matches!(
+                    capture,
+                    LiveHlsCaptureOutcome::FinishVideoOnly | LiveHlsCaptureOutcome::Unrecoverable
+                ) {
                     // Keep a video-only recovery decision across process restarts:
                     // an old audio playlist must not be restored on the next retry.
                     remove_regular_file_if_present(&audio_dir.join("local.m3u8"))
@@ -640,7 +684,19 @@ pub(crate) async fn run_manifest_download(
         match capture.outcome {
             DashLiveCaptureOutcome::Discard => return Ok(ManifestOutcome::Aborted),
             DashLiveCaptureOutcome::Paused => return Ok(ManifestOutcome::Paused),
-            DashLiveCaptureOutcome::Finish | DashLiveCaptureOutcome::FinishVideoOnly => {
+            DashLiveCaptureOutcome::Finish
+            | DashLiveCaptureOutcome::FinishVideoOnly
+            | DashLiveCaptureOutcome::Unrecoverable => {
+                if matches!(capture.outcome, DashLiveCaptureOutcome::Unrecoverable) {
+                    crate::live_capture_state::persist(
+                        &staging,
+                        "dash",
+                        "DASH presentation continuity could not be verified",
+                        downloaded.load(Ordering::Relaxed),
+                    )
+                    .await
+                    .map_err(ManifestRunError::Failed)?;
+                }
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 _finish_stop_sender = Some(sender);
                 abort = receiver;
@@ -654,7 +710,10 @@ pub(crate) async fn run_manifest_download(
         {
             return Ok(ManifestOutcome::Aborted);
         }
-        if matches!(capture.outcome, DashLiveCaptureOutcome::FinishVideoOnly) {
+        if matches!(
+            capture.outcome,
+            DashLiveCaptureOutcome::FinishVideoOnly | DashLiveCaptureOutcome::Unrecoverable
+        ) {
             remove_regular_file_if_present(&audio_dir.join(DASH_LIVE_STATE_NAME))
                 .await
                 .map_err(ManifestRunError::Failed)?;

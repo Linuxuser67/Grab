@@ -5087,6 +5087,45 @@ fn pause_sends_a_distinct_intent_to_native_live_manifest_workers() {
 }
 
 #[test]
+fn finish_live_recording_sends_finish_without_marking_the_row_cancelled() {
+    let (_q, _l) = test_locks();
+    let qf = test_queue_file("finish-live-manifest");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 921_875 + std::process::id() as u64;
+    let item = DownloadItem::new(id, "https://example.com/live.m3u8", "live.mp4", "/tmp/dl");
+    item.set_status(DownloadStatus::Downloading);
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Manifest {
+            source: crate::media_types::ManifestSource {
+                url: "https://example.com/live.m3u8".to_string(),
+                kind: crate::media_types::ManifestKind::Hls,
+                representation_key: "hls-variant-test".to_string(),
+                audio_key: None,
+                subtitle_key: None,
+                subtitle_language: None,
+            },
+        },
+    );
+    manager.live_rows.borrow_mut().insert(id);
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    manager.video_abort.borrow_mut().insert(id, stop_tx);
+
+    assert!(manager.finish_live_recording(id));
+    assert_eq!(item.status(), DownloadStatus::Downloading);
+    assert!(!manager.can_pause_live_capture(id));
+    assert_eq!(
+        stop_rx
+            .blocking_recv()
+            .expect("live worker should receive the finish intent"),
+        crate::video::StopIntent::Finish
+    );
+    let _ = std::fs::remove_file(qf);
+}
+
+#[test]
 fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     // Old `remove` could neither say *how* to stop nor wait. The stand-in recreates
     // dirs before its late write, so only a sweep that waits for teardown passes.

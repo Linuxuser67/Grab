@@ -34,46 +34,67 @@ type ManagedTorrentHandle = Arc<ManagedTorrent>;
 #[derive(Debug, thiserror::Error)]
 pub enum TorrentError {
     #[error("{0}")]
+    /// The magnet URI could not be parsed.
     InvalidMagnet(String),
     #[error("{0}")]
+    /// The magnet identifies a BitTorrent version not supported by Grab.
     UnsupportedMagnetVersion(String),
     #[error("{0}")]
+    /// The supplied torrent file exceeds the accepted size limit.
     TorrentTooLarge(String),
     #[error("{0}")]
+    /// Torrent metainfo could not be parsed or validated.
     InvalidTorrent(String),
     #[error("{message}: {source}")]
+    /// An archived torrent could not be stored.
     Store { message: String, #[source] source: io::Error },
     #[error("Cannot create session dir: {0}")]
+    /// The application data directory for the torrent session could not be created.
     SessionDirectory(#[source] io::Error),
     #[error("{0}")]
+    /// The archive filename collision retry limit was reached.
     StoreNameCollisions(String),
     #[error("{0}")]
+    /// The selected torrent file could not be read within its size bound.
     CouldNotReadTorrent(String),
     #[error("{0}")]
+    /// Resolved magnet metadata exceeds the persistence size limit.
     MetadataTooLarge(String),
     #[error("{0}")]
+    /// Resolved magnet metadata could not be parsed.
     InvalidResolvedMetadata(String),
     #[error("{0}")]
+    /// Resolved metadata does not match the requested magnet info-hash.
     MetadataHashMismatch(String),
     #[error("{0}")]
+    /// The info-hash cannot be used to construct a metadata cache path.
     InvalidInfoHash(String),
     #[error("{message}: {source}")]
+    /// Resolved magnet metadata could not be persisted safely.
     MetadataStorage { message: String, #[source] source: io::Error },
     #[error("{0}")]
+    /// Magnet metadata resolution exceeded its deadline.
     MagnetResolutionTimeout(String),
     #[error("{0}")]
+    /// The torrent engine failed to resolve the magnet.
     MagnetResolution(String),
     #[error("{0}")]
+    /// The engine returned a response other than a metadata file listing.
     UnexpectedMagnetResponse(String),
     #[error("{0}")]
+    /// The resolved torrent contains no files.
     EmptyTorrent(String),
     #[error("{message}: {source}")]
+    /// The blocking metadata persistence task failed to join.
     MetadataTask { message: String, #[source] source: tokio::task::JoinError },
     #[error("{0}")]
+    /// The configured listen port is outside the valid u16 range.
     InvalidListenPort(String),
     #[error("{0}")]
+    /// The configured peer blocklist is not an HTTP(S) URL.
     InvalidBlocklistUrl(String),
     #[error("{0}")]
+    /// The underlying torrent session could not be initialized.
     SessionStart(String),
 }
 

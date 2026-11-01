@@ -150,7 +150,8 @@ async fn intake_remote_torrent(
     // Parse off the GTK thread: bencode decode and the info-hash hash are
     // CPU work on up to 10 MB.
     let parsed = gio::spawn_blocking(move || {
-        let list = crate::torrent::torrent_file_list(&bytes)?;
+        let list = crate::torrent::torrent_file_list(&bytes)
+            .map_err(|error| error.to_string())?;
         Ok::<_, String>((bytes, list))
     })
     .await;

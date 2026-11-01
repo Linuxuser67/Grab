@@ -431,12 +431,12 @@ pub fn delete_archive_for_url(url: &str) {
     }
 }
 
-/// Remove archives no live row references (stale Failed/Cancelled leftovers stay for retry).
+/// Remove unreferenced torrent archives and magnet metadata (stale Failed/Cancelled rows remain referenced for retry).
 pub fn sweep_archives(referenced: &std::collections::HashSet<String>) {
     sweep_archives_in(&torrents_dir(), referenced);
 }
 
-/// Testable core: sweep a directory, keeping only referenced archives.
+/// Testable core: keep only `.torrent` archives and magnet metadata referenced by queue URLs.
 pub fn sweep_archives_in(dir: &std::path::Path, referenced: &std::collections::HashSet<String>) {
     let referenced_magnets: std::collections::HashSet<String> = referenced
         .iter()

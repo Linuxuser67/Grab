@@ -1435,6 +1435,14 @@ fn push_playlist_items_page(
             .build();
         list_box.append(&notice);
     }
+    // Playlist entries are yt-dlp video pages, so one output-mode choice
+    // applies to every selected item. Torrent/magnet pickers deliberately
+    // have no media-mode control because torrent files are arbitrary content.
+    let audio_only = gtk4::CheckButton::builder()
+        .label(gettext("Download audio only"))
+        .halign(gtk4::Align::Start)
+        .build();
+    list_box.append(&audio_only);
     // Small selections use their natural height; long lists scroll within
     // the grid's capped viewport. Captions stay outside the scroll area.
     list_box.append(grid.widget());
@@ -1521,6 +1529,7 @@ fn push_playlist_items_page(
             let close_card = close_card.clone();
             let page_url = playlist.page_url.clone();
             let add_btn = add_btn.clone();
+            let audio_only = audio_only.is_active();
             // The GTK clicked handler is an `Fn` and may run repeatedly;
             // clone the shared collection-host state for each import future.
             let guarded_child_hosts = guarded_child_hosts.clone();
@@ -1591,14 +1600,14 @@ fn push_playlist_items_page(
                         }
                     }
                     let settings = manager.settings();
-                    let name = default_name_for(settings, &item.title, false);
+                    let name = default_name_for(settings, &item.title, audio_only);
                     match manager.enqueue_video_staged(
                         &item_page_url,
                         &dir,
                         Some(&name),
                         crate::media_types::VideoChoices {
                             quality: manager.settings().video_quality(),
-                            audio_only: false,
+                            audio_only,
                             video_format_id: None,
                             // Live streams queued from a playlist take the VOD
                             // path; the worker re-resolves each item page anyway.
@@ -4340,10 +4349,16 @@ mod tests {
             Rc::clone(&close_card),
             "archive.torrent".into(),
             TorrentPickerSource::File { bytes: vec![0] },
-            vec![crate::torrent::TorrentFileEntry {
-                raw_path: "folder/file.txt".into(),
-                display_path: "folder/file.txt".into(),
-            }],
+            vec![
+                crate::torrent::TorrentFileEntry {
+                    raw_path: "folder/file.txt".into(),
+                    display_path: "folder/file.txt".into(),
+                },
+                crate::torrent::TorrentFileEntry {
+                    raw_path: "folder/second.txt".into(),
+                    display_path: "folder/second.txt".into(),
+                },
+            ],
             Rc::new(Cell::new(None)),
         );
         assert_eq!(torrent_nav.visible_page_tag().as_deref(), Some("torrent"));
@@ -4373,6 +4388,31 @@ mod tests {
         );
         assert_eq!(magnet_nav.visible_page_tag().as_deref(), Some("torrent"));
         assert_eq!(store.n_items(), 0, "magnet must wait for Add");
+
+        // The real Open With / remote-torrent entry point starts from a
+        // collapsed card, so exercise its reveal + picker push together.
+        let add_card = build_add_card(Rc::clone(&manager));
+        assert!(!add_card.is_open());
+        add_card.open_torrent_picker(
+            "opened.torrent".into(),
+            vec![0],
+            vec![
+                crate::torrent::TorrentFileEntry {
+                    raw_path: "one.txt".into(),
+                    display_path: "one.txt".into(),
+                },
+                crate::torrent::TorrentFileEntry {
+                    raw_path: "two.txt".into(),
+                    display_path: "two.txt".into(),
+                },
+            ],
+        );
+        assert!(add_card.is_open());
+        assert_eq!(
+            add_card.navigation().visible_page_tag().as_deref(),
+            Some("torrent"),
+            "opening a multi-file torrent must present the inline selection page",
+        );
     }
 
     #[test]

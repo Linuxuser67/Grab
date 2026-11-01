@@ -354,7 +354,10 @@ pub(crate) fn parse_dash_manifest_at(
                 mime_type.as_deref(),
                 adaptation.contentType.as_deref(),
                 adaptation.mimeType.as_deref(),
-                representation.codecs.as_deref().or(adaptation.codecs.as_deref()),
+                representation
+                    .codecs
+                    .as_deref()
+                    .or(adaptation.codecs.as_deref()),
             );
             let Some(kind) = kind else {
                 // Text, metadata, and unknown adaptation sets are not media inputs.
@@ -421,9 +424,11 @@ pub(crate) fn parse_dash_manifest_at(
                 language,
                 kind,
                 is_default_audio: kind == DashTrackKind::Audio && is_default_audio,
-                is_default_subtitle: kind == DashTrackKind::Subtitle && adaptation.Role.iter().any(|role| {
-                    role.schemeIdUri == DASH_ROLE_SCHEME && role.value.as_deref() == Some("main")
-                }),
+                is_default_subtitle: kind == DashTrackKind::Subtitle
+                    && adaptation.Role.iter().any(|role| {
+                        role.schemeIdUri == DASH_ROLE_SCHEME
+                            && role.value.as_deref() == Some("main")
+                    }),
                 source: DashRepresentationSource {
                     base_url: representation_base,
                     addressing,
@@ -436,7 +441,11 @@ pub(crate) fn parse_dash_manifest_at(
                 DashTrackKind::Subtitle => subtitle_representations.push(choice),
             }
 
-            if video_representations.len() + audio_representations.len() + subtitle_representations.len() > MAX_REPRESENTATIONS {
+            if video_representations.len()
+                + audio_representations.len()
+                + subtitle_representations.len()
+                > MAX_REPRESENTATIONS
+            {
                 return Err(DashError::LimitExceeded);
             }
         }
@@ -788,7 +797,10 @@ fn track_kind(
         && codecs.is_some_and(|codecs| {
             codecs.split(',').any(|codec| {
                 let codec = codec.trim().to_ascii_lowercase();
-                codec == "stpp" || codec.starts_with("stpp.") || codec == "wvtt" || codec.starts_with("wvtt.")
+                codec == "stpp"
+                    || codec.starts_with("stpp.")
+                    || codec == "wvtt"
+                    || codec.starts_with("wvtt.")
             })
         })
     {

@@ -747,7 +747,7 @@ pub(crate) async fn run_manifest_download(
         let capture = run_live_hls_tracks(
             &client,
             &job.source.url,
-            dest_dir,
+            &dest_dir,
             video,
             audio.as_ref(),
             finish_requested,
@@ -818,7 +818,7 @@ pub(crate) async fn run_manifest_download(
         let capture = run_live_dash_tracks(
             &client,
             &job.source.url,
-            dest_dir,
+            &dest_dir,
             &job.source.representation_key,
             job.source.audio_key.as_deref(),
             video_plan,
@@ -1031,7 +1031,7 @@ pub(crate) async fn run_manifest_download(
         abort,
         tx: &tx,
         staging: &staging,
-        dest_dir,
+        dest_dir: &dest_dir,
         video_dir: &video_dir,
         audio_dir: &audio_dir,
         output_part,

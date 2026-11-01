@@ -117,6 +117,22 @@ fn ffmpeg_log_indicates_storage_full(log: &str) -> bool {
     log.contains("no space left on device") || log.contains("disk quota exceeded")
 }
 
+/// Classify mux failures as terminal so staged resources remain available for retry.
+fn mux_failure_error(log: &str) -> ManifestRunError {
+    if ffmpeg_log_indicates_storage_full(log) {
+        return ManifestRunError::Failed(
+            "Not enough free disk space to finalize this stream".to_string(),
+        );
+    }
+
+    let detail = log
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("FFmpeg could not mux the stream");
+    ManifestRunError::Failed(format!("FFmpeg could not mux the stream: {detail}"))
+}
+
 /// Inputs retained by the queue; URLs for individual segments are resolved again on every attempt.
 #[derive(Clone, Debug)]
 pub(crate) struct ManifestJob {
@@ -3283,19 +3299,7 @@ async fn run_ffmpeg(
     };
     let log = stderr_task.await.unwrap_or_default();
     if !status.success() {
-        if ffmpeg_log_indicates_storage_full(&log) {
-            return Err(ManifestRunError::Failed(
-                "Not enough free disk space to finalize this stream".to_string(),
-            ));
-        }
-        let detail = log
-            .lines()
-            .rev()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("FFmpeg could not mux the stream");
-        return Err(ManifestRunError::Unsupported(format!(
-            "FFmpeg could not mux the stream: {detail}"
-        )));
+        return Err(mux_failure_error(&log));
     }
     Ok(true)
 }
@@ -3348,6 +3352,32 @@ mod tests {
         assert!(ffmpeg_log_indicates_storage_full("Disk quota exceeded"));
         assert!(!ffmpeg_log_indicates_storage_full(
             "Invalid data found when processing input"
+        ));
+    }
+
+    #[test]
+    fn mux_failure_preserves_the_staged_capture_for_retry() {
+        let error = mux_failure_error("Invalid data found when processing input");
+        assert!(matches!(
+            &error,
+            ManifestRunError::Failed(message)
+                if message.contains("FFmpeg could not mux the stream")
+        ));
+        assert!(
+            matches!(error.into_engine_message(), EngineMsg::Failed(_)),
+            "a mux error must not enter the fallback path that removes staged resources"
+        );
+    }
+
+    #[test]
+    fn mux_storage_full_failure_keeps_its_specific_error() {
+        let error = mux_failure_error(
+            "av_interleaved_write_frame(): No space left on device",
+        );
+        assert!(matches!(
+            error,
+            ManifestRunError::Failed(message)
+                if message == "Not enough free disk space to finalize this stream"
         ));
     }
 

@@ -2059,8 +2059,8 @@ one.ts
         let error = parse_hls_master_playlist(BASE_URL, body).err();
         assert!(
             matches!(
-                error,
-                Some(ManifestError::Parse(ref details))
+                &error,
+                Some(ManifestError::Parse(details))
                     if details.contains("Tag at byte 0")
                         && !details.contains("not a playlist")
             ),

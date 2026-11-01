@@ -656,6 +656,17 @@ pub fn setup(app: &adw::Application) {
             manager.restore_queue();
             manager.start_scheduler();
 
+            // Bind the loopback endpoint as soon as the queue manager exists.
+            // The extension's cold-start wake polls /hello before retrying its
+            // cookie-bearing POST; starting the listener before building the
+            // full GTK window removes that UI construction from the wake path.
+            // The bounded channel buffers a POST until the GLib bridge below
+            // has installed the application state and begins receiving it.
+            let (ext_tx, mut ext_rx) = tokio::sync::mpsc::channel::<
+                crate::extension_server::Handoff,
+            >(crate::extension_server::QUEUE_DEPTH);
+            crate::runtime::tokio_rt().spawn(crate::extension_server::serve(ext_tx));
+
             let toasts = Rc::new(adw::ToastOverlay::new());
             register_actions(app, &st, &shutdown_requested);
             let win = window::build_window(app, manager.clone(), settings.clone(), toasts.clone());
@@ -730,14 +741,10 @@ pub fn setup(app: &adw::Application) {
                 }
             });
 
-            // Extension HTTP server -> download queue bridge. Routes through
-            // the same confirm dialog and route_open_uri as grab:// handoffs.
+            // Extension HTTP server -> download queue bridge. The listener
+            // is already active; this receiver connects it to the application
+            // once the GTK state and window are ready.
             let bridge_state = st.clone();
-            // Bounded: a flood of handoffs gets 429 from the server instead of
-            // piling up confirm dialogs or memory here.
-            let (ext_tx, mut ext_rx) =
-                tokio::sync::mpsc::channel::<crate::extension_server::Handoff>(crate::extension_server::QUEUE_DEPTH);
-            crate::runtime::tokio_rt().spawn(crate::extension_server::serve(ext_tx));
             glib::spawn_future_local(async move {
                 while let Some(handoff) = ext_rx.recv().await {
                     // Early `continue`s below drop `decision`: a decline.

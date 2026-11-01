@@ -25,23 +25,6 @@ pub(crate) enum ManifestDownloadPlan {
     },
 }
 
-#[derive(Debug)]
-pub(crate) struct ManifestPlanError(String);
-
-impl std::fmt::Display for ManifestPlanError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for ManifestPlanError {}
-
-impl ManifestPlanError {
-    fn unsupported(message: impl Into<String>) -> Self {
-        Self(message.into())
-    }
-}
-
 /// Select the closest representation to the configured video-quality preference.
 #[must_use]
 pub(crate) fn preferred_choice_index(choices: &[ManifestChoice], quality: &str) -> usize {
@@ -261,20 +244,18 @@ impl ManifestLookup {
 /// resources, or the HLS child-playlist URLs that the runner fetches before
 /// executing the media playlists.
 pub(crate) fn download_plan(
-    lookup: &ManifestLookup,
+    lookup: ManifestLookup,
     source: &ManifestSource,
 ) -> Result<ManifestDownloadPlan, ManifestPlanError> {
     if lookup.kind() != source.kind {
-        return Err(ManifestPlanError::unsupported(
-            "The stream manifest protocol changed since this item was queued",
-        ));
+        return Err("The stream manifest is no longer supported".to_string());
     }
 
-    match (&lookup.manifest, source.kind) {
+    match (lookup.manifest, source.kind) {
         (NativeManifest::HlsMedia(plan), ManifestKind::Hls)
-            if source.representation_key == "hls-media" && source.audio_key.is_none() =>
+            if source.representation_key == "hls-media" =>
         {
-            Ok(ManifestDownloadPlan::HlsMedia(plan.as_ref().clone()))
+            Ok(ManifestDownloadPlan::HlsMedia(*plan))
         }
         (NativeManifest::HlsMaster(master), ManifestKind::Hls) => {
             let variant = master
@@ -286,9 +267,7 @@ pub(crate) fn download_plan(
                         .then_some(variant)
                 })
                 .ok_or_else(|| {
-                    ManifestPlanError::unsupported(
-                        "The selected HLS variant is no longer available",
-                    )
+                    "The selected HLS variant is no longer available".to_string()
                 })?;
             let selected_audio = match source.audio_key.as_deref() {
                 Some(audio_key) => Some(
@@ -306,9 +285,7 @@ pub(crate) fn download_plan(
                                 .is_some_and(|group| rendition.group_id == group)
                         })
                         .ok_or_else(|| {
-                            ManifestPlanError::unsupported(
-                                "The selected HLS audio rendition is no longer available",
-                            )
+                            "The selected HLS audio rendition is no longer available".to_string()
                         })?,
                 ),
                 None => variant.audio_group.as_deref().and_then(|group| {
@@ -332,19 +309,17 @@ pub(crate) fn download_plan(
         }
         (NativeManifest::Dash(dash), ManifestKind::Dash) => {
             let video = crate::manifest::dash::plan_dash_representation(
-                dash,
+                &dash,
                 &source.representation_key,
             )
-            .map_err(|error| ManifestPlanError::unsupported(error.to_string()))?;
+            .map_err(|error| error.to_string())?;
             let selected_audio = match source.audio_key.as_deref() {
                 Some(audio_key) => Some(
                     dash.audio_representations
                         .iter()
                         .find(|track| track.key == audio_key || track.live_key == audio_key)
                         .ok_or_else(|| {
-                            ManifestPlanError::unsupported(
-                                "The selected DASH audio representation is no longer available",
-                            )
+                            "The selected DASH audio representation is no longer available".to_string()
                         })?,
                 ),
                 None => dash.default_audio(),
@@ -358,16 +333,14 @@ pub(crate) fn download_plan(
                     } else {
                         track.key.as_str()
                     };
-                    crate::manifest::dash::plan_dash_representation(dash, plan_key)
+                    crate::manifest::dash::plan_dash_representation(&dash, plan_key)
                         .map(Box::new)
-                        .map_err(|error| ManifestPlanError::unsupported(error.to_string()))
+                        .map_err(|error| error.to_string())
                 })
                 .transpose()?;
             Ok(ManifestDownloadPlan::Dash { video, audio })
         }
-        _ => Err(ManifestPlanError::unsupported(
-            "The selected representation is not valid for this manifest",
-        )),
+        _ => Err("The selected representation is not valid for this manifest".to_string()),
     }
 }
 
@@ -507,7 +480,7 @@ video/720.m3u8
             .selected_source(&video_key, Some(&audio_key))
             .expect("valid stable track selection");
 
-        let plan = download_plan(&lookup, &source).expect("valid selected download plan");
+        let plan = download_plan(lookup, &source).expect("valid selected download plan");
         let ManifestDownloadPlan::HlsMaster {
             video_url,
             audio_url,
@@ -547,6 +520,6 @@ video/720.m3u8
             audio_key: None,
         };
 
-        assert!(download_plan(&lookup, &source).is_err());
+        assert!(download_plan(lookup, &source).is_err());
     }
 }

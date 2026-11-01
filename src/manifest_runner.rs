@@ -3169,6 +3169,7 @@ async fn run_live_dash_tracks(
 ) -> Result<DashLiveCapture, ManifestRunError> {
     let (mut video, video_bytes) =
         load_dash_live_track(representation_key, video_dir, video_plan).await?;
+    let staging_dir = video_dir.parent().unwrap_or(video_dir);
     let mut audio_key = audio_key
         .map(str::to_string)
         .or_else(|| audio_plan.map(|plan| plan.representation.live_key.clone()));
@@ -3248,7 +3249,6 @@ async fn run_live_dash_tracks(
         });
     }
     downloaded.store(total_bytes, Ordering::Relaxed);
-    let staging_dir = video_dir.parent().unwrap_or(video_dir);
     ensure_manifest_mux_spaces(staging_dir, destination_dir, total_bytes)?;
 
     let (Some(mut current_video_plan), mut current_audio_plan) =

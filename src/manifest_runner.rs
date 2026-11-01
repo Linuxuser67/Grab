@@ -4016,10 +4016,18 @@ async fn fetch_and_write_dash_track(
                 }
             }
         };
-        if !window_outcome? {
-            break;
+        match window_outcome {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(error) => {
+                tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                    .ok();
+                return Err(error);
+            }
         }
         if next_resource_index != window_end {
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                .ok();
             return Err(ManifestRunError::Failed(
                 "The ordered DASH fetch window ended before its resources were committed"
                     .to_string(),

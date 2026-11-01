@@ -16,6 +16,7 @@ pub(crate) enum ManifestDownloadPlan {
         video_url: Url,
         audio_url: Option<Url>,
         subtitle_url: Option<Url>,
+        subtitle_language: Option<String>,
     },
     Dash {
         video: Box<DashRepresentationPlan>,
@@ -420,6 +421,15 @@ pub(crate) fn download_plan(
                         .ok_or_else(|| "The selected HLS subtitle rendition is no longer available".to_string())?),
                     None => None,
                 },
+                subtitle_language: source.subtitle_key.as_deref().and_then(|subtitle_key| {
+                    master.subtitle_renditions.iter()
+                        .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
+                        .find_map(|(rendition, key)| {
+                            (key.as_deref() == Some(subtitle_key)
+                                && variant.subtitles_group.as_deref() == Some(rendition.group_id.as_str()))
+                                .then(|| rendition.language.clone())
+                        })
+                }),
             })
         }
         (NativeManifest::Dash(dash), ManifestKind::Dash) => {

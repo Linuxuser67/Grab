@@ -759,8 +759,13 @@ pub(crate) async fn run_manifest_download(
         Tracks::Hls { subtitle_language, .. } | Tracks::Dash { subtitle_language, .. } => subtitle_language.as_deref(),
         Tracks::DashLiveOffline { .. } => None,
     };
+    let subtitle_language = subtitle_language.filter(|language| {
+        !language.is_empty()
+            && language.len() <= 35
+            && language.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    }).unwrap_or("und");
     let subtitle_sidecar = if subtitle_input.is_some() && !job.embed_subs {
-        Some(crate::video_staging::sidecar_path_for(&output_part, subtitle_language.unwrap_or("und")))
+        Some(crate::video_staging::sidecar_path_for(&output_part, subtitle_language))
     } else {
         None
     };
@@ -827,8 +832,8 @@ pub(crate) async fn run_manifest_download(
             ));
         }
     }
-    if let (Some(sidecar), Some(language)) = (subtitle_sidecar.as_deref(), subtitle_language) {
-        crate::video_staging::collect_sidecar(sidecar, &job.dest, language);
+    if let Some(sidecar) = subtitle_sidecar.as_deref() {
+        crate::video_staging::collect_sidecar(sidecar, &job.dest, subtitle_language);
     }
     let parent = job.dest.parent().map(Path::to_path_buf);
     if let Some(parent) = parent {
@@ -865,6 +870,7 @@ async fn resolve_tracks(
             video_url,
             audio_url,
             subtitle_url,
+            subtitle_language,
         } => {
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
             if let Some(audio_url) = audio_url.as_ref() {
@@ -887,11 +893,6 @@ async fn resolve_tracks(
                 }
                 None => None,
             };
-            let subtitle_language = source.subtitle_key.as_deref().and_then(|_| {
-                // The subtitle key was validated by the planner; language metadata is
-                // resolved from the selected rendition below in a follow-up lookup.
-                None
-            });
             let audio = match audio_url {
                 Some(url) => {
                     let plan =
@@ -3275,7 +3276,8 @@ async fn run_ffmpeg(
     }
     command.args(["-c", "copy"]);
     if subtitle_input.is_some() && embed_subtitles {
-        command.args(["-map", "2:s:0?", "-c:s", "mov_text"]);
+        let subtitle_stream = if audio_input.is_some() { "2:s:0?" } else { "1:s:0?" };
+        command.arg("-map").arg(subtitle_stream).args(["-c:s", "mov_text"]);
     }
     command
         .args(["-movflags", "+faststart", "-f", "mp4"])
@@ -3285,7 +3287,9 @@ async fn run_ffmpeg(
             ManifestRunError::Failed("Subtitle sidecar destination is missing".to_string())
         })?;
         command
-            .args(["-map", "2:s:0", "-c:s", "srt", "-f", "srt"])
+            .arg("-map")
+            .arg(if audio_input.is_some() { "2:s:0" } else { "1:s:0" })
+            .args(["-c:s", "srt", "-f", "srt"])
             .arg(sidecar);
     }
         .stdin(std::process::Stdio::null())

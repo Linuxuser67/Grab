@@ -895,6 +895,23 @@ video/720.m3u8
             subtitle.representation.representation_id.as_deref(),
             Some("sub-en")
         );
+
+        let invalid_lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/manifest.mpd".to_string(),
+            manifest: NativeManifest::Dash(
+                crate::manifest::dash::parse_dash_manifest(
+                    "https://cdn.example.test/manifest.mpd",
+                    body,
+                )
+                .expect("valid static DASH presentation"),
+            ),
+        };
+        let mut invalid_source = source;
+        invalid_source.subtitle_key = Some(video_key);
+        assert!(
+            download_plan(invalid_lookup, &invalid_source).is_err(),
+            "a video representation key must not be accepted as a subtitle key"
+        );
     }
 
     #[test]

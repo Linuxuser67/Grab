@@ -8836,6 +8836,17 @@ fn resolve_subtitle_lang_uses_the_explicit_language_without_a_probe_or_fallback(
         None,
     ));
     assert_eq!(result, Ok(Some("de".to_string())));
+
+    job.info_json = Some(serde_json::json!({"subtitles": {"fr": []}}));
+    job.subtitle_selection = crate::media_types::SubtitleSelection::Language("de".into());
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let result = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        std::path::Path::new("/missing/yt-dlp"),
+        &job,
+        &mut abort_rx,
+        None,
+    ));
+    assert_eq!(result, Ok(None), "cached metadata must reject a disappeared track");
 }
 
 #[test]

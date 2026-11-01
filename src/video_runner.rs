@@ -1334,16 +1334,14 @@ pub(crate) async fn resolve_subtitle_lang(
             // choice directly instead of doing a second metadata extraction.
             // If cached metadata is available, still reject a track that is
             // known to have disappeared; an empty sanitized map is inconclusive.
+            let selected_language = language.to_ascii_lowercase();
             if let Some(json) = job.info_json.as_ref() {
                 let available = available_subtitle_langs(json);
                 if !available.is_empty() {
-                    return Ok(pick_subtitle_lang(
-                        &available,
-                        &[language.to_ascii_lowercase().as_str()],
-                    ));
+                    return Ok(pick_subtitle_lang(&available, &[selected_language.as_str()]));
                 }
             }
-            return Ok(Some(language.to_ascii_lowercase()));
+            return Ok(Some(selected_language));
         }
         crate::media_types::SubtitleSelection::Language(_) => {
             tracing::warn!("ignoring invalid persisted subtitle language selection");

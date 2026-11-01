@@ -1321,10 +1321,12 @@ impl DownloadManager {
             .extension()
             .and_then(|extension| extension.to_str())
         {
-            Some(extension) if extension.eq_ignore_ascii_case("mp4") => {}
+            Some(extension)
+                if extension.eq_ignore_ascii_case("mp4")
+                    || extension.eq_ignore_ascii_case("mkv") => {}
             Some(_) => {
                 return Err(gettext(
-                    "Native HLS/DASH downloads currently require an MP4 filename",
+                    "Native HLS/DASH downloads require an MP4 or MKV filename",
                 ));
             }
             None => requested_name.push_str(".mp4"),

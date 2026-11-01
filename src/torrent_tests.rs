@@ -556,15 +556,13 @@ fn sweep_archives_keeps_referenced_magnet_metadata_only() {
     std::fs::create_dir_all(&dir).expect("create metadata directory");
     let hash = "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3";
     let cached = magnet_metadata_path_in(&dir, hash).expect("valid info hash");
-    let stale = magnet_metadata_path_in(
-        &dir,
-        "b94a8fe5ccb19ba61c4c0873d391e987982fbbd3",
-    )
-    .expect("valid info hash");
+    let stale = magnet_metadata_path_in(&dir, "b94a8fe5ccb19ba61c4c0873d391e987982fbbd3")
+        .expect("valid info hash");
     std::fs::write(&cached, b"cached").expect("write cached metadata");
     std::fs::write(&stale, b"stale").expect("write stale metadata");
-    let referenced: std::collections::HashSet<String> =
-        [format!("magnet:?xt=urn:btih:{hash}")].into_iter().collect();
+    let referenced: std::collections::HashSet<String> = [format!("magnet:?xt=urn:btih:{hash}")]
+        .into_iter()
+        .collect();
 
     sweep_archives_in(&dir, &referenced);
 

@@ -279,18 +279,21 @@ fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), String> 
         .write_all(bytes)
         .and_then(|()| temporary.as_file().sync_all())
         .map_err(|error| format!("{}: {error}", gettext("Cannot write magnet metadata")))?;
-    temporary
-        .persist(&path)
-        .map_err(|error| {
-            format!(
-                "{}: {}",
-                gettext("Cannot publish magnet metadata"),
-                error.error
-            )
-        })?;
+    temporary.persist(&path).map_err(|error| {
+        format!(
+            "{}: {}",
+            gettext("Cannot publish magnet metadata"),
+            error.error
+        )
+    })?;
     std::fs::File::open(&dir)
         .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("{}: {error}", gettext("Cannot sync magnet metadata directory")))?;
+        .map_err(|error| {
+            format!(
+                "{}: {error}",
+                gettext("Cannot sync magnet metadata directory")
+            )
+        })?;
     Ok(())
 }
 
@@ -434,9 +437,7 @@ pub(crate) async fn list_magnet_files(
     let bytes = listing.torrent_bytes;
     tokio::task::spawn_blocking(move || persist_magnet_metadata(&info_hash, &bytes))
         .await
-        .map_err(|error| {
-            format!("{}: {error}", gettext("Could not persist magnet metadata"))
-        })??;
+        .map_err(|error| format!("{}: {error}", gettext("Could not persist magnet metadata")))??;
 
     Ok((name, entries))
 }
@@ -707,13 +708,7 @@ fn remove_beneath(path: &std::path::Path, folder: &std::path::Path, remove_final
             return;
         };
         // SAFETY: the descriptor is open and target_name is a NUL-free component.
-        let result = unsafe {
-            libc::unlinkat(
-                parent.fd.as_raw_fd(),
-                target_name.as_ptr(),
-                0,
-            )
-        };
+        let result = unsafe { libc::unlinkat(parent.fd.as_raw_fd(), target_name.as_ptr(), 0) };
         if result != 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() != std::io::ErrorKind::NotFound {

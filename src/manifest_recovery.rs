@@ -125,8 +125,8 @@ fn directory_has_staged_data(directory: &Path) -> Result<bool, String> {
     let entries = fs::read_dir(directory)
         .map_err(|error| format!("Could not inspect manifest staging directory: {error}"))?;
     for entry in entries {
-        let entry = entry
-            .map_err(|error| format!("Could not inspect manifest staging entry: {error}"))?;
+        let entry =
+            entry.map_err(|error| format!("Could not inspect manifest staging entry: {error}"))?;
         let name = entry.file_name();
         if name == ".grab-manifest-owner" || name == RECOVERY_FILE {
             continue;
@@ -306,8 +306,15 @@ mod tests {
         fs::write(&resource, b"preserve me").expect("write staged resource");
 
         let changed = fingerprint(&source(), "mkv", true).expect("changed fingerprint");
-        assert!(validate_or_initialize(staging.path(), changed).await.is_err());
-        assert_eq!(fs::read(resource).expect("read preserved resource"), b"preserve me");
+        assert!(
+            validate_or_initialize(staging.path(), changed)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(resource).expect("read preserved resource"),
+            b"preserve me"
+        );
     }
 
     #[tokio::test]
@@ -317,17 +324,27 @@ mod tests {
         fs::write(&resource, b"legacy data").expect("write legacy resource");
         let expected = fingerprint(&source(), "mp4", true).expect("fingerprint");
 
-        assert!(validate_or_initialize(staging.path(), expected).await.is_err());
-        assert_eq!(fs::read(resource).expect("read preserved resource"), b"legacy data");
+        assert!(
+            validate_or_initialize(staging.path(), expected)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(resource).expect("read preserved resource"),
+            b"legacy data"
+        );
     }
 
     #[tokio::test]
     async fn malformed_recovery_metadata_is_rejected() {
         let staging = tempfile::tempdir().expect("create staging directory");
-        fs::write(staging.path().join(RECOVERY_FILE), b"{")
-            .expect("write malformed metadata");
+        fs::write(staging.path().join(RECOVERY_FILE), b"{").expect("write malformed metadata");
         let expected = fingerprint(&source(), "mp4", true).expect("fingerprint");
 
-        assert!(validate_or_initialize(staging.path(), expected).await.is_err());
+        assert!(
+            validate_or_initialize(staging.path(), expected)
+                .await
+                .is_err()
+        );
     }
 }

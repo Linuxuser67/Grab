@@ -120,6 +120,23 @@ fn ffmpeg_log_indicates_storage_full(log: &str) -> bool {
 }
 
 /// Classify mux failures as terminal so staged resources remain available for retry.
+fn subtitle_mux_unsupported(log: &str) -> bool {
+    let log = log.to_ascii_lowercase();
+    [
+        "matches no streams",
+        "unknown decoder",
+        "decoder not found",
+        "unknown encoder",
+        "encoder not found",
+        "could not find tag for codec",
+        "subtitle codec",
+        "unsupported codec",
+        "codec is not supported",
+    ]
+    .iter()
+    .any(|needle| log.contains(needle))
+}
+
 fn mux_failure_error(log: &str) -> ManifestRunError {
     if ffmpeg_log_indicates_storage_full(log) {
         return ManifestRunError::Failed(
@@ -3290,7 +3307,7 @@ async fn run_ffmpeg(
     }
     command.args(["-c", "copy"]);
     if subtitle_input.is_some() && embed_subtitles {
-        let subtitle_stream = if audio_input.is_some() { "2:s:0?" } else { "1:s:0?" };
+        let subtitle_stream = if audio_input.is_some() { "2:s:0" } else { "1:s:0" };
         command.arg("-map").arg(subtitle_stream).args(["-c:s", "mov_text"]);
     }
     command
@@ -3306,6 +3323,7 @@ async fn run_ffmpeg(
             .args(["-c:s", "srt", "-f", "srt"])
             .arg(sidecar);
     }
+    command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -3342,6 +3360,11 @@ async fn run_ffmpeg(
     };
     let log = stderr_task.await.unwrap_or_default();
     if !status.success() {
+        if subtitle_input.is_some() && subtitle_mux_unsupported(&log) {
+            return Err(ManifestRunError::Unsupported(
+                "The selected subtitle format is not supported by the native finalizer".to_string(),
+            ));
+        }
         return Err(mux_failure_error(&log));
     }
     Ok(true)

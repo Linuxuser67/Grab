@@ -1294,7 +1294,10 @@ pub(crate) fn pick_subtitle_lang(
 /// Available subtitle languages for one video: the lowercase keys of the
 /// info-JSON `subtitles` and `automatic_captions` maps. Pure.
 fn available_subtitle_langs(info: &serde_json::Value) -> std::collections::HashSet<String> {
-    crate::video_probe::subtitle_languages(info).into_vec().into_iter().collect()
+    crate::video_probe::subtitle_languages(info)
+        .into_vec()
+        .into_iter()
+        .collect()
 }
 
 /// Resolve the subtitle language for the media command. Automatic mode uses

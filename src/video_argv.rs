@@ -50,8 +50,8 @@ pub struct VideoJob {
     pub audio_only: bool,
     /// Raw browser-auth setting (`none` = off), resolved to `--cookies-from-browser` in the worker.
     pub cookies_browser: String,
-    /// Subtitle language preference captured from settings (`None` = off).
-    /// Resolved against the video's offered tracks before the media command is built.
+    /// Configured language preference for Automatic mode; `None` disables
+    /// automatic subtitles. Explicit per-row language choices override it.
     pub subtitles: Option<String>,
     /// Per-row override, persisted on the page source.
     pub subtitle_selection: crate::media_types::SubtitleSelection,

@@ -426,9 +426,11 @@ pub(crate) fn subtitle_languages(info: &serde_json::Value) -> Box<[String]> {
     let mut languages = std::collections::BTreeSet::new();
     for key in ["subtitles", "automatic_captions"] {
         if let Some(map) = info.get(key).and_then(serde_json::Value::as_object) {
-            languages.extend(map.keys().map(|language| language.to_ascii_lowercase()).filter(
-                |language| crate::video_prefs::is_plain_lang_key(language),
-            ));
+            languages.extend(
+                map.keys()
+                    .map(|language| language.to_ascii_lowercase())
+                    .filter(|language| crate::video_prefs::is_plain_lang_key(language)),
+            );
         }
     }
     languages.into_iter().collect()

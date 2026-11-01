@@ -28,8 +28,8 @@ pub fn quality_value(index: usize) -> &'static str {
     combo_value(VIDEO_QUALITY_VALUES, index, "1080p")
 }
 
-/// Per-row subtitle behavior. Automatic uses the configured preferred language;
-/// Off disables subtitles; Language pins one offered language code.
+/// Per-row subtitle behavior. Automatic uses the configured preference with
+/// an English fallback; Off disables subtitles; Language pins one offered code.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubtitleSelection {
@@ -80,7 +80,7 @@ pub enum VideoSource {
     Direct,
     /// Direct HLS/DASH manifest with a durable selected video representation.
     Manifest { source: ManifestSource },
-    /// Media behind a page needing yt-dlp; identity is the page URL, `media_url`/`expires_at` transient, quality/audio per-item choices.
+    /// Media behind a page needing yt-dlp; identity is the page URL, `media_url`/`expires_at` transient, quality/audio/subtitle choices per-item.
     Page {
         page_url: String,
         media_url: Option<String>,

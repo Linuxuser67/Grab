@@ -2926,6 +2926,7 @@ impl DownloadManager {
                     item.set_detail(e);
                     item.set_status(DownloadStatus::Failed);
                     self.changed();
+                    self.start_next();
                     return;
                 }
             };
@@ -2936,6 +2937,7 @@ impl DownloadManager {
                 item.set_detail(e);
                 item.set_status(DownloadStatus::Failed);
                 self.changed();
+                self.start_next();
                 return;
             }
         };
@@ -2954,10 +2956,6 @@ impl DownloadManager {
             trackers,
             proxy.as_ref(),
         );
-        let id = item.id();
-        let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
-        self.epoch.borrow_mut().insert(id, generation);
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let is_file = crate::torrent::is_torrent_url(&magnet);
         let source = if is_file {
             match crate::torrent::archive_path_for_url(&magnet) {
@@ -2966,12 +2964,19 @@ impl DownloadManager {
                     item.set_detail(gettext("Torrent file is missing from the archive"));
                     item.set_status(DownloadStatus::Failed);
                     self.changed();
+                    self.start_next();
                     return;
                 }
             }
         } else {
             crate::torrent::TorrentSource::Magnet(magnet)
         };
+        // Source validation can fail before an engine or pump exists. Do not
+        // register an attempt generation or channel until the source is ready.
+        let id = item.id();
+        let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
+        self.epoch.borrow_mut().insert(id, generation);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let only_files = crate::torrent::get_selection(&item.url().to_string());
         // Intake-recorded collision subfolders (file torrents) are already final; magnets use their recorded dir.
         let dest_is_final = !recorded.is_empty() && is_file;
@@ -3044,6 +3049,20 @@ impl DownloadManager {
             playlist_item_id,
         } = params;
         let id = item.id();
+        let opts = DownloadOptions::from_settings(&self.settings);
+        // Validate before registering the attempt so a failed configuration
+        // cannot leave a stale live-row marker, gate, or abort sender behind.
+        let proxy = match opts.proxy_config() {
+            Ok(proxy) => proxy,
+            Err(error) => {
+                item.set_detail(error);
+                item.set_status(DownloadStatus::Failed);
+                self.changed();
+                self.start_next();
+                return;
+            }
+        };
+
         let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(id, generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3060,17 +3079,6 @@ impl DownloadManager {
         } else {
             self.live_rows.borrow_mut().remove(&id);
         }
-        let opts = DownloadOptions::from_settings(&self.settings);
-        // Invalid manual proxy fails the row loudly before any network: never silently route direct.
-        let proxy = match opts.proxy_config() {
-            Ok(proxy) => proxy,
-            Err(e) => {
-                item.set_detail(e);
-                item.set_status(DownloadStatus::Failed);
-                self.changed();
-                return;
-            }
-        };
         // Probe JSON is only reusable under the conditions it was probed with.
         let probe_json_key: ProbeJsonKey = (
             page_url.clone(),

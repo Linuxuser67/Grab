@@ -66,6 +66,28 @@ fn wait_for_started(manager: &DownloadManager, id: u64, timeout: Duration) -> bo
     manager.started.borrow().contains(&id)
 }
 
+/// Wait for a queue row to reach an expected state while servicing the GLib context.
+fn wait_for_status(
+    manager: &DownloadManager,
+    id: u64,
+    expected: DownloadStatus,
+    timeout: Duration,
+) -> bool {
+    let context = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + timeout;
+    while !manager
+        .find(id)
+        .is_some_and(|item| item.status() == expected)
+        && std::time::Instant::now() < deadline
+    {
+        context.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    manager
+        .find(id)
+        .is_some_and(|item| item.status() == expected)
+}
+
 /// Wait for async destination preparation to settle, including its local-task cleanup.
 fn wait_for_preparation(manager: &DownloadManager, id: u64, timeout: Duration) -> bool {
     let ctx = glib::MainContext::default();
@@ -1251,6 +1273,10 @@ fn enqueue_video_spawns_and_fails_without_tools() {
     assert_eq!(
         item.detail(),
         "Media downloads need the yt-dlp support tools"
+    );
+    assert!(
+        manager.gate_for(id).is_some(),
+        "a video attempt with valid network configuration must install its delivery gate"
     );
     // The Page marker survives the failure, so Retry replays the pipeline.
     assert!(matches!(
@@ -6079,12 +6105,13 @@ fn enqueue_video_accepts_unlisted_url() {
 }
 
 #[test]
-fn a_video_attempt_gets_a_gate_and_a_plain_row_does_not() {
-    // Video attempts arbitrate delivery via a gate; plain rows abort outright and need none.
+fn video_proxy_failure_does_not_leave_live_state_or_stall_the_queue() {
     let (_q, _l) = test_locks();
-    let qf = test_queue_file("gate-spawn");
+    let qf = test_queue_file("video-proxy-failure-wakes-queue");
     let settings = test_settings();
-    // Fail validation after gate creation but before worker/pump starts: stays synchronous.
+    settings
+        .set_int(crate::settings::key::MAX_CONCURRENT, 1)
+        .unwrap();
     settings
         .set_string(
             crate::settings::key::PROXY_MODE,
@@ -6094,56 +6121,266 @@ fn a_video_attempt_gets_a_gate_and_a_plain_row_does_not() {
     settings
         .set_string(crate::settings::key::PROXY_HOST, "")
         .unwrap();
-    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+    let id = 700_001 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-video-proxy-failure-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest_dir = dest_dir.to_string_lossy().into_owned();
 
-    let plain = DownloadItem::new(700_001, "https://example.com/a.bin", "a.bin", "/tmp/dl");
-    manager.store().append(&plain);
-    manager.epoch.borrow_mut().insert(plain.id(), 1);
-    assert!(
-        manager.gate_for(plain.id()).is_none(),
-        "a plain row must not be given a gate to arbitrate"
+    let video = DownloadItem::new(id, "https://example.com/v.mp4", "v.mp4", &dest_dir);
+    manager.store().append(&video);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://example.com/v.mp4".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: true,
+            video_format_id: None,
+            playlist_item_id: None,
+            backend: None,
+        },
     );
+    let next = DownloadItem::new(
+        id + 1,
+        "http://127.0.0.1:9/next.bin",
+        "next.bin",
+        &dest_dir,
+    );
+    manager.store().append(&next);
 
-    let mut row = stored_row(
-        "https://example.com/v.mp4",
-        "/tmp/dl",
-        "v.mp4",
-        DownloadStatus::Queued,
-    );
-    row.video_source = Some(crate::media_types::VideoSource::Page {
+    manager.spawn_video(SpawnVideoParams {
+        item: video.clone(),
         page_url: "https://example.com/v.mp4".to_string(),
-        media_url: None,
-        expires_at: None,
         quality: "1080p".to_string(),
         audio_only: false,
-        is_live: false,
         video_format_id: None,
+        is_live: true,
         playlist_item_id: None,
-        backend: None,
     });
-    let item = manager.restore_existing(&row).expect("video row");
-    // Destination validation is asynchronous now. Wait until the attempt has
-    // passed preparation and installed its delivery gate before asserting the
-    // fail-fast proxy path; don't assume GTK setup runs in the enqueue call.
-    let context = glib::MainContext::default();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while manager.gate_for(item.id()).is_none()
-        && item.status() == DownloadStatus::Queued
-        && std::time::Instant::now() < deadline
-    {
-        context.iteration(false);
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    assert!(
-        manager.gate_for(item.id()).is_some(),
-        "a video attempt must install its delivery gate before engine validation"
-    );
-    quiesce(&context);
 
-    manager
-        .settings()
-        .set_string(crate::settings::key::PROXY_MODE, PROXY_MODE_DIRECT)
+    assert_eq!(video.status(), DownloadStatus::Failed);
+    assert!(
+        manager.gate_for(id).is_none(),
+        "proxy validation must fail before an attempt gate is registered"
+    );
+    assert!(
+        !manager.video_abort.borrow().contains_key(&id),
+        "a failed spawn must not leave a stale video abort sender"
+    );
+    assert!(
+        !manager.live_rows.borrow().contains(&id),
+        "a failed live-video spawn must not leave a stale live-row marker"
+    );
+    assert!(
+        !manager.epoch.borrow().contains_key(&id),
+        "a failed preflight must not create an attempt generation"
+    );
+    assert!(
+        wait_for_status(
+            &manager,
+            next.id(),
+            DownloadStatus::Failed,
+            Duration::from_secs(10),
+        ),
+        "the next queued row must be attempted after video proxy validation fails"
+    );
+    drain_engine(&manager, next.id());
+
+    settings
+        .set_string(crate::settings::key::PROXY_MODE, PROXY_MODE_SYSTEM)
         .unwrap();
+    settings
+        .set_string(crate::settings::key::PROXY_HOST, "127.0.0.1")
+        .unwrap();
+    settings
+        .set_int(crate::settings::key::MAX_CONCURRENT, 3)
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    let _ = std::fs::remove_file(qf);
+}
+
+#[test]
+fn torrent_blocklist_failure_starts_the_next_queued_row() {
+    let (_q, _l) = test_locks();
+    let qf = test_queue_file("torrent-blocklist-failure-wakes-queue");
+    let settings = test_settings();
+    settings
+        .set_int(crate::settings::key::MAX_CONCURRENT, 1)
+        .unwrap();
+    settings
+        .set_string(crate::settings::key::TORRENT_BLOCKLIST_URL, "not-a-url")
+        .unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+    let id = 705_001 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-torrent-blocklist-failure-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest_dir_text = dest_dir.to_string_lossy().into_owned();
+
+    let magnet = "magnet:?xt=urn:btih:0123456789012345678901234567890123456789";
+    let torrent = DownloadItem::new(id, magnet, "torrent", &dest_dir_text);
+    let next = DownloadItem::new(
+        id + 1,
+        "http://127.0.0.1:9/next.bin",
+        "next.bin",
+        &dest_dir_text,
+    );
+    manager.store().append(&torrent);
+    manager.store().append(&next);
+
+    manager.spawn_torrent(
+        torrent.clone(),
+        magnet.to_string(),
+        dest_dir.join("torrent-output"),
+    );
+
+    assert_eq!(torrent.status(), DownloadStatus::Failed);
+    assert!(
+        wait_for_status(
+            &manager,
+            next.id(),
+            DownloadStatus::Failed,
+            Duration::from_secs(10),
+        ),
+        "the next queued row must be attempted after blocklist validation fails"
+    );
+    drain_engine(&manager, next.id());
+
+    settings
+        .set_string(crate::settings::key::TORRENT_BLOCKLIST_URL, "")
+        .unwrap();
+    settings
+        .set_int(crate::settings::key::MAX_CONCURRENT, 3)
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    let _ = std::fs::remove_file(qf);
+}
+
+#[test]
+fn torrent_proxy_failure_starts_the_next_queued_row() {
+    let (_q, _l) = test_locks();
+    let qf = test_queue_file("torrent-proxy-failure-wakes-queue");
+    let settings = test_settings();
+    settings
+        .set_int(crate::settings::key::MAX_CONCURRENT, 1)
+        .unwrap();
+    settings
+        .set_string(
+            crate::settings::key::PROXY_MODE,
+            crate::download_net::PROXY_MODE_MANUAL,
+        )
+        .unwrap();
+    settings
+        .set_string(crate::settings::key::PROXY_HOST, "")
+        .unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+    let id = 706_001 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-torrent-proxy-failure-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest_dir_text = dest_dir.to_string_lossy().into_owned();
+
+    let magnet = "magnet:?xt=urn:btih:0123456789012345678901234567890123456789";
+    let torrent = DownloadItem::new(id, magnet, "torrent", &dest_dir_text);
+    let next = DownloadItem::new(
+        id + 1,
+        "http://127.0.0.1:9/next.bin",
+        "next.bin",
+        &dest_dir_text,
+    );
+    manager.store().append(&torrent);
+    manager.store().append(&next);
+
+    manager.spawn_torrent(
+        torrent.clone(),
+        magnet.to_string(),
+        dest_dir.join("torrent-output"),
+    );
+
+    assert_eq!(torrent.status(), DownloadStatus::Failed);
+    assert!(
+        wait_for_status(
+            &manager,
+            next.id(),
+            DownloadStatus::Failed,
+            Duration::from_secs(10),
+        ),
+        "the next queued row must be attempted after torrent proxy validation fails"
+    );
+    drain_engine(&manager, next.id());
+
+    settings
+        .set_string(crate::settings::key::PROXY_MODE, PROXY_MODE_SYSTEM)
+        .unwrap();
+    settings
+        .set_string(crate::settings::key::PROXY_HOST, "127.0.0.1")
+        .unwrap();
+    settings
+        .set_int(crate::settings::key::MAX_CONCURRENT, 3)
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    let _ = std::fs::remove_file(qf);
+}
+
+#[test]
+fn missing_archived_torrent_source_wakes_queue_without_registering_attempt() {
+    let (_q, _l) = test_locks();
+    let qf = test_queue_file("missing-archived-torrent-wakes-queue");
+    let settings = test_settings();
+    settings
+        .set_int(crate::settings::key::MAX_CONCURRENT, 1)
+        .unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+    let id = 707_001 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-missing-torrent-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest_dir_text = dest_dir.to_string_lossy().into_owned();
+    let archived_path = glib::user_data_dir()
+        .join("grab")
+        .join("torrents")
+        .join(format!("missing-{id}.torrent"));
+    let archived_url = format!("torrent:{}", archived_path.display());
+    let missing = DownloadItem::new(id, &archived_url, "missing.torrent", &dest_dir_text);
+    let next = DownloadItem::new(
+        id + 1,
+        "http://127.0.0.1:9/next.bin",
+        "next.bin",
+        &dest_dir_text,
+    );
+    manager.store().append(&missing);
+    manager.store().append(&next);
+
+    manager.spawn_torrent(
+        missing.clone(),
+        archived_url,
+        dest_dir.join("torrent-output"),
+    );
+
+    assert_eq!(missing.status(), DownloadStatus::Failed);
+    assert!(
+        !manager.epoch.borrow().contains_key(&id),
+        "an invalid archived source must fail before attempt registration"
+    );
+    assert!(
+        wait_for_status(
+            &manager,
+            next.id(),
+            DownloadStatus::Failed,
+            Duration::from_secs(10),
+        ),
+        "the next queued row must be attempted after archive validation fails"
+    );
+    drain_engine(&manager, next.id());
+
+    settings
+        .set_int(crate::settings::key::MAX_CONCURRENT, 3)
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dest_dir);
     let _ = std::fs::remove_file(qf);
 }
 

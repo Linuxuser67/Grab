@@ -77,28 +77,7 @@ pub(crate) async fn validate_or_initialize(
 fn validate_or_initialize_sync(staging: &Path, fingerprint: &str) -> Result<(), String> {
     let marker_path = staging.join(RECOVERY_FILE);
     match fs::symlink_metadata(&marker_path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err("Manifest recovery metadata is not a regular file".to_string());
-            }
-            let bytes = fs::read(&marker_path)
-                .map_err(|error| format!("Could not read manifest recovery metadata: {error}"))?;
-            let marker: RecoveryMarker = serde_json::from_slice(&bytes)
-                .map_err(|error| format!("Manifest recovery metadata is invalid: {error}"))?;
-            if marker.version != RECOVERY_VERSION {
-                return Err(format!(
-                    "Manifest recovery metadata version {} is unsupported",
-                    marker.version
-                ));
-            }
-            if marker.fingerprint != fingerprint {
-                return Err(
-                    "The selected manifest tracks or output container changed; existing staged data was preserved. Remove and add the download again to start a new plan."
-                        .to_string(),
-                );
-            }
-            Ok(())
-        }
+        Ok(_) => validate_existing_marker(&marker_path, fingerprint),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if directory_has_staged_data(staging)? {
                 return Err(
@@ -112,6 +91,31 @@ fn validate_or_initialize_sync(staging: &Path, fingerprint: &str) -> Result<(), 
             "Could not inspect manifest recovery metadata: {error}"
         )),
     }
+}
+
+fn validate_existing_marker(marker_path: &Path, fingerprint: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(marker_path)
+        .map_err(|error| format!("Could not inspect manifest recovery metadata: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("Manifest recovery metadata is not a regular file".to_string());
+    }
+    let bytes = fs::read(marker_path)
+        .map_err(|error| format!("Could not read manifest recovery metadata: {error}"))?;
+    let marker: RecoveryMarker = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Manifest recovery metadata is invalid: {error}"))?;
+    if marker.version != RECOVERY_VERSION {
+        return Err(format!(
+            "Manifest recovery metadata version {} is unsupported",
+            marker.version
+        ));
+    }
+    if marker.fingerprint != fingerprint {
+        return Err(
+            "The selected manifest tracks or output container changed; existing staged data was preserved. Remove and add the download again to start a new plan."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Only the staging ownership marker and empty directories are harmless when
@@ -172,9 +176,20 @@ fn write_recovery_marker(
         .as_file()
         .sync_all()
         .map_err(|error| format!("Could not sync manifest recovery metadata: {error}"))?;
-    temporary
-        .persist(marker_path)
-        .map_err(|error| format!("Could not publish manifest recovery metadata: {}", error.error))?;
+    match temporary.persist_noclobber(marker_path) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another attempt may have initialized the same item concurrently.
+            // Never replace its plan marker; accept only an exact match.
+            validate_existing_marker(marker_path, fingerprint)?;
+        }
+        Err(error) => {
+            return Err(format!(
+                "Could not publish manifest recovery metadata: {}",
+                error.error
+            ));
+        }
+    }
 
     // Persist the directory entry before the runner starts committing media data.
     File::open(staging)

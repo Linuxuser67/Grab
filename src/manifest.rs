@@ -2014,5 +2014,4 @@ video/720.m3u8
             Some("rendition-en")
         );
     }
-
 }

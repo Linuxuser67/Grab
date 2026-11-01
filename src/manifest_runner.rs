@@ -542,7 +542,7 @@ pub(crate) async fn run_manifest_download(
             LiveHlsCaptureOutcome::Ended => {}
             LiveHlsCaptureOutcome::Paused => return Ok(ManifestOutcome::Paused),
             LiveHlsCaptureOutcome::Preserve | LiveHlsCaptureOutcome::PreserveVideoOnly => {
-                // A preserved stop ends recording but still needs a live
+                // A Finish ends recording but still needs a live
                 // receiver during FFmpeg finalization. Removal remains guarded
                 // by AttemptGate::try_commit at the final delivery boundary.
                 if !staged_regular_file_exists(&video_dir.join("local.m3u8")).await {

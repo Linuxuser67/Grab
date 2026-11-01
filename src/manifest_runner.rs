@@ -374,8 +374,20 @@ pub(crate) async fn run_manifest_download(
     .await
     .map_err(|error| format!("Could not prepare manifest staging: {error}"))??;
 
+    // Bind every staged resource and interrupted output to the exact persisted
+    // selection and output settings before touching any existing staging data.
+    let recovery_fingerprint = crate::manifest_recovery::fingerprint(
+        &job.source,
+        output_container.extension(),
+        job.embed_subs,
+    )
+    .map_err(ManifestRunError::Failed)?;
+    crate::manifest_recovery::validate_or_initialize(&staging, recovery_fingerprint)
+        .await
+        .map_err(ManifestRunError::Failed)?;
+
     // Reclaim either supported container left by an interrupted attempt only
-    // after validating the state-dir stage's owner marker.
+    // after validating both the state-dir owner marker and the recovery plan.
     for extension in ["mp4", "mkv"] {
         remove_regular_file_if_present(&staging.join(format!("output.part.{extension}"))).await?;
     }

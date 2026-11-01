@@ -946,6 +946,10 @@ fn path_has_symlink_component(path: &std::path::Path, folder: &std::path::Path) 
 
 /// Trash all files listed in the torrent metadata (not the whole folder).
 /// Skips hostile entries and U+FFFD paths. Returns true if the folder is empty afterwards.
+///
+/// # Errors
+/// Returns a typed error when the archive cannot be read or parsed, or when an
+/// owned file cannot be moved to the desktop Trash.
 pub(crate) fn trash_torrent_contents(
     folder: &std::path::Path,
     url: &str,
@@ -973,7 +977,8 @@ pub(crate) fn trash_torrent_contents(
             .map(|mut entries| entries.next().is_none())
             .unwrap_or(true));
     }
-    let (_, entries) = torrent_file_list(&bytes).map_err(|_| TorrentError::TrashInvalidFileList)?;
+    let (_, entries) =
+        torrent_file_list(&bytes).map_err(|_| TorrentError::TrashInvalidFileList)?;
     let empty_keep: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (i, entry) in entries.iter().enumerate() {
         if let Some(target) = deletion_target(folder, i, &empty_keep, entry) {
@@ -985,7 +990,12 @@ pub(crate) fn trash_torrent_contents(
             match gio::File::for_path(&target).trash(gio::Cancellable::NONE) {
                 Ok(()) => {}
                 Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
-                Err(source) => return Err(TorrentError::TrashFile { path: target, source }),
+                Err(source) => {
+                    return Err(TorrentError::TrashFile {
+                        path: target,
+                        source,
+                    });
+                }
             }
             // GIO exposes no descriptor-relative trash API: the trash
             // metadata must carry the real path so Restore works. Validate

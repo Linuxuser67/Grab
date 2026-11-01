@@ -2290,9 +2290,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     manifest_audio_format.set_visible(false);
     video_group.add(&manifest_audio_format);
-    let manifest_container = adw::ComboRow::builder()
-        .title(gettext("Container"))
-        .build();
+    let manifest_container = adw::ComboRow::builder().title(gettext("Container")).build();
     manifest_container.set_model(Some(&gtk4::StringList::new(&["MP4", "MKV"])));
     manifest_container.set_visible(false);
     video_group.add(&manifest_container);
@@ -4878,10 +4876,11 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod manifest_container_tests {
-    use super::{manifest_container_extension, manifest_container_index, manifest_filename_with_extension};
+    use super::{
+        manifest_container_extension, manifest_container_index, manifest_filename_with_extension,
+    };
 
     #[test]
     fn manifest_container_defaults_to_mp4_and_detects_mkv_case_insensitively() {
@@ -4894,9 +4893,21 @@ mod manifest_container_tests {
 
     #[test]
     fn manifest_filename_tracks_selected_container_without_losing_stem() {
-        assert_eq!(manifest_filename_with_extension("Stream.mp4", "mkv"), "Stream.mkv");
-        assert_eq!(manifest_filename_with_extension("archive.part.MKV", "mp4"), "archive.part.mp4");
-        assert_eq!(manifest_filename_with_extension("Stream", "mkv"), "Stream.mkv");
-        assert_eq!(manifest_filename_with_extension(".hidden", "mp4"), ".hidden.mp4");
+        assert_eq!(
+            manifest_filename_with_extension("Stream.mp4", "mkv"),
+            "Stream.mkv"
+        );
+        assert_eq!(
+            manifest_filename_with_extension("archive.part.MKV", "mp4"),
+            "archive.part.mp4"
+        );
+        assert_eq!(
+            manifest_filename_with_extension("Stream", "mkv"),
+            "Stream.mkv"
+        );
+        assert_eq!(
+            manifest_filename_with_extension(".hidden", "mp4"),
+            ".hidden.mp4"
+        );
     }
 }

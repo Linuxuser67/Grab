@@ -483,6 +483,7 @@ fn refresh_row(
     // Native manifest live captures can pause at committed segment boundaries.
     // Other live extractors retain their finish-only behavior.
     let live_capturing = active && is_live;
+    let done = item.status() == DownloadStatus::Done;
     let manifest_download = is_manifest_download && !done;
     w.toggle_btn
         .set_visible(running && (!live_capturing || can_pause_live));
@@ -510,7 +511,6 @@ fn refresh_row(
         item.status(),
         DownloadStatus::Failed | DownloadStatus::Cancelled
     ));
-    let done = item.status() == DownloadStatus::Done;
     w.reveal_btn.set_visible(done);
     w.delete_btn
         .set_visible(done || live_capturing || manifest_download);

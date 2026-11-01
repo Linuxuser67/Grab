@@ -431,10 +431,11 @@ pub(crate) fn download_plan(
                         })
                 }),
             };
-            Ok(ManifestDownloadPlan::HlsMaster(Box::new(HlsMasterDownloadPlan {
-                video_url: variant.url.clone(),
-                audio_url: selected_audio.and_then(|rendition| rendition.url.clone()),
-                subtitle_url: match source.subtitle_key.as_deref() {
+            Ok(ManifestDownloadPlan::HlsMaster(Box::new(
+                HlsMasterDownloadPlan {
+                    video_url: variant.url.clone(),
+                    audio_url: selected_audio.and_then(|rendition| rendition.url.clone()),
+                    subtitle_url: match source.subtitle_key.as_deref() {
                     Some(subtitle_key) => Some(
                         master
                             .subtitle_renditions
@@ -452,21 +453,21 @@ pub(crate) fn download_plan(
                             })?,
                     ),
                     None => None,
+                    },
+                    subtitle_language: source.subtitle_key.as_deref().and_then(|subtitle_key| {
+                        master
+                            .subtitle_renditions
+                            .iter()
+                            .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
+                            .find_map(|(rendition, key)| {
+                                (key.as_deref() == Some(subtitle_key)
+                                    && variant.subtitles_group.as_deref()
+                                        == Some(rendition.group_id.as_str()))
+                                .then_some(rendition.language.clone())
+                            })
+                    }),
                 },
-                subtitle_language: source.subtitle_key.as_deref().and_then(|subtitle_key| {
-                    master
-                        .subtitle_renditions
-                        .iter()
-                        .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
-                        .find_map(|(rendition, key)| {
-                            (key.as_deref() == Some(subtitle_key)
-                                && variant.subtitles_group.as_deref()
-                                    == Some(rendition.group_id.as_str()))
-                            .then_some(rendition.language.clone())
-                            .flatten()
-                        })
-                }),
-            })))
+            )))
         }
         (NativeManifest::Dash(dash), ManifestKind::Dash) => {
             let video =
@@ -793,8 +794,7 @@ video/720.m3u8
             .selected_source(&video_key, None, Some(&subtitle_key))
             .expect("selected subtitle should be validated");
         let plan = download_plan(lookup, &source).expect("selected HLS subtitle plan");
-        let ManifestDownloadPlan::HlsMaster(plan) = plan
-        else {
+        let ManifestDownloadPlan::HlsMaster(plan) = plan else {
             panic!("expected an HLS master plan");
         };
         assert_eq!(
@@ -909,7 +909,9 @@ video/720.m3u8
             "https://cdn.example.test/video/720.m3u8"
         );
         assert_eq!(
-            plan.audio_url.expect("selected audio rendition URL").as_str(),
+            plan.audio_url
+                .expect("selected audio rendition URL")
+                .as_str(),
             "https://cdn.example.test/audio/en.m3u8"
         );
         assert!(plan.subtitle_url.is_none());

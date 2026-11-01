@@ -899,19 +899,25 @@ impl DownloadManager {
         )
     }
 
+    /// Whether an active live worker can still receive a stop intent.
+    pub(crate) fn can_finish_live_recording(&self, id: u64) -> bool {
+        self.is_live_video(id) && self.video_abort.borrow().contains_key(&id)
+    }
+
     /// Whether a live capture can be paused without losing its committed resume state.
     pub(crate) fn can_pause_live_capture(&self, id: u64) -> bool {
-        self.is_live_video(id)
-            && self.is_manifest_download(id)
-            && self.video_abort.borrow().contains_key(&id)
+        self.can_finish_live_recording(id) && self.is_manifest_download(id)
     }
 
     /// Request finalization of an active live recording without marking it cancelled.
     pub(crate) fn finish_live_recording(&self, id: u64) -> bool {
-        if !self.is_live_video(id)
+        if !self.can_finish_live_recording(id)
             || !self.stop_video_worker(id, crate::video::StopIntent::Finish)
         {
             return false;
+        }
+        if let Some(item) = self.find(id) {
+            item.set_detail(gettext("Finalizing recording…"));
         }
         self.persist_queue();
         self.changed();

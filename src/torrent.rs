@@ -485,9 +485,11 @@ pub(crate) async fn list_magnet_files(
     let info_hash = parsed
         .as_id20()
         .map(|id| id.as_string())
-        .ok_or_else(|| TorrentError::UnsupportedMagnetVersion(gettext(
-            "Only BitTorrent v1 magnets are supported",
-        )))?;
+        .ok_or_else(|| {
+            TorrentError::UnsupportedMagnetVersion(gettext(
+                "Only BitTorrent v1 magnets are supported",
+            ))
+        })?;
     if listing.info_hash.as_string() != info_hash {
         return Err(TorrentError::MetadataHashMismatch(gettext(
             "Resolved torrent metadata does not match the magnet link",
@@ -520,7 +522,9 @@ pub(crate) async fn list_magnet_files(
         })
         .collect();
     if entries.is_empty() {
-        return Err(TorrentError::EmptyTorrent(gettext("Torrent contains no files")));
+        return Err(TorrentError::EmptyTorrent(gettext(
+            "Torrent contains no files",
+        )));
     }
 
     // Move the bounded bytes only after the file list has been built; persistence
@@ -1089,7 +1093,9 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, TorrentError
             }
             let session = Session::new_with_opts(dir, opts)
                 .await
-                .map_err(|error| TorrentError::SessionStart(format!("Cannot start torrent engine: {error}")))?;
+                .map_err(|error| {
+                    TorrentError::SessionStart(format!("Cannot start torrent engine: {error}"))
+                })?;
             session.ratelimits.set_download_bps(bps(download_bps));
             session.ratelimits.set_upload_bps(bps(upload_bps));
             Ok(session)

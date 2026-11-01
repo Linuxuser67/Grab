@@ -236,7 +236,11 @@ async fn persist_unrecoverable_live_capture(
 /// An origin-only identifier safe for diagnostics. It deliberately omits
 /// user-info, path, query and fragment, all of which may contain credentials.
 fn diagnostic_url(url: &Url) -> String {
-    let mut origin = format!("{}://{}", url.scheme(), url.host_str().unwrap_or("<unknown>"));
+    let mut origin = format!(
+        "{}://{}",
+        url.scheme(),
+        url.host_str().unwrap_or("<unknown>")
+    );
     if let Some(port) = url.port() {
         origin.push_str(&format!(":{port}"));
     }
@@ -2414,8 +2418,7 @@ async fn fetch_resource_once(
         }
     } else if status == reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(ManifestRunError::Unsupported(
-            "The stream server returned partial content without a requested byte range"
-                .to_string(),
+            "The stream server returned partial content without a requested byte range".to_string(),
         ));
     } else if !status.is_success() {
         return Err(resource_status_error(status));
@@ -4381,7 +4384,10 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept resource request");
             let mut request = [0_u8; 1024];
-            let _ = socket.read(&mut request).await.expect("read resource request");
+            let _ = socket
+                .read(&mut request)
+                .await
+                .expect("read resource request");
             let response = "HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 0-1/4\r\nConnection: close\r\n\r\npa";
             socket
                 .write_all(response.as_bytes())
@@ -4394,8 +4400,7 @@ mod tests {
             .build()
             .expect("build direct HTTP test client");
         let resource = Resource {
-            url: Url::parse(&format!("http://{address}/complete.m4s"))
-                .expect("resource URL"),
+            url: Url::parse(&format!("http://{address}/complete.m4s")).expect("resource URL"),
             range: None,
             filename: "complete-000001-0123456789abcdef0123456789abcdef.bin".to_string(),
             key: false,
@@ -4408,7 +4413,11 @@ mod tests {
         assert!(matches!(result, Err(ManifestRunError::Unsupported(_))));
         assert_eq!(downloaded.load(Ordering::Relaxed), 0);
         assert!(!directory.join(resource.filename).exists());
-        assert!(!directory.join("complete-000001-0123456789abcdef0123456789abcdef.bin.part").exists());
+        assert!(
+            !directory
+                .join("complete-000001-0123456789abcdef0123456789abcdef.bin.part")
+                .exists()
+        );
         let _ = tokio::fs::remove_dir_all(directory).await;
     }
 
@@ -4439,7 +4448,13 @@ mod tests {
         assert_eq!(marker.protocol, "hls");
         assert_eq!(marker.staged_bytes, 420);
         assert_eq!(downloaded.load(Ordering::Relaxed), 420);
-        assert!(matches!(rx.try_recv(), Ok(EngineMsg::Progress { downloaded: 420, .. })));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineMsg::Progress {
+                downloaded: 420,
+                ..
+            })
+        ));
         let _ = tokio::fs::remove_dir_all(directory).await;
     }
 

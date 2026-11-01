@@ -1,13 +1,14 @@
 //! Native HLS/DASH segment transfer, resume and container finalization.
 
 use std::fmt;
-use thiserror::Error;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
+
+use thiserror::Error;
 
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};

@@ -901,7 +901,9 @@ impl DownloadManager {
 
     /// Whether a live capture can be paused without losing its committed resume state.
     pub fn can_pause_live_capture(&self, id: u64) -> bool {
-        self.is_live_video(id) && self.is_manifest_download(id)
+        self.is_live_video(id)
+            && self.is_manifest_download(id)
+            && self.video_abort.borrow().contains_key(&id)
     }
 
     /// Explicit absolute dest, else the effective download dir.

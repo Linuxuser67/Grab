@@ -817,3 +817,43 @@ mod sanitized_protocol_tests {
         );
     }
 }
+
+
+#[cfg(test)]
+mod subtitle_language_tests {
+    use super::subtitle_languages;
+
+    #[test]
+    fn subtitle_languages_are_sorted_deduplicated_and_safe() {
+        let info = serde_json::json!({
+            "subtitles": {
+                "fr": [],
+                "EN-us": [],
+                "-exclude": [],
+                "invalid/tag": [],
+                "zh_Hant": []
+            },
+            "automatic_captions": {
+                "en": [],
+                "FR": [],
+                "ar": [],
+                "bad language": []
+            }
+        });
+
+        assert_eq!(
+            subtitle_languages(&info).as_ref(),
+            ["ar", "en", "en-us", "fr", "zh_hant"]
+        );
+    }
+
+    #[test]
+    fn subtitle_languages_ignore_missing_or_non_object_maps() {
+        assert!(subtitle_languages(&serde_json::json!({})).is_empty());
+        assert!(subtitle_languages(&serde_json::json!({
+            "subtitles": null,
+            "automatic_captions": []
+        }))
+        .is_empty());
+    }
+}

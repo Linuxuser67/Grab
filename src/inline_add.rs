@@ -856,7 +856,7 @@ fn refresh_subtitle_picker(step: &VideoStep, languages: &[String]) {
     let labels = choices
         .iter()
         .map(|choice| match choice {
-            crate::media_types::SubtitleSelection::Automatic => gettext("Automatic"),
+            crate::media_types::SubtitleSelection::Automatic => gettext("Use preference"),
             crate::media_types::SubtitleSelection::Off => gettext("Off"),
             crate::media_types::SubtitleSelection::Language(language) => language.clone(),
         })

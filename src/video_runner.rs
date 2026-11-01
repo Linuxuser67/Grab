@@ -726,7 +726,7 @@ pub(crate) async fn run_unified_ytdlp(
     let Some(()) = done else {
         // User abort: on Preserve, try merging partial DASH parts into a
         // single file instead of abandoning them.
-        if matches!(abort_intent, Some(StopIntent::Finish))
+        if matches!(abort_intent, Some(StopIntent::Finish | StopIntent::Pause))
             && let Some(merged) =
                 try_merge_dash_partials(ffmpeg_bin, staging, &job.dest, &job.page_url, gate).await
         {
@@ -1874,8 +1874,8 @@ pub(crate) async fn run_live_ytdlp(
                 intent = &mut abort => {
                     reap_child(&mut child, &mut group).await;
                     break match intent {
-                        Ok(StopIntent::Finish) => (true, false),
-                        Ok(StopIntent::Pause | StopIntent::Discard) => (true, true),
+                        Ok(StopIntent::Finish | StopIntent::Pause) => (true, false),
+                        Ok(StopIntent::Discard) => (true, true),
                         Err(_) => {
                             // No sender remains to authorise anything: fail closed. Claim the gate so the pre-rename commit below cannot deliver either.
                             let _ = gate.discard();

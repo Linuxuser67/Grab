@@ -572,7 +572,9 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
                         let (bytes, _, entries) = match loaded {
                             Ok(Ok(data)) => data,
                             Ok(Err(e)) => {
-                                toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e.to_string())));
+                                toasts.add_toast(adw::Toast::new(
+                                    &crate::ui_util::esc_markup(&e.to_string()),
+                                ));
                                 return;
                             }
                             Err(e) => {

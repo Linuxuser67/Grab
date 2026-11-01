@@ -435,6 +435,24 @@ pub(crate) async fn run_manifest_download(
     let finish_requested = finish_marker_bytes.is_some();
     let dash_live_requested = job.source.kind == ManifestKind::Dash
         && job.source.representation_key.starts_with("dash-live-");
+    // A crash may occur after the unrecoverable marker is synced but before
+    // the stale audio index is removed. Enforce the video-only decision before
+    // restoring either protocol's local track state.
+    if let Some(state) = unrecoverable_state.as_ref() {
+        match state.protocol.as_str() {
+            "hls" => {
+                remove_regular_file_if_present(&audio_dir.join("local.m3u8"))
+                    .await
+                    .map_err(ManifestRunError::Failed)?;
+            }
+            "dash" => {
+                remove_regular_file_if_present(&audio_dir.join(DASH_LIVE_STATE_NAME))
+                    .await
+                    .map_err(ManifestRunError::Failed)?;
+            }
+            _ => unreachable!("validated unrecoverable marker protocol"),
+        }
+    }
     let mut offline_tracks =
         if (finish_requested || live_marker_exists) && job.source.kind == ManifestKind::Hls {
             restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?

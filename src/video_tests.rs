@@ -8801,7 +8801,8 @@ fn resolve_subtitle_lang_falls_back_to_english() {
         r#"{"subtitles":{"fr":[{"url":"http://x/fr","ext":"vtt"}]},"automatic_captions":{"en":[{"url":"http://x/en","ext":"vtt"}]}}"#,
         false,
     );
-    let job = probe_test_job(Some("de"));
+    let mut job = probe_test_job(Some("de"));
+    job.info_json = Some(serde_json::json!({"subtitles": {}, "automatic_captions": {}}));
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
         &fake,
@@ -8814,21 +8815,12 @@ fn resolve_subtitle_lang_falls_back_to_english() {
 }
 
 #[test]
-fn resolve_subtitle_lang_uses_the_explicit_language_without_english_fallback() {
-    let dir = std::env::temp_dir().join(format!("grab-probe-explicit-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let fake = fake_ytdlp_probe(
-        &dir,
-        r#"{"subtitles":{"fr":[{"url":"http://x/fr","ext":"vtt"}]},"automatic_captions":{"en":[{"url":"http://x/en","ext":"vtt"}]}}"#,
-        false,
-    );
+fn resolve_subtitle_lang_uses_the_explicit_language_without_a_probe_or_fallback() {
     let mut job = probe_test_job(None);
-    job.info_json = Some(serde_json::json!({"subtitles": {}, "automatic_captions": {}}));
     job.subtitle_selection = crate::media_types::SubtitleSelection::Language("fr".into());
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let result = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
-        &fake,
+        std::path::Path::new("/missing/yt-dlp"),
         &job,
         &mut abort_rx,
         None,
@@ -8838,17 +8830,26 @@ fn resolve_subtitle_lang_uses_the_explicit_language_without_english_fallback() {
     job.subtitle_selection = crate::media_types::SubtitleSelection::Language("de".into());
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let result = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
-        &fake,
+        std::path::Path::new("/missing/yt-dlp"),
         &job,
         &mut abort_rx,
         None,
     ));
-    assert_eq!(
-        result,
-        Ok(None),
-        "an explicit missing language must not silently switch to English"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(result, Ok(Some("de".to_string())));
+}
+
+#[test]
+fn resolve_subtitle_lang_rejects_unsafe_persisted_language() {
+    let mut job = probe_test_job(None);
+    job.subtitle_selection = crate::media_types::SubtitleSelection::Language("--all".into());
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let result = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        std::path::Path::new("/missing/yt-dlp"),
+        &job,
+        &mut abort_rx,
+        None,
+    ));
+    assert_eq!(result, Ok(None));
 }
 
 #[test]

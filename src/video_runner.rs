@@ -1330,7 +1330,20 @@ pub(crate) async fn resolve_subtitle_lang(
         crate::media_types::SubtitleSelection::Language(language)
             if crate::video_prefs::is_plain_lang_key(language) =>
         {
-            vec![language.to_ascii_lowercase()]
+            // The language came from the current preview. Use that explicit
+            // choice directly instead of doing a second metadata extraction.
+            // If cached metadata is available, still reject a track that is
+            // known to have disappeared; an empty sanitized map is inconclusive.
+            if let Some(json) = job.info_json.as_ref() {
+                let available = available_subtitle_langs(json);
+                if !available.is_empty() {
+                    return Ok(pick_subtitle_lang(
+                        &available,
+                        &[language.to_ascii_lowercase().as_str()],
+                    ));
+                }
+            }
+            return Ok(Some(language.to_ascii_lowercase()));
         }
         crate::media_types::SubtitleSelection::Language(_) => {
             tracing::warn!("ignoring invalid persisted subtitle language selection");
@@ -1338,15 +1351,11 @@ pub(crate) async fn resolve_subtitle_lang(
         }
     };
     let candidate_refs = candidates.iter().map(String::as_str).collect::<Vec<_>>();
-    // Fast path: the media leg is about to load this same probe JSON
-    // (--load-info-json), so its subtitle maps are what the download will
-    // use — deciding from them spares a second extraction. Only nonempty
-    // maps are useful; the Video model sanitizer replaces absent maps with empty objects.
+    // Automatic mode can reuse cached subtitle maps when they are populated.
+    // Empty maps are inconclusive because the Video model sanitizer replaces
+    // absent maps with empty objects, so the bounded probe checks the source.
     if let Some(json) = job.info_json.as_ref() {
         let available = available_subtitle_langs(json);
-        // The Video model's sanitizer replaces these maps with empty objects.
-        // Empty maps therefore cannot prove the source has no subtitles; in
-        // that case perform the bounded subtitle probe below.
         if !available.is_empty() {
             let lang = pick_subtitle_lang(&available, &candidate_refs);
             if lang.is_none() {

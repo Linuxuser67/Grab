@@ -2970,7 +2970,7 @@ impl DownloadManager {
                 Err(e) => {
                     // Set detail BEFORE status: the status notify pops the
                     // failure dialog, which reads detail.
-                    item.set_detail(e);
+                    item.set_detail(e.to_string());
                     item.set_status(DownloadStatus::Failed);
                     self.changed();
                     self.start_next();

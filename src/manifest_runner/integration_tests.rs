@@ -1062,7 +1062,7 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
     )
     .await
     .expect("finish the restored live HLS capture");
-    assert_eq!(finished, LiveHlsCaptureOutcome::Preserve);
+    assert_eq!(finished, LiveHlsCaptureOutcome::Finish);
 }
 
 #[tokio::test]
@@ -2028,5 +2028,5 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
     )
     .await
     .expect("finish the restored dynamic DASH capture");
-    assert_eq!(finished.outcome, DashLiveCaptureOutcome::Preserve);
+    assert_eq!(finished.outcome, DashLiveCaptureOutcome::Finish);
 }

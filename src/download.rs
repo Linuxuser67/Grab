@@ -168,7 +168,9 @@ fn execute_delete_operation(operation: DeleteOperation) -> Result<(), String> {
                 } else if has_archive {
                     // Preserve unrelated files in the folder; only trash
                     // paths owned by the torrent metadata.
-                    if crate::torrent::trash_torrent_contents(&path, &url)? {
+                    if crate::torrent::trash_torrent_contents(&path, &url)
+                        .map_err(|error| error.to_string())?
+                    {
                         trash_path(&path, &filename)?;
                     }
                 } else {

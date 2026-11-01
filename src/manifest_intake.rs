@@ -1078,10 +1078,10 @@ highest.m3u8
         };
 
         let preferred = lookup
-            .preferred_source("1080p")
+            .preferred_source("1080p", None)
             .expect("1080p HLS representation");
         let best = lookup
-            .preferred_source("best")
+            .preferred_source("best", None)
             .expect("best HLS representation");
 
         let choices = lookup.choices();
@@ -1214,7 +1214,7 @@ video/es.m3u8
         assert_eq!(lookup.audio_choices(spanish_video_key).len(), 1);
 
         let default_source = lookup
-            .preferred_source("1080p")
+            .preferred_source("1080p", None)
             .expect("preferred HLS video and default audio");
         assert_eq!(default_source.representation_key, english_video_key);
         assert_eq!(
@@ -1223,7 +1223,7 @@ video/es.m3u8
         );
 
         let selected = lookup
-            .selected_source(english_video_key, Some(&english_choices[1].key))
+            .selected_source(english_video_key, Some(&english_choices[1].key), None)
             .expect("selected alternate audio rendition");
         assert_eq!(
             selected.audio_key.as_deref(),
@@ -1231,7 +1231,7 @@ video/es.m3u8
         );
         assert!(
             lookup
-                .selected_source(spanish_video_key, Some(&english_choices[1].key))
+                .selected_source(spanish_video_key, Some(&english_choices[1].key), None)
                 .is_none(),
             "an audio rendition must not be selectable from another variant's group"
         );
@@ -1322,11 +1322,11 @@ video/es.m3u8
         assert!(choices.iter().any(|choice| choice.label.contains("fr")));
 
         let selected = lookup
-            .selected_source(&video_key, Some(&choices[1].key))
+            .selected_source(&video_key, Some(&choices[1].key), None)
             .expect("select the alternate DASH audio representation");
         assert_eq!(selected.audio_key.as_deref(), Some(choices[1].key.as_str()));
         let preferred = lookup
-            .preferred_source("720p")
+            .preferred_source("720p", None)
             .expect("default DASH audio is selected automatically");
         assert_eq!(
             preferred.audio_key.as_deref(),
@@ -1476,6 +1476,7 @@ video/720.m3u8
                 .selected_source(
                     "hls-variant-00000000000000000000000000000000",
                     Some(&current_audio_key),
+                None,
                 )
                 .is_none()
         );
@@ -1484,6 +1485,7 @@ video/720.m3u8
                 .selected_source(
                     &current_video_key,
                     Some("hls-audio-00000000000000000000000000000000"),
+                None,
                 )
                 .is_none()
         );

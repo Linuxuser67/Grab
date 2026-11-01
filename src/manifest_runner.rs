@@ -4382,7 +4382,7 @@ mod tests {
             let (mut socket, _) = listener.accept().await.expect("accept resource request");
             let mut request = [0_u8; 1024];
             let _ = socket.read(&mut request).await.expect("read resource request");
-            let response = "HTTP/1.1 206 Partial Content\\r\\nContent-Length: 2\\r\\nContent-Range: bytes 0-1/4\\r\\nConnection: close\\r\\n\\r\\npa";
+            let response = "HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 0-1/4\r\nConnection: close\r\n\r\npa";
             socket
                 .write_all(response.as_bytes())
                 .await

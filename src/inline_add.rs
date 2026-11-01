@@ -1922,7 +1922,7 @@ fn wire_torrent_picker(
             let (bytes, _, entries) = match loaded {
                 Ok(Ok(data)) => data,
                 Ok(Err(e)) => {
-                    set_field_error(&torrent_row, &e);
+                    set_field_error(&torrent_row, &e.to_string());
                     return;
                 }
                 Err(e) => {

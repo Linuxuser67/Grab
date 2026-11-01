@@ -749,7 +749,18 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
                 has_hex_fingerprint(key, "dash-", 32) || has_hex_fingerprint(key, "dash-live-", 32)
             }
         });
-    video_key_is_valid && audio_key_is_valid
+    let subtitle_key_is_valid = source
+        .subtitle_key
+        .as_deref()
+        .is_none_or(|key| match source.kind {
+            crate::media_types::ManifestKind::Hls => {
+                has_hex_fingerprint(key, "hls-subtitle-", 32)
+            }
+            crate::media_types::ManifestKind::Dash => {
+                has_hex_fingerprint(key, "dash-", 32) || has_hex_fingerprint(key, "dash-live-", 32)
+            }
+        });
+    video_key_is_valid && audio_key_is_valid && subtitle_key_is_valid
 }
 
 async fn read_bounded_response(

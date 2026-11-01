@@ -4972,7 +4972,7 @@ mod tests {
             let _ = socket.read(&mut request).await.expect("read range request");
             socket
                 .write_all(
-                    b"HTTP/1.1 206 Partial Content\\r\\nContent-Length: 4\\r\\nContent-Range: bytes 0-3/4\\r\\nConnection: close\\r\\n\\r\\nda",
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 0-3/4\r\nConnection: close\r\n\r\nda",
                 )
                 .await
                 .expect("write truncated range response");

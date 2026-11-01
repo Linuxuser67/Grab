@@ -3523,7 +3523,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 };
                 if let Some(source) = selected_source {
                     let filename = manifest_filename_with_extension(
-                        &step2.name.text().trim(),
+                        step2.name.text().trim(),
                         manifest_container_extension(step2.manifest_container.selected()),
                     );
                     let enqueue_manager = Rc::clone(&m);

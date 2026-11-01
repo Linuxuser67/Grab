@@ -5115,6 +5115,7 @@ fn finish_live_recording_sends_finish_without_marking_the_row_cancelled() {
 
     assert!(manager.finish_live_recording(id));
     assert_eq!(item.status(), DownloadStatus::Downloading);
+    assert!(!manager.can_finish_live_recording(id));
     assert!(!manager.can_pause_live_capture(id));
     assert_eq!(
         stop_rx

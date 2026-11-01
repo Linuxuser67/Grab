@@ -1130,13 +1130,14 @@ pub(crate) fn build_row(
             // Read the live flag first: the toast is about the state the user
             // clicked in, not the one `cancel` leaves them in.
             let copy = stop_copy(m.is_live_video(id));
-            m.cancel(id);
-            // Essential info gets a real channel: tooltips are unavailable on
-            // touch, and this is the one control whose meaning inverts.
-            // Progress, not completion: the remux can still fail, so promising
-            // a finished save would be a promise the code cannot keep.
             if copy == StopCopy::FinishRecording {
-                t.add_toast(adw::Toast::new(&gettext("Finalizing recording…")));
+                if m.finish_live_recording(id) {
+                    // Progress, not completion: the remux can still fail, so
+                    // promising a finished save would be a promise the code cannot keep.
+                    t.add_toast(adw::Toast::new(&gettext("Finalizing recording…")));
+                }
+            } else {
+                m.cancel(id);
             }
         });
     }

@@ -1799,9 +1799,7 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
             Path::new("ffmpeg"),
             &video_dir.join("video-track.mp4"),
             Some(&audio_dir.join("audio-track.mp4")),
-            None,
-            false,
-            None,
+            SubtitleOutput::default(),
             &output_part,
             &mut abort,
         )

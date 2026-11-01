@@ -86,7 +86,7 @@ pub fn is_magnet(s: &str) -> bool {
 
 /// Parse a magnet link, rejecting anything rqbit cannot resolve to BTv1.
 pub fn parse_magnet(s: &str) -> Result<librqbit::Magnet, String> {
-    let m = librqbit::Magnet::parse(s.trim()).map_err(|e| format!("Invalid magnet link: {e}"))?;
+    let m = librqbit::Magnet::parse(s.trim()).map_err(|e| format!("{}: {e}", gettext("Invalid magnet link")))?;
     if m.as_id20().is_none() {
         return Err(gettext("Only BitTorrent v1 magnets are supported"));
     }
@@ -165,10 +165,10 @@ pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, Str
         return Err(gettext("Torrent file is too large (max 10 MB)"));
     }
     // Parse first: never archive bytes rqbit itself would reject.
-    librqbit::torrent_from_bytes(bytes).map_err(|e| format!("Invalid torrent file: {e}"))?;
+    librqbit::torrent_from_bytes(bytes).map_err(|e| format!("{}: {e}", gettext("Invalid torrent file")))?;
     let stem = safe_stem(file_name).unwrap_or("torrent");
     let dir = torrents_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot store torrent file: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", gettext("Cannot store torrent file")))?;
     // Atomic create_new loop: no check-then-write race.
     let mut tried: Vec<String> = Vec::new();
     for _ in 0..32 {
@@ -188,12 +188,12 @@ pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, Str
                 // archive would otherwise linger and collide later.
                 if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
                     let _ = std::fs::remove_file(&path);
-                    return Err(format!("Cannot store torrent file: {e}"));
+                    return Err(format!("{}: {e}", gettext("Cannot store torrent file")));
                 }
                 return Ok(format!("torrent:{}", path.to_string_lossy()));
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("Cannot store torrent file: {e}")),
+            Err(e) => return Err(format!("{}: {e}", gettext("Cannot store torrent file"))),
         }
     }
     Err(gettext(
@@ -257,7 +257,7 @@ fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), String> 
         return Err(gettext("Torrent metadata is too large to store safely"));
     }
     let metadata = librqbit::torrent_from_bytes(bytes)
-        .map_err(|error| format!("Invalid resolved torrent metadata: {error}"))?;
+        .map_err(|error| format!("{}: {error}", gettext("Invalid resolved torrent metadata")))?;
     if metadata.info_hash.as_string() != info_hash {
         return Err(gettext(
             "Resolved torrent metadata does not match the magnet link",
@@ -266,22 +266,22 @@ fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), String> 
 
     let dir = torrents_dir();
     std::fs::create_dir_all(&dir)
-        .map_err(|error| format!("Cannot store magnet metadata: {error}"))?;
+        .map_err(|error| format!("{}: {error}", gettext("Cannot store magnet metadata")))?;
     let path = magnet_metadata_path_in(&dir, info_hash)
         .ok_or_else(|| gettext("Invalid torrent info-hash"))?;
     let mut temporary = tempfile::NamedTempFile::new_in(&dir)
-        .map_err(|error| format!("Cannot create magnet metadata file: {error}"))?;
+        .map_err(|error| format!("{}: {error}", gettext("Cannot create magnet metadata file")))?;
     use std::io::Write as _;
     temporary
         .write_all(bytes)
         .and_then(|()| temporary.as_file().sync_all())
-        .map_err(|error| format!("Cannot write magnet metadata: {error}"))?;
+        .map_err(|error| format!("{}: {error}", gettext("Cannot write magnet metadata")))?;
     temporary
         .persist(&path)
-        .map_err(|error| format!("Cannot publish magnet metadata: {}", error.error))?;
+        .map_err(|error| format!("{}: {}", gettext("Cannot publish magnet metadata"), error.error))?;
     std::fs::File::open(&dir)
         .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("Cannot sync magnet metadata directory: {error}"))?;
+        .map_err(|error| format!("{}: {error}", gettext("Cannot sync magnet metadata directory")))?;
     Ok(())
 }
 
@@ -323,7 +323,7 @@ fn sanitize_display_path(path: &str) -> String {
 
 pub fn torrent_file_list(bytes: &[u8]) -> Result<(String, Vec<TorrentFileEntry>), String> {
     let meta =
-        librqbit::torrent_from_bytes(bytes).map_err(|e| format!("Invalid torrent file: {e}"))?;
+        librqbit::torrent_from_bytes(bytes).map_err(|e| format!("{}: {e}", gettext("Invalid torrent file")))?;
     let name = raw_torrent_name(meta.info.data.name.as_ref())
         .filter(|n| sane_filename(n))
         .unwrap_or_else(|| "torrent".to_string());
@@ -373,7 +373,7 @@ pub(crate) async fn list_magnet_files(
     )
     .await
     .map_err(|_| gettext("Timed out while resolving torrent metadata"))?
-    .map_err(|error| format!("Cannot resolve magnet link: {error}"))?;
+    .map_err(|error| format!("{}: {error}", gettext("Cannot resolve magnet link")))?;
 
     let AddTorrentResponse::ListOnly(listing) = response else {
         return Err(gettext(
@@ -390,7 +390,16 @@ pub(crate) async fn list_magnet_files(
             "Resolved torrent metadata does not match the magnet link",
         ));
     }
-    persist_magnet_metadata(&info_hash, &listing.torrent_bytes)?;
+    // Keep synchronous parsing, fsync, and atomic publication off the async executor.
+    let bytes = listing.torrent_bytes.clone();
+    let persistence_info_hash = info_hash.clone();
+    tokio::task::spawn_blocking(move || {
+        persist_magnet_metadata(&persistence_info_hash, &bytes)
+    })
+    .await
+    .map_err(|error| {
+        format!("{}: {error}", gettext("Could not persist magnet metadata"))
+    })??;
 
     let magnet_name = parsed.name.filter(|name| sane_filename(name));
     let name = listing
@@ -658,15 +667,14 @@ fn remove_beneath(path: &std::path::Path, folder: &std::path::Path, remove_final
         name_in_parent: None,
     }];
     for component in &components[..components.len() - 1] {
+        let Some(parent) = stack.last() else {
+            return;
+        };
         // SAFETY: the previous descriptor is open; component is NUL-free; flags
         // require a directory and refuse a symlink in this component.
         let fd = unsafe {
             libc::openat(
-                stack
-                    .last()
-                    .expect("root descriptor retained")
-                    .fd
-                    .as_raw_fd(),
+                parent.fd.as_raw_fd(),
                 component.as_ptr(),
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
@@ -687,14 +695,13 @@ fn remove_beneath(path: &std::path::Path, folder: &std::path::Path, remove_final
     // unlinkat operates on one filename in the final, safely traversed parent.
     // Failure is not silently treated as deletion success.
     if remove_final {
+        let Some(parent) = stack.last() else {
+            return;
+        };
         // SAFETY: the descriptor is open and target_name is a NUL-free component.
         let result = unsafe {
             libc::unlinkat(
-                stack
-                    .last()
-                    .expect("root descriptor retained")
-                    .fd
-                    .as_raw_fd(),
+                parent.fd.as_raw_fd(),
                 target_name.as_ptr(),
                 0,
             )
@@ -712,11 +719,19 @@ fn remove_beneath(path: &std::path::Path, folder: &std::path::Path, remove_final
     // directory replacement cannot redirect these removals to another tree.
     while stack.len() > 1 {
         let child_index = stack.len() - 1;
-        let child_name = stack[child_index]
-            .name_in_parent
-            .as_ref()
-            .expect("non-root descriptor has a parent name");
-        let parent_fd = stack[child_index - 1].fd.as_raw_fd();
+        let Some(child) = stack.get(child_index) else {
+            break;
+        };
+        let Some(child_name) = child.name_in_parent.as_ref() else {
+            break;
+        };
+        let Some(parent) = child_index
+            .checked_sub(1)
+            .and_then(|parent_index| stack.get(parent_index))
+        else {
+            break;
+        };
+        let parent_fd = parent.fd.as_raw_fd();
         // SAFETY: parent_fd is open and child_name is a NUL-free component.
         let result = unsafe { libc::unlinkat(parent_fd, child_name.as_ptr(), libc::AT_REMOVEDIR) };
         if result != 0 {
@@ -1394,7 +1409,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
                     (hash_hex, hash_id, stub, folder, Adder::File(bytes))
                 }
                 Err(e) => {
-                    fail(format!("Invalid torrent file: {e}"));
+                    fail(format!("{}: {e}", gettext("Invalid torrent file")));
                     return;
                 }
             }

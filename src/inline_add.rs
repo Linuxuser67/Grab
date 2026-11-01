@@ -3448,7 +3448,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             let abort_task = AbortTaskOnDrop(task.abort_handle());
                             let result = match task.await {
                                 Ok(Ok((name, entries))) => Ok((resolved_magnet, name, entries)),
-                                Ok(Err(error)) => Err(error),
+                                Ok(Err(error)) => Err(error.to_string()),
                                 Err(error) => {
                                     Err(format!("Torrent metadata lookup task failed: {error}"))
                                 }

@@ -688,6 +688,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn subtitle_preference_uses_english_fallback_but_not_manifest_default() {
+        let choices = vec![
+            ManifestSubtitleChoice {
+                key: "fr".to_string(),
+                label: "French · Default".to_string(),
+                language: Some("fr".to_string()),
+                is_default: true,
+            },
+            ManifestSubtitleChoice {
+                key: "en".to_string(),
+                label: "English".to_string(),
+                language: Some("en".to_string()),
+                is_default: false,
+            },
+        ];
+
+        assert_eq!(
+            ManifestLookup::preferred_subtitle_choice_index(&choices, Some("de")),
+            Some(1),
+            "native selection follows yt-dlp: requested language, then English"
+        );
+        assert_eq!(
+            ManifestLookup::preferred_subtitle_choice_index(&choices, Some("off")),
+            None
+        );
+        assert_eq!(
+            ManifestLookup::preferred_subtitle_choice_index(&choices, None),
+            None
+        );
+    }
+
+    #[test]
     fn hls_subtitle_selection_uses_stable_rendition_ids_and_language_preference() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="subs/en.m3u8",STABLE-RENDITION-ID="subtitle-en"

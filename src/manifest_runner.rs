@@ -362,6 +362,7 @@ pub(crate) async fn run_manifest_download(
         ));
     };
     let parent = dest_dir.to_path_buf();
+    let output_container = ManifestOutputContainer::from_path(&job.dest)?;
     let item_id = job.item_id;
     let staging = tokio::task::spawn_blocking(move || {
         crate::video_staging::ensure_manifest_staging_dir(&parent, item_id)
@@ -370,10 +371,12 @@ pub(crate) async fn run_manifest_download(
     .await
     .map_err(|error| format!("Could not prepare manifest staging: {error}"))??;
 
-    // Reclaim output left by an interrupted attempt only after validating the
-    // state-dir stage's owner marker.
-    let output_part = staging.join("output.part.mp4");
-    remove_regular_file_if_present(&output_part).await?;
+    // Reclaim either supported container left by an interrupted attempt only
+    // after validating the state-dir stage's owner marker.
+    for extension in ["mp4", "mkv"] {
+        remove_regular_file_if_present(&staging.join(format!("output.part.{extension}"))).await?;
+    }
+    let output_part = staging.join(format!("output.part.{}", output_container.extension()));
     let video_dir = staging.join("video");
     ensure_track_dir(&video_dir).await?;
     let audio_dir = staging.join("audio");
@@ -2322,6 +2325,31 @@ fn content_range_matches(header: Option<&str>, range: ManifestByteRange) -> bool
         })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestOutputContainer {
+    Mp4,
+    Matroska,
+}
+
+impl ManifestOutputContainer {
+    fn from_path(path: &Path) -> Result<Self, ManifestRunError> {
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some(extension) if extension.eq_ignore_ascii_case("mp4") => Ok(Self::Mp4),
+            Some(extension) if extension.eq_ignore_ascii_case("mkv") => Ok(Self::Matroska),
+            _ => Err(ManifestRunError::Failed(
+                "Native HLS/DASH output must use an MP4 or MKV filename".to_string(),
+            )),
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Matroska => "mkv",
+        }
+    }
+}
+
 const DASH_LIVE_STATE_NAME: &str = "live-dash-state.json";
 const DASH_LIVE_STATE_VERSION: u32 = 1;
 
@@ -3352,6 +3380,7 @@ async fn run_ffmpeg(
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
+    let output_container = ManifestOutputContainer::from_path(output)?;
     let mut command = tokio::process::Command::new(ffmpeg);
     if is_hls_playlist_input(video_input) {
         add_hls_staging_options(&mut command);
@@ -3384,14 +3413,25 @@ async fn run_ffmpeg(
         } else {
             "1:s:0"
         };
-        command
-            .arg("-map")
-            .arg(subtitle_stream)
-            .args(["-c:s", "mov_text"]);
+        command.arg("-map").arg(subtitle_stream).args([
+            "-c:s",
+            match output_container {
+                ManifestOutputContainer::Mp4 => "mov_text",
+                // Matroska preserves the source subtitle codec instead of
+                // forcing MP4's mov_text representation.
+                ManifestOutputContainer::Matroska => "copy",
+            },
+        ]);
     }
-    command
-        .args(["-movflags", "+faststart", "-f", "mp4"])
-        .arg(output);
+    match output_container {
+        ManifestOutputContainer::Mp4 => {
+            command.args(["-movflags", "+faststart", "-f", "mp4"]);
+        }
+        ManifestOutputContainer::Matroska => {
+            command.args(["-f", "matroska"]);
+        }
+    }
+    command.arg(output);
     if subtitles.input.is_some() && !subtitles.embed {
         let sidecar = subtitles.sidecar.ok_or_else(|| {
             ManifestRunError::Failed("Subtitle sidecar destination is missing".to_string())
@@ -3456,6 +3496,20 @@ async fn run_ffmpeg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_output_container_accepts_only_mp4_and_mkv_extensions() {
+        assert_eq!(
+            ManifestOutputContainer::from_path(Path::new("stream.mp4")).expect("MP4 path"),
+            ManifestOutputContainer::Mp4
+        );
+        assert_eq!(
+            ManifestOutputContainer::from_path(Path::new("stream.MKV")).expect("MKV path"),
+            ManifestOutputContainer::Matroska
+        );
+        assert!(ManifestOutputContainer::from_path(Path::new("stream.webm")).is_err());
+        assert!(ManifestOutputContainer::from_path(Path::new("stream")).is_err());
+    }
 
     #[test]
     fn mux_space_check_reserves_room_for_ffmpeg_output() {

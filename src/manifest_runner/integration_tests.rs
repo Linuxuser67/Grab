@@ -74,7 +74,7 @@ fn assert_command_succeeded(output: &Output, context: &str) {
     );
 }
 
-fn assert_mp4_has_audio_and_video(ffprobe: &Path, output: &Path) {
+fn assert_has_audio_and_video(ffprobe: &Path, output: &Path) {
     let probe = Command::new(ffprobe)
         .args([
             "-v",
@@ -87,16 +87,16 @@ fn assert_mp4_has_audio_and_video(ffprobe: &Path, output: &Path) {
         .arg(output)
         .output()
         .expect("run ffprobe on finalized manifest download");
-    assert_command_succeeded(&probe, "ffprobe rejected the finalized MP4");
+    assert_command_succeeded(&probe, "ffprobe rejected the finalized media file");
 
     let streams = String::from_utf8_lossy(&probe.stdout);
     assert!(
         streams.lines().any(|line| line == "codec_type=video"),
-        "finalized MP4 has no video stream: {streams}"
+        "finalized media file has no video stream: {streams}"
     );
     assert!(
         streams.lines().any(|line| line == "codec_type=audio"),
-        "finalized MP4 has no audio stream: {streams}"
+        "finalized media file has no audio stream: {streams}"
     );
 }
 
@@ -875,7 +875,7 @@ async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
 
     let ffmpeg = Path::new("ffmpeg");
     let ffprobe = Path::new("ffprobe");
-    let output = root.path().join("live-capture.mp4.part");
+    let output = root.path().join("live-capture.part.mp4");
     assert!(
         tokio::time::timeout(
             FIXTURE_TIMEOUT,
@@ -893,7 +893,7 @@ async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
         .expect("FFmpeg live HLS finalization returned an error"),
         "FFmpeg finalization should complete without an abort"
     );
-    assert_mp4_has_audio_and_video(ffprobe, &output);
+    assert_has_audio_and_video(ffprobe, &output);
 }
 
 #[tokio::test]
@@ -1395,7 +1395,26 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
     let output = root.path().join("hls-output.mp4");
     crate::file_names::rename_noreplace(&output_part, &output)
         .expect("publish finalized HLS fixture");
-    assert_mp4_has_audio_and_video(Path::new("ffprobe"), &output);
+    assert_has_audio_and_video(Path::new("ffprobe"), &output);
+
+    let mkv_part = root.path().join("hls-output.part.mkv");
+    assert!(
+        run_ffmpeg(
+            Path::new("ffmpeg"),
+            &video_dir.join("local.m3u8"),
+            None,
+            SubtitleOutput::default(),
+            &mkv_part,
+            &mut abort,
+        )
+        .await
+        .expect("finalize HLS fixture as Matroska"),
+        "Matroska FFmpeg finalization unexpectedly aborted"
+    );
+    let mkv_output = root.path().join("hls-output.mkv");
+    crate::file_names::rename_noreplace(&mkv_part, &mkv_output)
+        .expect("publish finalized Matroska fixture");
+    assert_has_audio_and_video(Path::new("ffprobe"), &mkv_output);
 }
 
 #[tokio::test]
@@ -1587,7 +1606,7 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
     let output = root.path().join("dash-output.mp4");
     crate::file_names::rename_noreplace(&output_part, &output)
         .expect("publish finalized DASH fixture");
-    assert_mp4_has_audio_and_video(Path::new("ffprobe"), &output);
+    assert_has_audio_and_video(Path::new("ffprobe"), &output);
 }
 
 #[tokio::test]
@@ -1810,7 +1829,7 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
     let output = root.path().join("dynamic-dash-output.mp4");
     crate::file_names::rename_noreplace(&output_part, &output)
         .expect("publish finalized dynamic DASH fixture");
-    assert_mp4_has_audio_and_video(Path::new("ffprobe"), &output);
+    assert_has_audio_and_video(Path::new("ffprobe"), &output);
 }
 
 #[tokio::test]

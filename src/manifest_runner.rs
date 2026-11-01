@@ -809,12 +809,8 @@ async fn resolve_tracks(
                 .variants
                 .iter()
                 .zip(crate::manifest_intake::hls_variant_keys(&master.variants))
-                .zip(crate::manifest_intake::hls_variant_legacy_keys(
-                    &master.variants,
-                ))
-                .find_map(|((variant, current_key), legacy_key)| {
-                    (current_key == source.representation_key
-                        || legacy_key == source.representation_key)
+                .find_map(|(variant, key)| {
+                    (key.as_deref() == Some(source.representation_key.as_str()))
                         .then_some(variant)
                 })
                 .ok_or_else(|| {
@@ -831,12 +827,8 @@ async fn resolve_tracks(
                         .zip(crate::manifest_intake::hls_audio_rendition_keys(
                             &master.audio_renditions,
                         ))
-                        .zip(crate::manifest_intake::hls_audio_rendition_legacy_keys(
-                            &master.audio_renditions,
-                        ))
-                        .find_map(|((rendition, current_key), legacy_key)| {
-                            (current_key == audio_key || legacy_key == audio_key)
-                                .then_some(rendition)
+                        .find_map(|(rendition, key)| {
+                            (key.as_deref() == Some(audio_key)).then_some(rendition)
                         })
                         .filter(|rendition| {
                             variant

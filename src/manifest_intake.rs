@@ -4,7 +4,7 @@
 //! resources remain remote until the queue/fetch phase consumes the selected
 //! representation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use gettextrs::gettext;
@@ -220,7 +220,6 @@ pub(crate) struct ManifestAudioChoice {
     pub(crate) key: String,
     pub(crate) label: String,
     pub(crate) is_default: bool,
-    legacy_key: Option<String>,
 }
 
 #[derive(Debug)]
@@ -274,7 +273,8 @@ impl ManifestLookup {
                 .variants
                 .iter()
                 .zip(hls_variant_keys(&master.variants))
-                .map(|(variant, key)| {
+                .filter_map(|(variant, key)| {
+                    let key = key?;
                     let resolution = resolution_label(variant.width, variant.height);
                     let bitrate =
                         bitrate_label(Some(variant.average_bandwidth.unwrap_or(variant.bandwidth)));
@@ -334,9 +334,8 @@ impl ManifestLookup {
                     .variants
                     .iter()
                     .zip(hls_variant_keys(&master.variants))
-                    .zip(hls_variant_legacy_keys(&master.variants))
-                    .find_map(|((variant, current_key), legacy_key)| {
-                        (current_key == video_key || legacy_key == video_key)
+                    .find_map(|(variant, key)| {
+                        (key.as_deref() == Some(video_key))
                             .then_some(variant.audio_group.as_deref())
                             .flatten()
                     });
@@ -347,13 +346,13 @@ impl ManifestLookup {
                     .audio_renditions
                     .iter()
                     .zip(hls_audio_rendition_keys(&master.audio_renditions))
-                    .zip(hls_audio_rendition_legacy_keys(&master.audio_renditions))
-                    .filter(|((rendition, _), _)| rendition.group_id == group_id)
-                    .map(|((rendition, key), legacy_key)| ManifestAudioChoice {
-                        key,
-                        label: hls_audio_rendition_label(rendition),
-                        is_default: rendition.is_default,
-                        legacy_key: Some(legacy_key),
+                    .filter_map(|(rendition, key)| {
+                        let key = key?;
+                        (rendition.group_id == group_id).then(|| ManifestAudioChoice {
+                            key,
+                            label: hls_audio_rendition_label(rendition),
+                            is_default: rendition.is_default,
+                        })
                     })
                     .collect()
             }
@@ -390,7 +389,6 @@ impl ManifestLookup {
                             key: representation.key.clone(),
                             label,
                             is_default: representation.is_default_audio,
-                            legacy_key: None,
                         }
                     })
                     .collect::<Vec<_>>();
@@ -436,8 +434,7 @@ impl ManifestLookup {
             NativeManifest::HlsMaster(master) => {
                 hls_variant_keys(&master.variants)
                     .iter()
-                    .chain(hls_variant_legacy_keys(&master.variants).iter())
-                    .any(|key| key == representation_key)
+                    .any(|key| key.as_deref() == Some(representation_key))
                     .then_some(())?;
                 crate::media_types::ManifestKind::Hls
             }
@@ -457,9 +454,10 @@ impl ManifestLookup {
             }
         };
         if audio_key.is_some_and(|selected| {
-            !self.audio_choices(representation_key).iter().any(|choice| {
-                choice.key == selected || choice.legacy_key.as_deref() == Some(selected)
-            })
+            !self
+                .audio_choices(representation_key)
+                .iter()
+                .any(|choice| choice.key == selected)
         }) {
             return None;
         }
@@ -628,6 +626,45 @@ enum ManifestFetchMode {
     Download,
 }
 
+fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestIntakeError> {
+    let mut variant_ids = HashSet::with_capacity(master.variants.len());
+    let variants_have_unique_ids = master.variants.iter().all(|variant| {
+        variant
+            .stable_variant_id
+            .as_deref()
+            .is_some_and(|stable_id| variant_ids.insert(stable_id))
+    });
+    if !variants_have_unique_ids {
+        return Err(ManifestIntakeError::Unsupported(gettext(
+            "The HLS master playlist has missing or duplicate stable video track IDs",
+        )));
+    }
+
+    let audio_groups = master
+        .variants
+        .iter()
+        .filter_map(|variant| variant.audio_group.as_deref())
+        .collect::<HashSet<_>>();
+    let mut rendition_ids = HashSet::with_capacity(master.audio_renditions.len());
+    let renditions_have_unique_ids = master
+        .audio_renditions
+        .iter()
+        .filter(|rendition| audio_groups.contains(rendition.group_id.as_str()))
+        .all(|rendition| {
+            rendition
+                .stable_rendition_id
+                .as_deref()
+                .is_some_and(|stable_id| rendition_ids.insert(stable_id))
+        });
+    if !renditions_have_unique_ids {
+        return Err(ManifestIntakeError::Unsupported(gettext(
+            "The HLS master playlist has missing or duplicate stable audio track IDs",
+        )));
+    }
+
+    Ok(())
+}
+
 async fn lookup_with_client_policy(
     client: &reqwest::Client,
     raw_url: &str,
@@ -660,7 +697,10 @@ async fn lookup_with_client_policy(
     let manifest = match kind {
         crate::media_types::ManifestKind::Hls => {
             match crate::manifest::parse_hls_master_playlist(final_url.as_str(), &body) {
-                Ok(master) => NativeManifest::HlsMaster(master),
+                Ok(master) => {
+                    validate_hls_stable_track_ids(&master)?;
+                    NativeManifest::HlsMaster(master)
+                }
                 Err(crate::manifest::ManifestError::ExpectedMasterPlaylist) => {
                     let plan = crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
                         .map_err(|error| {
@@ -925,34 +965,6 @@ async fn fetch_bounded_manifest_once(
     Ok((final_url, body, server_now))
 }
 
-fn hls_audio_rendition_legacy_key(rendition: &crate::manifest::HlsAudioRendition) -> String {
-    let mut hasher = Sha256::new();
-    let resource_identity = rendition
-        .url
-        .as_ref()
-        .map(crate::manifest::resource_cache_key);
-    for value in [
-        Some(rendition.group_id.as_str()),
-        Some(rendition.name.as_str()),
-        rendition.language.as_deref(),
-        resource_identity.as_deref(),
-    ] {
-        if let Some(value) = value {
-            hasher.update([1]);
-            hasher.update((value.len() as u64).to_le_bytes());
-            hasher.update(value.as_bytes());
-        } else {
-            hasher.update([0]);
-        }
-    }
-    let digest = hasher.finalize();
-    let fingerprint: String = digest[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    format!("hls-audio-{fingerprint}")
-}
-
 fn stable_hls_track_key(prefix: &str, track_kind: &[u8], stable_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"grab-hls-stable-track\0");
@@ -967,31 +979,21 @@ fn stable_hls_track_key(prefix: &str, track_kind: &[u8], stable_id: &str) -> Str
     format!("{prefix}{fingerprint}")
 }
 
-fn hls_audio_rendition_key(rendition: &crate::manifest::HlsAudioRendition) -> String {
+fn hls_audio_rendition_key(
+    rendition: &crate::manifest::HlsAudioRendition,
+) -> Option<String> {
     rendition
         .stable_rendition_id
         .as_deref()
         .map(|stable_id| stable_hls_track_key("hls-audio-", b"rendition", stable_id))
-        .unwrap_or_else(|| hls_audio_rendition_legacy_key(rendition))
 }
 
-/// Stable HLS audio identities ignore rotating signature query parameters.
+/// Build keys only for renditions with Apple stable rendition IDs.
 #[must_use]
 pub(crate) fn hls_audio_rendition_keys(
     renditions: &[crate::manifest::HlsAudioRendition],
-) -> Vec<String> {
+) -> Vec<Option<String>> {
     renditions.iter().map(hls_audio_rendition_key).collect()
-}
-
-/// Legacy keys keep audio selections persisted before stable IDs were parsed resolvable.
-#[must_use]
-pub(crate) fn hls_audio_rendition_legacy_keys(
-    renditions: &[crate::manifest::HlsAudioRendition],
-) -> Vec<String> {
-    renditions
-        .iter()
-        .map(hls_audio_rendition_legacy_key)
-        .collect()
 }
 
 fn hls_audio_rendition_label(rendition: &crate::manifest::HlsAudioRendition) -> String {
@@ -1020,105 +1022,17 @@ fn hls_audio_rendition_label(rendition: &crate::manifest::HlsAudioRendition) -> 
     }
 }
 
-/// The pre-stable-ID identity is retained for resolving older queue entries.
-#[must_use]
-fn hls_variant_legacy_key(variant: &HlsVariant) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(variant.url.host_str().unwrap_or_default().as_bytes());
-    hasher.update(
-        variant
-            .url
-            .port_or_known_default()
-            .unwrap_or_default()
-            .to_le_bytes(),
-    );
-    hasher.update([0]);
-    hasher.update(variant.url.path().as_bytes());
-    hasher.update([0]);
-    hasher.update(variant.bandwidth.to_le_bytes());
-    hasher.update(variant.average_bandwidth.unwrap_or_default().to_le_bytes());
-    hasher.update(variant.width.unwrap_or_default().to_le_bytes());
-    hasher.update(variant.height.unwrap_or_default().to_le_bytes());
-    hasher.update(
-        variant
-            .frame_rate
-            .unwrap_or_default()
-            .to_bits()
-            .to_le_bytes(),
-    );
-    if let Some(codecs) = variant.codecs.as_deref() {
-        hasher.update(codecs.as_bytes());
-    }
-    hasher.update([0]);
-    if let Some(audio_group) = variant.audio_group.as_deref() {
-        hasher.update(audio_group.as_bytes());
-    }
-    let digest = hasher.finalize();
-    let fingerprint: String = digest[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    format!("hls-variant-{fingerprint}")
-}
-
-#[must_use]
-fn hls_variant_key(variant: &HlsVariant) -> String {
+fn hls_variant_key(variant: &HlsVariant) -> Option<String> {
     variant
         .stable_variant_id
         .as_deref()
         .map(|stable_id| stable_hls_track_key("hls-variant-", b"variant", stable_id))
-        .unwrap_or_else(|| hls_variant_legacy_key(variant))
 }
 
-fn disambiguate_hls_variant_keys(base_keys: Vec<String>, variants: &[HlsVariant]) -> Vec<String> {
-    let resource_urls: Vec<String> = variants
-        .iter()
-        .map(|variant| crate::manifest::resource_cache_key(&variant.url))
-        .collect();
-
-    let mut first_url_by_key = HashMap::<String, String>::with_capacity(base_keys.len());
-    let mut ambiguous_keys = HashSet::<String>::new();
-    for (base_key, resource_url) in base_keys.iter().zip(&resource_urls) {
-        match first_url_by_key.get(base_key) {
-            Some(first_url) if first_url != resource_url => {
-                ambiguous_keys.insert(base_key.clone());
-            }
-            Some(_) => {}
-            None => {
-                first_url_by_key.insert(base_key.clone(), resource_url.clone());
-            }
-        }
-    }
-
-    base_keys
-        .into_iter()
-        .zip(resource_urls)
-        .map(|(base_key, resource_url)| {
-            if !ambiguous_keys.contains(&base_key) {
-                return base_key;
-            }
-            let digest = Sha256::digest(resource_url.as_bytes());
-            let suffix: String = digest[..16]
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
-            format!("{base_key}{suffix}")
-        })
-        .collect()
-}
-
-/// Build unique keys for selected variants; rotating URL signatures are excluded.
+/// Build keys only for variants with Apple stable variant IDs.
 #[must_use]
-pub(crate) fn hls_variant_keys(variants: &[HlsVariant]) -> Vec<String> {
-    let base_keys = variants.iter().map(hls_variant_key).collect();
-    disambiguate_hls_variant_keys(base_keys, variants)
-}
-
-/// Legacy keys keep selections persisted before Apple stable IDs were captured.
-#[must_use]
-pub(crate) fn hls_variant_legacy_keys(variants: &[HlsVariant]) -> Vec<String> {
-    let base_keys = variants.iter().map(hls_variant_legacy_key).collect();
-    disambiguate_hls_variant_keys(base_keys, variants)
+pub(crate) fn hls_variant_keys(variants: &[HlsVariant]) -> Vec<Option<String>> {
+    variants.iter().map(hls_variant_key).collect()
 }
 
 fn has_hex_fingerprint(value: &str, prefix: &str, length: usize) -> bool {
@@ -1142,7 +1056,6 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
         crate::media_types::ManifestKind::Hls => {
             (source.representation_key == "hls-media" && source.audio_key.is_none())
                 || has_hex_fingerprint(&source.representation_key, "hls-variant-", 32)
-                || has_hex_fingerprint(&source.representation_key, "hls-variant-", 64)
         }
         crate::media_types::ManifestKind::Dash => {
             has_hex_fingerprint(&source.representation_key, "dash-", 32)
@@ -1500,11 +1413,11 @@ mod tests {
     #[test]
     fn preferred_source_selects_the_configured_hls_representation() {
         let body = br#"#EXTM3U
-#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720
+#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720,STABLE-VARIANT-ID="fixture-variant-1"
 low.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080
+#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080,STABLE-VARIANT-ID="fixture-variant-2"
 high.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=3500000,RESOLUTION=2560x1440
+#EXT-X-STREAM-INF:BANDWIDTH=3500000,RESOLUTION=2560x1440,STABLE-VARIANT-ID="fixture-variant-3"
 highest.m3u8
 "#;
         let master = crate::manifest::parse_hls_master_playlist(
@@ -1547,13 +1460,13 @@ highest.m3u8
     #[test]
     fn choices_sort_by_height_then_bandwidth_and_keep_ties_stable() {
         let body = br#"#EXTM3U
-#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080
+#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080,STABLE-VARIANT-ID="fixture-variant-4"
 first.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720
+#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720,STABLE-VARIANT-ID="fixture-variant-5"
 low.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1920x1080
+#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1920x1080,STABLE-VARIANT-ID="fixture-variant-6"
 higher-bandwidth.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080
+#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080,STABLE-VARIANT-ID="fixture-variant-7"
 second.m3u8
 "#;
         let master = crate::manifest::parse_hls_master_playlist(
@@ -1582,10 +1495,10 @@ second.m3u8
                 .map(|choice| choice.key.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                original_keys[2].as_str(),
-                original_keys[0].as_str(),
-                original_keys[3].as_str(),
-                original_keys[1].as_str(),
+                original_keys[2].as_deref().expect("stable variant key"),
+                original_keys[0].as_deref().expect("stable variant key"),
+                original_keys[3].as_deref().expect("stable variant key"),
+                original_keys[1].as_deref().expect("stable variant key"),
             ],
             "bandwidth should break height ties, and equal ties should keep manifest order"
         );
@@ -1622,12 +1535,12 @@ second.m3u8
     #[test]
     fn hls_audio_choices_are_scoped_to_variant_and_preselect_default() {
         let body = br#"#EXTM3U
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-en",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8?sig=old"
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-en",NAME="French",LANGUAGE="fr",DEFAULT=NO,AUTOSELECT=YES,URI="audio/fr.m3u8?sig=old"
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-es",NAME="Spanish",LANGUAGE="es",DEFAULT=YES,AUTOSELECT=YES,URI="audio/es.m3u8"
-#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080,AUDIO="audio-en"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-en",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,STABLE-RENDITION-ID="fixture-rendition-1",URI="audio/en.m3u8?sig=old"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-en",NAME="French",LANGUAGE="fr",DEFAULT=NO,AUTOSELECT=YES,STABLE-RENDITION-ID="fixture-rendition-2",URI="audio/fr.m3u8?sig=old"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-es",NAME="Spanish",LANGUAGE="es",DEFAULT=YES,AUTOSELECT=YES,STABLE-RENDITION-ID="fixture-rendition-3",URI="audio/es.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080,AUDIO="audio-en",STABLE-VARIANT-ID="fixture-variant-8"
 video/en.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720,AUDIO="audio-es"
+#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720,AUDIO="audio-es",STABLE-VARIANT-ID="fixture-variant-9"
 video/es.m3u8
 "#;
         let master = crate::manifest::parse_hls_master_playlist(
@@ -1641,7 +1554,9 @@ video/es.m3u8
             manifest: NativeManifest::HlsMaster(master),
         };
 
-        let english_choices = lookup.audio_choices(&video_keys[0]);
+        let english_video_key = video_keys[0].as_deref().expect("stable English video key");
+        let spanish_video_key = video_keys[1].as_deref().expect("stable Spanish video key");
+        let english_choices = lookup.audio_choices(english_video_key);
         assert_eq!(english_choices.len(), 2);
         assert!(english_choices[0].is_default);
         assert!(
@@ -1649,19 +1564,19 @@ video/es.m3u8
                 .iter()
                 .any(|choice| choice.label.contains("French"))
         );
-        assert_eq!(lookup.audio_choices(&video_keys[1]).len(), 1);
+        assert_eq!(lookup.audio_choices(spanish_video_key).len(), 1);
 
         let default_source = lookup
             .preferred_source("1080p")
             .expect("preferred HLS video and default audio");
-        assert_eq!(default_source.representation_key, video_keys[0]);
+        assert_eq!(default_source.representation_key, english_video_key);
         assert_eq!(
             default_source.audio_key.as_deref(),
             Some(english_choices[0].key.as_str())
         );
 
         let selected = lookup
-            .selected_source(&video_keys[0], Some(&english_choices[1].key))
+            .selected_source(english_video_key, Some(&english_choices[1].key))
             .expect("selected alternate audio rendition");
         assert_eq!(
             selected.audio_key.as_deref(),
@@ -1669,33 +1584,33 @@ video/es.m3u8
         );
         assert!(
             lookup
-                .selected_source(&video_keys[1], Some(&english_choices[1].key))
+                .selected_source(spanish_video_key, Some(&english_choices[1].key))
                 .is_none(),
             "an audio rendition must not be selectable from another variant's group"
         );
     }
 
     #[test]
-    fn hls_audio_keys_ignore_rotating_signature_query_parameters() {
+    fn hls_audio_key_uses_stable_rendition_id_across_url_rotation() {
         let rendition = |url: &str| crate::manifest::HlsAudioRendition {
             url: Some(Url::parse(url).expect("valid audio rendition URL")),
             group_id: "audio-main".to_string(),
             name: "English".to_string(),
             language: Some("en".to_string()),
             is_default: true,
-            stable_rendition_id: None,
+            stable_rendition_id: Some("rendition-en".to_string()),
         };
         let original = rendition("https://cdn.example.test/audio/en.m3u8?sig=old");
-        let refreshed = rendition("https://cdn.example.test/audio/en.m3u8?sig=new");
+        let refreshed = rendition("https://cdn.example.test/audio/en-new.m3u8?sig=new");
+        let mut missing_id = rendition("https://cdn.example.test/audio/no-id.m3u8");
+        missing_id.stable_rendition_id = None;
 
-        assert_eq!(
-            hls_audio_rendition_key(&original),
-            hls_audio_rendition_key(&refreshed)
-        );
+        assert_eq!(hls_audio_rendition_key(&original), hls_audio_rendition_key(&refreshed));
+        assert_eq!(hls_audio_rendition_key(&missing_id), None);
     }
 
     #[test]
-    fn hls_stable_rendition_key_survives_url_rotation_and_keeps_legacy_key() {
+    fn hls_stable_rendition_key_survives_url_rotation() {
         let rendition = |url: &str| crate::manifest::HlsAudioRendition {
             url: Some(Url::parse(url).expect("valid audio rendition URL")),
             group_id: "audio-main".to_string(),
@@ -1711,11 +1626,6 @@ video/es.m3u8
             hls_audio_rendition_key(&original),
             hls_audio_rendition_key(&refreshed),
             "stable rendition IDs survive URL and signature rotation"
-        );
-        assert_ne!(
-            hls_audio_rendition_legacy_key(&original),
-            hls_audio_rendition_legacy_key(&refreshed),
-            "the legacy identity remains available for queue compatibility"
         );
     }
 
@@ -1821,61 +1731,29 @@ video/es.m3u8
     }
 
     #[test]
-    fn hls_variant_key_survives_signed_query_rotation() {
-        let variant = |url: &str, height: Option<u64>| HlsVariant {
+    fn hls_variant_keys_use_stable_ids_only() {
+        let variant = |url: &str, stable_id: &str| HlsVariant {
             url: Url::parse(url).expect("valid variant URL"),
             bandwidth: 2_000_000,
             average_bandwidth: Some(1_800_000),
             width: Some(1920),
-            height,
+            height: Some(1080),
             codecs: Some("avc1.640028".to_string()),
             frame_rate: Some(30.0),
-            audio_group: Some("audio-main".to_string()),
-            stable_variant_id: None,
+            audio_group: None,
+            stable_variant_id: Some(stable_id.to_string()),
         };
-        let original = variant(
-            "https://cdn.example.test/video/1080.m3u8?sig=old",
-            Some(1080),
-        );
-        let refreshed = variant(
-            "https://cdn.example.test/video/1080.m3u8?sig=new",
-            Some(1080),
-        );
-        let different = variant(
-            "https://cdn.example.test/video/1080.m3u8?sig=new",
-            Some(720),
-        );
-
-        let different_query = variant(
-            "https://cdn.example.test/video/1080.m3u8?quality=720&sig=new",
-            Some(1080),
-        );
+        let original = variant("https://cdn.example.test/video/old.m3u8?sig=old", "variant-1080");
+        let refreshed = variant("https://cdn.example.test/video/new.m3u8?sig=new", "variant-1080");
+        let different = variant("https://cdn.example.test/video/720.m3u8?sig=new", "variant-720");
 
         assert_eq!(hls_variant_key(&original), hls_variant_key(&refreshed));
         assert_ne!(hls_variant_key(&original), hls_variant_key(&different));
-        assert_eq!(
-            hls_variant_key(&refreshed),
-            hls_variant_key(&different_query)
-        );
-
-        let collision_keys = hls_variant_keys(&[refreshed.clone(), different_query.clone()]);
-        assert_ne!(collision_keys[0], collision_keys[1]);
-        assert_eq!(collision_keys[0].len(), "hls-variant-".len() + 64);
-        assert!(collision_keys.iter().all(|key| {
-            valid_source(&crate::media_types::ManifestSource {
-                url: "https://cdn.example.test/master.m3u8".to_string(),
-                kind: crate::media_types::ManifestKind::Hls,
-                representation_key: key.clone(),
-                audio_key: None,
-            })
-        }));
-
-        let unique_keys = hls_variant_keys(std::slice::from_ref(&refreshed));
-        assert_eq!(unique_keys[0], hls_variant_key(&refreshed));
+        assert_eq!(hls_variant_keys(&[original, refreshed, different]).len(), 3);
     }
 
     #[test]
-    fn hls_stable_variant_key_survives_resource_rotation_and_keeps_legacy_key() {
+    fn hls_stable_variant_key_survives_resource_rotation() {
         let variant = |url: &str| HlsVariant {
             url: Url::parse(url).expect("valid variant URL"),
             bandwidth: 2_000_000,
@@ -1895,15 +1773,10 @@ video/es.m3u8
             hls_variant_key(&refreshed),
             "stable variant IDs survive resource and signature rotation"
         );
-        assert_ne!(
-            hls_variant_legacy_key(&original),
-            hls_variant_legacy_key(&refreshed),
-            "the legacy identity remains available for queue compatibility"
-        );
     }
 
     #[test]
-    fn selected_source_accepts_legacy_hls_keys_after_stable_ids_are_added() {
+    fn selected_source_rejects_url_derived_hls_keys() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",STABLE-RENDITION-ID="rendition-en",URI="audio/en.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,AUDIO="audio",STABLE-VARIANT-ID="variant-720"
@@ -1914,22 +1787,48 @@ video/720.m3u8
             body,
         )
         .expect("valid HLS master playlist");
-        let legacy_video_key = hls_variant_legacy_keys(&master.variants)[0].clone();
-        let legacy_audio_key = hls_audio_rendition_legacy_keys(&master.audio_renditions)[0].clone();
-        let current_video_key = hls_variant_keys(&master.variants)[0].clone();
-        let current_audio_key = hls_audio_rendition_keys(&master.audio_renditions)[0].clone();
-        assert_ne!(legacy_video_key, current_video_key);
-        assert_ne!(legacy_audio_key, current_audio_key);
-
+        let current_video_key = hls_variant_keys(&master.variants)[0]
+            .as_deref().expect("stable video key").to_string();
+        let current_audio_key = hls_audio_rendition_keys(&master.audio_renditions)[0]
+            .as_deref().expect("stable audio key").to_string();
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
             manifest: NativeManifest::HlsMaster(master),
         };
-        let source = lookup
-            .selected_source(&legacy_video_key, Some(&legacy_audio_key))
-            .expect("pre-stable-ID queue selections remain valid");
-        assert_eq!(source.representation_key, legacy_video_key);
-        assert_eq!(source.audio_key.as_deref(), Some(legacy_audio_key.as_str()));
+
+        assert!(lookup.selected_source(
+            "hls-variant-00000000000000000000000000000000",
+            Some(&current_audio_key),
+        ).is_none());
+        assert!(lookup.selected_source(
+            &current_video_key,
+            Some("hls-audio-00000000000000000000000000000000"),
+        ).is_none());
+    }
+
+    #[test]
+    fn hls_master_requires_unique_stable_ids_for_selectable_tracks() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",STABLE-RENDITION-ID="rendition-en",URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio",STABLE-VARIANT-ID="variant-720"
+video/720.m3u8
+"#;
+        let mut master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        ).expect("valid HLS master playlist");
+        assert!(validate_hls_stable_track_ids(&master).is_ok());
+
+        master.variants[0].stable_variant_id = None;
+        assert!(validate_hls_stable_track_ids(&master).is_err());
+        master.variants[0].stable_variant_id = Some("variant-720".to_string());
+        master.audio_renditions[0].stable_rendition_id = None;
+        assert!(validate_hls_stable_track_ids(&master).is_err());
+        master.audio_renditions[0].stable_rendition_id = Some("rendition-en".to_string());
+
+        let duplicate = master.variants[0].clone();
+        master.variants = vec![duplicate.clone(), duplicate].into_boxed_slice();
+        assert!(validate_hls_stable_track_ids(&master).is_err());
     }
 
     #[test]
@@ -1954,7 +1853,7 @@ video/720.m3u8
             .port();
         let seen_requests = Arc::new(Mutex::new(Vec::new()));
         let requests = Arc::clone(&seen_requests);
-        let manifest_body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1280x720\nvideo/720.m3u8?sig=child\n";
+        let manifest_body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1280x720,STABLE-VARIANT-ID="preview-variant"\nvideo/720.m3u8?sig=child\n";
         let response_body = manifest_body.to_string();
 
         let mut proxy_server = tokio::spawn(async move {

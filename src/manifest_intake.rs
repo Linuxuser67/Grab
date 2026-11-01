@@ -965,6 +965,7 @@ async fn fetch_bounded_manifest_once(
     Ok((final_url, body, server_now))
 }
 
+#[must_use]
 fn stable_hls_track_key(prefix: &str, track_kind: &[u8], stable_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"grab-hls-stable-track\0");

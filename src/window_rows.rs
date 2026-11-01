@@ -482,9 +482,10 @@ fn refresh_row(
     // Native manifest live captures can pause at committed segment boundaries.
     // Other live extractors retain their finish-only behavior.
     let live_capturing = active && is_live;
+    let paused_manifest = item.status() == DownloadStatus::Paused && is_manifest_download;
     w.toggle_btn
         .set_visible(running && (!live_capturing || can_pause_live));
-    w.stop_btn.set_visible(running);
+    w.stop_btn.set_visible(running && !paused_manifest);
     // Header caps for the tooltip, sentence case for the spoken a11y name.
     let (stop_tip, stop_a11y) = match stop_copy(live_capturing) {
         StopCopy::Cancel => (gettext("Cancel"), gettext("Cancel")),
@@ -509,7 +510,6 @@ fn refresh_row(
     ));
     let done = item.status() == DownloadStatus::Done;
     w.reveal_btn.set_visible(done);
-    let paused_manifest = item.status() == DownloadStatus::Paused && is_manifest_download;
     w.delete_btn
         .set_visible(done || live_capturing || paused_manifest);
     let delete_tip = if live_capturing {

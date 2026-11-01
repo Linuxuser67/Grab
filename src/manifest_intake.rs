@@ -979,6 +979,7 @@ fn stable_hls_track_key(prefix: &str, track_kind: &[u8], stable_id: &str) -> Str
     format!("{prefix}{fingerprint}")
 }
 
+#[must_use]
 fn hls_audio_rendition_key(
     rendition: &crate::manifest::HlsAudioRendition,
 ) -> Option<String> {
@@ -1022,6 +1023,7 @@ fn hls_audio_rendition_label(rendition: &crate::manifest::HlsAudioRendition) -> 
     }
 }
 
+#[must_use]
 fn hls_variant_key(variant: &HlsVariant) -> Option<String> {
     variant
         .stable_variant_id
@@ -1746,7 +1748,10 @@ video/es.m3u8
         let original = variant("https://cdn.example.test/video/old.m3u8?sig=old", "variant-1080");
         let refreshed = variant("https://cdn.example.test/video/new.m3u8?sig=new", "variant-1080");
         let different = variant("https://cdn.example.test/video/720.m3u8?sig=new", "variant-720");
+        let mut missing_id = original.clone();
+        missing_id.stable_variant_id = None;
 
+        assert_eq!(hls_variant_key(&missing_id), None);
         assert_eq!(hls_variant_key(&original), hls_variant_key(&refreshed));
         assert_ne!(hls_variant_key(&original), hls_variant_key(&different));
         assert_eq!(hls_variant_keys(&[original, refreshed, different]).len(), 3);
@@ -1820,11 +1825,18 @@ video/720.m3u8
         assert!(validate_hls_stable_track_ids(&master).is_ok());
 
         master.variants[0].stable_variant_id = None;
-        assert!(validate_hls_stable_track_ids(&master).is_err());
+        assert!(matches!(
+            validate_hls_stable_track_ids(&master),
+            Err(ManifestIntakeError::Unsupported(_))
+        ));
         master.variants[0].stable_variant_id = Some("variant-720".to_string());
         master.audio_renditions[0].stable_rendition_id = None;
         assert!(validate_hls_stable_track_ids(&master).is_err());
         master.audio_renditions[0].stable_rendition_id = Some("rendition-en".to_string());
+        let duplicate_rendition = master.audio_renditions[0].clone();
+        master.audio_renditions = vec![duplicate_rendition.clone(), duplicate_rendition]
+            .into_boxed_slice();
+        assert!(validate_hls_stable_track_ids(&master).is_err());
 
         let duplicate = master.variants[0].clone();
         master.variants = vec![duplicate.clone(), duplicate].into_boxed_slice();

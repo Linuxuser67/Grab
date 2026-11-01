@@ -41,7 +41,9 @@ use yt_dlp::model::Video;
 /// What a stop means for the attempt it reaches. The worker applies the intent (only it knows whether it is capturing live); a bare oneshot could not say *how* to stop, so removal once delivered a file with no row behind it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopIntent {
-    /// Stop and keep what is recorded (Stop, pause, cancel); a live capture adopts its partial and delivers it.
+    /// Pause a native live capture without finalizing; its committed manifest state remains resumable.
+    Pause,
+    /// Finish a recording and deliver the captured media.
     Preserve,
     /// Stop and throw it away (row removal): reap the recorder and return without adopting, remuxing or delivering; scratch stays for the manager to reclaim after the task returns.
     Discard,
@@ -1873,7 +1875,7 @@ pub(crate) async fn run_live_ytdlp(
                     reap_child(&mut child, &mut group).await;
                     break match intent {
                         Ok(StopIntent::Preserve) => (true, false),
-                        Ok(StopIntent::Discard) => (true, true),
+                        Ok(StopIntent::Pause | StopIntent::Discard) => (true, true),
                         Err(_) => {
                             // No sender remains to authorise anything: fail closed. Claim the gate so the pre-rename commit below cannot deliver either.
                             let _ = gate.discard();

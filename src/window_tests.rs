@@ -293,6 +293,14 @@ fn queue_row_resynced_after_picker_returns_to_form() {
     let toasts = std::rc::Rc::new(libadwaita::ToastOverlay::new());
     let (window, _, add_card) =
         crate::window::build_window(&app, manager.clone(), settings, toasts);
+    let list_clamp = find_widget_by_name(window.upcast_ref(), "download-list-clamp")
+        .expect("the download sections should be inside the HIG width clamp");
+    assert!(list_clamp.is::<libadwaita::Clamp>());
+    assert_eq!(
+        list_clamp.property::<i32>("maximum-size"),
+        960,
+        "the filter and download rows should share a centered 960px column"
+    );
     window.present();
     drain_gtk_events();
 
@@ -334,6 +342,21 @@ fn drain_gtk_events() {
         }
         context.iteration(false);
     }
+}
+
+fn find_widget_by_name(widget: &gtk4::Widget, name: &str) -> Option<gtk4::Widget> {
+    if widget.widget_name().as_str() == name {
+        return Some(widget.clone());
+    }
+
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = find_widget_by_name(&current, name) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
 }
 
 fn count_queue_rows(widget: &gtk4::Widget) -> usize {

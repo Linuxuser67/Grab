@@ -205,10 +205,12 @@ async fn persist_prepared_copy(
 async fn commit_renamed_destination(
     gate: &Arc<crate::attempt_gate::AttemptGate>,
     pending: &mut PendingDestination,
+    source: &Path,
     destination: &Path,
 ) -> std::io::Result<ManifestPublishOutcome> {
     pending.arm();
     sync_parent_directory(destination).await?;
+    sync_parent_directory(source).await?;
     if !gate.try_commit() {
         return Ok(ManifestPublishOutcome::Aborted);
     }
@@ -231,7 +233,7 @@ pub(crate) async fn publish(
     match crate::file_names::rename_noreplace_same_device(source, destination) {
         Ok(()) => {
             let mut pending = PendingDestination::new(destination, Arc::clone(gate), Some(source));
-            return commit_renamed_destination(gate, &mut pending, destination).await;
+            return commit_renamed_destination(gate, &mut pending, source, destination).await;
         }
         Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {}
         Err(error) => return Err(error),
@@ -282,6 +284,31 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             std::io::Write::flush(self.file)
         }
+    }
+
+    #[tokio::test]
+    async fn same_filesystem_publication_commits_the_renamed_output() {
+        let directory = tempfile::tempdir().expect("create publication root");
+        let staging = directory.path().join("staging");
+        let downloads = directory.path().join("downloads");
+        std::fs::create_dir(&staging).expect("create staging directory");
+        std::fs::create_dir(&downloads).expect("create destination directory");
+        let source = staging.join("output.part.mp4");
+        let destination = downloads.join("final.mp4");
+        std::fs::write(&source, b"complete media payload").expect("write staged output");
+        let gate = crate::attempt_gate::AttemptGate::new();
+
+        let outcome = publish(&source, &destination, &gate)
+            .await
+            .expect("sync both rename parents before delivery");
+
+        assert_eq!(outcome, ManifestPublishOutcome::Published);
+        assert!(gate.was_delivered());
+        assert!(!source.exists(), "same-filesystem publication moves staging output");
+        assert_eq!(
+            std::fs::read(&destination).expect("read delivered output"),
+            b"complete media payload"
+        );
     }
 
     #[tokio::test]

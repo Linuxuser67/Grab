@@ -4946,11 +4946,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn truncated_byte_range_is_retried_without_counting_partial_bytes() {
+    async fn truncated_byte_range_fails_without_retrying_or_counting_partial_bytes() {
+        use std::sync::atomic::AtomicUsize;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let directory =
-            std::env::temp_dir().join(format!("grab-manifest-range-retry-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!(
+            "grab-manifest-range-no-retry-{}",
+            std::process::id()
+        ));
         let _ = tokio::fs::remove_dir_all(&directory).await;
         tokio::fs::create_dir_all(&directory)
             .await
@@ -4960,19 +4963,25 @@ mod tests {
             .await
             .expect("bind HTTP test listener");
         let address = listener.local_addr().expect("listener address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
         let server = tokio::spawn(async move {
-            for body in ["da", "data"] {
-                let (mut socket, _) = listener.accept().await.expect("accept range request");
-                let mut request = [0_u8; 1024];
-                let _ = socket.read(&mut request).await.expect("read range request");
-                let response = format!(
-                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 0-3/4\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                socket
-                    .write_all(response.as_bytes())
-                    .await
-                    .expect("write range response");
+            let (mut socket, _) = listener.accept().await.expect("accept range request");
+            server_requests.fetch_add(1, Ordering::Relaxed);
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.expect("read range request");
+            socket
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\\r\\nContent-Length: 4\\r\\nContent-Range: bytes 0-3/4\\r\\nConnection: close\\r\\n\\r\\nda",
+                )
+                .await
+                .expect("write truncated range response");
+            if let Ok(Ok((mut retry_socket, _))) =
+                tokio::time::timeout(Duration::from_secs(1), listener.accept()).await
+            {
+                server_requests.fetch_add(1, Ordering::Relaxed);
+                let mut retry_request = [0_u8; 1024];
+                let _ = retry_socket.read(&mut retry_request).await;
             }
         });
 
@@ -4991,18 +5000,17 @@ mod tests {
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let downloaded = AtomicU64::new(0);
-        let size = fetch_resource(&client, resource.clone(), &directory, &tx, &downloaded)
-            .await
-            .expect("truncated range should recover on retry");
+        let result = fetch_resource(&client, resource.clone(), &directory, &tx, &downloaded).await;
 
         server.await.expect("HTTP test server task");
-        assert_eq!(size, 4);
-        assert_eq!(downloaded.load(Ordering::Relaxed), 4);
-        assert_eq!(
-            tokio::fs::read(directory.join(resource.filename))
-                .await
-                .expect("completed byte-range resource"),
-            b"data"
+        assert!(matches!(result, Err(ManifestRunError::Retryable(_))));
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        assert_eq!(downloaded.load(Ordering::Relaxed), 0);
+        assert!(!directory.join(&resource.filename).exists());
+        assert!(
+            !directory
+                .join("range-000001-0123456789abcdef0123456789abcdef.bin.part")
+                .exists()
         );
         let _ = tokio::fs::remove_dir_all(directory).await;
     }

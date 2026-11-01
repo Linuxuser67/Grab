@@ -2585,7 +2585,6 @@ fn wire_video_preview(step: Rc<VideoStep>) {
             show_gallery_ready(&step2, card, &title);
         });
     }
-
 }
 
 /// Controls for the optional torrent, destination, and scheduled-download rows.
@@ -3336,10 +3335,8 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
         })
     };
 
-
     kick_video
 }
-
 
 /// Shared state required by the single URL submission path.
 struct SubmitContext {
@@ -3669,7 +3666,6 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
     submit
 }
 
-
 /// Connect submit, keyboard, icon, and debounced URL-edit behavior.
 fn wire_url_entry(
     add_btn: &gtk4::Button,
@@ -3834,10 +3830,7 @@ fn wire_url_entry(
             *scheduled.borrow_mut() = Some(id);
         });
     }
-
-
 }
-
 
 /// Connect the destination folder chooser to the selected directory and row label.
 fn wire_destination_chooser(
@@ -3868,10 +3861,7 @@ fn wire_destination_chooser(
             });
         });
     }
-
-
 }
-
 
 /// Connect support-tool installation, retry, title reset, and format-name behavior.
 fn wire_video_preview_actions(
@@ -3955,8 +3945,6 @@ fn wire_video_preview_actions(
             }
         });
     }
-
-
 }
 
 /// Build the inline New Download card. The returned [`AddCard`] owns the
@@ -4015,12 +4003,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     } = build_url_controls();
     form.append(&url_bar);
     form.append(&opts_revealer);
-    let (step, video_revealer) = build_video_preview(
-        &url_entry,
-        spinner_paintable,
-        &action_revealer,
-        &add_btn,
-    );
+    let (step, video_revealer) =
+        build_video_preview(&url_entry, spinner_paintable, &action_revealer, &add_btn);
     wire_video_preview(Rc::clone(&step));
 
     form.append(&video_revealer);

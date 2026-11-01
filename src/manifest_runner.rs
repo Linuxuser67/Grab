@@ -210,7 +210,7 @@ enum ManifestTrackDirError {
 
 impl From<ManifestChildUrlError> for ManifestRunError {
     fn from(error: ManifestChildUrlError) -> Self {
-        Self::Unsupported(error.to_string())
+        Self::Failed(error.to_string())
     }
 }
 

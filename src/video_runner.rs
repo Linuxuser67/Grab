@@ -1299,11 +1299,10 @@ fn available_subtitle_langs(info: &serde_json::Value) -> std::collections::HashS
 
 /// Resolve the subtitle language for the media command. Automatic mode uses
 /// the configured preference then English; explicit mode requires the selected
-/// language; Off and audio-only modes skip subtitle discovery. When the media
-/// leg reuses the probe's info JSON
-/// (--load-info-json), that JSON already lists the offered tracks — the
-/// same extraction a fresh probe would pay for — so pick from it and skip
-/// the probe instead of a second network fetch. The probe is one
+/// language; Off and audio-only modes skip subtitle discovery. If cached
+/// info JSON contains nonempty subtitle maps, reuse those tracks and avoid a
+/// second extraction. Empty maps are inconclusive because sanitization clears
+/// absent subtitle metadata, so the bounded probe below checks the source. The probe is one
 /// best-effort info fetch — any failure (network, HTTP 429, unparsable
 /// output) yields `None`, so a subtitle outage can never sink the media
 /// download. `Err(())` means the user aborted mid-probe: the caller must

@@ -58,6 +58,7 @@ pub(crate) async fn write_ordered_track(
         &checkpoint_path,
         &part,
         &target,
+        directory,
         &fingerprint,
         resources,
     )
@@ -173,6 +174,7 @@ async fn load_checkpoint(
     checkpoint_path: &Path,
     part: &Path,
     target: &Path,
+    directory: &Path,
     fingerprint: &str,
     resources: &[String],
 ) -> Result<CheckpointState, String> {
@@ -211,7 +213,7 @@ async fn load_checkpoint(
     // a truncated or inconsistent checkpoint from skipping bytes on recovery.
     let mut expected_offset = 0_u64;
     for resource_name in resources.iter().take(checkpoint.next_resource_index) {
-        let resource_path = part.parent().unwrap_or_else(|| Path::new(".")).join(resource_name);
+        let resource_path = directory.join(resource_name);
         let metadata = tokio::fs::symlink_metadata(&resource_path)
             .await
             .map_err(|error| format!("Could not validate a committed DASH resource: {error}"))?;
@@ -238,6 +240,9 @@ async fn load_checkpoint(
         Err(error) => return Err(format!("Could not inspect the interrupted DASH track: {error}")),
     };
     if let Some(metadata) = part_metadata {
+        if tokio::fs::symlink_metadata(target).await.is_ok() {
+            return Err("Both the interrupted and published DASH track files exist".to_string());
+        }
         if metadata.len() < checkpoint.committed_offset {
             return Err("The interrupted DASH track is shorter than its committed checkpoint".to_string());
         }
@@ -416,6 +421,27 @@ mod tests {
             next_resource_index: 1,
             committed_offset: 5,
         };
+        tokio::fs::write(directory.join("track.mp4.checkpoint.json"), serde_json::to_vec(&checkpoint).expect("serialize checkpoint"))
+            .await.expect("write checkpoint");
+        let (_stop_tx, mut abort) = stop_channel();
+
+        assert!(write_ordered_track(&resources, &directory, "track.mp4", &mut abort).await.is_err());
+        tokio::fs::remove_dir_all(directory).await.expect("remove staging");
+    }
+
+    #[tokio::test]
+    async fn rejects_checkpoint_when_committed_offset_disagrees_with_resources() {
+        let directory = test_directory();
+        tokio::fs::create_dir_all(&directory).await.expect("create staging");
+        tokio::fs::write(directory.join("first.bin"), b"first").await.expect("write first");
+        let resources = vec!["first.bin".to_string(), "second.bin".to_string()];
+        let checkpoint = WriterCheckpoint {
+            version: CHECKPOINT_VERSION,
+            plan_fingerprint: plan_fingerprint(&resources).expect("fingerprint"),
+            next_resource_index: 1,
+            committed_offset: 4,
+        };
+        tokio::fs::write(directory.join("track.mp4.part"), b"first").await.expect("write part");
         tokio::fs::write(directory.join("track.mp4.checkpoint.json"), serde_json::to_vec(&checkpoint).expect("serialize checkpoint"))
             .await.expect("write checkpoint");
         let (_stop_tx, mut abort) = stop_channel();

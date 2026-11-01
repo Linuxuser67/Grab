@@ -22,6 +22,7 @@ mod manifest_intake;
 mod manifest_plan;
 mod manifest_publish;
 mod manifest_recovery;
+mod live_capture_state;
 mod manifest_runner;
 mod manifest_types;
 mod media_types;

@@ -509,10 +509,7 @@ fn create_private_merge_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir(path)
 }
 
-/// One direct download through a single yt-dlp invocation: Grab claims the output into place (EXDEV-safe, no clobber) and wipes staging.
-/// Returns the finished size, or `None` on user abort (the caller stays quiet).
-/// On Preserve abort of a DASH download, partial video+audio are merged into
-/// a single file instead of being abandoned.
+/// Find yt-dlp's remaining DASH format fragments, ordered largest-first.
 fn discover_dash_partials(staging: &Path) -> Option<Vec<(PathBuf, u64)>> {
     let mut parts: Vec<(PathBuf, u64)> = std::fs::read_dir(staging)
         .ok()?

@@ -30,7 +30,10 @@ enum CheckpointState {
         next_resource_index: usize,
         committed_offset: u64,
     },
-    AlreadyComplete { committed_offset: u64 },
+    AlreadyComplete {
+        committed_offset: u64,
+    },
+
 }
 
 /// Assemble staged DASH resources in their declared order, retaining a durable
@@ -185,9 +188,12 @@ impl OrderedTrackWriter {
             }
         };
         if copied != metadata.len() {
-            self.output.set_len(self.committed_offset).await.map_err(|error| {
-                format!("Could not roll back an incomplete DASH write: {error}")
-            })?;
+            self.output
+                .set_len(self.committed_offset)
+                .await
+                .map_err(|error| {
+                    format!("Could not roll back an incomplete DASH write: {error}")
+                })?;
             self.output
                 .sync_all()
                 .await
@@ -218,7 +224,9 @@ impl OrderedTrackWriter {
     /// Publish the complete ordered track without replacing an existing file.
     pub(crate) async fn finish(self) -> Result<(), String> {
         if self.next_resource_index != self.resources.len() {
-            return Err("The DASH track cannot be published before all resources are committed".to_string());
+            return Err(
+                "The DASH track cannot be published before all resources are committed".to_string(),
+            );
         }
         self.output
             .sync_all()

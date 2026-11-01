@@ -4377,17 +4377,13 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let parsed = crate::manifest::dash::parse_dash_manifest(
-            "https://example.test/manifest.mpd",
-            body,
-        )
-        .expect("parse static DASH fixture");
+        let parsed =
+            crate::manifest::dash::parse_dash_manifest("https://example.test/manifest.mpd", body)
+                .expect("parse static DASH fixture");
         let representation_key = parsed.video_representations[0].key.clone();
-        let mut plan = crate::manifest::dash::plan_dash_representation(
-            &parsed,
-            &representation_key,
-        )
-        .expect("plan video representation");
+        let mut plan =
+            crate::manifest::dash::plan_dash_representation(&parsed, &representation_key)
+                .expect("plan video representation");
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -4400,8 +4396,8 @@ mod tests {
                     format!("seg-{}.m4s", resource.segment_number.unwrap_or_default())
                 }
             };
-            resource.url = Url::parse(&format!("http://{address}/{filename}"))
-                .expect("local resource URL");
+            resource.url =
+                Url::parse(&format!("http://{address}/{filename}")).expect("local resource URL");
         }
 
         let active = Arc::new(AtomicUsize::new(0));
@@ -4436,7 +4432,10 @@ mod tests {
                         .write_all(header.as_bytes())
                         .await
                         .expect("write response header");
-                    socket.write_all(payload).await.expect("write response body");
+                    socket
+                        .write_all(payload)
+                        .await
+                        .expect("write response body");
                     active.fetch_sub(1, Ordering::AcqRel);
                 }));
             }

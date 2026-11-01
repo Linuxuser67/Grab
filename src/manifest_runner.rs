@@ -960,6 +960,63 @@ pub(crate) async fn run_manifest_download(
         }
     }
 
+    finalize_manifest_download(ManifestFinalization {
+        job: &job,
+        gate,
+        abort,
+        tx: &tx,
+        staging: &staging,
+        dest_dir,
+        video_dir: &video_dir,
+        audio_dir: &audio_dir,
+        output_part,
+        tracks,
+        has_audio,
+        downloaded: &downloaded,
+    })
+    .await
+}
+
+/// Mux the staged tracks, validate the output, and publish it without clobbering.
+///
+/// The staging data is retained on every failure before publication so the queue
+/// can retry without downloading already completed resources.
+struct ManifestFinalization<'a> {
+    job: &'a ManifestJob,
+    gate: Arc<crate::attempt_gate::AttemptGate>,
+    abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    staging: &'a Path,
+    dest_dir: &'a Path,
+    video_dir: &'a Path,
+    audio_dir: &'a Path,
+    output_part: PathBuf,
+    tracks: Tracks,
+    has_audio: bool,
+    downloaded: &'a AtomicU64,
+}
+
+/// Mux the staged tracks, validate the output, and publish it without clobbering.
+///
+/// The staging data is retained on every failure before publication so the queue
+/// can retry without downloading already completed resources.
+async fn finalize_manifest_download(
+    context: ManifestFinalization<'_>,
+) -> Result<ManifestOutcome, ManifestRunError> {
+    let ManifestFinalization {
+        job,
+        gate,
+        mut abort,
+        tx,
+        staging,
+        dest_dir,
+        video_dir,
+        audio_dir,
+        output_part,
+        tracks,
+        has_audio,
+        downloaded,
+    } = context;
     if abort.try_recv().is_ok() {
         return Ok(ManifestOutcome::Aborted);
     }
@@ -1032,7 +1089,7 @@ pub(crate) async fn run_manifest_download(
     // FFmpeg writes beside the staged segments, so check both the XDG state
     // filesystem (staged inputs plus mux output) and destination filesystem
     // (the no-clobber cross-device publication fallback).
-    ensure_manifest_mux_spaces(&staging, dest_dir, staged_bytes)?;
+    ensure_manifest_mux_spaces(staging, dest_dir, staged_bytes)?;
     if !run_ffmpeg(
         &ffmpeg,
         &video_input,

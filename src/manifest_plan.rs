@@ -203,7 +203,7 @@ impl ManifestLookup {
                     .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
                     .filter_map(|(rendition, key)| {
                         let key = key?;
-                        (rendition.group_id == group_id && rendition.url.is_some()).then(|| {
+                        (rendition.group_id == group_id).then(|| {
                             ManifestSubtitleChoice {
                                 key,
                                 language: rendition.language.clone(),
@@ -461,7 +461,8 @@ pub(crate) fn download_plan(
                             (key.as_deref() == Some(subtitle_key)
                                 && variant.subtitles_group.as_deref()
                                     == Some(rendition.group_id.as_str()))
-                            .then(|| rendition.language.clone())
+                            .then_some(rendition.language.clone())
+                                .flatten()
                         })
                 }),
             })

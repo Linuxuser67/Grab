@@ -607,6 +607,7 @@ pub(crate) struct VideoStep {
     pub(crate) manifest_audio_format: adw::ComboRow,
     pub(crate) manifest_subtitle_choices: Rc<RefCell<Vec<crate::manifest_intake::ManifestSubtitleChoice>>>,
     pub(crate) manifest_subtitle_selection: Rc<RefCell<Option<String>>>,
+    pub(crate) manifest_subtitle_preference: Rc<RefCell<Option<String>>>,
     pub(crate) manifest_subtitle_format: adw::ComboRow,
     /// Index-aligned with the combo's model. Reset on every resolve.
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
@@ -796,6 +797,7 @@ fn clear_manifest_preview(step: &VideoStep) {
     step.manifest_audio_format.set_visible(false);
     step.manifest_subtitle_choices.borrow_mut().clear();
     step.manifest_subtitle_selection.borrow_mut().take();
+    step.manifest_subtitle_preference.borrow_mut().take();
     step.manifest_subtitle_format.set_model(Some(&gtk4::StringList::new(&[])));
     step.manifest_subtitle_format.set_visible(false);
 }
@@ -848,14 +850,15 @@ fn refresh_manifest_subtitle_picker(
                 .map(|manifest| manifest.subtitle_choices(key))
         })
         .unwrap_or_default();
-    let selected_index = crate::manifest_plan::ManifestLookup::preferred_subtitle_choice_index(
+    let preferred_choice_index = crate::manifest_plan::ManifestLookup::preferred_subtitle_choice_index(
         &choices,
         preferred_language,
-    )
-    .map_or(0, |index| index + 1);
-    step.manifest_subtitle_selection.replace(
-        choices.get(selected_index.saturating_sub(1)).map(|choice| choice.key.clone()),
     );
+    let selected_index = preferred_choice_index.map_or(0, |index| index + 1);
+    step.manifest_subtitle_selection.replace(
+        preferred_choice_index.and_then(|index| choices.get(index).map(|choice| choice.key.clone())),
+    );
+    step.manifest_subtitle_preference.replace(preferred_language.map(str::to_string));
     step.manifest_subtitle_choices.replace(choices);
     let mut labels = vec![gettext("Off")];
     labels.extend(
@@ -884,6 +887,7 @@ fn show_manifest_ready(
     if let Some(manifest) = manifest {
         step.manifest.replace(Some(manifest));
     }
+    step.manifest_subtitle_preference.replace(preferred_subtitle_language.map(str::to_string));
     hide_video_step(step);
 
     let manifest_state = step.manifest.borrow();
@@ -2405,6 +2409,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         manifest_audio_format,
         manifest_subtitle_choices: Rc::new(RefCell::new(Vec::new())),
         manifest_subtitle_selection: Rc::new(RefCell::new(None)),
+        manifest_subtitle_preference: Rc::new(RefCell::new(None)),
         manifest_subtitle_format,
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
@@ -2431,6 +2436,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let manifest_format = step.manifest_format.clone();
         let choices = Rc::clone(&step.manifest_choices);
         let selection = Rc::clone(&step.manifest_selection);
+        let subtitle_preference = Rc::clone(&step.manifest_subtitle_preference);
         manifest_format.connect_selected_notify(move |row| {
             let selected_key = choices
                 .borrow()
@@ -2439,7 +2445,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             selection.replace(selected_key.clone());
             if let Some(step) = step_weak.upgrade() {
                 refresh_manifest_audio_picker(&step, selected_key.as_deref());
-                let subtitle_language = crate::video_prefs::subtitle_lang_active(&settings_b.subtitle_language());
+                let subtitle_language = subtitle_preference.borrow().clone();
                 refresh_manifest_subtitle_picker(&step, selected_key.as_deref(), subtitle_language.as_deref());
             }
         });

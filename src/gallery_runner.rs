@@ -12,7 +12,7 @@ use tokio::process::Command;
 use crate::gallery_argv::{GalleryJob, download_argv_with_proxy};
 use crate::gallery_progress::{GalleryProgress, ProgressLine, parse_progress_line};
 use crate::gallery_tools::GalleryError;
-use crate::runtime::lock_recover;
+use crate::runtime::lock_or_panic;
 use crate::video_spawn::ProcessGroupGuard;
 
 /// Outcome of a gallery download.
@@ -203,7 +203,7 @@ pub async fn run_gallery_download_with_proxy(
                     // Debug: echo stderr live. The line is still captured
                     // below for the failure tail.
                     crate::backend_debug::echo_line(&line);
-                    let mut buf = lock_recover(&stderr_lines_clone);
+                    let mut buf = lock_or_panic(&stderr_lines_clone);
                     buf.push(line);
                     if buf.len() > 20 {
                         buf.remove(0);
@@ -278,7 +278,7 @@ pub async fn run_gallery_download_with_proxy(
 
     if !status.success() {
         let code = status.code();
-        let stderr_tail = lock_recover(&stderr_lines).join("\n");
+        let stderr_tail = lock_or_panic(&stderr_lines).join("\n");
         // Log a redacted tail (gallery-dl failure lines embed media URLs with
         // signed query tokens; the journal gets no query strings). The
         // user-facing message keeps the full tail (the dialog scrolls).

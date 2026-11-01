@@ -3609,6 +3609,36 @@ async fn run_ffmpeg(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn live_finish_marker_is_idempotent_and_preserves_committed_bytes() {
+        let directory = tempfile::tempdir().expect("create live finish marker directory");
+        assert_eq!(
+            read_live_finish_marker(directory.path())
+                .await
+                .expect("read missing finish marker"),
+            None
+        );
+
+        ensure_live_finish_marker(directory.path(), 123_456)
+            .await
+            .expect("persist finish marker");
+        assert_eq!(
+            read_live_finish_marker(directory.path())
+                .await
+                .expect("read finish marker"),
+            Some(123_456)
+        );
+        ensure_live_finish_marker(directory.path(), 123_456)
+            .await
+            .expect("repeated finish marker write is idempotent");
+        assert!(
+            ensure_live_finish_marker(directory.path(), 123_457)
+                .await
+                .is_err(),
+            "a retry must not silently change the committed byte count"
+        );
+    }
+
     #[test]
     fn manifest_output_container_accepts_only_mp4_and_mkv_extensions() {
         assert_eq!(

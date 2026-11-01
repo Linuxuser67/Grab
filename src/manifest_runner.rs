@@ -653,6 +653,14 @@ pub(crate) async fn run_manifest_download(
                     .any(|name| name.starts_with("dash-live-segment-"))
             });
         }
+        if finish_requested {
+            downloaded.store(finish_marker_bytes.unwrap_or(0), Ordering::Relaxed);
+        } else {
+            ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
+                .await
+                .map_err(ManifestRunError::Failed)?;
+        }
+        tx.send(EngineMsg::LiveFinalizing).ok();
         if !concat_dash_resource_names(
             &capture.video_resources,
             &video_dir,
@@ -675,14 +683,6 @@ pub(crate) async fn run_manifest_download(
         {
             return Ok(ManifestOutcome::Aborted);
         }
-        if finish_requested {
-            downloaded.store(finish_marker_bytes.unwrap_or(0), Ordering::Relaxed);
-        } else {
-            ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
-                .await
-                .map_err(ManifestRunError::Failed)?;
-        }
-        tx.send(EngineMsg::LiveFinalizing).ok();
     } else {
         match &tracks {
             Tracks::Hls {

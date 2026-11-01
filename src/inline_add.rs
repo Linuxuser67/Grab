@@ -3841,6 +3841,127 @@ fn wire_url_entry(
 
 }
 
+
+/// Connect the destination folder chooser to the selected directory and row label.
+fn wire_destination_chooser(
+    dest_btn: &gtk4::Button,
+    dest_dir: Rc<RefCell<String>>,
+    dest_label: gtk4::Label,
+) {
+    // Destination chooser.
+    {
+        let dd = Rc::clone(&dest_dir);
+        let dl = dest_label.clone();
+        dest_btn.connect_clicked(move |b| {
+            let chooser = gtk4::FileDialog::builder()
+                .title(gettext("Choose download folder"))
+                .accept_label(gettext("Select Folder"))
+                .build();
+            let root = b.root().and_downcast::<gtk4::Window>();
+            let dd2 = Rc::clone(&dd);
+            let dl2 = dl.clone();
+            chooser.select_folder(root.as_ref(), gio::Cancellable::NONE, move |res| {
+                if let Ok(f) = res
+                    && let Some(p) = f.path()
+                {
+                    let s = p.to_string_lossy().into_owned();
+                    dl2.set_text(&s);
+                    *dd2.borrow_mut() = s;
+                }
+            });
+        });
+    }
+
+
+}
+
+
+/// Connect support-tool installation, retry, title reset, and format-name behavior.
+fn wire_video_preview_actions(
+    step: Rc<VideoStep>,
+    probe: Rc<RefCell<ProbeState>>,
+    kick_video: VideoLookupKick,
+    manager: &Rc<DownloadManager>,
+) {
+    // Install / retry / revert / audio-mode wiring.
+    {
+        let step2 = step.clone();
+        let kick = kick_video.clone();
+        let btn = video_install_btn.clone();
+        // Outside Flatpak there is no bundled binary and host packages can't
+        // be installed from here: guide through self-install instead.
+        if !crate::video_tools::in_flatpak() {
+            btn.set_label(&gettext("How to Install"));
+            btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
+        }
+        video_install_btn.connect_clicked(move |_| {
+            if !crate::video_tools::in_flatpak() {
+                let kick_b = kick.clone();
+                crate::install_help::show(&btn, move || kick_b(true, SubmitSource::Button));
+                return;
+            }
+            // Flatpak: staged auto-install under the shared progress popover anchored at
+            // the button (HIG: feedback lives with its control; stages stand in for the
+            // percentages that don't exist).
+            let (step_b, kick_b) = (step2.clone(), kick.clone());
+            crate::install_progress::run(
+                &btn,
+                move |err| {
+                    step_b.tools.set_subtitle(&err);
+                },
+                move || {
+                    // Re-probe, don't just refresh: an unlisted URL that led
+                    // here for missing tools has no preview yet.
+                    kick_b(true, SubmitSource::Button);
+                },
+                None, // Fresh install: show all tools.
+            );
+        });
+    }
+    {
+        let kick = kick_video.clone();
+        video_retry_btn.connect_clicked(move |_| kick(true, SubmitSource::Button));
+    }
+    // One-click restore of the title default (audio-aware, like submit).
+    {
+        let (name, step_c, probe) = (step.name.clone(), Rc::clone(&step), Rc::clone(&probe));
+        let settings = manager.settings().clone();
+        step.revert.connect_clicked(move |_| {
+            let st = probe.borrow();
+            if let Some(p) = st.info.as_ref() {
+                name.set_text(&default_name_for(
+                    &settings,
+                    p.title(),
+                    selected_audio_only(&step_c),
+                ));
+                name.grab_focus();
+            }
+        });
+    }
+    // Changing the format pick re-seeds an untouched name: the resolve-time
+    // seed ran under the other mode, so without this the row keeps a
+    // video-container name for an audio download (or vice versa). An edited
+    // name is never clobbered.
+    {
+        let (name, step_c, probe) = (step.name.clone(), Rc::clone(&step), Rc::clone(&probe));
+        let settings = manager.settings().clone();
+        step.format.connect_selected_notify(move |_| {
+            let st = probe.borrow();
+            if let Some(p) = st.info.as_ref() {
+                let active = selected_audio_only(&step_c);
+                let current = name.text().to_string();
+                if current.trim().is_empty()
+                    || current == default_name_for(&settings, p.title(), !active)
+                {
+                    name.set_text(&default_name_for(&settings, p.title(), active));
+                }
+            }
+        });
+    }
+
+
+}
+
 pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let open_state = Rc::new(OpenState::default());
     // Shared scheduled-download timestamp: set by the schedule picker UI,
@@ -4040,29 +4161,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         &manager,
     );
 
-    // Destination chooser.
-    {
-        let dd = Rc::clone(&dest_dir);
-        let dl = dest_label.clone();
-        dest_btn.connect_clicked(move |b| {
-            let chooser = gtk4::FileDialog::builder()
-                .title(gettext("Choose download folder"))
-                .accept_label(gettext("Select Folder"))
-                .build();
-            let root = b.root().and_downcast::<gtk4::Window>();
-            let dd2 = Rc::clone(&dd);
-            let dl2 = dl.clone();
-            chooser.select_folder(root.as_ref(), gio::Cancellable::NONE, move |res| {
-                if let Ok(f) = res
-                    && let Some(p) = f.path()
-                {
-                    let s = p.to_string_lossy().into_owned();
-                    dl2.set_text(&s);
-                    *dd2.borrow_mut() = s;
-                }
-            });
-        });
-    }
+    wire_destination_chooser(&dest_btn, Rc::clone(&dest_dir), dest_label.clone());
 
     wire_torrent_picker(
         &torrent_btn,
@@ -4074,81 +4173,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         Rc::clone(&scheduled_at),
     );
 
-    // Install / retry / revert / audio-mode wiring.
-    {
-        let step2 = step.clone();
-        let kick = kick_video.clone();
-        let btn = video_install_btn.clone();
-        // Outside Flatpak there is no bundled binary and host packages can't
-        // be installed from here: guide through self-install instead.
-        if !crate::video_tools::in_flatpak() {
-            btn.set_label(&gettext("How to Install"));
-            btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
-        }
-        video_install_btn.connect_clicked(move |_| {
-            if !crate::video_tools::in_flatpak() {
-                let kick_b = kick.clone();
-                crate::install_help::show(&btn, move || kick_b(true, SubmitSource::Button));
-                return;
-            }
-            // Flatpak: staged auto-install under the shared progress popover anchored at
-            // the button (HIG: feedback lives with its control; stages stand in for the
-            // percentages that don't exist).
-            let (step_b, kick_b) = (step2.clone(), kick.clone());
-            crate::install_progress::run(
-                &btn,
-                move |err| {
-                    step_b.tools.set_subtitle(&err);
-                },
-                move || {
-                    // Re-probe, don't just refresh: an unlisted URL that led
-                    // here for missing tools has no preview yet.
-                    kick_b(true, SubmitSource::Button);
-                },
-                None, // Fresh install: show all tools.
-            );
-        });
-    }
-    {
-        let kick = kick_video.clone();
-        video_retry_btn.connect_clicked(move |_| kick(true, SubmitSource::Button));
-    }
-    // One-click restore of the title default (audio-aware, like submit).
-    {
-        let (name, step_c, probe) = (step.name.clone(), Rc::clone(&step), Rc::clone(&probe));
-        let settings = manager.settings().clone();
-        step.revert.connect_clicked(move |_| {
-            let st = probe.borrow();
-            if let Some(p) = st.info.as_ref() {
-                name.set_text(&default_name_for(
-                    &settings,
-                    p.title(),
-                    selected_audio_only(&step_c),
-                ));
-                name.grab_focus();
-            }
-        });
-    }
-    // Changing the format pick re-seeds an untouched name: the resolve-time
-    // seed ran under the other mode, so without this the row keeps a
-    // video-container name for an audio download (or vice versa). An edited
-    // name is never clobbered.
-    {
-        let (name, step_c, probe) = (step.name.clone(), Rc::clone(&step), Rc::clone(&probe));
-        let settings = manager.settings().clone();
-        step.format.connect_selected_notify(move |_| {
-            let st = probe.borrow();
-            if let Some(p) = st.info.as_ref() {
-                let active = selected_audio_only(&step_c);
-                let current = name.text().to_string();
-                if current.trim().is_empty()
-                    || current == default_name_for(&settings, p.title(), !active)
-                {
-                    name.set_text(&default_name_for(&settings, p.title(), active));
-                }
-            }
-        });
-    }
+    wire_video_preview_actions(
+        Rc::clone(&step),
+        Rc::clone(&probe),
+        Rc::clone(&kick_video),
+        &manager,
+    );
 
     // Escape collapses the card.
     {

@@ -4,8 +4,13 @@ use gettextrs::gettext;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::manifest::{HlsAudioRendition, HlsPlan, HlsSubtitleRendition, HlsVariant, dash::{DashPresentation, DashRepresentationPlan}};
-use crate::manifest_types::{ManifestAudioChoice, ManifestChoice, ManifestLookup, ManifestSubtitleChoice, NativeManifest};
+use crate::manifest::{
+    HlsAudioRendition, HlsPlan, HlsSubtitleRendition, HlsVariant,
+    dash::{DashPresentation, DashRepresentationPlan},
+};
+use crate::manifest_types::{
+    ManifestAudioChoice, ManifestChoice, ManifestLookup, ManifestSubtitleChoice, NativeManifest,
+};
 use crate::media_types::{ManifestKind, ManifestSource};
 
 /// A validated protocol plan ready for the runner to materialize and execute.
@@ -209,14 +214,20 @@ impl ManifestLookup {
             }
             NativeManifest::HlsMedia(_) => Vec::new(),
             NativeManifest::Dash(dash) => {
-                if !dash.video_representations.iter().any(|track| track.key == video_key) {
+                if !dash
+                    .video_representations
+                    .iter()
+                    .any(|track| track.key == video_key)
+                {
                     return Vec::new();
                 }
                 let mut choices = dash
                     .subtitle_representations
                     .iter()
                     .map(|track| {
-                        let title = track.language.as_deref()
+                        let title = track
+                            .language
+                            .as_deref()
                             .filter(|language| !language.is_empty())
                             .or(track.representation_id.as_deref())
                             .map(short_label)
@@ -258,15 +269,17 @@ impl ManifestLookup {
         choices
             .iter()
             .position(|choice| {
-                choice.language.as_deref().is_some_and(|language| {
-                    subtitle_language_matches(preferred, language)
-                })
+                choice
+                    .language
+                    .as_deref()
+                    .is_some_and(|language| subtitle_language_matches(preferred, language))
             })
             .or_else(|| {
                 choices.iter().position(|choice| {
-                    choice.language.as_deref().is_some_and(|language| {
-                        subtitle_language_matches("en", language)
-                    })
+                    choice
+                        .language
+                        .as_deref()
+                        .is_some_and(|language| subtitle_language_matches("en", language))
                 })
             })
     }
@@ -293,7 +306,11 @@ impl ManifestLookup {
     }
 
     /// Return the representation closest to the configured video-quality preference.
-    pub(crate) fn preferred_source(&self, quality: &str, subtitle_language: Option<&str>) -> Option<ManifestSource> {
+    pub(crate) fn preferred_source(
+        &self,
+        quality: &str,
+        subtitle_language: Option<&str>,
+    ) -> Option<ManifestSource> {
         let choices = self.choices();
         let index = preferred_choice_index(&choices, quality);
         let choice = choices.get(index)?;
@@ -343,7 +360,10 @@ impl ManifestLookup {
             return None;
         }
         if subtitle_key.is_some_and(|selected| {
-            !self.subtitle_choices(representation_key).iter().any(|choice| choice.key == selected)
+            !self
+                .subtitle_choices(representation_key)
+                .iter()
+                .any(|choice| choice.key == selected)
         }) {
             return None;
         }
@@ -432,21 +452,34 @@ pub(crate) fn download_plan(
                 video_url: variant.url.clone(),
                 audio_url: selected_audio.and_then(|rendition| rendition.url.clone()),
                 subtitle_url: match source.subtitle_key.as_deref() {
-                    Some(subtitle_key) => Some(master.subtitle_renditions.iter()
-                        .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
-                        .find_map(|(rendition, key)| (key.as_deref() == Some(subtitle_key)
-                            && variant.subtitles_group.as_deref() == Some(rendition.group_id.as_str()))
-                            .then_some(rendition.url.clone()))
-                        .ok_or_else(|| "The selected HLS subtitle rendition is no longer available".to_string())?),
+                    Some(subtitle_key) => Some(
+                        master
+                            .subtitle_renditions
+                            .iter()
+                            .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
+                            .find_map(|(rendition, key)| {
+                                (key.as_deref() == Some(subtitle_key)
+                                    && variant.subtitles_group.as_deref()
+                                        == Some(rendition.group_id.as_str()))
+                                .then_some(rendition.url.clone())
+                            })
+                            .ok_or_else(|| {
+                                "The selected HLS subtitle rendition is no longer available"
+                                    .to_string()
+                            })?,
+                    ),
                     None => None,
                 },
                 subtitle_language: source.subtitle_key.as_deref().and_then(|subtitle_key| {
-                    master.subtitle_renditions.iter()
+                    master
+                        .subtitle_renditions
+                        .iter()
                         .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
                         .find_map(|(rendition, key)| {
                             (key.as_deref() == Some(subtitle_key)
-                                && variant.subtitles_group.as_deref() == Some(rendition.group_id.as_str()))
-                                .then(|| rendition.language.clone())
+                                && variant.subtitles_group.as_deref()
+                                    == Some(rendition.group_id.as_str()))
+                            .then(|| rendition.language.clone())
                         })
                 }),
             })
@@ -483,7 +516,10 @@ pub(crate) fn download_plan(
                 .transpose()?;
             let subtitle = match source.subtitle_key.as_deref() {
                 Some(_) if matches!(&dash.presentation, DashPresentation::Dynamic(_)) => {
-                    return Err("Native subtitles are not supported for live DASH presentations".to_string());
+                    return Err(
+                        "Native subtitles are not supported for live DASH presentations"
+                            .to_string(),
+                    );
                 }
                 Some(key) => {
                     let track = dash
@@ -541,14 +577,18 @@ pub(crate) fn hls_subtitle_rendition_keys(
     renditions
         .iter()
         .map(|rendition| {
-            rendition.stable_rendition_id.as_deref()
+            rendition
+                .stable_rendition_id
+                .as_deref()
                 .map(|stable_id| stable_hls_track_key("hls-subtitle-", b"subtitle", stable_id))
         })
         .collect()
 }
 
 fn hls_subtitle_rendition_label(rendition: &HlsSubtitleRendition) -> String {
-    let language = rendition.language.as_deref()
+    let language = rendition
+        .language
+        .as_deref()
         .filter(|language| !language.is_empty())
         .map(short_label);
     let name = (!rendition.name.is_empty()).then(|| rendition.name.clone());
@@ -594,22 +634,44 @@ fn normalize_subtitle_language(language: &str) -> Option<String> {
 }
 
 fn subtitle_language_matches(preferred: &str, available: &str) -> bool {
-    let preferred = preferred.split(['-', '_']).next().unwrap_or(preferred).to_ascii_lowercase();
-    let available = available.split(['-', '_']).next().unwrap_or(available).to_ascii_lowercase();
+    let preferred = preferred
+        .split(['-', '_'])
+        .next()
+        .unwrap_or(preferred)
+        .to_ascii_lowercase();
+    let available = available
+        .split(['-', '_'])
+        .next()
+        .unwrap_or(available)
+        .to_ascii_lowercase();
     if preferred == available {
         return true;
     }
     const ALIASES: &[(&str, &str)] = &[
-        ("en", "eng"), ("ar", "ara"), ("de", "deu"), ("de", "ger"),
-        ("es", "spa"), ("fr", "fra"), ("fr", "fre"), ("hi", "hin"),
-        ("id", "ind"), ("it", "ita"), ("ja", "jpn"), ("ko", "kor"),
-        ("nl", "nld"), ("nl", "dut"), ("pl", "pol"), ("pt", "por"),
-        ("ru", "rus"), ("tr", "tur"), ("vi", "vie"), ("zh", "zho"),
+        ("en", "eng"),
+        ("ar", "ara"),
+        ("de", "deu"),
+        ("de", "ger"),
+        ("es", "spa"),
+        ("fr", "fra"),
+        ("fr", "fre"),
+        ("hi", "hin"),
+        ("id", "ind"),
+        ("it", "ita"),
+        ("ja", "jpn"),
+        ("ko", "kor"),
+        ("nl", "nld"),
+        ("nl", "dut"),
+        ("pl", "pol"),
+        ("pt", "por"),
+        ("ru", "rus"),
+        ("tr", "tur"),
+        ("vi", "vie"),
+        ("zh", "zho"),
         ("zh", "chi"),
     ];
     ALIASES.iter().any(|(two, three)| {
-        (preferred == *two && available == *three)
-            || (preferred == *three && available == *two)
+        (preferred == *two && available == *three) || (preferred == *three && available == *two)
     })
 }
 

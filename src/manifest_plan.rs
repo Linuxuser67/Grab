@@ -11,13 +11,13 @@ use crate::media_types::{ManifestKind, ManifestSource};
 /// A validated protocol plan ready for the runner to materialize and execute.
 #[derive(Debug)]
 pub(crate) enum ManifestDownloadPlan {
-    HlsMedia(HlsPlan),
+    HlsMedia(Box<HlsPlan>),
     HlsMaster {
         video_url: Url,
         audio_url: Option<Url>,
     },
     Dash {
-        video: DashRepresentationPlan,
+        video: Box<DashRepresentationPlan>,
         audio: Option<Box<DashRepresentationPlan>>,
     },
 }
@@ -256,7 +256,7 @@ pub(crate) fn download_plan(
         (NativeManifest::HlsMedia(plan), ManifestKind::Hls)
             if source.representation_key == "hls-media" =>
         {
-            Ok(ManifestDownloadPlan::HlsMedia(*plan))
+            Ok(ManifestDownloadPlan::HlsMedia(plan))
         }
         (NativeManifest::HlsMaster(master), ManifestKind::Hls) => {
             let variant = master
@@ -335,7 +335,10 @@ pub(crate) fn download_plan(
                         .map_err(|error| error.to_string())
                 })
                 .transpose()?;
-            Ok(ManifestDownloadPlan::Dash { video, audio })
+            Ok(ManifestDownloadPlan::Dash {
+                video: Box::new(video),
+                audio,
+            })
         }
         _ => Err("The selected representation is not valid for this manifest".to_string()),
     }

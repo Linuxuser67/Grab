@@ -805,7 +805,10 @@ async fn resolve_tracks(
     match plan {
         ManifestDownloadPlan::HlsMedia(video) => {
             guard_hls_resources(&source.url, &video, guarded_child_hosts)?;
-            Ok(Tracks::Hls { video, audio: None })
+            Ok(Tracks::Hls {
+                video: *video,
+                audio: None,
+            })
         }
         ManifestDownloadPlan::HlsMaster {
             video_url,
@@ -838,7 +841,10 @@ async fn resolve_tracks(
                     guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
                 }
             }
-            Ok(Tracks::Dash { video, audio })
+            Ok(Tracks::Dash {
+                video: *video,
+                audio,
+            })
         }
     }
 }

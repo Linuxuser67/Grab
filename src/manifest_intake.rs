@@ -12,7 +12,7 @@ use url::Url;
 
 #[cfg(test)]
 use crate::manifest::HlsVariant;
-use crate::manifest::{HlsMasterPlan, HlsPlan, MAX_MANIFEST_BYTES, dash::DashManifestPlan};
+use crate::manifest::{HlsMasterPlan, HlsPlan, MAX_MANIFEST_BYTES};
 
 /// Download-time manifest requests retain their normal network tolerance.
 const MANIFEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -204,10 +204,7 @@ pub(crate) fn supports(raw_url: &str) -> bool {
         .is_some_and(|url| is_native_manifest_candidate(&url, ManifestTransportPolicy::HttpsOnly))
 }
 
-pub(crate) use crate::manifest_plan::{
-    hls_audio_rendition_key, hls_audio_rendition_keys, hls_variant_key, hls_variant_keys,
-    preferred_choice_index,
-};
+pub(crate) use crate::manifest_plan::preferred_choice_index;
 pub(crate) use crate::manifest_types::{
     ManifestAudioChoice, ManifestChoice, ManifestLookup, NativeManifest,
 };
@@ -770,6 +767,9 @@ async fn read_bounded_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest_plan::{
+        hls_audio_rendition_key, hls_audio_rendition_keys, hls_variant_key, hls_variant_keys,
+    };
 
     #[test]
     fn native_manifest_gate_accepts_explicit_format_query_hints() {

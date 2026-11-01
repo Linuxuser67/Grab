@@ -540,8 +540,12 @@ fn magnet_metadata_is_cached_and_used_to_clean_unselected_files() {
     assert!(!folder.join("sub/b.txt").exists());
     assert!(!folder.join("sub").exists());
 
+    // Deleting one row must not discard shared metainfo while another row
+    // with the same info-hash may still need it.
     delete_archive_for_url(&magnet);
-    assert!(read_archive_bytes(&magnet).is_none());
+    assert!(read_archive_bytes(&magnet).is_some());
+    let cached = magnet_metadata_path_in(&torrents_dir(), &info_hash).expect("cache path");
+    let _ = std::fs::remove_file(cached);
     let _ = std::fs::remove_dir_all(&folder);
 }
 

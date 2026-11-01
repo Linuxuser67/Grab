@@ -400,6 +400,7 @@ mod tests {
                 title: "T".into(),
                 page_url: "https://example.com/p".into(),
                 formats: Box::default(),
+                subtitle_languages: Box::default(),
                 is_live: false,
                 fetchable: true,
             }),

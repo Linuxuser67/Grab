@@ -2199,9 +2199,9 @@ fn picker_lists_hls_gap_heights() {
 #[test]
 fn video_info_carries_live_flag() {
     let mut video = test_video(serde_json::json!([]));
-    assert!(!VideoInfo::from(&video, "https://x.com/u/status/1", true).is_live);
+    assert!(!VideoInfo::from(&video, "https://x.com/u/status/1", true, Box::default()).is_live);
     video.is_live = Some(true);
-    assert!(VideoInfo::from(&video, "https://x.com/u/status/1", true).is_live);
+    assert!(VideoInfo::from(&video, "https://x.com/u/status/1", true, Box::default()).is_live);
 }
 
 #[cfg(unix)]

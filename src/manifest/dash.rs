@@ -1756,6 +1756,37 @@ mod tests {
 </MPD>"#;
 
     #[test]
+    fn parses_supported_mp4_subtitle_representations_only() {
+        let body = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="text" mimeType="application/mp4" lang="en">
+      <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      <SegmentTemplate timescale="1" duration="5" initialization="sub-init.mp4" media="sub-$Number$.m4s"/>
+      <Representation id="sub-en" bandwidth="1000" codecs="wvtt"/>
+    </AdaptationSet>
+    <AdaptationSet contentType="text" mimeType="text/vtt" lang="fr">
+      <SegmentTemplate duration="5" media="unsupported-$Number$.vtt"/>
+      <Representation id="sub-fr" bandwidth="1000"/>
+    </AdaptationSet>
+</Period>"#,
+        );
+        let plan = parse_dash_manifest(BASE_URL, &body)
+            .expect("supported DASH subtitle representation should parse");
+
+        assert_eq!(plan.subtitle_representations.len(), 1);
+        let subtitle = &plan.subtitle_representations[0];
+        assert_eq!(subtitle.representation_id.as_deref(), Some("sub-en"));
+        assert_eq!(subtitle.language.as_deref(), Some("en"));
+        assert!(subtitle.is_default_subtitle);
+        assert_eq!(subtitle.kind, DashTrackKind::Subtitle);
+        let download = plan_dash_representation(&plan, &subtitle.key)
+            .expect("subtitle representation should be plannable");
+        assert_eq!(download.representation.key, subtitle.key);
+        assert_eq!(download.resources.len(), 3);
+    }
+
+    #[test]
     fn representation_level_main_role_falls_back_to_first_audio_track() {
         let body = r#"<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">

@@ -299,9 +299,9 @@ pub(crate) fn read_archive_bytes(url: &str) -> Option<Vec<u8>> {
     read_torrent_bytes(&archive_path_for_url(url)?)
 }
 
-/// Whether file metadata is available for a queue URL, including cached magnet metainfo.
-pub(crate) fn has_metadata(url: &str) -> bool {
-    read_archive_bytes(url).is_some()
+/// Whether a `.torrent` archive exists for the URL (magnets have no user-supplied archive).
+pub(crate) fn has_archive(url: &str) -> bool {
+    archive_path_for_url(url).is_some_and(|path| path.exists())
 }
 
 /// Parse `.torrent` bytes into a display list for the file picker (display strips bidi/controls and caps length; selection is index-based).

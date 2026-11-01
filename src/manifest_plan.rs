@@ -15,14 +15,17 @@ use crate::media_types::{ManifestKind, ManifestSource};
 
 /// A validated protocol plan ready for the runner to materialize and execute.
 #[derive(Debug)]
+pub(crate) struct HlsMasterDownloadPlan {
+    pub(crate) video_url: Url,
+    pub(crate) audio_url: Option<Url>,
+    pub(crate) subtitle_url: Option<Url>,
+    pub(crate) subtitle_language: Option<String>,
+}
+
+#[derive(Debug)]
 pub(crate) enum ManifestDownloadPlan {
     HlsMedia(Box<HlsPlan>),
-    HlsMaster {
-        video_url: Url,
-        audio_url: Option<Url>,
-        subtitle_url: Option<Url>,
-        subtitle_language: Option<String>,
-    },
+    HlsMaster(Box<HlsMasterDownloadPlan>),
     Dash {
         video: Box<DashRepresentationPlan>,
         audio: Option<Box<DashRepresentationPlan>>,
@@ -428,7 +431,7 @@ pub(crate) fn download_plan(
                         })
                 }),
             };
-            Ok(ManifestDownloadPlan::HlsMaster {
+            Ok(ManifestDownloadPlan::HlsMaster(Box::new(HlsMasterDownloadPlan {
                 video_url: variant.url.clone(),
                 audio_url: selected_audio.and_then(|rendition| rendition.url.clone()),
                 subtitle_url: match source.subtitle_key.as_deref() {
@@ -463,7 +466,7 @@ pub(crate) fn download_plan(
                             .flatten()
                         })
                 }),
-            })
+            })))
         }
         (NativeManifest::Dash(dash), ManifestKind::Dash) => {
             let video =
@@ -790,19 +793,15 @@ video/720.m3u8
             .selected_source(&video_key, None, Some(&subtitle_key))
             .expect("selected subtitle should be validated");
         let plan = download_plan(lookup, &source).expect("selected HLS subtitle plan");
-        let ManifestDownloadPlan::HlsMaster {
-            subtitle_url,
-            subtitle_language,
-            ..
-        } = plan
+        let ManifestDownloadPlan::HlsMaster(plan) = plan
         else {
             panic!("expected an HLS master plan");
         };
         assert_eq!(
-            subtitle_url.expect("selected subtitle URL").as_str(),
+            plan.subtitle_url.expect("selected subtitle URL").as_str(),
             "https://cdn.example.test/subs/en.m3u8"
         );
-        assert_eq!(subtitle_language.as_deref(), Some("en"));
+        assert_eq!(plan.subtitle_language.as_deref(), Some("en"));
     }
 
     #[test]
@@ -901,24 +900,19 @@ video/720.m3u8
             .expect("valid stable track selection");
 
         let plan = download_plan(lookup, &source).expect("valid selected download plan");
-        let ManifestDownloadPlan::HlsMaster {
-            video_url,
-            audio_url,
-            subtitle_url,
-            ..
-        } = plan
+        let ManifestDownloadPlan::HlsMaster(plan) = plan
         else {
             panic!("expected an HLS master plan");
         };
         assert_eq!(
-            video_url.as_str(),
+            plan.video_url.as_str(),
             "https://cdn.example.test/video/720.m3u8"
         );
         assert_eq!(
-            audio_url.expect("selected audio rendition URL").as_str(),
+            plan.audio_url.expect("selected audio rendition URL").as_str(),
             "https://cdn.example.test/audio/en.m3u8"
         );
-        assert!(subtitle_url.is_none());
+        assert!(plan.subtitle_url.is_none());
     }
 
     #[test]

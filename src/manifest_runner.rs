@@ -433,18 +433,38 @@ struct DashLiveCapture {
 /// # Errors
 /// Returns a classified error. Only unsupported presentations use yt-dlp fallback;
 /// transient transfer errors preserve completed resources for a later native retry.
-pub(crate) async fn run_manifest_download(
-    job: ManifestJob,
-    gate: Arc<crate::attempt_gate::AttemptGate>,
-    mut abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-    tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-) -> Result<ManifestOutcome, ManifestRunError> {
-    let Some(dest_dir) = job.dest.parent() else {
-        return Err(ManifestRunError::Failed(
+
+/// State resolved before any manifest resources are transferred.
+struct ManifestPreparation {
+    staging: PathBuf,
+    dest_dir: PathBuf,
+    output_part: PathBuf,
+    video_dir: PathBuf,
+    audio_dir: PathBuf,
+    client: reqwest::Client,
+    tracks: Tracks,
+    guarded_child_hosts: std::collections::HashSet<String>,
+    has_audio: bool,
+    live_source: bool,
+    live_hls: bool,
+    live_dash: bool,
+    finish_requested: bool,
+    finish_marker_bytes: Option<u64>,
+    concurrency: usize,
+    downloaded: Arc<AtomicU64>,
+}
+
+/// Recover staged state, resolve the selected tracks, and prepare the transfer client.
+async fn prepare_manifest_attempt(
+    job: &ManifestJob,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+) -> Result<ManifestPreparation, ManifestRunError> {
+    let dest_dir = job.dest.parent().ok_or_else(|| {
+        ManifestRunError::Failed(
             "The download destination has no parent directory".to_string(),
-        ));
-    };
-    let parent = dest_dir.to_path_buf();
+        )
+    })?.to_path_buf();
+    let parent = dest_dir.clone();
     let output_container = ManifestOutputContainer::from_path(&job.dest)?;
     let item_id = job.item_id;
     let staging = tokio::task::spawn_blocking(move || {
@@ -669,6 +689,51 @@ pub(crate) async fn run_manifest_download(
     .ok();
     let concurrency = job.connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
     let downloaded = Arc::new(AtomicU64::new(finish_marker_bytes.unwrap_or(0)));
+
+    Ok(ManifestPreparation {
+        staging,
+        dest_dir,
+        output_part,
+        video_dir,
+        audio_dir,
+        client,
+        tracks,
+        guarded_child_hosts,
+        has_audio,
+        live_source,
+        live_hls,
+        live_dash,
+        finish_requested,
+        finish_marker_bytes,
+        concurrency,
+        downloaded,
+    })
+}
+
+pub(crate) async fn run_manifest_download(
+    job: ManifestJob,
+    gate: Arc<crate::attempt_gate::AttemptGate>,
+    mut abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+) -> Result<ManifestOutcome, ManifestRunError> {
+    let ManifestPreparation {
+        staging,
+        dest_dir,
+        output_part,
+        video_dir,
+        audio_dir,
+        client,
+        tracks,
+        mut guarded_child_hosts,
+        mut has_audio,
+        live_source: _,
+        live_hls,
+        live_dash,
+        finish_requested,
+        finish_marker_bytes,
+        concurrency,
+        downloaded,
+    } = prepare_manifest_attempt(&job, &tx).await?;
     let mut _finish_stop_sender = None;
     if finish_requested {
         // The durable finish marker means the local playlists / concatenated

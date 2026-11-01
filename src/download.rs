@@ -886,9 +886,22 @@ impl DownloadManager {
         });
     }
 
-    /// Whether the row is currently capturing a live stream (stop-and-keep applies).
+    /// Whether the row is currently capturing a live stream.
     pub fn is_live_video(&self, id: u64) -> bool {
         self.live_rows.borrow().contains(&id)
+    }
+
+    /// Whether this row uses the native manifest engine.
+    pub fn is_manifest_download(&self, id: u64) -> bool {
+        matches!(
+            self.video_sources.borrow().get(&id),
+            Some(crate::media_types::VideoSource::Manifest { .. })
+        )
+    }
+
+    /// Whether a live capture can be paused without losing its committed resume state.
+    pub fn can_pause_live_capture(&self, id: u64) -> bool {
+        self.is_live_video(id) && self.is_manifest_download(id)
     }
 
     /// Explicit absolute dest, else the effective download dir.
@@ -3216,6 +3229,7 @@ impl DownloadManager {
                 Ok(crate::manifest_runner::ManifestOutcome::Finished(size)) => {
                     tx.send(EngineMsg::Finished { size }).ok();
                 }
+                Ok(crate::manifest_runner::ManifestOutcome::Paused) => {}
                 Ok(crate::manifest_runner::ManifestOutcome::Aborted) => {}
                 Err(error) => {
                     tracing::warn!(
@@ -3497,8 +3511,22 @@ impl DownloadManager {
 
     /// Pause a running download, freeing its slot for the next queued item.
     pub fn pause(self: &Rc<Self>, id: u64) {
-        // Live captures finalize in the worker; the pump tail frees the slot on completion.
-        if !self.stop_engine(id) {
+        if self.can_pause_live_capture(id) {
+            // Native live workers commit each HLS/DASH update before observing
+            // Pause. Keep the row paused while the pump releases its slot.
+            self.stop_video_worker(id, crate::video::StopIntent::Pause);
+            if let Some(item) = self.find(id)
+                && item.status() == DownloadStatus::Downloading
+            {
+                item.set_status(DownloadStatus::Paused);
+                item.set_detail(gettext("Paused"));
+            }
+            self.persist_queue();
+            self.changed();
+            return;
+        }
+        // Non-live downloads retain their existing stop-and-resume behavior.
+        if !self.stop_engine(id, crate::video::StopIntent::Pause) {
             return;
         }
         if let Some(item) = self.find(id) {
@@ -3616,8 +3644,8 @@ impl DownloadManager {
     }
 
     /// Stop the engine for `id` without touching the row. Live rows only get signalled (the worker finalizes and its Finished drives the row); returns whether the engine was actually stopped.
-    fn stop_engine(&self, id: u64) -> bool {
-        self.stop_video_worker(id, crate::video::StopIntent::Preserve);
+    fn stop_engine(&self, id: u64, intent: crate::video::StopIntent) -> bool {
+        self.stop_video_worker(id, intent);
         if self.live_rows.borrow().contains(&id) {
             return false;
         }
@@ -3631,7 +3659,7 @@ impl DownloadManager {
     /// Stop the engine for `id`, keeping file, bitmap and progress, and mark it queued. Live rows only signal (see `stop_engine`).
     fn park(&self, id: u64) {
         // Live rows only signal: the worker finalizes and its message completes the row.
-        if !self.stop_engine(id) {
+        if !self.stop_engine(id, crate::video::StopIntent::Preserve) {
             return;
         }
         if let Some(item) = self.find(id) {
@@ -3749,7 +3777,11 @@ impl DownloadManager {
             }
             // Preserve and non-video Discard stop the engine the same way (see `stop_engine`).
             _ => {
-                self.stop_engine(id);
+                let intent = match stop {
+                    Stop::Preserve => crate::video::StopIntent::Preserve,
+                    Stop::Discard => crate::video::StopIntent::Discard,
+                };
+                self.stop_engine(id, intent);
             }
         }
         self.pending_names.borrow_mut().remove(&id);

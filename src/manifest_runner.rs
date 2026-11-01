@@ -5007,11 +5007,11 @@ mod tests {
         assert_eq!(requests.load(Ordering::Relaxed), 1);
         assert_eq!(downloaded.load(Ordering::Relaxed), 0);
         assert!(!directory.join(&resource.filename).exists());
-        assert!(
-            !directory
-                .join("range-000001-0123456789abcdef0123456789abcdef.bin.part")
-                .exists()
-        );
+        let partial = directory.join(format!("{}.part", resource.filename));
+        let partial_metadata = tokio::fs::metadata(&partial)
+            .await
+            .expect("incomplete transfer remains isolated in its staging file");
+        assert_eq!(partial_metadata.len(), 2);
         let _ = tokio::fs::remove_dir_all(directory).await;
     }
 

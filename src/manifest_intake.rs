@@ -456,12 +456,9 @@ impl ManifestLookup {
             }
         };
         if audio_key.is_some_and(|selected| {
-            !self
-                .audio_choices(representation_key)
-                .iter()
-                .any(|choice| {
-                    choice.key == selected || choice.legacy_key.as_deref() == Some(selected)
-                })
+            !self.audio_choices(representation_key).iter().any(|choice| {
+                choice.key == selected || choice.legacy_key.as_deref() == Some(selected)
+            })
         }) {
             return None;
         }
@@ -1072,10 +1069,7 @@ fn hls_variant_key(variant: &HlsVariant) -> String {
         .unwrap_or_else(|| hls_variant_legacy_key(variant))
 }
 
-fn disambiguate_hls_variant_keys(
-    base_keys: Vec<String>,
-    variants: &[HlsVariant],
-) -> Vec<String> {
+fn disambiguate_hls_variant_keys(base_keys: Vec<String>, variants: &[HlsVariant]) -> Vec<String> {
     let resource_urls: Vec<String> = variants
         .iter()
         .map(|variant| crate::manifest::resource_cache_key(&variant.url))
@@ -1920,8 +1914,7 @@ video/720.m3u8
         )
         .expect("valid HLS master playlist");
         let legacy_video_key = hls_variant_legacy_keys(&master.variants)[0].clone();
-        let legacy_audio_key =
-            hls_audio_rendition_legacy_keys(&master.audio_renditions)[0].clone();
+        let legacy_audio_key = hls_audio_rendition_legacy_keys(&master.audio_renditions)[0].clone();
         let current_video_key = hls_variant_keys(&master.variants)[0].clone();
         let current_audio_key = hls_audio_rendition_keys(&master.audio_renditions)[0].clone();
         assert_ne!(legacy_video_key, current_video_key);

@@ -340,12 +340,22 @@ impl ManifestLookup {
         }) {
             return None;
         }
+        let subtitle_language = subtitle_key
+            .and_then(|selected| {
+                self.subtitle_choices(representation_key)
+                    .into_iter()
+                    .find(|choice| choice.key == selected)
+            })
+            .and_then(|choice| choice.language)
+            .as_deref()
+            .and_then(normalize_subtitle_language);
         Some(ManifestSource {
             url: self.source_url.clone(),
             kind,
             representation_key: representation_key.to_string(),
             audio_key: audio_key.map(str::to_string),
             subtitle_key: subtitle_key.map(str::to_string),
+            subtitle_language,
         })
     }
 }
@@ -535,6 +545,35 @@ fn hls_subtitle_rendition_label(rendition: &HlsSubtitleRendition) -> String {
         label.push_str(&gettext("Default"));
     }
     label
+}
+
+fn normalize_subtitle_language(language: &str) -> Option<String> {
+    let primary = language
+        .split(['-', '_'])
+        .next()
+        .unwrap_or(language)
+        .to_ascii_lowercase();
+    let normalized = match primary.as_str() {
+        "eng" => "en",
+        "ara" => "ar",
+        "deu" | "ger" => "de",
+        "spa" => "es",
+        "fra" | "fre" => "fr",
+        "hin" => "hi",
+        "ind" => "id",
+        "ita" => "it",
+        "jpn" => "ja",
+        "kor" => "ko",
+        "nld" | "dut" => "nl",
+        "pol" => "pl",
+        "por" => "pt",
+        "rus" => "ru",
+        "tur" => "tr",
+        "vie" => "vi",
+        "zho" | "chi" => "zh",
+        code => code,
+    };
+    crate::video_prefs::subtitle_lang_active(normalized)
 }
 
 fn subtitle_language_matches(preferred: &str, available: &str) -> bool {

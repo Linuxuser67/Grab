@@ -64,6 +64,9 @@ pub(crate) struct ManifestSource {
     /// Missing values preserve the no-subtitle behavior of existing queue rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_key: Option<String>,
+    /// Allowlisted subtitle language used if native finalization falls back to yt-dlp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_language: Option<String>,
 }
 
 /// Where a resource comes from; serialized into the queue file, stable across releases.

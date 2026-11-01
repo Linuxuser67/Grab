@@ -1875,7 +1875,7 @@ fn wire_torrent_picker(
 ) {
     let nav = nav.clone();
     let torrent_btn = torrent_btn.clone();
-    let scheduled_at_c = Rc::clone(scheduled_at);
+    let scheduled_at_c = Rc::clone(&scheduled_at);
     let picker_in_flight = Rc::new(Cell::new(false));
     let picker_in_flight_c = Rc::clone(&picker_in_flight);
     torrent_btn.clone().connect_clicked(move |_| {

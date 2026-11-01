@@ -3498,6 +3498,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn manifest_output_container_accepts_only_mp4_and_mkv_extensions() {
+        assert_eq!(
+            ManifestOutputContainer::from_path(Path::new("stream.mp4")).unwrap(),
+            ManifestOutputContainer::Mp4
+        );
+        assert_eq!(
+            ManifestOutputContainer::from_path(Path::new("stream.MKV")).unwrap(),
+            ManifestOutputContainer::Matroska
+        );
+        assert!(ManifestOutputContainer::from_path(Path::new("stream.webm")).is_err());
+        assert!(ManifestOutputContainer::from_path(Path::new("stream")).is_err());
+    }
+
+    #[test]
     fn mux_space_check_reserves_room_for_ffmpeg_output() {
         assert!(check_manifest_mux_space(100, 100).is_ok());
         let error = check_manifest_mux_space(99, 100).expect_err("one byte short must fail");

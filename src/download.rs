@@ -141,7 +141,7 @@ fn execute_delete_operation(operation: DeleteOperation) -> Result<(), String> {
             output_dir,
             filename,
         } => {
-            let has_archive = crate::torrent::has_archive(&url);
+            let has_metadata = crate::torrent::has_metadata(&url);
             // Resolve the real output while archive metadata still exists.
             let single_path = if has_archive {
                 crate::torrent::single_file_path(&dest_dir, &url)
@@ -165,14 +165,14 @@ fn execute_delete_operation(operation: DeleteOperation) -> Result<(), String> {
             } else if let Some(path) = folder {
                 if path.is_file() {
                     trash_path(&path, &filename)?;
-                } else if has_archive {
+                } else if has_metadata {
                     // Preserve unrelated files in the folder; only trash
                     // paths owned by the torrent metadata.
                     if crate::torrent::trash_torrent_contents(&path, &url)? {
                         trash_path(&path, &filename)?;
                     }
                 } else {
-                    // A magnet without an archive cannot prove folder ownership.
+                    // A magnet without cached metainfo cannot prove folder ownership.
                     tracing::info!(
                         "magnet delete: leaving folder in place (no archive to enumerate): {}",
                         path.display()

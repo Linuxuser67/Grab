@@ -449,6 +449,7 @@ fn refresh_row(
     defer_available: bool,
     is_live: bool,
     can_pause_live: bool,
+    can_finish_live: bool,
     is_manifest_download: bool,
 ) {
     let frac = item.progress().clamp(0.0, 1.0);
@@ -486,6 +487,7 @@ fn refresh_row(
     w.toggle_btn
         .set_visible(running && (!live_capturing || can_pause_live));
     w.stop_btn.set_visible(running && !paused_manifest);
+    w.stop_btn.set_sensitive(!live_capturing || can_finish_live);
     // Header caps for the tooltip, sentence case for the spoken a11y name.
     let (stop_tip, stop_a11y) = match stop_copy(live_capturing) {
         StopCopy::Cancel => (gettext("Cancel"), gettext("Cancel")),
@@ -1052,6 +1054,7 @@ pub(crate) fn build_row(
             another_queued(&m_sync, it),
             m_sync.is_live_video(it.id()),
             m_sync.can_pause_live_capture(it.id()),
+            m_sync.can_finish_live_recording(it.id()),
             m_sync.is_manifest_download(it.id()),
         );
     };
@@ -1084,6 +1087,7 @@ pub(crate) fn build_row(
         another_queued(manager, item),
         manager.is_live_video(item.id()),
         manager.can_pause_live_capture(item.id()),
+        manager.can_finish_live_recording(item.id()),
         manager.is_manifest_download(item.id()),
     );
     // Indeterminate activity runs on wall-clock, not progress ticks:

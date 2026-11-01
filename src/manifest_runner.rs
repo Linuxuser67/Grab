@@ -392,16 +392,15 @@ pub(crate) async fn run_manifest_download(
     let finish_requested = finish_marker_bytes.is_some();
     let dash_live_requested = job.source.kind == ManifestKind::Dash
         && job.source.representation_key.starts_with("dash-live-");
-    let mut offline_tracks = if (finish_requested || live_marker_exists)
-        && job.source.kind == ManifestKind::Hls
-    {
-        restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
-    } else if dash_live_requested && dash_live_state_exists(&video_dir).await? {
-        let has_audio = dash_live_state_exists(&audio_dir).await?;
-        Some(Tracks::DashLiveOffline { has_audio })
-    } else {
-        None
-    };
+    let mut offline_tracks =
+        if (finish_requested || live_marker_exists) && job.source.kind == ManifestKind::Hls {
+            restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
+        } else if dash_live_requested && dash_live_state_exists(&video_dir).await? {
+            let has_audio = dash_live_state_exists(&audio_dir).await?;
+            Some(Tracks::DashLiveOffline { has_audio })
+        } else {
+            None
+        };
     if finish_requested && offline_tracks.is_none() {
         return Err(ManifestRunError::Failed(
             "The finished live recording has no committed staging data".to_string(),

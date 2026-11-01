@@ -440,7 +440,7 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
     .expect("partial resource bytes were not reserved before cancellation");
 
     abort_tx
-        .send(crate::video::StopIntent::Preserve)
+        .send(crate::video::StopIntent::Pause)
         .expect("signal pause to the manifest resource fetch");
     let aborted = tokio::time::timeout(FIXTURE_TIMEOUT, attempt)
         .await
@@ -1043,7 +1043,7 @@ async fn live_hls_preserve_stop_keeps_the_last_committed_window() {
 }
 
 #[tokio::test]
-async fn live_hls_preserve_stop_does_not_commit_an_interrupted_window() {
+async fn live_hls_pause_does_not_commit_an_interrupted_window() {
     let root = TempRoot::new("live-stop");
     let video_dir = root.path().join("video");
     tokio::fs::create_dir_all(&video_dir)
@@ -1062,8 +1062,8 @@ async fn live_hls_preserve_stop_does_not_commit_an_interrupted_window() {
     let downloaded = Arc::new(AtomicU64::new(0));
     let (stop_tx, mut abort) = tokio::sync::oneshot::channel();
     stop_tx
-        .send(crate::video::StopIntent::Preserve)
-        .expect("queue preserve stop");
+        .send(crate::video::StopIntent::Pause)
+        .expect("queue pause");
     let stopped = apply_live_hls_snapshot(
         &client,
         &plan,
@@ -1079,7 +1079,7 @@ async fn live_hls_preserve_stop_does_not_commit_an_interrupted_window() {
 
     assert_eq!(
         stopped,
-        LiveHlsSnapshotOutcome::Stopped(crate::video::StopIntent::Preserve)
+        LiveHlsSnapshotOutcome::Stopped(crate::video::StopIntent::Pause)
     );
     assert_eq!(track.accumulator.segment_count(), 0);
     assert!(

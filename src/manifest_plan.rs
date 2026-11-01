@@ -258,8 +258,8 @@ impl ManifestLookup {
 /// Apply the persisted selection to the freshly parsed manifest exactly once.
 ///
 /// The returned plan contains the selected representation and all DASH
-/// resources, or the HLS child-playlist URLs that intake must fetch before
-/// the runner can execute the media playlists.
+/// resources, or the HLS child-playlist URLs that the runner fetches before
+/// executing the media playlists.
 pub(crate) fn download_plan(
     lookup: &ManifestLookup,
     source: &ManifestSource,

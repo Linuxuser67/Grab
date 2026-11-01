@@ -18,6 +18,8 @@ use crate::manifest::{
     dash::{DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind},
 };
 use crate::manifest_intake::ManifestLookup;
+#[cfg(test)]
+use crate::manifest_intake::NativeManifest;
 use crate::media_types::{ManifestKind, ManifestSource};
 
 /// Upper bound for one media resource, independent of a server-supplied length.

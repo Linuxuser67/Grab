@@ -284,12 +284,12 @@ impl ManifestLookup {
                         codec_label(variant.codecs.as_deref()),
                     );
 
-                    ManifestChoice {
+                    Some(ManifestChoice {
                         key,
                         label,
                         height: variant.height,
                         bandwidth: Some(variant.average_bandwidth.unwrap_or(variant.bandwidth)),
-                    }
+                    })
                 })
                 .collect(),
             NativeManifest::HlsMedia(_) => vec![ManifestChoice {

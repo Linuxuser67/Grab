@@ -724,7 +724,7 @@ pub(crate) async fn run_unified_ytdlp(
     // yt-dlp is done reading it; don't keep signed URLs on disk through merge.
     drop(info_guard);
     let Some(()) = done else {
-        // User abort: on Preserve, try merging partial DASH parts into a
+        // User abort: on Finish, try merging partial DASH parts into a
         // single file instead of abandoning them.
         if matches!(abort_intent, Some(StopIntent::Finish | StopIntent::Pause))
             && let Some(merged) =

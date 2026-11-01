@@ -4747,5 +4747,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "manifest_runner/integration_tests.rs"]
+#[path = "manifest_runner_integration_tests.rs"]
 mod integration_tests;

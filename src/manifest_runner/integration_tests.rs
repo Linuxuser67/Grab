@@ -956,7 +956,7 @@ async fn live_hls_sequence_gap_preserves_already_committed_media() {
 }
 
 #[tokio::test]
-async fn live_hls_preserve_stop_keeps_the_last_committed_window() {
+async fn live_hls_pause_keeps_the_last_committed_window() {
     let root = TempRoot::new("live-preserve");
     let video_dir = root.path().join("video");
     tokio::fs::create_dir_all(&video_dir)
@@ -1009,8 +1009,8 @@ async fn live_hls_preserve_stop_keeps_the_last_committed_window() {
 
     let (stop_tx, mut stop_abort) = tokio::sync::oneshot::channel();
     stop_tx
-        .send(crate::video::StopIntent::Preserve)
-        .expect("queue preserve stop before the next window");
+        .send(crate::video::StopIntent::Pause)
+        .expect("queue pause before the next window");
     assert_eq!(
         apply_live_hls_snapshot(
             &client,
@@ -1023,8 +1023,8 @@ async fn live_hls_preserve_stop_keeps_the_last_committed_window() {
             0,
         )
         .await
-        .expect("preserve stop during the next live window"),
-        LiveHlsSnapshotOutcome::Stopped(crate::video::StopIntent::Preserve)
+        .expect("pause during the next live window"),
+        LiveHlsSnapshotOutcome::Stopped(crate::video::StopIntent::Pause)
     );
 
     let local = tokio::fs::read(video_dir.join("local.m3u8"))
@@ -1886,8 +1886,8 @@ async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
         .await
         .expect("dynamic DASH runner did not commit its first window");
         stop_tx
-            .send(crate::video::StopIntent::Preserve)
-            .expect("send preserve stop after committed dynamic DASH window");
+            .send(crate::video::StopIntent::Pause)
+            .expect("send pause after committed dynamic DASH window");
     });
 
     let mut guarded_child_hosts = std::collections::HashSet::new();
@@ -1908,11 +1908,11 @@ async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
         &mut abort,
     )
     .await
-    .expect("stop dynamic DASH capture after its first committed window");
-    stop_task.await.expect("preserve-stop observer task failed");
+    .expect("pause dynamic DASH capture after its first committed window");
+    stop_task.await.expect("pause observer task failed");
     wait_for_fixture_server(server).await;
 
-    assert_eq!(capture.outcome, DashLiveCaptureOutcome::Preserve);
+    assert_eq!(capture.outcome, DashLiveCaptureOutcome::Paused);
     assert_eq!(
         capture
             .video_resources
@@ -1920,7 +1920,7 @@ async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
             .filter(|name| name.starts_with("dash-live-segment-"))
             .count(),
         5,
-        "preserve stop must return the committed segment set"
+        "pause must return the committed segment set"
     );
     let (restored, retained_bytes) = load_dash_live_track(&representation_key, &video_dir, None)
         .await

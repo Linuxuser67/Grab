@@ -458,11 +458,13 @@ async fn prepare_manifest_attempt(
     job: &ManifestJob,
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
 ) -> Result<ManifestPreparation, ManifestRunError> {
-    let dest_dir = job.dest.parent().ok_or_else(|| {
-        ManifestRunError::Failed(
-            "The download destination has no parent directory".to_string(),
-        )
-    })?.to_path_buf();
+    let dest_dir = job
+        .dest
+        .parent()
+        .ok_or_else(|| {
+            ManifestRunError::Failed("The download destination has no parent directory".to_string())
+        })?
+        .to_path_buf();
     let parent = dest_dir.clone();
     let output_container = ManifestOutputContainer::from_path(&job.dest)?;
     let item_id = job.item_id;

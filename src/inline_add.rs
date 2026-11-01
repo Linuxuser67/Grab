@@ -2226,7 +2226,7 @@ fn build_video_preview(
     spinner_paintable: adw::SpinnerPaintable,
     action_revealer: &gtk4::Revealer,
     add_btn: &gtk4::Button,
-) -> (Rc<VideoStep>, gtk4::Revealer) {
+) -> (Rc<VideoStep>, gtk4::Revealer, gtk4::Button, gtk4::Button) {
     // Video preview block: hidden until a lookup runs; exactly one state shows.
     // HIG AdwPreferencesGroup: title/description are built-in, rows get the
     // 12px internal margins natively.
@@ -2392,7 +2392,7 @@ fn build_video_preview(
         add_btn: add_btn.clone(),
     });
 
-    (step, video_revealer)
+    (step, video_revealer, video_install_btn, video_retry_btn)
 }
 
 /// Connect the controls whose behavior is local to the video/gallery preview.
@@ -3869,6 +3869,8 @@ fn wire_video_preview_actions(
     probe: Rc<RefCell<ProbeState>>,
     kick_video: VideoLookupKick,
     manager: &Rc<DownloadManager>,
+    video_install_btn: &gtk4::Button,
+    video_retry_btn: &gtk4::Button,
 ) {
     // Install / retry / revert / audio-mode wiring.
     {
@@ -4003,7 +4005,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     } = build_url_controls();
     form.append(&url_bar);
     form.append(&opts_revealer);
-    let (step, video_revealer) =
+    let (step, video_revealer, video_install_btn, video_retry_btn) =
         build_video_preview(&url_entry, spinner_paintable, &action_revealer, &add_btn);
     wire_video_preview(Rc::clone(&step));
 
@@ -4161,6 +4163,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         Rc::clone(&probe),
         Rc::clone(&kick_video),
         &manager,
+        &video_install_btn,
+        &video_retry_btn,
     );
 
     // Escape collapses the card.

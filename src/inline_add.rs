@@ -862,7 +862,8 @@ fn refresh_subtitle_picker(step: &VideoStep, languages: &[String]) {
         })
         .collect::<Vec<_>>();
     let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
-    step.subtitle_format.set_model(Some(&gtk4::StringList::new(&label_refs)));
+    step.subtitle_format
+        .set_model(Some(&gtk4::StringList::new(&label_refs)));
     step.subtitle_format.set_selected(0);
     step.subtitle_choices.replace(choices);
     step.subtitle_selection
@@ -873,7 +874,8 @@ fn refresh_subtitle_picker(step: &VideoStep, languages: &[String]) {
 /// Hide subtitle selection for audio-only jobs and when no tracks are offered.
 fn sync_subtitle_picker_visibility(step: &VideoStep) {
     let has_language_choices = step.subtitle_choices.borrow().len() > 2;
-    step.subtitle_format.set_visible(has_language_choices && !selected_audio_only(step));
+    step.subtitle_format
+        .set_visible(has_language_choices && !selected_audio_only(step));
 }
 
 /// Show a parsed manifest and enable Add for the validated representation.

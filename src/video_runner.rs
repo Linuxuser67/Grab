@@ -1338,8 +1338,8 @@ pub(crate) async fn resolve_subtitle_lang(
     let candidate_refs = candidates.iter().map(String::as_str).collect::<Vec<_>>();
     // Fast path: the media leg is about to load this same probe JSON
     // (--load-info-json), so its subtitle maps are what the download will
-    // use — deciding from them spares a second extraction. Key presence
-    // only: no maps at all means the JSON cannot answer, keep the probe.
+    // use — deciding from them spares a second extraction. Only nonempty
+    // maps are useful; the Video model sanitizer replaces absent maps with empty objects.
     if let Some(json) = job.info_json.as_ref() {
         let available = available_subtitle_langs(json);
         // The Video model's sanitizer replaces these maps with empty objects.

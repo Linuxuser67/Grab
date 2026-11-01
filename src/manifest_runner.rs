@@ -3955,7 +3955,7 @@ async fn concat_dash_track(
         .iter()
         .map(|resource| resource.filename.clone())
         .collect::<Vec<_>>();
-    concat_dash_resource_names(&resources, directory, filename, abort).await
+    crate::manifest_writer::write_ordered_track(&resources, directory, filename, abort).await
 }
 
 async fn concat_dash_resource_names(

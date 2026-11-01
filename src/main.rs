@@ -25,6 +25,7 @@ mod manifest_publish;
 mod manifest_recovery;
 mod manifest_runner;
 mod manifest_types;
+mod manifest_writer;
 mod media_types;
 mod net_types;
 mod preferences;

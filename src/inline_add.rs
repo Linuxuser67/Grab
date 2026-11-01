@@ -2121,9 +2121,6 @@ fn slide_down_revealer() -> gtk4::Revealer {
     slide_revealer(gtk4::RevealerTransitionType::SlideDown)
 }
 
-/// Build the inline New Download card. The returned [`AddCard`] owns the
-/// widget and the open/toggle entry points; the card starts collapsed.
-
 /// Controls belonging to the URL-entry row and its adjacent options revealer.
 struct UrlControls {
     url_bar: gtk4::Box,
@@ -2131,7 +2128,6 @@ struct UrlControls {
     spinner_paintable: adw::SpinnerPaintable,
     add_btn: gtk4::Button,
     action_revealer: gtk4::Revealer,
-    opts_toggle: gtk4::ToggleButton,
     cancel_btn: gtk4::Button,
     opts_revealer: gtk4::Revealer,
 }
@@ -2213,14 +2209,12 @@ fn build_url_controls() -> UrlControls {
         });
     }
 
-
     UrlControls {
         url_bar,
         url_entry,
         spinner_paintable,
         add_btn,
         action_revealer,
-        opts_toggle,
         cancel_btn,
         opts_revealer,
     }
@@ -2780,7 +2774,6 @@ fn build_download_options(
         );
     }
 
-
     DownloadOptionsUi {
         content: opts_box,
         torrent_btn,
@@ -2791,6 +2784,8 @@ fn build_download_options(
     }
 }
 
+/// Build the inline New Download card. The returned [`AddCard`] owns the
+/// widget and the open/toggle entry points; the card starts collapsed.
 pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let open_state = Rc::new(OpenState::default());
     // Shared scheduled-download timestamp: set by the schedule picker UI,
@@ -2840,7 +2835,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         spinner_paintable,
         add_btn,
         action_revealer,
-        opts_toggle: _opts_toggle,
         cancel_btn,
         opts_revealer,
     } = build_url_controls();

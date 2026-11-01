@@ -1871,9 +1871,7 @@ async fn run_live_hls_tracks(
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
                         crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                        crate::video::StopIntent::Finish => {
-                            LiveHlsCaptureOutcome::FinishVideoOnly
-                        }
+                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
                         crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                     });
                 }

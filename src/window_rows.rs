@@ -483,10 +483,10 @@ fn refresh_row(
     // Native manifest live captures can pause at committed segment boundaries.
     // Other live extractors retain their finish-only behavior.
     let live_capturing = active && is_live;
-    let paused_manifest = item.status() == DownloadStatus::Paused && is_manifest_download;
+    let manifest_download = is_manifest_download && !done;
     w.toggle_btn
         .set_visible(running && (!live_capturing || can_pause_live));
-    w.stop_btn.set_visible(running && !paused_manifest);
+    w.stop_btn.set_visible(running && !(manifest_download && item.status() == DownloadStatus::Paused));
     w.stop_btn.set_sensitive(!live_capturing || can_finish_live);
     // Header caps for the tooltip, sentence case for the spoken a11y name.
     let (stop_tip, stop_a11y) = match stop_copy(live_capturing) {
@@ -513,10 +513,10 @@ fn refresh_row(
     let done = item.status() == DownloadStatus::Done;
     w.reveal_btn.set_visible(done);
     w.delete_btn
-        .set_visible(done || live_capturing || paused_manifest);
+        .set_visible(done || live_capturing || manifest_download);
     let delete_tip = if live_capturing {
         gettext("Delete Recording")
-    } else if paused_manifest {
+    } else if manifest_download {
         gettext("Delete Download")
     } else {
         gettext("Move to Trash")
@@ -525,7 +525,7 @@ fn refresh_row(
     w.delete_btn
         .update_property(&[gtk4::accessible::Property::Label(&delete_tip)]);
     w.remove_btn
-        .set_visible(!live_capturing && !paused_manifest);
+        .set_visible(!live_capturing && !manifest_download);
     let (icon, tip) = if item.status() == DownloadStatus::Paused {
         ("media-playback-start-symbolic", gettext("Resume"))
     } else {
@@ -1181,7 +1181,7 @@ pub(crate) fn build_row(
         delete_btn.connect_clicked(move |button| {
             if m.is_live_video(id)
                 || m.find(id).is_some_and(|item| {
-                    item.status() == DownloadStatus::Paused && m.is_manifest_download(id)
+                    item.status() != DownloadStatus::Done && m.is_manifest_download(id)
                 })
             {
                 let recording = m.is_live_video(id);

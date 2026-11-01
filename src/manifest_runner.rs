@@ -3017,6 +3017,7 @@ async fn run_live_dash_tracks(
                 representation_key: representation_key.to_string(),
                 audio_key: audio_key.clone(),
                 subtitle_key: None,
+            subtitle_language: None,
             },
             guarded_child_hosts,
         )
@@ -3489,6 +3490,7 @@ mod tests {
             representation_key: video_key.clone(),
             audio_key: Some(alternate_audio_key),
         subtitle_key: None,
+            subtitle_language: None,
         };
         let mut selected_hosts = std::collections::HashSet::new();
         let selected = resolve_tracks(
@@ -3585,6 +3587,7 @@ mod tests {
             representation_key: representation_key.clone(),
             audio_key: None,
         subtitle_key: None,
+            subtitle_language: None,
         };
         let client = reqwest::Client::new();
         let mut guarded_child_hosts = std::collections::HashSet::new();
@@ -3649,6 +3652,7 @@ mod tests {
                 representation_key: "hls-media".to_string(),
                 audio_key: None,
             subtitle_key: None,
+            subtitle_language: None,
             },
             dest: PathBuf::new(),
             proxy: None,

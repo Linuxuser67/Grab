@@ -4761,10 +4761,18 @@ mod tests {
             let _ = socket.read(&mut request).await.expect("read request");
             socket
                 .write_all(
-                    b"HTTP/1.1 503 Service Unavailable\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n",
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 )
                 .await
                 .expect("write response");
+            // A second request would indicate that the resource was retried.
+            if let Ok(Ok((mut retry_socket, _))) =
+                tokio::time::timeout(Duration::from_secs(1), listener.accept()).await
+            {
+                server_requests.fetch_add(1, Ordering::Relaxed);
+                let mut retry_request = [0_u8; 1024];
+                let _ = retry_socket.read(&mut retry_request).await;
+            }
         });
 
         let client = reqwest::Client::builder()

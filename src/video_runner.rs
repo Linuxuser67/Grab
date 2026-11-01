@@ -44,7 +44,7 @@ pub enum StopIntent {
     /// Pause a native live capture without finalizing; its committed manifest state remains resumable.
     Pause,
     /// Finish a recording and deliver the captured media.
-    Preserve,
+    Finish,
     /// Stop and throw it away (row removal): reap the recorder and return without adopting, remuxing or delivering; scratch stays for the manager to reclaim after the task returns.
     Discard,
 }
@@ -726,7 +726,7 @@ pub(crate) async fn run_unified_ytdlp(
     let Some(()) = done else {
         // User abort: on Preserve, try merging partial DASH parts into a
         // single file instead of abandoning them.
-        if matches!(abort_intent, Some(StopIntent::Preserve))
+        if matches!(abort_intent, Some(StopIntent::Finish))
             && let Some(merged) =
                 try_merge_dash_partials(ffmpeg_bin, staging, &job.dest, &job.page_url, gate).await
         {
@@ -1874,7 +1874,7 @@ pub(crate) async fn run_live_ytdlp(
                 intent = &mut abort => {
                     reap_child(&mut child, &mut group).await;
                     break match intent {
-                        Ok(StopIntent::Preserve) => (true, false),
+                        Ok(StopIntent::Finish) => (true, false),
                         Ok(StopIntent::Pause | StopIntent::Discard) => (true, true),
                         Err(_) => {
                             // No sender remains to authorise anything: fail closed. Claim the gate so the pre-rename commit below cannot deliver either.

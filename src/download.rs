@@ -2132,7 +2132,7 @@ impl DownloadManager {
         let proxy = match opts.proxy_config() {
             Ok(proxy) => proxy,
             Err(e) => {
-                item.set_detail(e);
+                item.set_detail(e.to_string());
                 item.set_status(DownloadStatus::Failed);
                 self.changed();
                 self.start_next();

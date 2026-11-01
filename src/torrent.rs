@@ -86,7 +86,8 @@ pub fn is_magnet(s: &str) -> bool {
 
 /// Parse a magnet link, rejecting anything rqbit cannot resolve to BTv1.
 pub fn parse_magnet(s: &str) -> Result<librqbit::Magnet, String> {
-    let m = librqbit::Magnet::parse(s.trim()).map_err(|e| format!("{}: {e}", gettext("Invalid magnet link")))?;
+    let m = librqbit::Magnet::parse(s.trim())
+        .map_err(|error| format!("{}: {error}", gettext("Invalid magnet link")))?;
     if m.as_id20().is_none() {
         return Err(gettext("Only BitTorrent v1 magnets are supported"));
     }
@@ -165,10 +166,12 @@ pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, Str
         return Err(gettext("Torrent file is too large (max 10 MB)"));
     }
     // Parse first: never archive bytes rqbit itself would reject.
-    librqbit::torrent_from_bytes(bytes).map_err(|e| format!("{}: {e}", gettext("Invalid torrent file")))?;
+    librqbit::torrent_from_bytes(bytes)
+        .map_err(|error| format!("{}: {error}", gettext("Invalid torrent file")))?;
     let stem = safe_stem(file_name).unwrap_or("torrent");
     let dir = torrents_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", gettext("Cannot store torrent file")))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("{}: {error}", gettext("Cannot store torrent file")))?;
     // Atomic create_new loop: no check-then-write race.
     let mut tried: Vec<String> = Vec::new();
     for _ in 0..32 {
@@ -278,7 +281,13 @@ fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), String> 
         .map_err(|error| format!("{}: {error}", gettext("Cannot write magnet metadata")))?;
     temporary
         .persist(&path)
-        .map_err(|error| format!("{}: {}", gettext("Cannot publish magnet metadata"), error.error))?;
+        .map_err(|error| {
+            format!(
+                "{}: {}",
+                gettext("Cannot publish magnet metadata"),
+                error.error
+            )
+        })?;
     std::fs::File::open(&dir)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("{}: {error}", gettext("Cannot sync magnet metadata directory")))?;
@@ -322,8 +331,8 @@ fn sanitize_display_path(path: &str) -> String {
 }
 
 pub fn torrent_file_list(bytes: &[u8]) -> Result<(String, Vec<TorrentFileEntry>), String> {
-    let meta =
-        librqbit::torrent_from_bytes(bytes).map_err(|e| format!("{}: {e}", gettext("Invalid torrent file")))?;
+    let meta = librqbit::torrent_from_bytes(bytes)
+        .map_err(|error| format!("{}: {error}", gettext("Invalid torrent file")))?;
     let name = raw_torrent_name(meta.info.data.name.as_ref())
         .filter(|n| sane_filename(n))
         .unwrap_or_else(|| "torrent".to_string());
@@ -390,17 +399,6 @@ pub(crate) async fn list_magnet_files(
             "Resolved torrent metadata does not match the magnet link",
         ));
     }
-    // Keep synchronous parsing, fsync, and atomic publication off the async executor.
-    let bytes = listing.torrent_bytes.clone();
-    let persistence_info_hash = info_hash.clone();
-    tokio::task::spawn_blocking(move || {
-        persist_magnet_metadata(&persistence_info_hash, &bytes)
-    })
-    .await
-    .map_err(|error| {
-        format!("{}: {error}", gettext("Could not persist magnet metadata"))
-    })??;
-
     let magnet_name = parsed.name.filter(|name| sane_filename(name));
     let name = listing
         .info
@@ -430,6 +428,16 @@ pub(crate) async fn list_magnet_files(
     if entries.is_empty() {
         return Err(gettext("Torrent contains no files"));
     }
+
+    // Move the bounded bytes only after the file list has been built; persistence
+    // performs parsing, fsync, and atomic publication on a blocking worker.
+    let bytes = listing.torrent_bytes;
+    tokio::task::spawn_blocking(move || persist_magnet_metadata(&info_hash, &bytes))
+        .await
+        .map_err(|error| {
+            format!("{}: {error}", gettext("Could not persist magnet metadata"))
+        })??;
+
     Ok((name, entries))
 }
 

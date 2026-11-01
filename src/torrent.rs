@@ -955,8 +955,8 @@ pub(crate) fn trash_torrent_contents(
     url: &str,
 ) -> Result<bool, TorrentError> {
     let bytes = read_archive_bytes(url).ok_or(TorrentError::TrashArchiveMissing)?;
-    let meta = librqbit::torrent_from_bytes(&bytes)
-        .map_err(|_| TorrentError::TrashInvalidMetadata)?;
+    let meta =
+        librqbit::torrent_from_bytes(&bytes).map_err(|_| TorrentError::TrashInvalidMetadata)?;
     let multi = is_multi_file(meta.info.data.files.as_deref());
     if !multi {
         // Single-file torrent: torrent_file_list returns empty (no selectable
@@ -970,15 +970,19 @@ pub(crate) fn trash_torrent_contents(
         match gio::File::for_path(&target).trash(gio::Cancellable::NONE) {
             Ok(()) => {}
             Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
-            Err(source) => return Err(TorrentError::TrashFile { path: target, source }),
+            Err(source) => {
+                return Err(TorrentError::TrashFile {
+                    path: target,
+                    source,
+                });
+            }
         }
         prune_empty_parents_beneath(&target, folder);
         return Ok(std::fs::read_dir(folder)
             .map(|mut entries| entries.next().is_none())
             .unwrap_or(true));
     }
-    let (_, entries) =
-        torrent_file_list(&bytes).map_err(|_| TorrentError::TrashInvalidFileList)?;
+    let (_, entries) = torrent_file_list(&bytes).map_err(|_| TorrentError::TrashInvalidFileList)?;
     let empty_keep: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (i, entry) in entries.iter().enumerate() {
         if let Some(target) = deletion_target(folder, i, &empty_keep, entry) {

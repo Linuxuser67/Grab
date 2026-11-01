@@ -2672,7 +2672,7 @@ impl DownloadManager {
                         // Preserve the native source and completed staging resources.
                         // DownloadManager::retry will re-enter the native runner.
                         item.set_detail(
-                            gettext("Temporary stream failure after bounded retries: {error}. Retry to resume.")
+                            gettext("Temporary stream failure: {error}. Retry to resume.")
                                 .replace("{error}", &error),
                         );
                         item.set_status(DownloadStatus::Failed);

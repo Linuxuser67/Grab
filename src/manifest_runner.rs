@@ -34,10 +34,6 @@ const RESOURCE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESOURCE_CONNECTIONS: usize = 16;
 /// Keep only a small diagnostic tail from FFmpeg.
 const FFMPEG_LOG_LINES: usize = 32;
-/// Maximum requests for one transiently failing resource before preserving staging for retry.
-const MAX_RESOURCE_ATTEMPTS: u32 = 3;
-/// Short linear backoff between transient resource requests.
-const RESOURCE_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 /// Upper bound on the persisted dynamic DASH segment index.
 const MAX_DASH_LIVE_SEGMENTS: usize = 100_000;
 /// Bound for a serialized dynamic DASH resume index.
@@ -426,6 +422,16 @@ struct DashLiveCapture {
     outcome: DashLiveCaptureOutcome,
     video_resources: Vec<String>,
     audio_resources: Option<Vec<String>>,
+}
+
+/// Resolve the complete FFmpeg toolchain before creating staging or fetching resources.
+fn resolve_manifest_ffmpeg(dirs: &[PathBuf]) -> Result<PathBuf, ManifestRunError> {
+    let ffmpeg_dir = crate::video_tools::toolchain_dir_in(dirs).ok_or_else(|| {
+        ManifestRunError::Failed(
+            "FFmpeg and ffprobe are required for native stream downloads".to_string(),
+        )
+    })?;
+    Ok(ffmpeg_dir.join("ffmpeg"))
 }
 
 /// State resolved before any manifest resources are transferred.
@@ -1131,17 +1137,18 @@ async fn prepare_live_dash_finalization(
     })
 }
 
-/// Run one HLS or static-DASH attempt, keeping completed resources for retry.
+/// Run one HLS or static-DASH attempt without automatic resource retries.
 ///
 /// # Errors
 /// Returns a classified error. Only unsupported presentations use yt-dlp fallback;
-/// transient transfer errors preserve completed resources for a later native retry.
+/// transient transfer errors preserve completed resources for a later user-initiated resume.
 pub(crate) async fn run_manifest_download(
     job: ManifestJob,
     gate: Arc<crate::attempt_gate::AttemptGate>,
     mut abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
 ) -> Result<ManifestOutcome, ManifestRunError> {
+    let ffmpeg = resolve_manifest_ffmpeg(&crate::video_tools::ffmpeg_search_dirs())?;
     let ManifestPreparation {
         staging,
         dest_dir,
@@ -1260,6 +1267,7 @@ pub(crate) async fn run_manifest_download(
         output_part,
         tracks,
         has_audio,
+        ffmpeg,
         downloaded: &downloaded,
     })
     .await
@@ -1267,8 +1275,8 @@ pub(crate) async fn run_manifest_download(
 
 /// Mux the staged tracks, validate the output, and publish it without clobbering.
 ///
-/// The staging data is retained on every failure before publication so the queue
-/// can retry without downloading already completed resources.
+/// The staging data is retained on every failure before publication so a later
+/// user-initiated resume can reuse completed resources.
 struct ManifestFinalization<'a> {
     job: &'a ManifestJob,
     gate: Arc<crate::attempt_gate::AttemptGate>,
@@ -1281,6 +1289,7 @@ struct ManifestFinalization<'a> {
     output_part: PathBuf,
     tracks: Tracks,
     has_audio: bool,
+    ffmpeg: PathBuf,
     downloaded: &'a AtomicU64,
 }
 
@@ -1303,6 +1312,7 @@ async fn finalize_manifest_download(
         output_part,
         tracks,
         has_audio,
+        ffmpeg,
         downloaded,
     } = context;
     if abort.try_recv().is_ok() {
@@ -1310,20 +1320,6 @@ async fn finalize_manifest_download(
     }
     tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
         .ok();
-
-    let ffmpeg_dir =
-        crate::video_tools::toolchain_dir_in(&crate::video_tools::ffmpeg_search_dirs())
-            .ok_or_else(|| {
-                ManifestRunError::Failed(
-                    "FFmpeg and ffprobe are required for native stream downloads".to_string(),
-                )
-            })?;
-    let ffmpeg = ffmpeg_dir.join("ffmpeg");
-    if !ffmpeg.is_file() {
-        return Err(ManifestRunError::Failed(
-            "The FFmpeg executable could not be found".to_string(),
-        ));
-    }
 
     let video_input = match tracks {
         Tracks::Hls { .. } => video_dir.join("local.m3u8"),
@@ -2698,30 +2694,13 @@ async fn fetch_resource(
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &AtomicU64,
 ) -> Result<u64, ManifestRunError> {
-    let mut attempt = 0_u32;
-    loop {
-        let result = fetch_resource_once(client, &resource, directory, tx, downloaded).await;
-        if result.is_err() {
-            // The failed attempt's reservation has been dropped; publish the rolled-back total.
-            tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
-                .ok();
-        }
-        match result {
-            Err(ManifestRunError::Retryable(error)) if attempt + 1 < MAX_RESOURCE_ATTEMPTS => {
-                attempt += 1;
-                let delay = RESOURCE_RETRY_BASE_DELAY * attempt;
-                tracing::debug!(
-                    filename = %resource.filename,
-                    attempt,
-                    delay_ms = delay.as_millis() as u64,
-                    error = %error,
-                    "retrying transient native stream resource"
-                );
-                tokio::time::sleep(delay).await;
-            }
-            result => return result,
-        }
+    let result = fetch_resource_once(client, &resource, directory, tx, downloaded).await;
+    if result.is_err() {
+        // The failed attempt's reservation has been dropped; publish the rolled-back total.
+        tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+            .ok();
     }
+    result
 }
 
 async fn fetch_resource_once(
@@ -4515,6 +4494,40 @@ mod tests {
         assert_eq!(guarded_child_hosts.len(), limit);
     }
 
+    #[test]
+    fn native_manifest_ffmpeg_preflight_requires_both_executables() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = std::env::temp_dir().join(format!(
+            "grab-manifest-ffmpeg-preflight-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("create FFmpeg tool directory");
+        let ffmpeg = directory.join("ffmpeg");
+        let ffprobe = directory.join("ffprobe");
+
+        assert!(matches!(
+            resolve_manifest_ffmpeg(std::slice::from_ref(&directory)),
+            Err(ManifestRunError::Failed(_))
+        ));
+        std::fs::write(&ffmpeg, b"").expect("create FFmpeg executable");
+        std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755))
+            .expect("make FFmpeg executable");
+        assert!(matches!(
+            resolve_manifest_ffmpeg(std::slice::from_ref(&directory)),
+            Err(ManifestRunError::Failed(_))
+        ));
+        std::fs::write(&ffprobe, b"").expect("create ffprobe executable");
+        std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o755))
+            .expect("make ffprobe executable");
+        assert_eq!(
+            resolve_manifest_ffmpeg(std::slice::from_ref(&directory)).expect("complete toolchain"),
+            ffmpeg
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
     #[tokio::test]
     async fn run_manifest_download_rejects_a_destination_without_a_parent() {
         let job = ManifestJob {
@@ -4722,11 +4735,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_resource_response_is_retried_and_completed_file_is_reused() {
+    async fn transient_resource_response_fails_without_retrying() {
+        use std::sync::atomic::AtomicUsize;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let directory =
-            std::env::temp_dir().join(format!("grab-manifest-retry-{}", std::process::id()));
+            std::env::temp_dir().join(format!("grab-manifest-no-retry-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&directory).await;
         tokio::fs::create_dir_all(&directory)
             .await
@@ -4736,19 +4750,26 @@ mod tests {
             .await
             .expect("bind HTTP test listener");
         let address = listener.local_addr().expect("listener address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
         let server = tokio::spawn(async move {
-            for (status, body) in [("503 Service Unavailable", ""), ("200 OK", "data")] {
-                let (mut socket, _) = listener.accept().await.expect("accept resource request");
-                let mut request = [0_u8; 1024];
-                let _ = socket.read(&mut request).await.expect("read request");
-                let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                socket
-                    .write_all(response.as_bytes())
-                    .await
-                    .expect("write response");
+            let (mut socket, _) = listener.accept().await.expect("accept resource request");
+            server_requests.fetch_add(1, Ordering::Relaxed);
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.expect("read request");
+            socket
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write response");
+            // A second request would indicate that the resource was retried.
+            if let Ok(Ok((mut retry_socket, _))) =
+                tokio::time::timeout(Duration::from_secs(1), listener.accept()).await
+            {
+                server_requests.fetch_add(1, Ordering::Relaxed);
+                let mut retry_request = [0_u8; 1024];
+                let _ = retry_socket.read(&mut retry_request).await;
             }
         });
 
@@ -4764,18 +4785,17 @@ mod tests {
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let downloaded = AtomicU64::new(0);
-        let size = fetch_resource(&client, resource.clone(), &directory, &tx, &downloaded)
-            .await
-            .expect("second resource attempt should succeed");
+        let result = fetch_resource(&client, resource.clone(), &directory, &tx, &downloaded).await;
 
         server.await.expect("HTTP test server task");
-        assert_eq!(size, 4);
-        assert_eq!(downloaded.load(Ordering::Relaxed), 4);
-        assert_eq!(
-            tokio::fs::read(directory.join(resource.filename))
-                .await
-                .expect("completed resource"),
-            b"data"
+        assert!(matches!(result, Err(ManifestRunError::Retryable(_))));
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        assert_eq!(downloaded.load(Ordering::Relaxed), 0);
+        assert!(!directory.join(&resource.filename).exists());
+        assert!(
+            !directory
+                .join("segment-000001-0123456789abcdef0123456789abcdef.bin.part")
+                .exists()
         );
         let _ = tokio::fs::remove_dir_all(directory).await;
     }
@@ -4926,11 +4946,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn truncated_byte_range_is_retried_without_counting_partial_bytes() {
+    async fn truncated_byte_range_fails_without_retrying_or_counting_partial_bytes() {
+        use std::sync::atomic::AtomicUsize;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let directory =
-            std::env::temp_dir().join(format!("grab-manifest-range-retry-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!(
+            "grab-manifest-range-no-retry-{}",
+            std::process::id()
+        ));
         let _ = tokio::fs::remove_dir_all(&directory).await;
         tokio::fs::create_dir_all(&directory)
             .await
@@ -4940,19 +4963,25 @@ mod tests {
             .await
             .expect("bind HTTP test listener");
         let address = listener.local_addr().expect("listener address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
         let server = tokio::spawn(async move {
-            for body in ["da", "data"] {
-                let (mut socket, _) = listener.accept().await.expect("accept range request");
-                let mut request = [0_u8; 1024];
-                let _ = socket.read(&mut request).await.expect("read range request");
-                let response = format!(
-                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 0-3/4\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                socket
-                    .write_all(response.as_bytes())
-                    .await
-                    .expect("write range response");
+            let (mut socket, _) = listener.accept().await.expect("accept range request");
+            server_requests.fetch_add(1, Ordering::Relaxed);
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.expect("read range request");
+            socket
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 0-3/4\r\nConnection: close\r\n\r\nda",
+                )
+                .await
+                .expect("write truncated range response");
+            if let Ok(Ok((mut retry_socket, _))) =
+                tokio::time::timeout(Duration::from_secs(1), listener.accept()).await
+            {
+                server_requests.fetch_add(1, Ordering::Relaxed);
+                let mut retry_request = [0_u8; 1024];
+                let _ = retry_socket.read(&mut retry_request).await;
             }
         });
 
@@ -4971,19 +5000,18 @@ mod tests {
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let downloaded = AtomicU64::new(0);
-        let size = fetch_resource(&client, resource.clone(), &directory, &tx, &downloaded)
-            .await
-            .expect("truncated range should recover on retry");
+        let result = fetch_resource(&client, resource.clone(), &directory, &tx, &downloaded).await;
 
         server.await.expect("HTTP test server task");
-        assert_eq!(size, 4);
-        assert_eq!(downloaded.load(Ordering::Relaxed), 4);
-        assert_eq!(
-            tokio::fs::read(directory.join(resource.filename))
-                .await
-                .expect("completed byte-range resource"),
-            b"data"
-        );
+        assert!(matches!(result, Err(ManifestRunError::Retryable(_))));
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        assert_eq!(downloaded.load(Ordering::Relaxed), 0);
+        assert!(!directory.join(&resource.filename).exists());
+        let partial = directory.join(format!("{}.part", resource.filename));
+        let partial_metadata = tokio::fs::metadata(&partial)
+            .await
+            .expect("incomplete transfer remains isolated in its staging file");
+        assert_eq!(partial_metadata.len(), 2);
         let _ = tokio::fs::remove_dir_all(directory).await;
     }
 

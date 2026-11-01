@@ -27,7 +27,7 @@ pub(crate) enum EngineMsg {
     Failed(String),
     /// Native manifest rejected the presentation or resource protocol; the pump switches to yt-dlp.
     ManifestFallback(String),
-    /// A transient native transfer exhausted its retry budget; owner-marked staging remains resumable.
+    /// A transient native transfer failed; owner-marked staging remains resumable.
     ManifestRetryable(String),
     /// A multi worker finished one piece; the UI thread records it for resume.
     PieceDone(u64),

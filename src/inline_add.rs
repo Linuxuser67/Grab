@@ -1189,7 +1189,6 @@ fn submit_probed_single(
                         video_format_id: format_id,
                         is_live,
                         playlist_item_id: None,
-                        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
                         subtitle_selection,
                     },
                 )
@@ -1656,7 +1655,6 @@ fn push_playlist_items_page(
                             // segment pages and never need it, but highlights — and anything
                             // unparseable at pick time — re-resolve the tray by this id.
                             playlist_item_id: Some(item.id.to_string()),
-                            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
                             subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
                         },
                         &existing,

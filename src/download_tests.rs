@@ -1712,6 +1712,7 @@ fn mismatched_video_source_dropped_on_restore() {
                 is_live: false,
                 video_format_id: None,
                 playlist_item_id: None,
+                subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
                 backend: None,
             }),
             started: None,
@@ -1766,6 +1767,7 @@ fn done_video_keeps_page_source_on_restore() {
                 is_live: false,
                 video_format_id: None,
                 playlist_item_id: None,
+                subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
                 backend: None,
             }),
             started: None,
@@ -2990,6 +2992,7 @@ fn expand_playlist_rows_use_titled_subfolder() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         },
     );
@@ -4781,6 +4784,7 @@ fn remove_cleans_video_staging() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         },
     );
@@ -4834,6 +4838,7 @@ fn remove_cleans_dest_side_video_staging() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         },
     );
@@ -5058,6 +5063,7 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
             is_live: true,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         },
     );
@@ -5609,6 +5615,7 @@ fn proxy_argv_precedes_end_of_options() {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
@@ -5983,6 +5990,7 @@ fn delete_download_trashes_video_sidecars() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         },
     );
@@ -6139,6 +6147,7 @@ fn video_proxy_failure_does_not_leave_live_state_or_stall_the_queue() {
             is_live: true,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         },
     );
@@ -6406,6 +6415,7 @@ fn a_removal_claims_the_gate_before_the_worker_can_commit() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         },
     );
@@ -6464,6 +6474,7 @@ fn a_finalizer_removes_the_orphan_a_lost_commit_left_behind() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         },
     );
@@ -6531,6 +6542,7 @@ fn removing_a_settled_video_row_keeps_the_users_finished_file() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         },
     );
@@ -6815,6 +6827,7 @@ fn released_reservation_wakes_parked_unremoved_row() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         }),
         started: false,
@@ -6895,6 +6908,7 @@ fn an_unremove_of_a_settled_row_stays_settled_while_reserved() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         }),
         started: false,
@@ -6942,6 +6956,7 @@ fn a_finalizer_releases_the_reservation_after_the_worker() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         },
     );
@@ -7003,6 +7018,7 @@ fn removing_a_never_spawned_video_row_releases_synchronously() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         },
     );
@@ -7044,6 +7060,7 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         },
     );
@@ -8480,6 +8497,7 @@ fn gallery_legacy_backend_converts() {
         is_live: false,
         video_format_id: None,
         playlist_item_id: None,
+        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
         backend: Some("gallerydl".to_string()),
     };
     let mut stored = gallery_stored_item(DownloadStatus::Paused, None);

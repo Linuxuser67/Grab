@@ -573,6 +573,7 @@ fn serde_page_round_trip() {
         is_live: false,
         video_format_id: Some("137".into()),
         playlist_item_id: None,
+        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
         backend: None,
     };
     let json = serde_json::to_string(&src).unwrap();
@@ -596,6 +597,7 @@ fn serde_page_old_json_gets_defaults() {
             is_live: false,
             video_format_id: None,
             playlist_item_id: None,
+            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
             backend: None,
         }
     );
@@ -1021,6 +1023,7 @@ fn resume_attempt_labels_reresolve_as_resuming() {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
@@ -1074,6 +1077,7 @@ fn pipeline_reports_missing_tools() {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
@@ -2287,6 +2291,7 @@ fn video_source_page_carries_format_pin() {
         is_live: false,
         video_format_id: Some("137".into()),
         playlist_item_id: None,
+        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
         backend: None,
     };
     let json = serde_json::to_string(&src).unwrap();
@@ -3527,6 +3532,7 @@ fn direct_test_job() -> VideoJob {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
@@ -3772,6 +3778,7 @@ fn live_test_job() -> VideoJob {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
@@ -6386,6 +6393,7 @@ fn vod_hls_pins_planner_variant_id() {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
@@ -6454,6 +6462,7 @@ fn vod_hls_refuses_existing_dest() {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
@@ -9168,6 +9177,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: Some("en".into()),
+        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,

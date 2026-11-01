@@ -1467,6 +1467,7 @@ impl DownloadManager {
                         video_format_id: None,
                         is_live: false,
                         playlist_item_id: None,
+                        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
                     },
                     &existing,
                 )

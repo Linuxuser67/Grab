@@ -566,6 +566,9 @@ async fn prepare_manifest_attempt(
         guarded_child_hosts,
         has_audio,
     } = resolve_manifest_tracks(job, offline_tracks, finish_requested).await?;
+    if has_audio {
+        ensure_track_dir(&audio_dir).await?;
+    }
 
     let live_source = matches!(
         &tracks,
@@ -721,10 +724,6 @@ async fn resolve_manifest_tracks(
         Tracks::Dash { audio, .. } => audio.is_some(),
         Tracks::DashLiveOffline { has_audio } => *has_audio,
     };
-    if has_audio {
-        ensure_track_dir(&audio_dir).await?;
-    }
-
     Ok(ResolvedManifestTracks {
         client,
         tracks,

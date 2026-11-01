@@ -214,6 +214,39 @@ impl From<crate::manifest_intake::ManifestIntakeError> for ManifestRunError {
     }
 }
 
+/// Persist an unrecoverable live-capture decision before returning from the capture path.
+/// The caller supplies bytes for the retained video track only; audio is discarded
+/// when continuity can no longer be established.
+async fn persist_unrecoverable_live_capture(
+    staging_dir: &Path,
+    protocol: &str,
+    reason: &str,
+    staged_bytes: u64,
+    downloaded: &AtomicU64,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+) -> Result<(), ManifestRunError> {
+    crate::live_capture_state::persist(staging_dir, protocol, reason, staged_bytes)
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    downloaded.store(staged_bytes, Ordering::Relaxed);
+    tx.send(progress_message(staged_bytes)).ok();
+    Ok(())
+}
+
+/// An origin-only identifier safe for diagnostics. It deliberately omits
+/// user-info, path, query and fragment, all of which may contain credentials.
+fn diagnostic_url(url: &Url) -> String {
+    let mut origin = format!(
+        "{}://{}",
+        url.scheme(),
+        url.host_str().unwrap_or("<unknown>")
+    );
+    if let Some(port) = url.port() {
+        origin.push_str(&format!(":{port}"));
+    }
+    origin
+}
+
 /// Result of one native manifest attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ManifestOutcome {
@@ -341,6 +374,17 @@ enum DashLiveCaptureOutcome {
     FinishVideoOnly,
     Unrecoverable,
     Discard,
+}
+
+fn discard_unrecoverable_dash_capture_without_video(
+    outcome: DashLiveCaptureOutcome,
+    has_video_segments: bool,
+) -> DashLiveCaptureOutcome {
+    if outcome == DashLiveCaptureOutcome::Unrecoverable && !has_video_segments {
+        DashLiveCaptureOutcome::Discard
+    } else {
+        outcome
+    }
 }
 
 #[derive(Debug)]
@@ -623,16 +667,6 @@ pub(crate) async fn run_manifest_download(
             LiveHlsCaptureOutcome::Finish
             | LiveHlsCaptureOutcome::FinishVideoOnly
             | LiveHlsCaptureOutcome::Unrecoverable => {
-                if matches!(capture, LiveHlsCaptureOutcome::Unrecoverable) {
-                    crate::live_capture_state::persist(
-                        &staging,
-                        "hls",
-                        "HLS playlist continuity could not be verified",
-                        downloaded.load(Ordering::Relaxed),
-                    )
-                    .await
-                    .map_err(ManifestRunError::Failed)?;
-                }
                 // A Finish ends recording but still needs a live
                 // receiver during FFmpeg finalization. Removal remains guarded
                 // by AttemptGate::try_commit at the final delivery boundary.
@@ -705,16 +739,6 @@ pub(crate) async fn run_manifest_download(
             DashLiveCaptureOutcome::Finish
             | DashLiveCaptureOutcome::FinishVideoOnly
             | DashLiveCaptureOutcome::Unrecoverable => {
-                if matches!(capture.outcome, DashLiveCaptureOutcome::Unrecoverable) {
-                    crate::live_capture_state::persist(
-                        &staging,
-                        "dash",
-                        "DASH presentation continuity could not be verified",
-                        downloaded.load(Ordering::Relaxed),
-                    )
-                    .await
-                    .map_err(ManifestRunError::Failed)?;
-                }
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 _finish_stop_sender = Some(sender);
                 abort = receiver;
@@ -1527,6 +1551,16 @@ async fn staged_regular_file_exists(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
 }
 
+async fn sync_staging_directory(directory: &Path) -> Result<(), String> {
+    let handle = tokio::fs::File::open(directory)
+        .await
+        .map_err(|error| format!("Could not open staging directory for sync: {error}"))?;
+    handle
+        .sync_all()
+        .await
+        .map_err(|error| format!("Could not sync staging directory: {error}"))
+}
+
 async fn write_live_playlist(
     directory: &Path,
     accumulator: &HlsLiveAccumulator,
@@ -1565,7 +1599,8 @@ async fn write_live_playlist(
     }
     tokio::fs::rename(&part, &target)
         .await
-        .map_err(|error| format!("Could not publish the live HLS playlist: {error}"))
+        .map_err(|error| format!("Could not publish the live HLS playlist: {error}"))?;
+    sync_staging_directory(directory).await
 }
 
 async fn fetched_hls_resource_bytes(
@@ -1629,21 +1664,21 @@ async fn apply_live_hls_snapshot(
         Ok(update) => update,
         Err(crate::manifest::ManifestError::LiveSequenceGap) => {
             tracing::warn!(
-                playlist = %playlist_url,
+                playlist = %diagnostic_url(&playlist_url),
                 "live HLS playlist continuity was lost; preserving captured media"
             );
             return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
         }
         Err(crate::manifest::ManifestError::LiveCaptureLimit) => {
             tracing::warn!(
-                playlist = %playlist_url,
+                playlist = %diagnostic_url(&playlist_url),
                 "live HLS capture reached a configured resource limit; preserving captured media"
             );
             return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
         }
         Err(error) if track.accumulator.segment_count() > 0 => {
             tracing::warn!(
-                playlist = %playlist_url,
+                playlist = %diagnostic_url(&playlist_url),
                 error = %error,
                 "live HLS update is no longer supported; preserving captured media"
             );
@@ -1663,7 +1698,7 @@ async fn apply_live_hls_snapshot(
             Some(deadline) => Some(deadline),
             None if track.accumulator.segment_count() > 0 => {
                 tracing::warn!(
-                    playlist = %playlist_url,
+                    playlist = %diagnostic_url(&playlist_url),
                     "live HLS reload deadline is out of range; preserving captured media"
                 );
                 return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
@@ -1689,7 +1724,7 @@ async fn apply_live_hls_snapshot(
     let fetch_outcome = match fetch_outcome {
         Err(ManifestRunError::Unsupported(error)) if track.accumulator.segment_count() > 0 => {
             tracing::warn!(
-                playlist = %playlist_url,
+                playlist = %diagnostic_url(&playlist_url),
                 error = %error,
                 "live HLS resource update is no longer supported; preserving captured media"
             );
@@ -1715,14 +1750,14 @@ async fn apply_live_hls_snapshot(
         Ok(()) => {}
         Err(crate::manifest::ManifestError::LiveCaptureLimit) => {
             tracing::warn!(
-                playlist = %playlist_url,
+                playlist = %diagnostic_url(&playlist_url),
                 "live HLS capture reached a configured resource limit; preserving captured media"
             );
             return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
         }
         Err(error) if track.accumulator.segment_count() > 0 => {
             tracing::warn!(
-                playlist = %playlist_url,
+                playlist = %diagnostic_url(&playlist_url),
                 error = %error,
                 "live HLS commit is no longer supported; preserving captured media"
             );
@@ -1772,7 +1807,7 @@ async fn poll_live_hls_track(
             if track.accumulator.segment_count() > 0 =>
         {
             tracing::warn!(
-                playlist = %track.playlist_url,
+                playlist = %diagnostic_url(&track.playlist_url),
                 error = %error,
                 "live HLS playlist is no longer supported; preserving captured media"
             );
@@ -1786,7 +1821,7 @@ async fn poll_live_hls_track(
     {
         if track.accumulator.segment_count() > 0 {
             tracing::warn!(
-                playlist = %plan.playlist_url,
+                playlist = %diagnostic_url(&plan.playlist_url),
                 error = %error,
                 "live HLS playlist host is no longer eligible; preserving captured media"
             );
@@ -1797,7 +1832,7 @@ async fn poll_live_hls_track(
     if let Err(error) = guard_hls_resources(source_url, &plan, guarded_child_hosts) {
         if track.accumulator.segment_count() > 0 {
             tracing::warn!(
-                playlist = %plan.playlist_url,
+                playlist = %diagnostic_url(&plan.playlist_url),
                 error = %error,
                 "live HLS resource host is no longer eligible; preserving captured media"
             );
@@ -1916,11 +1951,19 @@ async fn run_live_hls_tracks(
             });
         }
         LiveHlsSnapshotOutcome::ContinuityLost => {
-            return Ok(if video.accumulator.segment_count() > 0 {
-                LiveHlsCaptureOutcome::Unrecoverable
-            } else {
-                LiveHlsCaptureOutcome::Discard
-            });
+            if video.accumulator.segment_count() == 0 {
+                return Ok(LiveHlsCaptureOutcome::Discard);
+            }
+            persist_unrecoverable_live_capture(
+                staging_dir,
+                "hls",
+                "HLS playlist continuity could not be verified",
+                video.accumulator.resource_bytes(),
+                downloaded,
+                tx,
+            )
+            .await?;
+            return Ok(LiveHlsCaptureOutcome::Unrecoverable);
         }
     }
     if let (Some(plan), Some(track)) = (audio_plan, audio.as_mut()) {
@@ -1938,7 +1981,7 @@ async fn run_live_hls_tracks(
         let audio_outcome = match audio_outcome {
             Err(ManifestRunError::Unsupported(error)) => {
                 tracing::warn!(
-                    playlist = %plan.playlist_url,
+                    playlist = %diagnostic_url(&plan.playlist_url),
                     error = %error,
                     "live HLS audio rendition is no longer supported; preserving video capture"
                 );
@@ -1963,11 +2006,19 @@ async fn run_live_hls_tracks(
                 });
             }
             LiveHlsSnapshotOutcome::ContinuityLost => {
-                return Ok(if video.accumulator.segment_count() > 0 {
-                    LiveHlsCaptureOutcome::Unrecoverable
-                } else {
-                    LiveHlsCaptureOutcome::Discard
-                });
+                if video.accumulator.segment_count() == 0 {
+                    return Ok(LiveHlsCaptureOutcome::Discard);
+                }
+                persist_unrecoverable_live_capture(
+                    staging_dir,
+                    "hls",
+                    "HLS playlist continuity could not be verified",
+                    video.accumulator.resource_bytes(),
+                    downloaded,
+                    tx,
+                )
+                .await?;
+                return Ok(LiveHlsCaptureOutcome::Unrecoverable);
             }
         }
     }
@@ -2032,11 +2083,19 @@ async fn run_live_hls_tracks(
                     });
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
-                    return Ok(if video.accumulator.segment_count() > 0 {
-                        LiveHlsCaptureOutcome::Unrecoverable
-                    } else {
-                        LiveHlsCaptureOutcome::Discard
-                    });
+                    if video.accumulator.segment_count() == 0 {
+                        return Ok(LiveHlsCaptureOutcome::Discard);
+                    }
+                    persist_unrecoverable_live_capture(
+                        staging_dir,
+                        "hls",
+                        "HLS playlist continuity could not be verified",
+                        video.accumulator.resource_bytes(),
+                        downloaded,
+                        tx,
+                    )
+                    .await?;
+                    return Ok(LiveHlsCaptureOutcome::Unrecoverable);
                 }
             }
         }
@@ -2074,11 +2133,19 @@ async fn run_live_hls_tracks(
                     });
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
-                    return Ok(if video.accumulator.segment_count() > 0 {
-                        LiveHlsCaptureOutcome::Unrecoverable
-                    } else {
-                        LiveHlsCaptureOutcome::Discard
-                    });
+                    if video.accumulator.segment_count() == 0 {
+                        return Ok(LiveHlsCaptureOutcome::Discard);
+                    }
+                    persist_unrecoverable_live_capture(
+                        staging_dir,
+                        "hls",
+                        "HLS playlist continuity could not be verified",
+                        video.accumulator.resource_bytes(),
+                        downloaded,
+                        tx,
+                    )
+                    .await?;
+                    return Ok(LiveHlsCaptureOutcome::Unrecoverable);
                 }
             }
         }
@@ -2334,7 +2401,10 @@ async fn fetch_resource_once(
             ManifestRunError::Retryable("Timed out while requesting a stream segment".to_string())
         })?
         .map_err(|error| {
-            ManifestRunError::Retryable(format!("Could not retrieve a stream segment: {error}"))
+            ManifestRunError::Retryable(format!(
+                "Could not retrieve a stream segment: {}",
+                error.without_url()
+            ))
         })?;
     let status = response.status();
     if let Some(range) = resource.range {
@@ -2357,6 +2427,10 @@ async fn fetch_resource_once(
                 "The stream server did not honor the requested byte range".to_string(),
             ));
         }
+    } else if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(ManifestRunError::Unsupported(
+            "The stream server returned partial content without a requested byte range".to_string(),
+        ));
     } else if !status.is_success() {
         return Err(resource_status_error(status));
     }
@@ -2401,7 +2475,10 @@ async fn fetch_resource_once(
             break;
         };
         let chunk = chunk.map_err(|error| {
-            ManifestRunError::Retryable(format!("A stream segment transfer failed: {error}"))
+            ManifestRunError::Retryable(format!(
+                "A stream segment transfer failed: {}",
+                error.without_url()
+            ))
         })?;
         if resource
             .range
@@ -2821,7 +2898,10 @@ async fn write_dash_live_state(track: &DashLiveTrack) -> Result<(), ManifestRunE
     drop(file);
     tokio::fs::rename(&part, &target).await.map_err(|error| {
         ManifestRunError::Failed(format!("Could not publish dynamic DASH state: {error}"))
-    })
+    })?;
+    sync_staging_directory(&track.directory)
+        .await
+        .map_err(ManifestRunError::Failed)
 }
 
 async fn dash_live_track_bytes(
@@ -3103,6 +3183,7 @@ async fn run_live_dash_tracks(
 ) -> Result<DashLiveCapture, ManifestRunError> {
     let (mut video, video_bytes) =
         load_dash_live_track(representation_key, video_dir, video_plan).await?;
+    let staging_dir = video_dir.parent().unwrap_or(video_dir);
     let mut audio_key = audio_key
         .map(str::to_string)
         .or_else(|| audio_plan.map(|plan| plan.representation.live_key.clone()));
@@ -3126,7 +3207,23 @@ async fn run_live_dash_tracks(
     };
     macro_rules! finish_capture {
         ($outcome:expr) => {{
-            let outcome = $outcome;
+            let outcome = discard_unrecoverable_dash_capture_without_video(
+                $outcome,
+                !video.state.segments.is_empty(),
+            );
+            if matches!(outcome, DashLiveCaptureOutcome::Unrecoverable) {
+                let staged_video_bytes =
+                    dash_live_track_bytes(&video.state, &video.directory).await?;
+                persist_unrecoverable_live_capture(
+                    staging_dir,
+                    "dash",
+                    "DASH presentation continuity could not be verified",
+                    staged_video_bytes,
+                    downloaded,
+                    tx,
+                )
+                .await?;
+            }
             let video_resources = video
                 .state
                 .resource_names()
@@ -3169,7 +3266,6 @@ async fn run_live_dash_tracks(
         });
     }
     downloaded.store(total_bytes, Ordering::Relaxed);
-    let staging_dir = video_dir.parent().unwrap_or(video_dir);
     ensure_manifest_mux_spaces(staging_dir, destination_dir, total_bytes)?;
 
     let (Some(mut current_video_plan), mut current_audio_plan) =
@@ -4280,6 +4376,151 @@ mod tests {
             b"data"
         );
         let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn partial_content_without_a_requested_range_is_rejected() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let directory = std::env::temp_dir().join(format!(
+            "grab-manifest-unrequested-206-{}",
+            std::process::id()
+        ));
+        let _ = tokio::fs::remove_dir_all(&directory).await;
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .expect("create resource staging directory");
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind HTTP test listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept resource request");
+            let mut request = [0_u8; 1024];
+            let _ = socket
+                .read(&mut request)
+                .await
+                .expect("read resource request");
+            let response = "HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 0-1/4\r\nConnection: close\r\n\r\npa";
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write partial response");
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build direct HTTP test client");
+        let resource = Resource {
+            url: Url::parse(&format!("http://{address}/complete.m4s")).expect("resource URL"),
+            range: None,
+            filename: "complete-000001-0123456789abcdef0123456789abcdef.bin".to_string(),
+            key: false,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let downloaded = AtomicU64::new(0);
+        let result = fetch_resource(&client, resource.clone(), &directory, &tx, &downloaded).await;
+
+        server.await.expect("HTTP test server task");
+        assert!(matches!(result, Err(ManifestRunError::Unsupported(_))));
+        assert_eq!(downloaded.load(Ordering::Relaxed), 0);
+        assert!(!directory.join(resource.filename).exists());
+        assert!(
+            !directory
+                .join("complete-000001-0123456789abcdef0123456789abcdef.bin.part")
+                .exists()
+        );
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn unrecoverable_capture_marker_is_synced_before_capture_returns() {
+        let directory = dynamic_dash_test_directory("unrecoverable-marker");
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .expect("create live staging directory");
+        let downloaded = AtomicU64::new(900);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        persist_unrecoverable_live_capture(
+            &directory,
+            "hls",
+            "HLS playlist continuity could not be verified",
+            420,
+            &downloaded,
+            &tx,
+        )
+        .await
+        .expect("persist unrecoverable marker before returning");
+
+        let marker = crate::live_capture_state::read(&directory)
+            .await
+            .expect("read durable marker")
+            .expect("unrecoverable marker exists");
+        assert_eq!(marker.protocol, "hls");
+        assert_eq!(marker.staged_bytes, 420);
+        assert_eq!(downloaded.load(Ordering::Relaxed), 420);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineMsg::Progress {
+                downloaded: 420,
+                ..
+            })
+        ));
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[test]
+    fn dash_audio_continuity_loss_without_video_is_discarded() {
+        assert_eq!(
+            discard_unrecoverable_dash_capture_without_video(
+                DashLiveCaptureOutcome::Unrecoverable,
+                false,
+            ),
+            DashLiveCaptureOutcome::Discard
+        );
+        assert_eq!(
+            discard_unrecoverable_dash_capture_without_video(
+                DashLiveCaptureOutcome::Unrecoverable,
+                true,
+            ),
+            DashLiveCaptureOutcome::Unrecoverable
+        );
+    }
+
+    #[test]
+    fn manifest_diagnostic_url_omits_signed_path_query_and_fragment() {
+        let url = Url::parse(
+            "https://cdn.example.test/private/path?signature=very-secret#session=also-secret",
+        )
+        .expect("test URL");
+        let diagnostic = diagnostic_url(&url);
+        assert_eq!(diagnostic, "https://cdn.example.test");
+        assert!(!diagnostic.contains("private"));
+        assert!(!diagnostic.contains("very-secret"));
+        assert!(!diagnostic.contains("also-secret"));
+    }
+
+    #[tokio::test]
+    async fn request_error_diagnostics_do_not_include_signed_url() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind then close a local endpoint");
+        let address = listener.local_addr().expect("listener address");
+        drop(listener);
+        let url = format!("http://{address}/segment?signature=very-secret");
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build HTTP client")
+            .get(&url)
+            .send()
+            .await
+            .expect_err("closed endpoint should fail");
+        let diagnostic = error.without_url().to_string();
+        assert!(!diagnostic.contains("very-secret"));
     }
 
     #[tokio::test]

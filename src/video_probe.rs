@@ -842,8 +842,14 @@ mod subtitle_language_tests {
         });
 
         assert_eq!(
-            subtitle_languages(&info).as_ref(),
-            ["ar", "en", "en-us", "fr", "zh_hant"]
+            subtitle_languages(&info).into_vec(),
+            vec![
+                "ar".to_string(),
+                "en".to_string(),
+                "en-us".to_string(),
+                "fr".to_string(),
+                "zh_hant".to_string(),
+            ]
         );
     }
 

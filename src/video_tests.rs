@@ -8824,6 +8824,7 @@ fn resolve_subtitle_lang_uses_the_explicit_language_without_english_fallback() {
         false,
     );
     let mut job = probe_test_job(Some("de"));
+    job.info_json = Some(serde_json::json!({"subtitles": {}, "automatic_captions": {}}));
     job.subtitle_selection = crate::media_types::SubtitleSelection::Language("fr".into());
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let result = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(

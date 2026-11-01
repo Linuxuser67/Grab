@@ -1339,17 +1339,20 @@ pub(crate) async fn resolve_subtitle_lang(
     // (--load-info-json), so its subtitle maps are what the download will
     // use — deciding from them spares a second extraction. Key presence
     // only: no maps at all means the JSON cannot answer, keep the probe.
-    if let Some(json) = job.info_json.as_ref()
-        && (json.get("subtitles").is_some() || json.get("automatic_captions").is_some())
-    {
+    if let Some(json) = job.info_json.as_ref() {
         let available = available_subtitle_langs(json);
-        let lang = pick_subtitle_lang(&available, &candidate_refs);
-        if lang.is_none() {
+        // The Video model's sanitizer replaces these maps with empty objects.
+        // Empty maps therefore cannot prove the source has no subtitles; in
+        // that case perform the bounded subtitle probe below.
+        if !available.is_empty() {
+            let lang = pick_subtitle_lang(&available, &candidate_refs);
+            if lang.is_none() {
             tracing::debug!("video offers no subtitles in the preferred language or English");
-        } else {
-            tracing::debug!("subtitle resolve: reused the probe info JSON, skipping the probe");
+            } else {
+                tracing::debug!("subtitle resolve: reused the probe info JSON, skipping the probe");
+            }
+            return Ok(lang);
         }
-        return Ok(lang);
     }
     let mut argv = vec!["--ignore-config".to_string()];
     // A picked row probes the collection URL: scope to its entry, or the

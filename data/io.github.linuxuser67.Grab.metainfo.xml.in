@@ -50,6 +50,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.3" date="2026-11-01">
+      <description>
+        <ul>
+          <li>Improve native HLS/DASH downloads with stable track identities, plan-bound recovery, audio and subtitle selection, MP4/MKV output, and more reliable live-stream handling.</li>
+          <li>Make live recordings easier to control with separate Pause, Finish, and Delete actions, while improving continuity tracking, finalization, and byte accounting.</li>
+          <li>Improve collection and torrent intake, including consistent multi-file selection for magnet links, and keep download content centered at a readable width in maximized windows.</li>
+          <li>Check for FFmpeg and ffprobe before native stream downloads begin, and stop failed native resource transfers immediately instead of retrying automatically.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.2" date="2026-11-01">
       <description>
         <ul>

@@ -4,10 +4,7 @@ use gettextrs::gettext;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::manifest::{
-    HlsAudioRendition, HlsPlan, HlsVariant,
-    dash::DashRepresentationPlan,
-};
+use crate::manifest::{HlsAudioRendition, HlsPlan, HlsVariant, dash::DashRepresentationPlan};
 use crate::manifest_types::{ManifestAudioChoice, ManifestChoice, ManifestLookup, NativeManifest};
 use crate::media_types::{ManifestKind, ManifestSource};
 

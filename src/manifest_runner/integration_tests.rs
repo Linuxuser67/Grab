@@ -1040,6 +1040,29 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
             .expect("read last committed live segment"),
         b"committed-segment"
     );
+
+    let (finish_tx, mut finish_abort) = tokio::sync::oneshot::channel();
+    finish_tx
+        .send(crate::video::StopIntent::Finish)
+        .expect("queue finish after pausing the committed capture");
+    let mut guarded_child_hosts = std::collections::HashSet::new();
+    let finished = run_live_hls_tracks(
+        &client,
+        "https://origin.example.test/live.m3u8",
+        root.path(),
+        &first,
+        None,
+        &video_dir,
+        &audio_dir,
+        1,
+        &tx,
+        &downloaded,
+        &mut guarded_child_hosts,
+        &mut finish_abort,
+    )
+    .await
+    .expect("finish the restored live HLS capture");
+    assert_eq!(finished, LiveHlsCaptureOutcome::Preserve);
 }
 
 #[tokio::test]

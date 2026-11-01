@@ -916,6 +916,7 @@ impl DownloadManager {
         {
             return false;
         }
+        self.live_rows.borrow_mut().remove(&id);
         if let Some(item) = self.find(id) {
             item.set_detail(gettext("Finalizing recording…"));
         }
@@ -2893,6 +2894,12 @@ impl DownloadManager {
                             this.live_rows.borrow_mut().insert(id);
                         }
                     }
+                    EngineMsg::LiveFinalizing => {
+                        if item.status() == DownloadStatus::Downloading {
+                            this.live_rows.borrow_mut().remove(&id);
+                            item.set_detail(gettext("Finalizing recording…"));
+                        }
+                    }
                 }
             }
             // Post-loop cleanup: the manager may have been dropped while the
@@ -3794,9 +3801,12 @@ impl DownloadManager {
         let video = self.video_sources.borrow().contains_key(&id);
         match stop {
             Stop::Discard if video => {
-                self.stop_video_worker(id, crate::video::StopIntent::Discard);
+                let signalled = self.stop_video_worker(id, crate::video::StopIntent::Discard);
                 // The pump tail early-returns once `remove` drops the epoch entry, so clear the marker here or a later row reusing the id takes live paths.
                 self.live_rows.borrow_mut().remove(&id);
+                if !signalled {
+                    self.stop_engine(id, crate::video::StopIntent::Discard);
+                }
             }
             // Preserve and non-video Discard stop the engine the same way (see `stop_engine`).
             _ => {

@@ -485,10 +485,20 @@ pub(crate) fn download_plan(
                 Some(_) if matches!(&dash.presentation, DashPresentation::Dynamic(_)) => {
                     return Err("Native subtitles are not supported for live DASH presentations".to_string());
                 }
-                Some(key) => Some(Box::new(
-                    crate::manifest::dash::plan_dash_representation(&dash, key)
-                        .map_err(|error| error.to_string())?,
-                )),
+                Some(key) => {
+                    let track = dash
+                        .subtitle_representations
+                        .iter()
+                        .find(|track| track.key == key || track.live_key == key)
+                        .ok_or_else(|| {
+                            "The selected DASH subtitle representation is no longer available"
+                                .to_string()
+                        })?;
+                    Some(Box::new(
+                        crate::manifest::dash::plan_dash_representation(&dash, &track.key)
+                            .map_err(|error| error.to_string())?,
+                    ))
+                }
                 None => None,
             };
             Ok(ManifestDownloadPlan::Dash {

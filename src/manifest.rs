@@ -191,6 +191,8 @@ pub(crate) struct HlsVariant {
     pub(crate) codecs: Option<String>,
     pub(crate) frame_rate: Option<f64>,
     pub(crate) audio_group: Option<String>,
+    /// Apple HLS STABLE-VARIANT-ID, when the origin provides one.
+    pub(crate) stable_variant_id: Option<String>,
 }
 
 /// An alternate audio rendition advertised by an HLS master playlist.
@@ -201,6 +203,8 @@ pub(crate) struct HlsAudioRendition {
     pub(crate) name: String,
     pub(crate) language: Option<String>,
     pub(crate) is_default: bool,
+    /// Apple HLS STABLE-RENDITION-ID, when the origin provides one.
+    pub(crate) stable_rendition_id: Option<String>,
 }
 
 /// Master-playlist choices in manifest order; no variant is silently selected.
@@ -802,6 +806,12 @@ pub(crate) fn parse_hls_master_playlist(
                 codecs: variant.codecs,
                 frame_rate: variant.frame_rate,
                 audio_group: variant.audio,
+                stable_variant_id: variant
+                    .other_attributes
+                    .as_ref()
+                    .and_then(|attributes| attributes.get("STABLE-VARIANT-ID"))
+                    .map(|value| value.as_str().to_string())
+                    .filter(|value| !value.is_empty()),
             })
         })
         .collect::<Result<Vec<_>, ManifestError>>()?;
@@ -826,6 +836,12 @@ pub(crate) fn parse_hls_master_playlist(
                 name: alternative.name,
                 language: alternative.language,
                 is_default: alternative.default,
+                stable_rendition_id: alternative
+                    .other_attributes
+                    .as_ref()
+                    .and_then(|attributes| attributes.get("STABLE-RENDITION-ID"))
+                    .map(|value| value.as_str().to_string())
+                    .filter(|value| !value.is_empty()),
             })
         })
         .collect::<Result<Vec<_>, ManifestError>>()?;
@@ -1979,4 +1995,24 @@ one.ts
             Some(ManifestError::Parse)
         );
     }
+    #[test]
+    fn parses_apple_stable_variant_and_rendition_ids() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",STABLE-RENDITION-ID="rendition-en",URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,AUDIO="audio",STABLE-VARIANT-ID="variant-720"
+video/720.m3u8
+"#;
+        let plan = parse_hls_master_playlist(BASE_URL, body)
+            .expect("stable HLS identifiers should be preserved");
+
+        assert_eq!(
+            plan.variants[0].stable_variant_id.as_deref(),
+            Some("variant-720")
+        );
+        assert_eq!(
+            plan.audio_renditions[0].stable_rendition_id.as_deref(),
+            Some("rendition-en")
+        );
+    }
+
 }

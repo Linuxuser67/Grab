@@ -1629,6 +1629,7 @@ video/es.m3u8
             name: "English".to_string(),
             language: Some("en".to_string()),
             is_default: true,
+            stable_rendition_id: None,
         };
         let original = rendition("https://cdn.example.test/audio/en.m3u8?sig=old");
         let refreshed = rendition("https://cdn.example.test/audio/en.m3u8?sig=new");
@@ -1751,6 +1752,7 @@ video/es.m3u8
             codecs: Some("avc1.640028".to_string()),
             frame_rate: Some(30.0),
             audio_group: Some("audio-main".to_string()),
+            stable_variant_id: None,
         };
         let original = variant(
             "https://cdn.example.test/video/1080.m3u8?sig=old",

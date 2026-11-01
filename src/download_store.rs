@@ -58,7 +58,8 @@ pub(crate) struct StoredItem {
     /// Recorded engine output folder for torrents (v2+).
     #[serde(default)]
     pub(crate) output_dir: Option<String>,
-    /// Video-page source; only `Some(Page)` written so old files/versions stay compatible.
+    /// Persisted video source (page or native manifest); older entries default to `None`.
+    /// Supported older queue versions load; unsupported versions are quarantined.
     #[serde(default)]
     pub(crate) video_source: Option<crate::media_types::VideoSource>,
     /// Whether the engine ever started this row (additive, no version bump):

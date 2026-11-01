@@ -333,7 +333,7 @@ pub(crate) async fn jar_for_browser(
     if cookies_browser.is_empty() || cookies_browser == "none" {
         return None;
     }
-    if let Some(cached) = crate::runtime::lock_recover(jar_cache())
+    if let Some(cached) = crate::runtime::lock_or_panic(jar_cache())
         .get(cookies_browser)
         .filter(|c| c.at.elapsed() < JAR_TTL)
     {
@@ -352,7 +352,7 @@ pub(crate) async fn jar_for_browser(
     .await?;
     let (jar, count) = jar_from_export(&text);
     tracing::debug!(cookies = count, "exported browser cookies");
-    crate::runtime::lock_recover(jar_cache()).insert(
+    crate::runtime::lock_or_panic(jar_cache()).insert(
         cookies_browser.to_string(),
         CachedJar {
             text,

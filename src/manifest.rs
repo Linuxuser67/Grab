@@ -2071,14 +2071,14 @@ one.ts
     #[test]
     fn rejects_oversized_hls_manifest_bodies_before_parsing() {
         let body = vec![b' '; MAX_MANIFEST_BYTES + 1];
-        assert_eq!(
-            parse_hls_master_playlist(BASE_URL, &body).err(),
-            Some(ManifestError::Parse(_))
-        );
-        assert_eq!(
-            plan_hls_media_playlist(BASE_URL, &body).err(),
-            Some(ManifestError::Parse(_))
-        );
+        assert!(matches!(
+            parse_hls_master_playlist(BASE_URL, &body),
+            Err(ManifestError::Parse(_))
+        ));
+        assert!(matches!(
+            plan_hls_media_playlist(BASE_URL, &body),
+            Err(ManifestError::Parse(_))
+        ));
     }
     #[test]
     fn parses_apple_stable_variant_and_rendition_ids() {

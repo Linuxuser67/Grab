@@ -19,6 +19,8 @@ pub(crate) enum LiveCaptureStateError {
     TooLarge,
     #[error("the unrecoverable live-capture marker is malformed: {0}")]
     Malformed(#[source] serde_json::Error),
+    #[error("could not serialize unrecoverable live-capture state: {0}")]
+    Serialize(#[source] serde_json::Error),
     #[error("a different unrecoverable live-capture decision already exists")]
     ConflictingDecision,
     #[error("live-capture state I/O failed while {operation}: {source}")]
@@ -116,7 +118,7 @@ fn persist_sync(
             })?;
     }
     serde_json::to_writer(&mut temporary, marker)
-        .map_err(LiveCaptureStateError::Malformed)?;
+        .map_err(LiveCaptureStateError::Serialize)?;
     temporary
         .flush()
         .and_then(|()| temporary.as_file().sync_all())
@@ -204,17 +206,19 @@ mod tests {
         persist(directory.path(), "dash", "DASH timeline changed", 99)
             .await
             .expect("persist marker");
-        assert!(
-            persist(directory.path(), "dash", "different reason", 99)
-                .await
-                .is_err()
-        );
+        assert!(matches!(
+            persist(directory.path(), "dash", "different reason", 99).await,
+            Err(LiveCaptureStateError::ConflictingDecision)
+        ));
     }
 
     #[tokio::test]
     async fn malformed_marker_fails_closed() {
         let directory = tempfile::tempdir().expect("create staging");
         std::fs::write(directory.path().join(MARKER_NAME), b"{").expect("write malformed marker");
-        assert!(read(directory.path()).await.is_err());
+        assert!(matches!(
+            read(directory.path()).await,
+            Err(LiveCaptureStateError::Malformed(_))
+        ));
     }
 }

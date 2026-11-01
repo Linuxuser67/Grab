@@ -2786,170 +2786,37 @@ fn build_download_options(
 
 /// Build the inline New Download card. The returned [`AddCard`] owns the
 /// widget and the open/toggle entry points; the card starts collapsed.
-pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
-    let open_state = Rc::new(OpenState::default());
-    // Shared scheduled-download timestamp: set by the schedule picker UI,
-    // read by every enqueue path. None = start immediately.
-    let scheduled_at: Rc<Cell<Option<i64>>> = Rc::new(Cell::new(None));
 
-    // Card chrome: a slide-down revealer so the card animates in under the
-    // header; collapsed it takes no space.
-    let revealer = gtk4::Revealer::builder()
-        .transition_type(gtk4::RevealerTransitionType::SlideDown)
-        .reveal_child(false)
-        .build();
-    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    // 12px: matches the download list's original window margins.
-    card.set_margin_top(12);
-    card.set_margin_bottom(12);
-    card.set_margin_start(12);
-    card.set_margin_end(12);
-    // No .card class: each AdwPreferencesGroup below renders as its own
-    // flush card (rows touch the group's edge, 12px internal row margins
-    // match the app's card padding). The 6px margins give the window
-    // spacing.
+/// Shared state required by the asynchronous video metadata lookup callback.
+struct VideoLookupContext {
+    probe: Rc<RefCell<ProbeState>>,
+    step: Rc<VideoStep>,
+    url_entry: gtk4::Entry,
+    manager: Rc<DownloadManager>,
+    dest_dir: Rc<RefCell<String>>,
+    close_card: Rc<dyn Fn()>,
+    scheduled_at: Rc<Cell<Option<i64>>>,
+    pending_url: Rc<RefCell<VecDeque<String>>>,
+    nav: adw::NavigationView,
+    lookup_add: Rc<RefCell<Option<gtk4::Button>>>,
+}
 
-    // No in-card title: the card only opens from explicit "New Download"
-    // affordances (+, Ctrl+N, the empty-state pill), so restating it is
-    // redundant. The navigation page below keeps the accessible name.
-    // Dismissal is the header `+` toggle (now stateful) and Escape — the
-    // card has no window controls, and a fourth URL-row action was noise
-    // next to Add/options.
+type VideoLookupKick = Rc<dyn Fn(bool, SubmitSource)>;
 
-    let nav = adw::NavigationView::new();
-    // HIG form sizing: cap the card at 600px on wide windows instead of
-    // stretching the URL field with the window. AdwClamp hands the child
-    // the full width below the threshold, so narrow windows are untouched.
-    let clamp = adw::Clamp::builder().maximum_size(600).build();
-    clamp.set_child(Some(&nav));
-    card.append(&clamp);
-    revealer.set_child(Some(&card));
-
-    // Form page: URL row (entry + Add), the video preview block, then the
-    // file / torrent / destination rows. Each AdwPreferencesGroup is its
-    // own card; the 12px form spacing separates the cards (HIG).
-    let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    let UrlControls {
-        url_bar,
+/// Create the non-blocking video lookup callback, including stale-result handling.
+fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
+    let VideoLookupContext {
+        probe,
+        step,
         url_entry,
-        spinner_paintable,
-        add_btn,
-        action_revealer,
-        cancel_btn,
-        opts_revealer,
-    } = build_url_controls();
-    form.append(&url_bar);
-    form.append(&opts_revealer);
-    let (step, video_revealer) = build_video_preview(
-        &url_entry,
-        spinner_paintable,
-        &action_revealer,
-        &add_btn,
-    );
-    wire_video_preview(Rc::clone(&step));
-
-    form.append(&video_revealer);
-
-    let DownloadOptionsUi {
-        content: opts_box,
-        torrent_btn,
-        torrent_row,
-        dest_label,
-        dest_btn,
-        schedule_switch,
-    } = build_download_options(&manager, &scheduled_at);
-    opts_revealer.set_child(Some(&opts_box));
-
-    // Validation errors live on the fields themselves (error class +
-    // tooltip + accessible description), so there is no error caption under
-    // the URL bar: the form never shifts when an error appears or clears.
-    let form_page = adw::NavigationPage::builder()
-        .tag("form")
-        .title(gettext("New Download"))
-        .can_pop(false)
-        .child(&form)
-        .build();
-    nav.push(&form_page);
-
-    // Shared probe state: generation counter, in-flight marker, last
-    // resolved URL and probe result. A second Add press while a lookup is
-    // still in flight is suppressed by the marker; without it both would
-    // spawn yt-dlp and the loser's result would be discarded by the
-    // generation guard anyway.
-    let probe = Rc::new(RefCell::new(ProbeState::default()));
-    // Queued URL from context menu/share while a probe is in flight: the
-    // open() handler stores it here, and the probe completion auto-starts it.
-    let pending_url: Rc<RefCell<VecDeque<String>>> = Rc::new(RefCell::new(VecDeque::new()));
-    // The form's Add button, desensitized while a lookup is in flight (a
-    // dead button says so upfront). Every terminal state re-enables it.
-    let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
-    lookup_add.replace(Some(add_btn.clone()));
-    let dest_dir = Rc::new(RefCell::new(manager.effective_download_dir()));
-
-    // Collapse the card and reset the form to a fresh state, like closing the
-    // old dialog: reopening always starts clean, including the destination.
-    let close_card: Rc<dyn Fn()> = {
-        let revealer = revealer.clone();
-        let open_state = Rc::clone(&open_state);
-        let probe = Rc::clone(&probe);
-        let url_entry = url_entry.clone();
-        let step = Rc::clone(&step);
-        let torrent_row = torrent_row.clone();
-        let lookup_add = Rc::clone(&lookup_add);
-        let nav = nav.clone();
-        let dest_dir = Rc::clone(&dest_dir);
-        let dest_label = dest_label.clone();
-        let opts_revealer = opts_revealer.clone();
-        let default_dir = manager.effective_download_dir();
-        let scheduled_at = Rc::clone(&scheduled_at);
-        let schedule_switch = schedule_switch.clone();
-        Rc::new(move || {
-            open_state.set(false);
-            // Cancel any in-flight probe and drop its state; the
-            // generation bump discards the stale completion.
-            probe.borrow_mut().reset();
-            revealer.set_reveal_child(false);
-            reset_video_step(&step);
-            clear_field_error(&url_entry);
-            clear_field_error(&torrent_row);
-            set_lookup_add(&lookup_add, true);
-            dest_dir.replace(default_dir.clone());
-            dest_label.set_text(&default_dir);
-            // The options reopen collapsed with the default destination,
-            // like every other row of the fresh form.
-            opts_revealer.set_reveal_child(false);
-            // Reset the schedule picker: a stale timestamp must not leak
-            // into the next download.
-            scheduled_at.set(None);
-            schedule_switch.set_active(false);
-            // Clearing the URL fires the changed handler, which hides the
-            // step again; the generation bump keeps it from touching probe
-            // state.
-            url_entry.set_text("");
-            while nav.visible_page_tag().as_deref() != Some("form") {
-                if !nav.pop() {
-                    break;
-                }
-            }
-        })
-    };
-
-    // Gallery "Select files…" opener: set once at build time.
-    *step.gallery_select_opener.borrow_mut() = Some(make_gallery_picker_opener(
-        step.clone(),
-        &nav,
-        manager.clone(),
-        dest_dir.clone(),
-        close_card.clone(),
-        scheduled_at.clone(),
-    ));
-
-    // X button dismisses the card, like the header toggle and Escape.
-    {
-        let close = Rc::clone(&close_card);
-        cancel_btn.connect_clicked(move |_| close());
-    }
-
+        manager,
+        dest_dir,
+        close_card,
+        scheduled_at,
+        pending_url,
+        nav,
+        lookup_add,
+    } = context;
     // Video resolve machinery: metadata lookup that never blocks the main
     // loop, started only by an explicit Add/Enter press. The probe state's
     // generation drops stale completions; every async touch re-checks the
@@ -3471,6 +3338,187 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             }
         })
     };
+
+
+    kick_video
+}
+
+pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
+    let open_state = Rc::new(OpenState::default());
+    // Shared scheduled-download timestamp: set by the schedule picker UI,
+    // read by every enqueue path. None = start immediately.
+    let scheduled_at: Rc<Cell<Option<i64>>> = Rc::new(Cell::new(None));
+
+    // Card chrome: a slide-down revealer so the card animates in under the
+    // header; collapsed it takes no space.
+    let revealer = gtk4::Revealer::builder()
+        .transition_type(gtk4::RevealerTransitionType::SlideDown)
+        .reveal_child(false)
+        .build();
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    // 12px: matches the download list's original window margins.
+    card.set_margin_top(12);
+    card.set_margin_bottom(12);
+    card.set_margin_start(12);
+    card.set_margin_end(12);
+    // No .card class: each AdwPreferencesGroup below renders as its own
+    // flush card (rows touch the group's edge, 12px internal row margins
+    // match the app's card padding). The 6px margins give the window
+    // spacing.
+
+    // No in-card title: the card only opens from explicit "New Download"
+    // affordances (+, Ctrl+N, the empty-state pill), so restating it is
+    // redundant. The navigation page below keeps the accessible name.
+    // Dismissal is the header `+` toggle (now stateful) and Escape — the
+    // card has no window controls, and a fourth URL-row action was noise
+    // next to Add/options.
+
+    let nav = adw::NavigationView::new();
+    // HIG form sizing: cap the card at 600px on wide windows instead of
+    // stretching the URL field with the window. AdwClamp hands the child
+    // the full width below the threshold, so narrow windows are untouched.
+    let clamp = adw::Clamp::builder().maximum_size(600).build();
+    clamp.set_child(Some(&nav));
+    card.append(&clamp);
+    revealer.set_child(Some(&card));
+
+    // Form page: URL row (entry + Add), the video preview block, then the
+    // file / torrent / destination rows. Each AdwPreferencesGroup is its
+    // own card; the 12px form spacing separates the cards (HIG).
+    let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    let UrlControls {
+        url_bar,
+        url_entry,
+        spinner_paintable,
+        add_btn,
+        action_revealer,
+        cancel_btn,
+        opts_revealer,
+    } = build_url_controls();
+    form.append(&url_bar);
+    form.append(&opts_revealer);
+    let (step, video_revealer) = build_video_preview(
+        &url_entry,
+        spinner_paintable,
+        &action_revealer,
+        &add_btn,
+    );
+    wire_video_preview(Rc::clone(&step));
+
+    form.append(&video_revealer);
+
+    let DownloadOptionsUi {
+        content: opts_box,
+        torrent_btn,
+        torrent_row,
+        dest_label,
+        dest_btn,
+        schedule_switch,
+    } = build_download_options(&manager, &scheduled_at);
+    opts_revealer.set_child(Some(&opts_box));
+
+    // Validation errors live on the fields themselves (error class +
+    // tooltip + accessible description), so there is no error caption under
+    // the URL bar: the form never shifts when an error appears or clears.
+    let form_page = adw::NavigationPage::builder()
+        .tag("form")
+        .title(gettext("New Download"))
+        .can_pop(false)
+        .child(&form)
+        .build();
+    nav.push(&form_page);
+
+    // Shared probe state: generation counter, in-flight marker, last
+    // resolved URL and probe result. A second Add press while a lookup is
+    // still in flight is suppressed by the marker; without it both would
+    // spawn yt-dlp and the loser's result would be discarded by the
+    // generation guard anyway.
+    let probe = Rc::new(RefCell::new(ProbeState::default()));
+    // Queued URL from context menu/share while a probe is in flight: the
+    // open() handler stores it here, and the probe completion auto-starts it.
+    let pending_url: Rc<RefCell<VecDeque<String>>> = Rc::new(RefCell::new(VecDeque::new()));
+    // The form's Add button, desensitized while a lookup is in flight (a
+    // dead button says so upfront). Every terminal state re-enables it.
+    let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
+    lookup_add.replace(Some(add_btn.clone()));
+    let dest_dir = Rc::new(RefCell::new(manager.effective_download_dir()));
+
+    // Collapse the card and reset the form to a fresh state, like closing the
+    // old dialog: reopening always starts clean, including the destination.
+    let close_card: Rc<dyn Fn()> = {
+        let revealer = revealer.clone();
+        let open_state = Rc::clone(&open_state);
+        let probe = Rc::clone(&probe);
+        let url_entry = url_entry.clone();
+        let step = Rc::clone(&step);
+        let torrent_row = torrent_row.clone();
+        let lookup_add = Rc::clone(&lookup_add);
+        let nav = nav.clone();
+        let dest_dir = Rc::clone(&dest_dir);
+        let dest_label = dest_label.clone();
+        let opts_revealer = opts_revealer.clone();
+        let default_dir = manager.effective_download_dir();
+        let scheduled_at = Rc::clone(&scheduled_at);
+        let schedule_switch = schedule_switch.clone();
+        Rc::new(move || {
+            open_state.set(false);
+            // Cancel any in-flight probe and drop its state; the
+            // generation bump discards the stale completion.
+            probe.borrow_mut().reset();
+            revealer.set_reveal_child(false);
+            reset_video_step(&step);
+            clear_field_error(&url_entry);
+            clear_field_error(&torrent_row);
+            set_lookup_add(&lookup_add, true);
+            dest_dir.replace(default_dir.clone());
+            dest_label.set_text(&default_dir);
+            // The options reopen collapsed with the default destination,
+            // like every other row of the fresh form.
+            opts_revealer.set_reveal_child(false);
+            // Reset the schedule picker: a stale timestamp must not leak
+            // into the next download.
+            scheduled_at.set(None);
+            schedule_switch.set_active(false);
+            // Clearing the URL fires the changed handler, which hides the
+            // step again; the generation bump keeps it from touching probe
+            // state.
+            url_entry.set_text("");
+            while nav.visible_page_tag().as_deref() != Some("form") {
+                if !nav.pop() {
+                    break;
+                }
+            }
+        })
+    };
+
+    // Gallery "Select files…" opener: set once at build time.
+    *step.gallery_select_opener.borrow_mut() = Some(make_gallery_picker_opener(
+        step.clone(),
+        &nav,
+        manager.clone(),
+        dest_dir.clone(),
+        close_card.clone(),
+        scheduled_at.clone(),
+    ));
+
+    // X button dismisses the card, like the header toggle and Escape.
+    {
+        let close = Rc::clone(&close_card);
+        cancel_btn.connect_clicked(move |_| close());
+    }
+
+    let kick_video = build_video_lookup_kicker(VideoLookupContext {
+        probe: Rc::clone(&probe),
+        step: Rc::clone(&step),
+        url_entry: url_entry.clone(),
+        manager: Rc::clone(&manager),
+        dest_dir: Rc::clone(&dest_dir),
+        close_card: Rc::clone(&close_card),
+        scheduled_at: Rc::clone(&scheduled_at),
+        pending_url: Rc::clone(&pending_url),
+        nav: nav.clone(),
+        lookup_add: Rc::clone(&lookup_add),
+    });
 
     // One submit path for the Add button and Enter: video pages go through the
     // media pipeline (a matching preview is required so the row stores the

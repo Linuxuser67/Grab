@@ -576,10 +576,6 @@ pub(crate) async fn run_manifest_download(
                         .await
                         .map_err(ManifestRunError::Failed)?;
                     has_audio = false;
-                } else if has_audio
-                    && !staged_regular_file_exists(&audio_dir.join("local.m3u8")).await
-                {
-                    has_audio = false;
                 }
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 _finish_stop_sender = Some(sender);
@@ -589,6 +585,9 @@ pub(crate) async fn run_manifest_download(
         }
         if !staged_regular_file_exists(&video_dir.join("local.m3u8")).await {
             return Ok(ManifestOutcome::Aborted);
+        }
+        if has_audio && !staged_regular_file_exists(&audio_dir.join("local.m3u8")).await {
+            has_audio = false;
         }
         ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
             .await

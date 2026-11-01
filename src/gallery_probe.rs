@@ -153,10 +153,9 @@ pub fn route(
     }
 }
 
-/// Prefer gallery-dl for collections with multiple entries when it can list
-/// supported media. The dual probe already has yt-dlp's result, so an empty or
-/// unsupported gallery-dl result can fall back to yt-dlp without losing the
-/// original playlist picker.
+/// Preserve yt-dlp's playlist picker when it recognizes a collection:
+/// its entries carry stable item IDs and page URLs. For collections yt-dlp
+/// does not recognize as playlists, prefer gallery-dl when it lists media.
 pub(crate) fn route_for_collection(
     ytdlp_video: bool,
     ytdlp_playlist_entries: usize,
@@ -177,6 +176,15 @@ pub(crate) fn route_for_collection(
             (video, images)
         })
         .unwrap_or((false, false));
+
+    // A yt-dlp playlist has meaningful entry IDs and page URLs, unlike
+    // gallery-dl's positional --range listing. Keep it on the playlist path
+    // even when gallery-dl can enumerate the same videos or thumbnails.
+    if ytdlp_playlist_entries > 0 {
+        return ProbeOutcome::VideoYtDlp {
+            gallery_toggle: false,
+        };
+    }
 
     // Either backend can confirm multiple entries. The gallery-dl preview is
     // capped, so one supported preview item is enough when yt-dlp found a list.
@@ -1672,41 +1680,43 @@ mod tests {
     }
 
     #[test]
-    fn route_prefers_gallerydl_for_multi_entry_collections() {
+    fn ytdlp_playlists_keep_their_picker_when_gallerydl_also_lists_items() {
         let videos = vec![item("mp4"), item("webm")];
+        let ytdlp_playlist = ProbeOutcome::VideoYtDlp {
+            gallery_toggle: false,
+        };
         assert_eq!(
             route_for_collection(true, 4, Some(&videos), None),
-            ProbeOutcome::VideoGalleryDl
+            ytdlp_playlist
         );
 
-        // The probe is capped, so even a single preview item selects gallery-dl
-        // when yt-dlp confirms the source has multiple entries.
+        // The gallery-dl preview is capped; a single preview item still must
+        // not replace the playlist's ID-based item selection.
         let first_preview_item = vec![item("mp4")];
         assert_eq!(
             route_for_collection(true, 4, Some(&first_preview_item), None),
-            ProbeOutcome::VideoGalleryDl
+            ytdlp_playlist
         );
 
-        // Multi-entry image collections default to gallery-dl as well.
+        // Even if gallery-dl sees images, yt-dlp's recognized playlist stays
+        // a playlist. Gallery-only filters do not apply to its entries.
         let images = vec![item("jpg"), item("png")];
         assert_eq!(
             route_for_collection(true, 4, Some(&images), None),
-            ProbeOutcome::Gallery
+            ytdlp_playlist
         );
 
-        // gallery-dl can confirm a collection even if yt-dlp didn't parse it as one.
+        // A single-entry yt-dlp playlist also retains its own route.
+        assert_eq!(
+            route_for_collection(true, 1, Some(&videos[..1]), None),
+            ytdlp_playlist
+        );
+
+        // Without a yt-dlp playlist, gallery-dl still handles multi-entry
+        // video collections; this preserves the non-playlist collection path.
         assert_eq!(
             route_for_collection(true, 0, Some(&videos), None),
             ProbeOutcome::VideoGalleryDl
-        );
-
-        // Single-entry pages keep the established yt-dlp preference.
-        let single = vec![item("mp4")];
-        assert_eq!(
-            route_for_collection(true, 1, Some(&single), None),
-            ProbeOutcome::VideoYtDlp {
-                gallery_toggle: false
-            }
         );
     }
 

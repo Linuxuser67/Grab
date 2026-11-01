@@ -3672,6 +3672,175 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
     submit
 }
 
+
+/// Connect submit, keyboard, icon, and debounced URL-edit behavior.
+fn wire_url_entry(
+    add_btn: &gtk4::Button,
+    url_entry: &gtk4::Entry,
+    step: Rc<VideoStep>,
+    probe: Rc<RefCell<ProbeState>>,
+    submit: SubmitHandler,
+    manager: &Rc<DownloadManager>,
+) {
+    {
+        let s = submit.clone();
+        add_btn.connect_clicked(move |_| s(SubmitSource::Button));
+    }
+    {
+        let s = submit.clone();
+        url_entry.connect_activate(move |_| s(SubmitSource::Enter));
+    }
+    // Tick icon inside the entry submits like Enter; the spinner cancels the
+    // running lookup (the entry is locked while it resolves).
+    {
+        let s = submit.clone();
+        let step = step.clone();
+        let probe = Rc::clone(&probe);
+        url_entry.connect_icon_press(move |_, pos| {
+            if pos != gtk4::EntryIconPosition::Secondary {
+                return;
+            }
+            if step.looking_up.get() {
+                probe.borrow_mut().bump_generation();
+                abort_lookup(&step);
+                set_looking_up(&step, false);
+                sync_entry_icon(&step);
+            } else {
+                s(SubmitSource::Button);
+            }
+        });
+    }
+
+    // Sync the form skeleton while typing. The lookup itself never fires
+    // on its own: pasting or editing only updates the form, and the resolve
+    // starts when Add Download (or Enter) is pressed — unless auto-add is
+    // on, in which case a pasted/typed URL auto-starts the lookup (debounced)
+    // and the download follows automatically on resolve.
+    {
+        let probe = Rc::clone(&probe);
+        let step2 = step.clone();
+        let submit_auto = submit.clone();
+        let settings_auto = manager.settings().clone();
+        let debounce: Rc<std::cell::RefCell<Option<glib::SourceId>>> =
+            Rc::new(std::cell::RefCell::new(None));
+        let last_text: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+        // Complete URLs, including HLS/DASH manifests, share one tested
+        // auto-add policy and the same quiet-period debounce.
+        // GTK emits `changed` twice for a replace (clear, then insert). The
+        // 0 ms coalescing below drops the transient "", the sync handler
+        // only invalidates on a settled non-empty change, and the guard then
+        // ignores an identical re-set: none may count as an edit that wipes
+        // the resolved collection and re-arms auto-add.
+        let entry = url_entry.clone();
+        let last_text_sync = Rc::clone(&last_text);
+        let probe_sync = Rc::clone(&probe);
+        let step_sync = Rc::clone(&step2);
+        let apply = Rc::new(move || {
+            let text = entry.text().trim().to_string();
+            if !text_is_new(&mut last_text.borrow_mut(), &text) {
+                return;
+            }
+            // The sync handler skips the transient empty; a settled clear
+            // still invalidates the lookup (0 ms later).
+            if text.is_empty() && step2.looking_up.get() {
+                probe.borrow_mut().bump_generation();
+                abort_lookup(&step2);
+            }
+            clear_field_error(&entry);
+            // Auto-add: debounce the lookup so it fires after the user
+            // pauses typing/pasting, not on every keystroke.
+            if should_auto_add_lookup(settings_auto.auto_add_downloads(), &text) {
+                if let Some(id) = debounce.borrow_mut().take() {
+                    id.remove();
+                }
+                let s = submit_auto.clone();
+                let debounce_c = Rc::clone(&debounce);
+                let host = crate::video_probe::page_host(&text);
+                let debounce_started = std::time::Instant::now();
+                let id = glib::timeout_add_local(AUTO_ADD_LOOKUP_DEBOUNCE, move || {
+                    // Clear the stored ID first: after Break the source is
+                    // gone, and a later `changed` (e.g. programmatic
+                    // set_text) must not remove this dead ID — that was a
+                    // hard abort ("Source ID was not found").
+                    *debounce_c.borrow_mut() = None;
+                    tracing::info!(
+                        url_host = %host,
+                        debounce_ms = debounce_started.elapsed().as_millis() as u64,
+                        "auto-add debounce elapsed"
+                    );
+                    s(SubmitSource::Auto);
+                    glib::ControlFlow::Break
+                });
+                *debounce.borrow_mut() = Some(id);
+            } else if let Some(id) = debounce.borrow_mut().take() {
+                id.remove();
+            }
+            // A probed preview counts as video mode while its canonical URL
+            // matches the entry text.
+            let fresh_video = probe
+                .borrow()
+                .info
+                .as_ref()
+                .is_some_and(|p| p.page_url() == text);
+            let fresh_manifest = step2
+                .manifest
+                .borrow()
+                .as_ref()
+                .is_some_and(|manifest| manifest.source_url == text);
+            let fresh = fresh_video || fresh_manifest;
+            // A matching native manifest or extractor preview remains visible;
+            // any settled URL change invalidates both forms of preview.
+            if !fresh {
+                hide_video_step(&step2);
+                step2.action_revealer.set_reveal_child(false);
+                probe.borrow_mut().info.take();
+                clear_manifest_preview(&step2);
+            }
+            // Any edit clears the lookup-in-flight state, and the icon
+            // follows: the tick returns for non-empty text, the spinner
+            // and the icon-less states clear.
+            set_looking_up(&step2, false);
+            sync_entry_icon(&step2);
+        });
+        let scheduled: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+        url_entry.connect_changed(move |entry| {
+            // A re-set of the settled text (handoff, queued drain) is not an
+            // edit: aborting here would kill the live lookup while `apply`
+            // ignores the identical text, leaving the spinner up and the
+            // entry locked. Empty is skipped because GTK emits it transiently
+            // during a replace; `apply` aborts a real clear.
+            let text = entry.text().trim().to_string();
+            let looking_up = step_sync.looking_up.get();
+            if edit_invalidates_lookup(last_text_sync.borrow().as_str(), &text, looking_up) {
+                // Stale *now*: a probe completing this turn must not slip past
+                // the edit and (with auto-add) queue the URL being replaced.
+                // Aborting here also stops the probes instead of letting them
+                // read to completion for a URL the user left.
+                probe_sync.borrow_mut().bump_generation();
+                abort_lookup(&step_sync);
+                // The abort drops the task that would clear the lock; reset
+                // here so an edit that settles back to `last_text` can't
+                // leave the spinner up and the entry locked.
+                set_looking_up(&step_sync, false);
+                sync_entry_icon(&step_sync);
+            }
+            if let Some(id) = scheduled.borrow_mut().take() {
+                id.remove();
+            }
+            let apply = apply.clone();
+            let scheduled_c = Rc::clone(&scheduled);
+            let id = glib::timeout_add_local(std::time::Duration::from_millis(0), move || {
+                *scheduled_c.borrow_mut() = None;
+                apply();
+                glib::ControlFlow::Break
+            });
+            *scheduled.borrow_mut() = Some(id);
+        });
+    }
+
+
+}
+
 pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let open_state = Rc::new(OpenState::default());
     // Shared scheduled-download timestamp: set by the schedule picker UI,
@@ -3862,161 +4031,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         scheduled_at: Rc::clone(&scheduled_at),
     });
 
-    {
-        let s = submit.clone();
-        add_btn.connect_clicked(move |_| s(SubmitSource::Button));
-    }
-    {
-        let s = submit.clone();
-        url_entry.connect_activate(move |_| s(SubmitSource::Enter));
-    }
-    // Tick icon inside the entry submits like Enter; the spinner cancels the
-    // running lookup (the entry is locked while it resolves).
-    {
-        let s = submit.clone();
-        let step = step.clone();
-        let probe = Rc::clone(&probe);
-        url_entry.connect_icon_press(move |_, pos| {
-            if pos != gtk4::EntryIconPosition::Secondary {
-                return;
-            }
-            if step.looking_up.get() {
-                probe.borrow_mut().bump_generation();
-                abort_lookup(&step);
-                set_looking_up(&step, false);
-                sync_entry_icon(&step);
-            } else {
-                s(SubmitSource::Button);
-            }
-        });
-    }
-
-    // Sync the form skeleton while typing. The lookup itself never fires
-    // on its own: pasting or editing only updates the form, and the resolve
-    // starts when Add Download (or Enter) is pressed — unless auto-add is
-    // on, in which case a pasted/typed URL auto-starts the lookup (debounced)
-    // and the download follows automatically on resolve.
-    {
-        let probe = Rc::clone(&probe);
-        let step2 = step.clone();
-        let submit_auto = submit.clone();
-        let settings_auto = manager.settings().clone();
-        let debounce: Rc<std::cell::RefCell<Option<glib::SourceId>>> =
-            Rc::new(std::cell::RefCell::new(None));
-        let last_text: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-        // Complete URLs, including HLS/DASH manifests, share one tested
-        // auto-add policy and the same quiet-period debounce.
-        // GTK emits `changed` twice for a replace (clear, then insert). The
-        // 0 ms coalescing below drops the transient "", the sync handler
-        // only invalidates on a settled non-empty change, and the guard then
-        // ignores an identical re-set: none may count as an edit that wipes
-        // the resolved collection and re-arms auto-add.
-        let entry = url_entry.clone();
-        let last_text_sync = Rc::clone(&last_text);
-        let probe_sync = Rc::clone(&probe);
-        let step_sync = Rc::clone(&step2);
-        let apply = Rc::new(move || {
-            let text = entry.text().trim().to_string();
-            if !text_is_new(&mut last_text.borrow_mut(), &text) {
-                return;
-            }
-            // The sync handler skips the transient empty; a settled clear
-            // still invalidates the lookup (0 ms later).
-            if text.is_empty() && step2.looking_up.get() {
-                probe.borrow_mut().bump_generation();
-                abort_lookup(&step2);
-            }
-            clear_field_error(&entry);
-            // Auto-add: debounce the lookup so it fires after the user
-            // pauses typing/pasting, not on every keystroke.
-            if should_auto_add_lookup(settings_auto.auto_add_downloads(), &text) {
-                if let Some(id) = debounce.borrow_mut().take() {
-                    id.remove();
-                }
-                let s = submit_auto.clone();
-                let debounce_c = Rc::clone(&debounce);
-                let host = crate::video_probe::page_host(&text);
-                let debounce_started = std::time::Instant::now();
-                let id = glib::timeout_add_local(AUTO_ADD_LOOKUP_DEBOUNCE, move || {
-                    // Clear the stored ID first: after Break the source is
-                    // gone, and a later `changed` (e.g. programmatic
-                    // set_text) must not remove this dead ID — that was a
-                    // hard abort ("Source ID was not found").
-                    *debounce_c.borrow_mut() = None;
-                    tracing::info!(
-                        url_host = %host,
-                        debounce_ms = debounce_started.elapsed().as_millis() as u64,
-                        "auto-add debounce elapsed"
-                    );
-                    s(SubmitSource::Auto);
-                    glib::ControlFlow::Break
-                });
-                *debounce.borrow_mut() = Some(id);
-            } else if let Some(id) = debounce.borrow_mut().take() {
-                id.remove();
-            }
-            // A probed preview counts as video mode while its canonical URL
-            // matches the entry text.
-            let fresh_video = probe
-                .borrow()
-                .info
-                .as_ref()
-                .is_some_and(|p| p.page_url() == text);
-            let fresh_manifest = step2
-                .manifest
-                .borrow()
-                .as_ref()
-                .is_some_and(|manifest| manifest.source_url == text);
-            let fresh = fresh_video || fresh_manifest;
-            // A matching native manifest or extractor preview remains visible;
-            // any settled URL change invalidates both forms of preview.
-            if !fresh {
-                hide_video_step(&step2);
-                step2.action_revealer.set_reveal_child(false);
-                probe.borrow_mut().info.take();
-                clear_manifest_preview(&step2);
-            }
-            // Any edit clears the lookup-in-flight state, and the icon
-            // follows: the tick returns for non-empty text, the spinner
-            // and the icon-less states clear.
-            set_looking_up(&step2, false);
-            sync_entry_icon(&step2);
-        });
-        let scheduled: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
-        url_entry.connect_changed(move |entry| {
-            // A re-set of the settled text (handoff, queued drain) is not an
-            // edit: aborting here would kill the live lookup while `apply`
-            // ignores the identical text, leaving the spinner up and the
-            // entry locked. Empty is skipped because GTK emits it transiently
-            // during a replace; `apply` aborts a real clear.
-            let text = entry.text().trim().to_string();
-            let looking_up = step_sync.looking_up.get();
-            if edit_invalidates_lookup(last_text_sync.borrow().as_str(), &text, looking_up) {
-                // Stale *now*: a probe completing this turn must not slip past
-                // the edit and (with auto-add) queue the URL being replaced.
-                // Aborting here also stops the probes instead of letting them
-                // read to completion for a URL the user left.
-                probe_sync.borrow_mut().bump_generation();
-                abort_lookup(&step_sync);
-                // The abort drops the task that would clear the lock; reset
-                // here so an edit that settles back to `last_text` can't
-                // leave the spinner up and the entry locked.
-                set_looking_up(&step_sync, false);
-                sync_entry_icon(&step_sync);
-            }
-            if let Some(id) = scheduled.borrow_mut().take() {
-                id.remove();
-            }
-            let apply = apply.clone();
-            let scheduled_c = Rc::clone(&scheduled);
-            let id = glib::timeout_add_local(std::time::Duration::from_millis(0), move || {
-                *scheduled_c.borrow_mut() = None;
-                apply();
-                glib::ControlFlow::Break
-            });
-            *scheduled.borrow_mut() = Some(id);
-        });
-    }
+    wire_url_entry(
+        &add_btn,
+        &url_entry,
+        Rc::clone(&step),
+        Rc::clone(&probe),
+        Rc::clone(&submit),
+        &manager,
+    );
 
     // Destination chooser.
     {

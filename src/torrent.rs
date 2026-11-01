@@ -41,9 +41,11 @@ static ACTIVE: std::sync::LazyLock<Mutex<HashMap<u64, Active>>> =
 static PENDING_SELECTIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<usize>>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-/// Lock the staged-selection map, recovering from poisoning.
+/// Lock the staged-selection map, failing fast if its state may be inconsistent.
 fn lock_pending() -> std::sync::MutexGuard<'static, HashMap<String, Vec<usize>>> {
-    PENDING_SELECTIONS.lock().unwrap_or_else(|e| e.into_inner())
+    PENDING_SELECTIONS
+        .lock()
+        .expect("torrent pending-selection mutex poisoned")
 }
 
 /// Stage a file selection for the next spawn of `pseudo_url`.

@@ -911,9 +911,11 @@ impl DownloadManager {
 
     /// Request finalization of an active live recording without marking it cancelled.
     pub(crate) fn finish_live_recording(&self, id: u64) -> bool {
-        if !self.can_finish_live_recording(id)
-            || !self.stop_video_worker(id, crate::video::StopIntent::Finish)
-        {
+        if !self.can_finish_live_recording(id) {
+            return false;
+        }
+        if !self.stop_video_worker(id, crate::video::StopIntent::Finish) {
+            self.changed();
             return false;
         }
         if let Some(item) = self.find(id) {
@@ -3541,6 +3543,7 @@ impl DownloadManager {
             // Native live workers commit each HLS/DASH update before observing
             // Pause. Keep the row paused while the pump releases its slot.
             if !self.stop_video_worker(id, crate::video::StopIntent::Pause) {
+                self.changed();
                 return;
             }
             if let Some(item) = self.find(id)

@@ -23,7 +23,9 @@ impl UnrecoverableLiveCapture {
             || self.reason.trim().is_empty()
             || self.reason.len() > 512
         {
-            return Err("The unrecoverable live-capture marker is invalid or unsupported".to_string());
+            return Err(
+                "The unrecoverable live-capture marker is invalid or unsupported".to_string(),
+            );
         }
         Ok(())
     }
@@ -62,7 +64,9 @@ fn persist_sync(staging: &Path, marker: &UnrecoverableLiveCapture) -> Result<(),
             if existing == *marker {
                 return Ok(());
             }
-            return Err("A different unrecoverable live-capture decision already exists".to_string());
+            return Err(
+                "A different unrecoverable live-capture decision already exists".to_string(),
+            );
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("Could not inspect live-capture state: {error}")),
@@ -95,13 +99,15 @@ fn persist_sync(staging: &Path, marker: &UnrecoverableLiveCapture) -> Result<(),
 
 pub(crate) async fn read(staging: &Path) -> Result<Option<UnrecoverableLiveCapture>, String> {
     let staging = staging.to_path_buf();
-    tokio::task::spawn_blocking(move || match std::fs::symlink_metadata(staging.join(MARKER_NAME)) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            Err("The unrecoverable live-capture marker is not a regular file".to_string())
+    tokio::task::spawn_blocking(move || {
+        match std::fs::symlink_metadata(staging.join(MARKER_NAME)) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                Err("The unrecoverable live-capture marker is not a regular file".to_string())
+            }
+            Ok(_) => read_sync(&staging).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("Could not inspect live-capture state: {error}")),
         }
-        Ok(_) => read_sync(&staging).map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("Could not inspect live-capture state: {error}")),
     })
     .await
     .map_err(|error| format!("Could not read live-capture state: {error}"))?
@@ -148,16 +154,17 @@ mod tests {
         persist(directory.path(), "dash", "DASH timeline changed", 99)
             .await
             .expect("persist marker");
-        assert!(persist(directory.path(), "dash", "different reason", 99)
-            .await
-            .is_err());
+        assert!(
+            persist(directory.path(), "dash", "different reason", 99)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn malformed_marker_fails_closed() {
         let directory = tempfile::tempdir().expect("create staging");
-        std::fs::write(directory.path().join(MARKER_NAME), b"{")
-            .expect("write malformed marker");
+        std::fs::write(directory.path().join(MARKER_NAME), b"{").expect("write malformed marker");
         assert!(read(directory.path()).await.is_err());
     }
 }

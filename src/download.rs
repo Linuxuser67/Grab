@@ -1111,7 +1111,8 @@ impl DownloadManager {
             let existing =
                 crate::video_staging::try_dir_file_names(std::path::Path::new(&worker_dir))
                     .map_err(|error| format!("Could not inspect torrent destination: {error}"))?;
-            let pseudo = crate::torrent::archive_torrent_file(&worker_file_name, &bytes)?;
+            let pseudo = crate::torrent::archive_torrent_file(&worker_file_name, &bytes)
+                .map_err(|error| error.to_string())?;
             Ok::<_, String>((pseudo, base, existing))
         })
         .await

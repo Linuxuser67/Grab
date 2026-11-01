@@ -394,7 +394,7 @@ pub(crate) async fn run_manifest_download(
         && job.source.representation_key.starts_with("dash-live-");
     let mut offline_tracks = if finish_requested && job.source.kind == ManifestKind::Hls {
         restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
-    } else if (finish_requested || live_marker_exists) && job.source.kind == ManifestKind::Hls {
+    } else if live_marker_exists && job.source.kind == ManifestKind::Hls {
         restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
     } else if dash_live_requested && dash_live_state_exists(&video_dir).await? {
         let has_audio = dash_live_state_exists(&audio_dir).await?;
@@ -587,6 +587,12 @@ pub(crate) async fn run_manifest_download(
             }
             LiveHlsCaptureOutcome::Discard => return Ok(ManifestOutcome::Aborted),
         }
+        if !staged_regular_file_exists(&video_dir.join("local.m3u8")).await {
+            return Ok(ManifestOutcome::Aborted);
+        }
+        ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
+            .await
+            .map_err(ManifestRunError::Failed)?;
     } else if live_dash {
         let (video_plan, audio_plan) = match &tracks {
             Tracks::Dash { video, audio, .. } => (Some(video), audio.as_deref()),
@@ -665,6 +671,9 @@ pub(crate) async fn run_manifest_download(
         {
             return Ok(ManifestOutcome::Aborted);
         }
+        ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
+            .await
+            .map_err(ManifestRunError::Failed)?;
     } else {
         match &tracks {
             Tracks::Hls {

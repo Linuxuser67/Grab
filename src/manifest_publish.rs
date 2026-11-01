@@ -76,6 +76,31 @@ impl Drop for PendingDestination {
     }
 }
 
+/// Copy staged bytes while the attempt remains active.
+///
+/// Returns `false` when the row is discarded before the copy completes.
+fn copy_staged_bytes(
+    source: &mut impl std::io::Read,
+    destination: &mut impl std::io::Write,
+    gate: &crate::attempt_gate::AttemptGate,
+) -> std::io::Result<bool> {
+    const COPY_BUFFER_SIZE: usize = 256 * 1024;
+
+    let mut buffer = [0_u8; COPY_BUFFER_SIZE];
+    loop {
+        if !gate.is_active() {
+            return Ok(false);
+        }
+        let read = source.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        destination.write_all(&buffer[..read])?;
+    }
+
+    Ok(gate.is_active())
+}
+
 /// Copy a staged output into a private temporary in the destination directory.
 ///
 /// The returned temporary is not visible under the final name. Persist it with
@@ -84,10 +109,7 @@ fn prepare_destination_copy(
     source: &Path,
     destination: &Path,
     gate: &crate::attempt_gate::AttemptGate,
-    should_cancel: impl Fn() -> bool,
 ) -> std::io::Result<Option<tempfile::NamedTempFile>> {
-    const COPY_BUFFER_SIZE: usize = 256 * 1024;
-
     let parent = destination.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -97,20 +119,7 @@ fn prepare_destination_copy(
     let mut source_file = std::fs::File::open(source)?;
     let permissions = source_file.metadata()?.permissions();
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    let mut buffer = [0_u8; COPY_BUFFER_SIZE];
-
-    loop {
-        if !gate.is_active() || should_cancel() {
-            return Ok(None);
-        }
-        let read = source_file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        temporary.as_file_mut().write_all(&buffer[..read])?;
-    }
-
-    if !gate.is_active() || should_cancel() {
+    if !copy_staged_bytes(&mut source_file, temporary.as_file_mut(), gate)? {
         return Ok(None);
     }
 
@@ -118,7 +127,7 @@ fn prepare_destination_copy(
     temporary.as_file().set_permissions(permissions)?;
     temporary.as_file().sync_all()?;
 
-    if !gate.is_active() || should_cancel() {
+    if !gate.is_active() {
         return Ok(None);
     }
 
@@ -186,9 +195,7 @@ pub(crate) async fn publish(
     let destination_for_copy = destination.to_path_buf();
     let copy_gate = Arc::clone(gate);
     let temporary = tokio::task::spawn_blocking(move || {
-        prepare_destination_copy(&source_for_copy, &destination_for_copy, &copy_gate, || {
-            false
-        })
+        prepare_destination_copy(&source_for_copy, &destination_for_copy, &copy_gate)
     })
     .await
     .map_err(std::io::Error::other)??;
@@ -208,7 +215,27 @@ pub(crate) async fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DiscardAfterFirstWrite<'a> {
+        file: &'a mut std::fs::File,
+        gate: Arc<crate::attempt_gate::AttemptGate>,
+        discarded: bool,
+    }
+
+    impl std::io::Write for DiscardAfterFirstWrite<'_> {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            std::io::Write::write_all(self.file, buffer)?;
+            if !self.discarded {
+                self.discarded = true;
+                let _ = self.gate.discard();
+            }
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            std::io::Write::flush(self.file)
+        }
+    }
 
     #[test]
     fn destination_local_copy_is_private_until_no_clobber_persist() {
@@ -219,7 +246,7 @@ mod tests {
         std::fs::write(&source, &contents).unwrap();
         let gate = crate::attempt_gate::AttemptGate::new();
 
-        let temporary = prepare_destination_copy(&source, &destination, &gate, || false)
+        let temporary = prepare_destination_copy(&source, &destination, &gate)
             .unwrap()
             .expect("copy should prepare while the gate is active");
 
@@ -248,7 +275,7 @@ mod tests {
         std::fs::write(&source, b"source").unwrap();
         std::fs::write(&destination, b"user file").unwrap();
         let gate = crate::attempt_gate::AttemptGate::new();
-        let temporary = prepare_destination_copy(&source, &destination, &gate, || false)
+        let temporary = prepare_destination_copy(&source, &destination, &gate)
             .unwrap()
             .expect("temporary copy should complete");
 
@@ -282,7 +309,7 @@ mod tests {
         let gate = crate::attempt_gate::AttemptGate::new();
         assert!(gate.discard());
 
-        let temporary = prepare_destination_copy(&source, &destination, &gate, || false)
+        let temporary = prepare_destination_copy(&source, &destination, &gate)
             .expect("discard is a normal cancellation");
 
         assert!(temporary.is_none());
@@ -295,29 +322,30 @@ mod tests {
     fn cancellation_between_copy_chunks_drops_the_destination_temporary() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.part");
-        let destination = directory.path().join("final.mp4");
         std::fs::write(&source, vec![0x31; 1024 * 1024]).unwrap();
+        let mut source_file = std::fs::File::open(&source).unwrap();
+        let mut temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
         let gate = crate::attempt_gate::AttemptGate::new();
-        let checks = AtomicUsize::new(0);
-        let cancel_gate = Arc::clone(&gate);
+        let mut destination = DiscardAfterFirstWrite {
+            file: temporary.as_file_mut(),
+            gate: Arc::clone(&gate),
+            discarded: false,
+        };
 
-        let temporary = prepare_destination_copy(&source, &destination, &gate, || {
-            if checks.fetch_add(1, Ordering::Relaxed) >= 1 {
-                let _ = cancel_gate.discard();
-                true
-            } else {
-                false
-            }
-        })
-        .expect("cancellation is not a storage error");
+        let copied = copy_staged_bytes(&mut source_file, &mut destination, &gate)
+            .expect("cancellation is not a storage error");
 
-        assert!(temporary.is_none());
-        assert!(!destination.exists());
+        assert!(!copied, "the copy must stop after the first discarded chunk");
+        assert!(destination.discarded);
+        drop(destination);
+        drop(temporary);
+
+        assert!(!directory.path().join("final.mp4").exists());
         assert!(
             !gate.is_active(),
-            "the row discard stops the next copy chunk"
+            "the attempt gate must stop the next copy chunk"
         );
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
-        assert!(source.exists());
+        assert!(source.exists(), "the staged source must remain intact");
     }
 }

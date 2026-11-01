@@ -1354,6 +1354,7 @@ dependencies = [
  "libc",
  "librqbit",
  "m3u8-rs",
+ "nom 7.1.3",
  "percent-encoding",
  "pretty_assertions",
  "proptest",

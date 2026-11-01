@@ -3801,12 +3801,9 @@ impl DownloadManager {
         let video = self.video_sources.borrow().contains_key(&id);
         match stop {
             Stop::Discard if video => {
-                let signalled = self.stop_video_worker(id, crate::video::StopIntent::Discard);
+                self.stop_video_worker(id, crate::video::StopIntent::Discard);
                 // The pump tail early-returns once `remove` drops the epoch entry, so clear the marker here or a later row reusing the id takes live paths.
                 self.live_rows.borrow_mut().remove(&id);
-                if !signalled {
-                    self.stop_engine(id, crate::video::StopIntent::Discard);
-                }
             }
             // Preserve and non-video Discard stop the engine the same way (see `stop_engine`).
             _ => {

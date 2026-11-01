@@ -703,6 +703,7 @@ video/720.m3u8
             kind: ManifestKind::Hls,
             representation_key: "hls-variant-00000000000000000000000000000000".to_string(),
             audio_key: None,
+        subtitle_key: None,
         };
 
         assert!(download_plan(lookup, &source).is_err());

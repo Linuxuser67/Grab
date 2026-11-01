@@ -522,7 +522,9 @@ mod tests {
             next_resource_index: 1,
             committed_offset: 4,
         };
-        tokio::fs::write(directory.join("track.mp4.part"), b"first").await.expect("write part");
+        tokio::fs::write(directory.join("track.mp4.part"), b"first")
+            .await
+            .expect("write part");
         tokio::fs::write(
             directory.join("track.mp4.checkpoint.json"),
             serde_json::to_vec(&checkpoint).expect("serialize checkpoint"),

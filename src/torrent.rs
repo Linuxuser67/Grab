@@ -65,8 +65,8 @@ pub enum TorrentError {
     UnexpectedMagnetResponse(String),
     #[error("{0}")]
     EmptyTorrent(String),
-    #[error("{0}")]
-    MetadataTask(String),
+    #[error("{message}: {source}")]
+    MetadataTask { message: String, #[source] source: tokio::task::JoinError },
     #[error("{0}")]
     InvalidListenPort(String),
     #[error("{0}")]
@@ -521,10 +521,10 @@ pub(crate) async fn list_magnet_files(
     tokio::task::spawn_blocking(move || persist_magnet_metadata(&info_hash, &bytes))
         .await
         .map_err(|error| {
-            TorrentError::MetadataTask(format!(
-                "{}: {error}",
-                gettext("Could not persist magnet metadata")
-            ))
+            TorrentError::MetadataTask {
+                message: gettext("Could not persist magnet metadata"),
+                source: error,
+            }
         })??;
 
     Ok((name, entries))

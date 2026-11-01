@@ -727,13 +727,11 @@ mod tests {
         let choices = vec![
             ManifestSubtitleChoice {
                 key: "fr".to_string(),
-                label: "French · Default".to_string(),
                 language: Some("fr".to_string()),
                 is_default: true,
             },
             ManifestSubtitleChoice {
                 key: "en".to_string(),
-                label: "English".to_string(),
                 language: Some("en".to_string()),
                 is_default: false,
             },

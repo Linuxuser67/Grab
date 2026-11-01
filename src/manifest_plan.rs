@@ -901,8 +901,7 @@ video/720.m3u8
             .expect("valid stable track selection");
 
         let plan = download_plan(lookup, &source).expect("valid selected download plan");
-        let ManifestDownloadPlan::HlsMaster(plan) = plan
-        else {
+        let ManifestDownloadPlan::HlsMaster(plan) = plan else {
             panic!("expected an HLS master plan");
         };
         assert_eq!(

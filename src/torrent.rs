@@ -47,7 +47,11 @@ pub enum TorrentError {
     InvalidTorrent(String),
     /// An archived torrent could not be stored.
     #[error("{message}: {source}")]
-    Store { message: String, #[source] source: io::Error },
+    Store {
+        message: String,
+        #[source]
+        source: io::Error,
+    },
     /// The application data directory for the torrent session could not be created.
     #[error("Cannot create session dir: {0}")]
     SessionDirectory(#[source] io::Error),
@@ -71,7 +75,11 @@ pub enum TorrentError {
     InvalidInfoHash(String),
     /// Resolved magnet metadata could not be persisted safely.
     #[error("{message}: {source}")]
-    MetadataStorage { message: String, #[source] source: io::Error },
+    MetadataStorage {
+        message: String,
+        #[source]
+        source: io::Error,
+    },
     /// Magnet metadata resolution exceeded its deadline.
     #[error("{0}")]
     MagnetResolutionTimeout(String),
@@ -86,7 +94,11 @@ pub enum TorrentError {
     EmptyTorrent(String),
     /// The blocking metadata persistence task failed to join.
     #[error("{message}: {source}")]
-    MetadataTask { message: String, #[source] source: tokio::task::JoinError },
+    MetadataTask {
+        message: String,
+        #[source]
+        source: tokio::task::JoinError,
+    },
     /// The configured listen port is outside the valid u16 range.
     #[error("{0}")]
     InvalidListenPort(String),

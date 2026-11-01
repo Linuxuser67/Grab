@@ -4380,10 +4380,16 @@ mod tests {
             TorrentPickerSource::Magnet {
                 url: "magnet:?xt=urn:btih:0123456789012345678901234567890123456789".into(),
             },
-            vec![crate::torrent::TorrentFileEntry {
-                raw_path: "folder/file.txt".into(),
-                display_path: "folder/file.txt".into(),
-            }],
+            vec![
+                crate::torrent::TorrentFileEntry {
+                    raw_path: "folder/file.txt".into(),
+                    display_path: "folder/file.txt".into(),
+                },
+                crate::torrent::TorrentFileEntry {
+                    raw_path: "folder/second.txt".into(),
+                    display_path: "folder/second.txt".into(),
+                },
+            ],
             Rc::new(Cell::new(None)),
         );
         assert_eq!(magnet_nav.visible_page_tag().as_deref(), Some("torrent"));

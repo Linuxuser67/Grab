@@ -442,7 +442,6 @@ struct ManifestPreparation {
     live_hls: bool,
     live_dash: bool,
     finish_requested: bool,
-    finish_marker_bytes: Option<u64>,
     concurrency: usize,
     downloaded: Arc<AtomicU64>,
 }
@@ -698,7 +697,6 @@ async fn prepare_manifest_attempt(
         live_hls,
         live_dash,
         finish_requested,
-        finish_marker_bytes,
         concurrency,
         downloaded,
     })

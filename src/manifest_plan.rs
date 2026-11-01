@@ -362,6 +362,7 @@ impl ManifestLookup {
             representation_key: representation_key.to_string(),
             audio_key: audio_key.map(str::to_string),
             subtitle_key: subtitle_key.map(str::to_string),
+            subtitle_language: None,
             subtitle_language,
         })
     }
@@ -893,6 +894,7 @@ video/720.m3u8
             representation_key: "hls-variant-00000000000000000000000000000000".to_string(),
             audio_key: None,
             subtitle_key: None,
+            subtitle_language: None,
         };
 
         assert!(download_plan(lookup, &source).is_err());

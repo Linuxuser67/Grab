@@ -33,13 +33,13 @@ static MAIN_LOOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn lock_queue_file() -> std::sync::MutexGuard<'static, ()> {
     QUEUE_FILE_LOCK
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .expect("download test lock poisoned")
 }
 
 fn lock_main_loop() -> std::sync::MutexGuard<'static, ()> {
     MAIN_LOOP_LOCK
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .expect("download test lock poisoned")
 }
 
 /// Both locks in the safe order (queue, then loop); reversed order deadlocks the suite.

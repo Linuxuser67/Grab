@@ -487,7 +487,8 @@ fn refresh_row(
     let manifest_download = is_manifest_download && !done;
     w.toggle_btn
         .set_visible(running && (!live_capturing || can_pause_live));
-    w.stop_btn.set_visible(running && !(manifest_download && item.status() == DownloadStatus::Paused));
+    w.stop_btn
+        .set_visible(running && !(manifest_download && item.status() == DownloadStatus::Paused));
     w.stop_btn.set_sensitive(!live_capturing || can_finish_live);
     // Header caps for the tooltip, sentence case for the spoken a11y name.
     let (stop_tip, stop_a11y) = match stop_copy(live_capturing) {

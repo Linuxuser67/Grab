@@ -227,7 +227,7 @@ async fn persist_unrecoverable_live_capture(
 ) -> Result<(), ManifestRunError> {
     crate::live_capture_state::persist(staging_dir, protocol, reason, staged_bytes)
         .await
-        .map_err(ManifestRunError::Failed)?;
+        .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
     downloaded.store(staged_bytes, Ordering::Relaxed);
     tx.send(progress_message(staged_bytes)).ok();
     Ok(())
@@ -427,10 +427,10 @@ pub(crate) async fn run_manifest_download(
         output_container.extension(),
         job.embed_subs,
     )
-    .map_err(ManifestRunError::Failed)?;
+    .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
     crate::manifest_recovery::validate_or_initialize(&staging, recovery_fingerprint)
         .await
-        .map_err(ManifestRunError::Failed)?;
+        .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
 
     // Reclaim either supported container left by an interrupted attempt only
     // after validating both the state-dir owner marker and the recovery plan.
@@ -446,7 +446,7 @@ pub(crate) async fn run_manifest_download(
         .map_err(ManifestRunError::Failed)?;
     let unrecoverable_state = crate::live_capture_state::read(&staging)
         .await
-        .map_err(ManifestRunError::Failed)?;
+        .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
     if let Some(state) = unrecoverable_state.as_ref() {
         let expected_protocol = match job.source.kind {
             ManifestKind::Hls => "hls",

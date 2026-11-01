@@ -7,11 +7,41 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::media_types::{ManifestKind, ManifestSource};
 
 const RECOVERY_FILE: &str = "manifest-recovery.json";
 const RECOVERY_VERSION: u32 = 1;
+
+/// Structured failures from manifest recovery metadata operations.
+#[derive(Debug, Error)]
+pub(crate) enum RecoveryError {
+    #[error("could not encode manifest recovery plan: {0}")]
+    Serialize(#[source] serde_json::Error),
+    #[error("Manifest recovery metadata is invalid: {0}")]
+    Malformed(#[source] serde_json::Error),
+    #[error("Manifest recovery metadata version {0} is unsupported")]
+    UnsupportedVersion(u32),
+    #[error("manifest recovery metadata is not a regular file")]
+    NotRegularFile,
+    #[error(
+        "The selected manifest tracks or output container changed; existing staged data was preserved. Remove and add the download again to start a new plan."
+    )]
+    FingerprintMismatch,
+    #[error(
+        "Existing manifest staging data has no plan fingerprint; refusing unsafe recovery and preserving the data. Remove and add the download again to start a new plan."
+    )]
+    UnfingerprintedStagedData,
+    #[error("manifest recovery I/O failed while {operation}: {source}")]
+    Io {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("manifest recovery validation task failed: {0}")]
+    Join(#[from] tokio::task::JoinError),
+}
 
 #[derive(Serialize)]
 struct FingerprintInput<'a> {
@@ -38,7 +68,7 @@ pub(crate) fn fingerprint(
     source: &ManifestSource,
     output_container: &str,
     embed_subtitles: bool,
-) -> Result<String, String> {
+) -> Result<String, RecoveryError> {
     let input = FingerprintInput {
         version: RECOVERY_VERSION,
         manifest_kind: match source.kind {
@@ -52,8 +82,7 @@ pub(crate) fn fingerprint(
         output_container,
         embed_subtitles,
     };
-    let encoded = serde_json::to_vec(&input)
-        .map_err(|error| format!("Could not encode manifest recovery plan: {error}"))?;
+    let encoded = serde_json::to_vec(&input).map_err(RecoveryError::Serialize)?;
     let digest = Sha256::digest(encoded);
     let mut result = String::with_capacity(digest.len() * 2);
     for byte in digest {
@@ -67,53 +96,47 @@ pub(crate) fn fingerprint(
 pub(crate) async fn validate_or_initialize(
     staging: &Path,
     fingerprint: String,
-) -> Result<(), String> {
+) -> Result<(), RecoveryError> {
     let staging = staging.to_path_buf();
-    tokio::task::spawn_blocking(move || validate_or_initialize_sync(&staging, &fingerprint))
-        .await
-        .map_err(|error| format!("Manifest recovery validation task failed: {error}"))?
+    tokio::task::spawn_blocking(move || validate_or_initialize_sync(&staging, &fingerprint)).await?
 }
 
-fn validate_or_initialize_sync(staging: &Path, fingerprint: &str) -> Result<(), String> {
+fn validate_or_initialize_sync(staging: &Path, fingerprint: &str) -> Result<(), RecoveryError> {
     let marker_path = staging.join(RECOVERY_FILE);
     match fs::symlink_metadata(&marker_path) {
         Ok(_) => validate_existing_marker(&marker_path, fingerprint),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if directory_has_staged_data(staging)? {
-                return Err(
-                    "Existing manifest staging data has no plan fingerprint; refusing unsafe recovery and preserving the data. Remove and add the download again to start a new plan."
-                        .to_string(),
-                );
+                return Err(RecoveryError::UnfingerprintedStagedData);
             }
             write_recovery_marker(staging, &marker_path, fingerprint)
         }
-        Err(error) => Err(format!(
-            "Could not inspect manifest recovery metadata: {error}"
-        )),
+        Err(source) => Err(RecoveryError::Io {
+            operation: "inspecting recovery metadata",
+            source,
+        }),
     }
 }
 
-fn validate_existing_marker(marker_path: &Path, fingerprint: &str) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(marker_path)
-        .map_err(|error| format!("Could not inspect manifest recovery metadata: {error}"))?;
+fn validate_existing_marker(marker_path: &Path, fingerprint: &str) -> Result<(), RecoveryError> {
+    let metadata = fs::symlink_metadata(marker_path).map_err(|source| RecoveryError::Io {
+        operation: "inspecting recovery metadata",
+        source,
+    })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err("Manifest recovery metadata is not a regular file".to_string());
+        return Err(RecoveryError::NotRegularFile);
     }
-    let bytes = fs::read(marker_path)
-        .map_err(|error| format!("Could not read manifest recovery metadata: {error}"))?;
-    let marker: RecoveryMarker = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("Manifest recovery metadata is invalid: {error}"))?;
+    let bytes = fs::read(marker_path).map_err(|source| RecoveryError::Io {
+        operation: "reading recovery metadata",
+        source,
+    })?;
+    let marker: RecoveryMarker =
+        serde_json::from_slice(&bytes).map_err(RecoveryError::Malformed)?;
     if marker.version != RECOVERY_VERSION {
-        return Err(format!(
-            "Manifest recovery metadata version {} is unsupported",
-            marker.version
-        ));
+        return Err(RecoveryError::UnsupportedVersion(marker.version));
     }
     if marker.fingerprint != fingerprint {
-        return Err(
-            "The selected manifest tracks or output container changed; existing staged data was preserved. Remove and add the download again to start a new plan."
-                .to_string(),
-        );
+        return Err(RecoveryError::FingerprintMismatch);
     }
     Ok(())
 }
@@ -121,19 +144,24 @@ fn validate_existing_marker(marker_path: &Path, fingerprint: &str) -> Result<(),
 /// Only the staging ownership marker and empty directories are harmless when
 /// adopting a fresh stage. Symlinks and special files are treated as data so
 /// an unrecognized entry can never be silently overwritten or discarded.
-fn directory_has_staged_data(directory: &Path) -> Result<bool, String> {
-    let entries = fs::read_dir(directory)
-        .map_err(|error| format!("Could not inspect manifest staging directory: {error}"))?;
+fn directory_has_staged_data(directory: &Path) -> Result<bool, RecoveryError> {
+    let entries = fs::read_dir(directory).map_err(|source| RecoveryError::Io {
+        operation: "reading the staging directory",
+        source,
+    })?;
     for entry in entries {
-        let entry =
-            entry.map_err(|error| format!("Could not inspect manifest staging entry: {error}"))?;
+        let entry = entry.map_err(|source| RecoveryError::Io {
+            operation: "reading a staging directory entry",
+            source,
+        })?;
         let name = entry.file_name();
         if name == ".grab-manifest-owner" || name == RECOVERY_FILE {
             continue;
         }
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("Could not inspect manifest staging entry: {error}"))?;
+        let file_type = entry.file_type().map_err(|source| RecoveryError::Io {
+            operation: "inspecting a staging directory entry",
+            source,
+        })?;
         if file_type.is_dir() {
             if directory_has_staged_data(&entry.path())? {
                 return Ok(true);
@@ -149,33 +177,44 @@ fn write_recovery_marker(
     staging: &Path,
     marker_path: &Path,
     fingerprint: &str,
-) -> Result<(), String> {
+) -> Result<(), RecoveryError> {
     let marker = RecoveryMarker {
         version: RECOVERY_VERSION,
         fingerprint: fingerprint.to_string(),
     };
-    let contents = serde_json::to_vec(&marker)
-        .map_err(|error| format!("Could not encode manifest recovery metadata: {error}"))?;
+    let contents = serde_json::to_vec(&marker).map_err(RecoveryError::Serialize)?;
 
     // NamedTempFile creates a private file in the same directory, so
     // persist_noclobber() publishes it atomically without replacing an existing marker.
-    let mut temporary = tempfile::NamedTempFile::new_in(staging)
-        .map_err(|error| format!("Could not create manifest recovery metadata: {error}"))?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(staging).map_err(|source| RecoveryError::Io {
+            operation: "creating recovery metadata",
+            source,
+        })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         temporary
             .as_file()
             .set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Could not secure manifest recovery metadata: {error}"))?;
+            .map_err(|source| RecoveryError::Io {
+                operation: "securing recovery metadata",
+                source,
+            })?;
     }
     temporary
         .write_all(&contents)
-        .map_err(|error| format!("Could not write manifest recovery metadata: {error}"))?;
+        .map_err(|source| RecoveryError::Io {
+            operation: "writing recovery metadata",
+            source,
+        })?;
     temporary
         .as_file()
         .sync_all()
-        .map_err(|error| format!("Could not sync manifest recovery metadata: {error}"))?;
+        .map_err(|source| RecoveryError::Io {
+            operation: "syncing recovery metadata",
+            source,
+        })?;
     match temporary.persist_noclobber(marker_path) {
         Ok(_) => {}
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -184,17 +223,20 @@ fn write_recovery_marker(
             validate_existing_marker(marker_path, fingerprint)?;
         }
         Err(error) => {
-            return Err(format!(
-                "Could not publish manifest recovery metadata: {}",
-                error.error
-            ));
+            return Err(RecoveryError::Io {
+                operation: "publishing recovery metadata",
+                source: error.error,
+            });
         }
     }
 
     // Persist the directory entry before the runner starts committing media data.
     File::open(staging)
         .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("Could not sync manifest staging directory: {error}"))?;
+        .map_err(|source| RecoveryError::Io {
+            operation: "syncing the staging directory",
+            source,
+        })?;
     Ok(())
 }
 
@@ -306,11 +348,10 @@ mod tests {
         fs::write(&resource, b"preserve me").expect("write staged resource");
 
         let changed = fingerprint(&source(), "mkv", true).expect("changed fingerprint");
-        assert!(
-            validate_or_initialize(staging.path(), changed)
-                .await
-                .is_err()
-        );
+        assert!(matches!(
+            validate_or_initialize(staging.path(), changed).await,
+            Err(RecoveryError::FingerprintMismatch)
+        ));
         assert_eq!(
             fs::read(resource).expect("read preserved resource"),
             b"preserve me"
@@ -324,11 +365,10 @@ mod tests {
         fs::write(&resource, b"legacy data").expect("write legacy resource");
         let expected = fingerprint(&source(), "mp4", true).expect("fingerprint");
 
-        assert!(
-            validate_or_initialize(staging.path(), expected)
-                .await
-                .is_err()
-        );
+        assert!(matches!(
+            validate_or_initialize(staging.path(), expected).await,
+            Err(RecoveryError::UnfingerprintedStagedData)
+        ));
         assert_eq!(
             fs::read(resource).expect("read preserved resource"),
             b"legacy data"
@@ -341,10 +381,9 @@ mod tests {
         fs::write(staging.path().join(RECOVERY_FILE), b"{").expect("write malformed metadata");
         let expected = fingerprint(&source(), "mp4", true).expect("fingerprint");
 
-        assert!(
-            validate_or_initialize(staging.path(), expected)
-                .await
-                .is_err()
-        );
+        assert!(matches!(
+            validate_or_initialize(staging.path(), expected).await,
+            Err(RecoveryError::Malformed(_))
+        ));
     }
 }

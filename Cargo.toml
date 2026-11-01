@@ -20,6 +20,8 @@ gio = "0.22"
 url = "2"
 # HLS playlist parsing and local media-playlist serialization.
 m3u8-rs = "6.0.1"
+# Parse HLS diagnostics without exposing playlist contents.
+nom = "7"
 # DASH MPD parsing and serialization for native VOD downloads.
 dash-mpd-core = "0.1.0"
 # Read the single verified Deno executable from the official release ZIP.

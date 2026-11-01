@@ -1570,8 +1570,22 @@ fn native_manifest_source_survives_queue_restore() {
         assert!(saved.contains("master.m3u8"));
         assert!(saved.contains(&source.representation_key));
         assert!(saved.contains(source.audio_key.as_deref().expect("selected audio key")));
-        assert!(saved.contains(source.subtitle_key.as_deref().expect("selected subtitle key")));
-        assert!(saved.contains(source.subtitle_language.as_deref().expect("selected subtitle language")));
+        assert!(
+            saved.contains(
+                source
+                    .subtitle_key
+                    .as_deref()
+                    .expect("selected subtitle key")
+            )
+        );
+        assert!(
+            saved.contains(
+                source
+                    .subtitle_language
+                    .as_deref()
+                    .expect("selected subtitle language")
+            )
+        );
         id
     };
 

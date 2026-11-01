@@ -437,20 +437,20 @@ pub(crate) fn download_plan(
                     audio_url: selected_audio.and_then(|rendition| rendition.url.clone()),
                     subtitle_url: match source.subtitle_key.as_deref() {
                         Some(subtitle_key) => Some(
-                        master
-                            .subtitle_renditions
-                            .iter()
-                            .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
-                            .find_map(|(rendition, key)| {
-                                (key.as_deref() == Some(subtitle_key)
-                                    && variant.subtitles_group.as_deref()
-                                        == Some(rendition.group_id.as_str()))
-                                .then_some(rendition.url.clone())
-                            })
-                            .ok_or_else(|| {
-                                "The selected HLS subtitle rendition is no longer available"
-                                    .to_string()
-                            })?,
+                            master
+                                .subtitle_renditions
+                                .iter()
+                                .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
+                                .find_map(|(rendition, key)| {
+                                    (key.as_deref() == Some(subtitle_key)
+                                        && variant.subtitles_group.as_deref()
+                                            == Some(rendition.group_id.as_str()))
+                                    .then_some(rendition.url.clone())
+                                })
+                                .ok_or_else(|| {
+                                    "The selected HLS subtitle rendition is no longer available"
+                                        .to_string()
+                                })?,
                         ),
                         None => None,
                     },

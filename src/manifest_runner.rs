@@ -810,8 +810,7 @@ async fn resolve_tracks(
                 .iter()
                 .zip(crate::manifest_intake::hls_variant_keys(&master.variants))
                 .find_map(|(variant, key)| {
-                    (key.as_deref() == Some(source.representation_key.as_str()))
-                        .then_some(variant)
+                    (key.as_deref() == Some(source.representation_key.as_str())).then_some(variant)
                 })
                 .ok_or_else(|| {
                     ManifestRunError::Unsupported(

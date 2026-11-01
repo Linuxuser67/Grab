@@ -981,9 +981,7 @@ fn stable_hls_track_key(prefix: &str, track_kind: &[u8], stable_id: &str) -> Str
 }
 
 #[must_use]
-fn hls_audio_rendition_key(
-    rendition: &crate::manifest::HlsAudioRendition,
-) -> Option<String> {
+fn hls_audio_rendition_key(rendition: &crate::manifest::HlsAudioRendition) -> Option<String> {
     rendition
         .stable_rendition_id
         .as_deref()
@@ -1609,7 +1607,10 @@ video/es.m3u8
         let mut missing_id = rendition("https://cdn.example.test/audio/no-id.m3u8");
         missing_id.stable_rendition_id = None;
 
-        assert_eq!(hls_audio_rendition_key(&original), hls_audio_rendition_key(&refreshed));
+        assert_eq!(
+            hls_audio_rendition_key(&original),
+            hls_audio_rendition_key(&refreshed)
+        );
         assert_eq!(hls_audio_rendition_key(&missing_id), None);
     }
 
@@ -1753,9 +1754,18 @@ video/es.m3u8
             audio_group: None,
             stable_variant_id: Some(stable_id.to_string()),
         };
-        let original = variant("https://cdn.example.test/video/old.m3u8?sig=old", "variant-1080");
-        let refreshed = variant("https://cdn.example.test/video/new.m3u8?sig=new", "variant-1080");
-        let different = variant("https://cdn.example.test/video/720.m3u8?sig=new", "variant-720");
+        let original = variant(
+            "https://cdn.example.test/video/old.m3u8?sig=old",
+            "variant-1080",
+        );
+        let refreshed = variant(
+            "https://cdn.example.test/video/new.m3u8?sig=new",
+            "variant-1080",
+        );
+        let different = variant(
+            "https://cdn.example.test/video/720.m3u8?sig=new",
+            "variant-720",
+        );
         let mut missing_id = original.clone();
         missing_id.stable_variant_id = None;
 
@@ -1801,22 +1811,34 @@ video/720.m3u8
         )
         .expect("valid HLS master playlist");
         let current_video_key = hls_variant_keys(&master.variants)[0]
-            .as_deref().expect("stable video key").to_string();
+            .as_deref()
+            .expect("stable video key")
+            .to_string();
         let current_audio_key = hls_audio_rendition_keys(&master.audio_renditions)[0]
-            .as_deref().expect("stable audio key").to_string();
+            .as_deref()
+            .expect("stable audio key")
+            .to_string();
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
             manifest: NativeManifest::HlsMaster(master),
         };
 
-        assert!(lookup.selected_source(
-            "hls-variant-00000000000000000000000000000000",
-            Some(&current_audio_key),
-        ).is_none());
-        assert!(lookup.selected_source(
-            &current_video_key,
-            Some("hls-audio-00000000000000000000000000000000"),
-        ).is_none());
+        assert!(
+            lookup
+                .selected_source(
+                    "hls-variant-00000000000000000000000000000000",
+                    Some(&current_audio_key),
+                )
+                .is_none()
+        );
+        assert!(
+            lookup
+                .selected_source(
+                    &current_video_key,
+                    Some("hls-audio-00000000000000000000000000000000"),
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -1829,7 +1851,8 @@ video/720.m3u8
         let mut master = crate::manifest::parse_hls_master_playlist(
             "https://cdn.example.test/master.m3u8",
             body,
-        ).expect("valid HLS master playlist");
+        )
+        .expect("valid HLS master playlist");
         assert!(validate_hls_stable_track_ids(&master).is_ok());
 
         master.variants[0].stable_variant_id = None;
@@ -1842,8 +1865,8 @@ video/720.m3u8
         assert!(validate_hls_stable_track_ids(&master).is_err());
         master.audio_renditions[0].stable_rendition_id = Some("rendition-en".to_string());
         let duplicate_rendition = master.audio_renditions[0].clone();
-        master.audio_renditions = vec![duplicate_rendition.clone(), duplicate_rendition]
-            .into_boxed_slice();
+        master.audio_renditions =
+            vec![duplicate_rendition.clone(), duplicate_rendition].into_boxed_slice();
         assert!(validate_hls_stable_track_ids(&master).is_err());
         master.audio_renditions = vec![master.audio_renditions[0].clone()].into_boxed_slice();
 

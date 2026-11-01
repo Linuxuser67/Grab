@@ -967,14 +967,15 @@ pub(crate) async fn run_manifest_download(
         &tx,
         &staging,
         dest_dir,
+        &video_dir,
+        &audio_dir,
         output_part,
         tracks,
         has_audio,
         &downloaded,
     )
     .await
-}}
-
+}
 
 /// Mux the staged tracks, validate the output, and publish it without clobbering.
 ///
@@ -987,6 +988,8 @@ async fn finalize_manifest_download(
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     staging: &Path,
     dest_dir: &Path,
+    video_dir: &Path,
+    audio_dir: &Path,
     output_part: PathBuf,
     tracks: Tracks,
     has_audio: bool,

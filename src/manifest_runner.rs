@@ -386,9 +386,15 @@ pub(crate) async fn run_manifest_download(
     let live_marker_exists = read_live_hls_marker(&staging)
         .await
         .map_err(ManifestRunError::Failed)?;
+    let finish_marker_bytes = read_live_finish_marker(&staging)
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    let finish_requested = finish_marker_bytes.is_some();
     let dash_live_requested = job.source.kind == ManifestKind::Dash
         && job.source.representation_key.starts_with("dash-live-");
-    let mut offline_tracks = if live_marker_exists && job.source.kind == ManifestKind::Hls {
+    let mut offline_tracks = if finish_requested && job.source.kind == ManifestKind::Hls {
+        restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
+    } else if (finish_requested || live_marker_exists) && job.source.kind == ManifestKind::Hls {
         restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
     } else if dash_live_requested && dash_live_state_exists(&video_dir).await? {
         let has_audio = dash_live_state_exists(&audio_dir).await?;
@@ -396,27 +402,36 @@ pub(crate) async fn run_manifest_download(
     } else {
         None
     };
+    if finish_requested && offline_tracks.is_none() {
+        return Err(ManifestRunError::Failed(
+            "The finished live recording has no committed staging data".to_string(),
+        ));
+    }
 
-    let (client, force_offline) = match crate::manifest_intake::client_for_manifest(
-        &job.source.url,
-        &job.cookies_browser,
-        job.proxy.as_ref(),
-    )
-    .await
-    {
-        Ok(client) => (client, false),
-        Err(error) if offline_tracks.is_some() => {
-            tracing::warn!(
-                item_id = job.item_id,
-                error = %error,
-                "live stream source is unavailable; finalizing the committed local capture"
-            );
-            (reqwest::Client::new(), true)
-        }
-        Err(error) => {
-            return Err(ManifestRunError::Failed(format!(
-                "Could not configure manifest networking: {error}"
-            )));
+    let (client, force_offline) = if finish_requested {
+        (reqwest::Client::new(), true)
+    } else {
+        match crate::manifest_intake::client_for_manifest(
+            &job.source.url,
+            &job.cookies_browser,
+            job.proxy.as_ref(),
+        )
+        .await
+        {
+            Ok(client) => (client, false),
+            Err(error) if offline_tracks.is_some() => {
+                tracing::warn!(
+                    item_id = job.item_id,
+                    error = %error,
+                    "live stream source is unavailable; finalizing the committed local capture"
+                );
+                (reqwest::Client::new(), true)
+            }
+            Err(error) => {
+                return Err(ManifestRunError::Failed(format!(
+                    "Could not configure manifest networking: {error}"
+                )));
+            }
         }
     };
 
@@ -488,8 +503,11 @@ pub(crate) async fn run_manifest_download(
         Tracks::Hls { video, audio, .. }
             if video.is_live || audio.as_ref().is_some_and(|track| track.is_live)
     );
-    let live_hls = matches!(&tracks, Tracks::Hls { .. }) && (live_source || live_marker_exists);
-    let live_dash = dash_live_requested
+    let live_hls = !finish_requested
+        && matches!(&tracks, Tracks::Hls { .. })
+        && (live_source || live_marker_exists);
+    let live_dash = !finish_requested
+        && dash_live_requested
         && matches!(
             &tracks,
             Tracks::Dash { .. } | Tracks::DashLiveOffline { .. }
@@ -506,18 +524,21 @@ pub(crate) async fn run_manifest_download(
     if live_hls || live_dash {
         tx.send(EngineMsg::LiveDetected).ok();
     }
-    tx.send(EngineMsg::Phase(if live_source || live_dash {
-        "Recording live stream…".to_string()
-    } else if live_hls {
+    tx.send(EngineMsg::Phase(if finish_requested || live_hls {
         "Finalizing live stream…".to_string()
+    } else if live_source || live_dash {
+        "Recording live stream…".to_string()
     } else {
         "Downloading stream segments…".to_string()
     }))
     .ok();
     let concurrency = job.connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
-    let downloaded = Arc::new(AtomicU64::new(0));
+    let downloaded = Arc::new(AtomicU64::new(finish_marker_bytes.unwrap_or(0)));
     let mut _finish_stop_sender = None;
-    if live_hls {
+    if finish_requested {
+        // The durable finish marker means the local playlists / concatenated
+        // DASH tracks are ready; retry finalization without polling the source.
+    } else if live_hls {
         let Tracks::Hls { video, audio, .. } = &tracks else {
             return Err(ManifestRunError::Failed(
                 "Live HLS capture requires HLS media tracks".to_string(),

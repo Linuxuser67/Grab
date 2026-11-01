@@ -463,7 +463,7 @@ pub(crate) fn download_plan(
                 })
                 .transpose()?;
             let subtitle = match source.subtitle_key.as_deref() {
-                Some(key) if matches!(dash.presentation, DashPresentation::Dynamic(_)) => {
+                Some(key) if matches!(&dash.presentation, DashPresentation::Dynamic(_)) => {
                     return Err("Native subtitles are not supported for live DASH presentations".to_string());
                 }
                 Some(key) => Some(Box::new(

@@ -641,6 +641,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
     hasher.update(match kind {
         DashTrackKind::Video => b"video".as_slice(),
         DashTrackKind::Audio => b"audio".as_slice(),
+        DashTrackKind::Subtitle => b"subtitle".as_slice(),
     });
     hash_optional_text(&mut hasher, id);
     hash_optional_text(&mut hasher, base_url.host_str());

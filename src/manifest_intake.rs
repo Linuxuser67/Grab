@@ -1397,6 +1397,7 @@ video/es.m3u8
             codecs: Some("avc1.640028".to_string()),
             frame_rate: Some(30.0),
             audio_group: None,
+            subtitles_group: None,
             stable_variant_id: Some(stable_id.to_string()),
         };
         let original = variant(

@@ -838,7 +838,7 @@ pub(crate) fn parse_hls_master_playlist(
 
     let audio_renditions = master
         .alternatives
-        .into_iter()
+        .iter()
         .filter(|alternative| alternative.media_type == AlternativeMediaType::Audio)
         .map(|alternative| {
             let url = alternative
@@ -848,9 +848,9 @@ pub(crate) fn parse_hls_master_playlist(
                 .transpose()?;
             Ok(HlsAudioRendition {
                 url,
-                group_id: alternative.group_id,
-                name: alternative.name,
-                language: alternative.language,
+                group_id: alternative.group_id.clone(),
+                name: alternative.name.clone(),
+                language: alternative.language.clone(),
                 is_default: alternative.default,
                 stable_rendition_id: alternative
                     .other_attributes
@@ -864,7 +864,7 @@ pub(crate) fn parse_hls_master_playlist(
 
     let subtitle_renditions = master
         .alternatives
-        .into_iter()
+        .iter()
         .filter(|alternative| alternative.media_type == AlternativeMediaType::Subtitles)
         .map(|alternative| {
             let uri = alternative
@@ -874,9 +874,9 @@ pub(crate) fn parse_hls_master_playlist(
             let url = resolve_resource_url(&base_url, uri)?;
             Ok(HlsSubtitleRendition {
                 url,
-                group_id: alternative.group_id,
-                name: alternative.name,
-                language: alternative.language,
+                group_id: alternative.group_id.clone(),
+                name: alternative.name.clone(),
+                language: alternative.language.clone(),
                 is_default: alternative.default,
                 stable_rendition_id: alternative
                     .other_attributes

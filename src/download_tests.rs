@@ -1599,6 +1599,7 @@ fn native_manifest_queue_deduplicates_repeated_requested_filenames() {
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
         audio_key: None,
+        subtitle_key: None,
     };
 
     let first = manager
@@ -1657,6 +1658,7 @@ fn invalid_native_manifest_source_is_skipped_on_restore() {
                 kind: crate::media_types::ManifestKind::Dash,
                 representation_key: "dash-0123456789abcdef0123456789abcdef".to_string(),
                 audio_key: None,
+                subtitle_key: None,
             },
         }),
         started: None,

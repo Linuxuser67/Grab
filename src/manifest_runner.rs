@@ -1053,7 +1053,7 @@ async fn restore_local_live_hls_tracks(
         return Ok(None);
     };
     let audio = read_local_live_hls_plan(source_url, audio_dir).await?;
-    Ok(Some(Tracks::Hls { video, audio }))
+    Ok(Some(Tracks::Hls { video, audio, subtitle: None, subtitle_language: None }))
 }
 
 const LIVE_HLS_MARKER_NAME: &str = "live-hls.capture";
@@ -2991,7 +2991,7 @@ async fn run_live_dash_tracks(
         )
         .await;
         let refreshed = match refreshed {
-            Ok(Tracks::Dash { video, audio }) => (video, audio.map(|audio| *audio)),
+            Ok(Tracks::Dash { video, audio, .. }) => (video, audio.map(|audio| *audio)),
             Ok(_) => {
                 finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard

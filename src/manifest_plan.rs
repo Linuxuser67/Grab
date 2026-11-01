@@ -362,7 +362,6 @@ impl ManifestLookup {
             representation_key: representation_key.to_string(),
             audio_key: audio_key.map(str::to_string),
             subtitle_key: subtitle_key.map(str::to_string),
-            subtitle_language: None,
             subtitle_language,
         })
     }

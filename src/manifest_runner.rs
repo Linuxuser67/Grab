@@ -545,7 +545,7 @@ async fn prepare_manifest_attempt(
             _ => unreachable!("validated unrecoverable marker protocol"),
         }
     }
-    let mut offline_tracks =
+    let offline_tracks =
         if (finish_requested || live_marker_exists) && job.source.kind == ManifestKind::Hls {
             restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
         } else if dash_live_requested && dash_live_state_exists(&video_dir).await? {
@@ -560,6 +560,80 @@ async fn prepare_manifest_attempt(
         ));
     }
 
+    let ResolvedManifestTracks {
+        client,
+        tracks,
+        guarded_child_hosts,
+        has_audio,
+    } = resolve_manifest_tracks(job, offline_tracks, finish_requested).await?;
+
+    let live_source = matches!(
+        &tracks,
+        Tracks::Hls { video, audio, .. }
+            if video.is_live || audio.as_ref().is_some_and(|track| track.is_live)
+    );
+    let live_hls = matches!(&tracks, Tracks::Hls { .. }) && (live_source || live_marker_exists);
+    let live_dash = dash_live_requested
+        && matches!(
+            &tracks,
+            Tracks::Dash { .. } | Tracks::DashLiveOffline { .. }
+        );
+    if live_source {
+        ensure_live_hls_marker(&staging)
+            .await
+            .map_err(ManifestRunError::Failed)?;
+    } else if live_marker_exists && !matches!(&tracks, Tracks::Hls { .. }) {
+        return Err(ManifestRunError::Failed(
+            "A live HLS staging marker belongs to a non-HLS queue item".to_string(),
+        ));
+    }
+    if !finish_requested && (live_hls || live_dash) {
+        tx.send(EngineMsg::LiveDetected).ok();
+    }
+    tx.send(EngineMsg::Phase(if finish_requested || live_hls {
+        "Finalizing live stream…".to_string()
+    } else if live_source || live_dash {
+        "Recording live stream…".to_string()
+    } else {
+        "Downloading stream segments…".to_string()
+    }))
+    .ok();
+    let concurrency = job.connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
+    let downloaded = Arc::new(AtomicU64::new(finish_marker_bytes.unwrap_or(0)));
+
+    Ok(ManifestPreparation {
+        staging,
+        dest_dir,
+        output_part,
+        video_dir,
+        audio_dir,
+        client,
+        tracks,
+        guarded_child_hosts,
+        has_audio,
+        live_hls,
+        live_dash,
+        finish_requested,
+        concurrency,
+        downloaded,
+    })
+}
+
+
+/// Resolved manifest tracks and the network client used to transfer them.
+struct ResolvedManifestTracks {
+    client: reqwest::Client,
+    tracks: Tracks,
+    guarded_child_hosts: std::collections::HashSet<String>,
+    has_audio: bool,
+}
+
+/// Resolve selected tracks, falling back to committed live resources when the source is gone.
+async fn resolve_manifest_tracks(
+    job: &ManifestJob,
+    mut offline_tracks: Option<Tracks>,
+    finish_requested: bool,
+) -> Result<ResolvedManifestTracks, ManifestRunError> {
     let (client, force_offline) = if finish_requested {
         (reqwest::Client::new(), true)
     } else {
@@ -650,55 +724,12 @@ async fn prepare_manifest_attempt(
     if has_audio {
         ensure_track_dir(&audio_dir).await?;
     }
-    let live_source = matches!(
-        &tracks,
-        Tracks::Hls { video, audio, .. }
-            if video.is_live || audio.as_ref().is_some_and(|track| track.is_live)
-    );
-    let live_hls = matches!(&tracks, Tracks::Hls { .. }) && (live_source || live_marker_exists);
-    let live_dash = dash_live_requested
-        && matches!(
-            &tracks,
-            Tracks::Dash { .. } | Tracks::DashLiveOffline { .. }
-        );
-    if live_source {
-        ensure_live_hls_marker(&staging)
-            .await
-            .map_err(ManifestRunError::Failed)?;
-    } else if live_marker_exists && !matches!(&tracks, Tracks::Hls { .. }) {
-        return Err(ManifestRunError::Failed(
-            "A live HLS staging marker belongs to a non-HLS queue item".to_string(),
-        ));
-    }
-    if !finish_requested && (live_hls || live_dash) {
-        tx.send(EngineMsg::LiveDetected).ok();
-    }
-    tx.send(EngineMsg::Phase(if finish_requested || live_hls {
-        "Finalizing live stream…".to_string()
-    } else if live_source || live_dash {
-        "Recording live stream…".to_string()
-    } else {
-        "Downloading stream segments…".to_string()
-    }))
-    .ok();
-    let concurrency = job.connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
-    let downloaded = Arc::new(AtomicU64::new(finish_marker_bytes.unwrap_or(0)));
 
-    Ok(ManifestPreparation {
-        staging,
-        dest_dir,
-        output_part,
-        video_dir,
-        audio_dir,
+    Ok(ResolvedManifestTracks {
         client,
         tracks,
         guarded_child_hosts,
         has_audio,
-        live_hls,
-        live_dash,
-        finish_requested,
-        concurrency,
-        downloaded,
     })
 }
 

@@ -866,7 +866,7 @@ fn spawn_stderr_tail(
                         let line = String::from_utf8_lossy(&line_buf)
                             .trim_end_matches(['\n', '\r'])
                             .to_owned();
-                        let mut t = sink.lock().unwrap_or_else(|p| p.into_inner());
+                        let mut t = sink.lock().expect("gallery stderr tail mutex poisoned");
                         if t.len() == STDERR_TAIL_LINES {
                             t.pop_front();
                         }
@@ -890,7 +890,7 @@ fn spawn_stderr_tail(
 
 /// `": line | line"` for the error text, or empty when stderr said nothing.
 fn stderr_summary(tail: &StderrTail) -> String {
-    let t = tail.lock().unwrap_or_else(|p| p.into_inner());
+    let t = tail.lock().expect("gallery stderr tail mutex poisoned");
     if t.is_empty() {
         return String::new();
     }

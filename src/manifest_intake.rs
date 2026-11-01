@@ -1344,6 +1344,7 @@ video/es.m3u8
             }))
             .expect("legacy manifest source without an audio key remains compatible");
         assert_eq!(legacy.audio_key, None);
+        assert_eq!(legacy.subtitle_key, None);
 
         let mut source = crate::media_types::ManifestSource {
             url: "https://cdn.example.test/master.m3u8".to_string(),

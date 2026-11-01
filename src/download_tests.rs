@@ -1548,7 +1548,7 @@ fn native_manifest_source_survives_queue_restore() {
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
         audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".to_string()),
-        subtitle_key: None,
+        subtitle_key: Some("hls-subtitle-0123456789abcdef0123456789abcdef".to_string()),
     };
 
     let id = {
@@ -1569,6 +1569,7 @@ fn native_manifest_source_survives_queue_restore() {
         assert!(saved.contains("master.m3u8"));
         assert!(saved.contains(&source.representation_key));
         assert!(saved.contains(source.audio_key.as_deref().expect("selected audio key")));
+        assert!(saved.contains(source.subtitle_key.as_deref().expect("selected subtitle key")));
         id
     };
 

@@ -233,7 +233,7 @@ enum Tracks {
     Hls {
         video: HlsPlan,
         audio: Option<HlsPlan>,
-        subtitle: Option<HlsPlan>,
+        subtitle: Option<Box<HlsPlan>>,
         subtitle_language: Option<String>,
     },
     Dash {
@@ -909,7 +909,7 @@ async fn resolve_tracks(
                         ));
                     }
                     guard_hls_resources(&source.url, &plan, guarded_child_hosts)?;
-                    Some(plan)
+                    Some(Box::new(plan))
                 }
                 None => None,
             };

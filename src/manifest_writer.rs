@@ -240,7 +240,8 @@ impl OrderedTrackWriter {
     }
 }
 
-/// Assemble staged DASH resources in their declared order.
+/// Assemble staged DASH resources in their declared order for writer tests.
+#[cfg(test)]
 pub(crate) async fn write_ordered_track(
     resources: &[String],
     directory: &Path,

@@ -4,11 +4,11 @@
 //! commits their completed files to one track in manifest order. The checkpoint
 //! advances only after the output bytes have been synced to disk.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncWriteExt as _, AsyncReadExt as _};
+use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
 
 const CHECKPOINT_VERSION: u32 = 1;
 const MAX_TRACK_BYTES: u64 = 1 << 40;
@@ -79,7 +79,7 @@ pub(crate) async fn write_ordered_track(
             next_resource_index,
             committed_offset,
         } => (next_resource_index, committed_offset),
-        CheckpointState::AlreadyComplete => unreachable!(),
+        CheckpointState::AlreadyComplete => return Ok(true),
     };
 
     let mut output = tokio::fs::OpenOptions::new()
@@ -275,9 +275,12 @@ async fn persist_checkpoint(
 }
 
 async fn sync_directory(directory: &Path) -> Result<(), String> {
-    tokio::fs::File::open(directory)
+    let directory_file = tokio::fs::File::open(directory)
         .await
-        .and_then(|file| async { file.sync_all().await }.await)
+        .map_err(|error| format!("Could not open the DASH staging directory: {error}"))?;
+    directory_file
+        .sync_all()
+        .await
         .map_err(|error| format!("Could not sync the DASH staging directory: {error}"))
 }
 
@@ -318,7 +321,7 @@ fn plan_fingerprint(resources: &[String]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::path::PathBuf;
 
     fn test_directory() -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -331,9 +334,11 @@ mod tests {
         ))
     }
 
-    async fn stopped_receiver() -> tokio::sync::oneshot::Receiver<crate::video::StopIntent> {
-        let (_tx, rx) = tokio::sync::oneshot::channel();
-        rx
+    fn stop_channel() -> (
+        tokio::sync::oneshot::Sender<crate::video::StopIntent>,
+        tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    ) {
+        tokio::sync::oneshot::channel()
     }
 
     #[tokio::test]
@@ -343,7 +348,7 @@ mod tests {
         tokio::fs::write(directory.join("second.bin"), b"second").await.expect("write second");
         tokio::fs::write(directory.join("first.bin"), b"first").await.expect("write first");
         let resources = vec!["first.bin".to_string(), "second.bin".to_string()];
-        let mut abort = stopped_receiver().await;
+        let (_stop_tx, mut abort) = stop_channel();
 
         assert!(write_ordered_track(&resources, &directory, "track.mp4", &mut abort).await.expect("write track"));
         assert_eq!(tokio::fs::read(directory.join("track.mp4")).await.expect("read track"), b"firstsecond");
@@ -373,7 +378,7 @@ mod tests {
             directory.join("track.mp4.checkpoint.json"),
             serde_json::to_vec(&checkpoint).expect("serialize checkpoint"),
         ).await.expect("write checkpoint");
-        let mut abort = stopped_receiver().await;
+        let (_stop_tx, mut abort) = stop_channel();
 
         assert!(write_ordered_track(&resources, &directory, "track.mp4", &mut abort).await.expect("resume track"));
         assert_eq!(tokio::fs::read(directory.join("track.mp4")).await.expect("read track"), b"firstsecond");
@@ -393,7 +398,7 @@ mod tests {
         };
         tokio::fs::write(directory.join("track.mp4.checkpoint.json"), serde_json::to_vec(&checkpoint).expect("serialize checkpoint"))
             .await.expect("write checkpoint");
-        let mut abort = stopped_receiver().await;
+        let (_stop_tx, mut abort) = stop_channel();
 
         assert!(write_ordered_track(&resources, &directory, "track.mp4", &mut abort).await.is_err());
         tokio::fs::remove_dir_all(directory).await.expect("remove staging");
@@ -414,7 +419,7 @@ mod tests {
         tokio::fs::write(directory.join("track.mp4"), b"complete").await.expect("write published track");
         tokio::fs::write(directory.join("track.mp4.checkpoint.json"), serde_json::to_vec(&checkpoint).expect("serialize checkpoint"))
             .await.expect("write checkpoint");
-        let mut abort = stopped_receiver().await;
+        let (_stop_tx, mut abort) = stop_channel();
 
         assert!(write_ordered_track(&resources, &directory, "track.mp4", &mut abort).await.expect("recover completed track"));
         assert!(!directory.join("track.mp4.checkpoint.json").exists());
@@ -429,6 +434,5 @@ mod tests {
         let names = vec!["segment.bin".to_string(), "segment.bin".to_string()];
         let mut unique = std::collections::HashSet::new();
         assert!(names.iter().any(|name| !unique.insert(name)));
-        let _ = Arc::new(());
     }
 }

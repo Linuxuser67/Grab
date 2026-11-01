@@ -318,7 +318,7 @@ async fn route_open_uri(
     // torrent intake instead of saving the .torrent itself.
     if is_remote_torrent_url(&uri) {
         if let Err(e) = check_remote_torrent_uri(&uri) {
-            toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+            toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e.to_string())));
             return Routed::Failed;
         }
         let url = uri.as_str().to_string();

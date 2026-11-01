@@ -244,24 +244,31 @@ impl ManifestLookup {
         }
     }
 
-    /// Choose a subtitle matching the requested language, then the manifest default.
+    /// Match yt-dlp's preference policy: configured language, then English,
+    /// otherwise no subtitles. "off" and an unset preference never select a track.
     #[must_use]
     pub(crate) fn preferred_subtitle_choice_index(
         choices: &[ManifestSubtitleChoice],
         preferred_language: Option<&str>,
     ) -> Option<usize> {
-        if preferred_language.is_some_and(|language| language.eq_ignore_ascii_case("off")) {
+        let preferred = preferred_language?;
+        if preferred.eq_ignore_ascii_case("off") {
             return None;
         }
-        preferred_language
-            .and_then(|preferred| {
+        choices
+            .iter()
+            .position(|choice| {
+                choice.language.as_deref().is_some_and(|language| {
+                    subtitle_language_matches(preferred, language)
+                })
+            })
+            .or_else(|| {
                 choices.iter().position(|choice| {
                     choice.language.as_deref().is_some_and(|language| {
-                        subtitle_language_matches(preferred, language)
+                        subtitle_language_matches("en", language)
                     })
                 })
             })
-            .or_else(|| choices.iter().position(|choice| choice.is_default))
     }
 
     /// Resolve the selected subtitle key using the same language preference as yt-dlp.

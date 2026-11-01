@@ -203,11 +203,12 @@ impl ManifestLookup {
                     .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
                     .filter_map(|(rendition, key)| {
                         let key = key?;
-                        (rendition.group_id == group_id).then(|| ManifestSubtitleChoice {
-                            key,
-                            label: hls_subtitle_rendition_label(rendition),
-                            language: rendition.language.clone(),
-                            is_default: rendition.is_default,
+                        (rendition.group_id == group_id && rendition.url.is_some()).then(|| {
+                            ManifestSubtitleChoice {
+                                key,
+                                language: rendition.language.clone(),
+                                is_default: rendition.is_default,
+                            }
                         })
                     })
                     .collect()
@@ -224,29 +225,10 @@ impl ManifestLookup {
                 let mut choices = dash
                     .subtitle_representations
                     .iter()
-                    .map(|track| {
-                        let title = track
-                            .language
-                            .as_deref()
-                            .filter(|language| !language.is_empty())
-                            .or(track.representation_id.as_deref())
-                            .map(short_label)
-                            .unwrap_or_else(|| gettext("Subtitle track"));
-                        let mut label = join_label_parts(
-                            title,
-                            bitrate_label(track.bandwidth),
-                            codec_label(track.codecs.as_deref()),
-                        );
-                        if track.is_default_subtitle {
-                            label.push_str(" · ");
-                            label.push_str(&gettext("Default"));
-                        }
-                        ManifestSubtitleChoice {
-                            key: track.key.clone(),
-                            label,
-                            language: track.language.clone(),
-                            is_default: track.is_default_subtitle,
-                        }
+                    .map(|track| ManifestSubtitleChoice {
+                        key: track.key.clone(),
+                        language: track.language.clone(),
+                        is_default: track.is_default_subtitle,
                     })
                     .collect::<Vec<_>>();
                 choices.sort_by_key(|choice| !choice.is_default);
@@ -583,25 +565,6 @@ pub(crate) fn hls_subtitle_rendition_keys(
                 .map(|stable_id| stable_hls_track_key("hls-subtitle-", b"subtitle", stable_id))
         })
         .collect()
-}
-
-fn hls_subtitle_rendition_label(rendition: &HlsSubtitleRendition) -> String {
-    let language = rendition
-        .language
-        .as_deref()
-        .filter(|language| !language.is_empty())
-        .map(short_label);
-    let name = (!rendition.name.is_empty()).then(|| rendition.name.clone());
-    let mut label = join_label_parts(
-        language.unwrap_or_else(|| gettext("Subtitle track")),
-        name,
-        None,
-    );
-    if rendition.is_default {
-        label.push_str(" · ");
-        label.push_str(&gettext("Default"));
-    }
-    label
 }
 
 fn normalize_subtitle_language(language: &str) -> Option<String> {

@@ -3413,15 +3413,15 @@ async fn run_ffmpeg(
         } else {
             "1:s:0"
         };
-        command
-            .arg("-map")
-            .arg(subtitle_stream)
-            .args(["-c:s", match output_container {
+        command.arg("-map").arg(subtitle_stream).args([
+            "-c:s",
+            match output_container {
                 ManifestOutputContainer::Mp4 => "mov_text",
                 // Matroska preserves the source subtitle codec instead of
                 // forcing MP4's mov_text representation.
                 ManifestOutputContainer::Matroska => "copy",
-            }]);
+            },
+        ]);
     }
     match output_container {
         ManifestOutputContainer::Mp4 => {

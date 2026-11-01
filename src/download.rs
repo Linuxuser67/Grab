@@ -2051,7 +2051,6 @@ impl DownloadManager {
                     is_live,
                     video_format_id,
                     playlist_item_id,
-                    subtitle_language,
                     ..
                 }) => {
                     return self.spawn_video(SpawnVideoParams {
@@ -2592,12 +2591,6 @@ impl DownloadManager {
                             break;
                         }
 
-                        let subtitle_language = match this.video_sources.borrow().get(&id) {
-                            Some(crate::media_types::VideoSource::Manifest { source }) => {
-                                source.subtitle_language.clone()
-                            }
-                            _ => None,
-                        };
                         this.video_sources.borrow_mut().insert(
                             id,
                             crate::media_types::VideoSource::Page {
@@ -2609,7 +2602,6 @@ impl DownloadManager {
                                 is_live: false,
                                 video_format_id: None,
                                 playlist_item_id: None,
-                                subtitle_language,
                                 backend: None,
                             },
                         );
@@ -3042,7 +3034,6 @@ struct SpawnVideoParams {
     video_format_id: Option<String>,
     is_live: bool,
     playlist_item_id: Option<String>,
-    subtitle_language: Option<String>,
 }
 
 impl DownloadManager {
@@ -3056,7 +3047,6 @@ impl DownloadManager {
             video_format_id,
             is_live,
             playlist_item_id,
-            subtitle_language,
         } = params;
         let id = item.id();
         let opts = DownloadOptions::from_settings(&self.settings);
@@ -3114,10 +3104,7 @@ impl DownloadManager {
             subtitles: if audio_only {
                 None
             } else {
-                subtitle_language
-                    .as_deref()
-                    .and_then(crate::video_prefs::subtitle_lang_active)
-                    .or_else(|| crate::video_prefs::subtitle_lang_active(&self.settings.subtitle_language()))
+                crate::video_prefs::subtitle_lang_active(&self.settings.subtitle_language())
             },
             embed_subs: self.settings.embed_subs(),
             sponsorblock_remove: self.settings.sponsorblock_remove(),

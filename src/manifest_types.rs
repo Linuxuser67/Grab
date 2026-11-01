@@ -24,7 +24,6 @@ pub(crate) struct ManifestAudioChoice {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ManifestSubtitleChoice {
     pub(crate) key: String,
-    pub(crate) label: String,
     pub(crate) language: Option<String>,
     pub(crate) is_default: bool,
 }

@@ -3500,11 +3500,11 @@ mod tests {
     #[test]
     fn manifest_output_container_accepts_only_mp4_and_mkv_extensions() {
         assert_eq!(
-            ManifestOutputContainer::from_path(Path::new("stream.mp4")).unwrap(),
+            ManifestOutputContainer::from_path(Path::new("stream.mp4")).expect("MP4 path"),
             ManifestOutputContainer::Mp4
         );
         assert_eq!(
-            ManifestOutputContainer::from_path(Path::new("stream.MKV")).unwrap(),
+            ManifestOutputContainer::from_path(Path::new("stream.MKV")).expect("MKV path"),
             ManifestOutputContainer::Matroska
         );
         assert!(ManifestOutputContainer::from_path(Path::new("stream.webm")).is_err());

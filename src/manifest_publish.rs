@@ -285,8 +285,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn destination_local_copy_is_private_until_no_clobber_persist() {
+    #[tokio::test]
+    async fn destination_local_copy_is_private_until_no_clobber_persist() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.part");
         let destination = directory.path().join("final.mp4");
@@ -305,7 +305,9 @@ mod tests {
         assert_eq!(temporary.path().parent(), destination.parent());
         assert_eq!(std::fs::read(temporary.path()).unwrap(), contents);
 
-        let outcome = persist_prepared_copy(temporary, &destination, &gate).unwrap();
+        let outcome = persist_prepared_copy(temporary, &destination, &gate)
+            .await
+            .unwrap();
         assert_eq!(outcome, ManifestPublishOutcome::Published);
         assert!(gate.was_delivered());
         assert_eq!(std::fs::read(&destination).unwrap(), contents);
@@ -315,8 +317,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn no_clobber_persist_preserves_an_existing_destination() {
+    #[tokio::test]
+    async fn no_clobber_persist_preserves_an_existing_destination() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.part");
         let destination = directory.path().join("final.mp4");
@@ -328,6 +330,7 @@ mod tests {
             .expect("temporary copy should complete");
 
         let error = persist_prepared_copy(temporary, &destination, &gate)
+            .await
             .expect_err("an existing destination must win");
 
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);

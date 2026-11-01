@@ -259,7 +259,9 @@ fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), String> 
     let metadata = librqbit::torrent_from_bytes(bytes)
         .map_err(|error| format!("Invalid resolved torrent metadata: {error}"))?;
     if metadata.info_hash.as_string() != info_hash {
-        return Err(gettext("Resolved torrent metadata does not match the magnet link"));
+        return Err(gettext(
+            "Resolved torrent metadata does not match the magnet link",
+        ));
     }
 
     let dir = torrents_dir();
@@ -394,7 +396,9 @@ pub(crate) async fn list_magnet_files(
         .map(|id| id.as_string())
         .ok_or_else(|| gettext("Only BitTorrent v1 magnets are supported"))?;
     if listing.info_hash.as_string() != info_hash {
-        return Err(gettext("Resolved torrent metadata does not match the magnet link"));
+        return Err(gettext(
+            "Resolved torrent metadata does not match the magnet link",
+        ));
     }
     persist_magnet_metadata(&info_hash, &listing.torrent_bytes)?;
 

@@ -118,10 +118,10 @@ pub enum TorrentError {
     #[error("invalid torrent file list")]
     TrashInvalidFileList,
     /// A single-file torrent target traverses a symlink or unsafe path.
-    #[error("refusing to trash through symlink: {0}")]
+    #[error("refusing to trash through symlink: {}", .0.display())]
     TrashUnsafePath(PathBuf),
     /// GIO could not move a torrent-owned file to the desktop Trash.
-    #[error("could not move {path} to Trash: {source}")]
+    #[error("could not move {} to Trash: {source}", .path.display())]
     TrashFile {
         path: PathBuf,
         #[source]

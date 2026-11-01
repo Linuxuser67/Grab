@@ -452,7 +452,14 @@ pub(crate) struct IsolatedUntrustedHandoffPolicy {
 impl Drop for IsolatedUntrustedHandoffPolicy {
     fn drop(&mut self) {
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
-        *lock_or_panic(cache) = std::mem::take(&mut self.previous);
+        match cache.lock() {
+            Ok(mut cache) => *cache = std::mem::take(&mut self.previous),
+            // Destructors must not panic during unwinding. Leave poisoned state
+            // poisoned; the next ordinary access fails fast instead of reusing it.
+            Err(_) => tracing::error!(
+                "untrusted handoff host cache poisoned; test policy could not be restored"
+            ),
+        }
     }
 }
 

@@ -282,7 +282,9 @@ pub(crate) fn parse_dash_manifest_at(
         return Err(DashError::UnsupportedPresentation);
     }
 
-    let period = &mpd.periods[0];
+    let [period] = mpd.periods.as_slice() else {
+        return Err(DashError::UnsupportedPresentation);
+    };
     if period.href.is_some() || !period.ContentProtection.is_empty() {
         return Err(DashError::UnsupportedPresentation);
     }

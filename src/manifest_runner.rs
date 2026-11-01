@@ -218,6 +218,7 @@ impl From<crate::manifest_intake::ManifestIntakeError> for ManifestRunError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ManifestOutcome {
     Finished(u64),
+    Paused,
     Aborted,
 }
 
@@ -260,6 +261,7 @@ struct LiveHlsTrack {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LiveHlsCaptureOutcome {
     Ended,
+    Paused,
     Preserve,
     PreserveVideoOnly,
     Discard,
@@ -333,6 +335,7 @@ enum DashLiveUpdateOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DashLiveCaptureOutcome {
     Ended,
+    Paused,
     Preserve,
     PreserveVideoOnly,
     Discard,
@@ -537,6 +540,7 @@ pub(crate) async fn run_manifest_download(
         .await?;
         match capture {
             LiveHlsCaptureOutcome::Ended => {}
+            LiveHlsCaptureOutcome::Paused => return Ok(ManifestOutcome::Paused),
             LiveHlsCaptureOutcome::Preserve | LiveHlsCaptureOutcome::PreserveVideoOnly => {
                 // A preserved stop ends recording but still needs a live
                 // receiver during FFmpeg finalization. Removal remains guarded
@@ -591,6 +595,7 @@ pub(crate) async fn run_manifest_download(
         .await?;
         match capture.outcome {
             DashLiveCaptureOutcome::Discard => return Ok(ManifestOutcome::Aborted),
+            DashLiveCaptureOutcome::Paused => return Ok(ManifestOutcome::Paused),
             DashLiveCaptureOutcome::Preserve | DashLiveCaptureOutcome::PreserveVideoOnly => {
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 _preserve_stop_sender = Some(sender);
@@ -1707,6 +1712,7 @@ async fn run_live_hls_tracks(
         }
         LiveHlsSnapshotOutcome::Stopped(intent) => {
             return Ok(match intent {
+                crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                 crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
                 crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
             });
@@ -1753,7 +1759,8 @@ async fn run_live_hls_tracks(
             }
             LiveHlsSnapshotOutcome::Stopped(intent) => {
                 return Ok(match intent {
-                    crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::PreserveVideoOnly,
+                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::PreserveVideoOnly,
                     crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                 });
             }
@@ -1787,7 +1794,8 @@ async fn run_live_hls_tracks(
             biased;
             stop = &mut *abort => {
                 return Ok(match stop.unwrap_or(crate::video::StopIntent::Discard) {
-                    crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
+                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
                     crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                 });
             }
@@ -1820,7 +1828,8 @@ async fn run_live_hls_tracks(
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
-                        crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
+                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
                         crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                     });
                 }
@@ -1861,7 +1870,8 @@ async fn run_live_hls_tracks(
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
-                        crate::video::StopIntent::Preserve => {
+                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                crate::video::StopIntent::Preserve => {
                             LiveHlsCaptureOutcome::PreserveVideoOnly
                         }
                         crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
@@ -2995,7 +3005,8 @@ async fn run_live_dash_tracks(
         }
         DashLiveUpdateOutcome::Stopped(intent) => {
             finish_capture!(match intent {
-                crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
+                crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
+                    crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
                 crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
             });
         }
@@ -3034,6 +3045,7 @@ async fn run_live_dash_tracks(
             }
             DashLiveUpdateOutcome::Stopped(intent) => {
                 finish_capture!(match intent {
+                    crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
                     crate::video::StopIntent::Preserve => {
                         DashLiveCaptureOutcome::PreserveVideoOnly
                     }
@@ -3061,6 +3073,7 @@ async fn run_live_dash_tracks(
             biased;
             stop = &mut *abort => {
                 finish_capture!(match stop.unwrap_or(crate::video::StopIntent::Discard) {
+                    crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
                     crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                 });
@@ -3072,6 +3085,7 @@ async fn run_live_dash_tracks(
             biased;
             stop = &mut *abort => {
                 finish_capture!(match stop.unwrap_or(crate::video::StopIntent::Discard) {
+                    crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
                     crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                 });
@@ -3164,6 +3178,7 @@ async fn run_live_dash_tracks(
             }
             DashLiveUpdateOutcome::Stopped(intent) => {
                 finish_capture!(match intent {
+                    crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
                     crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                 });
@@ -3201,7 +3216,8 @@ async fn run_live_dash_tracks(
                     }
                     DashLiveUpdateOutcome::Stopped(intent) => {
                         finish_capture!(match intent {
-                            crate::video::StopIntent::Preserve => {
+                            crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
+                    crate::video::StopIntent::Preserve => {
                                 DashLiveCaptureOutcome::PreserveVideoOnly
                             }
                             crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
@@ -3246,7 +3262,8 @@ async fn run_live_dash_tracks(
                     }
                     DashLiveUpdateOutcome::Stopped(intent) => {
                         finish_capture!(match intent {
-                            crate::video::StopIntent::Preserve => {
+                            crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
+                    crate::video::StopIntent::Preserve => {
                                 DashLiveCaptureOutcome::PreserveVideoOnly
                             }
                             crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,

@@ -24,7 +24,9 @@ fn parses_valid_magnets() {
         Err(TorrentError::InvalidMagnet(_))
     ));
     assert!(matches!(
-        parse_magnet("magnet:?xt=urn:btmh:1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        parse_magnet(
+            "magnet:?xt=urn:btmh:1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
         Err(TorrentError::UnsupportedMagnetVersion(_))
     ));
     assert!(parse_magnet("https://example.com/f.iso").is_err());

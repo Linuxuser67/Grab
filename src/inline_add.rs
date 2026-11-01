@@ -2308,9 +2308,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     manifest_audio_format.set_visible(false);
     video_group.add(&manifest_audio_format);
-    let subtitle_format = adw::ComboRow::builder()
-        .title(gettext("Subtitles"))
-        .build();
+    let subtitle_format = adw::ComboRow::builder().title(gettext("Subtitles")).build();
     subtitle_format.set_visible(false);
     video_group.add(&subtitle_format);
 

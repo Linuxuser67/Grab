@@ -8846,7 +8846,11 @@ fn resolve_subtitle_lang_uses_the_explicit_language_without_a_probe_or_fallback(
         &mut abort_rx,
         None,
     ));
-    assert_eq!(result, Ok(None), "cached metadata must reject a disappeared track");
+    assert_eq!(
+        result,
+        Ok(None),
+        "cached metadata must reject a disappeared track"
+    );
 }
 
 #[test]

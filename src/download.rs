@@ -2606,7 +2606,8 @@ impl DownloadManager {
                                 is_live: false,
                                 video_format_id: None,
                                 playlist_item_id: None,
-                                subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
+                                subtitle_selection:
+                                    crate::media_types::SubtitleSelection::Automatic,
                                 backend: None,
                             },
                         );

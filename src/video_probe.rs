@@ -857,10 +857,12 @@ mod subtitle_language_tests {
     #[test]
     fn subtitle_languages_ignore_missing_or_non_object_maps() {
         assert!(subtitle_languages(&serde_json::json!({})).is_empty());
-        assert!(subtitle_languages(&serde_json::json!({
-            "subtitles": null,
-            "automatic_captions": []
-        }))
-        .is_empty());
+        assert!(
+            subtitle_languages(&serde_json::json!({
+                "subtitles": null,
+                "automatic_captions": []
+            }))
+            .is_empty()
+        );
     }
 }

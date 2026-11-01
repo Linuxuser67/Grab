@@ -1338,7 +1338,10 @@ pub(crate) async fn resolve_subtitle_lang(
             if let Some(json) = job.info_json.as_ref() {
                 let available = available_subtitle_langs(json);
                 if !available.is_empty() {
-                    return Ok(pick_subtitle_lang(&available, &[selected_language.as_str()]));
+                    return Ok(pick_subtitle_lang(
+                        &available,
+                        &[selected_language.as_str()],
+                    ));
                 }
             }
             return Ok(Some(selected_language));

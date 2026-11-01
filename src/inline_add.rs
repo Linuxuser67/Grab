@@ -2784,9 +2784,6 @@ fn build_download_options(
     }
 }
 
-/// Build the inline New Download card. The returned [`AddCard`] owns the
-/// widget and the open/toggle entry points; the card starts collapsed.
-
 /// Shared state required by the asynchronous video metadata lookup callback.
 struct VideoLookupContext {
     probe: Rc<RefCell<ProbeState>>,
@@ -3962,6 +3959,8 @@ fn wire_video_preview_actions(
 
 }
 
+/// Build the inline New Download card. The returned [`AddCard`] owns the
+/// widget and the open/toggle entry points; the card starts collapsed.
 pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let open_state = Rc::new(OpenState::default());
     // Shared scheduled-download timestamp: set by the schedule picker UI,

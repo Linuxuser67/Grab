@@ -503,11 +503,8 @@ pub(crate) async fn run_manifest_download(
         Tracks::Hls { video, audio, .. }
             if video.is_live || audio.as_ref().is_some_and(|track| track.is_live)
     );
-    let live_hls = !finish_requested
-        && matches!(&tracks, Tracks::Hls { .. })
-        && (live_source || live_marker_exists);
-    let live_dash = !finish_requested
-        && dash_live_requested
+    let live_hls = matches!(&tracks, Tracks::Hls { .. }) && (live_source || live_marker_exists);
+    let live_dash = dash_live_requested
         && matches!(
             &tracks,
             Tracks::Dash { .. } | Tracks::DashLiveOffline { .. }
@@ -521,7 +518,7 @@ pub(crate) async fn run_manifest_download(
             "A live HLS staging marker belongs to a non-HLS queue item".to_string(),
         ));
     }
-    if live_hls || live_dash {
+    if !finish_requested && (live_hls || live_dash) {
         tx.send(EngineMsg::LiveDetected).ok();
     }
     tx.send(EngineMsg::Phase(if finish_requested || live_hls {
@@ -550,6 +547,7 @@ pub(crate) async fn run_manifest_download(
             dest_dir,
             video,
             audio.as_ref(),
+            finish_requested,
             &video_dir,
             &audio_dir,
             concurrency,
@@ -577,9 +575,11 @@ pub(crate) async fn run_manifest_download(
                         .map_err(ManifestRunError::Failed)?;
                     has_audio = false;
                 }
-                let (sender, receiver) = tokio::sync::oneshot::channel();
-                _finish_stop_sender = Some(sender);
-                abort = receiver;
+                if !finish_requested {
+                    let (sender, receiver) = tokio::sync::oneshot::channel();
+                    _finish_stop_sender = Some(sender);
+                    abort = receiver;
+                }
             }
             LiveHlsCaptureOutcome::Discard => return Ok(ManifestOutcome::Aborted),
         }
@@ -589,9 +589,14 @@ pub(crate) async fn run_manifest_download(
         if has_audio && !staged_regular_file_exists(&audio_dir.join("local.m3u8")).await {
             has_audio = false;
         }
-        ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
-            .await
-            .map_err(ManifestRunError::Failed)?;
+        if finish_requested {
+            downloaded.store(finish_marker_bytes.unwrap_or(0), Ordering::Relaxed);
+        } else {
+            ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
+                .await
+                .map_err(ManifestRunError::Failed)?;
+        }
+        tx.send(EngineMsg::LiveFinalizing).ok();
     } else if live_dash {
         let (video_plan, audio_plan) = match &tracks {
             Tracks::Dash { video, audio, .. } => (Some(video), audio.as_deref()),
@@ -670,9 +675,14 @@ pub(crate) async fn run_manifest_download(
         {
             return Ok(ManifestOutcome::Aborted);
         }
-        ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
-            .await
-            .map_err(ManifestRunError::Failed)?;
+        if finish_requested {
+            downloaded.store(finish_marker_bytes.unwrap_or(0), Ordering::Relaxed);
+        } else {
+            ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
+                .await
+                .map_err(ManifestRunError::Failed)?;
+        }
+        tx.send(EngineMsg::LiveFinalizing).ok();
     } else {
         match &tracks {
             Tracks::Hls {
@@ -1730,6 +1740,7 @@ async fn run_live_hls_tracks(
     destination_dir: &Path,
     video_plan: &HlsPlan,
     audio_plan: Option<&HlsPlan>,
+    finish_only: bool,
     video_dir: &Path,
     audio_dir: &Path,
     connections: usize,
@@ -1760,6 +1771,9 @@ async fn run_live_hls_tracks(
     downloaded.store(retained_bytes, Ordering::Relaxed);
     let staging_dir = video_dir.parent().unwrap_or(video_dir);
     ensure_manifest_mux_spaces(staging_dir, destination_dir, retained_bytes)?;
+    if finish_only {
+        return Ok(LiveHlsCaptureOutcome::Finish);
+    }
 
     let audio_resource_bytes = audio
         .as_ref()

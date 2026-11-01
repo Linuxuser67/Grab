@@ -704,6 +704,163 @@ async fn prepare_manifest_attempt(
     })
 }
 
+/// Inputs for downloading and assembling the selected non-live manifest tracks.
+struct ManifestStaticTransfer<'a> {
+    client: &'a reqwest::Client,
+    tracks: &'a Tracks,
+    staging: &'a Path,
+    video_dir: &'a Path,
+    audio_dir: &'a Path,
+    concurrency: usize,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'a Arc<AtomicU64>,
+    abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+}
+
+/// Transfer selected static HLS/DASH resources and assemble their local track inputs.
+///
+/// Returns `false` when the attempt was stopped before all selected tracks were staged.
+async fn transfer_static_manifest_tracks(
+    context: ManifestStaticTransfer<'_>,
+) -> Result<bool, ManifestRunError> {
+    let ManifestStaticTransfer {
+        client,
+        tracks,
+        staging,
+        video_dir,
+        audio_dir,
+        concurrency,
+        tx,
+        downloaded,
+        abort,
+    } = context;
+    match tracks {
+        Tracks::Hls {
+            video,
+            audio,
+            subtitle,
+            ..
+        } => {
+            if !fetch_resources(
+                client,
+                hls_resources(video),
+                video_dir,
+                concurrency,
+                tx,
+                downloaded,
+                abort,
+            )
+            .await?
+            {
+                return Ok(false);
+            }
+            if let Some(audio) = audio
+                && !fetch_resources(
+                    client,
+                    hls_resources(audio),
+                    audio_dir,
+                    concurrency,
+                    tx,
+                    downloaded,
+                    abort,
+                )
+                .await?
+            {
+                return Ok(false);
+            }
+            write_playlist(video_dir, video).await?;
+            if let Some(audio) = audio {
+                write_playlist(audio_dir, audio).await?;
+            }
+            if let Some(subtitle) = subtitle {
+                let subtitle_dir = staging.join("subtitles");
+                ensure_track_dir(&subtitle_dir).await?;
+                if !fetch_resources(
+                    client,
+                    hls_resources(subtitle),
+                    &subtitle_dir,
+                    concurrency,
+                    tx,
+                    downloaded,
+                    abort,
+                )
+                .await?
+                {
+                    return Ok(false);
+                }
+                write_playlist(&subtitle_dir, subtitle).await?;
+            }
+        }
+        Tracks::Dash {
+            video,
+            audio,
+            subtitle,
+            ..
+        } => {
+            if !fetch_resources(
+                client,
+                dash_resources(video),
+                video_dir,
+                concurrency,
+                tx,
+                downloaded,
+                abort,
+            )
+            .await?
+            {
+                return Ok(false);
+            }
+            if !concat_dash_track(video, video_dir, "video-track.mp4", abort).await? {
+                return Ok(false);
+            }
+            if let Some(audio) = audio {
+                if !fetch_resources(
+                    client,
+                    dash_resources(audio),
+                    audio_dir,
+                    concurrency,
+                    tx,
+                    downloaded,
+                    abort,
+                )
+                .await?
+                {
+                    return Ok(false);
+                }
+                if !concat_dash_track(audio, audio_dir, "audio-track.mp4", abort).await? {
+                    return Ok(false);
+                }
+            }
+            if let Some(subtitle) = subtitle {
+                let subtitle_dir = staging.join("subtitles");
+                ensure_track_dir(&subtitle_dir).await?;
+                if !fetch_resources(
+                    client,
+                    dash_resources(subtitle),
+                    &subtitle_dir,
+                    concurrency,
+                    tx,
+                    downloaded,
+                    abort,
+                )
+                .await?
+                {
+                    return Ok(false);
+                }
+                if !concat_dash_track(subtitle, &subtitle_dir, "subtitle-track.mp4", abort).await? {
+                    return Ok(false);
+                }
+            }
+        }
+        Tracks::DashLiveOffline { .. } => {
+            return Err(ManifestRunError::Failed(
+                "A restored live DASH item bypassed the native live capture path".to_string(),
+            ));
+        }
+    }
+    Ok(true)
+}
+
 /// Run one HLS or static-DASH attempt, keeping completed resources for retry.
 ///
 /// # Errors
@@ -894,135 +1051,21 @@ pub(crate) async fn run_manifest_download(
         {
             return Ok(ManifestOutcome::Aborted);
         }
-    } else {
-        match &tracks {
-            Tracks::Hls {
-                video,
-                audio,
-                subtitle,
-                ..
-            } => {
-                if !fetch_resources(
-                    &client,
-                    hls_resources(video),
-                    &video_dir,
-                    concurrency,
-                    &tx,
-                    &downloaded,
-                    &mut abort,
-                )
-                .await?
-                {
-                    return Ok(ManifestOutcome::Aborted);
-                }
-                if let Some(audio) = audio
-                    && !fetch_resources(
-                        &client,
-                        hls_resources(audio),
-                        &audio_dir,
-                        concurrency,
-                        &tx,
-                        &downloaded,
-                        &mut abort,
-                    )
-                    .await?
-                {
-                    return Ok(ManifestOutcome::Aborted);
-                }
-                write_playlist(&video_dir, video).await?;
-                if let Some(audio) = audio {
-                    write_playlist(&audio_dir, audio).await?;
-                }
-                if let Some(subtitle) = subtitle {
-                    let subtitle_dir = staging.join("subtitles");
-                    ensure_track_dir(&subtitle_dir).await?;
-                    if !fetch_resources(
-                        &client,
-                        hls_resources(subtitle),
-                        &subtitle_dir,
-                        concurrency,
-                        &tx,
-                        &downloaded,
-                        &mut abort,
-                    )
-                    .await?
-                    {
-                        return Ok(ManifestOutcome::Aborted);
-                    }
-                    write_playlist(&subtitle_dir, subtitle).await?;
-                }
-            }
-            Tracks::Dash {
-                video,
-                audio,
-                subtitle,
-                ..
-            } => {
-                if !fetch_resources(
-                    &client,
-                    dash_resources(video),
-                    &video_dir,
-                    concurrency,
-                    &tx,
-                    &downloaded,
-                    &mut abort,
-                )
-                .await?
-                {
-                    return Ok(ManifestOutcome::Aborted);
-                }
-                if !concat_dash_track(video, &video_dir, "video-track.mp4", &mut abort).await? {
-                    return Ok(ManifestOutcome::Aborted);
-                }
-                if let Some(audio) = audio {
-                    if !fetch_resources(
-                        &client,
-                        dash_resources(audio),
-                        &audio_dir,
-                        concurrency,
-                        &tx,
-                        &downloaded,
-                        &mut abort,
-                    )
-                    .await?
-                    {
-                        return Ok(ManifestOutcome::Aborted);
-                    }
-                    if !concat_dash_track(audio, &audio_dir, "audio-track.mp4", &mut abort).await? {
-                        return Ok(ManifestOutcome::Aborted);
-                    }
-                }
-                if let Some(subtitle) = subtitle {
-                    let subtitle_dir = staging.join("subtitles");
-                    ensure_track_dir(&subtitle_dir).await?;
-                    if !fetch_resources(
-                        &client,
-                        dash_resources(subtitle),
-                        &subtitle_dir,
-                        concurrency,
-                        &tx,
-                        &downloaded,
-                        &mut abort,
-                    )
-                    .await?
-                    {
-                        return Ok(ManifestOutcome::Aborted);
-                    }
-                    if !concat_dash_track(subtitle, &subtitle_dir, "subtitle-track.mp4", &mut abort)
-                        .await?
-                    {
-                        return Ok(ManifestOutcome::Aborted);
-                    }
-                }
-            }
-            Tracks::DashLiveOffline { .. } => {
-                return Err(ManifestRunError::Failed(
-                    "A restored live DASH item bypassed the native live capture path".to_string(),
-                ));
-            }
-        }
+    } else if !transfer_static_manifest_tracks(ManifestStaticTransfer {
+        client: &client,
+        tracks: &tracks,
+        staging: &staging,
+        video_dir: &video_dir,
+        audio_dir: &audio_dir,
+        concurrency,
+        tx: &tx,
+        downloaded: &downloaded,
+        abort: &mut abort,
+    })
+    .await?
+    {
+        return Ok(ManifestOutcome::Aborted);
     }
-
     finalize_manifest_download(ManifestFinalization {
         job: &job,
         gate,

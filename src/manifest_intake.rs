@@ -735,7 +735,9 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
     }
     let video_key_is_valid = match source.kind {
         crate::media_types::ManifestKind::Hls => {
-            (source.representation_key == "hls-media" && source.audio_key.is_none())
+            (source.representation_key == "hls-media"
+                && source.audio_key.is_none()
+                && source.subtitle_key.is_none())
                 || has_hex_fingerprint(&source.representation_key, "hls-variant-", 32)
                 || has_hex_fingerprint(&source.representation_key, "hls-variant-", 64)
         }
@@ -1395,6 +1397,8 @@ video/es.m3u8
         source.representation_key = "hls-media".to_string();
         source.audio_key = None;
         assert!(valid_source(&source));
+        source.subtitle_key = Some("hls-subtitle-0123456789abcdef0123456789abcdef".to_string());
+        assert!(!valid_source(&source));
     }
 
     #[test]

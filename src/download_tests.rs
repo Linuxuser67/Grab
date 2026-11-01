@@ -4885,6 +4885,65 @@ fn removing_a_plain_row_still_aborts_its_task_and_frees_the_slot() {
 }
 
 #[test]
+fn live_detected_registers_a_downloading_row_for_stop_preservation() {
+    let (_q, _l) = test_locks();
+    let qf = test_queue_file("live-detected-pump");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 921_500 + std::process::id() as u64;
+    let item = DownloadItem::new(
+        id,
+        "https://example.com/live.m3u8",
+        "live.mp4",
+        "/tmp/dl",
+    );
+    item.set_status(DownloadStatus::Downloading);
+    manager.store().append(&item);
+    manager.epoch.borrow_mut().insert(id, 1);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    manager.pump(item.clone(), id, 1, rx);
+    tx.send(crate::engine_msg::EngineMsg::LiveDetected)
+        .expect("pump receiver should still be open");
+
+    let context = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !manager.live_rows.borrow().contains(&id)
+        && std::time::Instant::now() < deadline
+    {
+        context.iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        manager.live_rows.borrow().contains(&id),
+        "a live-detection message must register a currently downloading row"
+    );
+    assert!(
+        !manager.stop_engine(id),
+        "a registered live row must be signalled for preservation, not aborted"
+    );
+
+    item.set_status(DownloadStatus::Paused);
+    drop(tx);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while manager.pump_handles.borrow().contains_key(&id)
+        && std::time::Instant::now() < deadline
+    {
+        context.iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        !manager.pump_handles.borrow().contains_key(&id),
+        "the pump must finish after its message channel closes"
+    );
+    assert!(
+        !manager.live_rows.borrow().contains(&id),
+        "pump cleanup must remove the live marker"
+    );
+    let _ = std::fs::remove_file(qf);
+}
+
+#[test]
 fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     // Old `remove` could neither say *how* to stop nor wait. The stand-in recreates
     // dirs before its late write, so only a sweep that waits for teardown passes.

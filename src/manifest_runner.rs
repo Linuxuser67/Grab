@@ -457,6 +457,9 @@ pub(crate) async fn run_manifest_download(
             "A live HLS staging marker belongs to a non-HLS queue item".to_string(),
         ));
     }
+    if live_hls || live_dash {
+        tx.send(EngineMsg::LiveDetected).ok();
+    }
     tx.send(EngineMsg::Phase(if live_source || live_dash {
         "Recording live stream…".to_string()
     } else if live_hls {

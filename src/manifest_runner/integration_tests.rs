@@ -980,6 +980,10 @@ async fn live_hls_sequence_gap_preserves_already_committed_media() {
 async fn live_hls_pause_keeps_the_last_committed_window() {
     let root = TempRoot::new("live-preserve");
     let video_dir = root.path().join("video");
+    let audio_dir = root.path().join("audio");
+    tokio::fs::create_dir_all(&audio_dir)
+        .await
+        .expect("create live HLS audio staging");
     tokio::fs::create_dir_all(&video_dir)
         .await
         .expect("create live preserve staging");

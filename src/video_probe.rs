@@ -818,7 +818,6 @@ mod sanitized_protocol_tests {
     }
 }
 
-
 #[cfg(test)]
 mod subtitle_language_tests {
     use super::subtitle_languages;

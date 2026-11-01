@@ -1299,7 +1299,8 @@ fn available_subtitle_langs(info: &serde_json::Value) -> std::collections::HashS
 
 /// Resolve the subtitle language for the media command. Automatic mode uses
 /// the configured preference then English; explicit mode requires the selected
-/// language; Off and audio-only modes skip subtitle discovery. When the media leg reuses the probe's info JSON
+/// language; Off and audio-only modes skip subtitle discovery. When the media
+/// leg reuses the probe's info JSON
 /// (--load-info-json), that JSON already lists the offered tracks — the
 /// same extraction a fresh probe would pay for — so pick from it and skip
 /// the probe instead of a second network fetch. The probe is one
@@ -1347,7 +1348,7 @@ pub(crate) async fn resolve_subtitle_lang(
         if !available.is_empty() {
             let lang = pick_subtitle_lang(&available, &candidate_refs);
             if lang.is_none() {
-            tracing::debug!("video offers no subtitles in the preferred language or English");
+                tracing::debug!("video offers no matching subtitle language");
             } else {
                 tracing::debug!("subtitle resolve: reused the probe info JSON, skipping the probe");
             }
@@ -1447,7 +1448,7 @@ pub(crate) async fn resolve_subtitle_lang(
     let available = available_subtitle_langs(&info);
     let lang = pick_subtitle_lang(&available, &candidate_refs);
     if lang.is_none() {
-        tracing::debug!("video offers no subtitles in the preferred language or English");
+        tracing::debug!("video offers no matching subtitle language");
     }
     Ok(lang)
 }

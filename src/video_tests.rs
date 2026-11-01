@@ -8823,7 +8823,7 @@ fn resolve_subtitle_lang_uses_the_explicit_language_without_english_fallback() {
         r#"{"subtitles":{"fr":[{"url":"http://x/fr","ext":"vtt"}]},"automatic_captions":{"en":[{"url":"http://x/en","ext":"vtt"}]}}"#,
         false,
     );
-    let mut job = probe_test_job(Some("de"));
+    let mut job = probe_test_job(None);
     job.info_json = Some(serde_json::json!({"subtitles": {}, "automatic_captions": {}}));
     job.subtitle_selection = crate::media_types::SubtitleSelection::Language("fr".into());
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
@@ -8843,7 +8843,11 @@ fn resolve_subtitle_lang_uses_the_explicit_language_without_english_fallback() {
         &mut abort_rx,
         None,
     ));
-    assert_eq!(result, Ok(None), "an explicit missing language must not silently switch to English");
+    assert_eq!(
+        result,
+        Ok(None),
+        "an explicit missing language must not silently switch to English"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

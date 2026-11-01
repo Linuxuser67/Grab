@@ -834,25 +834,39 @@ fn refresh_manifest_audio_picker(step: &VideoStep, video_key: Option<&str>) {
 /// Clear per-download subtitle choices when the source preview changes.
 fn clear_subtitle_picker(step: &VideoStep) {
     step.subtitle_choices.borrow_mut().clear();
-    step.subtitle_selection.replace(crate::media_types::SubtitleSelection::Automatic);
-    step.subtitle_format.set_model(Some(&gtk4::StringList::new(&[])));
+    step.subtitle_selection
+        .replace(crate::media_types::SubtitleSelection::Automatic);
+    step.subtitle_format
+        .set_model(Some(&gtk4::StringList::new(&[])));
     step.subtitle_format.set_visible(false);
 }
 
 /// Populate the subtitle picker from the current page's offered tracks.
 fn refresh_subtitle_picker(step: &VideoStep, languages: &[String]) {
-    let mut choices = vec![crate::media_types::SubtitleSelection::Automatic, crate::media_types::SubtitleSelection::Off];
-    choices.extend(languages.iter().cloned().map(crate::media_types::SubtitleSelection::Language));
-    let labels = choices.iter().map(|choice| match choice {
-        crate::media_types::SubtitleSelection::Automatic => gettext("Automatic"),
-        crate::media_types::SubtitleSelection::Off => gettext("Off"),
-        crate::media_types::SubtitleSelection::Language(language) => language.clone(),
-    }).collect::<Vec<_>>();
+    let mut choices = vec![
+        crate::media_types::SubtitleSelection::Automatic,
+        crate::media_types::SubtitleSelection::Off,
+    ];
+    choices.extend(
+        languages
+            .iter()
+            .cloned()
+            .map(crate::media_types::SubtitleSelection::Language),
+    );
+    let labels = choices
+        .iter()
+        .map(|choice| match choice {
+            crate::media_types::SubtitleSelection::Automatic => gettext("Automatic"),
+            crate::media_types::SubtitleSelection::Off => gettext("Off"),
+            crate::media_types::SubtitleSelection::Language(language) => language.clone(),
+        })
+        .collect::<Vec<_>>();
     let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
     step.subtitle_format.set_model(Some(&gtk4::StringList::new(&label_refs)));
     step.subtitle_format.set_selected(0);
     step.subtitle_choices.replace(choices);
-    step.subtitle_selection.replace(crate::media_types::SubtitleSelection::Automatic);
+    step.subtitle_selection
+        .replace(crate::media_types::SubtitleSelection::Automatic);
     sync_subtitle_picker_visibility(step);
 }
 
@@ -2395,7 +2409,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         manifest_audio_selection: Rc::new(RefCell::new(None)),
         manifest_audio_format,
         subtitle_choices: Rc::new(RefCell::new(Vec::new())),
-        subtitle_selection: Rc::new(RefCell::new(crate::media_types::SubtitleSelection::Automatic)),
+        subtitle_selection: Rc::new(RefCell::new(
+            crate::media_types::SubtitleSelection::Automatic,
+        )),
         subtitle_format,
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,

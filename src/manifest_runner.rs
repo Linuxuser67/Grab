@@ -713,7 +713,7 @@ struct ManifestStaticTransfer<'a> {
     audio_dir: &'a Path,
     concurrency: usize,
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &'a AtomicU64,
+    downloaded: &'a Arc<AtomicU64>,
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 

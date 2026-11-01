@@ -25,9 +25,13 @@ pub(crate) enum RecoveryError {
     UnsupportedVersion(u32),
     #[error("manifest recovery metadata is not a regular file")]
     NotRegularFile,
-    #[error("The selected manifest tracks or output container changed; existing staged data was preserved. Remove and add the download again to start a new plan.")]
+    #[error(
+        "The selected manifest tracks or output container changed; existing staged data was preserved. Remove and add the download again to start a new plan."
+    )]
     FingerprintMismatch,
-    #[error("Existing manifest staging data has no plan fingerprint; refusing unsafe recovery and preserving the data. Remove and add the download again to start a new plan.")]
+    #[error(
+        "Existing manifest staging data has no plan fingerprint; refusing unsafe recovery and preserving the data. Remove and add the download again to start a new plan."
+    )]
     UnfingerprintedStagedData,
     #[error("manifest recovery I/O failed while {operation}: {source}")]
     Io {
@@ -182,12 +186,11 @@ fn write_recovery_marker(
 
     // NamedTempFile creates a private file in the same directory, so
     // persist_noclobber() publishes it atomically without replacing an existing marker.
-    let mut temporary = tempfile::NamedTempFile::new_in(staging).map_err(|source| {
-        RecoveryError::Io {
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(staging).map_err(|source| RecoveryError::Io {
             operation: "creating recovery metadata",
             source,
-        }
-    })?;
+        })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

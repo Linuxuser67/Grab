@@ -807,6 +807,12 @@ impl DownloadManager {
         (0..store.n_items()).filter_map(|i| store.item(i).and_downcast::<DownloadItem>())
     }
 
+    /// Whether a non-finished row already owns this normalized URL.
+    pub(crate) fn has_nonterminal_url(&self, url: &str) -> bool {
+        self.items()
+            .any(|item| item.status() != DownloadStatus::Done && item.url() == url)
+    }
+
     /// Position of the row with `id`, if it is still listed.
     fn position_of(&self, id: u64) -> Option<u32> {
         (0..self.store.n_items()).find(|&i| {
@@ -894,16 +900,54 @@ impl DownloadManager {
             .unwrap_or_else(|| self.effective_download_dir())
     }
 
-    /// Validate and queue a download, starting it when a slot is free.
+    /// Prepare the validated magnet and torrent-session settings for metadata lookup.
     ///
-    /// Names dedupe against live rows and reservations only: an on-disk file
-    /// never renames the intake. The engine refuses a fresh row whose
-    /// destination already exists (Parabolic-style), so duplicates surface as
-    /// an error instead of scattering ` (1)` copies.
+    /// # Errors
+    /// Returns a display-ready message when the magnet or torrent network
+    /// configuration is invalid.
+    pub(crate) fn prepare_magnet_metadata_lookup(
+        &self,
+        magnet: &str,
+    ) -> Result<(String, crate::torrent::SessionConfig), String> {
+        let magnet = normalize_url(magnet)?;
+        let settings = &self.settings;
+        let blocklist_url = crate::torrent::blocklist_url_of(&settings.torrent_blocklist_url())?;
+        let proxy = DownloadOptions::from_settings(settings).proxy_config()?;
+        let (listen_port, upnp) = crate::torrent::resolve_listen_config(
+            settings.torrent_seed_finished(),
+            settings.torrent_listen_port(),
+            settings.torrent_upnp(),
+        );
+        let net = crate::torrent::plan_torrent_net(
+            settings.torrent_dht(),
+            settings.torrent_lsd(),
+            listen_port,
+            upnp,
+            None,
+            proxy.as_ref(),
+        );
+        Ok((
+            magnet,
+            crate::torrent::SessionConfig {
+                dht: net.dht,
+                peer_limit: None,
+                download_bps: parse_rate(settings.speed_limit().trim()),
+                upload_bps: parse_rate(settings.torrent_upload_limit().trim()),
+                listen_port: net.listen_port,
+                upnp: net.upnp,
+                socks_proxy: net.socks_proxy,
+                blocklist_url,
+                lsd: net.lsd,
+            },
+        ))
+    }
+
+    /// Queue a download after listing its destination off GTK. The
+    /// engine refuses a fresh row whose destination already exists, so
+    /// duplicates surface as an error instead of scattering ` (1)` copies.
     ///
     /// # Errors
     /// Returns a display-ready message when the URL or filename is invalid.
-    /// Queue a plain download after listing its destination off GTK.
     pub(crate) async fn enqueue_async_batched(
         self: &Rc<Self>,
         url: &str,

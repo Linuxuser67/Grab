@@ -32,6 +32,13 @@ fn classifier_never_panics_on_unicode() {
 }
 
 #[test]
+fn classifier_accepts_pasted_bom_before_magnet_scheme() {
+    assert!(is_magnet(
+        "\u{feff}magnet:?xt=urn:btih:0123456789012345678901234567890123456789"
+    ));
+}
+
+#[test]
 fn stub_prefers_name_then_hash() {
     assert_eq!(stub_name(MAGNET).as_deref(), Some("test file"));
     assert_eq!(

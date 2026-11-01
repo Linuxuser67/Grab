@@ -589,6 +589,26 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         segment_bytes.len() as u64,
         "restoring a saved capture restores its retained-byte progress without a new fetch"
     );
+
+    let (_finish_tx, mut finish_abort) = tokio::sync::oneshot::channel();
+    let finish_outcome = run_live_hls_tracks(
+        &client,
+        "https://origin.example.test/master.m3u8",
+        root.path(),
+        &local_plan,
+        None,
+        true,
+        &video_dir,
+        &audio_dir,
+        1,
+        &tx,
+        &downloaded,
+        &mut guarded_child_hosts,
+        &mut finish_abort,
+    )
+    .await
+    .expect("resume a durable finish without polling the source");
+    assert_eq!(finish_outcome, LiveHlsCaptureOutcome::Finish);
     let final_playlist = m3u8_rs::parse_media_playlist_res(
         &tokio::fs::read(video_dir.join("local.m3u8"))
             .await

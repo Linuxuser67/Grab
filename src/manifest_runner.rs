@@ -960,20 +960,20 @@ pub(crate) async fn run_manifest_download(
         }
     }
 
-    finalize_manifest_download(
-        &job,
+    finalize_manifest_download(ManifestFinalization {
+        job: &job,
         gate,
         abort,
-        &tx,
-        &staging,
+        tx: &tx,
+        staging: &staging,
         dest_dir,
-        &video_dir,
-        &audio_dir,
+        video_dir: &video_dir,
+        audio_dir: &audio_dir,
         output_part,
         tracks,
         has_audio,
-        &downloaded,
-    )
+        downloaded: &downloaded,
+    })
     .await
 }
 
@@ -981,20 +981,42 @@ pub(crate) async fn run_manifest_download(
 ///
 /// The staging data is retained on every failure before publication so the queue
 /// can retry without downloading already completed resources.
-async fn finalize_manifest_download(
-    job: &ManifestJob,
+struct ManifestFinalization<'a> {
+    job: &'a ManifestJob,
     gate: Arc<crate::attempt_gate::AttemptGate>,
-    mut abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    staging: &Path,
-    dest_dir: &Path,
-    video_dir: &Path,
-    audio_dir: &Path,
+    abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    staging: &'a Path,
+    dest_dir: &'a Path,
+    video_dir: &'a Path,
+    audio_dir: &'a Path,
     output_part: PathBuf,
     tracks: Tracks,
     has_audio: bool,
-    downloaded: &AtomicU64,
+    downloaded: &'a AtomicU64,
+}
+
+/// Mux the staged tracks, validate the output, and publish it without clobbering.
+///
+/// The staging data is retained on every failure before publication so the queue
+/// can retry without downloading already completed resources.
+async fn finalize_manifest_download(
+    context: ManifestFinalization<'_>,
 ) -> Result<ManifestOutcome, ManifestRunError> {
+    let ManifestFinalization {
+        job,
+        gate,
+        mut abort,
+        tx,
+        staging,
+        dest_dir,
+        video_dir,
+        audio_dir,
+        output_part,
+        tracks,
+        has_audio,
+        downloaded,
+    } = context;
     if abort.try_recv().is_ok() {
         return Ok(ManifestOutcome::Aborted);
     }

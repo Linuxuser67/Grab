@@ -33,7 +33,6 @@ enum CheckpointState {
     AlreadyComplete {
         committed_offset: u64,
     },
-
 }
 
 /// Assemble staged DASH resources in their declared order, retaining a durable

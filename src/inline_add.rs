@@ -3522,7 +3522,10 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         })
                 };
                 if let Some(source) = selected_source {
-                    let filename = step2.name.text().trim().to_string();
+                    let filename = manifest_filename_with_extension(
+                        &step2.name.text().trim(),
+                        manifest_container_extension(step2.manifest_container.selected()),
+                    );
                     let enqueue_manager = Rc::clone(&m);
                     let error_step = Rc::clone(&step2);
                     let error_lookup_add = Rc::clone(&lookup_add_submit);

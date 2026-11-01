@@ -1529,7 +1529,8 @@ fn probe_struct_footprint_budget() {
     assert_eq!(size_of::<VideoInfo>(), 72, "VideoInfo");
     assert_eq!(size_of::<PlaylistItem>(), 56, "PlaylistItem");
     assert_eq!(size_of::<PlaylistInfo>(), 64, "PlaylistInfo");
-    assert_eq!(size_of::<ProbeResult>(), 64, "ProbeResult");
+    // The enum is sized for its largest variant, VideoInfo.
+    assert_eq!(size_of::<ProbeResult>(), 72, "ProbeResult");
     // Rare large variants stay boxed so the common values stay small.
     assert_eq!(size_of::<VideoOutcome>(), 16, "VideoOutcome");
     assert_eq!(size_of::<crate::engine_msg::EngineMsg>(), 40, "EngineMsg");

@@ -20,7 +20,9 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
                 .replace("{n}", &MAX_MAGNET_LEN.to_string()));
         }
         // Validated here so the row stores the trimmed link.
-        return crate::torrent::parse_magnet(trimmed).map(|_| trimmed.to_string());
+        return crate::torrent::parse_magnet(trimmed)
+            .map(|_| trimmed.to_string())
+            .map_err(|error| error.to_string());
     }
     if crate::torrent::is_torrent_url(trimmed) {
         // .torrent pseudo-URLs skip parsing/cap like magnets; missing archive means stale entry.

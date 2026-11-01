@@ -830,31 +830,31 @@ async fn transfer_static_manifest_tracks(
             subtitle,
             ..
         } => {
-            if !fetch_and_write_dash_track(
+            if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client,
-                video,
-                video_dir,
-                "video-track.mp4",
-                concurrency,
+                plan: video,
+                directory: video_dir,
+                filename: "video-track.mp4",
+                connections: concurrency,
                 tx,
                 downloaded,
                 abort,
-            )
+            })
             .await?
             {
                 return Ok(false);
             }
             if let Some(audio) = audio
-                && !fetch_and_write_dash_track(
+                && !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
-                    audio,
-                    audio_dir,
-                    "audio-track.mp4",
-                    concurrency,
+                    plan: audio,
+                    directory: audio_dir,
+                    filename: "audio-track.mp4",
+                    connections: concurrency,
                     tx,
                     downloaded,
                     abort,
-                )
+                })
                 .await?
             {
                 return Ok(false);
@@ -862,16 +862,16 @@ async fn transfer_static_manifest_tracks(
             if let Some(subtitle) = subtitle {
                 let subtitle_dir = staging.join("subtitles");
                 ensure_track_dir(&subtitle_dir).await?;
-                if !fetch_and_write_dash_track(
+                if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
-                    subtitle,
-                    &subtitle_dir,
-                    "subtitle-track.mp4",
-                    concurrency,
+                    plan: subtitle,
+                    directory: &subtitle_dir,
+                    filename: "subtitle-track.mp4",
+                    connections: concurrency,
                     tx,
                     downloaded,
                     abort,
-                )
+                })
                 .await?
                 {
                     return Ok(false);
@@ -3937,16 +3937,30 @@ async fn run_live_dash_tracks(
     }
 }
 
-async fn fetch_and_write_dash_track(
-    client: &reqwest::Client,
-    plan: &DashRepresentationPlan,
-    directory: &Path,
-    filename: &str,
+struct ManifestDashTrackTransfer<'a> {
+    client: &'a reqwest::Client,
+    plan: &'a DashRepresentationPlan,
+    directory: &'a Path,
+    filename: &'a str,
     connections: usize,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &Arc<AtomicU64>,
-    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'a Arc<AtomicU64>,
+    abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+}
+
+async fn fetch_and_write_dash_track(
+    context: ManifestDashTrackTransfer<'_>,
 ) -> Result<bool, ManifestRunError> {
+    let ManifestDashTrackTransfer {
+        client,
+        plan,
+        directory,
+        filename,
+        connections,
+        tx,
+        downloaded,
+        abort,
+    } = context;
     let resources = dash_resources(plan);
     let resource_names = resources
         .iter()
@@ -4045,6 +4059,21 @@ async fn fetch_and_write_dash_track(
     }
     writer.finish().await?;
     Ok(true)
+}
+
+#[cfg(test)]
+async fn concat_dash_track(
+    plan: &DashRepresentationPlan,
+    directory: &Path,
+    filename: &str,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<bool, String> {
+    let resources = plan
+        .resources
+        .iter()
+        .map(|resource| resource.filename.clone())
+        .collect::<Vec<_>>();
+    crate::manifest_writer::write_ordered_track(&resources, directory, filename, abort).await
 }
 
 async fn concat_dash_resource_names(

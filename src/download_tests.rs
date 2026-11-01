@@ -1630,7 +1630,7 @@ fn native_manifest_rejects_filename_extension_that_disagrees_with_mp4_muxer() {
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
         audio_key: None,
-    subtitle_key: None,
+        subtitle_key: None,
     };
 
     let result = manager.enqueue_manifest_staged(source, &directory, Some("Stream.mkv"), &[]);
@@ -1660,7 +1660,6 @@ fn invalid_native_manifest_source_is_skipped_on_restore() {
                 kind: crate::media_types::ManifestKind::Dash,
                 representation_key: "dash-0123456789abcdef0123456789abcdef".to_string(),
                 audio_key: None,
-               subtitle_key: None,
                 subtitle_key: None,
             },
         }),

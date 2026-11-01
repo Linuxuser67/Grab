@@ -50,6 +50,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.2" date="2026-11-01">
+      <description>
+        <ul>
+          <li>Show the shared file-selection picker for multi-file magnet links, allowing individual torrent files to be selected before downloads are queued.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.1" date="2026-10-30">
       <description>
         <ul>

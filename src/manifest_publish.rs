@@ -304,7 +304,10 @@ mod tests {
 
         assert_eq!(outcome, ManifestPublishOutcome::Published);
         assert!(gate.was_delivered());
-        assert!(!source.exists(), "same-filesystem publication moves staging output");
+        assert!(
+            !source.exists(),
+            "same-filesystem publication moves staging output"
+        );
         assert_eq!(
             std::fs::read(&destination).expect("read delivered output"),
             b"complete media payload"

@@ -299,9 +299,9 @@ pub(crate) fn read_archive_bytes(url: &str) -> Option<Vec<u8>> {
     read_torrent_bytes(&archive_path_for_url(url)?)
 }
 
-/// Whether a `.torrent` archive exists for the URL (magnets have none).
-pub(crate) fn has_archive(url: &str) -> bool {
-    archive_path_for_url(url).is_some_and(|p| p.exists())
+/// Whether file metadata is available for a queue URL, including cached magnet metainfo.
+pub(crate) fn has_metadata(url: &str) -> bool {
+    read_archive_bytes(url).is_some()
 }
 
 /// Parse `.torrent` bytes into a display list for the file picker (display strips bidi/controls and caps length; selection is index-based).
@@ -421,17 +421,12 @@ pub(crate) async fn list_magnet_files(
     Ok((name, entries))
 }
 
-/// Delete stored torrent metadata for a permanently deleted queue row.
+/// Delete an archived `.torrent` file. Magnet metadata is shared by info-hash and
+/// is reclaimed by `sweep_archives` only after no queue row references it.
 pub fn delete_archive_for_url(url: &str) {
-    if is_magnet(url) {
-        if let Some(path) = parse_magnet(url)
-            .ok()
-            .and_then(|magnet| magnet.as_id20())
-            .and_then(|id| magnet_metadata_path_in(&torrents_dir(), &id.as_string()))
-        {
-            let _ = std::fs::remove_file(path);
-        }
-    } else if let Some(path) = archive_path_for_url(url) {
+    if !is_magnet(url)
+        && let Some(path) = archive_path_for_url(url)
+    {
         let _ = std::fs::remove_file(path);
     }
 }

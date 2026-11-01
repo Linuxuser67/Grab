@@ -875,7 +875,7 @@ async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
 
     let ffmpeg = Path::new("ffmpeg");
     let ffprobe = Path::new("ffprobe");
-    let output = root.path().join("live-capture.mp4.part");
+    let output = root.path().join("live-capture.part.mp4");
     assert!(
         tokio::time::timeout(
             FIXTURE_TIMEOUT,

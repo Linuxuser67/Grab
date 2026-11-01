@@ -89,6 +89,7 @@ pub(crate) async fn write_ordered_track(
     let mut output = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&part)
         .await
         .map_err(|error| format!("Could not open the ordered DASH track: {error}"))?;
@@ -274,14 +275,14 @@ async fn load_checkpoint(
         });
     }
 
-    if checkpoint.next_resource_index == resources.len() {
-        if let Ok(metadata) = tokio::fs::symlink_metadata(target).await {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err("The completed DASH track is not a regular file".to_string());
-            }
-            if metadata.len() == checkpoint.committed_offset {
-                return Ok(CheckpointState::AlreadyComplete);
-            }
+    if checkpoint.next_resource_index == resources.len()
+        && let Ok(metadata) = tokio::fs::symlink_metadata(target).await
+    {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("The completed DASH track is not a regular file".to_string());
+        }
+        if metadata.len() == checkpoint.committed_offset {
+            return Ok(CheckpointState::AlreadyComplete);
         }
     }
     // The part file disappeared before the final rename. The source segments
@@ -585,7 +586,7 @@ mod tests {
         assert!(!safe_filename("../outside.bin"));
         assert!(!safe_filename("nested/file.bin"));
         assert!(safe_filename("segment.bin"));
-        let names = vec!["segment.bin".to_string(), "segment.bin".to_string()];
+        let names = ["segment.bin".to_string(), "segment.bin".to_string()];
         let mut unique = std::collections::HashSet::new();
         assert!(names.iter().any(|name| !unique.insert(name)));
     }

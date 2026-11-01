@@ -809,7 +809,14 @@ async fn resolve_tracks(
                 .variants
                 .iter()
                 .zip(crate::manifest_intake::hls_variant_keys(&master.variants))
-                .find_map(|(variant, key)| (key == source.representation_key).then_some(variant))
+                .zip(crate::manifest_intake::hls_variant_legacy_keys(
+                    &master.variants,
+                ))
+                .find_map(|((variant, current_key), legacy_key)| {
+                    (current_key == source.representation_key
+                        || legacy_key == source.representation_key)
+                        .then_some(variant)
+                })
                 .ok_or_else(|| {
                     ManifestRunError::Unsupported(
                         "The selected HLS variant is no longer available".to_string(),
@@ -824,7 +831,13 @@ async fn resolve_tracks(
                         .zip(crate::manifest_intake::hls_audio_rendition_keys(
                             &master.audio_renditions,
                         ))
-                        .find_map(|(rendition, key)| (key == audio_key).then_some(rendition))
+                        .zip(crate::manifest_intake::hls_audio_rendition_legacy_keys(
+                            &master.audio_renditions,
+                        ))
+                        .find_map(|((rendition, current_key), legacy_key)| {
+                            (current_key == audio_key || legacy_key == audio_key)
+                                .then_some(rendition)
+                        })
                         .filter(|rendition| {
                             variant
                                 .audio_group

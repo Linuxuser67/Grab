@@ -1376,6 +1376,11 @@ video/es.m3u8
         source.audio_key = Some("not-a-stable-audio-key".to_string());
         assert!(!valid_source(&source));
         source.audio_key = None;
+        source.subtitle_key = Some("hls-audio-0123456789abcdef0123456789abcdef".to_string());
+        assert!(!valid_source(&source));
+        source.subtitle_key = Some("hls-subtitle-0123456789abcdef0123456789abcdef".to_string());
+        assert!(valid_source(&source));
+        source.subtitle_key = None;
         source.representation_key = format!("hls-variant-{}", "0".repeat(64));
         assert!(
             valid_source(&source),

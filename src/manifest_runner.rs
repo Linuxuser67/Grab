@@ -3980,7 +3980,6 @@ async fn fetch_and_write_dash_track(
     .buffered(connections.clamp(1, MAX_RESOURCE_CONNECTIONS));
 
     let outcome = {
-        let mut fetches = fetches;
         tokio::pin!(fetches);
         let mut outcome = Ok(true);
         loop {

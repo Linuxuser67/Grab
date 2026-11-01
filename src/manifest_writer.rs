@@ -473,6 +473,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn incremental_writer_checkpoints_and_resumes_between_resources() {
+        let directory = test_directory();
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .expect("create staging");
+        tokio::fs::write(directory.join("first.bin"), b"first")
+            .await
+            .expect("write first");
+        tokio::fs::write(directory.join("second.bin"), b"second")
+            .await
+            .expect("write second");
+        let resources = vec!["first.bin".to_string(), "second.bin".to_string()];
+        let (_stop_tx, mut abort) = stop_channel();
+
+        let (Some(mut writer), committed) =
+            OrderedTrackWriter::open(resources.clone(), &directory, "track.mp4")
+                .await
+                .expect("open ordered writer")
+        else {
+            panic!("a fresh track must return an active writer");
+        };
+        assert_eq!(committed, 0);
+        assert_eq!(writer.next_resource_index(), 0);
+        assert!(writer.append_next(&mut abort).await.expect("append first"));
+
+        let checkpoint: WriterCheckpoint = serde_json::from_slice(
+            &tokio::fs::read(directory.join("track.mp4.checkpoint.json"))
+                .await
+                .expect("read checkpoint"),
+        )
+        .expect("decode checkpoint");
+        assert_eq!(checkpoint.next_resource_index, 1);
+        assert_eq!(checkpoint.committed_offset, 5);
+        drop(writer);
+
+        let (Some(mut writer), committed) =
+            OrderedTrackWriter::open(resources, &directory, "track.mp4")
+                .await
+                .expect("resume ordered writer")
+        else {
+            panic!("an interrupted track must return an active writer");
+        };
+        assert_eq!(committed, 5);
+        assert_eq!(writer.next_resource_index(), 1);
+        assert!(writer.append_next(&mut abort).await.expect("append second"));
+        writer.finish().await.expect("publish ordered track");
+
+        assert_eq!(
+            tokio::fs::read(directory.join("track.mp4"))
+                .await
+                .expect("read track"),
+            b"firstsecond"
+        );
+        tokio::fs::remove_dir_all(directory)
+            .await
+            .expect("remove staging");
+    }
+
+    #[tokio::test]
     async fn writes_resources_in_manifest_order_and_publishes_track() {
         let directory = test_directory();
         tokio::fs::create_dir_all(&directory)

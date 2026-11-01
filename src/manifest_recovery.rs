@@ -157,8 +157,8 @@ fn write_recovery_marker(
     let contents = serde_json::to_vec(&marker)
         .map_err(|error| format!("Could not encode manifest recovery metadata: {error}"))?;
 
-    // NamedTempFile creates a private file in the same directory, so persist()
-    // publishes it with an atomic same-filesystem rename.
+    // NamedTempFile creates a private file in the same directory, so
+    // persist_noclobber() publishes it with an atomic same-filesystem rename.
     let mut temporary = tempfile::NamedTempFile::new_in(staging)
         .map_err(|error| format!("Could not create manifest recovery metadata: {error}"))?;
     #[cfg(unix)]
@@ -232,18 +232,52 @@ mod tests {
 
         let mut changed_video = original.clone();
         changed_video.representation_key = "hls-variant-other".to_string();
-        assert_ne!(baseline, fingerprint(&changed_video, "mp4", true).unwrap());
+        assert_ne!(
+            baseline,
+            fingerprint(&changed_video, "mp4", true).expect("changed video fingerprint")
+        );
 
         let mut changed_audio = original.clone();
         changed_audio.audio_key = None;
-        assert_ne!(baseline, fingerprint(&changed_audio, "mp4", true).unwrap());
+        assert_ne!(
+            baseline,
+            fingerprint(&changed_audio, "mp4", true).expect("changed audio fingerprint")
+        );
 
         let mut changed_subtitle = original.clone();
         changed_subtitle.subtitle_key = None;
-        assert_ne!(baseline, fingerprint(&changed_subtitle, "mp4", true).unwrap());
+        assert_ne!(
+            baseline,
+            fingerprint(&changed_subtitle, "mp4", true).expect("changed subtitle fingerprint")
+        );
 
-        assert_ne!(baseline, fingerprint(&original, "mkv", true).unwrap());
-        assert_ne!(baseline, fingerprint(&original, "mp4", false).unwrap());
+        let mut changed_language = original.clone();
+        changed_language.subtitle_language = Some("fr".to_string());
+        assert_ne!(
+            baseline,
+            fingerprint(&changed_language, "mp4", true).expect("changed language fingerprint")
+        );
+        assert_ne!(
+            baseline,
+            fingerprint(&original, "mkv", true).expect("Matroska fingerprint")
+        );
+        assert_ne!(
+            baseline,
+            fingerprint(&original, "mp4", false).expect("external subtitle fingerprint")
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_owned_staging_directory_can_be_initialized() {
+        let staging = tempfile::tempdir().expect("create staging directory");
+        fs::write(staging.path().join(".grab-manifest-owner"), b"owned")
+            .expect("write staging ownership marker");
+        fs::create_dir(staging.path().join("video")).expect("create empty video directory");
+        let expected = fingerprint(&source(), "mp4", true).expect("fingerprint");
+
+        validate_or_initialize(staging.path(), expected)
+            .await
+            .expect("initialize a fresh owned staging directory");
     }
 
     #[tokio::test]

@@ -861,6 +861,121 @@ async fn transfer_static_manifest_tracks(
     Ok(true)
 }
 
+/// Result of preparing a live capture for the shared finalization phase.
+enum LiveCapturePreparation {
+    Ready {
+        has_audio: bool,
+        finish_stop_sender: Option<tokio::sync::oneshot::Sender<crate::video::StopIntent>>,
+    },
+    Stopped(ManifestOutcome),
+}
+
+/// Inputs for capturing a live HLS presentation and preparing its staged playlists.
+struct ManifestLiveHlsFinalization<'a> {
+    client: &'a reqwest::Client,
+    source_url: &'a str,
+    dest_dir: &'a Path,
+    staging: &'a Path,
+    video: &'a HlsPlan,
+    audio: Option<&'a HlsPlan>,
+    video_dir: &'a Path,
+    audio_dir: &'a Path,
+    concurrency: usize,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'a Arc<AtomicU64>,
+    has_audio: bool,
+    guarded_child_hosts: &'a mut std::collections::HashSet<String>,
+    abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+}
+
+/// Capture live HLS tracks, persist the finish decision, and prepare local playlists.
+///
+/// The returned stop sender keeps the replacement receiver open while FFmpeg finalizes.
+async fn prepare_live_hls_finalization(
+    context: ManifestLiveHlsFinalization<'_>,
+) -> Result<LiveCapturePreparation, ManifestRunError> {
+    let ManifestLiveHlsFinalization {
+        client,
+        source_url,
+        dest_dir,
+        staging,
+        video,
+        audio,
+        video_dir,
+        audio_dir,
+        concurrency,
+        tx,
+        downloaded,
+        mut has_audio,
+        guarded_child_hosts,
+        abort,
+    } = context;
+
+    let capture = run_live_hls_tracks(
+        client,
+        source_url,
+        dest_dir,
+        video,
+        audio,
+        false,
+        video_dir,
+        audio_dir,
+        concurrency,
+        tx,
+        downloaded,
+        guarded_child_hosts,
+        abort,
+    )
+    .await?;
+
+    let mut finish_stop_sender = None;
+    match capture {
+        LiveHlsCaptureOutcome::Ended => {}
+        LiveHlsCaptureOutcome::Paused => {
+            return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Paused));
+        }
+        LiveHlsCaptureOutcome::Finish
+        | LiveHlsCaptureOutcome::FinishVideoOnly
+        | LiveHlsCaptureOutcome::Unrecoverable => {
+            if !staged_regular_file_exists(&video_dir.join("local.m3u8")).await {
+                return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Aborted));
+            }
+            if matches!(
+                capture,
+                LiveHlsCaptureOutcome::FinishVideoOnly | LiveHlsCaptureOutcome::Unrecoverable
+            ) {
+                // Persist the video-only decision by removing any stale audio playlist.
+                remove_regular_file_if_present(&audio_dir.join("local.m3u8"))
+                    .await
+                    .map_err(ManifestRunError::Failed)?;
+                has_audio = false;
+            }
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            finish_stop_sender = Some(sender);
+            *abort = receiver;
+        }
+        LiveHlsCaptureOutcome::Discard => {
+            return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Aborted));
+        }
+    }
+
+    if !staged_regular_file_exists(&video_dir.join("local.m3u8")).await {
+        return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Aborted));
+    }
+    if has_audio && !staged_regular_file_exists(&audio_dir.join("local.m3u8")).await {
+        has_audio = false;
+    }
+    ensure_live_finish_marker(staging, downloaded.load(Ordering::Relaxed))
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    tx.send(EngineMsg::LiveFinalizing).ok();
+
+    Ok(LiveCapturePreparation::Ready {
+        has_audio,
+        finish_stop_sender,
+    })
+}
+
 /// Run one HLS or static-DASH attempt, keeping completed resources for retry.
 ///
 /// # Errors
@@ -899,67 +1014,33 @@ pub(crate) async fn run_manifest_download(
                 "Live HLS capture requires HLS media tracks".to_string(),
             ));
         };
-        let capture = run_live_hls_tracks(
-            &client,
-            &job.source.url,
-            &dest_dir,
+        match prepare_live_hls_finalization(ManifestLiveHlsFinalization {
+            client: &client,
+            source_url: &job.source.url,
+            dest_dir: &dest_dir,
+            staging: &staging,
             video,
-            audio.as_ref(),
-            finish_requested,
-            &video_dir,
-            &audio_dir,
+            audio: audio.as_ref(),
+            video_dir: &video_dir,
+            audio_dir: &audio_dir,
             concurrency,
-            &tx,
-            &downloaded,
-            &mut guarded_child_hosts,
-            &mut abort,
-        )
-        .await?;
-        match capture {
-            LiveHlsCaptureOutcome::Ended => {}
-            LiveHlsCaptureOutcome::Paused => return Ok(ManifestOutcome::Paused),
-            LiveHlsCaptureOutcome::Finish
-            | LiveHlsCaptureOutcome::FinishVideoOnly
-            | LiveHlsCaptureOutcome::Unrecoverable => {
-                // A Finish ends recording but still needs a live
-                // receiver during FFmpeg finalization. Removal remains guarded
-                // by AttemptGate::try_commit at the final delivery boundary.
-                if !staged_regular_file_exists(&video_dir.join("local.m3u8")).await {
-                    return Ok(ManifestOutcome::Aborted);
-                }
-                if matches!(
-                    capture,
-                    LiveHlsCaptureOutcome::FinishVideoOnly | LiveHlsCaptureOutcome::Unrecoverable
-                ) {
-                    // Keep a video-only recovery decision across process restarts:
-                    // an old audio playlist must not be restored on the next retry.
-                    remove_regular_file_if_present(&audio_dir.join("local.m3u8"))
-                        .await
-                        .map_err(ManifestRunError::Failed)?;
-                    has_audio = false;
-                }
-                if !finish_requested {
-                    let (sender, receiver) = tokio::sync::oneshot::channel();
-                    _finish_stop_sender = Some(sender);
-                    abort = receiver;
-                }
+            tx: &tx,
+            downloaded: &downloaded,
+            has_audio,
+            guarded_child_hosts: &mut guarded_child_hosts,
+            abort: &mut abort,
+        })
+        .await?
+        {
+            LiveCapturePreparation::Ready {
+                has_audio: live_has_audio,
+                finish_stop_sender,
+            } => {
+                has_audio = live_has_audio;
+                _finish_stop_sender = finish_stop_sender;
             }
-            LiveHlsCaptureOutcome::Discard => return Ok(ManifestOutcome::Aborted),
+            LiveCapturePreparation::Stopped(outcome) => return Ok(outcome),
         }
-        if !staged_regular_file_exists(&video_dir.join("local.m3u8")).await {
-            return Ok(ManifestOutcome::Aborted);
-        }
-        if has_audio && !staged_regular_file_exists(&audio_dir.join("local.m3u8")).await {
-            has_audio = false;
-        }
-        if finish_requested {
-            downloaded.store(finish_marker_bytes.unwrap_or(0), Ordering::Relaxed);
-        } else {
-            ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
-                .await
-                .map_err(ManifestRunError::Failed)?;
-        }
-        tx.send(EngineMsg::LiveFinalizing).ok();
     } else if live_dash {
         let (video_plan, audio_plan) = match &tracks {
             Tracks::Dash { video, audio, .. } => (Some(video), audio.as_deref()),

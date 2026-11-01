@@ -830,10 +830,11 @@ async fn transfer_static_manifest_tracks(
             subtitle,
             ..
         } => {
-            if !fetch_resources(
+            if !fetch_and_write_dash_track(
                 client,
-                dash_resources(video),
+                video,
                 video_dir,
+                "video-track.mp4",
                 concurrency,
                 tx,
                 downloaded,
@@ -843,34 +844,29 @@ async fn transfer_static_manifest_tracks(
             {
                 return Ok(false);
             }
-            if !concat_dash_track(video, video_dir, "video-track.mp4", abort).await? {
-                return Ok(false);
-            }
-            if let Some(audio) = audio {
-                if !fetch_resources(
+            if let Some(audio) = audio
+                && !fetch_and_write_dash_track(
                     client,
-                    dash_resources(audio),
+                    audio,
                     audio_dir,
+                    "audio-track.mp4",
                     concurrency,
                     tx,
                     downloaded,
                     abort,
                 )
                 .await?
-                {
-                    return Ok(false);
-                }
-                if !concat_dash_track(audio, audio_dir, "audio-track.mp4", abort).await? {
-                    return Ok(false);
-                }
+            {
+                return Ok(false);
             }
             if let Some(subtitle) = subtitle {
                 let subtitle_dir = staging.join("subtitles");
                 ensure_track_dir(&subtitle_dir).await?;
-                if !fetch_resources(
+                if !fetch_and_write_dash_track(
                     client,
-                    dash_resources(subtitle),
+                    subtitle,
                     &subtitle_dir,
+                    "subtitle-track.mp4",
                     concurrency,
                     tx,
                     downloaded,
@@ -878,9 +874,6 @@ async fn transfer_static_manifest_tracks(
                 )
                 .await?
                 {
-                    return Ok(false);
-                }
-                if !concat_dash_track(subtitle, &subtitle_dir, "subtitle-track.mp4", abort).await? {
                     return Ok(false);
                 }
             }
@@ -3944,18 +3937,91 @@ async fn run_live_dash_tracks(
     }
 }
 
-async fn concat_dash_track(
+async fn fetch_and_write_dash_track(
+    client: &reqwest::Client,
     plan: &DashRepresentationPlan,
     directory: &Path,
     filename: &str,
+    connections: usize,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &Arc<AtomicU64>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-) -> Result<bool, String> {
-    let resources = plan
-        .resources
+) -> Result<bool, ManifestRunError> {
+    let resources = dash_resources(plan);
+    let resource_names = resources
         .iter()
         .map(|resource| resource.filename.clone())
         .collect::<Vec<_>>();
-    crate::manifest_writer::write_ordered_track(&resources, directory, filename, abort).await
+    let (writer, committed_bytes) =
+        crate::manifest_writer::OrderedTrackWriter::open(resource_names, directory, filename)
+            .await?;
+    if committed_bytes > 0 {
+        let total = reserve_download_bytes(downloaded, committed_bytes)?;
+        tx.send(progress_message(total)).ok();
+    }
+    let Some(mut writer) = writer else {
+        return Ok(true);
+    };
+
+    // buffered() runs at most the configured number of fetches concurrently,
+    // while yielding them in manifest order for the single writer.
+    let remaining_resources = resources.into_iter().skip(writer.next_resource_index());
+    let fetches = futures_util::stream::iter(remaining_resources.map(|resource| {
+        let client = client.clone();
+        let directory = directory.to_path_buf();
+        let tx = tx.clone();
+        let downloaded = Arc::clone(downloaded);
+        async move {
+            fetch_resource(&client, resource, &directory, &tx, &downloaded)
+                .await
+                .map(|_| ())
+        }
+    }))
+    .buffered(connections.clamp(1, MAX_RESOURCE_CONNECTIONS));
+
+    let outcome = {
+        let mut fetches = fetches;
+        tokio::pin!(fetches);
+        let mut outcome = Ok(true);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut *abort => {
+                    outcome = Ok(false);
+                    break;
+                }
+                result = fetches.next() => match result {
+                    Some(Ok(())) => match writer.append_next(abort).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            outcome = Ok(false);
+                            break;
+                        }
+                        Err(error) => {
+                            outcome = Err(ManifestRunError::Failed(error));
+                            break;
+                        }
+                    },
+                    Some(Err(error)) => {
+                        outcome = Err(error);
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+        outcome
+    };
+
+    // Dropping the bounded stream cancels later requests and refunds their
+    // partial byte reservations before publishing the corrected progress.
+    tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+        .ok();
+    if !outcome? {
+        return Ok(false);
+    }
+    writer.finish().await?;
+    Ok(true)
 }
 
 async fn concat_dash_resource_names(

@@ -1162,6 +1162,73 @@ async fn restore_local_live_hls_tracks(
 
 const LIVE_HLS_MARKER_NAME: &str = "live-hls.capture";
 const LIVE_HLS_MARKER_CONTENT: &[u8] = b"grab-live-hls-v1\n";
+const LIVE_FINISH_MARKER_NAME: &str = "live-capture.finished";
+const LIVE_FINISH_MARKER_VERSION: &str = "grab-live-finish-v1";
+
+/// Read the durable finish intent and committed-byte count for a live capture.
+async fn read_live_finish_marker(directory: &Path) -> Result<Option<u64>, String> {
+    let marker = directory.join(LIVE_FINISH_MARKER_NAME);
+    let metadata = match tokio::fs::symlink_metadata(&marker).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Could not inspect live finish marker: {error}"
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 128 {
+        return Err("The live finish marker is not a supported regular file".to_string());
+    }
+    let contents = tokio::fs::read(&marker)
+        .await
+        .map_err(|error| format!("Could not read live finish marker: {error}"))?;
+    let text = std::str::from_utf8(&contents)
+        .map_err(|_| "The live finish marker is not valid UTF-8".to_string())?;
+    let mut lines = text.lines();
+    if lines.next() != Some(LIVE_FINISH_MARKER_VERSION) {
+        return Err("The live finish marker has an unsupported version".to_string());
+    }
+    let staged_bytes = lines
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "The live finish marker has an invalid byte count".to_string())?;
+    if lines.next().is_some() {
+        return Err("The live finish marker contains unexpected data".to_string());
+    }
+    Ok(Some(staged_bytes))
+}
+
+/// Persist the finish decision before finalization so retries never resume capture.
+async fn ensure_live_finish_marker(directory: &Path, staged_bytes: u64) -> Result<(), String> {
+    if let Some(existing_bytes) = read_live_finish_marker(directory).await? {
+        return if existing_bytes == staged_bytes {
+            Ok(())
+        } else {
+            Err("The live finish marker byte count changed between attempts".to_string())
+        };
+    }
+
+    let marker = directory.join(LIVE_FINISH_MARKER_NAME);
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+        .await
+        .map_err(|error| format!("Could not create live finish marker: {error}"))?;
+    let contents = format!("{LIVE_FINISH_MARKER_VERSION}\n{staged_bytes}\n");
+    if let Err(error) = file.write_all(contents.as_bytes()).await {
+        drop(file);
+        let _ = remove_regular_file_if_present(&marker).await;
+        return Err(format!("Could not write live finish marker: {error}"));
+    }
+    if let Err(error) = file.sync_all().await {
+        drop(file);
+        let _ = remove_regular_file_if_present(&marker).await;
+        return Err(format!("Could not flush live finish marker: {error}"));
+    }
+    Ok(())
+}
 
 async fn read_live_hls_marker(directory: &Path) -> Result<bool, String> {
     let marker = directory.join(LIVE_HLS_MARKER_NAME);

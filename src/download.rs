@@ -946,7 +946,8 @@ impl DownloadManager {
     ) -> Result<(String, crate::torrent::SessionConfig), String> {
         let magnet = normalize_url(magnet)?;
         let settings = &self.settings;
-        let blocklist_url = crate::torrent::blocklist_url_of(&settings.torrent_blocklist_url())?;
+        let blocklist_url = crate::torrent::blocklist_url_of(&settings.torrent_blocklist_url())
+            .map_err(|error| error.to_string())?;
         let proxy = DownloadOptions::from_settings(settings).proxy_config()?;
         let (listen_port, upnp) = crate::torrent::resolve_listen_config(
             settings.torrent_seed_finished(),
@@ -1110,7 +1111,8 @@ impl DownloadManager {
             let existing =
                 crate::video_staging::try_dir_file_names(std::path::Path::new(&worker_dir))
                     .map_err(|error| format!("Could not inspect torrent destination: {error}"))?;
-            let pseudo = crate::torrent::archive_torrent_file(&worker_file_name, &bytes)?;
+            let pseudo = crate::torrent::archive_torrent_file(&worker_file_name, &bytes)
+                .map_err(|error| error.to_string())?;
             Ok::<_, String>((pseudo, base, existing))
         })
         .await
@@ -2968,7 +2970,7 @@ impl DownloadManager {
                 Err(e) => {
                     // Set detail BEFORE status: the status notify pops the
                     // failure dialog, which reads detail.
-                    item.set_detail(e);
+                    item.set_detail(e.to_string());
                     item.set_status(DownloadStatus::Failed);
                     self.changed();
                     self.start_next();

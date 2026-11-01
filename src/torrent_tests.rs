@@ -19,7 +19,16 @@ fn parses_valid_magnets() {
     let m = parse_magnet(MAGNET).unwrap();
     assert_eq!(m.name.as_deref(), Some("test file"));
     assert!(parse_magnet(BARE_HASH).is_ok());
-    assert!(parse_magnet("magnet:?xt=urn:btih:xyz").is_err());
+    assert!(matches!(
+        parse_magnet("magnet:?xt=urn:btih:xyz"),
+        Err(TorrentError::InvalidMagnet(_))
+    ));
+    assert!(matches!(
+        parse_magnet(
+            "magnet:?xt=urn:btmh:1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        Err(TorrentError::UnsupportedMagnetVersion(_))
+    ));
     assert!(parse_magnet("https://example.com/f.iso").is_err());
     assert!(parse_magnet("").is_err());
 }
@@ -109,26 +118,29 @@ fn intake_plan_mirrors_engine_layout() {
 
 #[test]
 fn blocklist_url_empty_disables() {
-    assert_eq!(blocklist_url_of(""), Ok(None));
-    assert_eq!(blocklist_url_of("   "), Ok(None));
+    assert_eq!(blocklist_url_of("").unwrap(), None);
+    assert_eq!(blocklist_url_of("   ").unwrap(), None);
 }
 
 #[test]
 fn blocklist_url_accepts_http_schemes() {
     assert_eq!(
-        blocklist_url_of("https://example.com/ipfilter.dat"),
-        Ok(Some("https://example.com/ipfilter.dat".to_string()))
+        blocklist_url_of("https://example.com/ipfilter.dat").unwrap(),
+        Some("https://example.com/ipfilter.dat".to_string())
     );
     // Scheme match is case-insensitive; surrounding whitespace trims.
     assert_eq!(
-        blocklist_url_of("  HTTP://example.com/list.txt "),
-        Ok(Some("HTTP://example.com/list.txt".to_string()))
+        blocklist_url_of("  HTTP://example.com/list.txt ").unwrap(),
+        Some("HTTP://example.com/list.txt".to_string())
     );
 }
 
 #[test]
 fn blocklist_url_rejects_non_http() {
-    assert!(blocklist_url_of("ftp://example.com/list.txt").is_err());
+    assert!(matches!(
+        blocklist_url_of("ftp://example.com/list.txt"),
+        Err(TorrentError::InvalidBlocklistUrl(_))
+    ));
     assert!(blocklist_url_of("example.com/list.txt").is_err());
     assert!(blocklist_url_of("not a url").is_err());
 }
@@ -696,12 +708,15 @@ fn upnp_default_is_false() {
 #[test]
 fn clamp_listen_port_rejects_out_of_range() {
     // Valid ports pass through.
-    assert_eq!(clamp_listen_port(0), Ok(0));
-    assert_eq!(clamp_listen_port(6881), Ok(6881));
-    assert_eq!(clamp_listen_port(65535), Ok(65535));
+    assert_eq!(clamp_listen_port(0).unwrap(), 0);
+    assert_eq!(clamp_listen_port(6881).unwrap(), 6881);
+    assert_eq!(clamp_listen_port(65535).unwrap(), 65535);
     // Out of range fails loudly (not silent truncation via `as u16`).
     // Mutation: revert to `as u16` → 70000 becomes 4464, test must fail.
-    assert!(clamp_listen_port(65536).is_err());
+    assert!(matches!(
+        clamp_listen_port(65536),
+        Err(TorrentError::InvalidListenPort(_))
+    ));
     assert!(clamp_listen_port(70000).is_err());
     assert!(clamp_listen_port(-1).is_err());
 }

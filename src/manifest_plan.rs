@@ -35,7 +35,9 @@ pub(crate) fn preferred_choice_index(choices: &[ManifestChoice], quality: &str) 
         .min_by_key(|(index, choice)| {
             let height = choice.height.unwrap_or_default();
             let distance = desired_height.map_or(0, |desired| {
-                choice.height.map_or(u64::MAX, |height| height.abs_diff(desired))
+                choice
+                    .height
+                    .map_or(u64::MAX, |height| height.abs_diff(desired))
             });
             (
                 distance,
@@ -190,7 +192,9 @@ impl ManifestLookup {
         let choice = choices.get(index)?;
         let audio_choices = self.audio_choices(&choice.key);
         let audio_index = Self::preferred_audio_choice_index(&audio_choices);
-        let audio_key = audio_choices.get(audio_index).map(|audio| audio.key.as_str());
+        let audio_key = audio_choices
+            .get(audio_index)
+            .map(|audio| audio.key.as_str());
         self.selected_source(&choice.key, audio_key)
     }
 
@@ -263,12 +267,9 @@ pub(crate) fn download_plan(
                 .iter()
                 .zip(hls_variant_keys(&master.variants))
                 .find_map(|(variant, key)| {
-                    (key.as_deref() == Some(source.representation_key.as_str()))
-                        .then_some(variant)
+                    (key.as_deref() == Some(source.representation_key.as_str())).then_some(variant)
                 })
-                .ok_or_else(|| {
-                    "The selected HLS variant is no longer available".to_string()
-                })?;
+                .ok_or_else(|| "The selected HLS variant is no longer available".to_string())?;
             let selected_audio = match source.audio_key.as_deref() {
                 Some(audio_key) => Some(
                     master
@@ -308,18 +309,17 @@ pub(crate) fn download_plan(
             })
         }
         (NativeManifest::Dash(dash), ManifestKind::Dash) => {
-            let video = crate::manifest::dash::plan_dash_representation(
-                &dash,
-                &source.representation_key,
-            )
-            .map_err(|error| error.to_string())?;
+            let video =
+                crate::manifest::dash::plan_dash_representation(&dash, &source.representation_key)
+                    .map_err(|error| error.to_string())?;
             let selected_audio = match source.audio_key.as_deref() {
                 Some(audio_key) => Some(
                     dash.audio_representations
                         .iter()
                         .find(|track| track.key == audio_key || track.live_key == audio_key)
                         .ok_or_else(|| {
-                            "The selected DASH audio representation is no longer available".to_string()
+                            "The selected DASH audio representation is no longer available"
+                                .to_string()
                         })?,
                 ),
                 None => dash.default_audio(),
@@ -369,9 +369,7 @@ pub(crate) fn hls_audio_rendition_key(rendition: &HlsAudioRendition) -> Option<S
 
 /// Build keys only for renditions with Apple stable rendition IDs.
 #[must_use]
-pub(crate) fn hls_audio_rendition_keys(
-    renditions: &[HlsAudioRendition],
-) -> Vec<Option<String>> {
+pub(crate) fn hls_audio_rendition_keys(renditions: &[HlsAudioRendition]) -> Vec<Option<String>> {
     renditions.iter().map(hls_audio_rendition_key).collect()
 }
 
@@ -448,7 +446,6 @@ fn join_label_parts(resolution: String, bitrate: Option<String>, codecs: Option<
     parts.extend(codecs);
     parts.join(" · ")
 }
-
 
 #[cfg(test)]
 mod tests {

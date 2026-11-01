@@ -638,7 +638,12 @@ pub(crate) async fn run_manifest_download(
         }
     } else {
         match &tracks {
-            Tracks::Hls { video, audio, subtitle, .. } => {
+            Tracks::Hls {
+                video,
+                audio,
+                subtitle,
+                ..
+            } => {
                 if !fetch_resources(
                     &client,
                     hls_resources(video),
@@ -674,15 +679,27 @@ pub(crate) async fn run_manifest_download(
                     let subtitle_dir = staging.join("subtitles");
                     ensure_track_dir(&subtitle_dir).await?;
                     if !fetch_resources(
-                        &client, hls_resources(subtitle), &subtitle_dir, concurrency,
-                        &tx, &downloaded, &mut abort,
-                    ).await? {
+                        &client,
+                        hls_resources(subtitle),
+                        &subtitle_dir,
+                        concurrency,
+                        &tx,
+                        &downloaded,
+                        &mut abort,
+                    )
+                    .await?
+                    {
                         return Ok(ManifestOutcome::Aborted);
                     }
                     write_playlist(&subtitle_dir, subtitle).await?;
                 }
             }
-            Tracks::Dash { video, audio, subtitle, .. } => {
+            Tracks::Dash {
+                video,
+                audio,
+                subtitle,
+                ..
+            } => {
                 if !fetch_resources(
                     &client,
                     dash_resources(video),
@@ -721,12 +738,21 @@ pub(crate) async fn run_manifest_download(
                     let subtitle_dir = staging.join("subtitles");
                     ensure_track_dir(&subtitle_dir).await?;
                     if !fetch_resources(
-                        &client, dash_resources(subtitle), &subtitle_dir, concurrency,
-                        &tx, &downloaded, &mut abort,
-                    ).await? {
+                        &client,
+                        dash_resources(subtitle),
+                        &subtitle_dir,
+                        concurrency,
+                        &tx,
+                        &downloaded,
+                        &mut abort,
+                    )
+                    .await?
+                    {
                         return Ok(ManifestOutcome::Aborted);
                     }
-                    if !concat_dash_track(subtitle, &subtitle_dir, "subtitle-track.mp4", &mut abort).await? {
+                    if !concat_dash_track(subtitle, &subtitle_dir, "subtitle-track.mp4", &mut abort)
+                        .await?
+                    {
                         return Ok(ManifestOutcome::Aborted);
                     }
                 }
@@ -768,26 +794,44 @@ pub(crate) async fn run_manifest_download(
         ManifestKind::Dash => audio_dir.join("audio-track.mp4"),
     });
     let subtitle_input = match &tracks {
-        Tracks::Hls { subtitle: Some(_), .. } => Some(staging.join("subtitles/local.m3u8")),
-        Tracks::Dash { subtitle: Some(_), .. } => Some(staging.join("subtitles/subtitle-track.mp4")),
+        Tracks::Hls {
+            subtitle: Some(_), ..
+        } => Some(staging.join("subtitles/local.m3u8")),
+        Tracks::Dash {
+            subtitle: Some(_), ..
+        } => Some(staging.join("subtitles/subtitle-track.mp4")),
         _ => None,
     };
     let subtitle_language = match &tracks {
-        Tracks::Hls { subtitle_language, .. } | Tracks::Dash { subtitle_language, .. } => subtitle_language.as_deref(),
+        Tracks::Hls {
+            subtitle_language, ..
+        }
+        | Tracks::Dash {
+            subtitle_language, ..
+        } => subtitle_language.as_deref(),
         Tracks::DashLiveOffline { .. } => None,
     };
-    let subtitle_language = subtitle_language.filter(|language| {
-        !language.is_empty()
-            && language.len() <= 35
-            && language.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    }).unwrap_or("und");
+    let subtitle_language = subtitle_language
+        .filter(|language| {
+            !language.is_empty()
+                && language.len() <= 35
+                && language
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .unwrap_or("und");
     let subtitle_sidecar = if subtitle_input.is_some() && !job.embed_subs {
-        Some(crate::video_staging::sidecar_path_for(&output_part, subtitle_language))
+        Some(crate::video_staging::sidecar_path_for(
+            &output_part,
+            subtitle_language,
+        ))
     } else {
         None
     };
     if let Some(sidecar) = subtitle_sidecar.as_deref() {
-        remove_regular_file_if_present(sidecar).await.map_err(ManifestRunError::Failed)?;
+        remove_regular_file_if_present(sidecar)
+            .await
+            .map_err(ManifestRunError::Failed)?;
     }
     let staged_bytes = downloaded.load(Ordering::Relaxed);
     // FFmpeg writes beside the staged segments, so check both the XDG state
@@ -902,7 +946,8 @@ async fn resolve_tracks(
             let subtitle = match subtitle_url {
                 Some(url) => {
                     guard_manifest_child_url(&source.url, &url, guarded_child_hosts)?;
-                    let plan = crate::manifest_intake::lookup_hls_media(client, url.as_str()).await?;
+                    let plan =
+                        crate::manifest_intake::lookup_hls_media(client, url.as_str()).await?;
                     if plan.is_live {
                         return Err(ManifestRunError::Unsupported(
                             "Native live HLS subtitle renditions are not supported yet".to_string(),
@@ -922,14 +967,25 @@ async fn resolve_tracks(
                 }
                 None => None,
             };
-            if subtitle.is_some() && (video.is_live || audio.as_ref().is_some_and(|track| track.is_live)) {
+            if subtitle.is_some()
+                && (video.is_live || audio.as_ref().is_some_and(|track| track.is_live))
+            {
                 return Err(ManifestRunError::Unsupported(
                     "Native live HLS subtitle renditions are not supported yet".to_string(),
                 ));
             }
-            Ok(Tracks::Hls { video, audio, subtitle, subtitle_language })
+            Ok(Tracks::Hls {
+                video,
+                audio,
+                subtitle,
+                subtitle_language,
+            })
         }
-        ManifestDownloadPlan::Dash { video, audio, subtitle } => {
+        ManifestDownloadPlan::Dash {
+            video,
+            audio,
+            subtitle,
+        } => {
             for resource in video.resources.iter() {
                 guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
             }
@@ -943,7 +999,9 @@ async fn resolve_tracks(
                     guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
                 }
             }
-            let subtitle_language = subtitle.as_ref().and_then(|track| track.representation.language.clone());
+            let subtitle_language = subtitle
+                .as_ref()
+                .and_then(|track| track.representation.language.clone());
             Ok(Tracks::Dash {
                 video: *video,
                 audio,
@@ -1083,7 +1141,12 @@ async fn restore_local_live_hls_tracks(
         return Ok(None);
     };
     let audio = read_local_live_hls_plan(source_url, audio_dir).await?;
-    Ok(Some(Tracks::Hls { video, audio, subtitle: None, subtitle_language: None }))
+    Ok(Some(Tracks::Hls {
+        video,
+        audio,
+        subtitle: None,
+        subtitle_language: None,
+    }))
 }
 
 const LIVE_HLS_MARKER_NAME: &str = "live-hls.capture";
@@ -3308,8 +3371,15 @@ async fn run_ffmpeg(
     }
     command.args(["-c", "copy"]);
     if subtitle_input.is_some() && embed_subtitles {
-        let subtitle_stream = if audio_input.is_some() { "2:s:0" } else { "1:s:0" };
-        command.arg("-map").arg(subtitle_stream).args(["-c:s", "mov_text"]);
+        let subtitle_stream = if audio_input.is_some() {
+            "2:s:0"
+        } else {
+            "1:s:0"
+        };
+        command
+            .arg("-map")
+            .arg(subtitle_stream)
+            .args(["-c:s", "mov_text"]);
     }
     command
         .args(["-movflags", "+faststart", "-f", "mp4"])
@@ -3320,7 +3390,11 @@ async fn run_ffmpeg(
         })?;
         command
             .arg("-map")
-            .arg(if audio_input.is_some() { "2:s:0" } else { "1:s:0" })
+            .arg(if audio_input.is_some() {
+                "2:s:0"
+            } else {
+                "1:s:0"
+            })
             .args(["-c:s", "srt", "-f", "srt"])
             .arg(sidecar);
     }

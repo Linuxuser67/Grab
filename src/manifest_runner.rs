@@ -1115,7 +1115,7 @@ async fn resolve_tracks(
     use crate::manifest_plan::ManifestDownloadPlan;
 
     let plan = crate::manifest_plan::download_plan(lookup, source)
-        ?;
+        .map_err(ManifestRunError::Unsupported)?;
     match plan {
         ManifestDownloadPlan::HlsMedia(video) => {
             guard_hls_resources(&source.url, &video, guarded_child_hosts)?;

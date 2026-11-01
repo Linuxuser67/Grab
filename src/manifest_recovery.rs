@@ -19,15 +19,15 @@ const RECOVERY_VERSION: u32 = 1;
 pub(crate) enum RecoveryError {
     #[error("could not encode manifest recovery plan: {0}")]
     Serialize(#[source] serde_json::Error),
-    #[error("manifest recovery metadata is malformed: {0}")]
+    #[error("Manifest recovery metadata is invalid: {0}")]
     Malformed(#[source] serde_json::Error),
-    #[error("manifest recovery metadata is invalid or unsupported (version {0})")]
+    #[error("Manifest recovery metadata version {0} is unsupported")]
     UnsupportedVersion(u32),
     #[error("manifest recovery metadata is not a regular file")]
     NotRegularFile,
-    #[error("manifest recovery plan does not match the staged data")]
+    #[error("The selected manifest tracks or output container changed; existing staged data was preserved. Remove and add the download again to start a new plan.")]
     FingerprintMismatch,
-    #[error("existing manifest staging data has no plan fingerprint; refusing unsafe recovery and preserving the data")]
+    #[error("Existing manifest staging data has no plan fingerprint; refusing unsafe recovery and preserving the data. Remove and add the download again to start a new plan.")]
     UnfingerprintedStagedData,
     #[error("manifest recovery I/O failed while {operation}: {source}")]
     Io {

@@ -1396,6 +1396,25 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
     crate::file_names::rename_noreplace(&output_part, &output)
         .expect("publish finalized HLS fixture");
     assert_mp4_has_audio_and_video(Path::new("ffprobe"), &output);
+
+    let mkv_part = root.path().join("hls-output.part.mkv");
+    assert!(
+        run_ffmpeg(
+            Path::new("ffmpeg"),
+            &video_dir.join("local.m3u8"),
+            None,
+            SubtitleOutput::default(),
+            &mkv_part,
+            &mut abort,
+        )
+        .await
+        .expect("finalize HLS fixture as Matroska"),
+        "Matroska FFmpeg finalization unexpectedly aborted"
+    );
+    let mkv_output = root.path().join("hls-output.mkv");
+    crate::file_names::rename_noreplace(&mkv_part, &mkv_output)
+        .expect("publish finalized Matroska fixture");
+    assert_mp4_has_audio_and_video(Path::new("ffprobe"), &mkv_output);
 }
 
 #[tokio::test]

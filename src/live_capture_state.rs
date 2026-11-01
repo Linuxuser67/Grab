@@ -100,12 +100,11 @@ fn persist_sync(
         }
     }
 
-    let mut temporary = tempfile::NamedTempFile::new_in(staging).map_err(|source| {
-        LiveCaptureStateError::Io {
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(staging).map_err(|source| LiveCaptureStateError::Io {
             operation: "creating the marker",
             source,
-        }
-    })?;
+        })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -117,8 +116,7 @@ fn persist_sync(
                 source,
             })?;
     }
-    serde_json::to_writer(&mut temporary, marker)
-        .map_err(LiveCaptureStateError::Serialize)?;
+    serde_json::to_writer(&mut temporary, marker).map_err(LiveCaptureStateError::Serialize)?;
     temporary
         .flush()
         .and_then(|()| temporary.as_file().sync_all())
@@ -162,12 +160,11 @@ pub(crate) async fn read(
 }
 
 fn read_sync(staging: &Path) -> Result<UnrecoverableLiveCapture, LiveCaptureStateError> {
-    let bytes = std::fs::read(staging.join(MARKER_NAME)).map_err(|source| {
-        LiveCaptureStateError::Io {
+    let bytes =
+        std::fs::read(staging.join(MARKER_NAME)).map_err(|source| LiveCaptureStateError::Io {
             operation: "reading the marker",
             source,
-        }
-    })?;
+        })?;
     if bytes.len() > 4096 {
         return Err(LiveCaptureStateError::TooLarge);
     }

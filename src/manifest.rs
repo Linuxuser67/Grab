@@ -797,8 +797,8 @@ pub(crate) fn parse_hls_master_playlist(
 ) -> Result<HlsMasterPlan, ManifestError> {
     if body.len() > MAX_MANIFEST_BYTES {
         return Err(ManifestError::Parse(
-                "playlist exceeds its supported size limit".to_string(),
-            ));
+            "playlist exceeds its supported size limit".to_string(),
+        ));
     }
     let base_url = parse_manifest_url(manifest_url)?;
     let playlist = m3u8_rs::parse_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
@@ -956,8 +956,8 @@ pub(crate) fn plan_hls_media_playlist(
 ) -> Result<HlsPlan, ManifestError> {
     if body.len() > MAX_MANIFEST_BYTES {
         return Err(ManifestError::Parse(
-                "playlist exceeds its supported size limit".to_string(),
-            ));
+            "playlist exceeds its supported size limit".to_string(),
+        ));
     }
     let base_url = parse_manifest_url(manifest_url)?;
     let playlist = m3u8_rs::parse_media_playlist_res(body)

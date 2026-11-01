@@ -22,8 +22,8 @@ pub(crate) mod dash;
 pub(crate) enum ManifestError {
     #[error("invalid manifest url")]
     InvalidManifestUrl,
-    #[error("could not parse HLS playlist")]
-    Parse,
+    #[error("could not parse HLS playlist: {0}")]
+    Parse(String),
     #[error("expected an HLS master playlist")]
     ExpectedMasterPlaylist,
     #[error("HLS media playlist contains no segments")]
@@ -54,6 +54,21 @@ pub(crate) enum ManifestError {
     LiveCaptureLimit,
     #[error("the live HLS playlist can no longer be continued without losing media")]
     LiveSequenceGap,
+}
+
+/// Convert a nom diagnostic into a safe parser kind and byte offset without retaining playlist bytes.
+fn hls_parse_error(
+    input: &[u8],
+    error: nom::Err<nom::error::Error<&[u8]>>,
+) -> ManifestError {
+    let details = match error {
+        nom::Err::Error(error) | nom::Err::Failure(error) => {
+            let offset = input.len().saturating_sub(error.input.len());
+            format!("{:?} at byte {offset}", error.code)
+        }
+        nom::Err::Incomplete(_) => format!("incomplete input at byte {}", input.len()),
+    };
+    ManifestError::Parse(details)
 }
 
 /// A checked byte range in a remote HLS resource.
@@ -258,7 +273,7 @@ impl HlsPlan {
         let _validated = HlsLiveAccumulator::from_local_playlist_bytes(body)?;
         let playlist_url = parse_manifest_url(manifest_url)?;
         let mut local_playlist =
-            m3u8_rs::parse_media_playlist_res(body).map_err(|_| ManifestError::Parse)?;
+            m3u8_rs::parse_media_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
         local_playlist.end_list = true;
         local_playlist.playlist_type = Some(MediaPlaylistType::Vod);
 
@@ -367,10 +382,10 @@ impl HlsLiveAccumulator {
     /// Returns an error for malformed or unsafe staging metadata.
     pub(crate) fn from_local_playlist_bytes(body: &[u8]) -> Result<Self, ManifestError> {
         if body.len() > MAX_HLS_LOCAL_PLAYLIST_BYTES {
-            return Err(ManifestError::Parse);
+            return Err(ManifestError::Parse("playlist exceeds its supported size limit".to_string()));
         }
         let mut playlist =
-            m3u8_rs::parse_media_playlist_res(body).map_err(|_| ManifestError::Parse)?;
+            m3u8_rs::parse_media_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
         if !playlist.end_list
             || playlist.playlist_type != Some(MediaPlaylistType::Vod)
             || playlist.segments.is_empty()
@@ -778,10 +793,10 @@ pub(crate) fn parse_hls_master_playlist(
     body: &[u8],
 ) -> Result<HlsMasterPlan, ManifestError> {
     if body.len() > MAX_MANIFEST_BYTES {
-        return Err(ManifestError::Parse);
+        return Err(ManifestError::Parse("playlist exceeds its supported size limit".to_string()));
     }
     let base_url = parse_manifest_url(manifest_url)?;
-    let playlist = m3u8_rs::parse_playlist_res(body).map_err(|_| ManifestError::Parse)?;
+    let playlist = m3u8_rs::parse_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
 
     let Playlist::MasterPlaylist(master) = playlist else {
         return Err(ManifestError::ExpectedMasterPlaylist);
@@ -935,10 +950,10 @@ pub(crate) fn plan_hls_media_playlist(
     body: &[u8],
 ) -> Result<HlsPlan, ManifestError> {
     if body.len() > MAX_MANIFEST_BYTES {
-        return Err(ManifestError::Parse);
+        return Err(ManifestError::Parse("playlist exceeds its supported size limit".to_string()));
     }
     let base_url = parse_manifest_url(manifest_url)?;
-    let playlist = m3u8_rs::parse_media_playlist_res(body).map_err(|_| ManifestError::Parse)?;
+    let playlist = m3u8_rs::parse_media_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
     build_hls_plan(base_url, playlist)
 }
 
@@ -2039,15 +2054,30 @@ one.ts
     }
 
     #[test]
+    fn parser_errors_report_kind_and_offset_without_echoing_playlist_contents() {
+        let body = b"not a playlist";
+        let error = parse_hls_master_playlist(BASE_URL, body).err();
+        assert!(
+            matches!(
+                error,
+                Some(ManifestError::Parse(ref details))
+                    if details.contains("Tag at byte 0")
+                        && !details.contains("not a playlist")
+            ),
+            "unexpected parser error: {error:?}"
+        );
+    }
+
+    #[test]
     fn rejects_oversized_hls_manifest_bodies_before_parsing() {
         let body = vec![b' '; MAX_MANIFEST_BYTES + 1];
         assert_eq!(
             parse_hls_master_playlist(BASE_URL, &body).err(),
-            Some(ManifestError::Parse)
+            Some(ManifestError::Parse(_))
         );
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, &body).err(),
-            Some(ManifestError::Parse)
+            Some(ManifestError::Parse(_))
         );
     }
     #[test]

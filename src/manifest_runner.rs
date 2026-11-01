@@ -976,6 +976,140 @@ async fn prepare_live_hls_finalization(
     })
 }
 
+/// Inputs for capturing live DASH tracks and preparing their local track files.
+struct ManifestLiveDashFinalization<'a> {
+    client: &'a reqwest::Client,
+    source_url: &'a str,
+    dest_dir: &'a Path,
+    representation_key: &'a str,
+    audio_key: Option<&'a str>,
+    video_plan: Option<&'a DashRepresentationPlan>,
+    audio_plan: Option<&'a DashRepresentationPlan>,
+    video_dir: &'a Path,
+    audio_dir: &'a Path,
+    staging: &'a Path,
+    concurrency: usize,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'a Arc<AtomicU64>,
+    guarded_child_hosts: &'a mut std::collections::HashSet<String>,
+    abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+}
+
+/// Capture live DASH resources and prepare local track files for shared finalization.
+async fn prepare_live_dash_finalization(
+    context: ManifestLiveDashFinalization<'_>,
+) -> Result<LiveCapturePreparation, ManifestRunError> {
+    let ManifestLiveDashFinalization {
+        client,
+        source_url,
+        dest_dir,
+        representation_key,
+        audio_key,
+        video_plan,
+        audio_plan,
+        video_dir,
+        audio_dir,
+        staging,
+        concurrency,
+        tx,
+        downloaded,
+        guarded_child_hosts,
+        abort,
+    } = context;
+
+    let capture = run_live_dash_tracks(
+        client,
+        source_url,
+        dest_dir,
+        representation_key,
+        audio_key,
+        video_plan,
+        audio_plan,
+        video_dir,
+        audio_dir,
+        concurrency,
+        tx,
+        downloaded,
+        guarded_child_hosts,
+        abort,
+    )
+    .await?;
+
+    let mut finish_stop_sender = None;
+    match capture.outcome {
+        DashLiveCaptureOutcome::Discard => {
+            return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Aborted));
+        }
+        DashLiveCaptureOutcome::Paused => {
+            return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Paused));
+        }
+        DashLiveCaptureOutcome::Finish
+        | DashLiveCaptureOutcome::FinishVideoOnly
+        | DashLiveCaptureOutcome::Unrecoverable => {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            finish_stop_sender = Some(sender);
+            *abort = receiver;
+        }
+        DashLiveCaptureOutcome::Ended => {}
+    }
+
+    if !capture
+        .video_resources
+        .iter()
+        .any(|name| name.starts_with("dash-live-segment-"))
+    {
+        return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Aborted));
+    }
+    let has_audio = if matches!(
+        capture.outcome,
+        DashLiveCaptureOutcome::FinishVideoOnly | DashLiveCaptureOutcome::Unrecoverable
+    ) {
+        remove_regular_file_if_present(&audio_dir.join(DASH_LIVE_STATE_NAME))
+            .await
+            .map_err(ManifestRunError::Failed)?;
+        false
+    } else {
+        capture.audio_resources.as_ref().is_some_and(|resources| {
+            resources
+                .iter()
+                .any(|name| name.starts_with("dash-live-segment-"))
+        })
+    };
+
+    ensure_live_finish_marker(staging, downloaded.load(Ordering::Relaxed))
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    tx.send(EngineMsg::LiveFinalizing).ok();
+
+    if !concat_dash_resource_names(
+        &capture.video_resources,
+        video_dir,
+        "video-track.mp4",
+        abort,
+    )
+    .await?
+    {
+        return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Aborted));
+    }
+    if has_audio
+        && let Some(audio_resources) = capture.audio_resources.as_ref()
+        && !concat_dash_resource_names(
+            audio_resources,
+            audio_dir,
+            "audio-track.mp4",
+            abort,
+        )
+        .await?
+    {
+        return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Aborted));
+    }
+
+    Ok(LiveCapturePreparation::Ready {
+        has_audio,
+        finish_stop_sender,
+    })
+}
+
 /// Run one HLS or static-DASH attempt, keeping completed resources for retry.
 ///
 /// # Errors
@@ -1051,86 +1185,33 @@ pub(crate) async fn run_manifest_download(
                 ));
             }
         };
-        let capture = run_live_dash_tracks(
-            &client,
-            &job.source.url,
-            &dest_dir,
-            &job.source.representation_key,
-            job.source.audio_key.as_deref(),
+        match prepare_live_dash_finalization(ManifestLiveDashFinalization {
+            client: &client,
+            source_url: &job.source.url,
+            dest_dir: &dest_dir,
+            representation_key: &job.source.representation_key,
+            audio_key: job.source.audio_key.as_deref(),
             video_plan,
             audio_plan,
-            &video_dir,
-            &audio_dir,
+            video_dir: &video_dir,
+            audio_dir: &audio_dir,
+            staging: &staging,
             concurrency,
-            &tx,
-            &downloaded,
-            &mut guarded_child_hosts,
-            &mut abort,
-        )
-        .await?;
-        match capture.outcome {
-            DashLiveCaptureOutcome::Discard => return Ok(ManifestOutcome::Aborted),
-            DashLiveCaptureOutcome::Paused => return Ok(ManifestOutcome::Paused),
-            DashLiveCaptureOutcome::Finish
-            | DashLiveCaptureOutcome::FinishVideoOnly
-            | DashLiveCaptureOutcome::Unrecoverable => {
-                let (sender, receiver) = tokio::sync::oneshot::channel();
-                _finish_stop_sender = Some(sender);
-                abort = receiver;
-            }
-            DashLiveCaptureOutcome::Ended => {}
-        }
-        if !capture
-            .video_resources
-            .iter()
-            .any(|name| name.starts_with("dash-live-segment-"))
-        {
-            return Ok(ManifestOutcome::Aborted);
-        }
-        if matches!(
-            capture.outcome,
-            DashLiveCaptureOutcome::FinishVideoOnly | DashLiveCaptureOutcome::Unrecoverable
-        ) {
-            remove_regular_file_if_present(&audio_dir.join(DASH_LIVE_STATE_NAME))
-                .await
-                .map_err(ManifestRunError::Failed)?;
-            has_audio = false;
-        } else {
-            has_audio = capture.audio_resources.as_ref().is_some_and(|resources| {
-                resources
-                    .iter()
-                    .any(|name| name.starts_with("dash-live-segment-"))
-            });
-        }
-        if finish_requested {
-            downloaded.store(finish_marker_bytes.unwrap_or(0), Ordering::Relaxed);
-        } else {
-            ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
-                .await
-                .map_err(ManifestRunError::Failed)?;
-        }
-        tx.send(EngineMsg::LiveFinalizing).ok();
-        if !concat_dash_resource_names(
-            &capture.video_resources,
-            &video_dir,
-            "video-track.mp4",
-            &mut abort,
-        )
+            tx: &tx,
+            downloaded: &downloaded,
+            guarded_child_hosts: &mut guarded_child_hosts,
+            abort: &mut abort,
+        })
         .await?
         {
-            return Ok(ManifestOutcome::Aborted);
-        }
-        if has_audio
-            && let Some(audio_resources) = capture.audio_resources.as_ref()
-            && !concat_dash_resource_names(
-                audio_resources,
-                &audio_dir,
-                "audio-track.mp4",
-                &mut abort,
-            )
-            .await?
-        {
-            return Ok(ManifestOutcome::Aborted);
+            LiveCapturePreparation::Ready {
+                has_audio: live_has_audio,
+                finish_stop_sender,
+            } => {
+                has_audio = live_has_audio;
+                _finish_stop_sender = finish_stop_sender;
+            }
+            LiveCapturePreparation::Stopped(outcome) => return Ok(outcome),
         }
     } else if !transfer_static_manifest_tracks(ManifestStaticTransfer {
         client: &client,

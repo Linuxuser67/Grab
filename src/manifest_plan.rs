@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::manifest::{
-    HlsAudioRendition, HlsMasterPlan, HlsPlan, HlsVariant,
+    HlsAudioRendition, HlsPlan, HlsVariant,
     dash::{DashManifestPlan, DashRepresentationPlan},
 };
 use crate::manifest_types::{ManifestAudioChoice, ManifestChoice, ManifestLookup, NativeManifest};
@@ -374,7 +374,7 @@ pub(crate) fn download_plan(
 #[must_use]
 fn stable_hls_track_key(prefix: &str, track_kind: &[u8], stable_id: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"grab-hls-stable-track\\0");
+    hasher.update(b"grab-hls-stable-track\0");
     hasher.update(track_kind);
     hasher.update([0]);
     hasher.update(stable_id.as_bytes());
@@ -474,4 +474,79 @@ fn join_label_parts(resolution: String, bitrate: Option<String>, codecs: Option<
     parts.extend(bitrate);
     parts.extend(codecs);
     parts.join(" · ")
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hls_download_plan_uses_the_selected_stable_video_and_audio_ids() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",STABLE-RENDITION-ID="rendition-en",URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,AUDIO="audio",STABLE-VARIANT-ID="variant-720"
+video/720.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("valid HLS master playlist");
+        let video_key = hls_variant_keys(&master.variants)[0]
+            .clone()
+            .expect("stable video key");
+        let audio_key = hls_audio_rendition_keys(&master.audio_renditions)[0]
+            .clone()
+            .expect("stable audio key");
+        let lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/master.m3u8".to_string(),
+            manifest: NativeManifest::HlsMaster(master),
+        };
+        let source = lookup
+            .selected_source(&video_key, Some(&audio_key))
+            .expect("valid stable track selection");
+
+        let plan = download_plan(&lookup, &source).expect("valid selected download plan");
+        let ManifestDownloadPlan::HlsMaster {
+            video_url,
+            audio_url,
+        } = plan
+        else {
+            panic!("expected an HLS master plan");
+        };
+        assert_eq!(
+            video_url.as_str(),
+            "https://cdn.example.test/video/720.m3u8"
+        );
+        assert_eq!(
+            audio_url.expect("selected audio rendition URL").as_str(),
+            "https://cdn.example.test/audio/en.m3u8"
+        );
+    }
+
+    #[test]
+    fn download_plan_rejects_a_stale_hls_track_selection() {
+        let body = br#"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,STABLE-VARIANT-ID="variant-720"
+video/720.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("valid HLS master playlist");
+        let lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/master.m3u8".to_string(),
+            manifest: NativeManifest::HlsMaster(master),
+        };
+        let source = ManifestSource {
+            url: lookup.source_url.clone(),
+            kind: ManifestKind::Hls,
+            representation_key: "hls-variant-00000000000000000000000000000000".to_string(),
+            audio_key: None,
+        };
+
+        assert!(download_plan(&lookup, &source).is_err());
+    }
 }

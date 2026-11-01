@@ -13,6 +13,8 @@ use url::Url;
 use crate::manifest::{
     HlsMasterPlan, HlsPlan, MAX_MANIFEST_BYTES, dash::DashManifestPlan,
 };
+#[cfg(test)]
+use crate::manifest::HlsVariant;
 
 /// Download-time manifest requests retain their normal network tolerance.
 const MANIFEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);

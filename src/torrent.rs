@@ -381,16 +381,6 @@ pub(crate) async fn list_magnet_files(
         ));
     };
 
-    let hash_name = parsed.as_id20().map(|id| id.as_string());
-    let magnet_name = parsed.name.filter(|name| sane_filename(name));
-    let name = listing
-        .info
-        .name()
-        .map(|name| name.into_owned())
-        .filter(|name| sane_filename(name))
-        .or(magnet_name)
-        .or(hash_name)
-        .unwrap_or_else(|| "torrent".to_string());
     let info_hash = parsed
         .as_id20()
         .map(|id| id.as_string())
@@ -401,6 +391,15 @@ pub(crate) async fn list_magnet_files(
         ));
     }
     persist_magnet_metadata(&info_hash, &listing.torrent_bytes)?;
+
+    let magnet_name = parsed.name.filter(|name| sane_filename(name));
+    let name = listing
+        .info
+        .name()
+        .map(|name| name.into_owned())
+        .filter(|name| sane_filename(name))
+        .or(magnet_name)
+        .unwrap_or_else(|| info_hash.clone());
 
     let entries: Vec<TorrentFileEntry> = listing
         .info

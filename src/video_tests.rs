@@ -573,7 +573,7 @@ fn serde_page_round_trip() {
         is_live: false,
         video_format_id: Some("137".into()),
         playlist_item_id: None,
-        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
+        subtitle_selection: crate::media_types::SubtitleSelection::Language("fr".into()),
         backend: None,
     };
     let json = serde_json::to_string(&src).unwrap();

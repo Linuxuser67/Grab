@@ -32,7 +32,7 @@ pub fn quality_value(index: usize) -> &'static str {
 /// Off disables subtitles; Language pins one offered language code.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SubtitleSelection {
+pub enum SubtitleSelection {
     #[default]
     Automatic,
     Off,

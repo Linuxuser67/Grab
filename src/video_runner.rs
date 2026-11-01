@@ -1297,9 +1297,9 @@ fn available_subtitle_langs(info: &serde_json::Value) -> std::collections::HashS
     crate::video_probe::subtitle_languages(info).into_vec().into_iter().collect()
 }
 
-/// Resolve the subtitle language for the media command: the preferred
-/// language if the video offers it, else English if offered, else no
-/// subtitles. When the media leg reuses the probe's info JSON
+/// Resolve the subtitle language for the media command. Automatic mode uses
+/// the configured preference then English; explicit mode requires the selected
+/// language; Off and audio-only modes skip subtitle discovery. When the media leg reuses the probe's info JSON
 /// (--load-info-json), that JSON already lists the offered tracks — the
 /// same extraction a fresh probe would pay for — so pick from it and skip
 /// the probe instead of a second network fetch. The probe is one
@@ -1313,6 +1313,9 @@ pub(crate) async fn resolve_subtitle_lang(
     abort: &mut oneshot::Receiver<StopIntent>,
     playlist_index: Option<usize>,
 ) -> Result<Option<String>, ()> {
+    if job.audio_only {
+        return Ok(None);
+    }
     let candidates = match &job.subtitle_selection {
         crate::media_types::SubtitleSelection::Automatic => {
             let Some(preferred) = job.subtitles.as_deref() else {
@@ -1340,7 +1343,7 @@ pub(crate) async fn resolve_subtitle_lang(
         && (json.get("subtitles").is_some() || json.get("automatic_captions").is_some())
     {
         let available = available_subtitle_langs(json);
-        let lang = pick_subtitle_lang(&available, &candidate_refs)
+        let lang = pick_subtitle_lang(&available, &candidate_refs);
         if lang.is_none() {
             tracing::debug!("video offers no subtitles in the preferred language or English");
         } else {
@@ -1439,7 +1442,7 @@ pub(crate) async fn resolve_subtitle_lang(
         }
     };
     let available = available_subtitle_langs(&info);
-    let lang = pick_subtitle_lang(&available, &[&pref, "en"]);
+    let lang = pick_subtitle_lang(&available, &candidate_refs);
     if lang.is_none() {
         tracing::debug!("video offers no subtitles in the preferred language or English");
     }

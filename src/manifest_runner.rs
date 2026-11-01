@@ -1093,13 +1093,7 @@ async fn prepare_live_dash_finalization(
     }
     if has_audio
         && let Some(audio_resources) = capture.audio_resources.as_ref()
-        && !concat_dash_resource_names(
-            audio_resources,
-            audio_dir,
-            "audio-track.mp4",
-            abort,
-        )
-        .await?
+        && !concat_dash_resource_names(audio_resources, audio_dir, "audio-track.mp4", abort).await?
     {
         return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Aborted));
     }

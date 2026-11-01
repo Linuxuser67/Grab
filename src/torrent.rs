@@ -243,8 +243,59 @@ pub(crate) fn load_torrent_file(
     Ok((bytes, name, entries))
 }
 
-/// Bounded read of the archived `.torrent` behind a queue pseudo-URL (`None` when missing, unreadable, or over the ceiling).
+/// Path for metainfo resolved from a magnet. The info-hash makes the cache stable across queue retries and restarts.
+fn magnet_metadata_path_in(dir: &Path, info_hash: &str) -> Option<PathBuf> {
+    if info_hash.len() != 40 || !info_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(dir.join(format!("magnet-{}.meta", info_hash.to_ascii_lowercase())))
+}
+
+/// Persist validated magnet metainfo atomically so completion cleanup and later queue actions can resolve file paths.
+fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() as u64 > MAX_TORRENT_BYTES {
+        return Err(gettext("Torrent metadata is too large to store safely"));
+    }
+    let metadata = librqbit::torrent_from_bytes(bytes)
+        .map_err(|error| format!("Invalid resolved torrent metadata: {error}"))?;
+    if metadata.info_hash.as_string() != info_hash {
+        return Err(gettext("Resolved torrent metadata does not match the magnet link"));
+    }
+
+    let dir = torrents_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("Cannot store magnet metadata: {error}"))?;
+    let path = magnet_metadata_path_in(&dir, info_hash)
+        .ok_or_else(|| gettext("Invalid torrent info-hash"))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(&dir)
+        .map_err(|error| format!("Cannot create magnet metadata file: {error}"))?;
+    use std::io::Write as _;
+    temporary
+        .write_all(bytes)
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|error| format!("Cannot write magnet metadata: {error}"))?;
+    temporary
+        .persist(&path)
+        .map_err(|error| format!("Cannot publish magnet metadata: {}", error.error))?;
+    std::fs::File::open(&dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("Cannot sync magnet metadata directory: {error}"))?;
+    Ok(())
+}
+
+/// Read cached metainfo for a magnet, verifying that its info-hash matches the cache key.
+fn read_magnet_metadata_in(dir: &Path, magnet: &str) -> Option<Vec<u8>> {
+    let info_hash = parse_magnet(magnet).ok()?.as_id20()?.as_string();
+    let bytes = read_torrent_bytes(&magnet_metadata_path_in(dir, &info_hash)?)?;
+    let metadata = librqbit::torrent_from_bytes(&bytes).ok()?;
+    (metadata.info_hash.as_string() == info_hash).then_some(bytes)
+}
+
+/// Bounded read of torrent metainfo: archived `.torrent` bytes or cached magnet metadata.
 pub(crate) fn read_archive_bytes(url: &str) -> Option<Vec<u8>> {
+    if is_magnet(url) {
+        return read_magnet_metadata_in(&torrents_dir(), url);
+    }
     read_torrent_bytes(&archive_path_for_url(url)?)
 }
 
@@ -338,6 +389,15 @@ pub(crate) async fn list_magnet_files(
         .or(magnet_name)
         .or(hash_name)
         .unwrap_or_else(|| "torrent".to_string());
+    let info_hash = parsed
+        .as_id20()
+        .map(|id| id.as_string())
+        .ok_or_else(|| gettext("Only BitTorrent v1 magnets are supported"))?;
+    if listing.info_hash.as_string() != info_hash {
+        return Err(gettext("Resolved torrent metadata does not match the magnet link"));
+    }
+    persist_magnet_metadata(&info_hash, &listing.torrent_bytes)?;
+
     let entries: Vec<TorrentFileEntry> = listing
         .info
         .iter_file_details()
@@ -361,9 +421,17 @@ pub(crate) async fn list_magnet_files(
     Ok((name, entries))
 }
 
-/// Delete the archive behind a pseudo-URL. Missing files are fine.
+/// Delete stored torrent metadata for a permanently deleted queue row.
 pub fn delete_archive_for_url(url: &str) {
-    if let Some(path) = archive_path_for_url(url) {
+    if is_magnet(url) {
+        if let Some(path) = parse_magnet(url)
+            .ok()
+            .and_then(|magnet| magnet.as_id20())
+            .and_then(|id| magnet_metadata_path_in(&torrents_dir(), &id.as_string()))
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    } else if let Some(path) = archive_path_for_url(url) {
         let _ = std::fs::remove_file(path);
     }
 }
@@ -375,17 +443,34 @@ pub fn sweep_archives(referenced: &std::collections::HashSet<String>) {
 
 /// Testable core: sweep a directory, keeping only referenced archives.
 pub fn sweep_archives_in(dir: &std::path::Path, referenced: &std::collections::HashSet<String>) {
+    let referenced_magnets: std::collections::HashSet<String> = referenced
+        .iter()
+        .filter(|url| is_magnet(url))
+        .filter_map(|url| parse_magnet(url).ok()?.as_id20().map(|id| id.as_string()))
+        .collect();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("torrent") {
-            continue;
-        }
-        let url = format!("torrent:{}", path.to_string_lossy());
-        if !referenced.contains(&url) {
-            let _ = std::fs::remove_file(&path);
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("torrent") => {
+                let url = format!("torrent:{}", path.to_string_lossy());
+                if !referenced.contains(&url) {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            Some("meta") => {
+                let keep = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .and_then(|stem| stem.strip_prefix("magnet-"))
+                    .is_some_and(|hash| referenced_magnets.contains(&hash.to_ascii_lowercase()));
+                if !keep {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            _ => {}
         }
     }
 }

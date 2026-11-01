@@ -4507,16 +4507,16 @@ mod tests {
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
 
         assert!(
-            fetch_and_write_dash_track(
-                &client,
-                &plan,
-                staging.path(),
-                "video-track.mp4",
-                2,
-                &tx,
-                &downloaded,
-                &mut abort,
-            )
+            fetch_and_write_dash_track(ManifestDashTrackTransfer {
+                client: &client,
+                plan: &plan,
+                directory: staging.path(),
+                filename: "video-track.mp4",
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+                abort: &mut abort,
+            })
             .await
             .expect("fetch and write DASH track")
         );

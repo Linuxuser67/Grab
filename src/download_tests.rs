@@ -5020,8 +5020,8 @@ fn live_detected_registers_a_downloading_row_for_stop_preservation() {
         "a live-detection message must register a currently downloading row"
     );
     assert!(
-        !manager.stop_engine(id),
-        "a registered live row must be signalled for preservation, not aborted"
+        !manager.stop_engine(id, crate::video::StopIntent::Finish),
+        "a registered live row must be signalled to finish, not aborted"
     );
 
     item.set_status(DownloadStatus::Paused);
@@ -5038,6 +5038,50 @@ fn live_detected_registers_a_downloading_row_for_stop_preservation() {
     assert!(
         !manager.live_rows.borrow().contains(&id),
         "pump cleanup must remove the live marker"
+    );
+    let _ = std::fs::remove_file(qf);
+}
+
+#[test]
+fn pause_sends_a_distinct_intent_to_native_live_manifest_workers() {
+    let (_q, _l) = test_locks();
+    let qf = test_queue_file("pause-live-manifest");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 921_750 + std::process::id() as u64;
+    let item = DownloadItem::new(id, "https://example.com/live.m3u8", "live.mp4", "/tmp/dl");
+    item.set_status(DownloadStatus::Downloading);
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Manifest {
+            source: crate::media_types::ManifestSource {
+                url: "https://example.com/live.m3u8".to_string(),
+                kind: crate::media_types::ManifestKind::Hls,
+                representation_key: "hls-variant-test".to_string(),
+                audio_key: None,
+                subtitle_key: None,
+                subtitle_language: None,
+            },
+        },
+    );
+    manager.live_rows.borrow_mut().insert(id);
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    manager.video_abort.borrow_mut().insert(id, stop_tx);
+
+    assert!(manager.can_pause_live_capture(id));
+    manager.pause(id);
+
+    assert_eq!(item.status(), DownloadStatus::Paused);
+    assert_eq!(
+        stop_rx
+            .blocking_recv()
+            .expect("live worker should receive the pause intent"),
+        crate::video::StopIntent::Pause
+    );
+    assert!(
+        manager.live_rows.borrow().contains(&id),
+        "the pump owns live-marker cleanup after the worker exits"
     );
     let _ = std::fs::remove_file(qf);
 }

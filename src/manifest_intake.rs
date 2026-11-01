@@ -1837,6 +1837,7 @@ video/720.m3u8
         master.audio_renditions = vec![duplicate_rendition.clone(), duplicate_rendition]
             .into_boxed_slice();
         assert!(validate_hls_stable_track_ids(&master).is_err());
+        master.audio_renditions = vec![master.audio_renditions[0].clone()].into_boxed_slice();
 
         let duplicate = master.variants[0].clone();
         master.variants = vec![duplicate.clone(), duplicate].into_boxed_slice();

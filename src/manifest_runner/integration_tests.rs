@@ -1884,7 +1884,7 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
 }
 
 #[tokio::test]
-async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
+async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
     let root = TempRoot::new("dynamic-dash-preserve");
     let fixture_dir = root.path().join("fixture");
     let video_dir = root.path().join("video");
@@ -1982,4 +1982,28 @@ async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
         downloaded.load(Ordering::Relaxed),
         "restored byte accounting must match the committed live capture"
     );
+
+    let (finish_tx, mut finish_abort) = tokio::sync::oneshot::channel();
+    finish_tx
+        .send(crate::video::StopIntent::Finish)
+        .expect("queue finish after restoring the paused capture");
+    let finished = run_live_dash_tracks(
+        &client,
+        "https://origin.example.test/live.mpd",
+        root.path(),
+        &representation_key,
+        None,
+        Some(&video_plan),
+        None,
+        &video_dir,
+        &audio_dir,
+        3,
+        &tx,
+        &downloaded,
+        &mut guarded_child_hosts,
+        &mut finish_abort,
+    )
+    .await
+    .expect("finish the restored dynamic DASH capture");
+    assert_eq!(finished.outcome, DashLiveCaptureOutcome::Preserve);
 }

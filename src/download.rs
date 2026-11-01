@@ -916,7 +916,6 @@ impl DownloadManager {
         {
             return false;
         }
-        self.live_rows.borrow_mut().remove(&id);
         if let Some(item) = self.find(id) {
             item.set_detail(gettext("Finalizing recording…"));
         }

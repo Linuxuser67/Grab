@@ -842,9 +842,11 @@ pub(crate) async fn run_manifest_download(
         &ffmpeg,
         &video_input,
         audio_input.as_deref(),
-        subtitle_input.as_deref(),
-        job.embed_subs,
-        subtitle_sidecar.as_deref(),
+        SubtitleOutput {
+            input: subtitle_input.as_deref(),
+            embed: job.embed_subs,
+            sidecar: subtitle_sidecar.as_deref(),
+        },
         &output_part,
         &mut abort,
     )
@@ -930,12 +932,13 @@ async fn resolve_tracks(
                 subtitle_language: None,
             })
         }
-        ManifestDownloadPlan::HlsMaster {
-            video_url,
-            audio_url,
-            subtitle_url,
-            subtitle_language,
-        } => {
+        ManifestDownloadPlan::HlsMaster(plan) => {
+            let crate::manifest_plan::HlsMasterDownloadPlan {
+                video_url,
+                audio_url,
+                subtitle_url,
+                subtitle_language,
+            } = *plan;
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
             if let Some(audio_url) = audio_url.as_ref() {
                 guard_manifest_child_url(&source.url, audio_url, guarded_child_hosts)?;
@@ -3334,13 +3337,18 @@ fn add_hls_staging_options(command: &mut tokio::process::Command) {
     ]);
 }
 
+#[derive(Clone, Copy, Default)]
+struct SubtitleOutput<'a> {
+    input: Option<&'a Path>,
+    embed: bool,
+    sidecar: Option<&'a Path>,
+}
+
 async fn run_ffmpeg(
     ffmpeg: &Path,
     video_input: &Path,
     audio_input: Option<&Path>,
-    subtitle_input: Option<&Path>,
-    embed_subtitles: bool,
-    subtitle_sidecar: Option<&Path>,
+    subtitles: SubtitleOutput<'_>,
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
@@ -3363,14 +3371,14 @@ async fn run_ffmpeg(
     } else {
         command.arg("-map").arg("0:v:0?").arg("-map").arg("0:a:0?");
     }
-    if let Some(subtitle_input) = subtitle_input {
+    if let Some(subtitle_input) = subtitles.input {
         if is_hls_playlist_input(subtitle_input) {
             add_hls_staging_options(&mut command);
         }
         command.arg("-i").arg(subtitle_input);
     }
     command.args(["-c", "copy"]);
-    if subtitle_input.is_some() && embed_subtitles {
+    if subtitles.input.is_some() && subtitles.embed {
         let subtitle_stream = if audio_input.is_some() {
             "2:s:0"
         } else {
@@ -3384,8 +3392,8 @@ async fn run_ffmpeg(
     command
         .args(["-movflags", "+faststart", "-f", "mp4"])
         .arg(output);
-    if subtitle_input.is_some() && !embed_subtitles {
-        let sidecar = subtitle_sidecar.ok_or_else(|| {
+    if subtitles.input.is_some() && !subtitles.embed {
+        let sidecar = subtitles.sidecar.ok_or_else(|| {
             ManifestRunError::Failed("Subtitle sidecar destination is missing".to_string())
         })?;
         command
@@ -3435,7 +3443,7 @@ async fn run_ffmpeg(
     };
     let log = stderr_task.await.unwrap_or_default();
     if !status.success() {
-        if subtitle_input.is_some() && subtitle_mux_unsupported(&log) {
+        if subtitles.input.is_some() && subtitle_mux_unsupported(&log) {
             return Err(ManifestRunError::Unsupported(
                 "The selected subtitle format is not supported by the native finalizer".to_string(),
             ));

@@ -504,6 +504,74 @@ fn deletion_target_skips_kept_and_hostile_entries() {
 }
 
 #[test]
+fn magnet_metadata_is_cached_and_used_to_clean_unselected_files() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after Unix epoch")
+        .as_nanos();
+    let name = format!("magnet-cache-{}-{unique}", std::process::id());
+    let bytes = format!(
+        "d8:announce12:http://t.co/4:infod5:filesld6:lengthi2e4:pathl5:a.txteed6:lengthi3e4:pathl3:sub5:b.txteee4:name{}:{}12:piece lengthi16384e6:pieces20:{}ee",
+        name.len(),
+        name,
+        "A".repeat(20)
+    )
+    .into_bytes();
+    let metadata = librqbit::torrent_from_bytes(&bytes).expect("valid synthetic metainfo");
+    let info_hash = metadata.info_hash.as_string();
+    let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
+
+    persist_magnet_metadata(&info_hash, &bytes).expect("persist magnet metainfo");
+    assert_eq!(read_archive_bytes(&magnet), Some(bytes));
+
+    let folder = std::env::temp_dir().join(format!("grab-magnet-cleanup-{unique}"));
+    std::fs::create_dir_all(folder.join("sub")).expect("create output folder");
+    std::fs::write(folder.join("a.txt"), b"selected").expect("write selected file");
+    std::fs::write(folder.join("sub/b.txt"), b"unselected").expect("write unselected file");
+
+    cleanup_unselected(&folder, &magnet, &[0]);
+
+    assert_eq!(
+        std::fs::read(folder.join("a.txt")).expect("selected file remains"),
+        b"selected"
+    );
+    assert!(!folder.join("sub/b.txt").exists());
+    assert!(!folder.join("sub").exists());
+
+    // Deleting one row must not discard shared metainfo while another row
+    // with the same info-hash may still need it.
+    delete_archive_for_url(&magnet);
+    assert!(read_archive_bytes(&magnet).is_some());
+    let cached = magnet_metadata_path_in(&torrents_dir(), &info_hash).expect("cache path");
+    let _ = std::fs::remove_file(cached);
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[test]
+fn sweep_archives_keeps_referenced_magnet_metadata_only() {
+    let dir = std::env::temp_dir().join(format!("grab-magnet-sweep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create metadata directory");
+    let hash = "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3";
+    let cached = magnet_metadata_path_in(&dir, hash).expect("valid info hash");
+    let stale = magnet_metadata_path_in(&dir, "b94a8fe5ccb19ba61c4c0873d391e987982fbbd3")
+        .expect("valid info hash");
+    std::fs::write(&cached, b"cached").expect("write cached metadata");
+    std::fs::write(&stale, b"stale").expect("write stale metadata");
+    let referenced: std::collections::HashSet<String> = [format!("magnet:?xt=urn:btih:{hash}")]
+        .into_iter()
+        .collect();
+
+    sweep_archives_in(&dir, &referenced);
+
+    assert!(cached.exists());
+    assert!(!stale.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn read_torrent_bytes_enforces_single_bounded_open() {
     let dir = std::env::temp_dir().join(format!("grab-torrent-read-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

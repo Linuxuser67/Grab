@@ -2442,8 +2442,10 @@ impl DownloadManager {
                             // metadata reads and recursive walks; snapshot plain inputs and defer them.
                             let mtime = this.server_mtime.borrow_mut().remove(&id);
                             let keep_server_date = this.settings.keep_server_date();
-                            let cleanup_torrent = crate::torrent::is_torrent(&url)
-                                && !this.settings.torrent_seed_finished();
+                            // Finished is emitted only after seeding is disabled or its configured
+                            // limit is reached. At that point no peer needs boundary-piece bytes
+                            // in unselected files, so clean them for both modes.
+                            let cleanup_torrent = crate::torrent::is_torrent(&url);
                             // Snapshot the filter before dropping its row-scoped state; the
                             // filesystem cleanup runs later on a blocking worker.
                             let cleanup_selection = cleanup_torrent
@@ -4193,7 +4195,7 @@ impl DownloadManager {
             let referenced: std::collections::HashSet<String> = self
                 .items()
                 .map(|it| it.url().to_string())
-                .filter(|u| crate::torrent::is_torrent_url(u))
+                .filter(|u| crate::torrent::is_torrent(u))
                 .collect();
             crate::torrent::sweep_archives(&referenced);
             crate::torrent::prune_selections(&referenced);
@@ -5090,7 +5092,7 @@ impl DownloadManager {
         let referenced: HashSet<String> = self
             .items()
             .map(|it| it.url().to_string())
-            .filter(|u| crate::torrent::is_torrent_url(u))
+            .filter(|u| crate::torrent::is_torrent(u))
             .collect();
         // Only rows that can still resume own staging: a Done row has
         // delivered, so anything it left in its dest dir is debris.

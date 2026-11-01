@@ -436,7 +436,7 @@ pub(crate) fn download_plan(
                     video_url: variant.url.clone(),
                     audio_url: selected_audio.and_then(|rendition| rendition.url.clone()),
                     subtitle_url: match source.subtitle_key.as_deref() {
-                    Some(subtitle_key) => Some(
+                        Some(subtitle_key) => Some(
                         master
                             .subtitle_renditions
                             .iter()
@@ -451,8 +451,8 @@ pub(crate) fn download_plan(
                                 "The selected HLS subtitle rendition is no longer available"
                                     .to_string()
                             })?,
-                    ),
-                    None => None,
+                        ),
+                        None => None,
                     },
                     subtitle_language: source.subtitle_key.as_deref().and_then(|subtitle_key| {
                         master
@@ -464,6 +464,7 @@ pub(crate) fn download_plan(
                                     && variant.subtitles_group.as_deref()
                                         == Some(rendition.group_id.as_str()))
                                 .then_some(rendition.language.clone())
+                                .flatten()
                             })
                     }),
                 },

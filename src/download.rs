@@ -4195,7 +4195,7 @@ impl DownloadManager {
             let referenced: std::collections::HashSet<String> = self
                 .items()
                 .map(|it| it.url().to_string())
-                .filter(|u| crate::torrent::is_torrent_url(u))
+                .filter(|u| crate::torrent::is_torrent(u))
                 .collect();
             crate::torrent::sweep_archives(&referenced);
             crate::torrent::prune_selections(&referenced);
@@ -5092,7 +5092,7 @@ impl DownloadManager {
         let referenced: HashSet<String> = self
             .items()
             .map(|it| it.url().to_string())
-            .filter(|u| crate::torrent::is_torrent_url(u))
+            .filter(|u| crate::torrent::is_torrent(u))
             .collect();
         // Only rows that can still resume own staging: a Done row has
         // delivered, so anything it left in its dest dir is debris.

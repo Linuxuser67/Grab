@@ -4425,7 +4425,7 @@ fn live_capture_abort_adopts_partial() {
             if observed {
                 std::fs::write(&seen, b"1").ok();
             }
-            let _ = abort_tx.send(crate::video::StopIntent::Preserve);
+            let _ = abort_tx.send(crate::video::StopIntent::Finish);
         });
         run_live_ytdlp(
             &fake_yt,

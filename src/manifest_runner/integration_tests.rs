@@ -440,7 +440,7 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
     .expect("partial resource bytes were not reserved before cancellation");
 
     abort_tx
-        .send(crate::video::StopIntent::Preserve)
+        .send(crate::video::StopIntent::Pause)
         .expect("signal pause to the manifest resource fetch");
     let aborted = tokio::time::timeout(FIXTURE_TIMEOUT, attempt)
         .await
@@ -571,6 +571,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         root.path(),
         &local_plan,
         None,
+        false,
         &video_dir,
         &audio_dir,
         1,
@@ -588,6 +589,26 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         segment_bytes.len() as u64,
         "restoring a saved capture restores its retained-byte progress without a new fetch"
     );
+
+    let (_finish_tx, mut finish_abort) = tokio::sync::oneshot::channel();
+    let finish_outcome = run_live_hls_tracks(
+        &client,
+        "https://origin.example.test/master.m3u8",
+        root.path(),
+        &local_plan,
+        None,
+        true,
+        &video_dir,
+        &audio_dir,
+        1,
+        &tx,
+        &downloaded,
+        &mut guarded_child_hosts,
+        &mut finish_abort,
+    )
+    .await
+    .expect("resume a durable finish without polling the source");
+    assert_eq!(finish_outcome, LiveHlsCaptureOutcome::Finish);
     let final_playlist = m3u8_rs::parse_media_playlist_res(
         &tokio::fs::read(video_dir.join("local.m3u8"))
             .await
@@ -956,9 +977,13 @@ async fn live_hls_sequence_gap_preserves_already_committed_media() {
 }
 
 #[tokio::test]
-async fn live_hls_preserve_stop_keeps_the_last_committed_window() {
+async fn live_hls_pause_keeps_the_last_committed_window() {
     let root = TempRoot::new("live-preserve");
     let video_dir = root.path().join("video");
+    let audio_dir = root.path().join("audio");
+    tokio::fs::create_dir_all(&audio_dir)
+        .await
+        .expect("create live HLS audio staging");
     tokio::fs::create_dir_all(&video_dir)
         .await
         .expect("create live preserve staging");
@@ -1009,8 +1034,8 @@ async fn live_hls_preserve_stop_keeps_the_last_committed_window() {
 
     let (stop_tx, mut stop_abort) = tokio::sync::oneshot::channel();
     stop_tx
-        .send(crate::video::StopIntent::Preserve)
-        .expect("queue preserve stop before the next window");
+        .send(crate::video::StopIntent::Pause)
+        .expect("queue pause before the next window");
     assert_eq!(
         apply_live_hls_snapshot(
             &client,
@@ -1023,8 +1048,8 @@ async fn live_hls_preserve_stop_keeps_the_last_committed_window() {
             0,
         )
         .await
-        .expect("preserve stop during the next live window"),
-        LiveHlsSnapshotOutcome::Stopped(crate::video::StopIntent::Preserve)
+        .expect("pause during the next live window"),
+        LiveHlsSnapshotOutcome::Stopped(crate::video::StopIntent::Pause)
     );
 
     let local = tokio::fs::read(video_dir.join("local.m3u8"))
@@ -1040,10 +1065,86 @@ async fn live_hls_preserve_stop_keeps_the_last_committed_window() {
             .expect("read last committed live segment"),
         b"committed-segment"
     );
+
+    let (finish_tx, mut finish_abort) = tokio::sync::oneshot::channel();
+    finish_tx
+        .send(crate::video::StopIntent::Finish)
+        .expect("queue finish after pausing the committed capture");
+    let mut guarded_child_hosts = std::collections::HashSet::new();
+    let finished = run_live_hls_tracks(
+        &client,
+        "https://origin.example.test/live.m3u8",
+        root.path(),
+        &first,
+        None,
+        false,
+        &video_dir,
+        &audio_dir,
+        1,
+        &tx,
+        &downloaded,
+        &mut guarded_child_hosts,
+        &mut finish_abort,
+    )
+    .await
+    .expect("finish the restored live HLS capture");
+    assert_eq!(finished, LiveHlsCaptureOutcome::Finish);
 }
 
 #[tokio::test]
-async fn live_hls_preserve_stop_does_not_commit_an_interrupted_window() {
+async fn live_hls_runner_returns_paused_without_finalizing() {
+    let root = TempRoot::new("live-pause-runner");
+    let video_dir = root.path().join("video");
+    let audio_dir = root.path().join("audio");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create live HLS video staging");
+    tokio::fs::create_dir_all(&audio_dir)
+        .await
+        .expect("create live HLS audio staging");
+    let plan = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:500\n#EXTINF:4,\n500.ts\n",
+    )
+    .expect("plan a live media window");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (stop_tx, mut abort) = tokio::sync::oneshot::channel();
+    stop_tx
+        .send(crate::video::StopIntent::Pause)
+        .expect("queue pause before the first live HLS request");
+    let mut guarded_child_hosts = std::collections::HashSet::new();
+
+    let outcome = run_live_hls_tracks(
+        &client,
+        "https://origin.example.test/live.m3u8",
+        root.path(),
+        &plan,
+        None,
+        false,
+        &video_dir,
+        &audio_dir,
+        1,
+        &tx,
+        &downloaded,
+        &mut guarded_child_hosts,
+        &mut abort,
+    )
+    .await
+    .expect("pause the live HLS runner");
+
+    assert_eq!(outcome, LiveHlsCaptureOutcome::Paused);
+    assert!(
+        tokio::fs::symlink_metadata(video_dir.join("local.m3u8"))
+            .await
+            .is_err(),
+        "pausing before the first commit must not create an FFmpeg input"
+    );
+}
+
+#[tokio::test]
+async fn live_hls_pause_does_not_commit_an_interrupted_window() {
     let root = TempRoot::new("live-stop");
     let video_dir = root.path().join("video");
     tokio::fs::create_dir_all(&video_dir)
@@ -1062,8 +1163,8 @@ async fn live_hls_preserve_stop_does_not_commit_an_interrupted_window() {
     let downloaded = Arc::new(AtomicU64::new(0));
     let (stop_tx, mut abort) = tokio::sync::oneshot::channel();
     stop_tx
-        .send(crate::video::StopIntent::Preserve)
-        .expect("queue preserve stop");
+        .send(crate::video::StopIntent::Pause)
+        .expect("queue pause");
     let stopped = apply_live_hls_snapshot(
         &client,
         &plan,
@@ -1079,7 +1180,7 @@ async fn live_hls_preserve_stop_does_not_commit_an_interrupted_window() {
 
     assert_eq!(
         stopped,
-        LiveHlsSnapshotOutcome::Stopped(crate::video::StopIntent::Preserve)
+        LiveHlsSnapshotOutcome::Stopped(crate::video::StopIntent::Pause)
     );
     assert_eq!(track.accumulator.segment_count(), 0);
     assert!(
@@ -1833,7 +1934,7 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
 }
 
 #[tokio::test]
-async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
+async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
     let root = TempRoot::new("dynamic-dash-preserve");
     let fixture_dir = root.path().join("fixture");
     let video_dir = root.path().join("video");
@@ -1886,8 +1987,8 @@ async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
         .await
         .expect("dynamic DASH runner did not commit its first window");
         stop_tx
-            .send(crate::video::StopIntent::Preserve)
-            .expect("send preserve stop after committed dynamic DASH window");
+            .send(crate::video::StopIntent::Pause)
+            .expect("send pause after committed dynamic DASH window");
     });
 
     let mut guarded_child_hosts = std::collections::HashSet::new();
@@ -1908,11 +2009,11 @@ async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
         &mut abort,
     )
     .await
-    .expect("stop dynamic DASH capture after its first committed window");
-    stop_task.await.expect("preserve-stop observer task failed");
+    .expect("pause dynamic DASH capture after its first committed window");
+    stop_task.await.expect("pause observer task failed");
     wait_for_fixture_server(server).await;
 
-    assert_eq!(capture.outcome, DashLiveCaptureOutcome::Preserve);
+    assert_eq!(capture.outcome, DashLiveCaptureOutcome::Paused);
     assert_eq!(
         capture
             .video_resources
@@ -1920,7 +2021,7 @@ async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
             .filter(|name| name.starts_with("dash-live-segment-"))
             .count(),
         5,
-        "preserve stop must return the committed segment set"
+        "pause must return the committed segment set"
     );
     let (restored, retained_bytes) = load_dash_live_track(&representation_key, &video_dir, None)
         .await
@@ -1931,4 +2032,28 @@ async fn dynamic_dash_live_runner_preserves_committed_window_on_stop() {
         downloaded.load(Ordering::Relaxed),
         "restored byte accounting must match the committed live capture"
     );
+
+    let (finish_tx, mut finish_abort) = tokio::sync::oneshot::channel();
+    finish_tx
+        .send(crate::video::StopIntent::Finish)
+        .expect("queue finish after restoring the paused capture");
+    let finished = run_live_dash_tracks(
+        &client,
+        "https://origin.example.test/live.mpd",
+        root.path(),
+        &representation_key,
+        None,
+        Some(&video_plan),
+        None,
+        &video_dir,
+        &audio_dir,
+        3,
+        &tx,
+        &downloaded,
+        &mut guarded_child_hosts,
+        &mut finish_abort,
+    )
+    .await
+    .expect("finish the restored dynamic DASH capture");
+    assert_eq!(finished.outcome, DashLiveCaptureOutcome::Finish);
 }

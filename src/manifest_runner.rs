@@ -218,6 +218,7 @@ impl From<crate::manifest_intake::ManifestIntakeError> for ManifestRunError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ManifestOutcome {
     Finished(u64),
+    Paused,
     Aborted,
 }
 
@@ -260,8 +261,9 @@ struct LiveHlsTrack {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LiveHlsCaptureOutcome {
     Ended,
-    Preserve,
-    PreserveVideoOnly,
+    Paused,
+    Finish,
+    FinishVideoOnly,
     Discard,
 }
 
@@ -333,8 +335,9 @@ enum DashLiveUpdateOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DashLiveCaptureOutcome {
     Ended,
-    Preserve,
-    PreserveVideoOnly,
+    Paused,
+    Finish,
+    FinishVideoOnly,
     Discard,
 }
 
@@ -383,37 +386,51 @@ pub(crate) async fn run_manifest_download(
     let live_marker_exists = read_live_hls_marker(&staging)
         .await
         .map_err(ManifestRunError::Failed)?;
+    let finish_marker_bytes = read_live_finish_marker(&staging)
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    let finish_requested = finish_marker_bytes.is_some();
     let dash_live_requested = job.source.kind == ManifestKind::Dash
         && job.source.representation_key.starts_with("dash-live-");
-    let mut offline_tracks = if live_marker_exists && job.source.kind == ManifestKind::Hls {
-        restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
-    } else if dash_live_requested && dash_live_state_exists(&video_dir).await? {
-        let has_audio = dash_live_state_exists(&audio_dir).await?;
-        Some(Tracks::DashLiveOffline { has_audio })
-    } else {
-        None
-    };
+    let mut offline_tracks =
+        if (finish_requested || live_marker_exists) && job.source.kind == ManifestKind::Hls {
+            restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
+        } else if dash_live_requested && dash_live_state_exists(&video_dir).await? {
+            let has_audio = dash_live_state_exists(&audio_dir).await?;
+            Some(Tracks::DashLiveOffline { has_audio })
+        } else {
+            None
+        };
+    if finish_requested && offline_tracks.is_none() {
+        return Err(ManifestRunError::Failed(
+            "The finished live recording has no committed staging data".to_string(),
+        ));
+    }
 
-    let (client, force_offline) = match crate::manifest_intake::client_for_manifest(
-        &job.source.url,
-        &job.cookies_browser,
-        job.proxy.as_ref(),
-    )
-    .await
-    {
-        Ok(client) => (client, false),
-        Err(error) if offline_tracks.is_some() => {
-            tracing::warn!(
-                item_id = job.item_id,
-                error = %error,
-                "live stream source is unavailable; finalizing the committed local capture"
-            );
-            (reqwest::Client::new(), true)
-        }
-        Err(error) => {
-            return Err(ManifestRunError::Failed(format!(
-                "Could not configure manifest networking: {error}"
-            )));
+    let (client, force_offline) = if finish_requested {
+        (reqwest::Client::new(), true)
+    } else {
+        match crate::manifest_intake::client_for_manifest(
+            &job.source.url,
+            &job.cookies_browser,
+            job.proxy.as_ref(),
+        )
+        .await
+        {
+            Ok(client) => (client, false),
+            Err(error) if offline_tracks.is_some() => {
+                tracing::warn!(
+                    item_id = job.item_id,
+                    error = %error,
+                    "live stream source is unavailable; finalizing the committed local capture"
+                );
+                (reqwest::Client::new(), true)
+            }
+            Err(error) => {
+                return Err(ManifestRunError::Failed(format!(
+                    "Could not configure manifest networking: {error}"
+                )));
+            }
         }
     };
 
@@ -500,21 +517,24 @@ pub(crate) async fn run_manifest_download(
             "A live HLS staging marker belongs to a non-HLS queue item".to_string(),
         ));
     }
-    if live_hls || live_dash {
+    if !finish_requested && (live_hls || live_dash) {
         tx.send(EngineMsg::LiveDetected).ok();
     }
-    tx.send(EngineMsg::Phase(if live_source || live_dash {
-        "Recording live stream…".to_string()
-    } else if live_hls {
+    tx.send(EngineMsg::Phase(if finish_requested || live_hls {
         "Finalizing live stream…".to_string()
+    } else if live_source || live_dash {
+        "Recording live stream…".to_string()
     } else {
         "Downloading stream segments…".to_string()
     }))
     .ok();
     let concurrency = job.connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
-    let downloaded = Arc::new(AtomicU64::new(0));
-    let mut _preserve_stop_sender = None;
-    if live_hls {
+    let downloaded = Arc::new(AtomicU64::new(finish_marker_bytes.unwrap_or(0)));
+    let mut _finish_stop_sender = None;
+    if finish_requested {
+        // The durable finish marker means the local playlists / concatenated
+        // DASH tracks are ready; retry finalization without polling the source.
+    } else if live_hls {
         let Tracks::Hls { video, audio, .. } = &tracks else {
             return Err(ManifestRunError::Failed(
                 "Live HLS capture requires HLS media tracks".to_string(),
@@ -526,6 +546,7 @@ pub(crate) async fn run_manifest_download(
             dest_dir,
             video,
             audio.as_ref(),
+            finish_requested,
             &video_dir,
             &audio_dir,
             concurrency,
@@ -537,31 +558,44 @@ pub(crate) async fn run_manifest_download(
         .await?;
         match capture {
             LiveHlsCaptureOutcome::Ended => {}
-            LiveHlsCaptureOutcome::Preserve | LiveHlsCaptureOutcome::PreserveVideoOnly => {
-                // A preserved stop ends recording but still needs a live
+            LiveHlsCaptureOutcome::Paused => return Ok(ManifestOutcome::Paused),
+            LiveHlsCaptureOutcome::Finish | LiveHlsCaptureOutcome::FinishVideoOnly => {
+                // A Finish ends recording but still needs a live
                 // receiver during FFmpeg finalization. Removal remains guarded
                 // by AttemptGate::try_commit at the final delivery boundary.
                 if !staged_regular_file_exists(&video_dir.join("local.m3u8")).await {
                     return Ok(ManifestOutcome::Aborted);
                 }
-                if matches!(capture, LiveHlsCaptureOutcome::PreserveVideoOnly) {
+                if matches!(capture, LiveHlsCaptureOutcome::FinishVideoOnly) {
                     // Keep a video-only recovery decision across process restarts:
                     // an old audio playlist must not be restored on the next retry.
                     remove_regular_file_if_present(&audio_dir.join("local.m3u8"))
                         .await
                         .map_err(ManifestRunError::Failed)?;
                     has_audio = false;
-                } else if has_audio
-                    && !staged_regular_file_exists(&audio_dir.join("local.m3u8")).await
-                {
-                    has_audio = false;
                 }
-                let (sender, receiver) = tokio::sync::oneshot::channel();
-                _preserve_stop_sender = Some(sender);
-                abort = receiver;
+                if !finish_requested {
+                    let (sender, receiver) = tokio::sync::oneshot::channel();
+                    _finish_stop_sender = Some(sender);
+                    abort = receiver;
+                }
             }
             LiveHlsCaptureOutcome::Discard => return Ok(ManifestOutcome::Aborted),
         }
+        if !staged_regular_file_exists(&video_dir.join("local.m3u8")).await {
+            return Ok(ManifestOutcome::Aborted);
+        }
+        if has_audio && !staged_regular_file_exists(&audio_dir.join("local.m3u8")).await {
+            has_audio = false;
+        }
+        if finish_requested {
+            downloaded.store(finish_marker_bytes.unwrap_or(0), Ordering::Relaxed);
+        } else {
+            ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
+                .await
+                .map_err(ManifestRunError::Failed)?;
+        }
+        tx.send(EngineMsg::LiveFinalizing).ok();
     } else if live_dash {
         let (video_plan, audio_plan) = match &tracks {
             Tracks::Dash { video, audio, .. } => (Some(video), audio.as_deref()),
@@ -591,9 +625,10 @@ pub(crate) async fn run_manifest_download(
         .await?;
         match capture.outcome {
             DashLiveCaptureOutcome::Discard => return Ok(ManifestOutcome::Aborted),
-            DashLiveCaptureOutcome::Preserve | DashLiveCaptureOutcome::PreserveVideoOnly => {
+            DashLiveCaptureOutcome::Paused => return Ok(ManifestOutcome::Paused),
+            DashLiveCaptureOutcome::Finish | DashLiveCaptureOutcome::FinishVideoOnly => {
                 let (sender, receiver) = tokio::sync::oneshot::channel();
-                _preserve_stop_sender = Some(sender);
+                _finish_stop_sender = Some(sender);
                 abort = receiver;
             }
             DashLiveCaptureOutcome::Ended => {}
@@ -605,7 +640,7 @@ pub(crate) async fn run_manifest_download(
         {
             return Ok(ManifestOutcome::Aborted);
         }
-        if matches!(capture.outcome, DashLiveCaptureOutcome::PreserveVideoOnly) {
+        if matches!(capture.outcome, DashLiveCaptureOutcome::FinishVideoOnly) {
             remove_regular_file_if_present(&audio_dir.join(DASH_LIVE_STATE_NAME))
                 .await
                 .map_err(ManifestRunError::Failed)?;
@@ -617,6 +652,14 @@ pub(crate) async fn run_manifest_download(
                     .any(|name| name.starts_with("dash-live-segment-"))
             });
         }
+        if finish_requested {
+            downloaded.store(finish_marker_bytes.unwrap_or(0), Ordering::Relaxed);
+        } else {
+            ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
+                .await
+                .map_err(ManifestRunError::Failed)?;
+        }
+        tx.send(EngineMsg::LiveFinalizing).ok();
         if !concat_dash_resource_names(
             &capture.video_resources,
             &video_dir,
@@ -1157,6 +1200,71 @@ async fn restore_local_live_hls_tracks(
 
 const LIVE_HLS_MARKER_NAME: &str = "live-hls.capture";
 const LIVE_HLS_MARKER_CONTENT: &[u8] = b"grab-live-hls-v1\n";
+const LIVE_FINISH_MARKER_NAME: &str = "live-capture.finished";
+const LIVE_FINISH_MARKER_VERSION: &str = "grab-live-finish-v1";
+
+/// Read the durable finish intent and committed-byte count for a live capture.
+async fn read_live_finish_marker(directory: &Path) -> Result<Option<u64>, String> {
+    let marker = directory.join(LIVE_FINISH_MARKER_NAME);
+    let metadata = match tokio::fs::symlink_metadata(&marker).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!("Could not inspect live finish marker: {error}"));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 128 {
+        return Err("The live finish marker is not a supported regular file".to_string());
+    }
+    let contents = tokio::fs::read(&marker)
+        .await
+        .map_err(|error| format!("Could not read live finish marker: {error}"))?;
+    let text = std::str::from_utf8(&contents)
+        .map_err(|_| "The live finish marker is not valid UTF-8".to_string())?;
+    let mut lines = text.lines();
+    if lines.next() != Some(LIVE_FINISH_MARKER_VERSION) {
+        return Err("The live finish marker has an unsupported version".to_string());
+    }
+    let staged_bytes = lines
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "The live finish marker has an invalid byte count".to_string())?;
+    if lines.next().is_some() {
+        return Err("The live finish marker contains unexpected data".to_string());
+    }
+    Ok(Some(staged_bytes))
+}
+
+/// Persist the finish decision before finalization so retries never resume capture.
+async fn ensure_live_finish_marker(directory: &Path, staged_bytes: u64) -> Result<(), String> {
+    if let Some(existing_bytes) = read_live_finish_marker(directory).await? {
+        return if existing_bytes == staged_bytes {
+            Ok(())
+        } else {
+            Err("The live finish marker byte count changed between attempts".to_string())
+        };
+    }
+
+    let marker = directory.join(LIVE_FINISH_MARKER_NAME);
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+        .await
+        .map_err(|error| format!("Could not create live finish marker: {error}"))?;
+    let contents = format!("{LIVE_FINISH_MARKER_VERSION}\n{staged_bytes}\n");
+    if let Err(error) = file.write_all(contents.as_bytes()).await {
+        drop(file);
+        let _ = remove_regular_file_if_present(&marker).await;
+        return Err(format!("Could not write live finish marker: {error}"));
+    }
+    if let Err(error) = file.sync_all().await {
+        drop(file);
+        let _ = remove_regular_file_if_present(&marker).await;
+        return Err(format!("Could not flush live finish marker: {error}"));
+    }
+    Ok(())
+}
 
 async fn read_live_hls_marker(directory: &Path) -> Result<bool, String> {
     let marker = directory.join(LIVE_HLS_MARKER_NAME);
@@ -1629,6 +1737,7 @@ async fn run_live_hls_tracks(
     destination_dir: &Path,
     video_plan: &HlsPlan,
     audio_plan: Option<&HlsPlan>,
+    finish_only: bool,
     video_dir: &Path,
     audio_dir: &Path,
     connections: usize,
@@ -1659,6 +1768,9 @@ async fn run_live_hls_tracks(
     downloaded.store(retained_bytes, Ordering::Relaxed);
     let staging_dir = video_dir.parent().unwrap_or(video_dir);
     ensure_manifest_mux_spaces(staging_dir, destination_dir, retained_bytes)?;
+    if finish_only {
+        return Ok(LiveHlsCaptureOutcome::Finish);
+    }
 
     let audio_resource_bytes = audio
         .as_ref()
@@ -1670,7 +1782,7 @@ async fn run_live_hls_tracks(
         .is_none_or(|total| total > crate::manifest::MAX_HLS_LIVE_CAPTURE_BYTES)
     {
         return Ok(if video.accumulator.segment_count() > 0 {
-            LiveHlsCaptureOutcome::PreserveVideoOnly
+            LiveHlsCaptureOutcome::FinishVideoOnly
         } else {
             LiveHlsCaptureOutcome::Discard
         });
@@ -1707,13 +1819,14 @@ async fn run_live_hls_tracks(
         }
         LiveHlsSnapshotOutcome::Stopped(intent) => {
             return Ok(match intent {
-                crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
+                crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
                 crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
             });
         }
         LiveHlsSnapshotOutcome::ContinuityLost => {
             return Ok(if video.accumulator.segment_count() > 0 {
-                LiveHlsCaptureOutcome::PreserveVideoOnly
+                LiveHlsCaptureOutcome::FinishVideoOnly
             } else {
                 LiveHlsCaptureOutcome::Discard
             });
@@ -1738,7 +1851,7 @@ async fn run_live_hls_tracks(
                     error = %error,
                     "live HLS audio rendition is no longer supported; preserving video capture"
                 );
-                return Ok(LiveHlsCaptureOutcome::PreserveVideoOnly);
+                return Ok(LiveHlsCaptureOutcome::FinishVideoOnly);
             }
             Err(error) => return Err(error),
             Ok(outcome) => outcome,
@@ -1753,13 +1866,14 @@ async fn run_live_hls_tracks(
             }
             LiveHlsSnapshotOutcome::Stopped(intent) => {
                 return Ok(match intent {
-                    crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::PreserveVideoOnly,
+                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
                     crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                 });
             }
             LiveHlsSnapshotOutcome::ContinuityLost => {
                 return Ok(if video.accumulator.segment_count() > 0 {
-                    LiveHlsCaptureOutcome::PreserveVideoOnly
+                    LiveHlsCaptureOutcome::FinishVideoOnly
                 } else {
                     LiveHlsCaptureOutcome::Discard
                 });
@@ -1787,7 +1901,8 @@ async fn run_live_hls_tracks(
             biased;
             stop = &mut *abort => {
                 return Ok(match stop.unwrap_or(crate::video::StopIntent::Discard) {
-                    crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
+                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
                     crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                 });
             }
@@ -1820,13 +1935,14 @@ async fn run_live_hls_tracks(
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
-                        crate::video::StopIntent::Preserve => LiveHlsCaptureOutcome::Preserve,
+                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
                         crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                     });
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
                     return Ok(if video.accumulator.segment_count() > 0 {
-                        LiveHlsCaptureOutcome::PreserveVideoOnly
+                        LiveHlsCaptureOutcome::FinishVideoOnly
                     } else {
                         LiveHlsCaptureOutcome::Discard
                     });
@@ -1861,15 +1977,14 @@ async fn run_live_hls_tracks(
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(match intent {
-                        crate::video::StopIntent::Preserve => {
-                            LiveHlsCaptureOutcome::PreserveVideoOnly
-                        }
+                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
                         crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                     });
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
                     return Ok(if video.accumulator.segment_count() > 0 {
-                        LiveHlsCaptureOutcome::PreserveVideoOnly
+                        LiveHlsCaptureOutcome::FinishVideoOnly
                     } else {
                         LiveHlsCaptureOutcome::Discard
                     });
@@ -2926,7 +3041,7 @@ async fn run_live_dash_tracks(
                 .resource_names()
                 .map(str::to_string)
                 .collect::<Vec<_>>();
-            let audio_resources = if outcome == DashLiveCaptureOutcome::PreserveVideoOnly {
+            let audio_resources = if outcome == DashLiveCaptureOutcome::FinishVideoOnly {
                 None
             } else {
                 audio.as_ref().map(|(track, _)| {
@@ -2954,7 +3069,7 @@ async fn run_live_dash_tracks(
     })?;
     if total_bytes > MAX_MANIFEST_DOWNLOAD_BYTES {
         finish_capture!(if !video.state.segments.is_empty() {
-            DashLiveCaptureOutcome::PreserveVideoOnly
+            DashLiveCaptureOutcome::FinishVideoOnly
         } else {
             DashLiveCaptureOutcome::Discard
         });
@@ -2969,7 +3084,7 @@ async fn run_live_dash_tracks(
         finish_capture!(if video.state.segments.is_empty() {
             DashLiveCaptureOutcome::Discard
         } else {
-            DashLiveCaptureOutcome::Preserve
+            DashLiveCaptureOutcome::Finish
         });
     };
     let mut next_refresh_at = dash_next_refresh_deadline(&current_video_plan.presentation)?;
@@ -2995,7 +3110,8 @@ async fn run_live_dash_tracks(
         }
         DashLiveUpdateOutcome::Stopped(intent) => {
             finish_capture!(match intent {
-                crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
+                crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
+                crate::video::StopIntent::Finish => DashLiveCaptureOutcome::Finish,
                 crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
             });
         }
@@ -3003,14 +3119,14 @@ async fn run_live_dash_tracks(
             finish_capture!(if video.state.segments.is_empty() {
                 DashLiveCaptureOutcome::Discard
             } else {
-                DashLiveCaptureOutcome::PreserveVideoOnly
+                DashLiveCaptureOutcome::FinishVideoOnly
             });
         }
     }
 
     if let Some(audio) = audio.as_mut() {
         let Some(plan) = current_audio_plan.as_ref() else {
-            finish_capture!(DashLiveCaptureOutcome::PreserveVideoOnly);
+            finish_capture!(DashLiveCaptureOutcome::FinishVideoOnly);
         };
         let updated_video_bytes = dash_live_track_bytes(&video.state, &video.directory).await?;
         match apply_dash_live_snapshot(
@@ -3034,14 +3150,15 @@ async fn run_live_dash_tracks(
             }
             DashLiveUpdateOutcome::Stopped(intent) => {
                 finish_capture!(match intent {
-                    crate::video::StopIntent::Preserve => {
-                        DashLiveCaptureOutcome::PreserveVideoOnly
+                    crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => {
+                        DashLiveCaptureOutcome::FinishVideoOnly
                     }
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                 });
             }
             DashLiveUpdateOutcome::ContinuityLost => {
-                finish_capture!(DashLiveCaptureOutcome::PreserveVideoOnly);
+                finish_capture!(DashLiveCaptureOutcome::FinishVideoOnly);
             }
         }
     }
@@ -3061,7 +3178,8 @@ async fn run_live_dash_tracks(
             biased;
             stop = &mut *abort => {
                 finish_capture!(match stop.unwrap_or(crate::video::StopIntent::Discard) {
-                    crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
+                    crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => DashLiveCaptureOutcome::Finish,
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                 });
             }
@@ -3072,7 +3190,8 @@ async fn run_live_dash_tracks(
             biased;
             stop = &mut *abort => {
                 finish_capture!(match stop.unwrap_or(crate::video::StopIntent::Discard) {
-                    crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
+                    crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => DashLiveCaptureOutcome::Finish,
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                 });
             }
@@ -3087,7 +3206,7 @@ async fn run_live_dash_tracks(
                 finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
-                    DashLiveCaptureOutcome::PreserveVideoOnly
+                    DashLiveCaptureOutcome::FinishVideoOnly
                 });
             }
             Err(crate::manifest_intake::ManifestIntakeError::Retryable(error)) => {
@@ -3098,7 +3217,7 @@ async fn run_live_dash_tracks(
                 finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
-                    DashLiveCaptureOutcome::PreserveVideoOnly
+                    DashLiveCaptureOutcome::FinishVideoOnly
                 });
             }
         };
@@ -3122,7 +3241,7 @@ async fn run_live_dash_tracks(
                 finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
-                    DashLiveCaptureOutcome::PreserveVideoOnly
+                    DashLiveCaptureOutcome::FinishVideoOnly
                 });
             }
             Err(ManifestRunError::Unsupported(error)) => {
@@ -3130,7 +3249,7 @@ async fn run_live_dash_tracks(
                 finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
-                    DashLiveCaptureOutcome::PreserveVideoOnly
+                    DashLiveCaptureOutcome::FinishVideoOnly
                 });
             }
             Err(error) => return Err(error),
@@ -3164,7 +3283,8 @@ async fn run_live_dash_tracks(
             }
             DashLiveUpdateOutcome::Stopped(intent) => {
                 finish_capture!(match intent {
-                    crate::video::StopIntent::Preserve => DashLiveCaptureOutcome::Preserve,
+                    crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => DashLiveCaptureOutcome::Finish,
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                 });
             }
@@ -3172,7 +3292,7 @@ async fn run_live_dash_tracks(
                 finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
-                    DashLiveCaptureOutcome::PreserveVideoOnly
+                    DashLiveCaptureOutcome::FinishVideoOnly
                 });
             }
         }
@@ -3201,8 +3321,9 @@ async fn run_live_dash_tracks(
                     }
                     DashLiveUpdateOutcome::Stopped(intent) => {
                         finish_capture!(match intent {
-                            crate::video::StopIntent::Preserve => {
-                                DashLiveCaptureOutcome::PreserveVideoOnly
+                            crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
+                            crate::video::StopIntent::Finish => {
+                                DashLiveCaptureOutcome::FinishVideoOnly
                             }
                             crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                         });
@@ -3211,7 +3332,7 @@ async fn run_live_dash_tracks(
                         finish_capture!(if video.state.segments.is_empty() {
                             DashLiveCaptureOutcome::Discard
                         } else {
-                            DashLiveCaptureOutcome::PreserveVideoOnly
+                            DashLiveCaptureOutcome::FinishVideoOnly
                         });
                     }
                 }
@@ -3246,14 +3367,15 @@ async fn run_live_dash_tracks(
                     }
                     DashLiveUpdateOutcome::Stopped(intent) => {
                         finish_capture!(match intent {
-                            crate::video::StopIntent::Preserve => {
-                                DashLiveCaptureOutcome::PreserveVideoOnly
+                            crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
+                            crate::video::StopIntent::Finish => {
+                                DashLiveCaptureOutcome::FinishVideoOnly
                             }
                             crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                         });
                     }
                     DashLiveUpdateOutcome::ContinuityLost => {
-                        finish_capture!(DashLiveCaptureOutcome::PreserveVideoOnly);
+                        finish_capture!(DashLiveCaptureOutcome::FinishVideoOnly);
                     }
                 }
             }
@@ -3261,7 +3383,7 @@ async fn run_live_dash_tracks(
                 finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard
                 } else {
-                    DashLiveCaptureOutcome::PreserveVideoOnly
+                    DashLiveCaptureOutcome::FinishVideoOnly
                 });
             }
             (None, None) => {}
@@ -3496,6 +3618,36 @@ async fn run_ffmpeg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn live_finish_marker_is_idempotent_and_preserves_committed_bytes() {
+        let directory = tempfile::tempdir().expect("create live finish marker directory");
+        assert_eq!(
+            read_live_finish_marker(directory.path())
+                .await
+                .expect("read missing finish marker"),
+            None
+        );
+
+        ensure_live_finish_marker(directory.path(), 123_456)
+            .await
+            .expect("persist finish marker");
+        assert_eq!(
+            read_live_finish_marker(directory.path())
+                .await
+                .expect("read finish marker"),
+            Some(123_456)
+        );
+        ensure_live_finish_marker(directory.path(), 123_456)
+            .await
+            .expect("repeated finish marker write is idempotent");
+        assert!(
+            ensure_live_finish_marker(directory.path(), 123_457)
+                .await
+                .is_err(),
+            "a retry must not silently change the committed byte count"
+        );
+    }
 
     #[test]
     fn manifest_output_container_accepts_only_mp4_and_mkv_extensions() {

@@ -57,8 +57,10 @@ pub(crate) enum EngineMsg {
     /// Boxed: this variant is rare but would otherwise inflate every message
     /// on this hot channel (progress ticks) to the largest variant's size.
     Validator(Box<ValidatorInfo>),
-    /// Dialog-less live row: track so Stop finalizes capture instead of killing it as stalled VOD.
+    /// Dialog-less live row: track so Finish finalizes capture instead of killing it as stalled VOD.
     LiveDetected,
+    /// The capture has ended; subsequent pause/cancel controls now target finalization.
+    LiveFinalizing,
     /// Server object changed mid-download: drop bitmap so retry starts fresh.
     FailedVersion(String),
     /// Torrent per-piece haves (500ms tick); replaces bitfield, redraws off progress ticks.

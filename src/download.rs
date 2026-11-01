@@ -886,9 +886,44 @@ impl DownloadManager {
         });
     }
 
-    /// Whether the row is currently capturing a live stream (stop-and-keep applies).
+    /// Whether the row is currently capturing a live stream.
     pub fn is_live_video(&self, id: u64) -> bool {
         self.live_rows.borrow().contains(&id)
+    }
+
+    /// Whether this row uses the native manifest engine.
+    pub(crate) fn is_manifest_download(&self, id: u64) -> bool {
+        matches!(
+            self.video_sources.borrow().get(&id),
+            Some(crate::media_types::VideoSource::Manifest { .. })
+        )
+    }
+
+    /// Whether an active live worker can still receive a stop intent.
+    pub(crate) fn can_finish_live_recording(&self, id: u64) -> bool {
+        self.is_live_video(id) && self.video_abort.borrow().contains_key(&id)
+    }
+
+    /// Whether a live capture can be paused without losing its committed resume state.
+    pub(crate) fn can_pause_live_capture(&self, id: u64) -> bool {
+        self.can_finish_live_recording(id) && self.is_manifest_download(id)
+    }
+
+    /// Request finalization of an active live recording without marking it cancelled.
+    pub(crate) fn finish_live_recording(&self, id: u64) -> bool {
+        if !self.can_finish_live_recording(id) {
+            return false;
+        }
+        if !self.stop_video_worker(id, crate::video::StopIntent::Finish) {
+            self.changed();
+            return false;
+        }
+        if let Some(item) = self.find(id) {
+            item.set_detail(gettext("Finalizing recording…"));
+        }
+        self.persist_queue();
+        self.changed();
+        true
     }
 
     /// Explicit absolute dest, else the effective download dir.
@@ -2860,6 +2895,12 @@ impl DownloadManager {
                             this.live_rows.borrow_mut().insert(id);
                         }
                     }
+                    EngineMsg::LiveFinalizing => {
+                        if item.status() == DownloadStatus::Downloading {
+                            this.live_rows.borrow_mut().remove(&id);
+                            item.set_detail(gettext("Finalizing recording…"));
+                        }
+                    }
                 }
             }
             // Post-loop cleanup: the manager may have been dropped while the
@@ -3216,6 +3257,7 @@ impl DownloadManager {
                 Ok(crate::manifest_runner::ManifestOutcome::Finished(size)) => {
                     tx.send(EngineMsg::Finished { size }).ok();
                 }
+                Ok(crate::manifest_runner::ManifestOutcome::Paused) => {}
                 Ok(crate::manifest_runner::ManifestOutcome::Aborted) => {}
                 Err(error) => {
                     tracing::warn!(
@@ -3497,8 +3539,25 @@ impl DownloadManager {
 
     /// Pause a running download, freeing its slot for the next queued item.
     pub fn pause(self: &Rc<Self>, id: u64) {
-        // Live captures finalize in the worker; the pump tail frees the slot on completion.
-        if !self.stop_engine(id) {
+        if self.can_pause_live_capture(id) {
+            // Native live workers commit each HLS/DASH update before observing
+            // Pause. Keep the row paused while the pump releases its slot.
+            if !self.stop_video_worker(id, crate::video::StopIntent::Pause) {
+                self.changed();
+                return;
+            }
+            if let Some(item) = self.find(id)
+                && item.status() == DownloadStatus::Downloading
+            {
+                item.set_status(DownloadStatus::Paused);
+                item.set_detail(gettext("Paused"));
+            }
+            self.persist_queue();
+            self.changed();
+            return;
+        }
+        // Non-live downloads retain their existing preserve-partials behavior.
+        if !self.stop_engine(id, crate::video::StopIntent::Finish) {
             return;
         }
         if let Some(item) = self.find(id) {
@@ -3609,15 +3668,16 @@ impl DownloadManager {
     }
 
     /// Signal the worker for `id` to stop, with the intent that decides what stopping means. Only the worker knows whether it is capturing live.
-    fn stop_video_worker(&self, id: u64, intent: crate::video::StopIntent) {
-        if let Some(stop) = self.video_abort.borrow_mut().remove(&id) {
-            let _ = stop.send(intent);
-        }
+    fn stop_video_worker(&self, id: u64, intent: crate::video::StopIntent) -> bool {
+        self.video_abort
+            .borrow_mut()
+            .remove(&id)
+            .is_some_and(|stop| stop.send(intent).is_ok())
     }
 
-    /// Stop the engine for `id` without touching the row. Live rows only get signalled (the worker finalizes and its Finished drives the row); returns whether the engine was actually stopped.
-    fn stop_engine(&self, id: u64) -> bool {
-        self.stop_video_worker(id, crate::video::StopIntent::Preserve);
+    /// Stop the engine for `id` without touching the row. Live rows receive the requested intent and complete through the pump; returns whether the engine was actually stopped.
+    fn stop_engine(&self, id: u64, intent: crate::video::StopIntent) -> bool {
+        self.stop_video_worker(id, intent);
         if self.live_rows.borrow().contains(&id) {
             return false;
         }
@@ -3631,7 +3691,7 @@ impl DownloadManager {
     /// Stop the engine for `id`, keeping file, bitmap and progress, and mark it queued. Live rows only signal (see `stop_engine`).
     fn park(&self, id: u64) {
         // Live rows only signal: the worker finalizes and its message completes the row.
-        if !self.stop_engine(id) {
+        if !self.stop_engine(id, crate::video::StopIntent::Finish) {
             return;
         }
         if let Some(item) = self.find(id) {
@@ -3749,7 +3809,11 @@ impl DownloadManager {
             }
             // Preserve and non-video Discard stop the engine the same way (see `stop_engine`).
             _ => {
-                self.stop_engine(id);
+                let intent = match stop {
+                    Stop::Preserve => crate::video::StopIntent::Finish,
+                    Stop::Discard => crate::video::StopIntent::Discard,
+                };
+                self.stop_engine(id, intent);
             }
         }
         self.pending_names.borrow_mut().remove(&id);

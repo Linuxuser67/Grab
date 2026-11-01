@@ -41,8 +41,10 @@ use yt_dlp::model::Video;
 /// What a stop means for the attempt it reaches. The worker applies the intent (only it knows whether it is capturing live); a bare oneshot could not say *how* to stop, so removal once delivered a file with no row behind it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopIntent {
-    /// Stop and keep what is recorded (Stop, pause, cancel); a live capture adopts its partial and delivers it.
-    Preserve,
+    /// Pause a native live capture without finalizing; its committed manifest state remains resumable.
+    Pause,
+    /// Finish a recording and deliver the captured media.
+    Finish,
     /// Stop and throw it away (row removal): reap the recorder and return without adopting, remuxing or delivering; scratch stays for the manager to reclaim after the task returns.
     Discard,
 }
@@ -722,9 +724,9 @@ pub(crate) async fn run_unified_ytdlp(
     // yt-dlp is done reading it; don't keep signed URLs on disk through merge.
     drop(info_guard);
     let Some(()) = done else {
-        // User abort: on Preserve, try merging partial DASH parts into a
+        // User abort: on Finish, try merging partial DASH parts into a
         // single file instead of abandoning them.
-        if matches!(abort_intent, Some(StopIntent::Preserve))
+        if matches!(abort_intent, Some(StopIntent::Finish | StopIntent::Pause))
             && let Some(merged) =
                 try_merge_dash_partials(ffmpeg_bin, staging, &job.dest, &job.page_url, gate).await
         {
@@ -1872,7 +1874,7 @@ pub(crate) async fn run_live_ytdlp(
                 intent = &mut abort => {
                     reap_child(&mut child, &mut group).await;
                     break match intent {
-                        Ok(StopIntent::Preserve) => (true, false),
+                        Ok(StopIntent::Finish | StopIntent::Pause) => (true, false),
                         Ok(StopIntent::Discard) => (true, true),
                         Err(_) => {
                             // No sender remains to authorise anything: fail closed. Claim the gate so the pre-rename commit below cannot deliver either.

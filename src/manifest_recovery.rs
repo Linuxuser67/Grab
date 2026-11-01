@@ -158,7 +158,7 @@ fn write_recovery_marker(
         .map_err(|error| format!("Could not encode manifest recovery metadata: {error}"))?;
 
     // NamedTempFile creates a private file in the same directory, so
-    // persist_noclobber() publishes it with an atomic same-filesystem rename.
+    // persist_noclobber() publishes it atomically without replacing an existing marker.
     let mut temporary = tempfile::NamedTempFile::new_in(staging)
         .map_err(|error| format!("Could not create manifest recovery metadata: {error}"))?;
     #[cfg(unix)]

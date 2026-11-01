@@ -183,7 +183,7 @@ impl Pairing {
     }
 
     fn current(&self) -> [u8; SECRET_LEN] {
-        *self.secret.read().unwrap_or_else(|e| e.into_inner())
+        *self.secret.read().expect("pairing secret lock poisoned")
     }
 
     /// The pairing code shown in Preferences (lowercase hex).
@@ -196,7 +196,7 @@ impl Pairing {
         ensure_pairing_directory(path)?;
         let secret = random_secret()?;
         write_secret(path, &secret)?;
-        *self.secret.write().unwrap_or_else(|e| e.into_inner()) = secret;
+        *self.secret.write().expect("pairing secret lock poisoned") = secret;
         PAIRING_SECRET_RECOVERED.store(false, Ordering::Release);
         Ok(self.code())
     }
@@ -1816,7 +1816,7 @@ mod tests {
     static STORE_LOCK: Mutex<()> = Mutex::new(());
 
     fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-        let guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = STORE_LOCK.lock().expect("handoff cookie test lock poisoned");
         purge_handoff_cookies();
         guard
     }

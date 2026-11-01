@@ -906,6 +906,18 @@ impl DownloadManager {
             && self.video_abort.borrow().contains_key(&id)
     }
 
+    /// Request finalization of an active live recording without marking it cancelled.
+    pub(crate) fn finish_live_recording(&self, id: u64) -> bool {
+        if !self.is_live_video(id)
+            || !self.stop_video_worker(id, crate::video::StopIntent::Finish)
+        {
+            return false;
+        }
+        self.persist_queue();
+        self.changed();
+        true
+    }
+
     /// Explicit absolute dest, else the effective download dir.
     pub(crate) fn resolve_dir(&self, dest_dir: Option<&str>) -> String {
         // Explicit destinations must be absolute (relative dirs would resolve against the launcher CWD and fail the sandbox).

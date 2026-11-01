@@ -17,6 +17,7 @@ mod inline_add;
 mod inline_gallery;
 mod install_help;
 mod install_progress;
+mod live_capture_state;
 mod manifest;
 mod manifest_intake;
 mod manifest_plan;

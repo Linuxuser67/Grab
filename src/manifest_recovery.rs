@@ -345,11 +345,10 @@ mod tests {
         fs::write(&resource, b"preserve me").expect("write staged resource");
 
         let changed = fingerprint(&source(), "mkv", true).expect("changed fingerprint");
-        assert!(
-            validate_or_initialize(staging.path(), changed)
-                .await
-                .is_err()
-        );
+        assert!(matches!(
+            validate_or_initialize(staging.path(), changed).await,
+            Err(RecoveryError::FingerprintMismatch)
+        ));
         assert_eq!(
             fs::read(resource).expect("read preserved resource"),
             b"preserve me"
@@ -363,11 +362,10 @@ mod tests {
         fs::write(&resource, b"legacy data").expect("write legacy resource");
         let expected = fingerprint(&source(), "mp4", true).expect("fingerprint");
 
-        assert!(
-            validate_or_initialize(staging.path(), expected)
-                .await
-                .is_err()
-        );
+        assert!(matches!(
+            validate_or_initialize(staging.path(), expected).await,
+            Err(RecoveryError::UnfingerprintedStagedData)
+        ));
         assert_eq!(
             fs::read(resource).expect("read preserved resource"),
             b"legacy data"
@@ -380,10 +378,9 @@ mod tests {
         fs::write(staging.path().join(RECOVERY_FILE), b"{").expect("write malformed metadata");
         let expected = fingerprint(&source(), "mp4", true).expect("fingerprint");
 
-        assert!(
-            validate_or_initialize(staging.path(), expected)
-                .await
-                .is_err()
-        );
+        assert!(matches!(
+            validate_or_initialize(staging.path(), expected).await,
+            Err(RecoveryError::Malformed(_))
+        ));
     }
 }

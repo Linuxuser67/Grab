@@ -3114,7 +3114,10 @@ async fn run_live_dash_tracks(
                 .resource_names()
                 .map(str::to_string)
                 .collect::<Vec<_>>();
-            let audio_resources = if outcome == DashLiveCaptureOutcome::FinishVideoOnly {
+            let audio_resources = if matches!(
+                outcome,
+                DashLiveCaptureOutcome::FinishVideoOnly | DashLiveCaptureOutcome::Unrecoverable
+            ) {
                 None
             } else {
                 audio.as_ref().map(|(track, _)| {

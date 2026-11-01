@@ -892,7 +892,7 @@ impl DownloadManager {
     }
 
     /// Whether this row uses the native manifest engine.
-    pub fn is_manifest_download(&self, id: u64) -> bool {
+    pub(crate) fn is_manifest_download(&self, id: u64) -> bool {
         matches!(
             self.video_sources.borrow().get(&id),
             Some(crate::media_types::VideoSource::Manifest { .. })
@@ -900,7 +900,7 @@ impl DownloadManager {
     }
 
     /// Whether a live capture can be paused without losing its committed resume state.
-    pub fn can_pause_live_capture(&self, id: u64) -> bool {
+    pub(crate) fn can_pause_live_capture(&self, id: u64) -> bool {
         self.is_live_video(id)
             && self.is_manifest_download(id)
             && self.video_abort.borrow().contains_key(&id)
@@ -3516,7 +3516,9 @@ impl DownloadManager {
         if self.can_pause_live_capture(id) {
             // Native live workers commit each HLS/DASH update before observing
             // Pause. Keep the row paused while the pump releases its slot.
-            self.stop_video_worker(id, crate::video::StopIntent::Pause);
+            if !self.stop_video_worker(id, crate::video::StopIntent::Pause) {
+                return;
+            }
             if let Some(item) = self.find(id)
                 && item.status() == DownloadStatus::Downloading
             {
@@ -3639,13 +3641,14 @@ impl DownloadManager {
     }
 
     /// Signal the worker for `id` to stop, with the intent that decides what stopping means. Only the worker knows whether it is capturing live.
-    fn stop_video_worker(&self, id: u64, intent: crate::video::StopIntent) {
-        if let Some(stop) = self.video_abort.borrow_mut().remove(&id) {
-            let _ = stop.send(intent);
-        }
+    fn stop_video_worker(&self, id: u64, intent: crate::video::StopIntent) -> bool {
+        self.video_abort
+            .borrow_mut()
+            .remove(&id)
+            .is_some_and(|stop| stop.send(intent).is_ok())
     }
 
-    /// Stop the engine for `id` without touching the row. Live rows receive the requested intent and finish through the pump; returns whether the engine was actually stopped.
+    /// Stop the engine for `id` without touching the row. Live rows receive the requested intent and complete through the pump; returns whether the engine was actually stopped.
     fn stop_engine(&self, id: u64, intent: crate::video::StopIntent) -> bool {
         self.stop_video_worker(id, intent);
         if self.live_rows.borrow().contains(&id) {

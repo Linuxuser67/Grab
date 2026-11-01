@@ -1524,6 +1524,24 @@ video/720.m3u8
     }
 
     #[test]
+    fn hls_master_requires_stable_ids_for_referenced_subtitle_renditions() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",URI="subs/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,SUBTITLES="subs",STABLE-VARIANT-ID="variant-720"
+video/720.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("HLS parser retains subtitle metadata");
+        assert!(matches!(
+            validate_hls_stable_track_ids(&master),
+            Err(ManifestIntakeError::Unsupported(_))
+        ));
+    }
+
+    #[test]
     fn supports_manifest_urls_with_query_strings() {
         assert!(supports(
             "https://cdn.example.test/master.m3u8?expires=1&signature=x"

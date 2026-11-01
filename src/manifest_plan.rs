@@ -524,11 +524,11 @@ fn hls_subtitle_rendition_label(rendition: &HlsSubtitleRendition) -> String {
     let language = rendition.language.as_deref()
         .filter(|language| !language.is_empty())
         .map(short_label);
-    let name = (!rendition.name.is_empty()).then_some(rendition.name.as_str());
+    let name = (!rendition.name.is_empty()).then(|| rendition.name.clone());
     let mut label = join_label_parts(
         language.unwrap_or_else(|| gettext("Subtitle track")),
-        name.map(str::to_string).unwrap_or_default(),
-        String::new(),
+        name,
+        None,
     );
     if rendition.is_default {
         label.push_str(" · ");
@@ -640,6 +640,60 @@ fn join_label_parts(resolution: String, bitrate: Option<String>, codecs: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hls_subtitle_selection_uses_stable_rendition_ids_and_language_preference() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="subs/en.m3u8",STABLE-RENDITION-ID="subtitle-en"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,SUBTITLES="subs",STABLE-VARIANT-ID="variant-720"
+video/720.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("valid HLS master playlist");
+        let video_key = hls_variant_keys(&master.variants)[0]
+            .clone()
+            .expect("stable video key");
+        let subtitle_key = hls_subtitle_rendition_keys(&master.subtitle_renditions)[0]
+            .clone()
+            .expect("stable subtitle key");
+        let lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/master.m3u8".to_string(),
+            manifest: NativeManifest::HlsMaster(master),
+        };
+
+        let choices = lookup.subtitle_choices(&video_key);
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].language.as_deref(), Some("en"));
+        assert_eq!(
+            ManifestLookup::preferred_subtitle_choice_index(&choices, Some("en")),
+            Some(0)
+        );
+        assert_eq!(
+            ManifestLookup::preferred_subtitle_choice_index(&choices, Some("off")),
+            None
+        );
+
+        let source = lookup
+            .selected_source(&video_key, None, Some(&subtitle_key))
+            .expect("selected subtitle should be validated");
+        let plan = download_plan(lookup, &source).expect("selected HLS subtitle plan");
+        let ManifestDownloadPlan::HlsMaster {
+            subtitle_url,
+            subtitle_language,
+            ..
+        } = plan
+        else {
+            panic!("expected an HLS master plan");
+        };
+        assert_eq!(
+            subtitle_url.expect("selected subtitle URL").as_str(),
+            "https://cdn.example.test/subs/en.m3u8"
+        );
+        assert_eq!(subtitle_language.as_deref(), Some("en"));
+    }
 
     #[test]
     fn hls_download_plan_uses_the_selected_stable_video_and_audio_ids() {

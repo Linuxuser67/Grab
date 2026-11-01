@@ -1137,11 +1137,11 @@ async fn prepare_live_dash_finalization(
     })
 }
 
-/// Run one HLS or static-DASH attempt, keeping completed resources for retry.
+/// Run one HLS or static-DASH attempt without automatic resource retries.
 ///
 /// # Errors
 /// Returns a classified error. Only unsupported presentations use yt-dlp fallback;
-/// transient transfer errors preserve completed resources for a later native retry.
+/// transient transfer errors preserve completed resources for a later user-initiated resume.
 pub(crate) async fn run_manifest_download(
     job: ManifestJob,
     gate: Arc<crate::attempt_gate::AttemptGate>,
@@ -1275,8 +1275,8 @@ pub(crate) async fn run_manifest_download(
 
 /// Mux the staged tracks, validate the output, and publish it without clobbering.
 ///
-/// The staging data is retained on every failure before publication so the queue
-/// can retry without downloading already completed resources.
+/// The staging data is retained on every failure before publication so a later
+/// user-initiated resume can reuse completed resources.
 struct ManifestFinalization<'a> {
     job: &'a ManifestJob,
     gate: Arc<crate::attempt_gate::AttemptGate>,

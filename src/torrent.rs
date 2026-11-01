@@ -3,6 +3,7 @@
 
 use std::{
     collections::HashMap,
+    io,
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::Arc,
@@ -25,6 +26,54 @@ use crate::runtime::tokio_rt;
 
 // rqbit's handle alias is private, so name it locally.
 type ManagedTorrentHandle = Arc<ManagedTorrent>;
+
+/// Typed failures at the torrent intake and session boundaries.
+///
+/// Variants retain the failure category while carrying localized display text;
+/// filesystem and task failures retain their underlying error sources.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TorrentError {
+    #[error("{0}")]
+    InvalidMagnet(String),
+    #[error("{0}")]
+    UnsupportedMagnetVersion(String),
+    #[error("{0}")]
+    TorrentTooLarge(String),
+    #[error("{0}")]
+    InvalidTorrent(String),
+    #[error("{message}: {source}")]
+    Store { message: String, #[source] source: io::Error },
+    #[error("{0}")]
+    StoreNameCollisions(String),
+    #[error("{0}")]
+    CouldNotReadTorrent(String),
+    #[error("{0}")]
+    MetadataTooLarge(String),
+    #[error("{0}")]
+    InvalidResolvedMetadata(String),
+    #[error("{0}")]
+    MetadataHashMismatch(String),
+    #[error("{0}")]
+    InvalidInfoHash(String),
+    #[error("{message}: {source}")]
+    MetadataStorage { message: String, #[source] source: io::Error },
+    #[error("{0}")]
+    MagnetResolutionTimeout(String),
+    #[error("{0}")]
+    MagnetResolution(String),
+    #[error("{0}")]
+    UnexpectedMagnetResponse(String),
+    #[error("{0}")]
+    EmptyTorrent(String),
+    #[error("{0}")]
+    MetadataTask(String),
+    #[error("{0}")]
+    InvalidListenPort(String),
+    #[error("{0}")]
+    InvalidBlocklistUrl(String),
+    #[error("{0}")]
+    SessionStart(String),
+}
 
 /// A live torrent row: registered at spawn, removed on terminal/cancel.
 struct Active {
@@ -85,11 +134,14 @@ pub fn is_magnet(s: &str) -> bool {
 }
 
 /// Parse a magnet link, rejecting anything rqbit cannot resolve to BTv1.
-pub fn parse_magnet(s: &str) -> Result<librqbit::Magnet, String> {
-    let m = librqbit::Magnet::parse(s.trim())
-        .map_err(|error| format!("{}: {error}", gettext("Invalid magnet link")))?;
+pub fn parse_magnet(s: &str) -> Result<librqbit::Magnet, TorrentError> {
+    let m = librqbit::Magnet::parse(s.trim()).map_err(|error| {
+        TorrentError::InvalidMagnet(format!("{}: {error}", gettext("Invalid magnet link")))
+    })?;
     if m.as_id20().is_none() {
-        return Err(gettext("Only BitTorrent v1 magnets are supported"));
+        return Err(TorrentError::UnsupportedMagnetVersion(gettext(
+            "Only BitTorrent v1 magnets are supported",
+        )));
     }
     Ok(m)
 }
@@ -160,18 +212,21 @@ fn safe_stem(file_name: &str) -> Option<&str> {
 }
 
 /// Copy `.torrent` bytes into the archive, named after the sanitized file stem. Returns the queue pseudo-URL.
-pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, String> {
+pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, TorrentError> {
     const MAX_TORRENT_BYTES: usize = 10_000_000;
     if bytes.len() > MAX_TORRENT_BYTES {
-        return Err(gettext("Torrent file is too large (max 10 MB)"));
+        return Err(TorrentError::TorrentTooLarge(gettext("Torrent file is too large (max 10 MB)")));
     }
     // Parse first: never archive bytes rqbit itself would reject.
-    librqbit::torrent_from_bytes(bytes)
-        .map_err(|error| format!("{}: {error}", gettext("Invalid torrent file")))?;
+    librqbit::torrent_from_bytes(bytes).map_err(|error| {
+        TorrentError::InvalidTorrent(format!("{}: {error}", gettext("Invalid torrent file")))
+    })?;
     let stem = safe_stem(file_name).unwrap_or("torrent");
     let dir = torrents_dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| format!("{}: {error}", gettext("Cannot store torrent file")))?;
+    std::fs::create_dir_all(&dir).map_err(|source| TorrentError::Store {
+        message: gettext("Cannot store torrent file"),
+        source,
+    })?;
     // Atomic create_new loop: no check-then-write race.
     let mut tried: Vec<String> = Vec::new();
     for _ in 0..32 {
@@ -191,17 +246,25 @@ pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, Str
                 // archive would otherwise linger and collide later.
                 if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
                     let _ = std::fs::remove_file(&path);
-                    return Err(format!("{}: {e}", gettext("Cannot store torrent file")));
+                    return Err(TorrentError::Store {
+                        message: gettext("Cannot store torrent file"),
+                        source: e,
+                    });
                 }
                 return Ok(format!("torrent:{}", path.to_string_lossy()));
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("{}: {e}", gettext("Cannot store torrent file"))),
+            Err(source) => {
+                return Err(TorrentError::Store {
+                    message: gettext("Cannot store torrent file"),
+                    source,
+                });
+            }
         }
     }
-    Err(gettext(
+    Err(TorrentError::StoreNameCollisions(gettext(
         "Cannot store torrent file: too many name collisions",
-    ))
+    )))
 }
 
 /// Stub row name for an archived file: the sanitized file stem.
@@ -238,9 +301,9 @@ pub(crate) fn read_torrent_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
 /// whole job to a blocking pool.
 pub(crate) fn load_torrent_file(
     path: &std::path::Path,
-) -> Result<(Vec<u8>, String, Vec<TorrentFileEntry>), String> {
+) -> Result<(Vec<u8>, String, Vec<TorrentFileEntry>), TorrentError> {
     let Some(bytes) = read_torrent_bytes(path) else {
-        return Err(gettext("Could not read that .torrent file"));
+        return Err(TorrentError::CouldNotReadTorrent(gettext("Could not read that .torrent file")));
     };
     let (name, entries) = torrent_file_list(&bytes)?;
     Ok((bytes, name, entries))
@@ -255,44 +318,52 @@ fn magnet_metadata_path_in(dir: &Path, info_hash: &str) -> Option<PathBuf> {
 }
 
 /// Persist validated magnet metainfo atomically so completion cleanup and later queue actions can resolve file paths.
-fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), String> {
+fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), TorrentError> {
     if bytes.len() as u64 > MAX_TORRENT_BYTES {
-        return Err(gettext("Torrent metadata is too large to store safely"));
+        return Err(TorrentError::MetadataTooLarge(gettext("Torrent metadata is too large to store safely")));
     }
-    let metadata = librqbit::torrent_from_bytes(bytes)
-        .map_err(|error| format!("{}: {error}", gettext("Invalid resolved torrent metadata")))?;
+    let metadata = librqbit::torrent_from_bytes(bytes).map_err(|error| {
+        TorrentError::InvalidResolvedMetadata(format!(
+            "{}: {error}",
+            gettext("Invalid resolved torrent metadata")
+        ))
+    })?;
     if metadata.info_hash.as_string() != info_hash {
-        return Err(gettext(
+        return Err(TorrentError::MetadataHashMismatch(gettext(
             "Resolved torrent metadata does not match the magnet link",
-        ));
+        )));
     }
 
     let dir = torrents_dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| format!("{}: {error}", gettext("Cannot store magnet metadata")))?;
+    std::fs::create_dir_all(&dir).map_err(|source| TorrentError::MetadataStorage {
+        message: gettext("Cannot store magnet metadata"),
+        source,
+    })?;
     let path = magnet_metadata_path_in(&dir, info_hash)
-        .ok_or_else(|| gettext("Invalid torrent info-hash"))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(&dir)
-        .map_err(|error| format!("{}: {error}", gettext("Cannot create magnet metadata file")))?;
+        .ok_or_else(|| TorrentError::InvalidInfoHash(gettext("Invalid torrent info-hash")))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(&dir).map_err(|source| {
+        TorrentError::MetadataStorage {
+            message: gettext("Cannot create magnet metadata file"),
+            source,
+        }
+    })?;
     use std::io::Write as _;
     temporary
         .write_all(bytes)
         .and_then(|()| temporary.as_file().sync_all())
-        .map_err(|error| format!("{}: {error}", gettext("Cannot write magnet metadata")))?;
-    temporary.persist(&path).map_err(|error| {
-        format!(
-            "{}: {}",
-            gettext("Cannot publish magnet metadata"),
-            error.error
-        )
+        .map_err(|source| TorrentError::MetadataStorage {
+            message: gettext("Cannot write magnet metadata"),
+            source,
+        })?;
+    temporary.persist(&path).map_err(|error| TorrentError::MetadataStorage {
+        message: gettext("Cannot publish magnet metadata"),
+        source: error.error,
     })?;
     std::fs::File::open(&dir)
         .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            format!(
-                "{}: {error}",
-                gettext("Cannot sync magnet metadata directory")
-            )
+        .map_err(|source| TorrentError::MetadataStorage {
+            message: gettext("Cannot sync magnet metadata directory"),
+            source,
         })?;
     Ok(())
 }
@@ -333,9 +404,10 @@ fn sanitize_display_path(path: &str) -> String {
     out
 }
 
-pub fn torrent_file_list(bytes: &[u8]) -> Result<(String, Vec<TorrentFileEntry>), String> {
-    let meta = librqbit::torrent_from_bytes(bytes)
-        .map_err(|error| format!("{}: {error}", gettext("Invalid torrent file")))?;
+pub fn torrent_file_list(bytes: &[u8]) -> Result<(String, Vec<TorrentFileEntry>), TorrentError> {
+    let meta = librqbit::torrent_from_bytes(bytes).map_err(|error| {
+        TorrentError::InvalidTorrent(format!("{}: {error}", gettext("Invalid torrent file")))
+    })?;
     let name = raw_torrent_name(meta.info.data.name.as_ref())
         .filter(|n| sane_filename(n))
         .unwrap_or_else(|| "torrent".to_string());
@@ -370,7 +442,7 @@ pub fn torrent_file_list(bytes: &[u8]) -> Result<(String, Vec<TorrentFileEntry>)
 pub(crate) async fn list_magnet_files(
     magnet: &str,
     config: SessionConfig,
-) -> Result<(String, Vec<TorrentFileEntry>), String> {
+) -> Result<(String, Vec<TorrentFileEntry>), TorrentError> {
     let parsed = parse_magnet(magnet)?;
     let session = ensure_session(config).await?;
     let response = tokio::time::timeout(
@@ -384,23 +456,34 @@ pub(crate) async fn list_magnet_files(
         ),
     )
     .await
-    .map_err(|_| gettext("Timed out while resolving torrent metadata"))?
-    .map_err(|error| format!("{}: {error}", gettext("Cannot resolve magnet link")))?;
+    .map_err(|_| {
+        TorrentError::MagnetResolutionTimeout(gettext(
+            "Timed out while resolving torrent metadata",
+        ))
+    })?
+    .map_err(|error| {
+        TorrentError::MagnetResolution(format!(
+            "{}: {error}",
+            gettext("Cannot resolve magnet link")
+        ))
+    })?;
 
     let AddTorrentResponse::ListOnly(listing) = response else {
-        return Err(gettext(
+        return Err(TorrentError::UnexpectedMagnetResponse(gettext(
             "Torrent metadata lookup did not return a file list",
-        ));
+        )));
     };
 
     let info_hash = parsed
         .as_id20()
         .map(|id| id.as_string())
-        .ok_or_else(|| gettext("Only BitTorrent v1 magnets are supported"))?;
+        .ok_or_else(|| TorrentError::UnsupportedMagnetVersion(gettext(
+            "Only BitTorrent v1 magnets are supported",
+        )))?;
     if listing.info_hash.as_string() != info_hash {
-        return Err(gettext(
+        return Err(TorrentError::MetadataHashMismatch(gettext(
             "Resolved torrent metadata does not match the magnet link",
-        ));
+        )));
     }
     let magnet_name = parsed.name.filter(|name| sane_filename(name));
     let name = listing
@@ -429,7 +512,7 @@ pub(crate) async fn list_magnet_files(
         })
         .collect();
     if entries.is_empty() {
-        return Err(gettext("Torrent contains no files"));
+        return Err(TorrentError::EmptyTorrent(gettext("Torrent contains no files")));
     }
 
     // Move the bounded bytes only after the file list has been built; persistence
@@ -437,7 +520,12 @@ pub(crate) async fn list_magnet_files(
     let bytes = listing.torrent_bytes;
     tokio::task::spawn_blocking(move || persist_magnet_metadata(&info_hash, &bytes))
         .await
-        .map_err(|error| format!("{}: {error}", gettext("Could not persist magnet metadata")))??;
+        .map_err(|error| {
+            TorrentError::MetadataTask(format!(
+                "{}: {error}",
+                gettext("Could not persist magnet metadata")
+            ))
+        })??;
 
     Ok((name, entries))
 }
@@ -889,8 +977,10 @@ pub(crate) fn resolve_listen_config(
 
 /// Clamp a configured listen port to u16: fail loudly on out-of-range
 /// (defense-in-depth for dconf bypassing the GSettings range).
-pub(crate) fn clamp_listen_port(listen_port: i32) -> Result<u16, String> {
-    u16::try_from(listen_port).map_err(|_| "torrent listen port out of range (0-65535)".to_string())
+pub(crate) fn clamp_listen_port(listen_port: i32) -> Result<u16, TorrentError> {
+    u16::try_from(listen_port).map_err(|_| {
+        TorrentError::InvalidListenPort("torrent listen port out of range (0-65535)".to_string())
+    })
 }
 
 pub(crate) fn plan_torrent_net(
@@ -942,7 +1032,7 @@ pub(crate) struct SessionConfig {
     pub lsd: bool,
 }
 
-async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, String> {
+async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, TorrentError> {
     let SessionConfig {
         dht,
         peer_limit,
@@ -957,7 +1047,10 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, String> {
     SESSION
         .get_or_try_init(|| async {
             let dir = glib::user_data_dir().join("grab");
-            std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create session dir: {e}"))?;
+            std::fs::create_dir_all(&dir).map_err(|source| TorrentError::Store {
+                message: gettext("Cannot create session dir"),
+                source,
+            })?;
             // Fast resume: persist bitfields + session torrents across restarts (orphans swept once the queue is restored).
             let mut opts = SessionOptions {
                 fastresume: true,
@@ -991,7 +1084,7 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, String> {
             }
             let session = Session::new_with_opts(dir, opts)
                 .await
-                .map_err(|e| format!("Cannot start torrent engine: {e}"))?;
+                .map_err(|error| TorrentError::SessionStart(format!("Cannot start torrent engine: {error}")))?;
             session.ratelimits.set_download_bps(bps(download_bps));
             session.ratelimits.set_upload_bps(bps(upload_bps));
             Ok(session)
@@ -1001,7 +1094,7 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, String> {
 }
 
 /// Validate the peer-blocklist preference (empty = off; anything else must be http(s), else fail loudly).
-pub(crate) fn blocklist_url_of(raw: &str) -> Result<Option<String>, String> {
+pub(crate) fn blocklist_url_of(raw: &str) -> Result<Option<String>, TorrentError> {
     let url = raw.trim();
     if url.is_empty() {
         return Ok(None);
@@ -1010,7 +1103,7 @@ pub(crate) fn blocklist_url_of(raw: &str) -> Result<Option<String>, String> {
     if lower.starts_with("http://") || lower.starts_with("https://") {
         return Ok(Some(url.to_string()));
     }
-    Err(gettext("Peer blocklist must be an http(s) URL"))
+    Err(TorrentError::InvalidBlocklistUrl(gettext("Peer blocklist must be an http(s) URL")))
 }
 /// Live-apply the speed caps (peer limit has no live setter: creation + per-add only).
 pub(crate) fn apply_live_limits(download_bps: Option<u64>, upload_bps: Option<u64>) {
@@ -1382,7 +1475,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
                 )
             }
             Err(e) => {
-                fail(e);
+                fail(e.to_string());
                 return;
             }
         },

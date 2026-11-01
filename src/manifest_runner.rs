@@ -4364,6 +4364,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn static_dash_fetches_concurrently_and_writes_in_manifest_order() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="5" initialization="init.mp4" media="seg-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000" codecs="avc1.64001f"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let parsed = crate::manifest::dash::parse_dash_manifest(
+            "https://example.test/manifest.mpd",
+            body,
+        )
+        .expect("parse static DASH fixture");
+        let representation_key = parsed.video_representations[0].key.clone();
+        let mut plan = crate::manifest::dash::plan_dash_representation(
+            &parsed,
+            &representation_key,
+        )
+        .expect("plan video representation");
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind DASH resource server");
+        let address = listener.local_addr().expect("resource server address");
+        for resource in &mut plan.resources {
+            let filename = match resource.kind {
+                DashResourceKind::Initialization => "init.mp4".to_string(),
+                DashResourceKind::Segment => {
+                    format!("seg-{}.m4s", resource.segment_number.unwrap_or_default())
+                }
+            };
+            resource.url = Url::parse(&format!("http://{address}/{filename}"))
+                .expect("local resource URL");
+        }
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let server_active = Arc::clone(&active);
+        let server_maximum = Arc::clone(&maximum);
+        let server = tokio::spawn(async move {
+            let mut tasks = Vec::new();
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.expect("accept DASH resource");
+                let active = Arc::clone(&server_active);
+                let maximum = Arc::clone(&server_maximum);
+                tasks.push(tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let count = socket.read(&mut request).await.expect("read request");
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                    let (payload, delay): (&[u8], u64) = match path {
+                        "/init.mp4" => (b"init", 100),
+                        "/seg-1.m4s" => (b"one", 5),
+                        "/seg-2.m4s" => (b"two", 1),
+                        _ => (b"unexpected", 0),
+                    };
+                    let current = active.fetch_add(1, Ordering::AcqRel) + 1;
+                    maximum.fetch_max(current, Ordering::AcqRel);
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    );
+                    socket
+                        .write_all(header.as_bytes())
+                        .await
+                        .expect("write response header");
+                    socket.write_all(payload).await.expect("write response body");
+                    active.fetch_sub(1, Ordering::AcqRel);
+                }));
+            }
+            for task in tasks {
+                task.await.expect("resource request task");
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build direct HTTP client");
+        let staging = tempfile::tempdir().expect("create DASH staging");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+
+        assert!(
+            fetch_and_write_dash_track(
+                &client,
+                &plan,
+                staging.path(),
+                "video-track.mp4",
+                2,
+                &tx,
+                &downloaded,
+                &mut abort,
+            )
+            .await
+            .expect("fetch and write DASH track")
+        );
+        server.await.expect("DASH resource server task");
+
+        assert_eq!(maximum.load(Ordering::Relaxed), 2);
+        assert_eq!(downloaded.load(Ordering::Relaxed), 10);
+        assert_eq!(
+            tokio::fs::read(staging.path().join("video-track.mp4"))
+                .await
+                .expect("read assembled DASH track"),
+            b"initonetwo"
+        );
+    }
+
+    #[tokio::test]
     async fn selected_dash_audio_representation_is_used_for_track_planning() {
         let body = r#"<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">

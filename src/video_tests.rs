@@ -1525,7 +1525,8 @@ fn probe_result_helpers_cover_both_variants() {
 fn probe_struct_footprint_budget() {
     use std::mem::size_of;
     assert_eq!(size_of::<VideoFormatOption>(), 40, "VideoFormatOption");
-    assert_eq!(size_of::<VideoInfo>(), 56, "VideoInfo");
+    // Subtitle language metadata adds one boxed-slice pointer (16 bytes) per row.
+    assert_eq!(size_of::<VideoInfo>(), 72, "VideoInfo");
     assert_eq!(size_of::<PlaylistItem>(), 56, "PlaylistItem");
     assert_eq!(size_of::<PlaylistInfo>(), 64, "PlaylistInfo");
     assert_eq!(size_of::<ProbeResult>(), 64, "ProbeResult");

@@ -4736,13 +4736,11 @@ mod tests {
 
     #[tokio::test]
     async fn transient_resource_response_fails_without_retrying() {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let directory = std::env::temp_dir().join(format!(
-            "grab-manifest-no-retry-{}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("grab-manifest-no-retry-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&directory).await;
         tokio::fs::create_dir_all(&directory)
             .await
@@ -4794,9 +4792,11 @@ mod tests {
         assert_eq!(requests.load(Ordering::Relaxed), 1);
         assert_eq!(downloaded.load(Ordering::Relaxed), 0);
         assert!(!directory.join(&resource.filename).exists());
-        assert!(!directory
-            .join("segment-000001-0123456789abcdef0123456789abcdef.bin.part")
-            .exists());
+        assert!(
+            !directory
+                .join("segment-000001-0123456789abcdef0123456789abcdef.bin.part")
+                .exists()
+        );
         let _ = tokio::fs::remove_dir_all(directory).await;
     }
 

@@ -698,7 +698,7 @@ async fn prepare_manifest_attempt(
         live_hls,
         live_dash,
         finish_requested,
-        finish_marker_bytes,
+        finish_marker_bytes: _,
         concurrency,
         downloaded,
     })

@@ -7,11 +7,8 @@ const BARE_HASH: &str = "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982
 #[test]
 fn trash_torrent_contents_reports_missing_archive_as_typed_error() {
     let folder = std::env::temp_dir();
-    let error = trash_torrent_contents(
-        &folder,
-        "torrent:/tmp/grab-missing-trash-test.torrent",
-    )
-    .expect_err("missing archive must fail");
+    let error = trash_torrent_contents(&folder, "torrent:/tmp/grab-missing-trash-test.torrent")
+        .expect_err("missing archive must fail");
     assert!(matches!(error, TorrentError::TrashArchiveMissing));
     assert_eq!(error.to_string(), "no torrent archive");
 }

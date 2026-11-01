@@ -847,9 +847,7 @@ async fn transfer_static_manifest_tracks(
                 {
                     return Ok(false);
                 }
-                if !concat_dash_track(subtitle, &subtitle_dir, "subtitle-track.mp4", abort)
-                    .await?
-                {
+                if !concat_dash_track(subtitle, &subtitle_dir, "subtitle-track.mp4", abort).await? {
                     return Ok(false);
                 }
             }

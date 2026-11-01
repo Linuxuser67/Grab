@@ -1211,9 +1211,7 @@ async fn read_live_finish_marker(directory: &Path) -> Result<Option<u64>, String
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(format!(
-                "Could not inspect live finish marker: {error}"
-            ));
+            return Err(format!("Could not inspect live finish marker: {error}"));
         }
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 128 {

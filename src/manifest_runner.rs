@@ -1067,7 +1067,7 @@ async fn finalize_manifest_download(
     // FFmpeg writes beside the staged segments, so check both the XDG state
     // filesystem (staged inputs plus mux output) and destination filesystem
     // (the no-clobber cross-device publication fallback).
-    ensure_manifest_mux_spaces(&staging, dest_dir, staged_bytes)?;
+    ensure_manifest_mux_spaces(staging, dest_dir, staged_bytes)?;
     if !run_ffmpeg(
         &ffmpeg,
         &video_input,
@@ -1141,7 +1141,6 @@ async fn finalize_manifest_download(
     }
     Ok(ManifestOutcome::Finished(size))
 }
-
 
 async fn resolve_tracks(
     client: &reqwest::Client,

@@ -3643,7 +3643,7 @@ impl DownloadManager {
         }
     }
 
-    /// Stop the engine for `id` without touching the row. Live rows only get signalled (the worker finalizes and its Finished drives the row); returns whether the engine was actually stopped.
+    /// Stop the engine for `id` without touching the row. Live rows receive the requested intent and finish through the pump; returns whether the engine was actually stopped.
     fn stop_engine(&self, id: u64, intent: crate::video::StopIntent) -> bool {
         self.stop_video_worker(id, intent);
         if self.live_rows.borrow().contains(&id) {

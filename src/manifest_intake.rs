@@ -436,6 +436,7 @@ impl ManifestLookup {
             NativeManifest::HlsMaster(master) => {
                 hls_variant_keys(&master.variants)
                     .iter()
+                    .chain(hls_variant_legacy_keys(&master.variants).iter())
                     .any(|key| key == representation_key)
                     .then_some(())?;
                 crate::media_types::ManifestKind::Hls

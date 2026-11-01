@@ -605,6 +605,9 @@ pub(crate) struct VideoStep {
         Rc<RefCell<Vec<crate::manifest_intake::ManifestAudioChoice>>>,
     pub(crate) manifest_audio_selection: Rc<RefCell<Option<String>>>,
     pub(crate) manifest_audio_format: adw::ComboRow,
+    pub(crate) subtitle_choices: Rc<RefCell<Vec<crate::media_types::SubtitleSelection>>>,
+    pub(crate) subtitle_selection: Rc<RefCell<crate::media_types::SubtitleSelection>>,
+    pub(crate) subtitle_format: adw::ComboRow,
     /// Index-aligned with the combo's model. Reset on every resolve.
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
     pub(crate) tools: adw::ActionRow,
@@ -765,6 +768,7 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.format.set_visible(false);
     v.manifest_format.set_visible(false);
     v.manifest_audio_format.set_visible(false);
+    v.subtitle_format.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
     v.gallery_info.set_visible(false);
@@ -790,6 +794,7 @@ fn clear_manifest_preview(step: &VideoStep) {
     step.manifest_audio_format
         .set_model(Some(&gtk4::StringList::new(&[])));
     step.manifest_audio_format.set_visible(false);
+    clear_subtitle_picker(step);
 }
 
 /// Refresh the audio picker for the selected video representation.
@@ -824,6 +829,37 @@ fn refresh_manifest_audio_picker(step: &VideoStep, video_key: Option<&str>) {
         .set_selected(u32::try_from(selected_index).unwrap_or_default());
     step.manifest_audio_format
         .set_visible(step.manifest_audio_choices.borrow().len() > 1);
+}
+
+/// Clear per-download subtitle choices when the source preview changes.
+fn clear_subtitle_picker(step: &VideoStep) {
+    step.subtitle_choices.borrow_mut().clear();
+    step.subtitle_selection.replace(crate::media_types::SubtitleSelection::Automatic);
+    step.subtitle_format.set_model(Some(&gtk4::StringList::new(&[])));
+    step.subtitle_format.set_visible(false);
+}
+
+/// Populate the subtitle picker from the current page's offered tracks.
+fn refresh_subtitle_picker(step: &VideoStep, languages: &[String]) {
+    let mut choices = vec![crate::media_types::SubtitleSelection::Automatic, crate::media_types::SubtitleSelection::Off];
+    choices.extend(languages.iter().cloned().map(crate::media_types::SubtitleSelection::Language));
+    let labels = choices.iter().map(|choice| match choice {
+        crate::media_types::SubtitleSelection::Automatic => gettext("Automatic"),
+        crate::media_types::SubtitleSelection::Off => gettext("Off"),
+        crate::media_types::SubtitleSelection::Language(language) => language.clone(),
+    }).collect::<Vec<_>>();
+    let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    step.subtitle_format.set_model(Some(&gtk4::StringList::new(&label_refs)));
+    step.subtitle_format.set_selected(0);
+    step.subtitle_choices.replace(choices);
+    step.subtitle_selection.replace(crate::media_types::SubtitleSelection::Automatic);
+    sync_subtitle_picker_visibility(step);
+}
+
+/// Hide subtitle selection for audio-only jobs and when no tracks are offered.
+fn sync_subtitle_picker_visibility(step: &VideoStep) {
+    let has_language_choices = step.subtitle_choices.borrow().len() > 2;
+    step.subtitle_format.set_visible(has_language_choices && !selected_audio_only(step));
 }
 
 /// Show a parsed manifest and enable Add for the validated representation.
@@ -981,6 +1017,7 @@ fn show_video_ready(v: &VideoStep) {
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
+    sync_subtitle_picker_visibility(v);
     // The switcher shows while both sides exist for this decode.
     v.mode_toggle_wrap
         .set_visible(v.toggle_items.borrow().is_some());
@@ -1132,6 +1169,7 @@ fn submit_probed_single(
     };
     let page_url = v.page_url.clone();
     let is_live = v.is_live;
+    let subtitle_selection = step.subtitle_selection.borrow().clone();
     let enqueue_manager = Rc::clone(manager);
     let error_step = Rc::clone(step);
     let error_lookup_add = Rc::clone(lookup_add);
@@ -1151,6 +1189,8 @@ fn submit_probed_single(
                         video_format_id: format_id,
                         is_live,
                         playlist_item_id: None,
+                        subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
+                        subtitle_selection,
                     },
                 )
                 .await
@@ -1616,6 +1656,8 @@ fn push_playlist_items_page(
                             // segment pages and never need it, but highlights — and anything
                             // unparseable at pick time — re-resolve the tray by this id.
                             playlist_item_id: Some(item.id.to_string()),
+                            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
+                            subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
                         },
                         &existing,
                     ) {
@@ -2252,6 +2294,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     manifest_audio_format.set_visible(false);
     video_group.add(&manifest_audio_format);
+    let subtitle_format = adw::ComboRow::builder()
+        .title(gettext("Subtitles"))
+        .build();
+    subtitle_format.set_visible(false);
+    video_group.add(&subtitle_format);
 
     let video_format = adw::ComboRow::builder()
         .title(gettext("Media format"))
@@ -2349,6 +2396,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         manifest_audio_choices: Rc::new(RefCell::new(Vec::new())),
         manifest_audio_selection: Rc::new(RefCell::new(None)),
         manifest_audio_format,
+        subtitle_choices: Rc::new(RefCell::new(Vec::new())),
+        subtitle_selection: Rc::new(RefCell::new(crate::media_types::SubtitleSelection::Automatic)),
+        subtitle_format,
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
         error: video_error,
@@ -2396,6 +2446,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     .map(|choice| choice.key.clone());
                 selection.replace(selected_key);
             });
+    }
+    {
+        let choices = Rc::clone(&step.subtitle_choices);
+        let selection = Rc::clone(&step.subtitle_selection);
+        step.subtitle_format.connect_selected_notify(move |row| {
+            if let Some(choice) = choices.borrow().get(row.selected() as usize) {
+                selection.replace(choice.clone());
+            }
+        });
     }
     // "Select files…" invokes the opener set below (where the picker context
     // lives). Connected once; the opener is set once at build time.
@@ -3264,6 +3323,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                     step_b.name.set_text(&base);
                                 }
                                 probe_b.borrow_mut().last_ok = url;
+                                refresh_subtitle_picker(&step_b, &v.subtitle_languages);
                                 rebuild_format_options(&step_b, &v, &settings_b.video_quality());
                                 // Store a copy for retry; auto-add submits
                                 // immediately with the pre-selected quality.
@@ -3866,6 +3926,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let (name, step_c, probe) = (step.name.clone(), Rc::clone(&step), Rc::clone(&probe));
         let settings = manager.settings().clone();
         step.format.connect_selected_notify(move |_| {
+            sync_subtitle_picker_visibility(&step_c);
             let st = probe.borrow();
             if let Some(p) = st.info.as_ref() {
                 let active = selected_audio_only(&step_c);
@@ -4547,6 +4608,7 @@ mod tests {
             title: "Test title".into(),
             page_url: "https://youtu.be/x".into(),
             formats: Box::new([]),
+            subtitle_languages: Box::new([]),
             is_live: false,
             fetchable: true,
         })

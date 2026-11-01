@@ -1108,6 +1108,7 @@ fn test_video_info(page_url: &str) -> ProbeResult {
         title: "T".into(),
         page_url: page_url.into(),
         formats: Box::default(),
+        subtitle_languages: Box::default(),
         is_live: false,
         fetchable: false,
     })

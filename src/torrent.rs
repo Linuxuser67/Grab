@@ -43,6 +43,8 @@ pub enum TorrentError {
     InvalidTorrent(String),
     #[error("{message}: {source}")]
     Store { message: String, #[source] source: io::Error },
+    #[error("Cannot create session dir: {0}")]
+    SessionDirectory(#[source] io::Error),
     #[error("{0}")]
     StoreNameCollisions(String),
     #[error("{0}")]
@@ -215,7 +217,9 @@ fn safe_stem(file_name: &str) -> Option<&str> {
 pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, TorrentError> {
     const MAX_TORRENT_BYTES: usize = 10_000_000;
     if bytes.len() > MAX_TORRENT_BYTES {
-        return Err(TorrentError::TorrentTooLarge(gettext("Torrent file is too large (max 10 MB)")));
+        return Err(TorrentError::TorrentTooLarge(gettext(
+            "Torrent file is too large (max 10 MB)",
+        )));
     }
     // Parse first: never archive bytes rqbit itself would reject.
     librqbit::torrent_from_bytes(bytes).map_err(|error| {
@@ -303,7 +307,9 @@ pub(crate) fn load_torrent_file(
     path: &std::path::Path,
 ) -> Result<(Vec<u8>, String, Vec<TorrentFileEntry>), TorrentError> {
     let Some(bytes) = read_torrent_bytes(path) else {
-        return Err(TorrentError::CouldNotReadTorrent(gettext("Could not read that .torrent file")));
+        return Err(TorrentError::CouldNotReadTorrent(gettext(
+            "Could not read that .torrent file",
+        )));
     };
     let (name, entries) = torrent_file_list(&bytes)?;
     Ok((bytes, name, entries))
@@ -320,7 +326,9 @@ fn magnet_metadata_path_in(dir: &Path, info_hash: &str) -> Option<PathBuf> {
 /// Persist validated magnet metainfo atomically so completion cleanup and later queue actions can resolve file paths.
 fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), TorrentError> {
     if bytes.len() as u64 > MAX_TORRENT_BYTES {
-        return Err(TorrentError::MetadataTooLarge(gettext("Torrent metadata is too large to store safely")));
+        return Err(TorrentError::MetadataTooLarge(gettext(
+            "Torrent metadata is too large to store safely",
+        )));
     }
     let metadata = librqbit::torrent_from_bytes(bytes).map_err(|error| {
         TorrentError::InvalidResolvedMetadata(format!(
@@ -1047,10 +1055,7 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, TorrentError
     SESSION
         .get_or_try_init(|| async {
             let dir = glib::user_data_dir().join("grab");
-            std::fs::create_dir_all(&dir).map_err(|source| TorrentError::Store {
-                message: gettext("Cannot create session dir"),
-                source,
-            })?;
+            std::fs::create_dir_all(&dir).map_err(TorrentError::SessionDirectory)?;
             // Fast resume: persist bitfields + session torrents across restarts (orphans swept once the queue is restored).
             let mut opts = SessionOptions {
                 fastresume: true,
@@ -1103,7 +1108,9 @@ pub(crate) fn blocklist_url_of(raw: &str) -> Result<Option<String>, TorrentError
     if lower.starts_with("http://") || lower.starts_with("https://") {
         return Ok(Some(url.to_string()));
     }
-    Err(TorrentError::InvalidBlocklistUrl(gettext("Peer blocklist must be an http(s) URL")))
+    Err(TorrentError::InvalidBlocklistUrl(gettext(
+        "Peer blocklist must be an http(s) URL",
+    )))
 }
 /// Live-apply the speed caps (peer limit has no live setter: creation + per-add only).
 pub(crate) fn apply_live_limits(download_bps: Option<u64>, upload_bps: Option<u64>) {

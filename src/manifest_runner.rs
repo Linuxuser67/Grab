@@ -734,7 +734,7 @@ async fn transfer_static_manifest_tracks(
         downloaded,
         abort,
     } = context;
-    match context.tracks {
+    match tracks {
             Tracks::Hls {
                 video,
                 audio,
@@ -742,13 +742,13 @@ async fn transfer_static_manifest_tracks(
                 ..
             } => {
                 if !fetch_resources(
-                    &client,
+                    client,
                     hls_resources(video),
-                    &video_dir,
+                    video_dir,
                     concurrency,
-                    &tx,
-                    &downloaded,
-                    &mut abort,
+                    tx,
+                    downloaded,
+                    abort,
                 )
                 .await?
                 {
@@ -756,33 +756,33 @@ async fn transfer_static_manifest_tracks(
                 }
                 if let Some(audio) = audio
                     && !fetch_resources(
-                        &client,
+                        client,
                         hls_resources(audio),
-                        &audio_dir,
+                        audio_dir,
                         concurrency,
-                        &tx,
-                        &downloaded,
-                        &mut abort,
+                        tx,
+                        downloaded,
+                        abort,
                     )
                     .await?
                 {
                     return Ok(false);
                 }
-                write_playlist(&video_dir, video).await?;
+                write_playlist(video_dir, video).await?;
                 if let Some(audio) = audio {
-                    write_playlist(&audio_dir, audio).await?;
+                    write_playlist(audio_dir, audio).await?;
                 }
                 if let Some(subtitle) = subtitle {
                     let subtitle_dir = staging.join("subtitles");
                     ensure_track_dir(&subtitle_dir).await?;
                     if !fetch_resources(
-                        &client,
+                        client,
                         hls_resources(subtitle),
                         &subtitle_dir,
                         concurrency,
-                        &tx,
-                        &downloaded,
-                        &mut abort,
+                        tx,
+                        downloaded,
+                        abort,
                     )
                     .await?
                     {
@@ -798,36 +798,36 @@ async fn transfer_static_manifest_tracks(
                 ..
             } => {
                 if !fetch_resources(
-                    &client,
+                    client,
                     dash_resources(video),
-                    &video_dir,
+                    video_dir,
                     concurrency,
-                    &tx,
-                    &downloaded,
-                    &mut abort,
+                    tx,
+                    downloaded,
+                    abort,
                 )
                 .await?
                 {
                     return Ok(false);
                 }
-                if !concat_dash_track(video, &video_dir, "video-track.mp4", &mut abort).await? {
+                if !concat_dash_track(video, video_dir, "video-track.mp4", &mut abort).await? {
                     return Ok(false);
                 }
                 if let Some(audio) = audio {
                     if !fetch_resources(
-                        &client,
+                        client,
                         dash_resources(audio),
-                        &audio_dir,
+                        audio_dir,
                         concurrency,
-                        &tx,
-                        &downloaded,
-                        &mut abort,
+                        tx,
+                        downloaded,
+                        abort,
                     )
                     .await?
                     {
                         return Ok(false);
                     }
-                    if !concat_dash_track(audio, &audio_dir, "audio-track.mp4", &mut abort).await? {
+                    if !concat_dash_track(audio, audio_dir, "audio-track.mp4", &mut abort).await? {
                         return Ok(false);
                     }
                 }
@@ -835,13 +835,13 @@ async fn transfer_static_manifest_tracks(
                     let subtitle_dir = staging.join("subtitles");
                     ensure_track_dir(&subtitle_dir).await?;
                     if !fetch_resources(
-                        &client,
+                        client,
                         dash_resources(subtitle),
                         &subtitle_dir,
                         concurrency,
-                        &tx,
-                        &downloaded,
-                        &mut abort,
+                        tx,
+                        downloaded,
+                        abort,
                     )
                     .await?
                     {

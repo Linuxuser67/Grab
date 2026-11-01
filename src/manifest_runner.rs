@@ -4413,7 +4413,7 @@ mod tests {
             .await
             .expect("bind DASH resource server");
         let address = listener.local_addr().expect("resource server address");
-        for resource in &mut plan.resources {
+        for resource in plan.resources.iter_mut() {
             let filename = match resource.kind {
                 DashResourceKind::Initialization => "init.mp4".to_string(),
                 DashResourceKind::Segment => {

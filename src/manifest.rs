@@ -58,10 +58,7 @@ pub(crate) enum ManifestError {
 
 /// Convert a nom diagnostic into a safe parser kind and byte offset without
 /// retaining playlist bytes.
-fn hls_parse_error(
-    input: &[u8],
-    error: nom::Err<nom::error::Error<&[u8]>>,
-) -> ManifestError {
+fn hls_parse_error(input: &[u8], error: nom::Err<nom::error::Error<&[u8]>>) -> ManifestError {
     let details = match error {
         nom::Err::Error(error) | nom::Err::Failure(error) => {
             let offset = input.len().saturating_sub(error.input.len());
@@ -273,8 +270,8 @@ impl HlsPlan {
     ) -> Result<Self, ManifestError> {
         let _validated = HlsLiveAccumulator::from_local_playlist_bytes(body)?;
         let playlist_url = parse_manifest_url(manifest_url)?;
-        let mut local_playlist =
-            m3u8_rs::parse_media_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
+        let mut local_playlist = m3u8_rs::parse_media_playlist_res(body)
+            .map_err(|error| hls_parse_error(body, error))?;
         local_playlist.end_list = true;
         local_playlist.playlist_type = Some(MediaPlaylistType::Vod);
 
@@ -387,8 +384,8 @@ impl HlsLiveAccumulator {
                 "playlist exceeds its supported size limit".to_string(),
             ));
         }
-        let mut playlist =
-            m3u8_rs::parse_media_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
+        let mut playlist = m3u8_rs::parse_media_playlist_res(body)
+            .map_err(|error| hls_parse_error(body, error))?;
         if !playlist.end_list
             || playlist.playlist_type != Some(MediaPlaylistType::Vod)
             || playlist.segments.is_empty()
@@ -801,7 +798,8 @@ pub(crate) fn parse_hls_master_playlist(
         ));
     }
     let base_url = parse_manifest_url(manifest_url)?;
-    let playlist = m3u8_rs::parse_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
+    let playlist =
+        m3u8_rs::parse_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
 
     let Playlist::MasterPlaylist(master) = playlist else {
         return Err(ManifestError::ExpectedMasterPlaylist);
@@ -960,8 +958,8 @@ pub(crate) fn plan_hls_media_playlist(
         ));
     }
     let base_url = parse_manifest_url(manifest_url)?;
-    let playlist = m3u8_rs::parse_media_playlist_res(body)
-        .map_err(|error| hls_parse_error(body, error))?;
+    let playlist =
+        m3u8_rs::parse_media_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
     build_hls_plan(base_url, playlist)
 }
 

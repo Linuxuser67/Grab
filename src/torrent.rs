@@ -108,6 +108,25 @@ pub enum TorrentError {
     /// The underlying torrent session could not be initialized.
     #[error("{0}")]
     SessionStart(String),
+    /// The archived torrent metadata needed to safely trash its files is unavailable.
+    #[error("no torrent archive")]
+    TrashArchiveMissing,
+    /// The archived torrent metadata could not be parsed for deletion.
+    #[error("invalid torrent metadata")]
+    TrashInvalidMetadata,
+    /// The torrent file list could not be parsed for deletion.
+    #[error("invalid torrent file list")]
+    TrashInvalidFileList,
+    /// A single-file torrent target traverses a symlink or unsafe path.
+    #[error("refusing to trash through symlink: {0}")]
+    TrashUnsafePath(PathBuf),
+    /// GIO could not move a torrent-owned file to the desktop Trash.
+    #[error("could not move {path} to Trash: {source}")]
+    TrashFile {
+        path: PathBuf,
+        #[source]
+        source: glib::Error,
+    },
 }
 
 /// A live torrent row: registered at spawn, removed on terminal/cancel.
@@ -927,13 +946,13 @@ fn path_has_symlink_component(path: &std::path::Path, folder: &std::path::Path) 
 
 /// Trash all files listed in the torrent metadata (not the whole folder).
 /// Skips hostile entries and U+FFFD paths. Returns true if the folder is empty afterwards.
-pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> Result<bool, String> {
-    let Some(bytes) = read_archive_bytes(url) else {
-        return Err("no torrent archive".to_string());
-    };
-    let Ok(meta) = librqbit::torrent_from_bytes(&bytes) else {
-        return Err("invalid torrent metadata".to_string());
-    };
+pub(crate) fn trash_torrent_contents(
+    folder: &std::path::Path,
+    url: &str,
+) -> Result<bool, TorrentError> {
+    let bytes = read_archive_bytes(url).ok_or(TorrentError::TrashArchiveMissing)?;
+    let meta = librqbit::torrent_from_bytes(&bytes)
+        .map_err(|_| TorrentError::TrashInvalidMetadata)?;
     let multi = is_multi_file(meta.info.data.files.as_deref());
     if !multi {
         // Single-file torrent: torrent_file_list returns empty (no selectable
@@ -942,24 +961,19 @@ pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> Res
             .unwrap_or_else(|| meta.info_hash.as_string());
         let target = folder.join(name);
         if path_has_symlink_component(&target, folder) {
-            return Err(format!(
-                "refusing to trash through symlink: {}",
-                target.display()
-            ));
+            return Err(TorrentError::TrashUnsafePath(target));
         }
         match gio::File::for_path(&target).trash(gio::Cancellable::NONE) {
             Ok(()) => {}
             Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
-            Err(e) => return Err(format!("could not move {} to Trash: {e}", target.display())),
+            Err(source) => return Err(TorrentError::TrashFile { path: target, source }),
         }
         prune_empty_parents_beneath(&target, folder);
         return Ok(std::fs::read_dir(folder)
             .map(|mut entries| entries.next().is_none())
             .unwrap_or(true));
     }
-    let Ok((_, entries)) = torrent_file_list(&bytes) else {
-        return Err("invalid torrent file list".to_string());
-    };
+    let (_, entries) = torrent_file_list(&bytes).map_err(|_| TorrentError::TrashInvalidFileList)?;
     let empty_keep: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (i, entry) in entries.iter().enumerate() {
         if let Some(target) = deletion_target(folder, i, &empty_keep, entry) {
@@ -971,7 +985,7 @@ pub(crate) fn trash_torrent_contents(folder: &std::path::Path, url: &str) -> Res
             match gio::File::for_path(&target).trash(gio::Cancellable::NONE) {
                 Ok(()) => {}
                 Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
-                Err(e) => return Err(format!("could not move {} to Trash: {e}", target.display())),
+                Err(source) => return Err(TorrentError::TrashFile { path: target, source }),
             }
             // GIO exposes no descriptor-relative trash API: the trash
             // metadata must carry the real path so Restore works. Validate

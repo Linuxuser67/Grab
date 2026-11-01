@@ -14,6 +14,7 @@ use url::Url;
 /// Maximum response body accepted by the native manifest intake.
 pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 
+#[path = "manifest_dash.rs"]
 pub(crate) mod dash;
 
 /// Errors that make a manifest unsuitable for Grab's native download path.

@@ -246,7 +246,7 @@ impl ManifestLookup {
 pub(crate) fn download_plan(
     lookup: ManifestLookup,
     source: &ManifestSource,
-) -> Result<ManifestDownloadPlan, ManifestPlanError> {
+) -> Result<ManifestDownloadPlan, String> {
     if lookup.kind() != source.kind {
         return Err("The stream manifest is no longer supported".to_string());
     }

@@ -250,8 +250,10 @@ impl ManifestLookup {
         choices: &[ManifestSubtitleChoice],
         preferred_language: Option<&str>,
     ) -> Option<usize> {
+        if preferred_language.is_some_and(|language| language.eq_ignore_ascii_case("off")) {
+            return None;
+        }
         preferred_language
-            .filter(|language| !language.eq_ignore_ascii_case("off"))
             .and_then(|preferred| {
                 choices.iter().position(|choice| {
                     choice.language.as_deref().is_some_and(|language| {
@@ -662,13 +664,15 @@ video/720.m3u8
             manifest: NativeManifest::HlsMaster(master),
         };
         let source = lookup
-            .selected_source(&video_key, Some(&audio_key))
+            .selected_source(&video_key, Some(&audio_key), None)
             .expect("valid stable track selection");
 
         let plan = download_plan(lookup, &source).expect("valid selected download plan");
         let ManifestDownloadPlan::HlsMaster {
             video_url,
             audio_url,
+            subtitle_url,
+            ..
         } = plan
         else {
             panic!("expected an HLS master plan");
@@ -681,6 +685,7 @@ video/720.m3u8
             audio_url.expect("selected audio rendition URL").as_str(),
             "https://cdn.example.test/audio/en.m3u8"
         );
+        assert!(subtitle_url.is_none());
     }
 
     #[test]
@@ -703,7 +708,7 @@ video/720.m3u8
             kind: ManifestKind::Hls,
             representation_key: "hls-variant-00000000000000000000000000000000".to_string(),
             audio_key: None,
-        subtitle_key: None,
+            subtitle_key: None,
         };
 
         assert!(download_plan(lookup, &source).is_err());

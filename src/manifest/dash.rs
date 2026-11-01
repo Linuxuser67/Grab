@@ -41,7 +41,7 @@ pub(crate) enum DashError {
     NoAvailableSegments,
 }
 
-/// Whether a DASH representation carries video or audio.
+/// Whether a DASH representation carries video, audio, or supported text subtitles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DashTrackKind {
     Video,
@@ -49,7 +49,7 @@ pub(crate) enum DashTrackKind {
     Subtitle,
 }
 
-/// A user-selectable video or automatically-selectable audio representation.
+/// A selectable video, audio, or supported subtitle representation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DashRepresentation {
     pub(crate) key: String,
@@ -354,6 +354,7 @@ pub(crate) fn parse_dash_manifest_at(
                 mime_type.as_deref(),
                 adaptation.contentType.as_deref(),
                 adaptation.mimeType.as_deref(),
+                representation.codecs.as_deref().or(adaptation.codecs.as_deref()),
             );
             let Some(kind) = kind else {
                 // Text, metadata, and unknown adaptation sets are not media inputs.

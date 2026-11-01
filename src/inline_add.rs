@@ -2988,7 +2988,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     .as_ref()
                     .is_some_and(|manifest| manifest.source_url == url);
                 if fresh_manifest {
-                    let subtitle_language = crate::video_prefs::subtitle_lang_active(&settings_b.subtitle_language());
+                    let subtitle_language = Some(settings_b.subtitle_language().as_str());
                     show_manifest_ready(&step_b, &lookup_add_b, None, &settings_b.video_quality(), subtitle_language.as_deref());
                     return;
                 }

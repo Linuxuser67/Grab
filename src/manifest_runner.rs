@@ -769,6 +769,9 @@ pub(crate) async fn run_manifest_download(
     } else {
         None
     };
+    if let Some(sidecar) = subtitle_sidecar.as_deref() {
+        remove_regular_file_if_present(sidecar).await.map_err(ManifestRunError::Failed)?;
+    }
     let staged_bytes = downloaded.load(Ordering::Relaxed);
     // FFmpeg writes beside the staged segments, so check both the XDG state
     // filesystem (staged inputs plus mux output) and destination filesystem
@@ -893,6 +896,11 @@ async fn resolve_tracks(
                 }
                 None => None,
             };
+            if subtitle.is_some() && (video.is_live || audio_url.as_ref().is_some_and(|_| false)) {
+                return Err(ManifestRunError::Unsupported(
+                    "Native live HLS subtitle renditions are not supported yet".to_string(),
+                ));
+            }
             let audio = match audio_url {
                 Some(url) => {
                     let plan =
@@ -902,6 +910,11 @@ async fn resolve_tracks(
                 }
                 None => None,
             };
+            if subtitle.is_some() && (video.is_live || audio.as_ref().is_some_and(|track| track.is_live)) {
+                return Err(ManifestRunError::Unsupported(
+                    "Native live HLS subtitle renditions are not supported yet".to_string(),
+                ));
+            }
             Ok(Tracks::Hls { video, audio, subtitle, subtitle_language })
         }
         ManifestDownloadPlan::Dash { video, audio, subtitle } => {
@@ -910,6 +923,11 @@ async fn resolve_tracks(
             }
             if let Some(audio) = audio.as_ref() {
                 for resource in audio.resources.iter() {
+                    guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
+                }
+            }
+            if let Some(subtitle) = subtitle.as_ref() {
+                for resource in subtitle.resources.iter() {
                     guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
                 }
             }

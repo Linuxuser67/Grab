@@ -1656,12 +1656,7 @@ fn native_manifest_accepts_mp4_and_mkv_but_rejects_other_containers() {
         .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mkv"), &[])
         .expect("MKV native manifest row");
     assert_eq!(mkv.filename(), "Stream.mkv");
-    let unsupported = manager.enqueue_manifest_staged(
-        source,
-        &directory,
-        Some("Stream.webm"),
-        &[],
-    );
+    let unsupported = manager.enqueue_manifest_staged(source, &directory, Some("Stream.webm"), &[]);
     assert!(unsupported.is_err());
     assert_eq!(manager.store().n_items(), 1);
 

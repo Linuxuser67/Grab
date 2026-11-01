@@ -138,6 +138,15 @@ fn allowlisted_active(raw: &str, values: &[&str]) -> Option<String> {
         .map(|v| v.to_string())
 }
 
+/// Whether an extractor-provided subtitle language key is safe to display and pass to yt-dlp.
+pub(crate) fn is_plain_lang_key(key: &str) -> bool {
+    key.len() <= 35
+        && key.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// Active subtitle language for one job (see [`allowlisted_active`]).
 pub(crate) fn subtitle_lang_active(raw: &str) -> Option<String> {
     allowlisted_active(raw, SUBTITLE_LANGUAGE_VALUES)

@@ -420,6 +420,20 @@ pub(crate) fn sanitize_video_json(value: &mut serde_json::Value) {
     }
 }
 
+/// Available subtitle language codes from yt-dlp's info JSON. Both manual and
+/// automatic captions are included; unsafe or malformed remote keys are omitted.
+pub(crate) fn subtitle_languages(info: &serde_json::Value) -> Box<[String]> {
+    let mut languages = std::collections::BTreeSet::new();
+    for key in ["subtitles", "automatic_captions"] {
+        if let Some(map) = info.get(key).and_then(serde_json::Value::as_object) {
+            languages.extend(map.keys().map(|language| language.to_ascii_lowercase()).filter(
+                |language| crate::video_prefs::is_plain_lang_key(language),
+            ));
+        }
+    }
+    languages.into_iter().collect()
+}
+
 /// Picker cap: a thousand-row dialog is not a picker anymore. The item count shown
 /// notes the truncation.
 pub(crate) const MAX_PLAYLIST_ITEMS: usize = 500;

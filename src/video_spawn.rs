@@ -270,6 +270,7 @@ pub async fn fetch_video_infos(
                 parse_ms = phase_started.elapsed().as_millis() as u64;
                 return Ok((ProbeResult::Playlist(playlist), None));
             }
+            let subtitle_languages = crate::video_probe::subtitle_languages(&value);
             sanitize_video_json(&mut value);
             // Clone for --load-info-json: the parse below consumes `value`.
             // The JSON is ~100KB; one clone per probe is acceptable.
@@ -279,7 +280,12 @@ pub async fn fetch_video_infos(
             parse_ms = phase_started.elapsed().as_millis() as u64;
             let video = parsed_video?;
             Ok((
-                ProbeResult::Single(VideoInfo::from(&video, &url, newest_first)),
+                ProbeResult::Single(VideoInfo::from(
+                    &video,
+                    &url,
+                    newest_first,
+                    subtitle_languages,
+                )),
                 Some(raw_json),
             ))
         }

@@ -1295,6 +1295,7 @@ impl DownloadManager {
                 is_live: choices.is_live,
                 video_format_id: choices.video_format_id,
                 playlist_item_id: choices.playlist_item_id,
+                subtitle_selection: choices.subtitle_selection,
                 backend: None,
             },
         );
@@ -2051,6 +2052,7 @@ impl DownloadManager {
                     is_live,
                     video_format_id,
                     playlist_item_id,
+                    subtitle_selection,
                     ..
                 }) => {
                     return self.spawn_video(SpawnVideoParams {
@@ -2061,6 +2063,7 @@ impl DownloadManager {
                         video_format_id,
                         is_live,
                         playlist_item_id,
+                        subtitle_selection,
                     });
                 }
                 Some(crate::media_types::VideoSource::Manifest { source }) => {
@@ -2602,6 +2605,7 @@ impl DownloadManager {
                                 is_live: false,
                                 video_format_id: None,
                                 playlist_item_id: None,
+                                subtitle_selection: crate::media_types::SubtitleSelection::Automatic,
                                 backend: None,
                             },
                         );
@@ -3034,6 +3038,7 @@ struct SpawnVideoParams {
     video_format_id: Option<String>,
     is_live: bool,
     playlist_item_id: Option<String>,
+    subtitle_selection: crate::media_types::SubtitleSelection,
 }
 
 impl DownloadManager {
@@ -3047,6 +3052,7 @@ impl DownloadManager {
             video_format_id,
             is_live,
             playlist_item_id,
+            subtitle_selection,
         } = params;
         let id = item.id();
         let opts = DownloadOptions::from_settings(&self.settings);
@@ -3106,6 +3112,7 @@ impl DownloadManager {
             } else {
                 crate::video_prefs::subtitle_lang_active(&self.settings.subtitle_language())
             },
+            subtitle_selection,
             embed_subs: self.settings.embed_subs(),
             sponsorblock_remove: self.settings.sponsorblock_remove(),
             sponsorblock_mark: self.settings.sponsorblock_mark(),

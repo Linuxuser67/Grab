@@ -28,6 +28,17 @@ pub fn quality_value(index: usize) -> &'static str {
     combo_value(VIDEO_QUALITY_VALUES, index, "1080p")
 }
 
+/// Per-row subtitle behavior. Automatic uses the configured preferred language;
+/// Off disables subtitles; Language pins one offered language code.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SubtitleSelection {
+    #[default]
+    Automatic,
+    Off,
+    Language(String),
+}
+
 /// Per-row video choices; bundled to stay under the argument-count lint.
 #[derive(Debug, Clone)]
 pub struct VideoChoices {
@@ -38,6 +49,7 @@ pub struct VideoChoices {
     pub is_live: bool,
     /// Playlist entry id this row was picked from; worker selects by id since collection URLs re-resolve the tray.
     pub playlist_item_id: Option<String>,
+    pub subtitle_selection: SubtitleSelection,
 }
 
 /// Native manifest protocol, persisted with the selected representation.
@@ -86,6 +98,9 @@ pub enum VideoSource {
         /// Playlist entry id (see `VideoChoices`); persisted so restores still resolve the picked story.
         #[serde(default)]
         playlist_item_id: Option<String>,
+        /// Per-download subtitle override; old queue rows keep the preference behavior.
+        #[serde(default)]
+        subtitle_selection: SubtitleSelection,
         /// Legacy: pre-B4 video backend flag. Deserialize-only; a stored
         /// `"gallerydl"` row converts to a gallery job on restore (see
         /// `validate_stored_item`). Never written by current code.

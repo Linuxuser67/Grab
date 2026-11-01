@@ -159,6 +159,8 @@ pub struct VideoInfo {
     pub page_url: Box<str>,
     /// Pinnable video-only formats, tallest first. Computed once at resolve.
     pub formats: Box<[VideoFormatOption]>,
+    /// Offered subtitle language codes, including automatic captions.
+    pub subtitle_languages: Box<[String]>,
     /// Whether the page is currently live. Decides stop-and-keep behavior
     /// for HLS captures; refreshed on every resolve.
     pub is_live: bool,
@@ -203,7 +205,12 @@ mod live_status_detection_tests {
 }
 
 impl VideoInfo {
-    pub(crate) fn from(v: &Video, fallback_page: &str, newest_first: bool) -> Self {
+    pub(crate) fn from(
+        v: &Video,
+        fallback_page: &str,
+        newest_first: bool,
+        subtitle_languages: Box<[String]>,
+    ) -> Self {
         let page_url = v
             .webpage_url
             .as_deref()
@@ -214,6 +221,7 @@ impl VideoInfo {
             title: v.title.clone().into_boxed_str(),
             page_url: page_url.into_boxed_str(),
             formats: video_format_options(v, newest_first),
+            subtitle_languages,
             is_live: yt_dlp_reports_currently_live(v.is_live, &v.live_status),
             fetchable: has_fetchable_media(v),
         }

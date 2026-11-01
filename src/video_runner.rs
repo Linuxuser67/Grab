@@ -1013,6 +1013,7 @@ async fn subtitle_degrade(
     // Subtitles off in every downstream use: the language pass returns None
     // immediately and the argv builders skip the write/embed/sidecar legs.
     job.subtitles = None;
+    job.subtitle_selection = crate::media_types::SubtitleSelection::Off;
     job.embed_subs = false;
     Ok(())
 }
@@ -1270,15 +1271,6 @@ const MERGE_WALL_CLOCK: Duration = Duration::from_secs(3600);
 /// the first candidate the video offers, accepting a region variant (`en`
 /// matches `en-us`). Returns the concrete offered key so `--sub-langs`
 /// matches exactly. Pure.
-/// A site-supplied subtitle key is only passed to `--sub-langs` when it is a plain language tag: that option takes comma-separated regexes and a leading `-` means "exclude".
-fn is_plain_lang_key(key: &str) -> bool {
-    key.len() <= 35
-        && key.starts_with(|c: char| c.is_ascii_alphanumeric())
-        && key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
 pub(crate) fn pick_subtitle_lang(
     available: &std::collections::HashSet<String>,
     candidates: &[&str],
@@ -1288,7 +1280,7 @@ pub(crate) fn pick_subtitle_lang(
             return Some(cand.to_string());
         }
         if let Some(hit) = available.iter().find(|a| {
-            is_plain_lang_key(a)
+            crate::video_prefs::is_plain_lang_key(a)
                 && a.len() > cand.len()
                 && a.starts_with(*cand)
                 && matches!(a.as_bytes()[cand.len()], b'-' | b'_')
@@ -1302,13 +1294,7 @@ pub(crate) fn pick_subtitle_lang(
 /// Available subtitle languages for one video: the lowercase keys of the
 /// info-JSON `subtitles` and `automatic_captions` maps. Pure.
 fn available_subtitle_langs(info: &serde_json::Value) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    for key in ["subtitles", "automatic_captions"] {
-        if let Some(map) = info.get(key).and_then(|v| v.as_object()) {
-            out.extend(map.keys().map(|k| k.to_ascii_lowercase()));
-        }
-    }
-    out
+    crate::video_probe::subtitle_languages(info).into_vec().into_iter().collect()
 }
 
 /// Resolve the subtitle language for the media command: the preferred
@@ -1327,10 +1313,25 @@ pub(crate) async fn resolve_subtitle_lang(
     abort: &mut oneshot::Receiver<StopIntent>,
     playlist_index: Option<usize>,
 ) -> Result<Option<String>, ()> {
-    let pref = match job.subtitles.as_deref() {
-        Some(p) => p.to_ascii_lowercase(),
-        None => return Ok(None),
+    let candidates = match &job.subtitle_selection {
+        crate::media_types::SubtitleSelection::Automatic => {
+            let Some(preferred) = job.subtitles.as_deref() else {
+                return Ok(None);
+            };
+            vec![preferred.to_ascii_lowercase(), "en".to_string()]
+        }
+        crate::media_types::SubtitleSelection::Off => return Ok(None),
+        crate::media_types::SubtitleSelection::Language(language)
+            if crate::video_prefs::is_plain_lang_key(language) =>
+        {
+            vec![language.to_ascii_lowercase()]
+        }
+        crate::media_types::SubtitleSelection::Language(_) => {
+            tracing::warn!("ignoring invalid persisted subtitle language selection");
+            return Ok(None);
+        }
     };
+    let candidate_refs = candidates.iter().map(String::as_str).collect::<Vec<_>>();
     // Fast path: the media leg is about to load this same probe JSON
     // (--load-info-json), so its subtitle maps are what the download will
     // use — deciding from them spares a second extraction. Key presence
@@ -1339,7 +1340,7 @@ pub(crate) async fn resolve_subtitle_lang(
         && (json.get("subtitles").is_some() || json.get("automatic_captions").is_some())
     {
         let available = available_subtitle_langs(json);
-        let lang = pick_subtitle_lang(&available, &[&pref, "en"]);
+        let lang = pick_subtitle_lang(&available, &candidate_refs)
         if lang.is_none() {
             tracing::debug!("video offers no subtitles in the preferred language or English");
         } else {

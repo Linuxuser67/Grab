@@ -50,8 +50,11 @@ pub struct VideoJob {
     pub audio_only: bool,
     /// Raw browser-auth setting (`none` = off), resolved to `--cookies-from-browser` in the worker.
     pub cookies_browser: String,
-    /// Subtitle language code for sidecars (`None` = off); missing language warns, never fails.
+    /// Subtitle language preference captured from settings (`None` = off).
+    /// Resolved against the video's offered tracks before the media command is built.
     pub subtitles: Option<String>,
+    /// Per-row override, persisted on the page source.
+    pub subtitle_selection: crate::media_types::SubtitleSelection,
     /// Mux downloaded subtitles into the finished file; live rows never take it.
     pub embed_subs: bool,
     /// Cut SponsorBlock sponsor segments; live rows never take it.

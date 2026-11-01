@@ -3,7 +3,7 @@
 
 use crate::attempt_gate::AttemptGate;
 use crate::file_names::is_url_derived_name;
-use crate::runtime::lock_recover;
+use crate::runtime::lock_or_panic;
 use crate::video_argv::{
     VideoJob, apply_proxy_env, container_truth_name, dash_merge_argv, fallback_to_live_edge,
     hls_download_argv, live_capture_argv, live_from_start_unsupported, live_remux_argv,
@@ -513,60 +513,73 @@ fn create_private_merge_dir(path: &Path) -> std::io::Result<()> {
 /// Returns the finished size, or `None` on user abort (the caller stays quiet).
 /// On Preserve abort of a DASH download, partial video+audio are merged into
 /// a single file instead of being abandoned.
-async fn try_merge_dash_partials(
-    ffmpeg_bin: &Path,
-    staging: &Path,
-    dest: &Path,
-    page_url: &str,
-    gate: &AttemptGate,
-) -> Option<u64> {
-    // Find DASH format files in staging: both in-progress (.part) and
-    // completed (.f137.mp4 without .part). yt-dlp renames completed formats,
-    // so a Stop after video finished leaves a mix.
+fn discover_dash_partials(staging: &Path) -> Option<Vec<(PathBuf, u64)>> {
     let mut parts: Vec<(PathBuf, u64)> = std::fs::read_dir(staging)
         .ok()?
-        .filter_map(|e| e.ok().map(|x| x.path()))
-        .filter(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            // Match .f<id>.ext or .f<id>.ext.part (DASH format files).
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
             name.contains(".f")
                 && name
                     .split(".f")
                     .nth(1)
-                    .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                    .is_some_and(|suffix| suffix.chars().next().is_some_and(|c| c.is_ascii_digit()))
         })
-        .filter_map(|p| std::fs::metadata(&p).ok().map(|m| (p, m.len())))
-        .filter(|(_, len)| *len > 1024) // Ignore tiny fragments.
+        .filter_map(|path| std::fs::metadata(&path).ok().map(|metadata| (path, metadata.len())))
+        .filter(|(_, len)| *len > 1024)
         .collect();
     if parts.is_empty() {
         return None;
     }
     parts.sort_by_key(|(_, len)| std::cmp::Reverse(*len));
+    Some(parts)
+}
 
-    // Single part (audio-only): just rename into place, no merge needed.
+/// Preserve DASH fragments without blocking a Tokio worker on filesystem work.
+async fn try_merge_dash_partials(
+    ffmpeg_bin: &Path,
+    staging: &Path,
+    dest: &Path,
+    page_url: &str,
+    gate: &Arc<AttemptGate>,
+) -> Option<u64> {
+    let staging_path = staging.to_path_buf();
+    let parts = tokio::task::spawn_blocking(move || discover_dash_partials(&staging_path))
+        .await
+        .ok()??;
+
+    // Single part (audio-only): publish it without an FFmpeg process.
     if parts.len() == 1 {
-        let (part, _) = &parts[0];
-        let size = std::fs::metadata(part).ok()?.len();
-        if !gate.try_commit() {
-            return None;
-        }
-        if let Err(error) = crate::file_names::rename_noreplace(part, dest) {
-            tracing::warn!(
-                error = %error,
-                "could not preserve DASH partial without clobbering the destination"
-            );
-            return None;
-        }
-        gate.mark_delivered();
-        return Some(size);
+        let (part, size) = parts.into_iter().next()?;
+        let gate = Arc::clone(gate);
+        let dest = dest.to_path_buf();
+        return tokio::task::spawn_blocking(move || {
+            if !gate.try_commit() {
+                return None;
+            }
+            if let Err(error) = crate::file_names::rename_noreplace(&part, &dest) {
+                tracing::warn!(
+                    error = %error,
+                    "could not preserve DASH partial without clobbering the destination"
+                );
+                return None;
+            }
+            gate.mark_delivered();
+            Some(size)
+        })
+        .await
+        .ok()?;
     }
 
     let (video_part, _) = &parts[0];
     let (audio_part, _) = &parts[1];
 
-    // Merge in an exclusive private directory beside staging, keeping the final
-    // no-clobber move on the same filesystem without touching user-owned temp names.
-    let merged_dir = DashMergeTempDir::create(staging).ok()?;
+    // Directory creation can touch slow or remote storage; keep it off the runtime.
+    let staging_path = staging.to_path_buf();
+    let merged_dir = tokio::task::spawn_blocking(move || DashMergeTempDir::create(&staging_path))
+        .await
+        .ok()?
+        .ok()?;
     let merged_tmp = merged_dir.output_path();
     let argv = dash_merge_argv(video_part, audio_part, &merged_tmp, page_url);
     let mut cmd = tokio::process::Command::new(ffmpeg_bin);
@@ -576,33 +589,43 @@ async fn try_merge_dash_partials(
         .stderr(std::process::Stdio::null());
     let status = cmd.status().await.ok()?;
     if !status.success() {
-        let _ = std::fs::remove_file(&merged_tmp);
+        let _ = tokio::fs::remove_file(&merged_tmp).await;
         return None;
     }
-    let size = std::fs::metadata(&merged_tmp).ok()?.len();
+    let size = tokio::fs::metadata(&merged_tmp).await.ok()?.len();
     if size == 0 {
-        let _ = std::fs::remove_file(&merged_tmp);
+        let _ = tokio::fs::remove_file(&merged_tmp).await;
         return None;
     }
-    // Removal can win while FFmpeg is merging; only commit if this row still owns delivery.
-    if !gate.try_commit() {
-        let _ = std::fs::remove_file(&merged_tmp);
-        return None;
-    }
-    // Claim the destination atomically; a file created after preflight must survive.
-    if let Err(error) = crate::file_names::rename_noreplace(&merged_tmp, dest) {
-        let _ = std::fs::remove_file(&merged_tmp);
-        tracing::warn!(
-            error = %error,
-            "could not preserve merged DASH partial without clobbering the destination"
-        );
-        return None;
-    }
-    gate.mark_delivered();
-    // Clean up the parts we merged.
-    let _ = std::fs::remove_file(video_part);
-    let _ = std::fs::remove_file(audio_part);
-    Some(size)
+
+    // Keep the gate transition and no-clobber publication in one blocking task.
+    // If this future is cancelled after the task starts, the worker still owns
+    // the gate and completes (or rejects) the delivery decision consistently.
+    let gate = Arc::clone(gate);
+    let dest = dest.to_path_buf();
+    let video_part = video_part.clone();
+    let audio_part = audio_part.clone();
+    tokio::task::spawn_blocking(move || {
+        let _merged_dir = merged_dir;
+        if !gate.try_commit() {
+            let _ = std::fs::remove_file(&merged_tmp);
+            return None;
+        }
+        if let Err(error) = crate::file_names::rename_noreplace(&merged_tmp, &dest) {
+            let _ = std::fs::remove_file(&merged_tmp);
+            tracing::warn!(
+                error = %error,
+                "could not preserve merged DASH partial without clobbering the destination"
+            );
+            return None;
+        }
+        gate.mark_delivered();
+        let _ = std::fs::remove_file(video_part);
+        let _ = std::fs::remove_file(audio_part);
+        Some(size)
+    })
+    .await
+    .ok()?
 }
 
 #[expect(
@@ -732,7 +755,13 @@ pub(crate) async fn run_unified_ytdlp(
         }
         return Ok(None);
     };
-    let final_tmp = discover_unified_output(staging, after_move.as_deref());
+    let staging_for_discovery = staging.to_path_buf();
+    let after_move_for_discovery = after_move.clone();
+    let final_tmp = tokio::task::spawn_blocking(move || {
+        discover_unified_output(&staging_for_discovery, after_move_for_discovery.as_deref())
+    })
+    .await
+    .map_err(VideoError::runtime)?;
     let Some(final_tmp) = final_tmp else {
         return Err(VideoError::part_failed("no output file produced"));
     };
@@ -781,7 +810,7 @@ pub(crate) async fn run_unified_ytdlp(
 
 /// Time since yt-dlp last wrote a stdout line: the stall watchdog's clock.
 fn stall_elapsed(last_progress: &std::sync::Mutex<std::time::Instant>) -> std::time::Duration {
-    lock_recover(last_progress).elapsed()
+    lock_or_panic(last_progress).elapsed()
 }
 
 /// Wait for the child: bounded by the stall deadline while downloading, and by
@@ -835,7 +864,7 @@ async fn run_ytdlp_attempt(
         let mut after_move = None::<String>;
         let mut merged = false;
         while let Ok(Some(line)) = lines.next_line().await {
-            *lock_recover(&last_progress_p) = std::time::Instant::now();
+            *lock_or_panic(&last_progress_p) = std::time::Instant::now();
             if !merged && is_ytdlp_merge_line(&line) {
                 merged = true;
                 merging_p.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1489,7 +1518,7 @@ fn spawn_growth_watcher(
             }
             if bytes > max {
                 max = bytes;
-                *lock_recover(&last_progress) = std::time::Instant::now();
+                *lock_or_panic(&last_progress) = std::time::Instant::now();
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
@@ -1837,7 +1866,7 @@ pub(crate) async fn run_live_ytdlp(
             let mut announced = false;
             while let Ok(Some(line)) = lines.next_line().await {
                 // Any stdout line proves the recorder is alive.
-                *lock_recover(&last_progress_p) = std::time::Instant::now();
+                *lock_or_panic(&last_progress_p) = std::time::Instant::now();
                 if let Some(p) = parse_ytdlp_template(&line) {
                     if !announced {
                         announced = true;
@@ -2228,7 +2257,7 @@ pub(crate) async fn run_hls_ytdlp(
         let mut after_move = None::<String>;
         let mut merged = false;
         while let Ok(Some(line)) = lines.next_line().await {
-            *lock_recover(&last_progress_p) = std::time::Instant::now();
+            *lock_or_panic(&last_progress_p) = std::time::Instant::now();
             if is_ytdlp_merge_line(&line) && !merged {
                 merged = true;
                 merging_p.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2330,7 +2359,13 @@ pub(crate) async fn run_hls_ytdlp(
         let detail = ytdlp_failure_detail(&log_tail);
         return Err(VideoError::part_failed(detail));
     }
-    let final_tmp = discover_ytdlp_output(&job.dest, after_move.as_deref());
+    let dest_for_discovery = job.dest.clone();
+    let after_move_for_discovery = after_move.clone();
+    let final_tmp = tokio::task::spawn_blocking(move || {
+        discover_ytdlp_output(&dest_for_discovery, after_move_for_discovery.as_deref())
+    })
+    .await
+    .map_err(VideoError::runtime)?;
     let Some(final_tmp) = final_tmp else {
         return Err(VideoError::part_failed("no output file produced"));
     };

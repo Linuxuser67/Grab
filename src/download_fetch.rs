@@ -6,7 +6,7 @@ use crate::download_pieces::{SegmentState, plan_pieces};
 use crate::download_rate::{live_rate_limit, pace_chunk, parse_rate, progress_msg};
 use crate::engine_msg::{DEST_EXISTS, EngineMsg};
 use crate::file_names::{PIECE_MIN, percent_decode, piece_len, sane_filename};
-use crate::runtime::lock_recover;
+use crate::runtime::lock_or_panic;
 use futures_util::StreamExt as _;
 use gettextrs::gettext;
 use std::collections::VecDeque;
@@ -70,7 +70,7 @@ fn send_validator(tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>, resp: &req
 
 /// First recorded worker error, or a generic interruption message (callers keep their own `AttemptFail` variant).
 fn take_first_err(first_err: &Mutex<Option<String>>) -> String {
-    lock_recover(first_err)
+    lock_or_panic(first_err)
         .take()
         .unwrap_or_else(|| gettext("Download interrupted"))
 }
@@ -367,7 +367,7 @@ async fn attempt_multi(
     let depth = ((8 * PIECE_MIN) / piece_len(total)).clamp(2, 8) as usize;
     let (wtx, wrx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>, u64)>(depth);
     // Never exceed the configured connections: extra range requests are what throttled hosts punish.
-    let n_workers = lock_recover(&queue)
+    let n_workers = lock_or_panic(&queue)
         .len()
         .min(max_workers.max(1))
         .clamp(1, 16);
@@ -387,7 +387,7 @@ async fn attempt_multi(
                 if failed.load(Ordering::SeqCst) {
                     break;
                 }
-                let piece = lock_recover(&queue).pop_front();
+                let piece = lock_or_panic(&queue).pop_front();
                 let Some((idx, s, e)) = piece else { break };
                 match fetch_piece(ctx, s, e, total).await {
                     Ok(bytes) => {
@@ -396,19 +396,19 @@ async fn attempt_multi(
                         }
                     }
                     Err(AttemptFail::Throttled(msg)) => {
-                        lock_recover(&first_err).get_or_insert(msg);
+                        lock_or_panic(&first_err).get_or_insert(msg);
                         throttled.store(true, Ordering::SeqCst);
                         failed.store(true, Ordering::SeqCst);
                         break;
                     }
                     Err(AttemptFail::Changed(msg)) => {
-                        lock_recover(&first_err).get_or_insert(msg);
+                        lock_or_panic(&first_err).get_or_insert(msg);
                         changed.store(true, Ordering::SeqCst);
                         failed.store(true, Ordering::SeqCst);
                         break;
                     }
                     Err(AttemptFail::Retryable(msg)) => {
-                        lock_recover(&first_err).get_or_insert(msg);
+                        lock_or_panic(&first_err).get_or_insert(msg);
                         failed.store(true, Ordering::SeqCst);
                         break;
                     }

@@ -31,7 +31,7 @@ fn stop_copy_distinguishes_a_live_capture_from_a_discard() {
     );
     assert_eq!(
         stop_copy(true),
-        StopCopy::StopRecording,
+        StopCopy::FinishRecording,
         "a live capture is kept, so the copy must not read as a discard"
     );
 }

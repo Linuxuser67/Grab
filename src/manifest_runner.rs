@@ -1861,7 +1861,7 @@ async fn poll_live_hls_track(
             );
             return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
         }
-        return Err(ManifestRunError::Unsupported(error));
+        return Err(error.into());
     }
     if let Err(error) = guard_hls_resources(source_url, &plan, guarded_child_hosts) {
         if track.accumulator.segment_count() > 0 {
@@ -1872,7 +1872,7 @@ async fn poll_live_hls_track(
             );
             return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
         }
-        return Err(ManifestRunError::Unsupported(error));
+        return Err(error.into());
     }
     apply_live_hls_snapshot(
         client,
@@ -1951,10 +1951,10 @@ async fn run_live_hls_tracks(
     let all_tracks_ended = video_plan.end_list && audio_plan.is_none_or(|plan| plan.end_list);
     if !all_tracks_ended {
         guard_manifest_child_url(source_url, &video_plan.playlist_url, guarded_child_hosts)
-            .map_err(ManifestRunError::Unsupported)?;
+            ?;
         if let Some(plan) = audio_plan {
             guard_manifest_child_url(source_url, &plan.playlist_url, guarded_child_hosts)
-                .map_err(ManifestRunError::Unsupported)?;
+                ?;
         }
     }
 
@@ -3842,6 +3842,21 @@ async fn run_ffmpeg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn track_directory_rejects_existing_non_directory() {
+        let directory = tempfile::tempdir().expect("create staging parent");
+        let path = directory.path().join("track");
+        tokio::fs::write(&path, b"not a directory")
+            .await
+            .expect("create conflicting track file");
+
+        let error = ensure_track_dir(&path)
+            .await
+            .expect_err("a regular file cannot be used as a track directory");
+
+        assert!(matches!(error, ManifestTrackDirError::NotDirectory));
+    }
 
     #[tokio::test]
     async fn live_finish_marker_is_idempotent_and_preserves_committed_bytes() {

@@ -428,12 +428,6 @@ struct DashLiveCapture {
     audio_resources: Option<Vec<String>>,
 }
 
-/// Run one HLS or static-DASH attempt, keeping completed resources for retry.
-///
-/// # Errors
-/// Returns a classified error. Only unsupported presentations use yt-dlp fallback;
-/// transient transfer errors preserve completed resources for a later native retry.
-
 /// State resolved before any manifest resources are transferred.
 struct ManifestPreparation {
     staging: PathBuf,
@@ -649,7 +643,7 @@ async fn prepare_manifest_attempt(
             Err(error) => return Err(error.into()),
         }
     };
-    let mut has_audio = match &tracks {
+    let has_audio = match &tracks {
         Tracks::Hls { audio, .. } => audio.is_some(),
         Tracks::Dash { audio, .. } => audio.is_some(),
         Tracks::DashLiveOffline { has_audio } => *has_audio,
@@ -710,6 +704,11 @@ async fn prepare_manifest_attempt(
     })
 }
 
+/// Run one HLS or static-DASH attempt, keeping completed resources for retry.
+///
+/// # Errors
+/// Returns a classified error. Only unsupported presentations use yt-dlp fallback;
+/// transient transfer errors preserve completed resources for a later native retry.
 pub(crate) async fn run_manifest_download(
     job: ManifestJob,
     gate: Arc<crate::attempt_gate::AttemptGate>,

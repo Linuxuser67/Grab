@@ -3659,7 +3659,7 @@ impl DownloadManager {
     /// Stop the engine for `id`, keeping file, bitmap and progress, and mark it queued. Live rows only signal (see `stop_engine`).
     fn park(&self, id: u64) {
         // Live rows only signal: the worker finalizes and its message completes the row.
-        if !self.stop_engine(id, crate::video::StopIntent::Preserve) {
+        if !self.stop_engine(id, crate::video::StopIntent::Finish) {
             return;
         }
         if let Some(item) = self.find(id) {
@@ -3778,7 +3778,7 @@ impl DownloadManager {
             // Preserve and non-video Discard stop the engine the same way (see `stop_engine`).
             _ => {
                 let intent = match stop {
-                    Stop::Preserve => crate::video::StopIntent::Preserve,
+                    Stop::Preserve => crate::video::StopIntent::Finish,
                     Stop::Discard => crate::video::StopIntent::Discard,
                 };
                 self.stop_engine(id, intent);

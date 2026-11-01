@@ -1,7 +1,7 @@
 //! Network options + proxy/client plumbing: `DownloadOptions`, proxy resolution, per-attempt reqwest clients.
 
 use crate::net_types::ResolvedProxy;
-use crate::runtime::lock_recover;
+use crate::runtime::lock_or_panic;
 use gettextrs::gettext;
 use gtk4::gio;
 use gtk4::gio::prelude::*;
@@ -437,7 +437,7 @@ static UNTRUSTED_HANDOFF_POLICY_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// Serialize tests that temporarily replace the process-global handoff policy.
 #[cfg(test)]
 pub(crate) fn lock_untrusted_handoff_policy_for_test() -> std::sync::MutexGuard<'static, ()> {
-    lock_recover(&UNTRUSTED_HANDOFF_POLICY_TEST_LOCK)
+    lock_or_panic(&UNTRUSTED_HANDOFF_POLICY_TEST_LOCK)
 }
 
 /// Restore the process-global handoff policy when a test finishes.
@@ -452,7 +452,7 @@ pub(crate) struct IsolatedUntrustedHandoffPolicy {
 impl Drop for IsolatedUntrustedHandoffPolicy {
     fn drop(&mut self) {
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
-        *lock_recover(cache) = std::mem::take(&mut self.previous);
+        *lock_or_panic(cache) = std::mem::take(&mut self.previous);
     }
 }
 
@@ -462,7 +462,7 @@ impl Drop for IsolatedUntrustedHandoffPolicy {
 pub(crate) fn isolate_untrusted_handoff_policy_for_test() -> IsolatedUntrustedHandoffPolicy {
     let lock = lock_untrusted_handoff_policy_for_test();
     let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
-    let previous = std::mem::take(&mut *lock_recover(cache));
+    let previous = std::mem::take(&mut *lock_or_panic(cache));
     IsolatedUntrustedHandoffPolicy {
         _lock: lock,
         previous,
@@ -499,7 +499,7 @@ pub(crate) fn require_public_resolution(host: &str) -> bool {
         Err(_) if is_local_or_private_host(&key) => return false,
         Err(_) => {}
     }
-    let mut hosts = lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default));
+    let mut hosts = lock_or_panic(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default));
     if policy_matches(&hosts, &key) {
         return true;
     }
@@ -521,7 +521,7 @@ pub(crate) fn retain_public_resolution(host: &str) {
     if key.is_empty() {
         return;
     }
-    *lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default))
+    *lock_or_panic(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default))
         .entry(key)
         .or_insert(0) += 1;
 }
@@ -534,7 +534,7 @@ pub(crate) fn release_public_resolution(host: &str) {
     if key.is_empty() {
         return;
     }
-    let mut hosts = lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default));
+    let mut hosts = lock_or_panic(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default));
     if let Some(refs) = hosts.get_mut(&key) {
         *refs = refs.saturating_sub(1);
     }
@@ -550,7 +550,7 @@ fn policy_matches(hosts: &std::collections::BTreeMap<String, usize>, host: &str)
 
 pub(crate) fn is_untrusted_handoff_host(host: &str) -> bool {
     policy_matches(
-        &lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default)),
+        &lock_or_panic(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default)),
         &host_key(host),
     )
 }
@@ -578,7 +578,7 @@ fn require_public_dns_filter(cache: &PublicDnsPolicy, host: &str) -> bool {
         Err(_) if is_local_or_private_host(&key) => return false,
         Err(_) => {}
     }
-    let mut cache = lock_recover(cache.as_ref());
+    let mut cache = lock_or_panic(cache.as_ref());
     if cache.hosts.contains(&key) {
         return true;
     }
@@ -595,7 +595,7 @@ fn require_public_dns_filter(cache: &PublicDnsPolicy, host: &str) -> bool {
 
 fn requires_public_dns_filter(host: &str, cache: &PublicDnsPolicy) -> bool {
     let key = host_key(host);
-    is_untrusted_handoff_host(&key) || lock_recover(cache.as_ref()).hosts.contains(&key)
+    is_untrusted_handoff_host(&key) || lock_or_panic(cache.as_ref()).hosts.contains(&key)
 }
 
 /// Extend an untrusted collection's public-only policy to a selected or
@@ -946,12 +946,12 @@ pub(crate) fn tool_client_builder_proxied() -> Result<reqwest::ClientBuilder, St
 
 #[cfg(test)]
 pub(crate) fn clear_public_resolution_for_tests() {
-    lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default)).clear();
+    lock_or_panic(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default)).clear();
 }
 
 #[cfg(test)]
 pub(crate) fn public_resolution_refs(host: &str) -> Option<usize> {
-    lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default))
+    lock_or_panic(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default))
         .get(&host_key(host))
         .copied()
 }
@@ -987,7 +987,7 @@ mod tests {
         let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
-            let mut set = lock_recover(cache);
+            let mut set = lock_or_panic(cache);
             std::mem::take(&mut *set)
         };
         assert!(require_public_resolution("Marked-Name.EXAMPLE."));
@@ -1001,7 +1001,7 @@ mod tests {
             assert!(!is_untrusted_handoff_host(h), "must not mark {h}");
         }
         assert!(!is_untrusted_handoff_host("never-marked.example"));
-        *lock_recover(cache) = previous;
+        *lock_or_panic(cache) = previous;
     }
 
     #[test]
@@ -1017,7 +1017,7 @@ mod tests {
         let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
-            let mut set = lock_recover(cache);
+            let mut set = lock_or_panic(cache);
             std::mem::take(&mut *set)
         };
         assert!(require_public_resolution("www.example.com"));
@@ -1030,7 +1030,7 @@ mod tests {
         ));
         assert!(is_untrusted_handoff_host("example.com"));
         assert!(!is_untrusted_handoff_host("other-example.com"));
-        *lock_recover(cache) = previous;
+        *lock_or_panic(cache) = previous;
     }
 
     #[test]
@@ -1038,7 +1038,7 @@ mod tests {
         let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
-            let mut set = lock_recover(cache);
+            let mut set = lock_or_panic(cache);
             std::mem::take(&mut *set)
         };
         assert!(require_public_resolution("collection-limit.example"));
@@ -1070,7 +1070,7 @@ mod tests {
         )
         .expect("an already-counted host should remain accepted");
         assert_eq!(seen.len(), MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION);
-        *lock_recover(cache) = previous;
+        *lock_or_panic(cache) = previous;
     }
 
     #[test]
@@ -1108,7 +1108,7 @@ mod tests {
         let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
-            let mut set = lock_recover(cache);
+            let mut set = lock_or_panic(cache);
             std::mem::take(&mut *set)
         };
         assert!(require_public_resolution("collection.example"));
@@ -1121,7 +1121,7 @@ mod tests {
             "https://collection.example/list",
             "http://127.0.0.1/admin"
         ));
-        *lock_recover(cache) = previous;
+        *lock_or_panic(cache) = previous;
     }
 
     #[test]
@@ -1129,7 +1129,7 @@ mod tests {
         let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
-            let mut set = lock_recover(cache);
+            let mut set = lock_or_panic(cache);
             std::mem::take(&mut *set)
         };
         for i in 0..UNTRUSTED_HANDOFF_HOSTS_CAP {
@@ -1149,7 +1149,7 @@ mod tests {
         release_public_resolution("test-0.example");
         assert!(!require_public_resolution("overflow.example"));
         assert!(is_untrusted_handoff_host("test-0.example"));
-        *lock_recover(cache) = previous;
+        *lock_or_panic(cache) = previous;
     }
 
     #[test]
@@ -1157,7 +1157,7 @@ mod tests {
         let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
-            let mut set = lock_recover(cache);
+            let mut set = lock_or_panic(cache);
             std::mem::take(&mut *set)
         };
         assert!(require_public_resolution("idle.example"));
@@ -1167,7 +1167,7 @@ mod tests {
         // A second release must not wrap or remove the entry.
         release_public_resolution("idle.example");
         assert!(is_untrusted_handoff_host("idle.example"));
-        *lock_recover(cache) = previous;
+        *lock_or_panic(cache) = previous;
     }
 
     #[tokio::test(flavor = "current_thread")]

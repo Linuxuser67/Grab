@@ -1604,6 +1604,7 @@ fn native_manifest_queue_deduplicates_repeated_requested_filenames() {
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
         audio_key: None,
         subtitle_key: None,
+            subtitle_language: None,
     };
 
     let first = manager
@@ -1634,6 +1635,7 @@ fn native_manifest_rejects_filename_extension_that_disagrees_with_mp4_muxer() {
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
         audio_key: None,
         subtitle_key: None,
+            subtitle_language: None,
     };
 
     let result = manager.enqueue_manifest_staged(source, &directory, Some("Stream.mkv"), &[]);
@@ -1664,6 +1666,7 @@ fn invalid_native_manifest_source_is_skipped_on_restore() {
                 representation_key: "dash-0123456789abcdef0123456789abcdef".to_string(),
                 audio_key: None,
                 subtitle_key: None,
+            subtitle_language: None,
             },
         }),
         started: None,

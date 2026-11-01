@@ -8,6 +8,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use thiserror::Error;
+
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 use url::Url;
@@ -185,6 +187,38 @@ impl fmt::Display for ManifestRunError {
 }
 
 impl std::error::Error for ManifestRunError {}
+
+/// Failures while validating manifest-derived resource hosts.
+#[derive(Debug, Error, PartialEq, Eq)]
+enum ManifestChildUrlError {
+    #[error("The stream manifest exceeds the limit of {0} distinct resource hosts")]
+    TooManyDistinctHosts(usize),
+    #[error("The stream manifest references a local or private network resource")]
+    UnsafeDestination,
+}
+
+/// Failures while creating or validating a per-track staging directory.
+#[derive(Debug, Error)]
+enum ManifestTrackDirError {
+    #[error("Could not inspect manifest staging: {0}")]
+    Inspect(#[source] std::io::Error),
+    #[error("Manifest staging path is not a real directory")]
+    NotDirectory,
+    #[error("Could not create manifest staging: {0}")]
+    Create(#[source] std::io::Error),
+}
+
+impl From<ManifestChildUrlError> for ManifestRunError {
+    fn from(error: ManifestChildUrlError) -> Self {
+        Self::Failed(error.to_string())
+    }
+}
+
+impl From<ManifestTrackDirError> for ManifestRunError {
+    fn from(error: ManifestTrackDirError) -> Self {
+        Self::Failed(error.to_string())
+    }
+}
 
 impl ManifestRunError {
     pub(crate) fn into_engine_message(self) -> EngineMsg {
@@ -1180,7 +1214,7 @@ fn guard_hls_resources(
     parent_url: &str,
     plan: &HlsPlan,
     seen_hosts: &mut std::collections::HashSet<String>,
-) -> Result<(), String> {
+) -> Result<(), ManifestChildUrlError> {
     for resource in plan.resources.iter() {
         guard_manifest_child_url(parent_url, &resource.url, seen_hosts)?;
     }
@@ -1193,19 +1227,20 @@ fn guard_manifest_child_url(
     parent_url: &str,
     child_url: &Url,
     seen_hosts: &mut std::collections::HashSet<String>,
-) -> Result<(), String> {
+) -> Result<(), ManifestChildUrlError> {
     match crate::download_net::inherit_public_resolution_for_collection(
         parent_url,
         child_url.as_str(),
         seen_hosts,
     ) {
         Ok(()) => Ok(()),
-        Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => Err(format!(
-            "The stream manifest exceeds the limit of {} distinct resource hosts",
-            crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
-        )),
+        Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
+            Err(ManifestChildUrlError::TooManyDistinctHosts(
+                crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION,
+            ))
+        }
         Err(crate::download_net::CollectionHostError::UnsafeDestination) => {
-            Err("The stream manifest references a local or private network resource".to_string())
+            Err(ManifestChildUrlError::UnsafeDestination)
         }
     }
 }
@@ -1242,19 +1277,19 @@ fn dash_resources_from(resources: &[DashResource]) -> Vec<Resource> {
         .collect()
 }
 
-async fn ensure_track_dir(path: &Path) -> Result<(), String> {
+async fn ensure_track_dir(path: &Path) -> Result<(), ManifestTrackDirError> {
     match tokio::fs::create_dir(path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let metadata = tokio::fs::symlink_metadata(path)
                 .await
-                .map_err(|error| format!("Could not inspect manifest staging: {error}"))?;
+                .map_err(ManifestTrackDirError::Inspect)?;
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err("Manifest staging path is not a real directory".to_string());
+                return Err(ManifestTrackDirError::NotDirectory);
             }
             Ok(())
         }
-        Err(error) => Err(format!("Could not create manifest staging: {error}")),
+        Err(error) => Err(ManifestTrackDirError::Create(error)),
     }
 }
 
@@ -1827,7 +1862,7 @@ async fn poll_live_hls_track(
             );
             return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
         }
-        return Err(ManifestRunError::Unsupported(error));
+        return Err(ManifestRunError::Unsupported(error.to_string()));
     }
     if let Err(error) = guard_hls_resources(source_url, &plan, guarded_child_hosts) {
         if track.accumulator.segment_count() > 0 {
@@ -1838,7 +1873,7 @@ async fn poll_live_hls_track(
             );
             return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
         }
-        return Err(ManifestRunError::Unsupported(error));
+        return Err(ManifestRunError::Unsupported(error.to_string()));
     }
     apply_live_hls_snapshot(
         client,
@@ -1917,10 +1952,10 @@ async fn run_live_hls_tracks(
     let all_tracks_ended = video_plan.end_list && audio_plan.is_none_or(|plan| plan.end_list);
     if !all_tracks_ended {
         guard_manifest_child_url(source_url, &video_plan.playlist_url, guarded_child_hosts)
-            .map_err(ManifestRunError::Unsupported)?;
+            .map_err(|error| ManifestRunError::Unsupported(error.to_string()))?;
         if let Some(plan) = audio_plan {
             guard_manifest_child_url(source_url, &plan.playlist_url, guarded_child_hosts)
-                .map_err(ManifestRunError::Unsupported)?;
+                .map_err(|error| ManifestRunError::Unsupported(error.to_string()))?;
         }
     }
 
@@ -3810,6 +3845,21 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn track_directory_rejects_existing_non_directory() {
+        let directory = tempfile::tempdir().expect("create staging parent");
+        let path = directory.path().join("track");
+        tokio::fs::write(&path, b"not a directory")
+            .await
+            .expect("create conflicting track file");
+
+        let error = ensure_track_dir(&path)
+            .await
+            .expect_err("a regular file cannot be used as a track directory");
+
+        assert!(matches!(error, ManifestTrackDirError::NotDirectory));
+    }
+
+    #[tokio::test]
     async fn live_finish_marker_is_idempotent_and_preserves_committed_bytes() {
         let directory = tempfile::tempdir().expect("create live finish marker directory");
         assert_eq!(
@@ -4161,8 +4211,9 @@ mod tests {
         let error = guard_manifest_child_url(parent_url, &child_url, &mut seen_hosts)
             .expect_err("untrusted manifests must not reach private hosts");
 
+        assert_eq!(error, ManifestChildUrlError::UnsafeDestination);
         assert_eq!(
-            error,
+            error.to_string(),
             "The stream manifest references a local or private network resource"
         );
         assert!(
@@ -4264,6 +4315,12 @@ mod tests {
 
         assert_eq!(
             error,
+            ManifestChildUrlError::TooManyDistinctHosts(
+                crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+            )
+        );
+        assert_eq!(
+            error.to_string(),
             format!(
                 "The stream manifest exceeds the limit of {} distinct resource hosts",
                 crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION

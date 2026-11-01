@@ -21,6 +21,7 @@ mod manifest;
 mod manifest_intake;
 mod manifest_plan;
 mod manifest_publish;
+mod manifest_recovery;
 mod manifest_runner;
 mod manifest_types;
 mod media_types;

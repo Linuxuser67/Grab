@@ -1,5 +1,4 @@
 //! Atomic publication for native manifest downloads.
-use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

@@ -1043,6 +1043,57 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
 }
 
 #[tokio::test]
+async fn live_hls_runner_returns_paused_without_finalizing() {
+    let root = TempRoot::new("live-pause-runner");
+    let video_dir = root.path().join("video");
+    let audio_dir = root.path().join("audio");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create live HLS video staging");
+    tokio::fs::create_dir_all(&audio_dir)
+        .await
+        .expect("create live HLS audio staging");
+    let plan = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:500\n#EXTINF:4,\n500.ts\n",
+    )
+    .expect("plan a live media window");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (stop_tx, mut abort) = tokio::sync::oneshot::channel();
+    stop_tx
+        .send(crate::video::StopIntent::Pause)
+        .expect("queue pause before the first live HLS request");
+    let mut guarded_child_hosts = std::collections::HashSet::new();
+
+    let outcome = run_live_hls_tracks(
+        &client,
+        "https://origin.example.test/live.m3u8",
+        root.path(),
+        &plan,
+        None,
+        &video_dir,
+        &audio_dir,
+        1,
+        &tx,
+        &downloaded,
+        &mut guarded_child_hosts,
+        &mut abort,
+    )
+    .await
+    .expect("pause the live HLS runner");
+
+    assert_eq!(outcome, LiveHlsCaptureOutcome::Paused);
+    assert!(
+        tokio::fs::symlink_metadata(video_dir.join("local.m3u8"))
+            .await
+            .is_err(),
+        "pausing before the first commit must not create an FFmpeg input"
+    );
+}
+
+#[tokio::test]
 async fn live_hls_pause_does_not_commit_an_interrupted_window() {
     let root = TempRoot::new("live-stop");
     let video_dir = root.path().join("video");

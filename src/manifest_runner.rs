@@ -376,6 +376,17 @@ enum DashLiveCaptureOutcome {
     Discard,
 }
 
+fn discard_unrecoverable_dash_capture_without_video(
+    outcome: DashLiveCaptureOutcome,
+    has_video_segments: bool,
+) -> DashLiveCaptureOutcome {
+    if outcome == DashLiveCaptureOutcome::Unrecoverable && !has_video_segments {
+        DashLiveCaptureOutcome::Discard
+    } else {
+        outcome
+    }
+}
+
 #[derive(Debug)]
 struct DashLiveCapture {
     outcome: DashLiveCaptureOutcome,
@@ -3196,7 +3207,10 @@ async fn run_live_dash_tracks(
     };
     macro_rules! finish_capture {
         ($outcome:expr) => {{
-            let outcome = $outcome;
+            let outcome = discard_unrecoverable_dash_capture_without_video(
+                $outcome,
+                !video.state.segments.is_empty(),
+            );
             if matches!(outcome, DashLiveCaptureOutcome::Unrecoverable) {
                 let staged_video_bytes =
                     dash_live_track_bytes(&video.state, &video.directory).await?;
@@ -4456,6 +4470,24 @@ mod tests {
             })
         ));
         let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[test]
+    fn dash_audio_continuity_loss_without_video_is_discarded() {
+        assert_eq!(
+            discard_unrecoverable_dash_capture_without_video(
+                DashLiveCaptureOutcome::Unrecoverable,
+                false,
+            ),
+            DashLiveCaptureOutcome::Discard
+        );
+        assert_eq!(
+            discard_unrecoverable_dash_capture_without_video(
+                DashLiveCaptureOutcome::Unrecoverable,
+                true,
+            ),
+            DashLiveCaptureOutcome::Unrecoverable
+        );
     }
 
     #[test]

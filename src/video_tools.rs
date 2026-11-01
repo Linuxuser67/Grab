@@ -502,7 +502,7 @@ where
         Fut: std::future::Future<Output = Result<V, E>>,
     {
         let probe_lock = {
-            let mut locks = self.locks.lock().unwrap_or_else(|p| p.into_inner());
+            let mut locks = self.locks.lock().expect("video tool state mutex poisoned");
             if locks.len() > 128 {
                 // Preserve locks owned by a probe or its waiters; removing one
                 // while in use could permit two probes for the key.
@@ -516,7 +516,7 @@ where
         let _guard = probe_lock.lock().await;
         let stamp = file_stamp(binary);
         {
-            let mut values = self.values.lock().unwrap_or_else(|p| p.into_inner());
+            let mut values = self.values.lock().expect("video tool state mutex poisoned");
             if let Some(entry) = values.get(&key)
                 && entry.stamp == stamp
                 && (entry.result.is_ok() || entry.cached_at.elapsed() < failure_ttl)
@@ -529,7 +529,7 @@ where
         let result = probe().await;
         let after = file_stamp(binary);
         if stamp != (None, 0) && stamp == after && (result.is_ok() || !failure_ttl.is_zero()) {
-            let mut values = self.values.lock().unwrap_or_else(|p| p.into_inner());
+            let mut values = self.values.lock().expect("video tool state mutex poisoned");
             if values.len() >= 128 {
                 let evict = values.keys().find(|existing| *existing != &key).cloned();
                 if let Some(evict) = evict {
@@ -944,14 +944,14 @@ fn selected_deno_path_slot() -> &'static Mutex<Option<PathBuf>> {
 fn remember_deno_path(path: &Path) {
     let mut selected = selected_deno_path_slot()
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .expect("Deno path mutex poisoned");
     *selected = Some(path.to_path_buf());
 }
 
 fn selected_deno_path() -> Option<PathBuf> {
     let path = selected_deno_path_slot()
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .expect("Deno path mutex poisoned")
         .clone()?;
     is_executable(&path).then_some(path)
 }
@@ -1849,7 +1849,7 @@ pub(crate) fn browser_profile_dir(browser: &str) -> Option<PathBuf> {
     let started = std::time::Instant::now();
     let mut cache = browser_profile_cache()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .expect("browser profile cache mutex poisoned");
     if let Some((at, found)) = cache.get(&key)
         && at.elapsed() < BROWSER_PROFILE_CACHE_TTL
     {

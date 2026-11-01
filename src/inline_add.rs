@@ -3009,7 +3009,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         let manifest = *manifest;
                         let preferred_quality = settings_b.video_quality();
                         let subtitle_language = settings_b.subtitle_language();
-                        let preferred_source = manifest.preferred_source(&preferred_quality, Some(&subtitle_language));
+                        let preferred_source =
+                            manifest.preferred_source(&preferred_quality, Some(&subtitle_language));
                         show_manifest_ready(
                             &step_b,
                             &lookup_add_b,
@@ -3454,10 +3455,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         .filter(|manifest| manifest.source_url == url)
                         .and_then(|manifest| {
                             selected.as_deref().and_then(|key| {
-                                let subtitle_key = manifest.preferred_subtitle_key(
-                                    key,
-                                    Some(&subtitle_language),
-                                );
+                                let subtitle_key =
+                                    manifest.preferred_subtitle_key(key, Some(&subtitle_language));
                                 manifest.selected_source(
                                     key,
                                     selected_audio.as_deref(),

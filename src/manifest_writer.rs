@@ -59,7 +59,7 @@ pub(crate) async fn write_ordered_track(
         &part,
         &target,
         &fingerprint,
-        resources.len(),
+        resources,
     )
     .await?;
 
@@ -174,7 +174,7 @@ async fn load_checkpoint(
     part: &Path,
     target: &Path,
     fingerprint: &str,
-    resource_count: usize,
+    resources: &[String],
 ) -> Result<CheckpointState, String> {
     let checkpoint_metadata = match tokio::fs::symlink_metadata(checkpoint_path).await {
         Ok(metadata) => {
@@ -200,11 +200,31 @@ async fn load_checkpoint(
         .map_err(|error| format!("The DASH writer checkpoint is invalid: {error}"))?;
     if checkpoint.version != CHECKPOINT_VERSION
         || checkpoint.plan_fingerprint != fingerprint
-        || checkpoint.next_resource_index > resource_count
+        || checkpoint.next_resource_index > resources.len()
         || checkpoint.committed_offset > MAX_TRACK_BYTES
         || (checkpoint.next_resource_index == 0) != (checkpoint.committed_offset == 0)
     {
         return Err("The DASH writer checkpoint does not match the selected resource plan".to_string());
+    }
+
+    // Recompute the durable prefix from the exact resource files. This prevents
+    // a truncated or inconsistent checkpoint from skipping bytes on recovery.
+    let mut expected_offset = 0_u64;
+    for resource_name in resources.iter().take(checkpoint.next_resource_index) {
+        let resource_path = part.parent().unwrap_or_else(|| Path::new(".")).join(resource_name);
+        let metadata = tokio::fs::symlink_metadata(&resource_path)
+            .await
+            .map_err(|error| format!("Could not validate a committed DASH resource: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
+            return Err("A committed DASH resource is not a valid regular file".to_string());
+        }
+        expected_offset = expected_offset
+            .checked_add(metadata.len())
+            .filter(|offset| *offset <= MAX_TRACK_BYTES)
+            .ok_or_else(|| "The committed DASH resource prefix exceeds the 1 TiB limit".to_string())?;
+    }
+    if expected_offset != checkpoint.committed_offset {
+        return Err("The DASH writer checkpoint offset does not match its committed resources".to_string());
     }
 
     let part_metadata = match tokio::fs::symlink_metadata(part).await {
@@ -227,7 +247,7 @@ async fn load_checkpoint(
         });
     }
 
-    if checkpoint.next_resource_index == resource_count {
+    if checkpoint.next_resource_index == resources.len() {
         if let Ok(metadata) = tokio::fs::symlink_metadata(target).await {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 return Err("The completed DASH track is not a regular file".to_string());

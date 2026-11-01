@@ -960,6 +960,38 @@ pub(crate) async fn run_manifest_download(
         }
     }
 
+    finalize_manifest_download(
+        &job,
+        gate,
+        abort,
+        &tx,
+        &staging,
+        dest_dir,
+        output_part,
+        tracks,
+        has_audio,
+        &downloaded,
+    )
+    .await
+}}
+
+
+/// Mux the staged tracks, validate the output, and publish it without clobbering.
+///
+/// The staging data is retained on every failure before publication so the queue
+/// can retry without downloading already completed resources.
+async fn finalize_manifest_download(
+    job: &ManifestJob,
+    gate: Arc<crate::attempt_gate::AttemptGate>,
+    mut abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    staging: &Path,
+    dest_dir: &Path,
+    output_part: PathBuf,
+    tracks: Tracks,
+    has_audio: bool,
+    downloaded: &AtomicU64,
+) -> Result<ManifestOutcome, ManifestRunError> {
     if abort.try_recv().is_ok() {
         return Ok(ManifestOutcome::Aborted);
     }
@@ -1106,6 +1138,7 @@ pub(crate) async fn run_manifest_download(
     }
     Ok(ManifestOutcome::Finished(size))
 }
+
 
 async fn resolve_tracks(
     client: &reqwest::Client,

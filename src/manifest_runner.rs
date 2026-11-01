@@ -3371,9 +3371,7 @@ mod tests {
 
     #[test]
     fn mux_storage_full_failure_keeps_its_specific_error() {
-        let error = mux_failure_error(
-            "av_interleaved_write_frame(): No space left on device",
-        );
+        let error = mux_failure_error("av_interleaved_write_frame(): No space left on device");
         assert!(matches!(
             error,
             ManifestRunError::Failed(message)

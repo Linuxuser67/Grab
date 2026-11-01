@@ -335,7 +335,10 @@ mod tests {
         let copied = copy_staged_bytes(&mut source_file, &mut destination, &gate)
             .expect("cancellation is not a storage error");
 
-        assert!(!copied, "the copy must stop after the first discarded chunk");
+        assert!(
+            !copied,
+            "the copy must stop after the first discarded chunk"
+        );
         assert!(destination.discarded);
         drop(destination);
         drop(temporary);

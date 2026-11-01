@@ -4920,9 +4920,8 @@ fn terminal_manifest_failure_preserves_owned_staging_for_retry() {
     let dest_dir = std::env::temp_dir().join(format!("grab-manifest-failure-{id}"));
     let _ = std::fs::remove_dir_all(&dest_dir);
     std::fs::create_dir_all(&dest_dir).unwrap();
-    let staging =
-        crate::video_staging::ensure_manifest_staging_dir(&dest_dir, id)
-            .expect("create owned native-manifest staging");
+    let staging = crate::video_staging::ensure_manifest_staging_dir(&dest_dir, id)
+        .expect("create owned native-manifest staging");
     let staged_segment = staging.join("video-segment.bin");
     std::fs::write(&staged_segment, b"captured segment").unwrap();
 
@@ -4946,9 +4945,7 @@ fn terminal_manifest_failure_preserves_owned_staging_for_retry() {
 
     let context = glib::MainContext::default();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while manager.pump_handles.borrow().contains_key(&id)
-        && std::time::Instant::now() < deadline
-    {
+    while manager.pump_handles.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
         context.iteration(false);
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -4974,12 +4971,7 @@ fn live_detected_registers_a_downloading_row_for_stop_preservation() {
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     let id = 921_500 + std::process::id() as u64;
-    let item = DownloadItem::new(
-        id,
-        "https://example.com/live.m3u8",
-        "live.mp4",
-        "/tmp/dl",
-    );
+    let item = DownloadItem::new(id, "https://example.com/live.m3u8", "live.mp4", "/tmp/dl");
     item.set_status(DownloadStatus::Downloading);
     manager.store().append(&item);
     manager.epoch.borrow_mut().insert(id, 1);
@@ -4991,9 +4983,7 @@ fn live_detected_registers_a_downloading_row_for_stop_preservation() {
 
     let context = glib::MainContext::default();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !manager.live_rows.borrow().contains(&id)
-        && std::time::Instant::now() < deadline
-    {
+    while !manager.live_rows.borrow().contains(&id) && std::time::Instant::now() < deadline {
         context.iteration(false);
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -5009,9 +4999,7 @@ fn live_detected_registers_a_downloading_row_for_stop_preservation() {
     item.set_status(DownloadStatus::Paused);
     drop(tx);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while manager.pump_handles.borrow().contains_key(&id)
-        && std::time::Instant::now() < deadline
-    {
+    while manager.pump_handles.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
         context.iteration(false);
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -6144,12 +6132,7 @@ fn video_proxy_failure_does_not_leave_live_state_or_stall_the_queue() {
             backend: None,
         },
     );
-    let next = DownloadItem::new(
-        id + 1,
-        "http://127.0.0.1:9/next.bin",
-        "next.bin",
-        &dest_dir,
-    );
+    let next = DownloadItem::new(id + 1, "http://127.0.0.1:9/next.bin", "next.bin", &dest_dir);
     manager.store().append(&next);
 
     manager.spawn_video(SpawnVideoParams {

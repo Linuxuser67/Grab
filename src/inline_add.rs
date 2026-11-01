@@ -2123,50 +2123,20 @@ fn slide_down_revealer() -> gtk4::Revealer {
 
 /// Build the inline New Download card. The returned [`AddCard`] owns the
 /// widget and the open/toggle entry points; the card starts collapsed.
-pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
-    let open_state = Rc::new(OpenState::default());
-    // Shared scheduled-download timestamp: set by the schedule picker UI,
-    // read by every enqueue path. None = start immediately.
-    let scheduled_at: Rc<Cell<Option<i64>>> = Rc::new(Cell::new(None));
 
-    // Card chrome: a slide-down revealer so the card animates in under the
-    // header; collapsed it takes no space.
-    let revealer = gtk4::Revealer::builder()
-        .transition_type(gtk4::RevealerTransitionType::SlideDown)
-        .reveal_child(false)
-        .build();
-    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    // 12px: matches the download list's original window margins.
-    card.set_margin_top(12);
-    card.set_margin_bottom(12);
-    card.set_margin_start(12);
-    card.set_margin_end(12);
-    // No .card class: each AdwPreferencesGroup below renders as its own
-    // flush card (rows touch the group's edge, 12px internal row margins
-    // match the app's card padding). The 6px margins give the window
-    // spacing.
+/// Controls belonging to the URL-entry row and its adjacent options revealer.
+struct UrlControls {
+    url_bar: gtk4::Box,
+    url_entry: gtk4::Entry,
+    spinner_paintable: adw::SpinnerPaintable,
+    add_btn: gtk4::Button,
+    action_revealer: gtk4::Revealer,
+    opts_toggle: gtk4::ToggleButton,
+    cancel_btn: gtk4::Button,
+    opts_revealer: gtk4::Revealer,
+}
 
-    // No in-card title: the card only opens from explicit "New Download"
-    // affordances (+, Ctrl+N, the empty-state pill), so restating it is
-    // redundant. The navigation page below keeps the accessible name.
-    // Dismissal is the header `+` toggle (now stateful) and Escape — the
-    // card has no window controls, and a fourth URL-row action was noise
-    // next to Add/options.
-
-    let nav = adw::NavigationView::new();
-    // HIG form sizing: cap the card at 600px on wide windows instead of
-    // stretching the URL field with the window. AdwClamp hands the child
-    // the full width below the threshold, so narrow windows are untouched.
-    let clamp = adw::Clamp::builder().maximum_size(600).build();
-    clamp.set_child(Some(&nav));
-    card.append(&clamp);
-    revealer.set_child(Some(&card));
-
-    // Form page: URL row (entry + Add), the video preview block, then the
-    // file / torrent / destination rows. Each AdwPreferencesGroup is its
-    // own card; the 12px form spacing separates the cards (HIG).
-    let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-
+fn build_url_controls() -> UrlControls {
     // URL bar: plain GtkEntry (entry styling, 6px corners) with the action
     // buttons beside it — AdwEntryRow would render card styling (12px).
     // The tick lives inside the entry as the secondary icon (the established
@@ -2223,7 +2193,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     cancel_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Cancel"))]);
     url_bar.append(&cancel_btn);
-    form.append(&url_bar);
 
     // Download options live in a revealer directly under the URL row: the
     // card opens compact, one tap on the gear reveals file name, torrent,
@@ -2243,8 +2212,27 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             revealer.set_reveal_child(active);
         });
     }
-    form.append(&opts_revealer);
 
+
+    UrlControls {
+        url_bar,
+        url_entry,
+        spinner_paintable,
+        add_btn,
+        action_revealer,
+        opts_toggle,
+        cancel_btn,
+        opts_revealer,
+    }
+}
+
+/// Build the video/gallery preview group and its state shared by lookup handlers.
+fn build_video_preview(
+    url_entry: &gtk4::Entry,
+    spinner_paintable: adw::SpinnerPaintable,
+    action_revealer: &gtk4::Revealer,
+    add_btn: &gtk4::Button,
+) -> (Rc<VideoStep>, gtk4::Revealer) {
     // Video preview block: hidden until a lookup runs; exactly one state shows.
     // HIG AdwPreferencesGroup: title/description are built-in, rows get the
     // 12px internal margins natively.
@@ -2409,6 +2397,12 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         lookup_abort: Rc::new(RefCell::new(None)),
         add_btn: add_btn.clone(),
     });
+
+    (step, video_revealer)
+}
+
+/// Connect the controls whose behavior is local to the video/gallery preview.
+fn wire_video_preview(step: Rc<VideoStep>) {
     // Keep both selections aligned with their ComboRows. Changing video
     // representation resets audio to that representation's default rendition.
     {
@@ -2597,10 +2591,23 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             show_gallery_ready(&step2, card, &title);
         });
     }
-    // Card-local choices: the format is initialized from Preferences (not
-    // bound). Exact picks are per lookup, so nothing persists here.
-    form.append(&video_revealer);
 
+}
+
+/// Controls for the optional torrent, destination, and scheduled-download rows.
+struct DownloadOptionsUi {
+    content: gtk4::Box,
+    torrent_btn: gtk4::Button,
+    torrent_row: adw::ActionRow,
+    dest_label: gtk4::Label,
+    dest_btn: gtk4::Button,
+    schedule_switch: adw::SwitchRow,
+}
+
+fn build_download_options(
+    manager: &Rc<DownloadManager>,
+    scheduled_at: &Rc<Cell<Option<i64>>>,
+) -> DownloadOptionsUi {
     // Download options: HIG AdwPreferencesGroup, no header — the rows
     // speak for themselves. Rows get the 12px internal margins natively.
     let group = adw::PreferencesGroup::new();
@@ -2772,6 +2779,91 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             move |_, _| sync_c(),
         );
     }
+
+
+    DownloadOptionsUi {
+        content: opts_box,
+        torrent_btn,
+        torrent_row,
+        dest_label,
+        dest_btn,
+        schedule_switch,
+    }
+}
+
+pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
+    let open_state = Rc::new(OpenState::default());
+    // Shared scheduled-download timestamp: set by the schedule picker UI,
+    // read by every enqueue path. None = start immediately.
+    let scheduled_at: Rc<Cell<Option<i64>>> = Rc::new(Cell::new(None));
+
+    // Card chrome: a slide-down revealer so the card animates in under the
+    // header; collapsed it takes no space.
+    let revealer = gtk4::Revealer::builder()
+        .transition_type(gtk4::RevealerTransitionType::SlideDown)
+        .reveal_child(false)
+        .build();
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    // 12px: matches the download list's original window margins.
+    card.set_margin_top(12);
+    card.set_margin_bottom(12);
+    card.set_margin_start(12);
+    card.set_margin_end(12);
+    // No .card class: each AdwPreferencesGroup below renders as its own
+    // flush card (rows touch the group's edge, 12px internal row margins
+    // match the app's card padding). The 6px margins give the window
+    // spacing.
+
+    // No in-card title: the card only opens from explicit "New Download"
+    // affordances (+, Ctrl+N, the empty-state pill), so restating it is
+    // redundant. The navigation page below keeps the accessible name.
+    // Dismissal is the header `+` toggle (now stateful) and Escape — the
+    // card has no window controls, and a fourth URL-row action was noise
+    // next to Add/options.
+
+    let nav = adw::NavigationView::new();
+    // HIG form sizing: cap the card at 600px on wide windows instead of
+    // stretching the URL field with the window. AdwClamp hands the child
+    // the full width below the threshold, so narrow windows are untouched.
+    let clamp = adw::Clamp::builder().maximum_size(600).build();
+    clamp.set_child(Some(&nav));
+    card.append(&clamp);
+    revealer.set_child(Some(&card));
+
+    // Form page: URL row (entry + Add), the video preview block, then the
+    // file / torrent / destination rows. Each AdwPreferencesGroup is its
+    // own card; the 12px form spacing separates the cards (HIG).
+    let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    let UrlControls {
+        url_bar,
+        url_entry,
+        spinner_paintable,
+        add_btn,
+        action_revealer,
+        opts_toggle: _opts_toggle,
+        cancel_btn,
+        opts_revealer,
+    } = build_url_controls();
+    form.append(&url_bar);
+    form.append(&opts_revealer);
+    let (step, video_revealer) = build_video_preview(
+        &url_entry,
+        spinner_paintable,
+        &action_revealer,
+        &add_btn,
+    );
+    wire_video_preview(Rc::clone(&step));
+
+    form.append(&video_revealer);
+
+    let DownloadOptionsUi {
+        content: opts_box,
+        torrent_btn,
+        torrent_row,
+        dest_label,
+        dest_btn,
+        schedule_switch,
+    } = build_download_options(&manager, &scheduled_at);
     opts_revealer.set_child(Some(&opts_box));
 
     // Validation errors live on the fields themselves (error class +

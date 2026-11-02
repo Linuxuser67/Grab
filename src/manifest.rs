@@ -285,12 +285,16 @@ impl HlsPlan {
         })
     }
 
-    /// Serialize the rewritten VOD playlist consumed by FFmpeg after fetch.
-    ///
-    /// # Errors
-    /// Returns a serialization error if the playlist writer fails.
+    /// Whether non-empty static HLS resources can be assembled as a plain MPEG-TS track.
     pub(crate) fn is_plain_mpegts_candidate(&self) -> bool {
-        if self.resources.is_empty()
+        !self.resources.is_empty() && self.is_plain_mpegts_presentation()
+    }
+
+    /// Whether the playlist can be concatenated as a plain MPEG-TS byte stream.
+    ///
+    /// This also accepts a restored local playlist whose resources have no remote plan.
+    pub(crate) fn is_plain_mpegts_presentation(&self) -> bool {
+        if self.local_playlist.segments.is_empty()
             || self.resources.iter().any(|resource| {
                 resource.kind != HlsResourceKind::Segment || resource.range.is_some()
             })
@@ -703,6 +707,56 @@ impl HlsLiveAccumulator {
     /// Resource basenames referenced by the committed local playlist.
     pub(crate) fn resource_names(&self) -> impl Iterator<Item = &str> {
         self.seen_resources.iter().map(String::as_str)
+    }
+
+    /// Return captured segment names in playlist order when the recording is plain MPEG-TS.
+    ///
+    /// The ordered writer must never derive its append order from the resource set.
+    #[must_use]
+    pub(crate) fn plain_mpegts_resource_names(&self) -> Option<Vec<String>> {
+        let Some(playlist) = self.local_playlist.as_ref() else {
+            return Some(Vec::new());
+        };
+        if playlist.segments.is_empty() || !self.seen_key_resources.is_empty() {
+            return None;
+        }
+
+        let bytes = self.local_playlist_bytes().ok()?;
+        let serialized = std::str::from_utf8(&bytes).ok()?;
+        if serialized.lines().any(|line| {
+            line.starts_with("#EXT-X-MAP:")
+                || line.starts_with("#EXT-X-KEY:")
+                || line.starts_with("#EXT-X-BYTERANGE:")
+                || line == "#EXT-X-DISCONTINUITY"
+                || line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:")
+        }) {
+            return None;
+        }
+
+        let mut names = Vec::with_capacity(playlist.segments.len());
+        for segment in &playlist.segments {
+            if segment.map.is_some()
+                || segment.key.is_some()
+                || segment.byte_range.is_some()
+                || !is_safe_staged_resource_name(&segment.uri)
+            {
+                return None;
+            }
+            names.push(segment.uri.clone());
+        }
+
+        let ordered_names = names.iter().map(String::as_str).collect::<HashSet<_>>();
+        if ordered_names.len() != names.len()
+            || ordered_names.len() != self.seen_resources.len()
+            || self
+                .seen_resources
+                .iter()
+                .any(|name| !ordered_names.contains(name.as_str()))
+        {
+            return None;
+        }
+
+        Some(names)
     }
 
     /// Forget a staged resource that is missing but may still appear in a remote window.

@@ -593,7 +593,6 @@ fn rejects_unsafe_and_duplicate_resource_names() {
     let names = ["segment.bin".to_string(), "segment.bin".to_string()];
     let mut unique = std::collections::HashSet::new();
     assert!(names.iter().any(|name| !unique.insert(name)));
-
 }
 
 #[tokio::test]
@@ -621,12 +620,16 @@ async fn destination_part_stays_visible_until_final_container_cleanup() {
         crate::manifest_destination::TrackKind::Video,
     )
     .await
-    .expect("open destination writer")
-    else {
+    .expect("open destination writer") else {
         panic!("a fresh destination track must return an active writer");
     };
     assert_eq!(committed, 0);
-    assert!(writer.append_next(&mut abort).await.expect("append resource"));
+    assert!(
+        writer
+            .append_next(&mut abort)
+            .await
+            .expect("append resource")
+    );
     writer.finish().await.expect("finish destination track");
 
     let part = crate::manifest_destination::part_path(
@@ -636,7 +639,10 @@ async fn destination_part_stays_visible_until_final_container_cleanup() {
         crate::manifest_destination::TrackKind::Video,
     )
     .expect("resolve destination part");
-    assert_eq!(tokio::fs::read(&part).await.expect("read visible part"), b"first");
+    assert_eq!(
+        tokio::fs::read(&part).await.expect("read visible part"),
+        b"first"
+    );
     assert!(directory.join("video-track.mp4.checkpoint.json").is_file());
     assert!(!directory.join("video-track.mp4").exists());
 
@@ -714,7 +720,10 @@ async fn migrates_a_completed_staging_track_to_the_owned_destination_part() {
         crate::manifest_destination::TrackKind::Video,
     )
     .expect("resolve destination part");
-    assert_eq!(tokio::fs::read(&part).await.expect("read migrated part"), b"complete");
+    assert_eq!(
+        tokio::fs::read(&part).await.expect("read migrated part"),
+        b"complete"
+    );
     assert!(!directory.join("video-track.mp4").exists());
 
     cleanup_destination_part(
@@ -729,7 +738,6 @@ async fn migrates_a_completed_staging_track_to_the_owned_destination_part() {
     tokio::fs::remove_dir_all(directory)
         .await
         .expect("remove staging");
-
 }
 
 #[tokio::test]
@@ -799,7 +807,10 @@ async fn resumes_a_crash_during_staging_to_destination_part_migration() {
         crate::manifest_destination::TrackKind::Video,
     )
     .expect("resolve destination part");
-    assert_eq!(tokio::fs::read(&part).await.expect("read recovered part"), b"complete");
+    assert_eq!(
+        tokio::fs::read(&part).await.expect("read recovered part"),
+        b"complete"
+    );
     assert!(!directory.join("video-track.mp4").exists());
     cleanup_destination_part(
         &directory,
@@ -814,4 +825,3 @@ async fn resumes_a_crash_during_staging_to_destination_part_migration() {
         .await
         .expect("remove staging");
 }
-

@@ -327,7 +327,9 @@ impl ManifestLookup {
                     .then_some(())?;
                 ManifestKind::Hls
             }
-            NativeManifest::HlsMedia(_) if representation_key.as_str() == "hls-media" => ManifestKind::Hls,
+            NativeManifest::HlsMedia(_) if representation_key.as_str() == "hls-media" => {
+                ManifestKind::Hls
+            }
             NativeManifest::HlsMedia(_) => return None,
             NativeManifest::Dash(dash) => {
                 if !dash

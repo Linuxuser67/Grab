@@ -1,12 +1,14 @@
 //! Domain types shared by native manifest intake, planning, and execution.
 
 use crate::manifest::{HlsMasterPlan, HlsPlan, dash::DashManifestPlan};
-use crate::media_types::ManifestKind;
+use crate::media_types::{
+    ManifestAudioKey, ManifestKind, ManifestRepresentationKey, ManifestSubtitleKey,
+};
 
 /// One selectable video choice from a parsed native manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ManifestChoice {
-    pub(crate) key: String,
+    pub(crate) key: ManifestRepresentationKey,
     pub(crate) label: String,
     pub(crate) height: Option<u64>,
     pub(crate) bandwidth: Option<u64>,
@@ -15,7 +17,7 @@ pub(crate) struct ManifestChoice {
 /// One selectable audio rendition associated with a selected video representation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ManifestAudioChoice {
-    pub(crate) key: String,
+    pub(crate) key: ManifestAudioKey,
     pub(crate) label: String,
     pub(crate) is_default: bool,
 }
@@ -23,7 +25,7 @@ pub(crate) struct ManifestAudioChoice {
 /// One selectable subtitle rendition associated with a selected video representation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ManifestSubtitleChoice {
-    pub(crate) key: String,
+    pub(crate) key: ManifestSubtitleKey,
     pub(crate) language: Option<String>,
     pub(crate) is_default: bool,
 }

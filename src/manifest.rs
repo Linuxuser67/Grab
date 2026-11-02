@@ -289,6 +289,31 @@ impl HlsPlan {
     ///
     /// # Errors
     /// Returns a serialization error if the playlist writer fails.
+    pub(crate) fn is_plain_mpegts_candidate(&self) -> bool {
+        if self.resources.is_empty()
+            || self.resources.iter().any(|resource| {
+                resource.kind != HlsResourceKind::Segment || resource.range.is_some()
+            })
+        {
+            return false;
+        }
+
+        let Ok(bytes) = self.local_playlist_bytes() else {
+            return false;
+        };
+        let Ok(playlist) = std::str::from_utf8(&bytes) else {
+            return false;
+        };
+
+        !playlist.lines().any(|line| {
+            line.starts_with("#EXT-X-MAP:")
+                || line.starts_with("#EXT-X-KEY:")
+                || line.starts_with("#EXT-X-BYTERANGE:")
+                || line == "#EXT-X-DISCONTINUITY"
+                || line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:")
+        })
+    }
+
     pub(crate) fn local_playlist_bytes(&self) -> Result<Vec<u8>, ManifestError> {
         let mut output = Vec::new();
         self.local_playlist

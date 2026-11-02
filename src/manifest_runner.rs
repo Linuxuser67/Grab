@@ -857,7 +857,7 @@ async fn transfer_static_manifest_tracks(
                         Err(error) => {
                             if matches!(&error, ManifestRunError::Unsupported(_)) {
                                 let _ = crate::manifest_writer::cleanup_destination_part(
-                                    video_dir,
+                                    staging,
                                     destination,
                                     item_id,
                                     crate::manifest_destination::TrackKind::Video,
@@ -2615,7 +2615,7 @@ async fn fetch_and_write_ordered_track(
                 if require_mpegts && matches!(&error, ManifestRunError::Unsupported(_)) {
                     drop(writer);
                     crate::manifest_writer::cleanup_destination_part(
-                        directory,
+                        directory.parent().unwrap_or(directory),
                         destination,
                         item_id,
                         track,

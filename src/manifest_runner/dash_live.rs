@@ -18,7 +18,9 @@ pub(super) async fn dash_live_state_exists(directory: &Path) -> Result<bool, Man
     }
 }
 
-pub(super) async fn read_dash_live_representation_key(directory: &Path) -> Result<String, ManifestRunError> {
+pub(super) async fn read_dash_live_representation_key(
+    directory: &Path,
+) -> Result<String, ManifestRunError> {
     let path = directory.join(DASH_LIVE_STATE_NAME);
     let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|error| {
         ManifestRunError::Failed(format!(

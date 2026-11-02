@@ -242,6 +242,18 @@ pub(crate) fn part_path(
     Ok(canonical_destination_dir.join(&part.file_name))
 }
 
+/// Resolve a destination part without blocking an async runtime worker.
+pub(crate) async fn part_path_async(
+    staging: PathBuf,
+    destination: PathBuf,
+    item_id: u64,
+    track: TrackKind,
+) -> Result<PathBuf, String> {
+    tokio::task::spawn_blocking(move || part_path(&staging, &destination, item_id, track))
+        .await
+        .map_err(|error| format!("Destination part path task failed: {error}"))?
+}
+
 /// Open the planned part only when its persisted ownership record proves that
 /// it is the same regular file Grab created for this item and destination.
 ///
@@ -377,6 +389,21 @@ pub(crate) fn verify_owned_part(
     Ok(())
 }
 
+/// Open a destination part on a blocking worker and return its Tokio file handle.
+pub(crate) async fn open_owned_part_async(
+    staging: PathBuf,
+    destination: PathBuf,
+    item_id: u64,
+    track: TrackKind,
+) -> Result<tokio::fs::File, String> {
+    let file = tokio::task::spawn_blocking(move || {
+        open_owned_part(&staging, &destination, item_id, track)
+    })
+    .await
+    .map_err(|error| format!("Destination part open task failed: {error}"))??;
+    Ok(tokio::fs::File::from_std(file))
+}
+
 /// Remove a destination part only while its inode still matches Grab's
 /// durable ownership record. A missing file is an idempotent cleanup result.
 ///
@@ -465,6 +492,34 @@ pub(crate) fn remove_owned_part(
     fs::remove_file(&owner_path)
         .map_err(|error| format!("Could not remove manifest part ownership record: {error}"))?;
     sync_staging_directory(staging)
+}
+
+/// Verify a destination part on a blocking worker.
+pub(crate) async fn verify_owned_part_async(
+    staging: PathBuf,
+    destination: PathBuf,
+    item_id: u64,
+    track: TrackKind,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        verify_owned_part(&staging, &destination, item_id, track)
+    })
+    .await
+    .map_err(|error| format!("Destination part verification task failed: {error}"))?
+}
+
+/// Remove an owned destination part on a blocking worker.
+pub(crate) async fn remove_owned_part_async(
+    staging: PathBuf,
+    destination: PathBuf,
+    item_id: u64,
+    track: TrackKind,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        remove_owned_part(&staging, &destination, item_id, track)
+    })
+    .await
+    .map_err(|error| format!("Destination part cleanup task failed: {error}"))?
 }
 
 #[derive(Clone, Copy)]

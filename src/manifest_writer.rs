@@ -253,6 +253,30 @@ impl OrderedTrackWriter {
 
         let (next_resource_index, committed_offset, committed_resources) = match checkpoint_state {
             CheckpointState::AlreadyComplete { committed_offset } => {
+                if let Some(destination_part) = destination_part.as_ref() {
+                    let owned = crate::manifest_destination::open_owned_part(
+                        directory,
+                        &destination_part.destination,
+                        destination_part.item_id,
+                        destination_part.track,
+                    )?;
+                    let mut output = tokio::fs::File::from_std(owned);
+                    let mut input = tokio::fs::File::open(&target).await
+                        .map_err(|error| format!("Could not open the recovered DASH track: {error}"))?;
+                    let copied = tokio::io::copy(&mut input, &mut output).await
+                        .map_err(|error| format!("Could not restore the destination-side DASH part: {error}"))?;
+                    if copied != committed_offset {
+                        return Err("The recovered DASH track length does not match its checkpoint".to_string());
+                    }
+                    output.sync_all().await
+                        .map_err(|error| format!("Could not sync the restored destination-side DASH part: {error}"))?;
+                    drop(output);
+                    if let Some(parent) = part.parent() {
+                        sync_directory(parent).await?;
+                    }
+                    remove_regular_file_if_present(&target).await?;
+                    sync_directory(directory).await?;
+                }
                 if checkpoint_policy == CheckpointPolicy::RemoveAfterPublish {
                     remove_regular_file_if_present(&checkpoint_path).await?;
                     remove_regular_file_if_present(&journal_path).await?;

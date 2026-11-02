@@ -267,8 +267,13 @@ mod tests {
     #[tokio::test]
     async fn marker_rejects_conflicting_decisions() {
         let directory = tempfile::tempdir().expect("create staging");
-        persist(directory.path(), ManifestKind::Dash, "DASH timeline changed", 99)
-            .await
+        persist(
+            directory.path(),
+            ManifestKind::Dash,
+            "DASH timeline changed",
+            99,
+        )
+        .await
             .expect("persist marker");
         assert!(matches!(
             persist(directory.path(), ManifestKind::Dash, "different reason", 99).await,

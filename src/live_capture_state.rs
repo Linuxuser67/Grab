@@ -226,7 +226,7 @@ mod tests {
         persist(directory.path(), ManifestKind::Hls, reason, 1234)
             .await
             .expect("persist marker");
-        persist(directory.path(), "hls", reason, 1234)
+        persist(directory.path(), ManifestKind::Hls, reason, 1234)
             .await
             .expect("repeat identical marker");
         let marker = read(directory.path())

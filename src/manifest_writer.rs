@@ -57,6 +57,7 @@ enum CheckpointState {
     },
     AlreadyComplete {
         committed_offset: u64,
+        resources: Vec<CommittedResource>,
     },
 }
 
@@ -271,9 +272,12 @@ impl OrderedTrackWriter {
 
         let (next_resource_index, committed_offset, committed_resources, migrate_from_target) =
             match checkpoint_state {
-                CheckpointState::AlreadyComplete { committed_offset } => {
+                CheckpointState::AlreadyComplete {
+                    committed_offset,
+                    resources: completed_resources,
+                } => {
                     if destination_part.is_some() {
-                        (resources.len(), committed_offset, Vec::new(), true)
+                        (resources.len(), committed_offset, completed_resources, true)
                     } else {
                         if checkpoint_policy == CheckpointPolicy::RemoveAfterPublish {
                             remove_regular_file_if_present(&checkpoint_path).await?;
@@ -342,6 +346,10 @@ impl OrderedTrackWriter {
                     ));
                 }
             };
+            verify_resource_ranges_file(&mut input, &target, &committed_resources).await?;
+            input.seek(std::io::SeekFrom::Start(0)).await.map_err(|error| {
+                format!("Could not rewind the completed staging track: {error}")
+            })?;
             output.set_len(0).await.map_err(|error| {
                 format!("Could not reset the destination DASH part for migration: {error}")
             })?;
@@ -788,12 +796,29 @@ async fn verify_resource_ranges(
     output_path: &Path,
     committed: &[CommittedResource],
 ) -> Result<(), String> {
-    let mut file = tokio::fs::File::open(output_path).await.map_err(|error| {
+    let file = open_regular_file_no_follow(output_path).map_err(|error| {
         format!(
-            "Could not open {} for DASH verification: {error}",
+            "Could not safely open {} for DASH verification: {error}",
             output_path.display()
         )
     })?;
+    let mut file = tokio::fs::File::from_std(file);
+    verify_resource_ranges_file(&mut file, output_path, committed).await
+}
+
+async fn verify_resource_ranges_file(
+    file: &mut tokio::fs::File,
+    output_path: &Path,
+    committed: &[CommittedResource],
+) -> Result<(), String> {
+    file.seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|error| {
+            format!(
+                "Could not seek {} for DASH verification: {error}",
+                output_path.display()
+            )
+        })?;
     let mut buffer = [0_u8; 64 * 1024];
     for resource in committed {
         let mut remaining = resource.length;
@@ -1062,6 +1087,7 @@ async fn load_checkpoint(
     } else {
         Ok(CheckpointState::AlreadyComplete {
             committed_offset: checkpoint.committed_offset,
+            resources: committed,
         })
     }
 }

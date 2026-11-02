@@ -28,7 +28,10 @@ mod dash_live;
 mod hls_live;
 
 #[cfg(test)]
-use dash_live::apply_dash_live_snapshot;
+use dash_live::{
+    apply_dash_live_snapshot, dash_live_track_bytes, load_dash_live_track,
+    read_dash_live_representation_key, validate_dash_live_state, write_dash_live_state,
+};
 use dash_live::{dash_live_state_exists, run_live_dash_tracks};
 #[cfg(test)]
 use hls_live::{apply_live_hls_snapshot, load_live_hls_track, write_live_playlist};

@@ -819,39 +819,39 @@ async fn transfer_static_manifest_tracks(
                     .as_ref()
                     .is_none_or(HlsPlan::is_plain_mpegts_candidate);
             if use_destination_parts {
-                if !fetch_and_write_hls_track(
+                if !fetch_and_write_hls_track(ManifestHlsTrackTransfer {
                     client,
                     staging,
-                    video,
-                    video_dir,
-                    "video-track.ts",
+                    plan: video,
+                    directory: video_dir,
+                    filename: "video-track.ts",
                     destination,
                     item_id,
-                    crate::manifest_destination::TrackKind::Video,
-                    concurrency,
+                    track: crate::manifest_destination::TrackKind::Video,
+                    connections: concurrency,
                     tx,
                     downloaded,
                     abort,
-                )
+                })
                 .await?
                 {
                     return Ok(false);
                 }
                 if let Some(audio) = audio {
-                    match fetch_and_write_hls_track(
+                    match fetch_and_write_hls_track(ManifestHlsTrackTransfer {
                         client,
                         staging,
-                        audio,
-                        audio_dir,
-                        "audio-track.ts",
+                        plan: audio,
+                        directory: audio_dir,
+                        filename: "audio-track.ts",
                         destination,
                         item_id,
-                        crate::manifest_destination::TrackKind::Audio,
-                        concurrency,
+                        track: crate::manifest_destination::TrackKind::Audio,
+                        connections: concurrency,
                         tx,
                         downloaded,
                         abort,
-                    )
+                    })
                     .await
                     {
                         Ok(true) => {}

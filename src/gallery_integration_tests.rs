@@ -42,9 +42,8 @@ async fn enumerate_all(
     url: &str,
     filter: GalleryFilter,
 ) -> Result<Vec<GalleryItem>, crate::gallery_tools::GalleryError> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(
-        crate::gallery_probe::GALLERY_ENUMERATION_CHANNEL_CAPACITY,
-    );
+    let (tx, mut rx) =
+        tokio::sync::mpsc::channel(crate::gallery_probe::GALLERY_ENUMERATION_CHANNEL_CAPACITY);
     let tool = tool.to_path_buf();
     let url = url.to_string();
     let enumeration = tokio::spawn(async move {

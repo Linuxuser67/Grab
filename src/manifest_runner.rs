@@ -4669,8 +4669,8 @@ mod tests {
         let selected_source = ManifestSource {
             url: manifest_url.to_string(),
             kind: ManifestKind::Dash,
-            representation_key: video_key.clone(),
-            audio_key: Some(alternate_audio_key),
+            representation_key: video_key.clone().into(),
+            audio_key: Some(alternate_audio_key.into()),
             subtitle_key: None,
             subtitle_language: None,
         };
@@ -4865,7 +4865,7 @@ mod tests {
             source: ManifestSource {
                 url: "https://cdn.example.test/master.m3u8".to_string(),
                 kind: ManifestKind::Hls,
-                representation_key: "hls-media".to_string(),
+                representation_key: "hls-media".into(),
                 audio_key: None,
                 subtitle_key: None,
                 subtitle_language: None,
@@ -5211,7 +5211,7 @@ mod tests {
             .await
             .expect("read durable marker")
             .expect("unrecoverable marker exists");
-        assert_eq!(marker.protocol, "hls");
+        assert_eq!(marker.protocol, ManifestKind::Hls);
         assert_eq!(marker.staged_bytes, 420);
         assert_eq!(downloaded.load(Ordering::Relaxed), 420);
         assert!(matches!(

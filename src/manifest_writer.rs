@@ -647,7 +647,6 @@ pub(crate) async fn committed_resource_prefix(
     };
     if part_metadata.is_some() && target_metadata.is_some() {
         return Err("Both the interrupted and published DASH track files exist".to_string());
-    }exist".to_string());
     }
 
     let output_path = if let Some(metadata) = &part_metadata {

@@ -2893,14 +2893,8 @@ mod tests {
         let staging = tempfile::tempdir().expect("create DASH staging");
         let destination_dir = tempfile::tempdir().expect("create DASH destination");
         let destination = destination_dir.path().join("Example.mp4");
-        crate::manifest_destination::ensure_plan(
-            staging.path(),
-            &destination,
-            42,
-            false,
-            false,
-        )
-        .expect("persist DASH destination plan");
+        crate::manifest_destination::ensure_plan(staging.path(), &destination, 42, false, false)
+            .expect("persist DASH destination plan");
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let downloaded = Arc::new(AtomicU64::new(0));
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();

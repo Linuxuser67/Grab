@@ -460,7 +460,7 @@ fn rustix_torrent_cleanup_refuses_symlinked_root_and_unlinks_final_symlink_only(
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(&protected, b"must survive").unwrap();
-    symlink(&root, &root_link).unwrap();
+    symlink(&outside, &root_link).unwrap();
 
     // A symlink used as the configured root must not be followed.
     remove_file_and_prune_parents(&root_link.join("keep.txt"), &root_link);

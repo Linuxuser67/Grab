@@ -78,9 +78,9 @@ pub(crate) fn fingerprint(
             ManifestKind::Hls => "hls",
             ManifestKind::Dash => "dash",
         },
-        video_key: &source.representation_key,
-        audio_key: source.audio_key.as_deref(),
-        subtitle_key: source.subtitle_key.as_deref(),
+        video_key: source.representation_key.as_str(),
+        audio_key: source.audio_key.as_ref().map(|key| key.as_str()),
+        subtitle_key: source.subtitle_key.as_ref().map(|key| key.as_str()),
         subtitle_language: source.subtitle_language.as_deref(),
         output_container,
         embed_subtitles,
@@ -252,9 +252,9 @@ mod tests {
         ManifestSource {
             url: "https://origin.example.test/master.m3u8?token=secret".to_string(),
             kind: ManifestKind::Hls,
-            representation_key: "hls-variant-stable".to_string(),
-            audio_key: Some("hls-audio-stable".to_string()),
-            subtitle_key: Some("hls-subtitle-stable".to_string()),
+            representation_key: "hls-variant-stable".into(),
+            audio_key: Some("hls-audio-stable".into()),
+            subtitle_key: Some("hls-subtitle-stable".into()),
             subtitle_language: Some("en".to_string()),
         }
     }
@@ -277,7 +277,7 @@ mod tests {
         let baseline = fingerprint(&original, "mp4", true).expect("baseline fingerprint");
 
         let mut changed_video = original.clone();
-        changed_video.representation_key = "hls-variant-other".to_string();
+        changed_video.representation_key = "hls-variant-other".into();
         assert_ne!(
             baseline,
             fingerprint(&changed_video, "mp4", true).expect("changed video fingerprint")

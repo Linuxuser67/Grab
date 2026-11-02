@@ -1,8 +1,7 @@
 //! Destination-side path planning for native manifest track parts.
 //!
-//! Media bytes are moved here by the ordered writer in a follow-up change. This
-//! module records exact filenames in XDG state before creating visible files;
-//! the plan itself does not authorize cleanup of a destination-side file.
+//! Exact destination-side part names and file ownership are persisted in XDG
+//! state. A filename plan alone never authorizes opening or removing a file.
 
 use std::fs::{self, File, OpenOptions};
 #[cfg(unix)]
@@ -335,7 +334,16 @@ pub(crate) fn remove_owned_part(
     let Some(owner) = read_part_owner(&owner_path)? else {
         return Err("The manifest part has no ownership record; it was preserved".to_string());
     };
-    if owner.version != 1 || owner.item_id != item_id || owner.file_name != file_name {
+    let destination_dir = destination.parent()
+        .ok_or_else(|| "The download destination has no parent directory".to_string())?;
+    let canonical_destination_dir = fs::canonicalize(destination_dir)
+        .map_err(|error| format!("Could not resolve destination directory: {error}"))?;
+    let destination_key = crate::video_staging::dest_key(&canonical_destination_dir);
+    if owner.version != 1
+        || owner.item_id != item_id
+        || owner.destination_key != destination_key
+        || owner.file_name != file_name
+    {
         return Err("The manifest part ownership record does not match this download".to_string());
     }
     match fs::symlink_metadata(&path) {
@@ -458,6 +466,7 @@ fn write_part_owner(staging: &Path, path: &Path, owner: &PartOwner, replace_exis
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     #[test]
     fn plan_records_visible_track_part_names() {

@@ -896,7 +896,7 @@ fn show_manifest_ready(
         .set_selected(u32::try_from(selected_index).unwrap_or_default());
     step.manifest_format.set_visible(true);
     drop(manifest_state);
-    refresh_manifest_audio_picker(step, selected_video_key.as_deref());
+    refresh_manifest_audio_picker(step, selected_video_key.as_ref());
     if step.name.text().trim().is_empty() {
         step.name.set_text("Stream.mp4");
     }

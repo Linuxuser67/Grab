@@ -27,19 +27,19 @@ use crate::media_types::{ManifestKind, ManifestRepresentationKey, ManifestSource
 mod dash_live;
 mod hls_live;
 
+#[cfg(test)]
+use dash_live::apply_dash_live_snapshot;
 use dash_live::{
     dash_live_state_exists, dash_live_track_bytes, load_dash_live_track,
     read_dash_live_representation_key, run_live_dash_tracks, validate_dash_live_state,
     write_dash_live_state,
 };
+#[cfg(test)]
+use hls_live::{apply_live_hls_snapshot, load_live_hls_track, write_live_playlist};
 use hls_live::{
     ensure_live_hls_marker, read_live_hls_marker, restore_local_live_hls_tracks,
     run_live_hls_tracks,
 };
-#[cfg(test)]
-use hls_live::{apply_live_hls_snapshot, load_live_hls_track, write_live_playlist};
-#[cfg(test)]
-use dash_live::apply_dash_live_snapshot;
 
 /// Upper bound for one media resource, independent of a server-supplied length.
 const MAX_RESOURCE_BYTES: u64 = crate::manifest_writer::MAX_RESOURCE_BYTES;

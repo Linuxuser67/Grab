@@ -2501,10 +2501,10 @@ async fn fetch_and_write_hls_track(
     downloaded: &Arc<AtomicU64>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
-    fetch_and_write_ordered_track(
+    fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
         client,
         staging,
-        hls_resources(plan),
+        resources: hls_resources(plan),
         directory,
         filename,
         destination,
@@ -2514,27 +2514,51 @@ async fn fetch_and_write_hls_track(
         tx,
         downloaded,
         abort,
-        true,
-    )
+        format: OrderedTrackFormat::MpegTs,
+    })
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn fetch_and_write_ordered_track(
-    client: &reqwest::Client,
-    staging: &Path,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OrderedTrackFormat {
+    Any,
+    MpegTs,
+}
+
+struct ManifestOrderedTrackTransfer<'a> {
+    client: &'a reqwest::Client,
+    staging: &'a Path,
     resources: Vec<Resource>,
-    directory: &Path,
-    filename: &str,
-    destination: &Path,
+    directory: &'a Path,
+    filename: &'a str,
+    destination: &'a Path,
     item_id: u64,
     track: crate::manifest_destination::TrackKind,
     connections: usize,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &Arc<AtomicU64>,
-    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-    require_mpegts: bool,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'a Arc<AtomicU64>,
+    abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    format: OrderedTrackFormat,
+}
+
+async fn fetch_and_write_ordered_track(
+    context: ManifestOrderedTrackTransfer<'_>,
 ) -> Result<bool, ManifestRunError> {
+    let ManifestOrderedTrackTransfer {
+        client,
+        staging,
+        resources,
+        directory,
+        filename,
+        destination,
+        item_id,
+        track,
+        connections,
+        tx,
+        downloaded,
+        abort,
+        format,
+    } = context;
     let resource_names = resources
         .iter()
         .map(|resource| resource.filename.clone())
@@ -2597,7 +2621,7 @@ async fn fetch_and_write_ordered_track(
                         Some(Ok(index)) => {
                             completed.insert(index);
                             while completed.remove(&next_resource_index) {
-                                if require_mpegts
+                                if format == OrderedTrackFormat::MpegTs
                                     && !is_mpegts_segment(
                                         &directory.join(&resource_names[next_resource_index]),
                                     )
@@ -2629,7 +2653,7 @@ async fn fetch_and_write_ordered_track(
             Err(error) => {
                 tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
                     .ok();
-                if require_mpegts && matches!(&error, ManifestRunError::Unsupported(_)) {
+                if format == OrderedTrackFormat::MpegTs && matches!(&error, ManifestRunError::Unsupported(_)) {
                     drop(writer);
                     crate::manifest_writer::cleanup_destination_part(
                         staging,

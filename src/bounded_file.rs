@@ -36,9 +36,8 @@ pub(crate) fn read_regular_file_bounded(
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(
-            libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NOCTTY | libc::O_NONBLOCK,
-        );
+        options
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NOCTTY | libc::O_NONBLOCK);
     }
     let file = options.open(path).map_err(|source| {
         #[cfg(unix)]

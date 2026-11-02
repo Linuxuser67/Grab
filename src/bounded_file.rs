@@ -23,8 +23,9 @@ pub(crate) enum BoundedFileError {
 /// one byte beyond the limit so concurrent file growth is detected.
 pub(crate) fn read_regular_file_bounded(
     path: &Path,
-    max_bytes: u64,
+    max_bytes: usize,
 ) -> Result<Vec<u8>, BoundedFileError> {
+    let max_bytes = u64::try_from(max_bytes).map_err(|_| BoundedFileError::TooLarge)?;
     let path_metadata = fs::symlink_metadata(path).map_err(BoundedFileError::Io)?;
     if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
         return Err(BoundedFileError::NotRegularFile);
@@ -35,7 +36,9 @@ pub(crate) fn read_regular_file_bounded(
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        options.custom_flags(
+            libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NOCTTY | libc::O_NONBLOCK,
+        );
     }
     let file = options.open(path).map_err(|source| {
         #[cfg(unix)]

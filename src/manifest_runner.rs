@@ -1516,9 +1516,18 @@ async fn finalize_manifest_download(
     let mut destination_parts_cleaned = true;
     if destination_parts {
         for (track, filename) in [
-            (crate::manifest_destination::TrackKind::Video, "video-track.mp4"),
-            (crate::manifest_destination::TrackKind::Audio, "audio-track.mp4"),
-            (crate::manifest_destination::TrackKind::Subtitles, "subtitle-track.mp4"),
+            (
+                crate::manifest_destination::TrackKind::Video,
+                "video-track.mp4",
+            ),
+            (
+                crate::manifest_destination::TrackKind::Audio,
+                "audio-track.mp4",
+            ),
+            (
+                crate::manifest_destination::TrackKind::Subtitles,
+                "subtitle-track.mp4",
+            ),
         ] {
             let should_clean = match track {
                 crate::manifest_destination::TrackKind::Video => true,

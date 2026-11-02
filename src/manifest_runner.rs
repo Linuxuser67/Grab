@@ -3860,7 +3860,9 @@ async fn run_live_dash_tracks(
                 url: source_url.to_string(),
                 kind: ManifestKind::Dash,
                 representation_key: ManifestRepresentationKey::from(representation_key),
-                audio_key: audio_key.clone().map(crate::media_types::ManifestAudioKey::from),
+                audio_key: audio_key
+                    .clone()
+                    .map(crate::media_types::ManifestAudioKey::from),
                 subtitle_key: None,
                 subtitle_language: None,
             },

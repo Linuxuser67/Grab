@@ -1608,7 +1608,9 @@ video/720.m3u8
         assert!(
             lookup
                 .selected_source(
-                    &crate::media_types::ManifestRepresentationKey::from(current_video_key.as_str()),
+                    &crate::media_types::ManifestRepresentationKey::from(
+                        current_video_key.as_str()
+                    ),
                     Some(&crate::media_types::ManifestAudioKey::from(
                         "hls-audio-00000000000000000000000000000000",
                     )),

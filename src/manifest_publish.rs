@@ -534,7 +534,10 @@ mod tests {
 
         assert!(source.exists(), "rollback restores the staging source");
         assert!(!destination.exists(), "rollback removes the published name");
-        assert!(!gate.was_delivered(), "successful rollback is not a delivery");
+        assert!(
+            !gate.was_delivered(),
+            "successful rollback is not a delivery"
+        );
     }
 
     #[tokio::test]
@@ -549,8 +552,14 @@ mod tests {
         drop(pending);
         gate.wait_for_rollbacks().await;
 
-        assert!(!destination.exists(), "rollback removes the copied destination");
-        assert!(!gate.was_delivered(), "successful rollback is not a delivery");
+        assert!(
+            !destination.exists(),
+            "rollback removes the copied destination"
+        );
+        assert!(
+            !gate.was_delivered(),
+            "successful rollback is not a delivery"
+        );
     }
 
     #[tokio::test]
@@ -567,9 +576,17 @@ mod tests {
         drop(pending);
         gate.wait_for_rollbacks().await;
 
-        assert!(gate.was_delivered(), "failed rollback must be visible to the finalizer");
-        assert!(destination.exists(), "a no-clobber rollback preserves the existing source");
-        assert_eq!(std::fs::read(&source).expect("read source"), b"existing source");
+        assert!(
+            gate.was_delivered(),
+            "failed rollback must be visible to the finalizer"
+        );
+        assert!(
+            destination.exists(),
+            "a no-clobber rollback preserves the existing source"
+        );
+        assert_eq!(
+            std::fs::read(&source).expect("read source"),
+            b"existing source"
+        );
     }
-
 }

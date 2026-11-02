@@ -15,10 +15,10 @@ const RESOURCE_RECORD_BYTES: usize = 40;
 const MAX_RESOURCE_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Load a checkpointed prefix, rebuilding the journal only from retained sources.
- ///
- /// # Errors
- ///
- /// Returns an error if the journal and staged sources cannot establish the same prefix.
+///
+/// # Errors
+///
+/// Returns an error if the journal and staged sources cannot establish the same prefix.
 pub(super) async fn load_resource_records(
     journal_path: &Path,
     directory: &Path,
@@ -34,7 +34,10 @@ pub(super) async fn load_resource_records(
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            return Err(format!("Could not inspect {}: {error}", journal_path.display()));
+            return Err(format!(
+                "Could not inspect {}: {error}",
+                journal_path.display()
+            ));
         }
     }
 
@@ -58,7 +61,12 @@ pub(super) async fn load_resource_records(
         let source = directory.join(resource_name);
         let metadata = tokio::fs::symlink_metadata(&source)
             .await
-            .map_err(|error| format!("Could not read {} to rebuild its DASH digest: {error}", source.display()))?;
+            .map_err(|error| {
+                format!(
+                    "Could not read {} to rebuild its DASH digest: {error}",
+                    source.display()
+                )
+            })?;
         if metadata.file_type().is_symlink()
             || !metadata.is_file()
             || metadata.len() == 0
@@ -77,10 +85,10 @@ pub(super) async fn load_resource_records(
 }
 
 /// Read exactly the checkpointed number of fixed-size digest records.
- ///
- /// # Errors
- ///
- /// Returns an error if the journal is missing, malformed, or shorter than the prefix.
+///
+/// # Errors
+///
+/// Returns an error if the journal is missing, malformed, or shorter than the prefix.
 pub(super) async fn read_resource_journal(
     journal_path: &Path,
     directory: &Path,
@@ -106,26 +114,36 @@ pub(super) async fn read_resource_journal(
             return Err("The DASH resource digest journal is missing".to_string());
         }
         Err(error) => {
-            return Err(format!("Could not inspect {}: {error}", journal_path.display()));
+            return Err(format!(
+                "Could not inspect {}: {error}",
+                journal_path.display()
+            ));
         }
     };
 
     if let Some(metadata) = metadata {
         if metadata.len() < expected_length {
-            return Err("The DASH resource digest journal is shorter than its checkpoint".to_string());
+            return Err(
+                "The DASH resource digest journal is shorter than its checkpoint".to_string(),
+            );
         }
         if metadata.len() > expected_length {
             if !truncate_uncommitted_tail {
-                return Err("The DASH resource digest journal contains uncommitted records".to_string());
+                return Err(
+                    "The DASH resource digest journal contains uncommitted records".to_string(),
+                );
             }
             let file = tokio::fs::OpenOptions::new()
                 .write(true)
                 .open(journal_path)
                 .await
                 .map_err(|error| format!("Could not open {}: {error}", journal_path.display()))?;
-            file.set_len(expected_length)
-                .await
-                .map_err(|error| format!("Could not truncate uncommitted records in {}: {error}", journal_path.display()))?;
+            file.set_len(expected_length).await.map_err(|error| {
+                format!(
+                    "Could not truncate uncommitted records in {}: {error}",
+                    journal_path.display()
+                )
+            })?;
             file.sync_all()
                 .await
                 .map_err(|error| format!("Could not sync {}: {error}", journal_path.display()))?;
@@ -142,9 +160,12 @@ pub(super) async fn read_resource_journal(
         .map_err(|error| format!("Could not open {}: {error}", journal_path.display()))?;
     for _ in 0..resource_count {
         let mut record = [0_u8; RESOURCE_RECORD_BYTES];
-        file.read_exact(&mut record)
-            .await
-            .map_err(|error| format!("Could not read a digest record from {}: {error}", journal_path.display()))?;
+        file.read_exact(&mut record).await.map_err(|error| {
+            format!(
+                "Could not read a digest record from {}: {error}",
+                journal_path.display()
+            )
+        })?;
         let mut length_bytes = [0_u8; 8];
         length_bytes.copy_from_slice(&record[..8]);
         records.push(CommittedResource {
@@ -156,10 +177,10 @@ pub(super) async fn read_resource_journal(
 }
 
 /// Append and sync one resource digest record at its manifest-order position.
- ///
- /// # Errors
- ///
- /// Returns an error if the journal position or file operations are invalid.
+///
+/// # Errors
+///
+/// Returns an error if the journal position or file operations are invalid.
 pub(super) async fn append_resource_record(
     journal_path: &Path,
     directory: &Path,
@@ -181,7 +202,9 @@ pub(super) async fn append_resource_record(
             return Err("The DASH resource digest journal is not a regular file".to_string());
         }
         Ok(metadata) if metadata.len() < expected_offset => {
-            return Err("The DASH resource digest journal is shorter than its checkpoint".to_string());
+            return Err(
+                "The DASH resource digest journal is shorter than its checkpoint".to_string(),
+            );
         }
         Ok(metadata) if metadata.len() > expected_offset => {
             let file = tokio::fs::OpenOptions::new()
@@ -189,9 +212,12 @@ pub(super) async fn append_resource_record(
                 .open(journal_path)
                 .await
                 .map_err(|error| format!("Could not open {}: {error}", journal_path.display()))?;
-            file.set_len(expected_offset)
-                .await
-                .map_err(|error| format!("Could not truncate uncommitted records in {}: {error}", journal_path.display()))?;
+            file.set_len(expected_offset).await.map_err(|error| {
+                format!(
+                    "Could not truncate uncommitted records in {}: {error}",
+                    journal_path.display()
+                )
+            })?;
             file.sync_all()
                 .await
                 .map_err(|error| format!("Could not sync {}: {error}", journal_path.display()))?;
@@ -202,12 +228,18 @@ pub(super) async fn append_resource_record(
             return Err("The DASH resource digest journal is missing".to_string());
         }
         Err(error) => {
-            return Err(format!("Could not inspect {}: {error}", journal_path.display()));
+            return Err(format!(
+                "Could not inspect {}: {error}",
+                journal_path.display()
+            ));
         }
     }
 
     let record = encode_resource_record(resource)?;
-    debug_assert_eq!(u64::try_from(record.len()).ok(), Some(next_length - expected_offset));
+    debug_assert_eq!(
+        u64::try_from(record.len()).ok(),
+        Some(next_length - expected_offset)
+    );
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -221,9 +253,12 @@ pub(super) async fn append_resource_record(
     file.seek(std::io::SeekFrom::Start(expected_offset))
         .await
         .map_err(|error| format!("Could not seek in {}: {error}", journal_path.display()))?;
-    file.write_all(&record)
-        .await
-        .map_err(|error| format!("Could not append a digest record to {}: {error}", journal_path.display()))?;
+    file.write_all(&record).await.map_err(|error| {
+        format!(
+            "Could not append a digest record to {}: {error}",
+            journal_path.display()
+        )
+    })?;
     file.sync_all()
         .await
         .map_err(|error| format!("Could not sync the DASH resource digest record: {error}"))?;
@@ -231,10 +266,10 @@ pub(super) async fn append_resource_record(
 }
 
 /// Atomically replace the journal with a complete legacy-derived prefix.
- ///
- /// # Errors
- ///
- /// Returns an error if the record set exceeds limits or durable replacement fails.
+///
+/// # Errors
+///
+/// Returns an error if the record set exceeds limits or durable replacement fails.
 pub(super) async fn write_resource_journal(
     journal_path: &Path,
     directory: &Path,
@@ -274,7 +309,9 @@ pub(super) async fn write_resource_journal(
     sync_directory(directory).await
 }
 
-fn encode_resource_record(resource: &CommittedResource) -> Result<[u8; RESOURCE_RECORD_BYTES], String> {
+fn encode_resource_record(
+    resource: &CommittedResource,
+) -> Result<[u8; RESOURCE_RECORD_BYTES], String> {
     if resource.length == 0 || resource.length > MAX_RESOURCE_BYTES {
         return Err("A DASH resource digest record has an invalid length".to_string());
     }
@@ -329,11 +366,14 @@ fn validate_committed_resources(
         offset = offset
             .checked_add(resource.length)
             .filter(|value| *value <= MAX_TRACK_BYTES)
-            .ok_or_else(|| "The committed DASH resource prefix exceeds the 1 TiB limit".to_string())?;
+            .ok_or_else(|| {
+                "The committed DASH resource prefix exceeds the 1 TiB limit".to_string()
+            })?;
     }
     if offset != committed_offset {
-        return Err("The DASH checkpoint offset does not match its resource digest journal".to_string());
+        return Err(
+            "The DASH checkpoint offset does not match its resource digest journal".to_string(),
+        );
     }
     Ok(())
 }
-

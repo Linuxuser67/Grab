@@ -221,7 +221,7 @@ fn live_hls_poll_interval(target_duration: u64, changed: bool) -> Duration {
     if changed { target } else { target.div_f32(2.0) }
 }
 
-async fn write_live_playlist(
+pub(super) async fn write_live_playlist(
     directory: &Path,
     accumulator: &HlsLiveAccumulator,
 ) -> Result<(), String> {
@@ -301,7 +301,7 @@ async fn fetched_hls_resource_bytes(
     clippy::too_many_arguments,
     reason = "one rendition update shares its client, cancellation, progress and aggregate byte-budget context"
 )]
-async fn apply_live_hls_snapshot(
+pub(super) async fn apply_live_hls_snapshot(
     client: &reqwest::Client,
     plan: &HlsPlan,
     track: &mut LiveHlsTrack,

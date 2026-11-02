@@ -542,16 +542,29 @@ async fn append_live_hls_destination_part(
     Ok(None)
 }
 
+pub(super) struct SavedLiveHlsDestinationParts<'a> {
+    pub(super) source_url: &'a str,
+    pub(super) staging: &'a Path,
+    pub(super) destination: &'a Path,
+    pub(super) item_id: u64,
+    pub(super) video_dir: &'a Path,
+    pub(super) audio_dir: &'a Path,
+    pub(super) has_audio: bool,
+}
+
 pub(super) async fn complete_saved_live_hls_destination_parts(
-    source_url: &str,
-    staging: &Path,
-    destination: &Path,
-    item_id: u64,
-    video_dir: &Path,
-    audio_dir: &Path,
-    has_audio: bool,
+    context: SavedLiveHlsDestinationParts<'_>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<Option<crate::video::StopIntent>, ManifestRunError> {
+    let SavedLiveHlsDestinationParts {
+        source_url,
+        staging,
+        destination,
+        item_id,
+        video_dir,
+        audio_dir,
+        has_audio,
+    } = context;
     let Some(video_plan) = read_local_live_hls_plan(source_url, video_dir).await? else {
         return Ok(None);
     };

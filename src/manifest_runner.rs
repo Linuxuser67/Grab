@@ -1224,13 +1224,15 @@ async fn prepare_live_hls_finalization(
     if destination_parts {
         loop {
             match hls_live::complete_saved_live_hls_destination_parts(
-                source_url,
-                staging,
-                destination,
-                item_id,
-                video_dir,
-                audio_dir,
-                has_audio,
+                hls_live::SavedLiveHlsDestinationParts {
+                    source_url,
+                    staging,
+                    destination,
+                    item_id,
+                    video_dir,
+                    audio_dir,
+                    has_audio,
+                },
                 abort,
             )
             .await?

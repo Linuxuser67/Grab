@@ -50,10 +50,7 @@ mod manifest_protocol {
     use crate::media_types::ManifestKind;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(super) fn serialize<S>(
-        protocol: &ManifestKind,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
+    pub(super) fn serialize<S>(protocol: &ManifestKind, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {

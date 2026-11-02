@@ -1031,7 +1031,9 @@ pub(super) async fn run_live_hls_tracks(
                     return Ok(LiveHlsCapture::new(
                         match intent {
                             crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                            crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
+                            crate::video::StopIntent::Finish => {
+                                LiveHlsCaptureOutcome::FinishVideoOnly
+                            }
                             crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                         },
                         output,

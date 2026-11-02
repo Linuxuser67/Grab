@@ -1513,6 +1513,7 @@ async fn finalize_manifest_download(
             ));
         }
     }
+    let mut destination_parts_cleaned = true;
     if destination_parts {
         for (track, filename) in [
             (crate::manifest_destination::TrackKind::Video, "video-track.mp4"),
@@ -1534,6 +1535,7 @@ async fn finalize_manifest_download(
                 )
                 .await
             {
+                destination_parts_cleaned = false;
                 tracing::warn!(
                     item_id = job.item_id,
                     track = ?track,
@@ -1549,11 +1551,18 @@ async fn finalize_manifest_download(
     }
     let parent = job.dest.parent().map(Path::to_path_buf);
     if let Some(parent) = parent {
-        let id = job.item_id;
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::video_staging::clean_manifest_staging_files(&parent, id);
-        })
-        .await;
+        if destination_parts_cleaned {
+            let id = job.item_id;
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::video_staging::clean_manifest_staging_files(&parent, id);
+            })
+            .await;
+        } else {
+            tracing::warn!(
+                item_id = job.item_id,
+                "retaining XDG recovery metadata because a destination part could not be safely cleaned"
+            );
+        }
     }
     Ok(ManifestOutcome::Finished(size))
 }

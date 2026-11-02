@@ -2584,7 +2584,7 @@ async fn fetch_and_write_ordered_track(
         .collect::<Vec<_>>();
     let (writer, committed_bytes) =
         crate::manifest_writer::OrderedTrackWriter::open_destination_part(
-            resource_names,
+            resource_names.clone(),
             directory,
             staging,
             filename,

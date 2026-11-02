@@ -42,10 +42,15 @@ pub(crate) fn read_regular_file_bounded(
     }
     let file = options.open(path).map_err(|source| {
         #[cfg(unix)]
-        if source.raw_os_error() == Some(libc::ELOOP) {
-            return BoundedFileError::NotRegularFile;
+        let is_symlink = source.raw_os_error() == Some(libc::ELOOP);
+        #[cfg(not(unix))]
+        let is_symlink = false;
+
+        if is_symlink {
+            BoundedFileError::NotRegularFile
+        } else {
+            BoundedFileError::Io(source)
         }
-        BoundedFileError::Io(source)
     })?;
 
     let metadata = file.metadata().map_err(BoundedFileError::Io)?;
@@ -78,7 +83,12 @@ mod tests {
         let path = directory.path().join("marker.json");
         fs::write(&path, b"ok").expect("write marker");
 
-        assert_eq!(read_regular_file_bounded(&path, 32).expect("read marker"), b"ok");
+        assert_eq!(
+            read_regular_file_bounded(&path, 32)
+                .expect("read marker")
+                .as_slice(),
+            b"ok"
+        );
     }
 
     #[test]

@@ -1643,7 +1643,6 @@ async fn ensure_track_dir(path: &Path) -> Result<(), ManifestTrackDirError> {
     }
 }
 
-
 const LIVE_HLS_MARKER_NAME: &str = "live-hls.capture";
 const LIVE_HLS_MARKER_CONTENT: &[u8] = b"grab-live-hls-v1\n";
 const LIVE_FINISH_MARKER_NAME: &str = "live-capture.finished";
@@ -1712,7 +1711,6 @@ async fn ensure_live_finish_marker(directory: &Path, staged_bytes: u64) -> Resul
     Ok(())
 }
 
-
 async fn staged_regular_file_exists(path: &Path) -> bool {
     tokio::fs::symlink_metadata(path)
         .await
@@ -1728,7 +1726,6 @@ async fn sync_staging_directory(directory: &Path) -> Result<(), String> {
         .await
         .map_err(|error| format!("Could not sync staging directory: {error}"))
 }
-
 
 async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> {
     let bytes = plan
@@ -2194,7 +2191,6 @@ impl ManifestOutputContainer {
 
 const DASH_LIVE_STATE_NAME: &str = "live-dash-state.json";
 const DASH_LIVE_STATE_VERSION: u32 = 1;
-
 
 struct ManifestDashTrackTransfer<'a> {
     client: &'a reqwest::Client,

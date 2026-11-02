@@ -1364,6 +1364,7 @@ pub(crate) async fn run_manifest_download(
     finalize_manifest_download(ManifestFinalization {
         job: &job,
         destination_parts: !live_dash
+            && !live_hls
             && (matches!(&tracks, Tracks::Dash { .. })
                 || matches!(
                     &tracks,

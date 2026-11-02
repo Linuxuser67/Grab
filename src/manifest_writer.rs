@@ -191,6 +191,7 @@ impl OrderedTrackWriter {
     /// # Errors
     ///
     /// Returns an error if the resource plan, checkpoint, or staging files are invalid.
+    #[cfg(test)]
     pub(crate) async fn open_retaining_checkpoint(
         resources: Vec<String>,
         directory: &Path,
@@ -872,6 +873,7 @@ async fn committed_resource_prefix_inner(
 /// # Errors
 ///
 /// Returns an error if the published track or its retained checkpoint is invalid.
+#[cfg(test)]
 pub(crate) async fn committed_resources(
     resources: &[String],
     directory: &Path,
@@ -1008,6 +1010,7 @@ async fn verify_resource_ranges_file(
 /// # Errors
 ///
 /// Returns an error if the complete output cannot be verified or source cleanup fails.
+#[cfg(test)]
 pub(crate) async fn cleanup_committed_resources(
     resources: &[String],
     directory: &Path,

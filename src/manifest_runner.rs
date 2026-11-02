@@ -30,6 +30,7 @@ mod hls_live;
 #[cfg(test)]
 use dash_live::{
     apply_dash_live_snapshot, dash_live_track_bytes, load_dash_live_track,
+    load_dash_live_track_for_destination,
     read_dash_live_representation_key, validate_dash_live_state, write_dash_live_state,
 };
 use dash_live::{dash_live_state_exists, run_live_dash_tracks};
@@ -4297,6 +4298,7 @@ segment-2.ts
             directory: directory.clone(),
             committed_resource_count: 0,
             committed_bytes: 0,
+            destination_part: None,
             state: DashLiveState {
                 version: DASH_LIVE_STATE_VERSION,
                 representation_key: ManifestRepresentationKey::from(representation_key),

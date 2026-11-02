@@ -49,6 +49,7 @@ pub(super) async fn read_dash_live_representation_key(
     Ok(state.representation_key.as_str().to_string())
 }
 
+#[cfg(test)]
 pub(super) async fn load_dash_live_track(
     representation_key: &str,
     directory: &Path,

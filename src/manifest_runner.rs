@@ -836,8 +836,8 @@ async fn transfer_static_manifest_tracks(
                 {
                     return Ok(false);
                 }
-                if let Some(audio) = audio
-                    && let Err(error) = fetch_and_write_hls_track(
+                if let Some(audio) = audio {
+                    match fetch_and_write_hls_track(
                         client,
                         audio,
                         audio_dir,
@@ -851,16 +851,23 @@ async fn transfer_static_manifest_tracks(
                         abort,
                     )
                     .await
-                {
-                    let _ = crate::manifest_writer::cleanup_destination_part(
-                        video_dir,
-                        destination,
-                        item_id,
-                        crate::manifest_destination::TrackKind::Video,
-                        "video-track.ts",
-                    )
-                    .await;
-                    return Err(error);
+                    {
+                        Ok(true) => {}
+                        Ok(false) => return Ok(false),
+                        Err(error) => {
+                            if matches!(&error, ManifestRunError::Unsupported(_)) {
+                                let _ = crate::manifest_writer::cleanup_destination_part(
+                                    video_dir,
+                                    destination,
+                                    item_id,
+                                    crate::manifest_destination::TrackKind::Video,
+                                    "video-track.ts",
+                                )
+                                .await;
+                            }
+                            return Err(error);
+                        }
+                    }
                 }
             } else {
                 if !fetch_resources(

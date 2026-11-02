@@ -5273,28 +5273,26 @@ mod tests {
             .expect("write media resource");
 
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
-        let (Some(mut writer), committed) =
-            crate::manifest_writer::OrderedTrackWriter::open(
-                resources.clone(),
-                &directory,
-                "video-track.mp4",
-            )
-            .await
-            .expect("open live DASH ordered writer")
-        else {
+        let (Some(mut writer), committed) = crate::manifest_writer::OrderedTrackWriter::open(
+            resources.clone(),
+            &directory,
+            "video-track.mp4",
+        )
+        .await
+        .expect("open live DASH ordered writer") else {
             panic!("a fresh live DASH track must return an active writer");
         };
         assert_eq!(committed, 0);
-        assert!(writer.append_next(&mut abort).await.expect("commit initialization"));
+        assert!(
+            writer
+                .append_next(&mut abort)
+                .await
+                .expect("commit initialization")
+        );
         drop(writer);
 
         assert!(
-            concat_dash_resource_names(
-                &resources,
-                &directory,
-                "video-track.mp4",
-                &mut abort,
-            )
+            concat_dash_resource_names(&resources, &directory, "video-track.mp4", &mut abort,)
             .await
             .expect("resume live DASH finalization")
         );

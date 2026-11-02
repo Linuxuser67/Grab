@@ -227,7 +227,7 @@ impl ManifestLookup {
                 if !dash
                     .video_representations
                     .iter()
-                    .any(|track| track.key == video_key)
+                    .any(|track| track.key == video_key.as_str())
                 {
                     return Vec::new();
                 }
@@ -856,7 +856,7 @@ mod tests {
                 is_default: true,
             },
             ManifestSubtitleChoice {
-                key: "en".into(),"
+                key: "en".into(),
                 language: Some("en".to_string()),
                 is_default: false,
             },
@@ -1064,7 +1064,7 @@ video/720.m3u8
         let source = ManifestSource {
             url: lookup.source_url.clone(),
             kind: ManifestKind::Hls,
-            representation_key: "hls-variant-00000000000000000000000000000000".into(),"
+            representation_key: "hls-variant-00000000000000000000000000000000".into(),
             audio_key: None,
             subtitle_key: None,
             subtitle_language: None,

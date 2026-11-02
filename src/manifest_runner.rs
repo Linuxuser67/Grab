@@ -1370,23 +1370,25 @@ async fn finalize_manifest_download(
 
     let video_input = match &tracks {
         Tracks::Hls { .. } => video_dir.join("local.m3u8"),
-        Tracks::Dash { .. } if destination_parts => crate::manifest_destination::part_path(
-            staging,
-            &job.dest,
+        Tracks::Dash { .. } if destination_parts => crate::manifest_destination::part_path_async(
+            staging.to_path_buf(),
+            job.dest.clone(),
             job.item_id,
             crate::manifest_destination::TrackKind::Video,
         )
+        .await
         .map_err(ManifestRunError::Failed)?,
         Tracks::Dash { .. } | Tracks::DashLiveOffline { .. } => video_dir.join("video-track.mp4"),
     };
     let audio_input = if has_audio {
         Some(if destination_parts {
-            crate::manifest_destination::part_path(
-                staging,
-                &job.dest,
-                job.item_id,
-                crate::manifest_destination::TrackKind::Audio,
-            )
+            crate::manifest_destination::part_path_async(
+            staging.to_path_buf(),
+            job.dest.clone(),
+            job.item_id,
+            crate::manifest_destination::TrackKind::Audio,
+        )
+        .await
             .map_err(ManifestRunError::Failed)?
         } else {
             match job.source.kind {
@@ -1404,12 +1406,13 @@ async fn finalize_manifest_download(
         Tracks::Dash {
             subtitle: Some(_), ..
         } if destination_parts => Some(
-            crate::manifest_destination::part_path(
-                staging,
-                &job.dest,
-                job.item_id,
-                crate::manifest_destination::TrackKind::Subtitles,
-            )
+            crate::manifest_destination::part_path_async(
+            staging.to_path_buf(),
+            job.dest.clone(),
+            job.item_id,
+            crate::manifest_destination::TrackKind::Subtitles,
+        )
+        .await
             .map_err(ManifestRunError::Failed)?,
         ),
         Tracks::Dash {
@@ -1427,12 +1430,13 @@ async fn finalize_manifest_download(
             ),
         ] {
             if should_verify {
-                crate::manifest_destination::verify_owned_part(
-                    staging,
-                    &job.dest,
+                crate::manifest_destination::verify_owned_part_async(
+                    staging.to_path_buf(),
+                    job.dest.clone(),
                     job.item_id,
                     track,
                 )
+                .await
                 .map_err(ManifestRunError::Failed)?;
             }
         }

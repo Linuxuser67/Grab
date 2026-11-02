@@ -3032,9 +3032,18 @@ segment-1.ts
 segment-2.ts
 #EXT-X-ENDLIST
 "#;
-        let manifest_url = format!("http://{address}/playlist.m3u8");
-        let plan = crate::manifest::plan_hls_media_playlist(&manifest_url, playlist)
-            .expect("plan static HLS media playlist");
+        let mut plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/playlist.m3u8",
+            playlist,
+        )
+        .expect("plan static HLS media playlist");
+        for (index, resource) in plan.resources.iter_mut().enumerate() {
+            resource.url = url::Url::parse(&format!(
+                "http://{address}/segment-{}.ts",
+                index + 1
+            ))
+            .expect("set local HLS test resource URL");
+        }
         assert!(plan.is_plain_mpegts_candidate());
 
         let client = reqwest::Client::builder()

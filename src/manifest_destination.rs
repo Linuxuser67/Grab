@@ -266,32 +266,41 @@ pub(crate) fn open_owned_part(
             {
                 return Err("The manifest part ownership record does not match this download".to_string());
             }
-            let file = open_part_no_follow(&path)?;
-            let identity = file_identity(&file)?;
-            if identity.device != owner.device || identity.inode != owner.inode {
-                return Err("The manifest part was replaced after Grab created it; existing data was preserved".to_string());
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink() || !metadata.is_file() {
+                        return Err("The manifest part is not a regular file; existing data was preserved".to_string());
+                    }
+                    let identity = metadata_identity(&metadata)?;
+                    if identity.device != owner.device || identity.inode != owner.inode {
+                        return Err("The manifest part was replaced after Grab created it; existing data was preserved".to_string());
+                    }
+                    let file = open_part_no_follow(&path)?;
+                    let opened_identity = file_identity(&file)?;
+                    if opened_identity.device != owner.device || opened_identity.inode != owner.inode {
+                        return Err("The manifest part changed while it was being opened; existing data was preserved".to_string());
+                    }
+                    Ok(file)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let file = create_part_file(&path)?;
+                    let identity = file_identity(&file)?;
+                    let replacement = PartOwner {
+                        version: 1,
+                        item_id,
+                        destination_key,
+                        file_name: file_name.to_string(),
+                        device: identity.device,
+                        inode: identity.inode,
+                    };
+                    write_part_owner(staging, &owner_path, &replacement, true)?;
+                    Ok(file)
+                }
+                Err(error) => Err(format!("Could not inspect destination manifest part: {error}")),
             }
-            Ok(file)
         }
         None => {
-            let mut options = OpenOptions::new();
-            options.read(true).write(true).create_new(true);
-            #[cfg(unix)]
-            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-            let file = options.open(&path).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    "A file already exists at the planned manifest part path and has no ownership record; it was preserved".to_string()
-                } else {
-                    format!("Could not exclusively create destination manifest part {}: {error}", path.display())
-                }
-            })?;
-            #[cfg(unix)]
-            file.set_permissions(fs::Permissions::from_mode(0o600))
-                .map_err(|error| format!("Could not secure destination manifest part: {error}"))?;
-            file.sync_all().map_err(|error| format!("Could not sync destination manifest part: {error}"))?;
-            let parent = path.parent().ok_or_else(|| "The manifest part has no parent directory".to_string())?;
-            File::open(parent).and_then(|directory| directory.sync_all())
-                .map_err(|error| format!("Could not sync destination directory after creating manifest part: {error}"))?;
+            let file = create_part_file(&path)?;
             let identity = file_identity(&file)?;
             let owner = PartOwner {
                 version: 1,
@@ -301,7 +310,7 @@ pub(crate) fn open_owned_part(
                 device: identity.device,
                 inode: identity.inode,
             };
-            write_part_owner(staging, &owner_path, &owner)?;
+            write_part_owner(staging, &owner_path, &owner, false)?;
             Ok(file)
         }
     }
@@ -377,6 +386,29 @@ fn metadata_identity(_metadata: &fs::Metadata) -> Result<FileIdentity, String> {
     Err("Destination manifest part ownership requires Unix file identities".to_string())
 }
 
+
+fn create_part_file(path: &Path) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options.open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "A file already exists at the planned manifest part path without a matching ownership proof; it was preserved".to_string()
+        } else {
+            format!("Could not exclusively create destination manifest part {}: {error}", path.display())
+        }
+    })?;
+    #[cfg(unix)]
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("Could not secure destination manifest part: {error}"))?;
+    file.sync_all().map_err(|error| format!("Could not sync destination manifest part: {error}"))?;
+    let parent = path.parent().ok_or_else(|| "The manifest part has no parent directory".to_string())?;
+    File::open(parent).and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("Could not sync destination directory after creating manifest part: {error}"))?;
+    Ok(file)
+}
+
 fn open_part_no_follow(path: &Path) -> Result<File, String> {
     let mut options = OpenOptions::new();
     options.read(true).write(true);
@@ -399,7 +431,7 @@ fn read_part_owner(path: &Path) -> Result<Option<PartOwner>, String> {
         .map_err(|error| format!("Manifest part ownership record is invalid: {error}"))
 }
 
-fn write_part_owner(staging: &Path, path: &Path, owner: &PartOwner) -> Result<(), String> {
+fn write_part_owner(staging: &Path, path: &Path, owner: &PartOwner, replace_existing: bool) -> Result<(), String> {
     let bytes = serde_json::to_vec(owner)
         .map_err(|error| format!("Could not encode manifest part ownership: {error}"))?;
     let mut temporary = tempfile::NamedTempFile::new_in(staging)
@@ -411,9 +443,15 @@ fn write_part_owner(staging: &Path, path: &Path, owner: &PartOwner) -> Result<()
         .map_err(|error| format!("Could not write manifest part ownership record: {error}"))?;
     temporary.as_file().sync_all()
         .map_err(|error| format!("Could not sync manifest part ownership record: {error}"))?;
-    temporary.persist_noclobber(path).map_err(|error| {
-        format!("Could not durably record manifest part ownership: {}", error.error)
-    })?;
+    if replace_existing {
+        temporary.persist(path).map_err(|error| {
+            format!("Could not update manifest part ownership: {}", error.error)
+        })?;
+    } else {
+        temporary.persist_noclobber(path).map_err(|error| {
+            format!("Could not durably record manifest part ownership: {}", error.error)
+        })?;
+    }
     sync_staging_directory(staging)
 }
 

@@ -122,18 +122,18 @@ fn validate_or_initialize_sync(staging: &Path, fingerprint: &str) -> Result<(), 
 }
 
 fn validate_existing_marker(marker_path: &Path, fingerprint: &str) -> Result<(), RecoveryError> {
-    let bytes = crate::bounded_file::read_regular_file_bounded(
-        marker_path,
-        MAX_RECOVERY_MARKER_BYTES,
-    )
-    .map_err(|error| match error {
-        crate::bounded_file::BoundedFileError::NotRegularFile => RecoveryError::NotRegularFile,
-        crate::bounded_file::BoundedFileError::TooLarge => RecoveryError::TooLarge,
-        crate::bounded_file::BoundedFileError::Io(source) => RecoveryError::Io {
-            operation: "reading recovery metadata",
-            source,
-        },
-    })?;
+    let bytes =
+        crate::bounded_file::read_regular_file_bounded(marker_path, MAX_RECOVERY_MARKER_BYTES)
+            .map_err(|error| match error {
+                crate::bounded_file::BoundedFileError::NotRegularFile => {
+                    RecoveryError::NotRegularFile
+                }
+                crate::bounded_file::BoundedFileError::TooLarge => RecoveryError::TooLarge,
+                crate::bounded_file::BoundedFileError::Io(source) => RecoveryError::Io {
+                    operation: "reading recovery metadata",
+                    source,
+                },
+            })?;
     let marker: RecoveryMarker =
         serde_json::from_slice(&bytes).map_err(RecoveryError::Malformed)?;
     if marker.version != RECOVERY_VERSION {

@@ -156,6 +156,7 @@ impl OrderedTrackWriter {
     /// # Errors
     ///
     /// Returns an error if the resource plan, checkpoint, or staging files are invalid.
+    #[cfg(test)]
     pub(crate) async fn open(
         resources: Vec<String>,
         directory: &Path,

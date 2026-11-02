@@ -2044,18 +2044,17 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
         5,
         "pause must return the committed segment set"
     );
-    let (restored, retained_bytes) =
-        load_dash_live_track_for_destination(
-            &representation_key,
-            &video_dir,
-            None,
-            "video-track.mp4",
-            &destination,
-            item_id,
-            crate::manifest_destination::TrackKind::Video,
-        )
-        .await
-        .expect("restore the preserved dynamic DASH capture");
+    let (restored, retained_bytes) = load_dash_live_track_for_destination(
+        &representation_key,
+        &video_dir,
+        None,
+        "video-track.mp4",
+        &destination,
+        item_id,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .await
+    .expect("restore the preserved dynamic DASH capture");
     assert_eq!(restored.state.segments.len(), 5);
     assert_eq!(
         retained_bytes,

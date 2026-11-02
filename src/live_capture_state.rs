@@ -7,7 +7,7 @@ use thiserror::Error;
 
 const MARKER_NAME: &str = ".grab-live-unrecoverable.json";
 const MARKER_VERSION: u32 = 1;
-const MAX_MARKER_BYTES: u64 = 4096;
+const MAX_MARKER_BYTES: usize = 4096;
 
 /// Structured failures from unrecoverable live-capture state persistence.
 #[derive(Debug, Error)]
@@ -221,7 +221,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("create staging");
         std::fs::write(
             directory.path().join(MARKER_NAME),
-            vec![b' '; MAX_MARKER_BYTES as usize + 1],
+            vec![b' '; MAX_MARKER_BYTES + 1],
         )
         .expect("write oversized marker");
 

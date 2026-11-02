@@ -1042,6 +1042,7 @@ enum LiveCapturePreparation {
     Ready {
         has_audio: bool,
         finish_stop_sender: Option<tokio::sync::oneshot::Sender<crate::video::StopIntent>>,
+        destination_parts: bool,
     },
     Stopped(ManifestOutcome),
 }

@@ -64,14 +64,9 @@ async fn incremental_writer_checkpoints_and_resumes_between_resources() {
     assert_eq!(checkpoint.next_resource_index, 1);
     assert_eq!(checkpoint.committed_offset, 5);
     assert_eq!(
-        read_resource_journal(
-            &directory.join("track.mp4.resources"),
-            &directory,
-            1,
-            false,
-        )
-        .await
-        .expect("read committed resource journal"),
+        read_resource_journal(&directory.join("track.mp4.resources"), &directory, 1, false,)
+            .await
+            .expect("read committed resource journal"),
         vec![resource_checkpoint(b"first")]
     );
     drop(writer);
@@ -201,7 +196,10 @@ async fn resumes_from_checkpoint_and_truncates_uncommitted_tail() {
     write_resource_journal(
         &directory.join("track.mp4.resources"),
         &directory,
-        &[resource_checkpoint(b"first"), resource_checkpoint(b"second")],
+        &[
+            resource_checkpoint(b"first"),
+            resource_checkpoint(b"second"),
+        ],
     )
     .await
     .expect("write journal with an uncommitted trailing record");
@@ -216,14 +214,9 @@ async fn resumes_from_checkpoint_and_truncates_uncommitted_tail() {
     };
     assert_eq!(committed, 5);
     assert_eq!(
-        read_resource_journal(
-            &directory.join("track.mp4.resources"),
-            &directory,
-            1,
-            false,
-        )
-        .await
-        .expect("read truncated journal"),
+        read_resource_journal(&directory.join("track.mp4.resources"), &directory, 1, false,)
+            .await
+            .expect("read truncated journal"),
         vec![resource_checkpoint(b"first")]
     );
     assert!(writer.append_next(&mut abort).await.expect("append second"));
@@ -248,11 +241,8 @@ async fn rejects_checkpoint_for_a_different_resource_order() {
     let resources = vec!["first.bin".to_string(), "second.bin".to_string()];
     let checkpoint = WriterCheckpoint {
         version: CHECKPOINT_VERSION,
-        plan_fingerprint: plan_fingerprint(&[
-            "second.bin".to_string(),
-            "first.bin".to_string(),
-        ])
-        .expect("fingerprint"),
+        plan_fingerprint: plan_fingerprint(&["second.bin".to_string(), "first.bin".to_string()])
+            .expect("fingerprint"),
         next_resource_index: 1,
         committed_offset: 5,
     };
@@ -366,9 +356,15 @@ async fn recovers_crash_after_track_rename_before_checkpoint_removal() {
 #[tokio::test]
 async fn migrates_legacy_checkpoint_before_resuming() {
     let directory = test_directory();
-    tokio::fs::create_dir_all(&directory).await.expect("create staging");
-    tokio::fs::write(directory.join("first.bin"), b"first").await.expect("write first");
-    tokio::fs::write(directory.join("second.bin"), b"second").await.expect("write second");
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .expect("create staging");
+    tokio::fs::write(directory.join("first.bin"), b"first")
+        .await
+        .expect("write first");
+    tokio::fs::write(directory.join("second.bin"), b"second")
+        .await
+        .expect("write second");
     let resources = vec!["first.bin".to_string(), "second.bin".to_string()];
     let checkpoint = WriterCheckpoint {
         version: LEGACY_CHECKPOINT_VERSION,
@@ -376,35 +372,49 @@ async fn migrates_legacy_checkpoint_before_resuming() {
         next_resource_index: 1,
         committed_offset: 5,
     };
-    tokio::fs::write(directory.join("track.mp4.part"), b"first").await.expect("write part");
-    tokio::fs::write(directory.join("track.mp4.checkpoint.json"), serde_json::to_vec(&checkpoint).expect("serialize checkpoint"))
-        .await.expect("write legacy checkpoint");
+    tokio::fs::write(directory.join("track.mp4.part"), b"first")
+        .await
+        .expect("write part");
+    tokio::fs::write(
+        directory.join("track.mp4.checkpoint.json"),
+        serde_json::to_vec(&checkpoint).expect("serialize checkpoint"),
+    )
+    .await
+    .expect("write legacy checkpoint");
     let (_stop_tx, mut abort) = stop_channel();
 
-    let (Some(mut writer), committed) = OrderedTrackWriter::open(resources.clone(), &directory, "track.mp4")
-        .await.expect("migrate and resume legacy checkpoint") else {
+    let (Some(mut writer), committed) =
+        OrderedTrackWriter::open(resources.clone(), &directory, "track.mp4")
+            .await
+            .expect("migrate and resume legacy checkpoint")
+    else {
         panic!("an interrupted track must return an active writer");
     };
     assert_eq!(committed, 5);
     let migrated: WriterCheckpoint = serde_json::from_slice(
-        &tokio::fs::read(directory.join("track.mp4.checkpoint.json")).await.expect("read migrated checkpoint"),
-    ).expect("decode migrated checkpoint");
+        &tokio::fs::read(directory.join("track.mp4.checkpoint.json"))
+            .await
+            .expect("read migrated checkpoint"),
+    )
+    .expect("decode migrated checkpoint");
     assert_eq!(migrated.version, CHECKPOINT_VERSION);
     assert_eq!(
-        read_resource_journal(
-            &directory.join("track.mp4.resources"),
-            &directory,
-            1,
-            false,
-        )
-        .await
-        .expect("read migrated digest journal"),
+        read_resource_journal(&directory.join("track.mp4.resources"), &directory, 1, false,)
+            .await
+            .expect("read migrated digest journal"),
         vec![resource_checkpoint(b"first")]
     );
     assert!(writer.append_next(&mut abort).await.expect("append second"));
     writer.finish().await.expect("publish migrated track");
-    assert_eq!(tokio::fs::read(directory.join("track.mp4")).await.expect("read track"), b"firstsecond");
-    tokio::fs::remove_dir_all(directory).await.expect("remove staging");
+    assert_eq!(
+        tokio::fs::read(directory.join("track.mp4"))
+            .await
+            .expect("read track"),
+        b"firstsecond"
+    );
+    tokio::fs::remove_dir_all(directory)
+        .await
+        .expect("remove staging");
 }
 
 #[tokio::test]
@@ -465,17 +475,31 @@ async fn rebuilds_a_missing_digest_journal_from_retained_sources() {
 #[tokio::test]
 async fn retained_checkpoint_allows_idempotent_source_cleanup_and_recovery() {
     let directory = test_directory();
-    tokio::fs::create_dir_all(&directory).await.expect("create staging");
-    tokio::fs::write(directory.join("first.bin"), b"first").await.expect("write first");
-    tokio::fs::write(directory.join("second.bin"), b"second").await.expect("write second");
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .expect("create staging");
+    tokio::fs::write(directory.join("first.bin"), b"first")
+        .await
+        .expect("write first");
+    tokio::fs::write(directory.join("second.bin"), b"second")
+        .await
+        .expect("write second");
     let resources = vec!["first.bin".to_string(), "second.bin".to_string()];
     let (_stop_tx, mut abort) = stop_channel();
-    let (Some(mut writer), _) = OrderedTrackWriter::open_retaining_checkpoint(resources.clone(), &directory, "track.mp4")
-        .await.expect("open retained writer") else {
+    let (Some(mut writer), _) =
+        OrderedTrackWriter::open_retaining_checkpoint(resources.clone(), &directory, "track.mp4")
+            .await
+            .expect("open retained writer")
+    else {
         panic!("a fresh track must return an active writer");
     };
     while writer.next_resource_index() < resources.len() {
-        assert!(writer.append_next(&mut abort).await.expect("append resource"));
+        assert!(
+            writer
+                .append_next(&mut abort)
+                .await
+                .expect("append resource")
+        );
         let committed_index = writer.next_resource_index() - 1;
         assert!(
             !directory.join(&resources[committed_index]).exists(),
@@ -488,44 +512,77 @@ async fn retained_checkpoint_allows_idempotent_source_cleanup_and_recovery() {
         .await
         .expect("simulate a source left behind by interrupted cleanup");
 
-    cleanup_committed_resources(&resources, &directory, "track.mp4").await.expect("clean committed sources");
+    cleanup_committed_resources(&resources, &directory, "track.mp4")
+        .await
+        .expect("clean committed sources");
     assert!(!directory.join("first.bin").exists());
     assert!(!directory.join("second.bin").exists());
-    let committed = committed_resources(&resources, &directory, "track.mp4").await
-        .expect("verify retained checkpoint").expect("complete checkpoint exists");
+    let committed = committed_resources(&resources, &directory, "track.mp4")
+        .await
+        .expect("verify retained checkpoint")
+        .expect("complete checkpoint exists");
     assert_eq!(
-        committed.iter().map(|resource| resource.length).collect::<Vec<_>>(),
+        committed
+            .iter()
+            .map(|resource| resource.length)
+            .collect::<Vec<_>>(),
         vec![5, 6]
     );
 
-    let (writer, committed_bytes) = OrderedTrackWriter::open_retaining_checkpoint(resources.clone(), &directory, "track.mp4")
-        .await.expect("recover published track");
+    let (writer, committed_bytes) =
+        OrderedTrackWriter::open_retaining_checkpoint(resources.clone(), &directory, "track.mp4")
+            .await
+            .expect("recover published track");
     assert!(writer.is_none());
     assert_eq!(committed_bytes, 11);
-    cleanup_committed_resources(&resources, &directory, "track.mp4").await.expect("repeat cleanup");
-    tokio::fs::remove_dir_all(directory).await.expect("remove staging");
+    cleanup_committed_resources(&resources, &directory, "track.mp4")
+        .await
+        .expect("repeat cleanup");
+    tokio::fs::remove_dir_all(directory)
+        .await
+        .expect("remove staging");
 }
 
 #[tokio::test]
 async fn rejects_corruption_in_a_published_track_before_source_cleanup() {
     let directory = test_directory();
-    tokio::fs::create_dir_all(&directory).await.expect("create staging");
-    tokio::fs::write(directory.join("first.bin"), b"first").await.expect("write first");
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .expect("create staging");
+    tokio::fs::write(directory.join("first.bin"), b"first")
+        .await
+        .expect("write first");
     let resources = vec!["first.bin".to_string()];
     let (_stop_tx, mut abort) = stop_channel();
-    let (Some(mut writer), _) = OrderedTrackWriter::open_retaining_checkpoint(resources.clone(), &directory, "track.mp4")
-        .await.expect("open retained writer") else {
+    let (Some(mut writer), _) =
+        OrderedTrackWriter::open_retaining_checkpoint(resources.clone(), &directory, "track.mp4")
+            .await
+            .expect("open retained writer")
+    else {
         panic!("a fresh track must return an active writer");
     };
-    assert!(writer.append_next(&mut abort).await.expect("append resource"));
+    assert!(
+        writer
+            .append_next(&mut abort)
+            .await
+            .expect("append resource")
+    );
     writer.finish().await.expect("publish retained track");
     tokio::fs::write(directory.join("first.bin"), b"first")
         .await
         .expect("simulate a leftover staged source");
-    tokio::fs::write(directory.join("track.mp4"), b"wrong").await.expect("corrupt track");
-    assert!(cleanup_committed_resources(&resources, &directory, "track.mp4").await.is_err());
+    tokio::fs::write(directory.join("track.mp4"), b"wrong")
+        .await
+        .expect("corrupt track");
+    assert!(
+        cleanup_committed_resources(&resources, &directory, "track.mp4")
+            .await
+            .is_err()
+    );
     assert!(directory.join("first.bin").exists());
-    tokio::fs::remove_dir_all(directory).await.expect("remove staging");
+    tokio::fs::remove_dir_all(directory)
+        .await
+        .expect("remove staging");
 }
 
 #[test]

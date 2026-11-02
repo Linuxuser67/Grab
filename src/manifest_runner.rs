@@ -1417,6 +1417,26 @@ async fn finalize_manifest_download(
         } => Some(staging.join("subtitles/subtitle-track.mp4")),
         _ => None,
     };
+    if destination_parts {
+        for (track, should_verify) in [
+            (crate::manifest_destination::TrackKind::Video, true),
+            (crate::manifest_destination::TrackKind::Audio, has_audio),
+            (
+                crate::manifest_destination::TrackKind::Subtitles,
+                subtitle_input.is_some(),
+            ),
+        ] {
+            if should_verify {
+                crate::manifest_destination::verify_owned_part(
+                    staging,
+                    &job.dest,
+                    job.item_id,
+                    track,
+                )
+                .map_err(ManifestRunError::Failed)?;
+            }
+        }
+    }
     let subtitle_language = match &tracks {
         Tracks::Hls {
             subtitle_language, ..

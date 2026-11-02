@@ -1369,6 +1369,44 @@ video/es.m3u8
         assert_eq!(legacy.subtitle_key, None);
         assert_eq!(legacy.subtitle_language, None);
 
+        // Existing queue files store these identities as plain JSON strings.
+        let legacy_with_tracks: crate::media_types::ManifestSource =
+            serde_json::from_value(serde_json::json!({
+                "url": "https://cdn.example.test/master.m3u8",
+                "kind": "Hls",
+                "representation_key": "hls-variant-0123456789abcdef0123456789abcdef",
+                "audio_key": "hls-audio-0123456789abcdef0123456789abcdef",
+                "subtitle_key": "hls-subtitle-0123456789abcdef0123456789abcdef",
+                "subtitle_language": "en"
+            }))
+            .expect("legacy string keys remain compatible with typed identities");
+        assert_eq!(
+            legacy_with_tracks.representation_key.as_str(),
+            "hls-variant-0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            legacy_with_tracks.audio_key.as_deref(),
+            Some("hls-audio-0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(
+            legacy_with_tracks.subtitle_key.as_deref(),
+            Some("hls-subtitle-0123456789abcdef0123456789abcdef")
+        );
+        let encoded = serde_json::to_value(&legacy_with_tracks)
+            .expect("serialize typed manifest identities");
+        assert_eq!(
+            encoded["representation_key"],
+            "hls-variant-0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            encoded["audio_key"],
+            "hls-audio-0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            encoded["subtitle_key"],
+            "hls-subtitle-0123456789abcdef0123456789abcdef"
+        );
+
         let mut source = crate::media_types::ManifestSource {
             url: "https://cdn.example.test/master.m3u8".to_string(),
             kind: crate::media_types::ManifestKind::Hls,

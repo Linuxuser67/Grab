@@ -13,6 +13,7 @@ use url::Url;
 #[cfg(test)]
 use crate::manifest::HlsVariant;
 use crate::manifest::{HlsMasterPlan, HlsPlan, MAX_MANIFEST_BYTES};
+use crate::manifest_plan::{hls_audio_rendition_key, hls_subtitle_rendition_key, hls_variant_key};
 
 /// Download-time manifest requests retain their normal network tolerance.
 const MANIFEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -356,16 +357,18 @@ enum ManifestFetchMode {
 }
 
 fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestIntakeError> {
-    let mut variant_ids = HashSet::with_capacity(master.variants.len());
-    let variants_have_unique_ids = master.variants.iter().all(|variant| {
-        variant
-            .stable_variant_id
-            .as_deref()
-            .is_some_and(|stable_id| variant_ids.insert(stable_id))
-    });
-    if !variants_have_unique_ids {
+    // Every track gets a key: an Apple stable ID when the origin provides one,
+    // else a derived content identity (stable across CDN and signed-URL
+    // rotation). Only genuinely duplicate identities are rejected, because a
+    // persisted selection could then resolve to the wrong track.
+    let mut variant_keys = HashSet::with_capacity(master.variants.len());
+    if !master
+        .variants
+        .iter()
+        .all(|variant| variant_keys.insert(hls_variant_key(variant)))
+    {
         return Err(ManifestIntakeError::Unsupported(gettext(
-            "The HLS master playlist has missing or duplicate stable video track IDs",
+            "The HLS master playlist has duplicate stable video track identities",
         )));
     }
 
@@ -374,20 +377,15 @@ fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestI
         .iter()
         .filter_map(|variant| variant.audio_group.as_deref())
         .collect::<HashSet<_>>();
-    let mut rendition_ids = HashSet::with_capacity(master.audio_renditions.len());
-    let renditions_have_unique_ids = master
+    let mut rendition_keys = HashSet::with_capacity(master.audio_renditions.len());
+    if !master
         .audio_renditions
         .iter()
         .filter(|rendition| audio_groups.contains(rendition.group_id.as_str()))
-        .all(|rendition| {
-            rendition
-                .stable_rendition_id
-                .as_deref()
-                .is_some_and(|stable_id| rendition_ids.insert(stable_id))
-        });
-    if !renditions_have_unique_ids {
+        .all(|rendition| rendition_keys.insert(hls_audio_rendition_key(rendition)))
+    {
         return Err(ManifestIntakeError::Unsupported(gettext(
-            "The HLS master playlist has missing or duplicate stable audio track IDs",
+            "The HLS master playlist has duplicate stable audio track identities",
         )));
     }
 
@@ -396,20 +394,15 @@ fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestI
         .iter()
         .filter_map(|variant| variant.subtitles_group.as_deref())
         .collect::<HashSet<_>>();
-    let mut subtitle_ids = HashSet::with_capacity(master.subtitle_renditions.len());
-    let subtitles_have_unique_ids = master
+    let mut subtitle_keys = HashSet::with_capacity(master.subtitle_renditions.len());
+    if !master
         .subtitle_renditions
         .iter()
         .filter(|rendition| subtitle_groups.contains(rendition.group_id.as_str()))
-        .all(|rendition| {
-            rendition
-                .stable_rendition_id
-                .as_deref()
-                .is_some_and(|stable_id| subtitle_ids.insert(stable_id))
-        });
-    if !subtitles_have_unique_ids {
+        .all(|rendition| subtitle_keys.insert(hls_subtitle_rendition_key(rendition)))
+    {
         return Err(ManifestIntakeError::Unsupported(gettext(
-            "The HLS master playlist has missing or duplicate stable subtitle track IDs",
+            "The HLS master playlist has duplicate stable subtitle track identities",
         )));
     }
 
@@ -1275,7 +1268,10 @@ video/es.m3u8
             hls_audio_rendition_key(&original),
             hls_audio_rendition_key(&refreshed)
         );
-        assert_eq!(hls_audio_rendition_key(&missing_id), None);
+        assert!(
+            hls_audio_rendition_key(&missing_id).is_some(),
+            "renditions without Apple stable IDs derive a content key"
+        );
     }
 
     #[test]
@@ -1417,7 +1413,7 @@ video/es.m3u8
     }
 
     #[test]
-    fn hls_variant_keys_use_stable_ids_only() {
+    fn hls_variant_keys_prefer_stable_ids_over_content_identities() {
         let variant = |url: &str, stable_id: &str| HlsVariant {
             url: Url::parse(url).expect("valid variant URL"),
             bandwidth: 2_000_000,
@@ -1444,11 +1440,62 @@ video/es.m3u8
         );
         let mut missing_id = original.clone();
         missing_id.stable_variant_id = None;
+        let mut rotated_host = missing_id.clone();
+        rotated_host.url =
+            Url::parse("https://mirror.example.test/video/old.m3u8?sig=new").expect("valid URL");
 
-        assert_eq!(hls_variant_key(&missing_id), None);
+        let derived = hls_variant_key(&missing_id)
+            .expect("variants without Apple stable IDs keep a content-derived key");
+        assert_eq!(hls_variant_key(&rotated_host), Some(derived));
         assert_eq!(hls_variant_key(&original), hls_variant_key(&refreshed));
         assert_ne!(hls_variant_key(&original), hls_variant_key(&different));
         assert_eq!(hls_variant_keys(&[original, refreshed, different]).len(), 3);
+    }
+
+    #[test]
+    fn hls_variant_content_keys_survive_host_and_signature_rotation() {
+        // Twitter/X amplify-style master: no STABLE-VARIANT-ID at all.
+        let variant = |url: &str, height: u64, width: u64, bandwidth: u64| HlsVariant {
+            url: Url::parse(url).expect("valid variant URL"),
+            bandwidth,
+            average_bandwidth: Some(bandwidth * 2 / 3),
+            width: Some(width),
+            height: Some(height),
+            codecs: Some("mp4a.40.2,avc1.4D401F".to_string()),
+            frame_rate: Some(30.0),
+            audio_group: Some(format!("audio-{bandwidth}")),
+            subtitles_group: None,
+            stable_variant_id: None,
+        };
+        let original = variant(
+            "https://video.twimg.com/amplify_video/6/pl/avc1/854x480/abc.m3u8",
+            480,
+            854,
+            1_630_685,
+        );
+        let refreshed = variant(
+            "https://video10.twimg.com/amplify_video/6/pl/avc1/854x480/abc.m3u8?sig=rotated",
+            480,
+            854,
+            1_630_685,
+        );
+        let other = variant(
+            "https://video.twimg.com/amplify_video/6/pl/avc1/640x360/xyz.m3u8",
+            360,
+            640,
+            817_916,
+        );
+
+        assert_eq!(
+            hls_variant_key(&original),
+            hls_variant_key(&refreshed),
+            "host and signed-query rotation must not change the identity"
+        );
+        assert_ne!(
+            hls_variant_key(&original),
+            hls_variant_key(&other),
+            "different tracks must not share a content identity"
+        );
     }
 
     #[test]
@@ -1521,7 +1568,7 @@ video/720.m3u8
     }
 
     #[test]
-    fn hls_master_requires_unique_stable_ids_for_selectable_tracks() {
+    fn hls_master_rejects_duplicate_track_identities() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",STABLE-RENDITION-ID="rendition-en",URI="audio/en.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio",STABLE-VARIANT-ID="variant-720"
@@ -1534,28 +1581,76 @@ video/720.m3u8
         .expect("valid HLS master playlist");
         assert!(validate_hls_stable_track_ids(&master).is_ok());
 
-        master.variants[0].stable_variant_id = None;
+        let duplicate = master.variants[0].clone();
+        master.variants = vec![duplicate.clone(), duplicate].into_boxed_slice();
         assert!(matches!(
             validate_hls_stable_track_ids(&master),
             Err(ManifestIntakeError::Unsupported(_))
         ));
-        master.variants[0].stable_variant_id = Some("variant-720".to_string());
-        master.audio_renditions[0].stable_rendition_id = None;
+        master.variants = vec![master.variants[0].clone()].into_boxed_slice();
+
+        // Attribute-less tracks must collide through their content identities
+        // too; this is the dominant path for ordinary non-Apple masters.
+        let mut attribute_less = master.variants[0].clone();
+        attribute_less.stable_variant_id = None;
+        master.variants = vec![attribute_less.clone(), attribute_less].into_boxed_slice();
         assert!(validate_hls_stable_track_ids(&master).is_err());
-        master.audio_renditions[0].stable_rendition_id = Some("rendition-en".to_string());
+        master.variants = vec![master.variants[0].clone()].into_boxed_slice();
+
         let duplicate_rendition = master.audio_renditions[0].clone();
         master.audio_renditions =
             vec![duplicate_rendition.clone(), duplicate_rendition].into_boxed_slice();
         assert!(validate_hls_stable_track_ids(&master).is_err());
         master.audio_renditions = vec![master.audio_renditions[0].clone()].into_boxed_slice();
 
-        let duplicate = master.variants[0].clone();
-        master.variants = vec![duplicate.clone(), duplicate].into_boxed_slice();
+        let mut attribute_less_rendition = master.audio_renditions[0].clone();
+        attribute_less_rendition.stable_rendition_id = None;
+        master.audio_renditions =
+            vec![attribute_less_rendition.clone(), attribute_less_rendition].into_boxed_slice();
         assert!(validate_hls_stable_track_ids(&master).is_err());
     }
 
     #[test]
-    fn hls_master_requires_stable_ids_for_referenced_subtitle_renditions() {
+    fn hls_master_supports_tracks_without_stable_ids() {
+        // Twitter/X amplify-style master: attribute-less audio and variants.
+        let body = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-INDEPENDENT-SEGMENTS
+#EXT-X-MEDIA:NAME="Audio",TYPE=AUDIO,GROUP-ID="audio-32000",AUTOSELECT=YES,URI="/pl/mp4a/32000/a.m3u8"
+#EXT-X-MEDIA:NAME="Audio",TYPE=AUDIO,GROUP-ID="audio-128000",AUTOSELECT=YES,URI="/pl/mp4a/128000/b.m3u8"
+
+#EXT-X-STREAM-INF:AVERAGE-BANDWIDTH=146321,BANDWIDTH=241630,RESOLUTION=480x270,CODECS="mp4a.40.2,avc1.4D4015",AUDIO="audio-32000"
+/pl/avc1/480x270/v1.m3u8
+#EXT-X-STREAM-INF:AVERAGE-BANDWIDTH=792011,BANDWIDTH=1630685,RESOLUTION=854x480,CODECS="mp4a.40.2,avc1.64001F",AUDIO="audio-128000"
+/pl/avc1/854x480/v3.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://video.twimg.com/amplify_video/6/pl/master.m3u8",
+            body,
+        )
+        .expect("valid HLS master playlist");
+
+        validate_hls_stable_track_ids(&master)
+            .expect("attribute-less masters stay on the native path");
+        let keys = hls_variant_keys(&master.variants);
+        assert!(
+            keys.iter().all(Option::is_some),
+            "every variant gets a durable content-derived key"
+        );
+        assert_ne!(keys[0], keys[1], "distinct tracks get distinct keys");
+        let lookup = ManifestLookup {
+            source_url: "https://video.twimg.com/amplify_video/6/pl/master.m3u8".to_string(),
+            manifest: NativeManifest::HlsMaster(master),
+        };
+        assert_eq!(
+            lookup.choices().len(),
+            2,
+            "attribute-less masters offer selectable variants"
+        );
+    }
+
+    #[test]
+    fn hls_master_supports_subtitle_renditions_without_stable_ids() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",URI="subs/en.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,SUBTITLES="subs",STABLE-VARIANT-ID="variant-720"
@@ -1566,10 +1661,10 @@ video/720.m3u8
             body,
         )
         .expect("HLS parser retains subtitle metadata");
-        assert!(matches!(
-            validate_hls_stable_track_ids(&master),
-            Err(ManifestIntakeError::Unsupported(_))
-        ));
+        assert!(
+            validate_hls_stable_track_ids(&master).is_ok(),
+            "subtitle renditions without Apple stable IDs fall back to content identities"
+        );
     }
 
     #[test]

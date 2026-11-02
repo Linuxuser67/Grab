@@ -47,6 +47,14 @@ enum CheckpointPolicy {
 }
 
 #[derive(Debug)]
+struct CheckpointPaths<'a> {
+    checkpoint: &'a Path,
+    journal: &'a Path,
+    part: &'a Path,
+    target: &'a Path,
+    directory: &'a Path,
+}
+
 enum CheckpointState {
     Fresh,
     Resume {
@@ -263,11 +271,13 @@ impl OrderedTrackWriter {
             }
         }
         let checkpoint_state = load_checkpoint(
-            &checkpoint_path,
-            &journal_path,
-            &part,
-            &target,
-            directory,
+            CheckpointPaths {
+                checkpoint: &checkpoint_path,
+                journal: &journal_path,
+                part: &part,
+                target: &target,
+                directory,
+            },
             &fingerprint,
             &resources,
             destination_part.is_some(),
@@ -885,15 +895,18 @@ pub(crate) async fn cleanup_committed_resources(
 }
 
 async fn load_checkpoint(
-    checkpoint_path: &Path,
-    journal_path: &Path,
-    part: &Path,
-    target: &Path,
-    directory: &Path,
+    paths: CheckpointPaths<'_>,
     fingerprint: &str,
     resources: &[String],
     allow_part_and_target: bool,
 ) -> Result<CheckpointState, String> {
+    let CheckpointPaths {
+        checkpoint: checkpoint_path,
+        journal: journal_path,
+        part,
+        target,
+        directory,
+    } = paths;
     let checkpoint_metadata = match tokio::fs::symlink_metadata(checkpoint_path).await {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {

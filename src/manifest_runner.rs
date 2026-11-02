@@ -3055,20 +3055,20 @@ segment-2.ts
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
 
         assert!(
-            fetch_and_write_hls_track(
-                &client,
-                staging.path(),
-                &plan,
-                &video_dir,
-                "video-track.ts",
-                &destination,
-                84,
-                crate::manifest_destination::TrackKind::Video,
-                2,
-                &tx,
-                &downloaded,
-                &mut abort,
-            )
+            fetch_and_write_hls_track(ManifestHlsTrackTransfer {
+                client: &client,
+                staging: staging.path(),
+                plan: &plan,
+                directory: &video_dir,
+                filename: "video-track.ts",
+                destination: &destination,
+                item_id: 84,
+                track: crate::manifest_destination::TrackKind::Video,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+                abort: &mut abort,
+            })
             .await
             .expect("fetch and assemble static HLS MPEG-TS fragments")
         );

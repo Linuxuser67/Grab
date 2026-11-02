@@ -2672,7 +2672,9 @@ async fn fetch_and_write_ordered_track(
             Err(error) => {
                 tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
                     .ok();
-                if format == OrderedTrackFormat::MpegTs && matches!(&error, ManifestRunError::Unsupported(_)) {
+                if format == OrderedTrackFormat::MpegTs
+                    && matches!(&error, ManifestRunError::Unsupported(_))
+                {
                     drop(writer);
                     crate::manifest_writer::cleanup_destination_part(
                         staging,
@@ -2755,10 +2757,9 @@ async fn is_mpegts_segment(path: &Path) -> Result<bool, ManifestRunError> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|error| manifest_storage_error("Could not open an HLS media fragment", error))?;
-    let metadata = file
-        .metadata()
-        .await
-        .map_err(|error| manifest_storage_error("Could not inspect an HLS media fragment", error))?;
+    let metadata = file.metadata().await.map_err(|error| {
+        manifest_storage_error("Could not inspect an HLS media fragment", error)
+    })?;
     if metadata.len() < 188 || !metadata.len().is_multiple_of(188) {
         return Ok(false);
     }
@@ -2768,10 +2769,12 @@ async fn is_mpegts_segment(path: &Path) -> Result<bool, ManifestRunError> {
     while offset < metadata.len().min(564) {
         file.seek(std::io::SeekFrom::Start(offset))
             .await
-            .map_err(|error| manifest_storage_error("Could not inspect an HLS media fragment", error))?;
-        file.read_exact(&mut sync_byte)
-            .await
-            .map_err(|error| manifest_storage_error("Could not inspect an HLS media fragment", error))?;
+            .map_err(|error| {
+                manifest_storage_error("Could not inspect an HLS media fragment", error)
+            })?;
+        file.read_exact(&mut sync_byte).await.map_err(|error| {
+            manifest_storage_error("Could not inspect an HLS media fragment", error)
+        })?;
         if sync_byte[0] != 0x47 {
             return Ok(false);
         }
@@ -2958,24 +2961,30 @@ mod tests {
         tokio::fs::write(&path, &bytes)
             .await
             .expect("write MPEG-TS fragment");
-        assert!(is_mpegts_segment(&path)
-            .await
-            .expect("inspect MPEG-TS fragment"));
+        assert!(
+            is_mpegts_segment(&path)
+                .await
+                .expect("inspect MPEG-TS fragment")
+        );
 
         bytes[188] = 0;
         tokio::fs::write(&path, &bytes)
             .await
             .expect("write invalid transport fragment");
-        assert!(!is_mpegts_segment(&path)
-            .await
-            .expect("inspect invalid transport fragment"));
+        assert!(
+            !is_mpegts_segment(&path)
+                .await
+                .expect("inspect invalid transport fragment")
+        );
 
         tokio::fs::write(&path, vec![0x47; 187])
             .await
             .expect("write truncated transport fragment");
-        assert!(!is_mpegts_segment(&path)
-            .await
-            .expect("inspect truncated transport fragment"));
+        assert!(
+            !is_mpegts_segment(&path)
+                .await
+                .expect("inspect truncated transport fragment")
+        );
     }
 
     #[tokio::test]
@@ -3038,11 +3047,8 @@ segment-2.ts
         )
         .expect("plan static HLS media playlist");
         for (index, resource) in plan.resources.iter_mut().enumerate() {
-            resource.url = url::Url::parse(&format!(
-                "http://{address}/segment-{}.ts",
-                index + 1
-            ))
-            .expect("set local HLS test resource URL");
+            resource.url = url::Url::parse(&format!("http://{address}/segment-{}.ts", index + 1))
+                .expect("set local HLS test resource URL");
         }
         assert!(plan.is_plain_mpegts_candidate());
 

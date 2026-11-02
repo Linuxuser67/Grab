@@ -334,6 +334,49 @@ pub(crate) fn open_owned_part(
     }
 }
 
+/// Verify that a planned destination part is still the exact regular file
+/// claimed by this download. Unlike `open_owned_part`, this
+/// function never creates a missing file.
+///
+/// # Errors
+///
+/// Returns an error if the ownership record or filesystem identity does not match.
+pub(crate) fn verify_owned_part(
+    staging: &Path,
+    destination: &Path,
+    item_id: u64,
+    track: TrackKind,
+) -> Result<(), String> {
+    let path = part_path(staging, destination, item_id, track)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "The manifest part filename is invalid".to_string())?;
+    let owner_path = staging.join(format!("{file_name}.owner.json"));
+    let Some(owner) = read_part_owner(&owner_path)? else {
+        return Err("The manifest part has no ownership record; it was preserved".to_string());
+    };
+    let destination_dir = destination
+        .parent()
+        .ok_or_else(|| "The download destination has no parent directory".to_string())?;
+    let canonical_destination_dir = fs::canonicalize(destination_dir)
+        .map_err(|error| format!("Could not resolve destination directory: {error}"))?;
+    let destination_key = crate::video_staging::dest_key(&canonical_destination_dir);
+    if owner.version != 1
+        || owner.item_id != item_id
+        || owner.destination_key != destination_key
+        || owner.file_name != file_name
+    {
+        return Err("The manifest part ownership record does not match this download".to_string());
+    }
+    let file = open_part_no_follow(&path)?;
+    let identity = file_identity(&file)?;
+    if identity.device != owner.device || identity.inode != owner.inode {
+        return Err("The manifest part was replaced; existing data was preserved".to_string());
+    }
+    Ok(())
+}
+
 /// Remove a destination part only while its inode still matches Grab's
 /// durable ownership record. A missing file is an idempotent cleanup result.
 ///

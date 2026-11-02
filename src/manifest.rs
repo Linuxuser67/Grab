@@ -1322,6 +1322,60 @@ mod tests {
     const BASE_URL: &str = "https://cdn.example.test/path/master.m3u8";
 
     #[test]
+    fn plain_mpegts_candidate_excludes_non_concatenable_hls_features() {
+        let plain = br#"#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:4
+#EXTINF:4,
+segment-1.ts
+#EXTINF:4,
+segment-2.ts
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, plain)
+            .expect("plain static HLS playlist should be accepted");
+        assert!(plan.is_plain_mpegts_candidate());
+
+        let fragmented_mp4 = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4,
+segment-1.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, fragmented_mp4)
+            .expect("fMP4 HLS playlist should be accepted for FFmpeg");
+        assert!(!plan.is_plain_mpegts_candidate());
+
+        let encrypted = br#"#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:4
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin"
+#EXTINF:4,
+segment-1.ts
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, encrypted)
+            .expect("AES-128 HLS playlist should be accepted for FFmpeg");
+        assert!(!plan.is_plain_mpegts_candidate());
+
+        let discontinuous = br#"#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:4
+#EXTINF:4,
+segment-1.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4,
+segment-2.ts
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, discontinuous)
+            .expect("discontinuous HLS playlist should be accepted for FFmpeg");
+        assert!(!plan.is_plain_mpegts_candidate());
+    }
+
+    #[test]
     fn master_playlist_keeps_variants_in_manifest_order_and_audio_renditions() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="audio/en.m3u8"

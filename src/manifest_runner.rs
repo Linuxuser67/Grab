@@ -548,7 +548,6 @@ async fn prepare_manifest_attempt(
                     .await
                     .map_err(ManifestRunError::Failed)?;
             }
-            _ => unreachable!("validated unrecoverable marker protocol"),
         }
     }
     let offline_tracks =

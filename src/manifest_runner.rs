@@ -1537,7 +1537,8 @@ pub(crate) async fn run_manifest_download(
     finalize_manifest_download(ManifestFinalization {
         job: &job,
         destination_parts: live_destination_parts
-            || (!live_hls && !live_dash
+            || (!live_hls
+                && !live_dash
                 && (matches!(&tracks, Tracks::Dash { .. })
                     || matches!(
                         &tracks,

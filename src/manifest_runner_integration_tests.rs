@@ -2104,7 +2104,6 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
     assert_eq!(finished.outcome, DashLiveCaptureOutcome::Finish);
 }
 
-
 #[tokio::test]
 async fn live_hls_snapshot_appends_fetched_mpegts_fragments_to_visible_destination_part() {
     let root = TempRoot::new("live-destination-part");

@@ -701,9 +701,7 @@ pub(super) async fn run_live_hls_tracks(
         && audio_plan.is_none_or(HlsPlan::is_plain_mpegts_presentation);
     if use_destination_parts {
         use_destination_parts = live_hls_track_has_only_mpegts_resources(&video).await?;
-        if use_destination_parts
-            && let Some(track) = audio.as_ref()
-        {
+        if use_destination_parts && let Some(track) = audio.as_ref() {
             use_destination_parts = live_hls_track_has_only_mpegts_resources(track).await?;
         }
     }
@@ -748,20 +746,26 @@ pub(super) async fn run_live_hls_tracks(
     ensure_manifest_mux_spaces(staging, destination_dir, retained_bytes)?;
     if use_destination_parts {
         if let Some(intent) = append_live_hls_destination_part(&video, abort).await? {
-            return Ok(LiveHlsCapture::new(match intent {
-                crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+            return Ok(LiveHlsCapture::new(
+                match intent {
+crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                 crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
                 crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-            }, output));
+                },
+                output,
+            ));
         }
         if let Some(audio) = audio.as_ref()
             && let Some(intent) = append_live_hls_destination_part(audio, abort).await?
         {
-            return Ok(LiveHlsCapture::new(match intent {
-                crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+            return Ok(LiveHlsCapture::new(
+                match intent {
+crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                 crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
                 crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-            }, output));
+                },
+                output,
+            ));
         }
     }
     if finish_only {
@@ -778,11 +782,14 @@ pub(super) async fn run_live_hls_tracks(
         .checked_add(audio_resource_bytes)
         .is_none_or(|total| total > crate::manifest::MAX_HLS_LIVE_CAPTURE_BYTES)
     {
-        return Ok(LiveHlsCapture::new(if video.accumulator.segment_count() > 0 {
-            LiveHlsCaptureOutcome::FinishVideoOnly
-        } else {
-            LiveHlsCaptureOutcome::Discard
-        }, output));
+        return Ok(LiveHlsCapture::new(
+            if video.accumulator.segment_count() > 0 {
+                LiveHlsCaptureOutcome::FinishVideoOnly
+            } else {
+                LiveHlsCaptureOutcome::Discard
+            },
+            output,
+        ));
     }
 
     let all_tracks_ended = video_plan.end_list && audio_plan.is_none_or(|plan| plan.end_list);
@@ -815,11 +822,14 @@ pub(super) async fn run_live_hls_tracks(
             )?;
         }
         LiveHlsSnapshotOutcome::Stopped(intent) => {
-            return Ok(LiveHlsCapture::new(match intent {
-                crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+            return Ok(LiveHlsCapture::new(
+                match intent {
+crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                 crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
                 crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-            }, output));
+                },
+                output,
+            ));
         }
         LiveHlsSnapshotOutcome::ContinuityLost => {
             if video.accumulator.segment_count() == 0 {
@@ -834,7 +844,10 @@ pub(super) async fn run_live_hls_tracks(
                 tx,
             )
             .await?;
-            return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Unrecoverable, output));
+            return Ok(LiveHlsCapture::new(
+                LiveHlsCaptureOutcome::Unrecoverable,
+                output,
+            ));
         }
     }
     if let (Some(plan), Some(track)) = (audio_plan, audio.as_mut()) {
@@ -856,7 +869,10 @@ pub(super) async fn run_live_hls_tracks(
                     error = %error,
                     "live HLS audio rendition is no longer supported; preserving video capture"
                 );
-                return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::FinishVideoOnly, output));
+                return Ok(LiveHlsCapture::new(
+                    LiveHlsCaptureOutcome::FinishVideoOnly,
+                    output,
+                ));
             }
             Err(error) => return Err(error),
             Ok(outcome) => outcome,
@@ -870,11 +886,14 @@ pub(super) async fn run_live_hls_tracks(
                 )?;
             }
             LiveHlsSnapshotOutcome::Stopped(intent) => {
-                return Ok(LiveHlsCapture::new(match intent {
-                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                return Ok(LiveHlsCapture::new(
+                match intent {
+crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                     crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
                     crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                }, output));
+                },
+                output,
+            ));
             }
             LiveHlsSnapshotOutcome::ContinuityLost => {
                 if video.accumulator.segment_count() == 0 {
@@ -947,11 +966,14 @@ pub(super) async fn run_live_hls_tracks(
                     )?;
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
-                    return Ok(LiveHlsCapture::new(match intent {
-                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                    return Ok(LiveHlsCapture::new(
+                match intent {
+crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                         crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
                         crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                    }, output));
+                },
+                output,
+            ));
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
                     if video.accumulator.segment_count() == 0 {
@@ -997,11 +1019,14 @@ pub(super) async fn run_live_hls_tracks(
                     )?;
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
-                    return Ok(LiveHlsCapture::new(match intent {
-                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                    return Ok(LiveHlsCapture::new(
+                match intent {
+crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                         crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
                         crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                    }, output));
+                },
+                output,
+            ));
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
                     if video.accumulator.segment_count() == 0 {
@@ -1024,7 +1049,6 @@ pub(super) async fn run_live_hls_tracks(
 
     Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Ended, output))
 }
-
 
 #[cfg(test)]
 mod destination_part_tests {
@@ -1164,7 +1188,9 @@ mod destination_part_tests {
         let mut expected = expected_first;
         expected.extend_from_slice(&next_bodies.concat());
         assert_eq!(
-            tokio::fs::read(&part).await.expect("read extended HLS part"),
+            tokio::fs::read(&part)
+                .await
+                .expect("read extended HLS part"),
             expected
         );
 

@@ -542,14 +542,15 @@ mod tests {
         ensure_plan(staging.path(), &destination, 42, false, false).expect("write plan");
         let part = part_path(staging.path(), &destination, 42, TrackKind::Video)
             .expect("resolve part path");
-        drop(open_owned_part(staging.path(), &destination, 42, TrackKind::Video)
-            .expect("claim destination part"));
+        let original = open_owned_part(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("claim destination part");
         fs::remove_file(&part).expect("replace owned part");
         fs::write(&part, b"replacement").expect("write replacement");
 
         assert!(open_owned_part(staging.path(), &destination, 42, TrackKind::Video).is_err());
         assert!(remove_owned_part(staging.path(), &destination, 42, TrackKind::Video).is_err());
         assert_eq!(fs::read(part).expect("read replacement"), b"replacement");
+        drop(original);
     }
 
 

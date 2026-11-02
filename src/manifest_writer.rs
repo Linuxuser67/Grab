@@ -366,7 +366,7 @@ impl OrderedTrackWriter {
                     drop(output);
                     if let Some(destination_part) = destination_part.as_ref() {
                         let _ = crate::manifest_destination::remove_owned_part_async(
-                            directory.to_path_buf(),
+                        directory.to_path_buf(),
                         destination_part.destination.clone(),
                         destination_part.item_id,
                         destination_part.track,

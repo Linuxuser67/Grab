@@ -6,7 +6,7 @@
 
 use std::fs::{self, File};
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 

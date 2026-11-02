@@ -36,6 +36,10 @@ use hls_live::{
     ensure_live_hls_marker, read_live_hls_marker, restore_local_live_hls_tracks,
     run_live_hls_tracks,
 };
+#[cfg(test)]
+use hls_live::{apply_live_hls_snapshot, load_live_hls_track, write_live_playlist};
+#[cfg(test)]
+use dash_live::apply_dash_live_snapshot;
 
 /// Upper bound for one media resource, independent of a server-supplied length.
 const MAX_RESOURCE_BYTES: u64 = crate::manifest_writer::MAX_RESOURCE_BYTES;

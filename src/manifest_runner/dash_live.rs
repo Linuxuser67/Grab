@@ -421,7 +421,7 @@ async fn dash_live_resource_needs_fetch(
     clippy::too_many_arguments,
     reason = "one rendition update shares its client, cancellation, progress and aggregate byte-budget context"
 )]
-async fn apply_dash_live_snapshot(
+pub(super) async fn apply_dash_live_snapshot(
     client: &reqwest::Client,
     plan: &DashRepresentationPlan,
     track: &mut DashLiveTrack,

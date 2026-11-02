@@ -107,7 +107,7 @@ pub(super) async fn ensure_live_hls_marker(directory: &Path) -> Result<(), Strin
     Ok(())
 }
 
-async fn load_live_hls_track(
+pub(super) async fn load_live_hls_track(
     plan: &HlsPlan,
     directory: &Path,
 ) -> Result<LiveHlsTrack, ManifestRunError> {

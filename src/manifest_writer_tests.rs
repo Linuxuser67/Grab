@@ -594,6 +594,8 @@ fn rejects_unsafe_and_duplicate_resource_names() {
     let mut unique = std::collections::HashSet::new();
     assert!(names.iter().any(|name| !unique.insert(name)));
 
+}
+
 #[tokio::test]
 async fn destination_part_stays_visible_until_final_container_cleanup() {
     let directory = test_directory();
@@ -727,4 +729,3 @@ async fn migrates_a_completed_staging_track_to_the_owned_destination_part() {
         .expect("remove staging");
 }
 
-}

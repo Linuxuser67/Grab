@@ -3238,8 +3238,22 @@ mod tests {
             !video_dir.join("video-track.mp4.checkpoint.json").exists(),
             "track checkpoint should be removed from its track directory"
         );
+        let part_path = crate::manifest_destination::part_path(
+            staging.path(),
+            &destination,
+            42,
+            crate::manifest_destination::TrackKind::Video,
+        )
+        .expect("resolve destination part after cleanup");
+        let part_name = part_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("destination part has a filename");
         assert!(
-            !staging.path().join("video.part.owner.json").exists(),
+            !staging
+                .path()
+                .join(format!("{part_name}.owner.json"))
+                .exists(),
             "destination owner record should be removed from the XDG staging root"
         );
     }

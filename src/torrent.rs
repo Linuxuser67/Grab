@@ -851,9 +851,11 @@ fn remove_beneath(path: &std::path::Path, folder: &std::path::Path, remove_final
         let Some(parent) = stack.last() else {
             return;
         };
-        if let Err(error) =
-            rustix::fs::unlinkat(&parent.fd, target_name.as_c_str(), rustix::fs::AtFlags::empty())
-        {
+        if let Err(error) = rustix::fs::unlinkat(
+            &parent.fd,
+            target_name.as_c_str(),
+            rustix::fs::AtFlags::empty(),
+        ) {
             if error != rustix::io::Errno::NOENT {
                 tracing::debug!(path = %path.display(), error = %error, "torrent file cleanup failed");
                 return;

@@ -613,6 +613,7 @@ impl OrderedTrackWriter {
 /// Returns an error if the part is no longer owned by this item or metadata cleanup fails.
 pub(crate) async fn cleanup_destination_part(
     staging: &Path,
+    track_directory: &Path,
     destination: &Path,
     item_id: u64,
     track: crate::manifest_destination::TrackKind,
@@ -625,8 +626,10 @@ pub(crate) async fn cleanup_destination_part(
         track,
     )
     .await?;
-    remove_regular_file_if_present(&staging.join(format!("{filename}.checkpoint.json"))).await?;
-    remove_regular_file_if_present(&staging.join(format!("{filename}.resources"))).await?;
+    remove_regular_file_if_present(&track_directory.join(format!("{filename}.checkpoint.json")))
+        .await?;
+    remove_regular_file_if_present(&track_directory.join(format!("{filename}.resources"))).await?;
+    sync_directory(track_directory).await?;
     sync_directory(staging).await
 }
 

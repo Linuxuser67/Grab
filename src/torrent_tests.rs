@@ -447,10 +447,8 @@ fn descriptor_torrent_cleanup_refuses_intermediate_symlinks() {
 fn rustix_torrent_cleanup_refuses_symlinked_root_and_unlinks_final_symlink_only() {
     use std::os::unix::fs::symlink;
 
-    let base = std::env::temp_dir().join(format!(
-        "grab-torrent-rustix-links-{}",
-        std::process::id()
-    ));
+    let base =
+        std::env::temp_dir().join(format!("grab-torrent-rustix-links-{}", std::process::id()));
     let root = base.join("root");
     let outside = base.join("outside");
     let root_link = base.join("root-link");

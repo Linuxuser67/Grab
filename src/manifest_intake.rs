@@ -1167,19 +1167,19 @@ second.m3u8
     fn preferred_choice_index_matches_configured_height_and_best_uses_highest() {
         let choices = [
             ManifestChoice {
-                key: "720".into(),"
+                key: "720".into(),
                 label: "720p".to_string(),
                 height: Some(720),
                 bandwidth: Some(1_000_000),
             },
             ManifestChoice {
-                key: "1080".into(),"
+                key: "1080".into(),
                 label: "1080p".to_string(),
                 height: Some(1080),
                 bandwidth: Some(2_500_000),
             },
             ManifestChoice {
-                key: "1440".into(),"
+                key: "1440".into(),
                 label: "1440p".to_string(),
                 height: Some(1440),
                 bandwidth: Some(4_000_000),

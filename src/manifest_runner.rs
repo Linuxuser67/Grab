@@ -3856,7 +3856,7 @@ async fn run_live_dash_tracks(
                 url: source_url.to_string(),
                 kind: ManifestKind::Dash,
                 representation_key: ManifestRepresentationKey::from(representation_key),
-                audio_key: audio_key.clone(),
+                audio_key: audio_key.clone().map(crate::media_types::ManifestAudioKey::from),
                 subtitle_key: None,
                 subtitle_language: None,
             },
@@ -4765,7 +4765,7 @@ mod tests {
         let source = ManifestSource {
             url: manifest_url.to_string(),
             kind: ManifestKind::Dash,
-            representation_key: representation_key.clone(),
+            representation_key: representation_key.clone().into(),
             audio_key: None,
             subtitle_key: None,
             subtitle_language: None,

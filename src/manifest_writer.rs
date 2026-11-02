@@ -341,8 +341,7 @@ impl OrderedTrackWriter {
             length: copied,
             sha256,
         };
-        append_resource_record(&self.journal_path, self.next_resource_index, &resource)
-        .await?;
+        append_resource_record(&self.journal_path, self.next_resource_index, &resource).await?;
 
         let next_resource_index = self
             .next_resource_index

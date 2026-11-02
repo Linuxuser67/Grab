@@ -3088,7 +3088,10 @@ async fn load_dash_live_track(
     };
     validate_dash_live_state(&state, representation_key)?;
 
-    let resource_names = state.resource_names().map(str::to_string).collect::<Vec<_>>();
+    let resource_names = state
+        .resource_names()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     let committed_resources = crate::manifest_writer::committed_resource_prefix(
         &resource_names,
         directory,
@@ -3097,16 +3100,20 @@ async fn load_dash_live_track(
     .await
     .map_err(ManifestRunError::Failed)?;
     let committed_resource_count = committed_resources.len();
-    let committed_bytes = committed_resources.iter().try_fold(0_u64, |total, resource| {
-        if resource.length == 0 || resource.length > MAX_RESOURCE_BYTES {
-            return Err(ManifestRunError::Failed(
-                "A committed dynamic DASH resource has an invalid size".to_string(),
-            ));
-        }
-        total.checked_add(resource.length).ok_or_else(|| {
-            ManifestRunError::Failed("The committed dynamic DASH byte total overflowed".to_string())
-        })
-    })?;
+    let committed_bytes = committed_resources
+        .iter()
+        .try_fold(0_u64, |total, resource| {
+            if resource.length == 0 || resource.length > MAX_RESOURCE_BYTES {
+                return Err(ManifestRunError::Failed(
+                    "A committed dynamic DASH resource has an invalid size".to_string(),
+                ));
+            }
+            total.checked_add(resource.length).ok_or_else(|| {
+                ManifestRunError::Failed(
+                    "The committed dynamic DASH byte total overflowed".to_string(),
+                )
+            })
+        })?;
     let current_resources: std::collections::HashMap<&str, &DashResource> = current_plan
         .into_iter()
         .flat_map(|plan| plan.resources.iter())
@@ -3119,16 +3126,22 @@ async fn load_dash_live_track(
             if committed.length == 0
                 || committed.length > MAX_RESOURCE_BYTES
                 || expected.is_some_and(|resource| {
-                    resource.range.is_some_and(|range| range.length != committed.length)
+                    resource
+                        .range
+                        .is_some_and(|range| range.length != committed.length)
                 })
             {
                 return Err(ManifestRunError::Failed(
                     "A committed dynamic DASH resource has an invalid length".to_string(),
                 ));
             }
-            retained_bytes = retained_bytes.checked_add(committed.length).ok_or_else(|| {
-                ManifestRunError::Failed("The staged dynamic DASH byte total overflowed".to_string())
-            })?;
+            retained_bytes = retained_bytes
+                .checked_add(committed.length)
+                .ok_or_else(|| {
+                    ManifestRunError::Failed(
+                        "The staged dynamic DASH byte total overflowed".to_string(),
+                    )
+                })?;
             continue;
         }
 
@@ -3152,11 +3165,15 @@ async fn load_dash_live_track(
             let cached_is_valid = metadata.len() > 0
                 && metadata.len() <= MAX_RESOURCE_BYTES
                 && expected.is_none_or(|resource| {
-                    resource.range.is_none_or(|range| metadata.len() == range.length)
+                    resource
+                        .range
+                        .is_none_or(|range| metadata.len() == range.length)
                 });
             if cached_is_valid {
                 retained_bytes = retained_bytes.checked_add(metadata.len()).ok_or_else(|| {
-                    ManifestRunError::Failed("The staged dynamic DASH byte total overflowed".to_string())
+                    ManifestRunError::Failed(
+                        "The staged dynamic DASH byte total overflowed".to_string(),
+                    )
                 })?;
             } else if expected.is_none() {
                 return Err(ManifestRunError::Failed(
@@ -3538,8 +3555,13 @@ async fn apply_dash_live_snapshot(
     if candidate.segments.len() > MAX_DASH_LIVE_SEGMENTS {
         return Ok(DashLiveUpdateOutcome::ContinuityLost);
     }
-    let retained_bytes =
-        dash_live_track_bytes(&candidate, &track.directory, track.committed_resource_count, track.committed_bytes).await?;
+    let retained_bytes = dash_live_track_bytes(
+        &candidate,
+        &track.directory,
+        track.committed_resource_count,
+        track.committed_bytes,
+    )
+    .await?;
     if retained_bytes
         .checked_add(other_rendition_bytes)
         .is_none_or(|total| total > MAX_MANIFEST_DOWNLOAD_BYTES)
@@ -3622,8 +3644,13 @@ async fn run_live_dash_tracks(
                 !video.state.segments.is_empty(),
             );
             if matches!(outcome, DashLiveCaptureOutcome::Unrecoverable) {
-                let staged_video_bytes =
-                    dash_live_track_bytes(&video.state, &video.directory, video.committed_resource_count, video.committed_bytes).await?;
+                let staged_video_bytes = dash_live_track_bytes(
+                    &video.state,
+                    &video.directory,
+                    video.committed_resource_count,
+                    video.committed_bytes,
+                )
+                .await?;
                 persist_unrecoverable_live_capture(
                     staging_dir,
                     "dash",
@@ -3728,7 +3755,13 @@ async fn run_live_dash_tracks(
         let Some(plan) = current_audio_plan.as_ref() else {
             finish_capture!(DashLiveCaptureOutcome::FinishVideoOnly);
         };
-        let updated_video_bytes = dash_live_track_bytes(&video.state, &video.directory, video.committed_resource_count, video.committed_bytes).await?;
+        let updated_video_bytes = dash_live_track_bytes(
+            &video.state,
+            &video.directory,
+            video.committed_resource_count,
+            video.committed_bytes,
+        )
+        .await?;
         match apply_dash_live_snapshot(
             client,
             plan,
@@ -3858,7 +3891,15 @@ async fn run_live_dash_tracks(
         current_audio_plan = refreshed.1;
         next_refresh_at = dash_next_refresh_deadline(&current_video_plan.presentation)?;
         let current_audio_bytes = match audio.as_ref() {
-            Some((track, _)) => dash_live_track_bytes(&track.state, &track.directory, track.committed_resource_count, track.committed_bytes).await?,
+            Some((track, _)) => {
+                dash_live_track_bytes(
+                    &track.state,
+                    &track.directory,
+                    track.committed_resource_count,
+                    track.committed_bytes,
+                )
+                .await?
+            }
             None => 0,
         };
 
@@ -3899,7 +3940,13 @@ async fn run_live_dash_tracks(
 
         match (&mut audio, current_audio_plan.as_ref()) {
             (Some((track, _)), Some(plan)) => {
-                let video_bytes = dash_live_track_bytes(&video.state, &video.directory, video.committed_resource_count, video.committed_bytes).await?;
+                let video_bytes = dash_live_track_bytes(
+                    &video.state,
+                    &video.directory,
+                    video.committed_resource_count,
+                    video.committed_bytes,
+                )
+                .await?;
                 match apply_dash_live_snapshot(
                     client,
                     plan,
@@ -3943,7 +3990,13 @@ async fn run_live_dash_tracks(
                     .unwrap_or_else(|| plan.representation.live_key.clone());
                 let (mut track, _) =
                     load_dash_live_track(&key, audio_dir, Some(plan), "audio-track.mp4").await?;
-                let video_bytes = dash_live_track_bytes(&video.state, &video.directory, video.committed_resource_count, video.committed_bytes).await?;
+                let video_bytes = dash_live_track_bytes(
+                    &video.state,
+                    &video.directory,
+                    video.committed_resource_count,
+                    video.committed_bytes,
+                )
+                .await?;
                 match apply_dash_live_snapshot(
                     client,
                     plan,
@@ -3962,7 +4015,13 @@ async fn run_live_dash_tracks(
                             destination_dir,
                             downloaded.load(Ordering::Relaxed),
                         )?;
-                        let bytes = dash_live_track_bytes(&track.state, &track.directory, track.committed_resource_count, track.committed_bytes).await?;
+                        let bytes = dash_live_track_bytes(
+                            &track.state,
+                            &track.directory,
+                            track.committed_resource_count,
+                            track.committed_bytes,
+                        )
+                        .await?;
                         audio_key = Some(key);
                         audio = Some((track, bytes));
                     }
@@ -5337,13 +5396,15 @@ mod tests {
             .expect("write media resource");
 
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
-        let (Some(mut writer), committed) = crate::manifest_writer::OrderedTrackWriter::open_retaining_checkpoint(
-            resources.clone(),
-            &directory,
-            "video-track.mp4",
-        )
-        .await
-        .expect("open live DASH ordered writer") else {
+        let (Some(mut writer), committed) =
+            crate::manifest_writer::OrderedTrackWriter::open_retaining_checkpoint(
+                resources.clone(),
+                &directory,
+                "video-track.mp4",
+            )
+            .await
+            .expect("open live DASH ordered writer")
+        else {
             panic!("a fresh live DASH track must return an active writer");
         };
         assert_eq!(committed, 0);
@@ -5466,8 +5527,8 @@ mod tests {
 
         let (restored, total_bytes) =
             load_dash_live_track(representation_key, &directory, None, "video-track.mp4")
-            .await
-            .expect("restore persisted dynamic DASH track");
+                .await
+                .expect("restore persisted dynamic DASH track");
         assert_eq!(restored.state, track.state);
         assert_eq!(
             restored.state.resource_names().collect::<Vec<_>>(),
@@ -5478,24 +5539,40 @@ mod tests {
             (b"init".len() + b"segment-100".len() + b"segment-101".len()) as u64
         );
         assert_eq!(
-            dash_live_track_bytes(&restored.state, &directory, restored.committed_resource_count, restored.committed_bytes)
-                .await
-                .expect("sum restored staged resources"),
+            dash_live_track_bytes(
+                &restored.state,
+                &directory,
+                restored.committed_resource_count,
+                restored.committed_bytes
+            )
+            .await
+            .expect("sum restored staged resources"),
             total_bytes
         );
 
-        let resource_names = track.state.resource_names().map(str::to_string).collect::<Vec<_>>();
+        let resource_names = track
+            .state
+            .resource_names()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
-        let (Some(mut writer), _) = crate::manifest_writer::OrderedTrackWriter::open_retaining_checkpoint(
-            resource_names.clone(),
-            &directory,
-            "video-track.mp4",
-        )
-        .await
-        .expect("open live DASH track writer") else {
+        let (Some(mut writer), _) =
+            crate::manifest_writer::OrderedTrackWriter::open_retaining_checkpoint(
+                resource_names.clone(),
+                &directory,
+                "video-track.mp4",
+            )
+            .await
+            .expect("open live DASH track writer")
+        else {
             panic!("a fresh live DASH track must return an active writer");
         };
-        assert!(writer.append_next(&mut abort).await.expect("append first live DASH resource"));
+        assert!(
+            writer
+                .append_next(&mut abort)
+                .await
+                .expect("append first live DASH resource")
+        );
         drop(writer);
 
         let (restored_partial, partial_bytes) =
@@ -5505,23 +5582,35 @@ mod tests {
         assert_eq!(restored_partial.state, track.state);
         assert_eq!(partial_bytes, total_bytes);
         assert_eq!(
-            dash_live_track_bytes(&restored_partial.state, &directory, restored_partial.committed_resource_count, restored_partial.committed_bytes)
-                .await
-                .expect("sum partially committed track bytes"),
+            dash_live_track_bytes(
+                &restored_partial.state,
+                &directory,
+                restored_partial.committed_resource_count,
+                restored_partial.committed_bytes
+            )
+            .await
+            .expect("sum partially committed track bytes"),
             total_bytes
         );
 
-        let (Some(mut writer), _) = crate::manifest_writer::OrderedTrackWriter::open_retaining_checkpoint(
-            resource_names.clone(),
-            &directory,
-            "video-track.mp4",
-        )
-        .await
-        .expect("resume partially committed live DASH track") else {
+        let (Some(mut writer), _) =
+            crate::manifest_writer::OrderedTrackWriter::open_retaining_checkpoint(
+                resource_names.clone(),
+                &directory,
+                "video-track.mp4",
+            )
+            .await
+            .expect("resume partially committed live DASH track")
+        else {
             panic!("an interrupted live DASH track must return an active writer");
         };
         while writer.next_resource_index() < resource_names.len() {
-            assert!(writer.append_next(&mut abort).await.expect("append remaining live DASH resource"));
+            assert!(
+                writer
+                    .append_next(&mut abort)
+                    .await
+                    .expect("append remaining live DASH resource")
+            );
         }
         writer.finish().await.expect("publish live DASH track");
         crate::manifest_writer::cleanup_committed_resources(
@@ -5539,9 +5628,14 @@ mod tests {
         assert_eq!(restored_without_sources.state, track.state);
         assert_eq!(restored_bytes, total_bytes);
         assert_eq!(
-            dash_live_track_bytes(&restored_without_sources.state, &directory, restored_without_sources.committed_resource_count, restored_without_sources.committed_bytes)
-                .await
-                .expect("sum verified track bytes after source cleanup"),
+            dash_live_track_bytes(
+                &restored_without_sources.state,
+                &directory,
+                restored_without_sources.committed_resource_count,
+                restored_without_sources.committed_bytes
+            )
+            .await
+            .expect("sum verified track bytes after source cleanup"),
             total_bytes
         );
 

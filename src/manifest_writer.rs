@@ -206,22 +206,19 @@ impl OrderedTrackWriter {
     pub(crate) async fn open_destination_part(
         resources: Vec<String>,
         directory: &Path,
+        staging: &Path,
         filename: &str,
         destination: &Path,
         item_id: u64,
         track: crate::manifest_destination::TrackKind,
     ) -> Result<(Option<Self>, u64), String> {
-        let staging = directory
-            .parent()
-            .ok_or_else(|| "The manifest track directory has no staging parent".to_string())?
-            .to_path_buf();
         Box::pin(Self::open_with_policy(
             resources,
             directory,
             filename,
             CheckpointPolicy::RetainAfterPublish,
             Some(DestinationPart {
-                staging,
+                staging: staging.to_path_buf(),
                 destination: destination.to_path_buf(),
                 item_id,
                 track,

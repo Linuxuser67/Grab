@@ -1135,10 +1135,11 @@ async fn open_regular_file_no_follow_async(
     path: &Path,
 ) -> Result<tokio::fs::File, String> {
     let path = path.to_path_buf();
+    let display_path = path.display().to_string();
     let file = tokio::task::spawn_blocking(move || open_regular_file_no_follow(&path))
         .await
         .map_err(|error| format!("DASH file open task failed: {error}"))?
-        .map_err(|error| format!("Could not safely open {}: {error}", path.display()))?;
+        .map_err(|error| format!("Could not safely open {display_path}: {error}"))?;
     Ok(tokio::fs::File::from_std(file))
 }
 

@@ -48,7 +48,8 @@ pub(crate) enum ManifestKind {
 }
 
 macro_rules! manifest_key {
-    ($name:ident) => {
+    ($name:ident, $description:literal) => {
+        #[doc = $description]
         #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
         #[serde(transparent)]
         pub(crate) struct $name(String);

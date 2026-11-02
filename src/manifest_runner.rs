@@ -3223,6 +3223,25 @@ mod tests {
                 .expect("read assembled DASH track"),
             b"initonetwo"
         );
+
+        crate::manifest_writer::cleanup_destination_part(
+            staging.path(),
+            &video_dir,
+            &destination,
+            42,
+            crate::manifest_destination::TrackKind::Video,
+            "video-track.mp4",
+        )
+        .await
+        .expect("clean destination part and nested track checkpoint");
+        assert!(
+            !video_dir.join("video-track.mp4.checkpoint.json").exists(),
+            "track checkpoint should be removed from its track directory"
+        );
+        assert!(
+            !staging.path().join("video.part.owner.json").exists(),
+            "destination owner record should be removed from the XDG staging root"
+        );
     }
 
     #[tokio::test]

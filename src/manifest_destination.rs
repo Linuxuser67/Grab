@@ -289,6 +289,9 @@ pub(crate) fn open_owned_part(
             file.set_permissions(fs::Permissions::from_mode(0o600))
                 .map_err(|error| format!("Could not secure destination manifest part: {error}"))?;
             file.sync_all().map_err(|error| format!("Could not sync destination manifest part: {error}"))?;
+            let parent = path.parent().ok_or_else(|| "The manifest part has no parent directory".to_string())?;
+            File::open(parent).and_then(|directory| directory.sync_all())
+                .map_err(|error| format!("Could not sync destination directory after creating manifest part: {error}"))?;
             let identity = file_identity(&file)?;
             let owner = PartOwner {
                 version: 1,
@@ -441,6 +444,65 @@ mod tests {
                 "Example video.42.subtitles.part",
             ]
         );
+    }
+
+
+    #[test]
+    fn owned_part_is_exclusive_durable_and_reopenable() {
+        let destination_dir = tempfile::tempdir().expect("create destination");
+        let staging = tempfile::tempdir().expect("create staging");
+        let destination = destination_dir.path().join("Example.mp4");
+        ensure_plan(staging.path(), &destination, 42, false, false).expect("write plan");
+
+        let part = part_path(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("resolve part path");
+        let mut file = open_owned_part(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("claim destination part");
+        file.write_all(b"partial media").expect("write part");
+        file.sync_all().expect("sync part");
+        drop(file);
+
+        let reopened = open_owned_part(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("reopen owned part");
+        assert_eq!(reopened.metadata().expect("part metadata").len(), 13);
+        drop(reopened);
+        assert_eq!(fs::read(&part).expect("read part"), b"partial media");
+
+        remove_owned_part(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("remove owned part");
+        assert!(!part.exists());
+    }
+
+    #[test]
+    fn preexisting_destination_part_without_owner_is_preserved() {
+        let destination_dir = tempfile::tempdir().expect("create destination");
+        let staging = tempfile::tempdir().expect("create staging");
+        let destination = destination_dir.path().join("Example.mp4");
+        ensure_plan(staging.path(), &destination, 42, false, false).expect("write plan");
+        let part = part_path(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("resolve part path");
+        fs::write(&part, b"foreign data").expect("create foreign file");
+
+        assert!(open_owned_part(staging.path(), &destination, 42, TrackKind::Video).is_err());
+        assert_eq!(fs::read(part).expect("read preserved file"), b"foreign data");
+    }
+
+    #[test]
+    fn replaced_destination_part_is_not_reopened_or_removed() {
+        let destination_dir = tempfile::tempdir().expect("create destination");
+        let staging = tempfile::tempdir().expect("create staging");
+        let destination = destination_dir.path().join("Example.mp4");
+        ensure_plan(staging.path(), &destination, 42, false, false).expect("write plan");
+        let part = part_path(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("resolve part path");
+        drop(open_owned_part(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("claim destination part"));
+        fs::remove_file(&part).expect("replace owned part");
+        fs::write(&part, b"replacement").expect("write replacement");
+
+        assert!(open_owned_part(staging.path(), &destination, 42, TrackKind::Video).is_err());
+        assert!(remove_owned_part(staging.path(), &destination, 42, TrackKind::Video).is_err());
+        assert_eq!(fs::read(part).expect("read replacement"), b"replacement");
     }
 
     #[test]

@@ -252,7 +252,9 @@ impl OrderedTrackWriter {
                     )?);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("Could not inspect destination DASH part: {error}")),
+                Err(error) => {
+                    return Err(format!("Could not inspect destination DASH part: {error}"));
+                }
             }
         }
         let checkpoint_state = load_checkpoint(
@@ -294,7 +296,12 @@ impl OrderedTrackWriter {
                     committed_offset,
                     resources,
                     migrate_from_target,
-                } => (next_resource_index, committed_offset, resources, migrate_from_target),
+                } => (
+                    next_resource_index,
+                    committed_offset,
+                    resources,
+                    migrate_from_target,
+                ),
             };
         if checkpoint_policy == CheckpointPolicy::RetainAfterPublish {
             remove_committed_source_files(&resources, directory, &committed_resources).await?;
@@ -330,13 +337,20 @@ impl OrderedTrackWriter {
                             destination_part.track,
                         );
                     }
-                    return Err(format!("Could not safely open the completed staging track for migration: {error}"));
+                    return Err(format!(
+                        "Could not safely open the completed staging track for migration: {error}"
+                    ));
                 }
             };
-            output.set_len(0).await
-                .map_err(|error| format!("Could not reset the destination DASH part for migration: {error}"))?;
-            output.seek(std::io::SeekFrom::Start(0)).await
-                .map_err(|error| format!("Could not seek to the start of the destination DASH part: {error}"))?;
+            output.set_len(0).await.map_err(|error| {
+                format!("Could not reset the destination DASH part for migration: {error}")
+            })?;
+            output
+                .seek(std::io::SeekFrom::Start(0))
+                .await
+                .map_err(|error| {
+                    format!("Could not seek to the start of the destination DASH part: {error}")
+                })?;
             let copied = match tokio::io::copy(&mut input, &mut output).await {
                 Ok(copied) => copied,
                 Err(error) => {
@@ -349,7 +363,9 @@ impl OrderedTrackWriter {
                             destination_part.track,
                         );
                     }
-                    return Err(format!("Could not migrate the completed staging track: {error}"));
+                    return Err(format!(
+                        "Could not migrate the completed staging track: {error}"
+                    ));
                 }
             };
             if copied != committed_offset {
@@ -362,10 +378,13 @@ impl OrderedTrackWriter {
                         destination_part.track,
                     );
                 }
-                return Err("The completed staging track length does not match its checkpoint".to_string());
+                return Err(
+                    "The completed staging track length does not match its checkpoint".to_string(),
+                );
             }
-            output.sync_all().await
-                .map_err(|error| format!("Could not sync the migrated destination DASH part: {error}"))?;
+            output.sync_all().await.map_err(|error| {
+                format!("Could not sync the migrated destination DASH part: {error}")
+            })?;
             if let Some(parent) = part.parent() {
                 sync_directory(parent).await?;
             }
@@ -956,7 +975,9 @@ async fn load_checkpoint(
         if !allow_part_and_target || checkpoint.next_resource_index != resources.len() {
             return Err("Both interrupted and published DASH tracks exist for an unsupported checkpoint state".to_string());
         }
-        let target_length = target_metadata.as_ref().map_or(0, |metadata| metadata.len());
+        let target_length = target_metadata
+            .as_ref()
+            .map_or(0, |metadata| metadata.len());
         if target_length != checkpoint.committed_offset {
             return Err("The completed staging track does not match its checkpoint".to_string());
         }
@@ -1044,7 +1065,6 @@ async fn load_checkpoint(
         })
     }
 }
-
 
 fn open_regular_file_no_follow(path: &Path) -> Result<std::fs::File, std::io::Error> {
     let mut options = std::fs::OpenOptions::new();

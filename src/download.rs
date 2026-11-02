@@ -3761,6 +3761,9 @@ impl DownloadManager {
                 let worker_abort = handle.abort_handle();
                 let finalizer = crate::runtime::tokio_rt().spawn(async move {
                     let _ = handle.await;
+                    // A cancelled publisher may have detached its blocking rollback.
+                    // Do not inspect delivery until that filesystem work has completed.
+                    gate.wait_for_rollbacks().await;
                     let remove_delivered_orphan = gate.was_delivered();
                     cleanup_discarded_files(dest.clone(), id, remove_delivered_orphan).await;
                     if let Ok(mut r) = reservations.lock() {

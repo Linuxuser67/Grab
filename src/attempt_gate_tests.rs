@@ -62,3 +62,31 @@ fn a_shared_gate_is_the_same_gate() {
         "the other handle did not observe the discard"
     );
 }
+
+#[test]
+fn rollback_waiter_waits_for_every_registered_job() {
+    use std::future::Future as _;
+    use std::task::{Context, Poll, Waker};
+
+    let gate = AttemptGate::new();
+    gate.begin_rollback();
+    gate.begin_rollback();
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut waiting = std::pin::pin!(gate.wait_for_rollbacks());
+
+    assert!(
+        matches!(waiting.as_mut().poll(&mut context), Poll::Pending),
+        "registered rollback jobs must keep the waiter pending"
+    );
+    gate.finish_rollback();
+    assert!(
+        matches!(waiting.as_mut().poll(&mut context), Poll::Pending),
+        "one remaining rollback job must keep the waiter pending"
+    );
+    gate.finish_rollback();
+    assert!(
+        matches!(waiting.as_mut().poll(&mut context), Poll::Ready(())),
+        "the waiter completes after every rollback job finishes"
+    );
+}

@@ -7,6 +7,7 @@ use thiserror::Error;
 
 const MARKER_NAME: &str = ".grab-live-unrecoverable.json";
 const MARKER_VERSION: u32 = 1;
+const MAX_MARKER_BYTES: u64 = 4096;
 
 /// Structured failures from unrecoverable live-capture state persistence.
 #[derive(Debug, Error)]
@@ -160,14 +161,20 @@ pub(crate) async fn read(
 }
 
 fn read_sync(staging: &Path) -> Result<UnrecoverableLiveCapture, LiveCaptureStateError> {
-    let bytes =
-        std::fs::read(staging.join(MARKER_NAME)).map_err(|source| LiveCaptureStateError::Io {
+    let bytes = crate::bounded_file::read_regular_file_bounded(
+        &staging.join(MARKER_NAME),
+        MAX_MARKER_BYTES,
+    )
+    .map_err(|error| match error {
+        crate::bounded_file::BoundedFileError::NotRegularFile => {
+            LiveCaptureStateError::NotRegularFile
+        }
+        crate::bounded_file::BoundedFileError::TooLarge => LiveCaptureStateError::TooLarge,
+        crate::bounded_file::BoundedFileError::Io(source) => LiveCaptureStateError::Io {
             operation: "reading the marker",
             source,
-        })?;
-    if bytes.len() > 4096 {
-        return Err(LiveCaptureStateError::TooLarge);
-    }
+        },
+    })?;
     let marker: UnrecoverableLiveCapture =
         serde_json::from_slice(&bytes).map_err(LiveCaptureStateError::Malformed)?;
     marker.validate()?;
@@ -206,6 +213,21 @@ mod tests {
         assert!(matches!(
             persist(directory.path(), "dash", "different reason", 99).await,
             Err(LiveCaptureStateError::ConflictingDecision)
+        ));
+    }
+
+    #[tokio::test]
+    async fn oversized_marker_is_rejected_before_deserialization() {
+        let directory = tempfile::tempdir().expect("create staging");
+        std::fs::write(
+            directory.path().join(MARKER_NAME),
+            vec![b' '; MAX_MARKER_BYTES as usize + 1],
+        )
+        .expect("write oversized marker");
+
+        assert!(matches!(
+            read(directory.path()).await,
+            Err(LiveCaptureStateError::TooLarge)
         ));
     }
 

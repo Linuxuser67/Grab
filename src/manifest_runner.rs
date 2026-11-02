@@ -22,7 +22,7 @@ use crate::manifest::{
 use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
-use crate::media_types::{ManifestKind, ManifestSource};
+use crate::media_types::{ManifestKind, ManifestRepresentationKey, ManifestSource};
 
 /// Upper bound for one media resource, independent of a server-supplied length.
 const MAX_RESOURCE_BYTES: u64 = crate::manifest_writer::MAX_RESOURCE_BYTES;
@@ -249,7 +249,7 @@ impl From<crate::manifest_intake::ManifestIntakeError> for ManifestRunError {
 /// when continuity can no longer be established.
 async fn persist_unrecoverable_live_capture(
     staging_dir: &Path,
-    protocol: &str,
+    protocol: ManifestKind,
     reason: &str,
     staged_bytes: u64,
     downloaded: &AtomicU64,
@@ -353,7 +353,7 @@ struct DashLiveSegment {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct DashLiveState {
     version: u32,
-    representation_key: String,
+    representation_key: ManifestRepresentationKey,
     initialization: Option<String>,
     segments: Vec<DashLiveSegment>,
 }
@@ -362,7 +362,7 @@ impl DashLiveState {
     fn new(representation_key: &str) -> Self {
         Self {
             version: 1,
-            representation_key: representation_key.to_string(),
+            representation_key: ManifestRepresentationKey::from(representation_key),
             initialization: None,
             segments: Vec::new(),
         }
@@ -506,11 +506,7 @@ async fn prepare_manifest_attempt(
         .await
         .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
     if let Some(state) = unrecoverable_state.as_ref() {
-        let expected_protocol = match job.source.kind {
-            ManifestKind::Hls => "hls",
-            ManifestKind::Dash => "dash",
-        };
-        if state.protocol != expected_protocol {
+        if state.protocol != job.source.kind {
             return Err(ManifestRunError::Failed(
                 "The unrecoverable live-capture marker belongs to a different manifest protocol"
                     .to_string(),
@@ -529,25 +525,25 @@ async fn prepare_manifest_attempt(
         }
         tracing::warn!(
             item_id = job.item_id,
-            protocol = %state.protocol,
+            protocol = ?state.protocol,
             reason = %state.reason,
             "resuming finalization of an unrecoverable live capture without polling its source"
         );
     }
     let finish_requested = finish_marker_bytes.is_some();
     let dash_live_requested = job.source.kind == ManifestKind::Dash
-        && job.source.representation_key.starts_with("dash-live-");
+        && job.source.representation_key.as_str().starts_with("dash-live-");
     // A crash may occur after the unrecoverable marker is synced but before
     // the stale audio index is removed. Enforce the video-only decision before
     // restoring either protocol's local track state.
     if let Some(state) = unrecoverable_state.as_ref() {
-        match state.protocol.as_str() {
-            "hls" => {
+        match state.protocol {
+            ManifestKind::Hls => {
                 remove_regular_file_if_present(&audio_dir.join("local.m3u8"))
                     .await
                     .map_err(ManifestRunError::Failed)?;
             }
-            "dash" => {
+            ManifestKind::Dash => {
                 remove_regular_file_if_present(&audio_dir.join(DASH_LIVE_STATE_NAME))
                     .await
                     .map_err(ManifestRunError::Failed)?;
@@ -1213,7 +1209,7 @@ pub(crate) async fn run_manifest_download(
             client: &client,
             source_url: &job.source.url,
             dest_dir: &dest_dir,
-            representation_key: &job.source.representation_key,
+            representation_key: job.source.representation_key.as_str(),
             audio_key: job.source.audio_key.as_deref(),
             video_plan,
             audio_plan,
@@ -2329,7 +2325,7 @@ async fn run_live_hls_tracks(
             }
             persist_unrecoverable_live_capture(
                 staging_dir,
-                "hls",
+                ManifestKind::Hls,
                 "HLS playlist continuity could not be verified",
                 video.accumulator.resource_bytes(),
                 downloaded,
@@ -2384,7 +2380,7 @@ async fn run_live_hls_tracks(
                 }
                 persist_unrecoverable_live_capture(
                     staging_dir,
-                    "hls",
+                    ManifestKind::Hls,
                     "HLS playlist continuity could not be verified",
                     video.accumulator.resource_bytes(),
                     downloaded,
@@ -2461,7 +2457,7 @@ async fn run_live_hls_tracks(
                     }
                     persist_unrecoverable_live_capture(
                         staging_dir,
-                        "hls",
+                        ManifestKind::Hls,
                         "HLS playlist continuity could not be verified",
                         video.accumulator.resource_bytes(),
                         downloaded,
@@ -2511,7 +2507,7 @@ async fn run_live_hls_tracks(
                     }
                     persist_unrecoverable_live_capture(
                         staging_dir,
-                        "hls",
+                        ManifestKind::Hls,
                         "HLS playlist continuity could not be verified",
                         video.accumulator.resource_bytes(),
                         downloaded,
@@ -3033,8 +3029,8 @@ async fn read_dash_live_representation_key(directory: &Path) -> Result<String, M
             "Could not parse saved dynamic DASH audio state: {error}"
         ))
     })?;
-    validate_dash_live_state(&state, &state.representation_key)?;
-    Ok(state.representation_key)
+    validate_dash_live_state(&state, state.representation_key.as_str())?;
+    Ok(state.representation_key.as_str().to_string())
 }
 
 async fn load_dash_live_track(
@@ -3211,7 +3207,7 @@ fn validate_dash_live_state(
     representation_key: &str,
 ) -> Result<(), ManifestRunError> {
     if state.version != DASH_LIVE_STATE_VERSION
-        || state.representation_key != representation_key
+        || state.representation_key.as_str() != representation_key
         || !representation_key
             .strip_prefix("dash-live-")
             .is_some_and(|fingerprint| {
@@ -3255,7 +3251,7 @@ fn validate_dash_live_state(
 }
 
 async fn write_dash_live_state(track: &DashLiveTrack) -> Result<(), ManifestRunError> {
-    validate_dash_live_state(&track.state, &track.state.representation_key)?;
+    validate_dash_live_state(&track.state, track.state.representation_key.as_str())?;
     let bytes = serde_json::to_vec(&track.state)
         .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
     if bytes.len() > MAX_DASH_LIVE_STATE_BYTES {
@@ -3419,7 +3415,7 @@ async fn apply_dash_live_snapshot(
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     other_rendition_bytes: u64,
 ) -> Result<DashLiveUpdateOutcome, ManifestRunError> {
-    if plan.representation.live_key != track.state.representation_key {
+    if plan.representation.live_key != track.state.representation_key.as_str() {
         return Ok(DashLiveUpdateOutcome::ContinuityLost);
     }
 
@@ -3653,7 +3649,7 @@ async fn run_live_dash_tracks(
                 .await?;
                 persist_unrecoverable_live_capture(
                     staging_dir,
-                    "dash",
+                    ManifestKind::Dash,
                     "DASH presentation continuity could not be verified",
                     staged_video_bytes,
                     downloaded,
@@ -3860,7 +3856,7 @@ async fn run_live_dash_tracks(
             &ManifestSource {
                 url: source_url.to_string(),
                 kind: ManifestKind::Dash,
-                representation_key: representation_key.to_string(),
+                representation_key: ManifestRepresentationKey::from(representation_key),
                 audio_key: audio_key.clone(),
                 subtitle_key: None,
                 subtitle_language: None,
@@ -5202,7 +5198,7 @@ mod tests {
 
         persist_unrecoverable_live_capture(
             &directory,
-            "hls",
+            ManifestKind::Hls,
             "HLS playlist continuity could not be verified",
             420,
             &downloaded,
@@ -5440,7 +5436,7 @@ mod tests {
         let key = "dash-live-0123456789abcdef0123456789abcdef";
         let valid = DashLiveState {
             version: DASH_LIVE_STATE_VERSION,
-            representation_key: key.to_string(),
+            representation_key: key.to_string().into(),
             initialization: Some("dash-live-init-0123456789abcdef0123456789abcdef.bin".to_string()),
             segments: vec![
                 DashLiveSegment {
@@ -5494,7 +5490,7 @@ mod tests {
             committed_bytes: 0,
             state: DashLiveState {
                 version: DASH_LIVE_STATE_VERSION,
-                representation_key: representation_key.to_string(),
+                representation_key: ManifestRepresentationKey::from(representation_key),
                 initialization: Some(initialization.to_string()),
                 segments: vec![
                     DashLiveSegment {

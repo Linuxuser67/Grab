@@ -2469,10 +2469,10 @@ async fn fetch_and_write_dash_track(
         downloaded,
         abort,
     } = context;
-    fetch_and_write_ordered_track(
+    fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
         client,
         staging,
-        dash_resources(plan),
+        resources: dash_resources(plan),
         directory,
         filename,
         destination,
@@ -2482,8 +2482,8 @@ async fn fetch_and_write_dash_track(
         tx,
         downloaded,
         abort,
-        false,
-    )
+        format: OrderedTrackFormat::Any,
+    })
     .await
 }
 

@@ -479,9 +479,11 @@ pub(crate) fn download_plan(
             )))
         }
         (NativeManifest::Dash(dash), ManifestKind::Dash) => {
-            let video =
-                crate::manifest::dash::plan_dash_representation(&dash, source.representation_key.as_str())
-                    .map_err(|error| error.to_string())?;
+            let video = crate::manifest::dash::plan_dash_representation(
+                &dash,
+                source.representation_key.as_str(),
+            )
+            .map_err(|error| error.to_string())?;
             let selected_audio = match source.audio_key.as_deref() {
                 Some(audio_key) => Some(
                     dash.audio_representations

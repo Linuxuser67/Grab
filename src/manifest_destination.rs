@@ -4,7 +4,9 @@
 //! module records exact filenames in XDG state before creating visible files;
 //! the plan itself does not authorize cleanup of a destination-side file.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -30,9 +32,9 @@ struct DestinationPart {
     file_name: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum TrackKind {
+pub(crate) enum TrackKind {
     Video,
     Audio,
     Subtitles,
@@ -190,6 +192,226 @@ fn sync_staging_directory(staging: &Path) -> Result<(), String> {
     File::open(staging)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("Could not sync manifest staging directory: {error}"))
+}
+
+
+#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PartOwner {
+    version: u32,
+    item_id: u64,
+    destination_key: String,
+    file_name: String,
+    device: u64,
+    inode: u64,
+}
+
+/// Resolve one planned destination-side part without creating or modifying it.
+pub(crate) fn part_path(
+    staging: &Path,
+    destination: &Path,
+    item_id: u64,
+    track: TrackKind,
+) -> Result<PathBuf, String> {
+    let destination_dir = destination
+        .parent()
+        .ok_or_else(|| "The download destination has no parent directory".to_string())?;
+    let canonical_destination_dir = fs::canonicalize(destination_dir).map_err(|error| {
+        format!("Could not resolve destination directory {}: {error}", destination_dir.display())
+    })?;
+    let destination_key = crate::video_staging::dest_key(&canonical_destination_dir);
+    let plan = read_plan(&staging.join(PLAN_FILE))?
+        .ok_or_else(|| "The manifest destination plan is missing".to_string())?;
+    if plan.version != PLAN_VERSION
+        || plan.item_id != item_id
+        || plan.destination_key != destination_key
+    {
+        return Err("The manifest destination plan belongs to a different download".to_string());
+    }
+    let part = plan.parts.iter().find(|part| part.track == track)
+        .ok_or_else(|| "The requested manifest track is absent from the destination plan".to_string())?;
+    if !safe_file_name(&part.file_name) {
+        return Err("The manifest destination plan contains an unsafe filename".to_string());
+    }
+    Ok(canonical_destination_dir.join(&part.file_name))
+}
+
+/// Open the planned part only when its persisted ownership record proves that
+/// it is the same regular file Grab created for this item and destination.
+///
+/// A file created without a durable owner record is deliberately treated as a
+/// conflict. It is never adopted, truncated, or removed automatically.
+pub(crate) fn open_owned_part(
+    staging: &Path,
+    destination: &Path,
+    item_id: u64,
+    track: TrackKind,
+) -> Result<File, String> {
+    let path = part_path(staging, destination, item_id, track)?;
+    let file_name = path.file_name().and_then(|name| name.to_str())
+        .ok_or_else(|| "The manifest part filename is invalid".to_string())?;
+    let owner_path = staging.join(format!("{file_name}.owner.json"));
+    let destination_dir = destination.parent()
+        .ok_or_else(|| "The download destination has no parent directory".to_string())?;
+    let canonical_destination_dir = fs::canonicalize(destination_dir)
+        .map_err(|error| format!("Could not resolve destination directory: {error}"))?;
+    let destination_key = crate::video_staging::dest_key(&canonical_destination_dir);
+
+    match read_part_owner(&owner_path)? {
+        Some(owner) => {
+            if owner.version != 1
+                || owner.item_id != item_id
+                || owner.destination_key != destination_key
+                || owner.file_name != file_name
+            {
+                return Err("The manifest part ownership record does not match this download".to_string());
+            }
+            let file = open_part_no_follow(&path)?;
+            let identity = file_identity(&file)?;
+            if identity.device != owner.device || identity.inode != owner.inode {
+                return Err("The manifest part was replaced after Grab created it; existing data was preserved".to_string());
+            }
+            Ok(file)
+        }
+        None => {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            let file = options.open(&path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    "A file already exists at the planned manifest part path and has no ownership record; it was preserved".to_string()
+                } else {
+                    format!("Could not exclusively create destination manifest part {}: {error}", path.display())
+                }
+            })?;
+            #[cfg(unix)]
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("Could not secure destination manifest part: {error}"))?;
+            file.sync_all().map_err(|error| format!("Could not sync destination manifest part: {error}"))?;
+            let identity = file_identity(&file)?;
+            let owner = PartOwner {
+                version: 1,
+                item_id,
+                destination_key,
+                file_name: file_name.to_string(),
+                device: identity.device,
+                inode: identity.inode,
+            };
+            write_part_owner(staging, &owner_path, &owner)?;
+            Ok(file)
+        }
+    }
+}
+
+/// Remove a destination part only while its inode still matches Grab's
+/// durable ownership record. A missing file is an idempotent cleanup result.
+///
+/// # Errors
+///
+/// Returns an error if ownership cannot be proven or filesystem cleanup fails.
+pub(crate) fn remove_owned_part(
+    staging: &Path,
+    destination: &Path,
+    item_id: u64,
+    track: TrackKind,
+) -> Result<(), String> {
+    let path = part_path(staging, destination, item_id, track)?;
+    let file_name = path.file_name().and_then(|name| name.to_str())
+        .ok_or_else(|| "The manifest part filename is invalid".to_string())?;
+    let owner_path = staging.join(format!("{file_name}.owner.json"));
+    let Some(owner) = read_part_owner(&owner_path)? else {
+        return Err("The manifest part has no ownership record; it was preserved".to_string());
+    };
+    if owner.version != 1 || owner.item_id != item_id || owner.file_name != file_name {
+        return Err("The manifest part ownership record does not match this download".to_string());
+    }
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("The manifest part was replaced; existing data was preserved".to_string());
+            }
+            let identity = metadata_identity(&metadata)?;
+            if identity.device != owner.device || identity.inode != owner.inode {
+                return Err("The manifest part was replaced; existing data was preserved".to_string());
+            }
+            fs::remove_file(&path)
+                .map_err(|error| format!("Could not remove owned manifest part {}: {error}", path.display()))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Could not inspect owned manifest part: {error}")),
+    }
+    fs::remove_file(&owner_path)
+        .map_err(|error| format!("Could not remove manifest part ownership record: {error}"))?;
+    sync_staging_directory(staging)?;
+    let parent = path.parent().ok_or_else(|| "The manifest part has no parent directory".to_string())?;
+    File::open(parent).and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("Could not sync destination directory: {error}"))
+}
+
+#[derive(Clone, Copy)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn file_identity(file: &File) -> Result<FileIdentity, String> {
+    let metadata = file.metadata()
+        .map_err(|error| format!("Could not inspect destination manifest part: {error}"))?;
+    if !metadata.is_file() {
+        return Err("The destination manifest part is not a regular file".to_string());
+    }
+    metadata_identity(&metadata)
+}
+
+#[cfg(unix)]
+fn metadata_identity(metadata: &fs::Metadata) -> Result<FileIdentity, String> {
+    Ok(FileIdentity { device: metadata.dev(), inode: metadata.ino() })
+}
+
+#[cfg(not(unix))]
+fn metadata_identity(_metadata: &fs::Metadata) -> Result<FileIdentity, String> {
+    Err("Destination manifest part ownership requires Unix file identities".to_string())
+}
+
+fn open_part_no_follow(path: &Path) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    options.open(path).map_err(|error| {
+        format!("Could not safely reopen destination manifest part {}: {error}", path.display())
+    })
+}
+
+fn read_part_owner(path: &Path) -> Result<Option<PartOwner>, String> {
+    let bytes = match crate::bounded_file::read_regular_file_bounded(path, MAX_PLAN_BYTES) {
+        Ok(bytes) => bytes,
+        Err(crate::bounded_file::BoundedFileError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Could not safely read manifest part ownership {}: {error}", path.display())),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| format!("Manifest part ownership record is invalid: {error}"))
+}
+
+fn write_part_owner(staging: &Path, path: &Path, owner: &PartOwner) -> Result<(), String> {
+    let bytes = serde_json::to_vec(owner)
+        .map_err(|error| format!("Could not encode manifest part ownership: {error}"))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(staging)
+        .map_err(|error| format!("Could not create manifest part ownership record: {error}"))?;
+    #[cfg(unix)]
+    temporary.as_file().set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("Could not secure manifest part ownership record: {error}"))?;
+    temporary.write_all(&bytes)
+        .map_err(|error| format!("Could not write manifest part ownership record: {error}"))?;
+    temporary.as_file().sync_all()
+        .map_err(|error| format!("Could not sync manifest part ownership record: {error}"))?;
+    temporary.persist_noclobber(path).map_err(|error| {
+        format!("Could not durably record manifest part ownership: {}", error.error)
+    })?;
+    sync_staging_directory(staging)
 }
 
 #[cfg(test)]

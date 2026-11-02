@@ -263,13 +263,39 @@ impl OrderedTrackWriter {
                     let mut output = tokio::fs::File::from_std(owned);
                     let mut input = tokio::fs::File::open(&target).await
                         .map_err(|error| format!("Could not open the recovered DASH track: {error}"))?;
-                    let copied = tokio::io::copy(&mut input, &mut output).await
-                        .map_err(|error| format!("Could not restore the destination-side DASH part: {error}"))?;
+                    let copied = match tokio::io::copy(&mut input, &mut output).await {
+                        Ok(copied) => copied,
+                        Err(error) => {
+                            drop(output);
+                            let _ = crate::manifest_destination::remove_owned_part(
+                                directory,
+                                &destination_part.destination,
+                                destination_part.item_id,
+                                destination_part.track,
+                            );
+                            return Err(format!("Could not restore the destination-side DASH part: {error}"));
+                        }
+                    };
                     if copied != committed_offset {
+                        drop(output);
+                        let _ = crate::manifest_destination::remove_owned_part(
+                            directory,
+                            &destination_part.destination,
+                            destination_part.item_id,
+                            destination_part.track,
+                        );
                         return Err("The recovered DASH track length does not match its checkpoint".to_string());
                     }
-                    output.sync_all().await
-                        .map_err(|error| format!("Could not sync the restored destination-side DASH part: {error}"))?;
+                    if let Err(error) = output.sync_all().await {
+                        drop(output);
+                        let _ = crate::manifest_destination::remove_owned_part(
+                            directory,
+                            &destination_part.destination,
+                            destination_part.item_id,
+                            destination_part.track,
+                        );
+                        return Err(format!("Could not sync the restored destination-side DASH part: {error}"));
+                    }
                     drop(output);
                     if let Some(parent) = part.parent() {
                         sync_directory(parent).await?;

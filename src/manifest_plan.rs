@@ -548,27 +548,137 @@ fn stable_hls_track_key(prefix: &str, track_kind: &[u8], stable_id: &str) -> Str
     format!("{prefix}{fingerprint}")
 }
 
+/// Content-derived identity for HLS tracks whose origin provides no Apple
+/// stable IDs. The hash deliberately ignores the child host, port, and query
+/// string so the identity survives CDN and signed-URL rotation. It does not
+/// survive path-embedded session tokens: those rows degrade to the documented
+/// "no longer available" fallback instead of picking a wrong track. Truly
+/// identical tracks collide into one key and fail intake validation instead
+/// of being silently disambiguated. Costs one in-memory SHA-256 per track:
+/// no extra network traffic.
 #[must_use]
-pub(crate) fn hls_audio_rendition_key(rendition: &HlsAudioRendition) -> Option<String> {
-    rendition
-        .stable_rendition_id
-        .as_deref()
-        .map(|stable_id| stable_hls_track_key("hls-audio-", b"rendition", stable_id))
+fn derived_hls_track_key(prefix: &str, track_kind: &[u8], fields: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"grab-hls-content-track\0");
+    hasher.update(track_kind);
+    hasher.update([0]);
+    for field in fields {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field);
+    }
+    let digest = hasher.finalize();
+    let fingerprint: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("{prefix}{fingerprint}")
 }
 
-/// Build keys only for subtitle renditions with Apple stable rendition IDs.
+/// Variant content identity: child path plus the quality ladder. Bandwidth is
+/// deliberately excluded — advertised `BANDWIDTH`/`AVERAGE-BANDWIDTH` values
+/// can differ between fetches, and ladder steps almost always differ in path,
+/// resolution, codecs, or frame rate. Rendition content identities drop
+/// language for the same reason (`en-US` vs `en` rotates between fetches; the
+/// group, name, and default flag separate language variants).
+///
+/// Like every content key, always `Some`: `None` arms on consumers are dead
+/// but kept for the same `Option` plumbing as Apple IDs.
+#[must_use]
+fn hls_variant_content_key(variant: &HlsVariant) -> String {
+    derived_hls_track_key(
+        "hls-variant-",
+        b"variant",
+        &[
+            variant.url.path().as_bytes(),
+            &variant.width.unwrap_or_default().to_le_bytes(),
+            &variant.height.unwrap_or_default().to_le_bytes(),
+            &variant
+                .frame_rate
+                .unwrap_or_default()
+                .to_bits()
+                .to_le_bytes(),
+            variant.codecs.as_deref().unwrap_or_default().as_bytes(),
+            variant
+                .audio_group
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+            variant
+                .subtitles_group
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        ],
+    )
+}
+
+/// Audio rendition content identity: group, label, default flag, and child
+/// path. Deliberately omits language: origins may emit `en-US` or `en`
+/// between fetches, so language variants are separated by group, name, and
+/// default flag. Always `Some` (see `hls_variant_content_key`).
+#[must_use]
+fn hls_audio_rendition_content_key(rendition: &HlsAudioRendition) -> String {
+    derived_hls_track_key(
+        "hls-audio-",
+        b"rendition",
+        &[
+            rendition.group_id.as_bytes(),
+            rendition.name.as_bytes(),
+            &[u8::from(rendition.is_default)],
+            rendition
+                .url
+                .as_ref()
+                .map_or(&b"<embedded>"[..], |url| url.path().as_bytes()),
+        ],
+    )
+}
+
+/// Subtitle rendition content identity: group, label, default flag, and
+/// child path; language omitted as in `hls_audio_rendition_content_key`.
+/// Always `Some` (see `hls_variant_content_key`).
+#[must_use]
+fn hls_subtitle_rendition_content_key(rendition: &HlsSubtitleRendition) -> String {
+    derived_hls_track_key(
+        "hls-subtitle-",
+        b"subtitle",
+        &[
+            rendition.group_id.as_bytes(),
+            rendition.name.as_bytes(),
+            &[u8::from(rendition.is_default)],
+            rendition.url.path().as_bytes(),
+        ],
+    )
+}
+
+#[must_use]
+pub(crate) fn hls_audio_rendition_key(rendition: &HlsAudioRendition) -> Option<String> {
+    Some(
+        rendition
+            .stable_rendition_id
+            .as_deref()
+            .map(|stable_id| stable_hls_track_key("hls-audio-", b"rendition", stable_id))
+            .unwrap_or_else(|| hls_audio_rendition_content_key(rendition)),
+    )
+}
+
+/// Build keys for subtitle renditions: Apple stable rendition IDs, else a
+/// derived content identity.
+#[must_use]
+pub(crate) fn hls_subtitle_rendition_key(rendition: &HlsSubtitleRendition) -> Option<String> {
+    Some(
+        rendition
+            .stable_rendition_id
+            .as_deref()
+            .map(|stable_id| stable_hls_track_key("hls-subtitle-", b"subtitle", stable_id))
+            .unwrap_or_else(|| hls_subtitle_rendition_content_key(rendition)),
+    )
+}
+
+#[must_use]
 pub(crate) fn hls_subtitle_rendition_keys(
     renditions: &[HlsSubtitleRendition],
 ) -> Vec<Option<String>> {
-    renditions
-        .iter()
-        .map(|rendition| {
-            rendition
-                .stable_rendition_id
-                .as_deref()
-                .map(|stable_id| stable_hls_track_key("hls-subtitle-", b"subtitle", stable_id))
-        })
-        .collect()
+    renditions.iter().map(hls_subtitle_rendition_key).collect()
 }
 
 fn normalize_subtitle_language(language: &str) -> Option<String> {
@@ -642,7 +752,7 @@ fn subtitle_language_matches(preferred: &str, available: &str) -> bool {
     })
 }
 
-/// Build keys only for renditions with Apple stable rendition IDs.
+/// Build keys for renditions: Apple stable rendition IDs, else derived content identities.
 #[must_use]
 pub(crate) fn hls_audio_rendition_keys(renditions: &[HlsAudioRendition]) -> Vec<Option<String>> {
     renditions.iter().map(hls_audio_rendition_key).collect()
@@ -676,13 +786,16 @@ fn hls_audio_rendition_label(rendition: &HlsAudioRendition) -> String {
 
 #[must_use]
 pub(crate) fn hls_variant_key(variant: &HlsVariant) -> Option<String> {
-    variant
-        .stable_variant_id
-        .as_deref()
-        .map(|stable_id| stable_hls_track_key("hls-variant-", b"variant", stable_id))
+    Some(
+        variant
+            .stable_variant_id
+            .as_deref()
+            .map(|stable_id| stable_hls_track_key("hls-variant-", b"variant", stable_id))
+            .unwrap_or_else(|| hls_variant_content_key(variant)),
+    )
 }
 
-/// Build keys only for variants with Apple stable variant IDs.
+/// Build keys for variants: Apple stable variant IDs, else derived content identities.
 #[must_use]
 pub(crate) fn hls_variant_keys(variants: &[HlsVariant]) -> Vec<Option<String>> {
     variants.iter().map(hls_variant_key).collect()

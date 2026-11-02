@@ -778,6 +778,8 @@ struct ManifestStaticTransfer<'a> {
     client: &'a reqwest::Client,
     tracks: &'a Tracks,
     staging: &'a Path,
+    destination: &'a Path,
+    item_id: u64,
     video_dir: &'a Path,
     audio_dir: &'a Path,
     concurrency: usize,
@@ -796,6 +798,8 @@ async fn transfer_static_manifest_tracks(
         client,
         tracks,
         staging,
+        destination,
+        item_id,
         video_dir,
         audio_dir,
         concurrency,
@@ -871,6 +875,9 @@ async fn transfer_static_manifest_tracks(
                 plan: video,
                 directory: video_dir,
                 filename: "video-track.mp4",
+                destination,
+                item_id,
+                track: crate::manifest_destination::TrackKind::Video,
                 connections: concurrency,
                 tx,
                 downloaded,
@@ -886,6 +893,9 @@ async fn transfer_static_manifest_tracks(
                     plan: audio,
                     directory: audio_dir,
                     filename: "audio-track.mp4",
+                    destination,
+                    item_id,
+                    track: crate::manifest_destination::TrackKind::Audio,
                     connections: concurrency,
                     tx,
                     downloaded,
@@ -903,6 +913,9 @@ async fn transfer_static_manifest_tracks(
                     plan: subtitle,
                     directory: &subtitle_dir,
                     filename: "subtitle-track.mp4",
+                    destination,
+                    item_id,
+                    track: crate::manifest_destination::TrackKind::Subtitles,
                     connections: concurrency,
                     tx,
                     downloaded,
@@ -1273,6 +1286,8 @@ pub(crate) async fn run_manifest_download(
         client: &client,
         tracks: &tracks,
         staging: &staging,
+        destination: &job.dest,
+        item_id: job.item_id,
         video_dir: &video_dir,
         audio_dir: &audio_dir,
         concurrency,
@@ -1286,6 +1301,7 @@ pub(crate) async fn run_manifest_download(
     }
     finalize_manifest_download(ManifestFinalization {
         job: &job,
+        destination_parts: !live_dash && matches!(&tracks, Tracks::Dash { .. }),
         gate,
         abort,
         tx: &tx,
@@ -1308,6 +1324,7 @@ pub(crate) async fn run_manifest_download(
 /// user-initiated resume can reuse completed resources.
 struct ManifestFinalization<'a> {
     job: &'a ManifestJob,
+    destination_parts: bool,
     gate: Arc<crate::attempt_gate::AttemptGate>,
     abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
@@ -1331,6 +1348,7 @@ async fn finalize_manifest_download(
 ) -> Result<ManifestOutcome, ManifestRunError> {
     let ManifestFinalization {
         job,
+        destination_parts,
         gate,
         mut abort,
         tx,
@@ -1350,23 +1368,79 @@ async fn finalize_manifest_download(
     tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
         .ok();
 
-    let video_input = match tracks {
+    let video_input = match &tracks {
         Tracks::Hls { .. } => video_dir.join("local.m3u8"),
+        Tracks::Dash { .. } if destination_parts => crate::manifest_destination::part_path_async(
+            staging.to_path_buf(),
+            job.dest.clone(),
+            job.item_id,
+            crate::manifest_destination::TrackKind::Video,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?,
         Tracks::Dash { .. } | Tracks::DashLiveOffline { .. } => video_dir.join("video-track.mp4"),
     };
-    let audio_input = has_audio.then(|| match job.source.kind {
-        ManifestKind::Hls => audio_dir.join("local.m3u8"),
-        ManifestKind::Dash => audio_dir.join("audio-track.mp4"),
-    });
+    let audio_input = if has_audio {
+        Some(if destination_parts {
+            crate::manifest_destination::part_path_async(
+                staging.to_path_buf(),
+                job.dest.clone(),
+                job.item_id,
+                crate::manifest_destination::TrackKind::Audio,
+            )
+            .await
+            .map_err(ManifestRunError::Failed)?
+        } else {
+            match job.source.kind {
+                ManifestKind::Hls => audio_dir.join("local.m3u8"),
+                ManifestKind::Dash => audio_dir.join("audio-track.mp4"),
+            }
+        })
+    } else {
+        None
+    };
     let subtitle_input = match &tracks {
         Tracks::Hls {
             subtitle: Some(_), ..
         } => Some(staging.join("subtitles/local.m3u8")),
         Tracks::Dash {
             subtitle: Some(_), ..
+        } if destination_parts => Some(
+            crate::manifest_destination::part_path_async(
+                staging.to_path_buf(),
+                job.dest.clone(),
+                job.item_id,
+                crate::manifest_destination::TrackKind::Subtitles,
+            )
+            .await
+            .map_err(ManifestRunError::Failed)?,
+        ),
+        Tracks::Dash {
+            subtitle: Some(_), ..
         } => Some(staging.join("subtitles/subtitle-track.mp4")),
         _ => None,
     };
+    if destination_parts {
+        for (track, should_verify) in [
+            (crate::manifest_destination::TrackKind::Video, true),
+            (crate::manifest_destination::TrackKind::Audio, has_audio),
+            (
+                crate::manifest_destination::TrackKind::Subtitles,
+                subtitle_input.is_some(),
+            ),
+        ] {
+            if should_verify {
+                crate::manifest_destination::verify_owned_part_async(
+                    staging.to_path_buf(),
+                    job.dest.clone(),
+                    job.item_id,
+                    track,
+                )
+                .await
+                .map_err(ManifestRunError::Failed)?;
+            }
+        }
+    }
     let subtitle_language = match &tracks {
         Tracks::Hls {
             subtitle_language, ..
@@ -1463,16 +1537,65 @@ async fn finalize_manifest_download(
             ));
         }
     }
+    let mut destination_parts_cleaned = true;
+    if destination_parts {
+        for (track, filename) in [
+            (
+                crate::manifest_destination::TrackKind::Video,
+                "video-track.mp4",
+            ),
+            (
+                crate::manifest_destination::TrackKind::Audio,
+                "audio-track.mp4",
+            ),
+            (
+                crate::manifest_destination::TrackKind::Subtitles,
+                "subtitle-track.mp4",
+            ),
+        ] {
+            let should_clean = match track {
+                crate::manifest_destination::TrackKind::Video => true,
+                crate::manifest_destination::TrackKind::Audio => has_audio,
+                crate::manifest_destination::TrackKind::Subtitles => subtitle_input.is_some(),
+            };
+            if should_clean
+                && let Err(error) = crate::manifest_writer::cleanup_destination_part(
+                    staging,
+                    &job.dest,
+                    job.item_id,
+                    track,
+                    filename,
+                )
+                .await
+            {
+                destination_parts_cleaned = false;
+                tracing::warn!(
+                    item_id = job.item_id,
+                    track = ?track,
+                    error = %error,
+                    "could not clean up an owned manifest destination part after publication"
+                );
+            }
+        }
+    }
+
     if let Some(sidecar) = subtitle_sidecar.as_deref() {
         crate::video_staging::collect_sidecar(sidecar, &job.dest, subtitle_language);
     }
     let parent = job.dest.parent().map(Path::to_path_buf);
     if let Some(parent) = parent {
-        let id = job.item_id;
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::video_staging::clean_manifest_staging_files(&parent, id);
-        })
-        .await;
+        if destination_parts_cleaned {
+            let id = job.item_id;
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::video_staging::clean_manifest_staging_files(&parent, id);
+            })
+            .await;
+        } else {
+            tracing::warn!(
+                item_id = job.item_id,
+                "retaining XDG recovery metadata because a destination part could not be safely cleaned"
+            );
+        }
     }
     Ok(ManifestOutcome::Finished(size))
 }
@@ -2217,6 +2340,9 @@ struct ManifestDashTrackTransfer<'a> {
     plan: &'a DashRepresentationPlan,
     directory: &'a Path,
     filename: &'a str,
+    destination: &'a Path,
+    item_id: u64,
+    track: crate::manifest_destination::TrackKind,
     connections: usize,
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &'a Arc<AtomicU64>,
@@ -2231,6 +2357,9 @@ async fn fetch_and_write_dash_track(
         plan,
         directory,
         filename,
+        destination,
+        item_id,
+        track,
         connections,
         tx,
         downloaded,
@@ -2242,8 +2371,15 @@ async fn fetch_and_write_dash_track(
         .map(|resource| resource.filename.clone())
         .collect::<Vec<_>>();
     let (writer, committed_bytes) =
-        crate::manifest_writer::OrderedTrackWriter::open(resource_names, directory, filename)
-            .await?;
+        crate::manifest_writer::OrderedTrackWriter::open_destination_part(
+            resource_names,
+            directory,
+            filename,
+            destination,
+            item_id,
+            track,
+        )
+        .await?;
     if committed_bytes > 0 {
         let total = reserve_download_bytes(downloaded, committed_bytes)?;
         tx.send(progress_message(total)).ok();
@@ -2759,6 +2895,10 @@ mod tests {
             .build()
             .expect("build direct HTTP client");
         let staging = tempfile::tempdir().expect("create DASH staging");
+        let destination_dir = tempfile::tempdir().expect("create DASH destination");
+        let destination = destination_dir.path().join("Example.mp4");
+        crate::manifest_destination::ensure_plan(staging.path(), &destination, 42, false, false)
+            .expect("persist DASH destination plan");
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let downloaded = Arc::new(AtomicU64::new(0));
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
@@ -2769,6 +2909,9 @@ mod tests {
                 plan: &plan,
                 directory: staging.path(),
                 filename: "video-track.mp4",
+                destination: &destination,
+                item_id: 42,
+                track: crate::manifest_destination::TrackKind::Video,
                 connections: 2,
                 tx: &tx,
                 downloaded: &downloaded,
@@ -2781,8 +2924,15 @@ mod tests {
 
         assert_eq!(maximum.load(Ordering::Relaxed), 2);
         assert_eq!(downloaded.load(Ordering::Relaxed), 10);
+        let part = crate::manifest_destination::part_path(
+            staging.path(),
+            &destination,
+            42,
+            crate::manifest_destination::TrackKind::Video,
+        )
+        .expect("resolve assembled DASH part");
         assert_eq!(
-            tokio::fs::read(staging.path().join("video-track.mp4"))
+            tokio::fs::read(part)
                 .await
                 .expect("read assembled DASH track"),
             b"initonetwo"

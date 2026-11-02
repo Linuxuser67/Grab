@@ -47,6 +47,14 @@ enum CheckpointPolicy {
 }
 
 #[derive(Debug)]
+struct CheckpointPaths<'a> {
+    checkpoint: &'a Path,
+    journal: &'a Path,
+    part: &'a Path,
+    target: &'a Path,
+    directory: &'a Path,
+}
+
 enum CheckpointState {
     Fresh,
     Resume {
@@ -54,8 +62,14 @@ enum CheckpointState {
         committed_offset: u64,
         resources: Vec<CommittedResource>,
     },
+    ResumeFromTarget {
+        next_resource_index: usize,
+        committed_offset: u64,
+        resources: Vec<CommittedResource>,
+    },
     AlreadyComplete {
         committed_offset: u64,
+        resources: Vec<CommittedResource>,
     },
 }
 
@@ -75,6 +89,13 @@ pub(crate) struct OrderedTrackWriter {
     next_resource_index: usize,
     committed_offset: u64,
     checkpoint_policy: CheckpointPolicy,
+    destination_part: Option<DestinationPart>,
+}
+
+struct DestinationPart {
+    destination: std::path::PathBuf,
+    item_id: u64,
+    track: crate::manifest_destination::TrackKind,
 }
 
 struct HashingWriter<'a> {
@@ -135,17 +156,19 @@ impl OrderedTrackWriter {
     /// # Errors
     ///
     /// Returns an error if the resource plan, checkpoint, or staging files are invalid.
+    #[cfg(test)]
     pub(crate) async fn open(
         resources: Vec<String>,
         directory: &Path,
         filename: &str,
     ) -> Result<(Option<Self>, u64), String> {
-        Self::open_with_policy(
+        Box::pin(Self::open_with_policy(
             resources,
             directory,
             filename,
             CheckpointPolicy::RemoveAfterPublish,
-        )
+            None,
+        ))
         .await
     }
 
@@ -162,12 +185,42 @@ impl OrderedTrackWriter {
         directory: &Path,
         filename: &str,
     ) -> Result<(Option<Self>, u64), String> {
-        Self::open_with_policy(
+        Box::pin(Self::open_with_policy(
             resources,
             directory,
             filename,
             CheckpointPolicy::RetainAfterPublish,
-        )
+            None,
+        ))
+        .await
+    }
+
+    /// Open a writer whose output is an exclusively claimed part beside the
+    /// user's final destination. Recovery metadata and source resources remain
+    /// in the XDG staging directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plan, checkpoint, ownership record, or files are invalid.
+    pub(crate) async fn open_destination_part(
+        resources: Vec<String>,
+        directory: &Path,
+        filename: &str,
+        destination: &Path,
+        item_id: u64,
+        track: crate::manifest_destination::TrackKind,
+    ) -> Result<(Option<Self>, u64), String> {
+        Box::pin(Self::open_with_policy(
+            resources,
+            directory,
+            filename,
+            CheckpointPolicy::RetainAfterPublish,
+            Some(DestinationPart {
+                destination: destination.to_path_buf(),
+                item_id,
+                track,
+            }),
+        ))
         .await
     }
 
@@ -176,6 +229,7 @@ impl OrderedTrackWriter {
         directory: &Path,
         filename: &str,
         checkpoint_policy: CheckpointPolicy,
+        destination_part: Option<DestinationPart>,
     ) -> Result<(Option<Self>, u64), String> {
         if resources.is_empty() {
             return Err("The DASH recording contains no media resources".to_string());
@@ -190,61 +244,208 @@ impl OrderedTrackWriter {
 
         let fingerprint = plan_fingerprint(&resources)?;
         let target = directory.join(filename);
-        let part = directory.join(format!("{filename}.part"));
+        let part = match destination_part.as_ref() {
+            Some(destination_part) => {
+                crate::manifest_destination::part_path_async(
+                    directory.to_path_buf(),
+                    destination_part.destination.clone(),
+                    destination_part.item_id,
+                    destination_part.track,
+                )
+                .await?
+            }
+            None => directory.join(format!("{filename}.part")),
+        };
         let checkpoint_path = directory.join(format!("{filename}.checkpoint.json"));
         let journal_path = directory.join(format!("{filename}.resources"));
+        if let Some(destination_part) = destination_part.as_ref() {
+            match tokio::fs::symlink_metadata(&part).await {
+                Ok(_) => {
+                    drop(
+                        crate::manifest_destination::open_owned_part_async(
+                            directory.to_path_buf(),
+                            destination_part.destination.clone(),
+                            destination_part.item_id,
+                            destination_part.track,
+                        )
+                        .await?,
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("Could not inspect destination DASH part: {error}"));
+                }
+            }
+        }
         let checkpoint_state = load_checkpoint(
-            &checkpoint_path,
-            &journal_path,
-            &part,
-            &target,
-            directory,
+            CheckpointPaths {
+                checkpoint: &checkpoint_path,
+                journal: &journal_path,
+                part: &part,
+                target: &target,
+                directory,
+            },
             &fingerprint,
             &resources,
+            destination_part.is_some(),
         )
         .await?;
 
-        let (next_resource_index, committed_offset, committed_resources) = match checkpoint_state {
-            CheckpointState::AlreadyComplete { committed_offset } => {
-                if checkpoint_policy == CheckpointPolicy::RemoveAfterPublish {
-                    remove_regular_file_if_present(&checkpoint_path).await?;
-                    remove_regular_file_if_present(&journal_path).await?;
-                    sync_directory(directory).await?;
+        let (next_resource_index, committed_offset, committed_resources, migration_source) =
+            match checkpoint_state {
+                CheckpointState::AlreadyComplete {
+                    committed_offset,
+                    resources: completed_resources,
+                } => {
+                    if destination_part.is_some() {
+                        (
+                            resources.len(),
+                            committed_offset,
+                            completed_resources,
+                            Some(target.clone()),
+                        )
+                    } else {
+                        if checkpoint_policy == CheckpointPolicy::RemoveAfterPublish {
+                            remove_regular_file_if_present(&checkpoint_path).await?;
+                            remove_regular_file_if_present(&journal_path).await?;
+                            sync_directory(directory).await?;
+                        }
+                        return Ok((None, committed_offset));
+                    }
                 }
-                return Ok((None, committed_offset));
-            }
-            CheckpointState::Fresh => {
-                remove_regular_file_if_present(&part).await?;
-                remove_regular_file_if_present(&target).await?;
-                remove_regular_file_if_present(&journal_path).await?;
-                (0, 0, Vec::new())
-            }
-            CheckpointState::Resume {
-                next_resource_index,
-                committed_offset,
-                resources,
-            } => (next_resource_index, committed_offset, resources),
-        };
+                CheckpointState::Fresh => {
+                    if destination_part.is_none() {
+                        remove_regular_file_if_present(&part).await?;
+                        remove_regular_file_if_present(&target).await?;
+                    }
+                    remove_regular_file_if_present(&journal_path).await?;
+                    (0, 0, Vec::new(), None)
+                }
+                CheckpointState::Resume {
+                    next_resource_index,
+                    committed_offset,
+                    resources,
+                } => (next_resource_index, committed_offset, resources, None),
+                CheckpointState::ResumeFromTarget {
+                    next_resource_index,
+                    committed_offset,
+                    resources,
+                } => (
+                    next_resource_index,
+                    committed_offset,
+                    resources,
+                    Some(target.clone()),
+                ),
+            };
         if checkpoint_policy == CheckpointPolicy::RetainAfterPublish {
             remove_committed_source_files(&resources, directory, &committed_resources).await?;
         }
 
-        let mut output = tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&part)
-            .await
-            .map_err(|error| format!("Could not open the ordered DASH track: {error}"))?;
-        output
-            .set_len(committed_offset)
-            .await
-            .map_err(|error| format!("Could not restore the DASH track checkpoint: {error}"))?;
-        output
-            .seek(std::io::SeekFrom::Start(committed_offset))
-            .await
-            .map_err(|error| format!("Could not seek to the DASH track checkpoint: {error}"))?;
+        let mut output = if let Some(destination_part) = destination_part.as_ref() {
+            crate::manifest_destination::open_owned_part_async(
+                directory.to_path_buf(),
+                destination_part.destination.clone(),
+                destination_part.item_id,
+                destination_part.track,
+            )
+            .await?
+        } else {
+            tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&part)
+                .await
+                .map_err(|error| format!("Could not open the ordered DASH track: {error}"))?
+        };
+        if let Some(migration_source) = migration_source {
+            let mut input = match open_regular_file_no_follow_async(&migration_source).await {
+                Ok(file) => file,
+                Err(error) => {
+                    drop(output);
+                    if let Some(destination_part) = destination_part.as_ref() {
+                        let _ = crate::manifest_destination::remove_owned_part_async(
+                            directory.to_path_buf(),
+                            destination_part.destination.clone(),
+                            destination_part.item_id,
+                            destination_part.track,
+                        )
+                        .await;
+                    }
+                    return Err(format!(
+                        "Could not safely open the completed staging track for migration: {error}"
+                    ));
+                }
+            };
+            verify_resource_ranges_file(&mut input, &migration_source, &committed_resources)
+                .await?;
+            input
+                .seek(std::io::SeekFrom::Start(0))
+                .await
+                .map_err(|error| {
+                    format!("Could not rewind the completed staging track: {error}")
+                })?;
+            output.set_len(0).await.map_err(|error| {
+                format!("Could not reset the destination DASH part for migration: {error}")
+            })?;
+            output
+                .seek(std::io::SeekFrom::Start(0))
+                .await
+                .map_err(|error| {
+                    format!("Could not seek to the start of the destination DASH part: {error}")
+                })?;
+            let copied = match tokio::io::copy(&mut input, &mut output).await {
+                Ok(copied) => copied,
+                Err(error) => {
+                    drop(output);
+                    if let Some(destination_part) = destination_part.as_ref() {
+                        let _ = crate::manifest_destination::remove_owned_part_async(
+                            directory.to_path_buf(),
+                            destination_part.destination.clone(),
+                            destination_part.item_id,
+                            destination_part.track,
+                        )
+                        .await;
+                    }
+                    return Err(format!(
+                        "Could not migrate the completed staging track: {error}"
+                    ));
+                }
+            };
+            if copied != committed_offset {
+                drop(output);
+                if let Some(destination_part) = destination_part.as_ref() {
+                    let _ = crate::manifest_destination::remove_owned_part_async(
+                        directory.to_path_buf(),
+                        destination_part.destination.clone(),
+                        destination_part.item_id,
+                        destination_part.track,
+                    )
+                    .await;
+                }
+                return Err(
+                    "The completed staging track length does not match its checkpoint".to_string(),
+                );
+            }
+            output.sync_all().await.map_err(|error| {
+                format!("Could not sync the migrated destination DASH part: {error}")
+            })?;
+            if let Some(parent) = part.parent() {
+                sync_directory(parent).await?;
+            }
+            remove_regular_file_if_present(&target).await?;
+            sync_directory(directory).await?;
+        } else {
+            output
+                .set_len(committed_offset)
+                .await
+                .map_err(|error| format!("Could not restore the DASH track checkpoint: {error}"))?;
+            output
+                .seek(std::io::SeekFrom::Start(committed_offset))
+                .await
+                .map_err(|error| format!("Could not seek to the DASH track checkpoint: {error}"))?;
+        }
 
         Ok((
             Some(Self {
@@ -259,6 +460,7 @@ impl OrderedTrackWriter {
                 next_resource_index,
                 committed_offset,
                 checkpoint_policy,
+                destination_part,
             }),
             committed_offset,
         ))
@@ -383,9 +585,14 @@ impl OrderedTrackWriter {
             .await
             .map_err(|error| format!("Could not flush the completed DASH track: {error}"))?;
         drop(self.output);
-        crate::file_names::rename_noreplace(&self.part, &self.target)
-            .map_err(|error| format!("Could not publish the ordered DASH track: {error}"))?;
-        sync_directory(&self.directory).await?;
+        if let Some(parent) = self.part.parent() {
+            sync_directory(parent).await?;
+        }
+        if self.destination_part.is_none() {
+            crate::file_names::rename_noreplace(&self.part, &self.target)
+                .map_err(|error| format!("Could not publish the ordered DASH track: {error}"))?;
+            sync_directory(&self.directory).await?;
+        }
         if self.checkpoint_policy == CheckpointPolicy::RemoveAfterPublish {
             remove_regular_file_if_present(&self.checkpoint_path).await?;
             remove_regular_file_if_present(&self.journal_path).await?;
@@ -393,6 +600,31 @@ impl OrderedTrackWriter {
         }
         Ok(())
     }
+}
+
+/// Remove the owned destination part and its XDG recovery metadata after
+/// the final container has been published successfully.
+///
+/// # Errors
+///
+/// Returns an error if the part is no longer owned by this item or metadata cleanup fails.
+pub(crate) async fn cleanup_destination_part(
+    staging: &Path,
+    destination: &Path,
+    item_id: u64,
+    track: crate::manifest_destination::TrackKind,
+    filename: &str,
+) -> Result<(), String> {
+    crate::manifest_destination::remove_owned_part_async(
+        staging.to_path_buf(),
+        destination.to_path_buf(),
+        item_id,
+        track,
+    )
+    .await?;
+    remove_regular_file_if_present(&staging.join(format!("{filename}.checkpoint.json"))).await?;
+    remove_regular_file_if_present(&staging.join(format!("{filename}.resources"))).await?;
+    sync_directory(staging).await
 }
 
 /// Return the resource prefix proven durable by the ordered writer.
@@ -608,12 +840,23 @@ async fn verify_resource_ranges(
     output_path: &Path,
     committed: &[CommittedResource],
 ) -> Result<(), String> {
-    let mut file = tokio::fs::File::open(output_path).await.map_err(|error| {
-        format!(
-            "Could not open {} for DASH verification: {error}",
-            output_path.display()
-        )
-    })?;
+    let mut file = open_regular_file_no_follow_async(output_path).await?;
+    verify_resource_ranges_file(&mut file, output_path, committed).await
+}
+
+async fn verify_resource_ranges_file(
+    file: &mut tokio::fs::File,
+    output_path: &Path,
+    committed: &[CommittedResource],
+) -> Result<(), String> {
+    file.seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|error| {
+            format!(
+                "Could not seek {} for DASH verification: {error}",
+                output_path.display()
+            )
+        })?;
     let mut buffer = [0_u8; 64 * 1024];
     for resource in committed {
         let mut remaining = resource.length;
@@ -663,14 +906,18 @@ pub(crate) async fn cleanup_committed_resources(
 }
 
 async fn load_checkpoint(
-    checkpoint_path: &Path,
-    journal_path: &Path,
-    part: &Path,
-    target: &Path,
-    directory: &Path,
+    paths: CheckpointPaths<'_>,
     fingerprint: &str,
     resources: &[String],
+    allow_part_and_target: bool,
 ) -> Result<CheckpointState, String> {
+    let CheckpointPaths {
+        checkpoint: checkpoint_path,
+        journal: journal_path,
+        part,
+        target,
+        directory,
+    } = paths;
     let checkpoint_metadata = match tokio::fs::symlink_metadata(checkpoint_path).await {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -735,7 +982,7 @@ async fn load_checkpoint(
             return Err(format!("Could not inspect {}: {error}", target.display()));
         }
     };
-    if part_metadata.is_some() && target_metadata.is_some() {
+    if part_metadata.is_some() && target_metadata.is_some() && !allow_part_and_target {
         return Err("Both the interrupted and published DASH track files exist".to_string());
     }
     if target_metadata.is_some() && checkpoint.next_resource_index != resources.len() {
@@ -789,6 +1036,24 @@ async fn load_checkpoint(
         )
         .await?
     };
+
+    if part_metadata.is_some() && target_metadata.is_some() {
+        if !allow_part_and_target || checkpoint.next_resource_index != resources.len() {
+            return Err("Both interrupted and published DASH tracks exist for an unsupported checkpoint state".to_string());
+        }
+        let target_length = target_metadata
+            .as_ref()
+            .map_or(0, |metadata| metadata.len());
+        if target_length != checkpoint.committed_offset {
+            return Err("The completed staging track does not match its checkpoint".to_string());
+        }
+        verify_resource_ranges(target, &committed).await?;
+        return Ok(CheckpointState::ResumeFromTarget {
+            next_resource_index: checkpoint.next_resource_index,
+            committed_offset: checkpoint.committed_offset,
+            resources: committed,
+        });
+    }
 
     let output_path = if part_metadata.is_some() {
         Some(part)
@@ -861,8 +1126,37 @@ async fn load_checkpoint(
     } else {
         Ok(CheckpointState::AlreadyComplete {
             committed_offset: checkpoint.committed_offset,
+            resources: committed,
         })
     }
+}
+
+async fn open_regular_file_no_follow_async(path: &Path) -> Result<tokio::fs::File, String> {
+    let path = path.to_path_buf();
+    let display_path = path.display().to_string();
+    let file = tokio::task::spawn_blocking(move || open_regular_file_no_follow(&path))
+        .await
+        .map_err(|error| format!("DASH file open task failed: {error}"))?
+        .map_err(|error| format!("Could not safely open {display_path}: {error}"))?;
+    Ok(tokio::fs::File::from_std(file))
+}
+
+fn open_regular_file_no_follow(path: &Path) -> Result<std::fs::File, std::io::Error> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path is not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 async fn hash_file_range(path: &Path, offset: u64, length: u64) -> Result<String, String> {

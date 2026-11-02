@@ -748,9 +748,9 @@ pub(super) async fn run_live_hls_tracks(
         if let Some(intent) = append_live_hls_destination_part(&video, abort).await? {
             return Ok(LiveHlsCapture::new(
                 match intent {
-crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
+                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                 },
                 output,
             ));
@@ -760,9 +760,9 @@ crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
         {
             return Ok(LiveHlsCapture::new(
                 match intent {
-crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
-                crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
+                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                 },
                 output,
             ));
@@ -824,9 +824,9 @@ crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
         LiveHlsSnapshotOutcome::Stopped(intent) => {
             return Ok(LiveHlsCapture::new(
                 match intent {
-crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
+                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
                 },
                 output,
             ));
@@ -887,13 +887,13 @@ crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
             }
             LiveHlsSnapshotOutcome::Stopped(intent) => {
                 return Ok(LiveHlsCapture::new(
-                match intent {
-crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
-                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                },
-                output,
-            ));
+                    match intent {
+                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
+                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                    },
+                    output,
+                ));
             }
             LiveHlsSnapshotOutcome::ContinuityLost => {
                 if video.accumulator.segment_count() == 0 {
@@ -908,7 +908,10 @@ crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                     tx,
                 )
                 .await?;
-                return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Unrecoverable, output));
+                return Ok(LiveHlsCapture::new(
+                    LiveHlsCaptureOutcome::Unrecoverable,
+                    output,
+                ));
             }
         }
     }
@@ -932,11 +935,14 @@ crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
         tokio::select! {
             biased;
             stop = &mut *abort => {
-                return Ok(LiveHlsCapture::new(match stop.unwrap_or(crate::video::StopIntent::Discard) {
-                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                }, output));
+                return Ok(LiveHlsCapture::new(
+                    match stop.unwrap_or(crate::video::StopIntent::Discard) {
+                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
+                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                    },
+                    output,
+                ));
             }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_poll)) => {}
         }
@@ -967,13 +973,13 @@ crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(LiveHlsCapture::new(
-                match intent {
-crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                },
-                output,
-            ));
+                        match intent {
+                            crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                            crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
+                            crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                        },
+                        output,
+                    ));
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
                     if video.accumulator.segment_count() == 0 {
@@ -988,7 +994,10 @@ crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                         tx,
                     )
                     .await?;
-                    return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Unrecoverable, output));
+                    return Ok(LiveHlsCapture::new(
+                        LiveHlsCaptureOutcome::Unrecoverable,
+                        output,
+                    ));
                 }
             }
         }
@@ -1020,13 +1029,13 @@ crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(LiveHlsCapture::new(
-                match intent {
-crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
-                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                },
-                output,
-            ));
+                        match intent {
+                            crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                            crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
+                            crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                        },
+                        output,
+                    ));
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
                     if video.accumulator.segment_count() == 0 {
@@ -1041,7 +1050,10 @@ crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                         tx,
                     )
                     .await?;
-                    return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Unrecoverable, output));
+                    return Ok(LiveHlsCapture::new(
+                        LiveHlsCaptureOutcome::Unrecoverable,
+                        output,
+                    ));
                 }
             }
         }

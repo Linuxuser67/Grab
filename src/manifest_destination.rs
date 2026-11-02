@@ -552,6 +552,44 @@ mod tests {
         assert_eq!(fs::read(part).expect("read replacement"), b"replacement");
     }
 
+
+    #[cfg(unix)]
+    #[test]
+    fn preexisting_destination_symlink_is_never_followed() {
+        let destination_dir = tempfile::tempdir().expect("create destination");
+        let staging = tempfile::tempdir().expect("create staging");
+        let destination = destination_dir.path().join("Example.mp4");
+        ensure_plan(staging.path(), &destination, 42, false, false).expect("write plan");
+        let part = part_path(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("resolve part path");
+        let victim = staging.path().join("victim");
+        fs::write(&victim, b"preserve").expect("write victim");
+        std::os::unix::fs::symlink(&victim, &part).expect("create destination symlink");
+
+        assert!(open_owned_part(staging.path(), &destination, 42, TrackKind::Video).is_err());
+        assert_eq!(fs::read(victim).expect("read victim"), b"preserve");
+        assert!(fs::symlink_metadata(part).expect("inspect symlink").file_type().is_symlink());
+    }
+
+    #[test]
+    fn missing_owned_part_is_recreated_with_a_new_identity() {
+        let destination_dir = tempfile::tempdir().expect("create destination");
+        let staging = tempfile::tempdir().expect("create staging");
+        let destination = destination_dir.path().join("Example.mp4");
+        ensure_plan(staging.path(), &destination, 42, false, false).expect("write plan");
+        let part = part_path(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("resolve part path");
+        drop(open_owned_part(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("claim destination part"));
+        fs::remove_file(&part).expect("simulate missing owned part");
+
+        let recreated = open_owned_part(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("recreate missing owned part");
+        assert_eq!(recreated.metadata().expect("part metadata").len(), 0);
+        drop(recreated);
+        assert_eq!(fs::metadata(part).expect("inspect recreated part").len(), 0);
+    }
+
     #[test]
     fn matching_plan_is_idempotent_and_changed_plan_is_preserved() {
         let destination_dir = tempfile::tempdir().expect("create destination");

@@ -503,7 +503,7 @@ pub(crate) async fn verify_owned_part_async(
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || verify_owned_part(&staging, &destination, item_id, track))
         .await
-    .map_err(|error| format!("Destination part verification task failed: {error}"))?
+        .map_err(|error| format!("Destination part verification task failed: {error}"))?
 }
 
 /// Remove an owned destination part on a blocking worker.
@@ -515,7 +515,7 @@ pub(crate) async fn remove_owned_part_async(
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || remove_owned_part(&staging, &destination, item_id, track))
         .await
-    .map_err(|error| format!("Destination part cleanup task failed: {error}"))?
+        .map_err(|error| format!("Destination part cleanup task failed: {error}"))?
 }
 
 #[derive(Clone, Copy)]

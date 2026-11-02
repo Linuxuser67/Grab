@@ -93,6 +93,7 @@ pub(crate) struct OrderedTrackWriter {
 }
 
 struct DestinationPart {
+    staging: std::path::PathBuf,
     destination: std::path::PathBuf,
     item_id: u64,
     track: crate::manifest_destination::TrackKind,
@@ -210,12 +211,17 @@ impl OrderedTrackWriter {
         item_id: u64,
         track: crate::manifest_destination::TrackKind,
     ) -> Result<(Option<Self>, u64), String> {
+        let staging = directory
+            .parent()
+            .ok_or_else(|| "The manifest track directory has no staging parent".to_string())?
+            .to_path_buf();
         Box::pin(Self::open_with_policy(
             resources,
             directory,
             filename,
             CheckpointPolicy::RetainAfterPublish,
             Some(DestinationPart {
+                staging,
                 destination: destination.to_path_buf(),
                 item_id,
                 track,
@@ -247,7 +253,7 @@ impl OrderedTrackWriter {
         let part = match destination_part.as_ref() {
             Some(destination_part) => {
                 crate::manifest_destination::part_path_async(
-                    directory.to_path_buf(),
+                    destination_part.staging.clone(),
                     destination_part.destination.clone(),
                     destination_part.item_id,
                     destination_part.track,
@@ -263,7 +269,7 @@ impl OrderedTrackWriter {
                 Ok(_) => {
                     drop(
                         crate::manifest_destination::open_owned_part_async(
-                            directory.to_path_buf(),
+                            destination_part.staging.clone(),
                             destination_part.destination.clone(),
                             destination_part.item_id,
                             destination_part.track,
@@ -343,7 +349,7 @@ impl OrderedTrackWriter {
 
         let mut output = if let Some(destination_part) = destination_part.as_ref() {
             crate::manifest_destination::open_owned_part_async(
-                directory.to_path_buf(),
+                destination_part.staging.clone(),
                 destination_part.destination.clone(),
                 destination_part.item_id,
                 destination_part.track,
@@ -366,7 +372,7 @@ impl OrderedTrackWriter {
                     drop(output);
                     if let Some(destination_part) = destination_part.as_ref() {
                         let _ = crate::manifest_destination::remove_owned_part_async(
-                            directory.to_path_buf(),
+                            destination_part.staging.clone(),
                             destination_part.destination.clone(),
                             destination_part.item_id,
                             destination_part.track,
@@ -401,7 +407,7 @@ impl OrderedTrackWriter {
                     drop(output);
                     if let Some(destination_part) = destination_part.as_ref() {
                         let _ = crate::manifest_destination::remove_owned_part_async(
-                            directory.to_path_buf(),
+                            destination_part.staging.clone(),
                             destination_part.destination.clone(),
                             destination_part.item_id,
                             destination_part.track,

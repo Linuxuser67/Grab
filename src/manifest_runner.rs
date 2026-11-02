@@ -2759,7 +2759,7 @@ async fn is_mpegts_segment(path: &Path) -> Result<bool, ManifestRunError> {
         .metadata()
         .await
         .map_err(|error| manifest_storage_error("Could not inspect an HLS media fragment", error))?;
-    if metadata.len() < 188 || metadata.len() % 188 != 0 {
+    if metadata.len() < 188 || !metadata.len().is_multiple_of(188) {
         return Ok(false);
     }
 

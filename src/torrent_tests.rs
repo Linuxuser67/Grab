@@ -444,6 +444,39 @@ fn descriptor_torrent_cleanup_refuses_intermediate_symlinks() {
 
 #[cfg(unix)]
 #[test]
+fn rustix_torrent_cleanup_refuses_symlinked_root_and_unlinks_final_symlink_only() {
+    use std::os::unix::fs::symlink;
+
+    let base = std::env::temp_dir().join(format!(
+        "grab-torrent-rustix-links-{}",
+        std::process::id()
+    ));
+    let root = base.join("root");
+    let outside = base.join("outside");
+    let root_link = base.join("root-link");
+    let protected = outside.join("keep.txt");
+    let final_link = root.join("final-link");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(&protected, b"must survive").unwrap();
+    symlink(&root, &root_link).unwrap();
+
+    // A symlink used as the configured root must not be followed.
+    remove_file_and_prune_parents(&root_link.join("keep.txt"), &root_link);
+    assert_eq!(std::fs::read(&protected).unwrap(), b"must survive");
+
+    // unlinkat removes the final symlink itself, never its target.
+    symlink(&protected, &final_link).unwrap();
+    remove_file_and_prune_parents(&final_link, &root);
+    assert!(!final_link.exists());
+    assert_eq!(std::fs::read(&protected).unwrap(), b"must survive");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
 fn prune_empty_parents_stops_at_a_nonempty_directory() {
     let base = std::env::temp_dir().join(format!("grab-torrent-prune-{}", std::process::id()));
     let root = base.join("root");

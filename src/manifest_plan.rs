@@ -11,7 +11,9 @@ use crate::manifest::{
 use crate::manifest_types::{
     ManifestAudioChoice, ManifestChoice, ManifestLookup, ManifestSubtitleChoice, NativeManifest,
 };
-use crate::media_types::{ManifestKind, ManifestSource};
+use crate::media_types::{
+    ManifestAudioKey, ManifestKind, ManifestRepresentationKey, ManifestSource, ManifestSubtitleKey,
+};
 
 /// A validated protocol plan ready for the runner to materialize and execute.
 #[derive(Debug)]
@@ -69,7 +71,7 @@ impl ManifestLookup {
                 .filter_map(|(variant, key)| {
                     let key = key?;
                     Some(ManifestChoice {
-                        key,
+                        key: key.into(),
                         label: join_label_parts(
                             resolution_label(variant.width, variant.height),
                             bitrate_label(Some(
@@ -83,7 +85,7 @@ impl ManifestLookup {
                 })
                 .collect(),
             NativeManifest::HlsMedia(_) => vec![ManifestChoice {
-                key: "hls-media".to_string(),
+                key: "hls-media".into(),
                 label: gettext("Source playlist"),
                 height: None,
                 bandwidth: None,
@@ -92,7 +94,7 @@ impl ManifestLookup {
                 .video_representations
                 .iter()
                 .map(|representation| ManifestChoice {
-                    key: representation.key.clone(),
+                    key: representation.key.clone().into(),
                     label: join_label_parts(
                         resolution_label(representation.width, representation.height),
                         bitrate_label(representation.bandwidth),
@@ -113,7 +115,10 @@ impl ManifestLookup {
     }
 
     /// List only audio renditions associated with the selected video representation.
-    pub(crate) fn audio_choices(&self, video_key: &str) -> Vec<ManifestAudioChoice> {
+    pub(crate) fn audio_choices(
+        &self,
+        video_key: &ManifestRepresentationKey,
+    ) -> Vec<ManifestAudioChoice> {
         match &self.manifest {
             NativeManifest::HlsMaster(master) => {
                 let group_id = master
@@ -121,7 +126,7 @@ impl ManifestLookup {
                     .iter()
                     .zip(hls_variant_keys(&master.variants))
                     .find_map(|(variant, key)| {
-                        (key.as_deref() == Some(video_key))
+                        (key.as_deref() == Some(video_key.as_str()))
                             .then_some(variant.audio_group.as_deref())
                             .flatten()
                     });
@@ -135,7 +140,7 @@ impl ManifestLookup {
                     .filter_map(|(rendition, key)| {
                         let key = key?;
                         (rendition.group_id == group_id).then(|| ManifestAudioChoice {
-                            key,
+                            key: key.into(),
                             label: hls_audio_rendition_label(rendition),
                             is_default: rendition.is_default,
                         })
@@ -147,7 +152,7 @@ impl ManifestLookup {
                 if !dash
                     .video_representations
                     .iter()
-                    .any(|representation| representation.key == video_key)
+                    .any(|representation| representation.key == video_key.as_str())
                 {
                     return Vec::new();
                 }
@@ -172,7 +177,7 @@ impl ManifestLookup {
                             label.push_str(&gettext("Default"));
                         }
                         ManifestAudioChoice {
-                            key: representation.key.clone(),
+                            key: representation.key.clone().into(),
                             label,
                             is_default: representation.is_default_audio,
                         }
@@ -185,7 +190,10 @@ impl ManifestLookup {
     }
 
     /// List only subtitle renditions associated with the selected video representation.
-    pub(crate) fn subtitle_choices(&self, video_key: &str) -> Vec<ManifestSubtitleChoice> {
+    pub(crate) fn subtitle_choices(
+        &self,
+        video_key: &ManifestRepresentationKey,
+    ) -> Vec<ManifestSubtitleChoice> {
         match &self.manifest {
             NativeManifest::HlsMaster(master) => {
                 let group_id = master
@@ -193,7 +201,7 @@ impl ManifestLookup {
                     .iter()
                     .zip(hls_variant_keys(&master.variants))
                     .find_map(|(variant, key)| {
-                        (key.as_deref() == Some(video_key))
+                        (key.as_deref() == Some(video_key.as_str()))
                             .then_some(variant.subtitles_group.as_deref())
                             .flatten()
                     });
@@ -207,7 +215,7 @@ impl ManifestLookup {
                     .filter_map(|(rendition, key)| {
                         let key = key?;
                         (rendition.group_id == group_id).then(|| ManifestSubtitleChoice {
-                            key,
+                            key: key.into(),
                             language: rendition.language.clone(),
                             is_default: rendition.is_default,
                         })
@@ -227,7 +235,7 @@ impl ManifestLookup {
                     .subtitle_representations
                     .iter()
                     .map(|track| ManifestSubtitleChoice {
-                        key: track.key.clone(),
+                        key: track.key.clone().into(),
                         language: track.language.clone(),
                         is_default: track.is_default_subtitle,
                     })
@@ -271,9 +279,9 @@ impl ManifestLookup {
     #[must_use]
     pub(crate) fn preferred_subtitle_key(
         &self,
-        video_key: &str,
+        video_key: &ManifestRepresentationKey,
         preferred_language: Option<&str>,
-    ) -> Option<String> {
+    ) -> Option<ManifestSubtitleKey> {
         let choices = self.subtitle_choices(video_key);
         let index = Self::preferred_subtitle_choice_index(&choices, preferred_language)?;
         choices.get(index).map(|choice| choice.key.clone())
@@ -301,33 +309,33 @@ impl ManifestLookup {
         let audio_index = Self::preferred_audio_choice_index(&audio_choices);
         let audio_key = audio_choices
             .get(audio_index)
-            .map(|audio| audio.key.as_str());
+            .map(|audio| &audio.key);
         let subtitle_key = self.preferred_subtitle_key(&choice.key, subtitle_language);
-        self.selected_source(&choice.key, audio_key, subtitle_key.as_deref())
+        self.selected_source(&choice.key, audio_key, subtitle_key.as_ref())
     }
 
     /// Validate and capture the exact video and optional audio selections.
     pub(crate) fn selected_source(
         &self,
-        representation_key: &str,
-        audio_key: Option<&str>,
-        subtitle_key: Option<&str>,
+        representation_key: &ManifestRepresentationKey,
+        audio_key: Option<&ManifestAudioKey>,
+        subtitle_key: Option<&ManifestSubtitleKey>,
     ) -> Option<ManifestSource> {
         let kind = match &self.manifest {
             NativeManifest::HlsMaster(master) => {
                 hls_variant_keys(&master.variants)
                     .iter()
-                    .any(|key| key.as_deref() == Some(representation_key))
+                    .any(|key| key.as_deref() == Some(representation_key.as_str()))
                     .then_some(())?;
                 ManifestKind::Hls
             }
-            NativeManifest::HlsMedia(_) if representation_key == "hls-media" => ManifestKind::Hls,
+            NativeManifest::HlsMedia(_) if representation_key.as_str() == "hls-media" => ManifestKind::Hls,
             NativeManifest::HlsMedia(_) => return None,
             NativeManifest::Dash(dash) => {
                 if !dash
                     .video_representations
                     .iter()
-                    .any(|representation| representation.key == representation_key)
+                    .any(|representation| representation.key == representation_key.as_str())
                 {
                     return None;
                 }
@@ -338,7 +346,7 @@ impl ManifestLookup {
             !self
                 .audio_choices(representation_key)
                 .iter()
-                .any(|choice| choice.key == selected)
+                .any(|choice| choice.key.as_str() == selected.as_str())
         }) {
             return None;
         }
@@ -346,7 +354,7 @@ impl ManifestLookup {
             !self
                 .subtitle_choices(representation_key)
                 .iter()
-                .any(|choice| choice.key == selected)
+                .any(|choice| choice.key.as_str() == selected.as_str())
         }) {
             return None;
         }
@@ -354,7 +362,7 @@ impl ManifestLookup {
             .and_then(|selected| {
                 self.subtitle_choices(representation_key)
                     .into_iter()
-                    .find(|choice| choice.key == selected)
+                    .find(|choice| choice.key.as_str() == selected.as_str())
             })
             .and_then(|choice| choice.language)
             .as_deref()
@@ -362,9 +370,9 @@ impl ManifestLookup {
         Some(ManifestSource {
             url: self.source_url.clone(),
             kind,
-            representation_key: representation_key.to_string(),
-            audio_key: audio_key.map(str::to_string),
-            subtitle_key: subtitle_key.map(str::to_string),
+            representation_key: representation_key.clone(),
+            audio_key: audio_key.cloned(),
+            subtitle_key: subtitle_key.cloned(),
             subtitle_language,
         })
     }
@@ -385,7 +393,7 @@ pub(crate) fn download_plan(
 
     match (lookup.manifest, source.kind) {
         (NativeManifest::HlsMedia(plan), ManifestKind::Hls)
-            if source.representation_key == "hls-media" =>
+            if source.representation_key.as_str() == "hls-media" =>
         {
             Ok(ManifestDownloadPlan::HlsMedia(plan))
         }
@@ -472,7 +480,7 @@ pub(crate) fn download_plan(
         }
         (NativeManifest::Dash(dash), ManifestKind::Dash) => {
             let video =
-                crate::manifest::dash::plan_dash_representation(&dash, &source.representation_key)
+                crate::manifest::dash::plan_dash_representation(&dash, source.representation_key.as_str())
                     .map_err(|error| error.to_string())?;
             let selected_audio = match source.audio_key.as_deref() {
                 Some(audio_key) => Some(
@@ -488,7 +496,7 @@ pub(crate) fn download_plan(
             };
             let audio = selected_audio
                 .map(|track| {
-                    let plan_key = if source.representation_key.starts_with("dash-live-")
+                    let plan_key = if source.representation_key.as_str().starts_with("dash-live-")
                         || source.audio_key.as_deref() == Some(track.live_key.as_str())
                     {
                         track.live_key.as_str()
@@ -843,12 +851,12 @@ mod tests {
     fn subtitle_preference_uses_english_fallback_but_not_manifest_default() {
         let choices = vec![
             ManifestSubtitleChoice {
-                key: "fr".to_string(),
+                key: "fr".into(),
                 language: Some("fr".to_string()),
                 is_default: true,
             },
             ManifestSubtitleChoice {
-                key: "en".to_string(),
+                key: "en".into(),"
                 language: Some("en".to_string()),
                 is_default: false,
             },
@@ -881,12 +889,16 @@ video/720.m3u8
             body,
         )
         .expect("valid HLS master playlist");
-        let video_key = hls_variant_keys(&master.variants)[0]
-            .clone()
-            .expect("stable video key");
-        let subtitle_key = hls_subtitle_rendition_keys(&master.subtitle_renditions)[0]
-            .clone()
-            .expect("stable subtitle key");
+        let video_key = ManifestRepresentationKey::from(
+            hls_variant_keys(&master.variants)[0]
+                .as_deref()
+                .expect("stable video key"),
+        );
+        let subtitle_key = ManifestSubtitleKey::from(
+            hls_subtitle_rendition_keys(&master.subtitle_renditions)[0]
+                .as_deref()
+                .expect("stable subtitle key"),
+        );
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
             manifest: NativeManifest::HlsMaster(master),
@@ -939,8 +951,8 @@ video/720.m3u8
             body,
         )
         .expect("valid static DASH presentation");
-        let video_key = dash.video_representations[0].key.clone();
-        let subtitle_key = dash.subtitle_representations[0].key.clone();
+        let video_key = ManifestRepresentationKey::from(dash.video_representations[0].key.clone());
+        let subtitle_key = ManifestSubtitleKey::from(dash.subtitle_representations[0].key.clone());
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/manifest.mpd".to_string(),
             manifest: NativeManifest::Dash(dash),
@@ -980,7 +992,7 @@ video/720.m3u8
             ),
         };
         let mut invalid_source = source;
-        invalid_source.subtitle_key = Some(video_key);
+        invalid_source.subtitle_key = Some(video_key.as_str().into());
         assert!(
             download_plan(invalid_lookup, &invalid_source).is_err(),
             "a video representation key must not be accepted as a subtitle key"
@@ -999,12 +1011,16 @@ video/720.m3u8
             body,
         )
         .expect("valid HLS master playlist");
-        let video_key = hls_variant_keys(&master.variants)[0]
-            .clone()
-            .expect("stable video key");
-        let audio_key = hls_audio_rendition_keys(&master.audio_renditions)[0]
-            .clone()
-            .expect("stable audio key");
+        let video_key = ManifestRepresentationKey::from(
+            hls_variant_keys(&master.variants)[0]
+                .as_deref()
+                .expect("stable video key"),
+        );
+        let audio_key = ManifestAudioKey::from(
+            hls_audio_rendition_keys(&master.audio_renditions)[0]
+                .as_deref()
+                .expect("stable audio key"),
+        );
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
             manifest: NativeManifest::HlsMaster(master),
@@ -1048,7 +1064,7 @@ video/720.m3u8
         let source = ManifestSource {
             url: lookup.source_url.clone(),
             kind: ManifestKind::Hls,
-            representation_key: "hls-variant-00000000000000000000000000000000".to_string(),
+            representation_key: "hls-variant-00000000000000000000000000000000".into(),"
             audio_key: None,
             subtitle_key: None,
             subtitle_language: None,

@@ -1383,12 +1383,12 @@ async fn finalize_manifest_download(
     let audio_input = if has_audio {
         Some(if destination_parts {
             crate::manifest_destination::part_path_async(
-            staging.to_path_buf(),
-            job.dest.clone(),
-            job.item_id,
-            crate::manifest_destination::TrackKind::Audio,
-        )
-        .await
+                staging.to_path_buf(),
+                job.dest.clone(),
+                job.item_id,
+                crate::manifest_destination::TrackKind::Audio,
+            )
+            .await
             .map_err(ManifestRunError::Failed)?
         } else {
             match job.source.kind {
@@ -1407,12 +1407,12 @@ async fn finalize_manifest_download(
             subtitle: Some(_), ..
         } if destination_parts => Some(
             crate::manifest_destination::part_path_async(
-            staging.to_path_buf(),
-            job.dest.clone(),
-            job.item_id,
-            crate::manifest_destination::TrackKind::Subtitles,
-        )
-        .await
+                staging.to_path_buf(),
+                job.dest.clone(),
+                job.item_id,
+                crate::manifest_destination::TrackKind::Subtitles,
+            )
+            .await
             .map_err(ManifestRunError::Failed)?,
         ),
         Tracks::Dash {

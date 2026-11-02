@@ -780,9 +780,7 @@ fn remove_beneath(path: &std::path::Path, folder: &std::path::Path, remove_final
     let Ok(relative) = path.strip_prefix(folder) else {
         return;
     };
-    use std::os::fd::{AsRawFd as _, FromRawFd as _};
     use std::os::unix::ffi::OsStrExt as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
 
     let components: Option<Vec<std::ffi::CString>> = relative
         .components()
@@ -799,11 +797,14 @@ fn remove_beneath(path: &std::path::Path, folder: &std::path::Path, remove_final
     };
 
     // Open the root without following a symlink in its final component.
-    let root = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open(folder)
-    {
+    let root = match rustix::fs::open(
+        folder,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    ) {
         Ok(root) => root,
         Err(error) => {
             tracing::debug!(path = %folder.display(), error = %error, "torrent cleanup could not open root directory");
@@ -812,7 +813,7 @@ fn remove_beneath(path: &std::path::Path, folder: &std::path::Path, remove_final
     };
 
     struct OpenDir {
-        fd: std::fs::File,
+        fd: std::os::fd::OwnedFd,
         name_in_parent: Option<std::ffi::CString>,
     }
     let mut stack = vec![OpenDir {
@@ -823,24 +824,23 @@ fn remove_beneath(path: &std::path::Path, folder: &std::path::Path, remove_final
         let Some(parent) = stack.last() else {
             return;
         };
-        // SAFETY: the previous descriptor is open; component is NUL-free; flags
-        // require a directory and refuse a symlink in this component.
-        let fd = unsafe {
-            libc::openat(
-                parent.fd.as_raw_fd(),
-                component.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            )
+        let fd = match rustix::fs::openat(
+            &parent.fd,
+            component.as_c_str(),
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(error) => {
+                tracing::debug!(error = %error, "torrent cleanup refused an unsafe or missing parent component");
+                return;
+            }
         };
-        if fd < 0 {
-            let error = std::io::Error::last_os_error();
-            tracing::debug!(error = %error, "torrent cleanup refused an unsafe or missing parent component");
-            return;
-        }
-        // SAFETY: openat returned a new owned file descriptor.
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
         stack.push(OpenDir {
-            fd: file,
+            fd,
             name_in_parent: Some(component.clone()),
         });
     }
@@ -851,14 +851,14 @@ fn remove_beneath(path: &std::path::Path, folder: &std::path::Path, remove_final
         let Some(parent) = stack.last() else {
             return;
         };
-        // SAFETY: the descriptor is open and target_name is a NUL-free component.
-        let result = unsafe { libc::unlinkat(parent.fd.as_raw_fd(), target_name.as_ptr(), 0) };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::NotFound {
-                tracing::debug!(path = %path.display(), error = %error, "torrent file cleanup failed");
-                return;
-            }
+        if let Err(error) = rustix::fs::unlinkat(
+            &parent.fd,
+            target_name.as_c_str(),
+            rustix::fs::AtFlags::empty(),
+        ) && error != rustix::io::Errno::NOENT
+        {
+            tracing::debug!(path = %path.display(), error = %error, "torrent file cleanup failed");
+            return;
         }
     }
 
@@ -878,10 +878,13 @@ fn remove_beneath(path: &std::path::Path, folder: &std::path::Path, remove_final
         else {
             break;
         };
-        let parent_fd = parent.fd.as_raw_fd();
-        // SAFETY: parent_fd is open and child_name is a NUL-free component.
-        let result = unsafe { libc::unlinkat(parent_fd, child_name.as_ptr(), libc::AT_REMOVEDIR) };
-        if result != 0 {
+        if rustix::fs::unlinkat(
+            &parent.fd,
+            child_name.as_c_str(),
+            rustix::fs::AtFlags::REMOVEDIR,
+        )
+        .is_err()
+        {
             break; // Non-empty, replaced, or otherwise not removable.
         }
         stack.pop();

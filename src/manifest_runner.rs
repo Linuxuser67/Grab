@@ -3175,6 +3175,10 @@ mod tests {
             .build()
             .expect("build direct HTTP client");
         let staging = tempfile::tempdir().expect("create DASH staging");
+        let video_dir = staging.path().join("video");
+        tokio::fs::create_dir(&video_dir)
+            .await
+            .expect("create DASH video track directory");
         let destination_dir = tempfile::tempdir().expect("create DASH destination");
         let destination = destination_dir.path().join("Example.mp4");
         crate::manifest_destination::ensure_plan(staging.path(), &destination, 42, false, false)
@@ -3188,7 +3192,7 @@ mod tests {
                 client: &client,
                 staging: staging.path(),
                 plan: &plan,
-                directory: staging.path(),
+                directory: &video_dir,
                 filename: "video-track.mp4",
                 destination: &destination,
                 item_id: 42,

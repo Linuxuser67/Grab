@@ -183,7 +183,6 @@ pub(super) async fn read_resource_journal(
 /// Returns an error if the journal position or file operations are invalid.
 pub(super) async fn append_resource_record(
     journal_path: &Path,
-    directory: &Path,
     resource_index: usize,
     resource: &CommittedResource,
 ) -> Result<(), String> {

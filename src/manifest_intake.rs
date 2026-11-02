@@ -1219,7 +1219,7 @@ video/es.m3u8
         let spanish_video_key = crate::media_types::ManifestRepresentationKey::from(
             video_keys[1].as_deref().expect("stable Spanish video key"),
         );
-        let english_choices = lookup.audio_choices(english_video_key);
+        let english_choices = lookup.audio_choices(&english_video_key);
         assert_eq!(english_choices.len(), 2);
         assert!(english_choices[0].is_default);
         assert!(
@@ -1227,7 +1227,7 @@ video/es.m3u8
                 .iter()
                 .any(|choice| choice.label.contains("French"))
         );
-        assert_eq!(lookup.audio_choices(spanish_video_key).len(), 1);
+        assert_eq!(lookup.audio_choices(&spanish_video_key).len(), 1);
 
         let default_source = lookup
             .preferred_source("1080p", None)
@@ -1239,7 +1239,7 @@ video/es.m3u8
         );
 
         let selected = lookup
-            .selected_source(english_video_key, Some(&english_choices[1].key), None)
+            .selected_source(&english_video_key, Some(&english_choices[1].key), None)
             .expect("selected alternate audio rendition");
         assert_eq!(
             selected.audio_key.as_deref(),
@@ -1247,7 +1247,7 @@ video/es.m3u8
         );
         assert!(
             lookup
-                .selected_source(spanish_video_key, Some(&english_choices[1].key), None)
+                .selected_source(&spanish_video_key, Some(&english_choices[1].key), None)
                 .is_none(),
             "an audio rendition must not be selectable from another variant's group"
         );

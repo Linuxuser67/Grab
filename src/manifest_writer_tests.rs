@@ -730,6 +730,8 @@ async fn migrates_a_completed_staging_track_to_the_owned_destination_part() {
         .await
         .expect("remove staging");
 
+}
+
 #[tokio::test]
 async fn resumes_a_crash_during_staging_to_destination_part_migration() {
     let directory = test_directory();
@@ -811,7 +813,5 @@ async fn resumes_a_crash_during_staging_to_destination_part_migration() {
     tokio::fs::remove_dir_all(directory)
         .await
         .expect("remove staging");
-}
-
 }
 

@@ -505,13 +505,13 @@ async fn prepare_manifest_attempt(
     let unrecoverable_state = crate::live_capture_state::read(&staging)
         .await
         .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
-    if let Some(state) = unrecoverable_state.as_ref() {
-        if state.protocol != job.source.kind {
-            return Err(ManifestRunError::Failed(
-                "The unrecoverable live-capture marker belongs to a different manifest protocol"
-                    .to_string(),
-            ));
-        }
+    if let Some(state) = unrecoverable_state.as_ref()
+        && state.protocol != job.source.kind
+    {
+        return Err(ManifestRunError::Failed(
+            "The unrecoverable live-capture marker belongs to a different manifest protocol"
+                .to_string(),
+        ));
     }
     let mut finish_marker_bytes = read_live_finish_marker(&staging)
         .await

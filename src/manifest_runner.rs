@@ -2961,6 +2961,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn static_hls_mpegts_fragments_grow_the_owned_destination_part_in_order() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind HLS fragment server");
+        let address = listener.local_addr().expect("HLS server address");
+        let mut first = vec![0_u8; 188 * 3];
+        let mut second = vec![0_u8; 188 * 3];
+        for offset in [0, 188, 376] {
+            first[offset] = 0x47;
+            second[offset] = 0x47;
+        }
+        first[4] = 1;
+        second[4] = 2;
+        let first_response = first.clone();
+        let second_response = second.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept HLS request");
+                let mut request = [0_u8; 1024];
+                let count = socket.read(&mut request).await.expect("read HLS request");
+                let request = String::from_utf8_lossy(&request[..count]);
+                let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                let payload = if path.contains("segment-1.ts") {
+                    &first_response
+                } else {
+                    &second_response
+                };
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                socket
+                    .write_all(header.as_bytes())
+                    .await
+                    .expect("write HLS response header");
+                socket
+                    .write_all(payload)
+                    .await
+                    .expect("write HLS response body");
+            }
+        });
+
+        let playlist = br#"#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:4
+#EXTINF:4,
+segment-1.ts
+#EXTINF:4,
+segment-2.ts
+#EXT-X-ENDLIST
+"#;
+        let manifest_url = format!("http://{address}/playlist.m3u8");
+        let plan = crate::manifest::plan_hls_media_playlist(&manifest_url, playlist)
+            .expect("plan static HLS media playlist");
+        assert!(plan.is_plain_mpegts_candidate());
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build direct HLS test client");
+        let staging = tempfile::tempdir().expect("create HLS staging root");
+        let video_dir = staging.path().join("video");
+        tokio::fs::create_dir(&video_dir)
+            .await
+            .expect("create HLS video track directory");
+        let destination_dir = tempfile::tempdir().expect("create HLS destination");
+        let destination = destination_dir.path().join("Example.mp4");
+        crate::manifest_destination::ensure_plan(staging.path(), &destination, 84, false, false)
+            .expect("persist HLS destination plan");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+
+        assert!(
+            fetch_and_write_hls_track(
+                &client,
+                staging.path(),
+                &plan,
+                &video_dir,
+                "video-track.ts",
+                &destination,
+                84,
+                crate::manifest_destination::TrackKind::Video,
+                2,
+                &tx,
+                &downloaded,
+                &mut abort,
+            )
+            .await
+            .expect("fetch and assemble static HLS MPEG-TS fragments")
+        );
+        server.await.expect("HLS fragment server task");
+
+        let part = crate::manifest_destination::part_path(
+            staging.path(),
+            &destination,
+            84,
+            crate::manifest_destination::TrackKind::Video,
+        )
+        .expect("resolve visible HLS destination part");
+        let mut expected = first;
+        expected.extend_from_slice(&second);
+        assert_eq!(
+            tokio::fs::read(part).await.expect("read visible HLS part"),
+            expected
+        );
+        assert_eq!(downloaded.load(Ordering::Relaxed), 188 * 6);
+    }
+
+    #[tokio::test]
     async fn track_directory_rejects_existing_non_directory() {
         let directory = tempfile::tempdir().expect("create staging parent");
         let path = directory.path().join("track");

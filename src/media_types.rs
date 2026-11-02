@@ -47,23 +47,64 @@ pub(crate) enum ManifestKind {
     Dash,
 }
 
+macro_rules! manifest_key {
+    ($name:ident) => {
+        #[derive(
+            Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+        )]
+        #[serde(transparent)]
+        pub(crate) struct $name(String);
+
+        impl $name {
+            /// Borrow the stable serialized key without exposing its storage.
+            #[must_use]
+            pub(crate) fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(value.to_string())
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
+            }
+        }
+    };
+}
+
+/// Stable, protocol-specific identity for a selected native video representation.
+manifest_key!(ManifestRepresentationKey);
+/// Stable, protocol-specific identity for a selected native audio rendition.
+manifest_key!(ManifestAudioKey);
+/// Stable, protocol-specific identity for a selected native subtitle rendition.
+manifest_key!(ManifestSubtitleKey);
+
 /// Stable native-manifest selection; signed child URLs are deliberately not persisted.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ManifestSource {
     pub(crate) url: String,
     pub(crate) kind: ManifestKind,
-    pub(crate) representation_key: String,
-    /// Stable selected HLS rendition or DASH audio representation.
-    ///
+    pub(crate) representation_key: ManifestRepresentationKey,
     /// Missing values preserve the automatic default/first-track behavior of
     /// queue entries created before audio selection was introduced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) audio_key: Option<String>,
-    /// Stable selected subtitle rendition or DASH text representation.
-    ///
+    pub(crate) audio_key: Option<ManifestAudioKey>,
     /// Missing values preserve the no-subtitle behavior of existing queue rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) subtitle_key: Option<String>,
+    pub(crate) subtitle_key: Option<ManifestSubtitleKey>,
     /// Normalized language of the selected native subtitle track, used for sidecar naming.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_language: Option<String>,

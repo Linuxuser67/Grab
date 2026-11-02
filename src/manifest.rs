@@ -945,6 +945,12 @@ pub(crate) fn parse_hls_master_playlist(
 /// deliberately rejected. Non-low-latency live playlists are accepted for
 /// incremental capture; the runner polls them until ENDLIST or user stop.
 ///
+/// shortcut: live reloads reuse the manifest URL verbatim, including frozen
+/// `_HLS_msn`/`_HLS_part` LL-HLS blocking-reload params; if an edge honors
+/// those stale params instead of serving the latest window, capture stop is
+/// `LiveSequenceGap` (`ContinuityLost`) with staged media preserved.
+/// Refresh the query per poll if users report this in the wild.
+///
 /// # Errors
 /// Returns an error for unsupported playlist features, invalid URLs or ranges,
 /// unsupported encryption, invalid durations, or an empty media playlist.
@@ -982,6 +988,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     if playlist.segments.is_empty() {
         return Err(ManifestError::EmptyPlaylist);
     }
+    strip_llhls_schedule_tags(&mut playlist);
     if playlist
         .unknown_tags
         .iter()
@@ -1223,16 +1230,39 @@ fn is_unsupported_hls_tag(tag: &str) -> bool {
     matches!(
         tag,
         "X-GAP"
-            | "X-PART"
-            | "X-PRELOAD-HINT"
-            | "X-SERVER-CONTROL"
-            | "X-PART-INF"
-            | "X-RENDITION-REPORT"
             | "X-SKIP"
             | "X-KEY"
             | "X-DEFINE"
             | "X-CONTENT-STEERING"
     )
+}
+
+/// Low-latency HLS schedule tags: server pacing hints for prefetching clients.
+/// They carry no media semantics for Grab's segment-based capture, so media
+/// playlists are accepted with them and they are stripped from the plan before
+/// the local playlist can reference files that were never staged.
+fn is_llhls_schedule_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "X-SERVER-CONTROL"
+            | "X-PART-INF"
+            | "X-PART"
+            | "X-PRELOAD-HINT"
+            | "X-RENDITION-REPORT"
+    )
+}
+
+/// Remove LL-HLS schedule tags at playlist and segment level so the rewritten
+/// local playlist FFmpeg consumes never references unstaged part/preload URLs.
+fn strip_llhls_schedule_tags(playlist: &mut MediaPlaylist) {
+    playlist
+        .unknown_tags
+        .retain(|tag| !is_llhls_schedule_tag(&tag.tag));
+    for segment in &mut playlist.segments {
+        segment
+            .unknown_tags
+            .retain(|tag| !is_llhls_schedule_tag(&tag.tag));
+    }
 }
 
 fn is_valid_https_resource_url(url: &Url) -> bool {
@@ -1452,6 +1482,63 @@ media.mp4
         assert_eq!(local.segments[0].uri, source.resources[0].filename);
         assert_eq!(local.playlist_type, Some(MediaPlaylistType::Vod));
         assert!(local.end_list);
+    }
+
+    #[test]
+    fn llhls_schedule_tags_are_accepted_and_stripped() {
+        // Twitch edge LL-HLS chunklist shape: schedule tags at playlist level
+        // and interleaved between segments, plus regular completes.
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.0,CAN-SKIP-UNTIL=12.0
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-MEDIA-SEQUENCE:7835
+#EXT-X-PART:DURATION=0.5,URI="part-7835.mp4"
+#EXTINF:2.0,
+7835.ts
+#EXT-X-PART:DURATION=0.5,URI="part-7836.mp4"
+#EXT-X-PRELOAD-HINT:TYPE=PART,URI="part-7836b.mp4"
+#EXTINF:2.0,
+7836.ts
+#EXT-X-RENDITION-REPORT:URI="chunklist_0_audio.m3u8",LAST-MSN=7836,LAST-PART=1
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body).expect("LL-HLS chunklist plans natively");
+        assert!(plan.is_live);
+        assert_eq!(plan.resources.len(), 2);
+        assert_eq!(plan.local_playlist.media_sequence, 7835);
+        assert_eq!(plan.local_playlist.segments.len(), 2);
+
+        let staged = String::from_utf8(plan.local_playlist_bytes().expect("serialize"))
+            .expect("utf8 local playlist");
+        for tag in [
+            "X-SERVER-CONTROL",
+            "X-PART-INF",
+            "X-PART",
+            "X-PRELOAD-HINT",
+            "X-RENDITION-REPORT",
+        ] {
+            assert!(
+                !staged.contains(tag),
+                "the staged playlist must not reference unstaged LL-HLS parts"
+            );
+        }
+    }
+
+    #[test]
+    fn llhls_skip_lists_stay_rejected() {
+        // The parser cannot account for SKIPPED-SEGMENTS, so sequence-identical
+        // staging would silently overwrite segment files.
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:1000
+#EXT-X-SKIP:SKIPPED-SEGMENTS=6
+#EXTINF:2.0,
+1006.ts
+"#;
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, body).err(),
+            Some(ManifestError::UnsupportedPlaylist)
+        );
     }
 
     #[test]
@@ -1932,18 +2019,13 @@ one.ts
         }
     }
 
+    /// Gap markers move to segment unknown tags, where the same reject list still
+    /// catches them: a gapped segment is missing media, not just schedule noise.
     #[test]
-    fn rejects_gap_and_low_latency_partial_segments() {
+    fn rejects_gapped_segments() {
         let gap_body = b"#EXTM3U\n#EXTINF:2,\n#EXT-X-GAP\none.ts\n#EXT-X-ENDLIST\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, gap_body).err(),
-            Some(ManifestError::UnsupportedPlaylist)
-        );
-
-        let partial_body =
-            b"#EXTM3U\n#EXT-X-PART-INF:PART-TARGET=0.5\n#EXTINF:2,\none.ts\n#EXT-X-ENDLIST\n";
-        assert_eq!(
-            plan_hls_media_playlist(BASE_URL, partial_body).err(),
             Some(ManifestError::UnsupportedPlaylist)
         );
     }

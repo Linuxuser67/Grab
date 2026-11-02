@@ -162,13 +162,13 @@ impl OrderedTrackWriter {
         directory: &Path,
         filename: &str,
     ) -> Result<(Option<Self>, u64), String> {
-        Self::open_with_policy(
+        Box::pin(Self::open_with_policy(
             resources,
             directory,
             filename,
             CheckpointPolicy::RemoveAfterPublish,
             None,
-        )
+        ))
         .await
     }
 
@@ -185,13 +185,13 @@ impl OrderedTrackWriter {
         directory: &Path,
         filename: &str,
     ) -> Result<(Option<Self>, u64), String> {
-        Self::open_with_policy(
+        Box::pin(Self::open_with_policy(
             resources,
             directory,
             filename,
             CheckpointPolicy::RetainAfterPublish,
             None,
-        )
+        ))
         .await
     }
 
@@ -210,7 +210,7 @@ impl OrderedTrackWriter {
         item_id: u64,
         track: crate::manifest_destination::TrackKind,
     ) -> Result<(Option<Self>, u64), String> {
-        Self::open_with_policy(
+        Box::pin(Self::open_with_policy(
             resources,
             directory,
             filename,
@@ -220,7 +220,7 @@ impl OrderedTrackWriter {
                 item_id,
                 track,
             }),
-        )
+        ))
         .await
     }
 

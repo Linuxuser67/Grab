@@ -19,11 +19,15 @@ pub(crate) fn parse_rate(s: &str) -> Option<u64> {
         b'0'..=b'9' => (s, 1),
         _ => return None,
     };
-    num.trim()
-        .parse::<f64>()
-        .ok()
-        .filter(|v| *v > 0.0)
-        .map(|v| (v * mult as f64) as u64)
+    let value = num.trim().parse::<f64>().ok()?;
+    let bytes_per_second = value * mult as f64;
+    if !bytes_per_second.is_finite()
+        || bytes_per_second < 1.0
+        || bytes_per_second >= u64::MAX as f64
+    {
+        return None;
+    }
+    Some(bytes_per_second as u64)
 }
 
 /// Live cap in bytes/sec (0 = unlimited), one atomic for all engines; `gio::Settings` is main-thread-only, hence the hop.

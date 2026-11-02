@@ -4399,7 +4399,9 @@ fn make_gallery_picker_opener(
                 }
             };
             let url_c = url.clone();
-            let (items_tx, mut items_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (items_tx, mut items_rx) = tokio::sync::mpsc::channel(
+                crate::gallery_probe::GALLERY_ENUMERATION_CHANNEL_CAPACITY,
+            );
             let handle = crate::runtime::tokio_rt().spawn(async move {
                 // Unified auth: handoff jar first, browser export as
                 // fallback (was handoff-only: auth-gated galleries could

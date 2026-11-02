@@ -501,10 +501,8 @@ pub(crate) async fn verify_owned_part_async(
     item_id: u64,
     track: TrackKind,
 ) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        verify_owned_part(&staging, &destination, item_id, track)
-    })
-    .await
+    tokio::task::spawn_blocking(move || verify_owned_part(&staging, &destination, item_id, track))
+        .await
     .map_err(|error| format!("Destination part verification task failed: {error}"))?
 }
 
@@ -515,10 +513,8 @@ pub(crate) async fn remove_owned_part_async(
     item_id: u64,
     track: TrackKind,
 ) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        remove_owned_part(&staging, &destination, item_id, track)
-    })
-    .await
+    tokio::task::spawn_blocking(move || remove_owned_part(&staging, &destination, item_id, track))
+        .await
     .map_err(|error| format!("Destination part cleanup task failed: {error}"))?
 }
 

@@ -1273,9 +1273,14 @@ async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_se
     }
 
     let representation_key = initial.representation.live_key.clone();
-    let (mut track, _) = load_dash_live_track(&representation_key, &video_dir, Some(&initial))
-        .await
-        .expect("create first dynamic DASH capture state");
+    let (mut track, _) = load_dash_live_track(
+        &representation_key,
+        &video_dir,
+        Some(&initial),
+        "video-track.mp4",
+    )
+    .await
+    .expect("create first dynamic DASH capture state");
     let client = fixture_client();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let downloaded = Arc::new(AtomicU64::new(0));
@@ -1310,10 +1315,14 @@ async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_se
     tokio::fs::remove_file(video_dir.join(&missing))
         .await
         .expect("remove one overlapping media segment to exercise repair");
-    let (mut restored, retained_bytes) =
-        load_dash_live_track(&representation_key, &video_dir, Some(&next))
-            .await
-            .expect("restore dynamic DASH state with one missing cache file");
+    let (mut restored, retained_bytes) = load_dash_live_track(
+        &representation_key,
+        &video_dir,
+        Some(&next),
+        "video-track.mp4",
+    )
+    .await
+    .expect("restore dynamic DASH state with one missing cache file");
     assert!(retained_bytes > 0);
     assert_eq!(restored.state.segments.len(), 5);
 
@@ -2023,9 +2032,10 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
         5,
         "pause must return the committed segment set"
     );
-    let (restored, retained_bytes) = load_dash_live_track(&representation_key, &video_dir, None)
-        .await
-        .expect("restore the preserved dynamic DASH capture");
+    let (restored, retained_bytes) =
+        load_dash_live_track(&representation_key, &video_dir, None, "video-track.mp4")
+            .await
+            .expect("restore the preserved dynamic DASH capture");
     assert_eq!(restored.state.segments.len(), 5);
     assert_eq!(
         retained_bytes,

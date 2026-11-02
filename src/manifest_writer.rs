@@ -2,17 +2,34 @@
 //!
 //! Segment requests remain concurrent and bounded by the runner. This module
 //! commits their completed files to one track in manifest order. The checkpoint
-//! advances only after the output bytes have been synced to disk.
+//! advances only after the output bytes and their digest record are synced.
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
-const CHECKPOINT_VERSION: u32 = 1;
+const CHECKPOINT_VERSION: u32 = 2;
+const LEGACY_CHECKPOINT_VERSION: u32 = 1;
 const MAX_TRACK_BYTES: u64 = 1 << 40;
+/// Maximum size of one staged DASH resource.
+pub(crate) const MAX_RESOURCE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_CHECKPOINT_BYTES: u64 = 1024 * 1024;
+
+#[path = "manifest_writer_journal.rs"]
+mod journal;
+
+#[cfg(test)]
+use journal::read_resource_journal;
+use journal::{append_resource_record, load_resource_records, write_resource_journal};
+
+/// Length and SHA-256 digest of one resource committed to an ordered track.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CommittedResource {
+    pub(crate) length: u64,
+    pub(crate) sha256: String,
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -24,34 +41,89 @@ struct WriterCheckpoint {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckpointPolicy {
+    RemoveAfterPublish,
+    RetainAfterPublish,
+}
+
+#[derive(Debug)]
 enum CheckpointState {
     Fresh,
     Resume {
         next_resource_index: usize,
         committed_offset: u64,
+        resources: Vec<CommittedResource>,
     },
     AlreadyComplete {
         committed_offset: u64,
     },
 }
 
-/// Assemble staged DASH resources in their declared order, retaining a durable
-/// byte-offset checkpoint after every resource. A stopped or interrupted write
-/// is truncated back to the last committed offset on the next attempt.
-/// An incremental writer for one static DASH track.
+/// Incrementally assemble staged DASH resources in manifest order.
 ///
-/// Fetchers may complete concurrently, but callers append only the next
-/// manifest resource. Each append advances a durable checkpoint.
+/// Each committed resource has a fixed-size SHA-256 record in an append-only
+/// journal. The small atomic checkpoint records the committed prefix length.
 pub(crate) struct OrderedTrackWriter {
     resources: Vec<String>,
     directory: std::path::PathBuf,
     target: std::path::PathBuf,
     part: std::path::PathBuf,
     checkpoint_path: std::path::PathBuf,
+    journal_path: std::path::PathBuf,
     fingerprint: String,
     output: tokio::fs::File,
     next_resource_index: usize,
     committed_offset: u64,
+    checkpoint_policy: CheckpointPolicy,
+}
+
+struct HashingWriter<'a> {
+    output: &'a mut tokio::fs::File,
+    digest: Sha256,
+}
+
+impl<'a> HashingWriter<'a> {
+    fn new(output: &'a mut tokio::fs::File) -> Self {
+        Self {
+            output,
+            digest: Sha256::new(),
+        }
+    }
+
+    fn finish(self) -> String {
+        digest_hex(&self.digest.finalize())
+    }
+}
+
+impl tokio::io::AsyncWrite for HashingWriter<'_> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        match std::pin::Pin::new(&mut *this.output).poll_write(context, buffer) {
+            std::task::Poll::Ready(Ok(written)) => {
+                this.digest.update(&buffer[..written]);
+                std::task::Poll::Ready(Ok(written))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.get_mut().output).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.get_mut().output).poll_shutdown(context)
+    }
 }
 
 impl OrderedTrackWriter {
@@ -59,10 +131,51 @@ impl OrderedTrackWriter {
     ///
     /// The returned byte count is already committed to this track, including
     /// when the final rename completed before checkpoint cleanup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the resource plan, checkpoint, or staging files are invalid.
     pub(crate) async fn open(
         resources: Vec<String>,
         directory: &Path,
         filename: &str,
+    ) -> Result<(Option<Self>, u64), String> {
+        Self::open_with_policy(
+            resources,
+            directory,
+            filename,
+            CheckpointPolicy::RemoveAfterPublish,
+        )
+        .await
+    }
+
+    /// Open a writer whose checkpoint remains available after publication.
+    ///
+    /// Live DASH recovery uses the retained checkpoint and digest journal to
+    /// prove that staged source resources can be removed without losing resume.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the resource plan, checkpoint, or staging files are invalid.
+    pub(crate) async fn open_retaining_checkpoint(
+        resources: Vec<String>,
+        directory: &Path,
+        filename: &str,
+    ) -> Result<(Option<Self>, u64), String> {
+        Self::open_with_policy(
+            resources,
+            directory,
+            filename,
+            CheckpointPolicy::RetainAfterPublish,
+        )
+        .await
+    }
+
+    async fn open_with_policy(
+        resources: Vec<String>,
+        directory: &Path,
+        filename: &str,
+        checkpoint_policy: CheckpointPolicy,
     ) -> Result<(Option<Self>, u64), String> {
         if resources.is_empty() {
             return Err("The DASH recording contains no media resources".to_string());
@@ -79,8 +192,10 @@ impl OrderedTrackWriter {
         let target = directory.join(filename);
         let part = directory.join(format!("{filename}.part"));
         let checkpoint_path = directory.join(format!("{filename}.checkpoint.json"));
+        let journal_path = directory.join(format!("{filename}.resources"));
         let checkpoint_state = load_checkpoint(
             &checkpoint_path,
+            &journal_path,
             &part,
             &target,
             directory,
@@ -89,24 +204,33 @@ impl OrderedTrackWriter {
         )
         .await?;
 
-        let (next_resource_index, committed_offset) = match checkpoint_state {
+        let (next_resource_index, committed_offset, committed_resources) = match checkpoint_state {
             CheckpointState::AlreadyComplete { committed_offset } => {
-                remove_regular_file_if_present(&checkpoint_path).await?;
-                sync_directory(directory).await?;
+                if checkpoint_policy == CheckpointPolicy::RemoveAfterPublish {
+                    remove_regular_file_if_present(&checkpoint_path).await?;
+                    remove_regular_file_if_present(&journal_path).await?;
+                    sync_directory(directory).await?;
+                }
                 return Ok((None, committed_offset));
             }
             CheckpointState::Fresh => {
                 remove_regular_file_if_present(&part).await?;
                 remove_regular_file_if_present(&target).await?;
-                (0, 0)
+                remove_regular_file_if_present(&journal_path).await?;
+                (0, 0, Vec::new())
             }
             CheckpointState::Resume {
                 next_resource_index,
                 committed_offset,
-            } => (next_resource_index, committed_offset),
+                resources,
+            } => (next_resource_index, committed_offset, resources),
         };
+        if checkpoint_policy == CheckpointPolicy::RetainAfterPublish {
+            remove_committed_source_files(&resources, directory, &committed_resources).await?;
+        }
 
         let mut output = tokio::fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .create(true)
             .truncate(false)
@@ -129,10 +253,12 @@ impl OrderedTrackWriter {
                 target,
                 part,
                 checkpoint_path,
+                journal_path,
                 fingerprint,
                 output,
                 next_resource_index,
                 committed_offset,
+                checkpoint_policy,
             }),
             committed_offset,
         ))
@@ -147,6 +273,10 @@ impl OrderedTrackWriter {
     ///
     /// Returns false when a user stop request interrupts the append. Any
     /// bytes beyond the last checkpoint are truncated before returning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the next source is invalid or durable output/checkpoint I/O fails.
     pub(crate) async fn append_next(
         &mut self,
         abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
@@ -161,8 +291,8 @@ impl OrderedTrackWriter {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err("A staged DASH segment is not a regular file".to_string());
         }
-        if metadata.len() == 0 {
-            return Err("A staged DASH segment is empty".to_string());
+        if metadata.len() == 0 || metadata.len() > MAX_RESOURCE_BYTES {
+            return Err("A staged DASH segment has an invalid size".to_string());
         }
         let next_offset = self
             .committed_offset
@@ -173,19 +303,22 @@ impl OrderedTrackWriter {
             .await
             .map_err(|error| format!("Could not open a staged DASH segment: {error}"))?;
 
+        let mut hashing_output = HashingWriter::new(&mut self.output);
         let copied = tokio::select! {
             biased;
             _ = &mut *abort => {
+                drop(hashing_output);
                 self.output.set_len(self.committed_offset).await
                     .map_err(|error| format!("Could not roll back an interrupted DASH write: {error}"))?;
                 self.output.sync_all().await
                     .map_err(|error| format!("Could not sync the interrupted DASH track: {error}"))?;
                 return Ok(false);
             }
-            result = tokio::io::copy(&mut input, &mut self.output) => {
+            result = tokio::io::copy(&mut input, &mut hashing_output) => {
                 result.map_err(|error| format!("Could not append a DASH segment in order: {error}"))?
             }
         };
+        let sha256 = hashing_output.finish();
         if copied != metadata.len() {
             self.output
                 .set_len(self.committed_offset)
@@ -204,23 +337,41 @@ impl OrderedTrackWriter {
             .sync_all()
             .await
             .map_err(|error| format!("Could not sync ordered DASH track data: {error}"))?;
-        self.committed_offset = next_offset;
-        self.next_resource_index += 1;
+        let resource = CommittedResource {
+            length: copied,
+            sha256,
+        };
+        append_resource_record(&self.journal_path, self.next_resource_index, &resource).await?;
+
+        let next_resource_index = self
+            .next_resource_index
+            .checked_add(1)
+            .ok_or_else(|| "The DASH resource index overflowed".to_string())?;
         persist_checkpoint(
             &self.checkpoint_path,
             &self.directory,
             &WriterCheckpoint {
                 version: CHECKPOINT_VERSION,
                 plan_fingerprint: self.fingerprint.clone(),
-                next_resource_index: self.next_resource_index,
-                committed_offset: self.committed_offset,
+                next_resource_index,
+                committed_offset: next_offset,
             },
         )
         .await?;
+
+        self.committed_offset = next_offset;
+        self.next_resource_index = next_resource_index;
+        if self.checkpoint_policy == CheckpointPolicy::RetainAfterPublish {
+            remove_committed_source_file_after_commit(&self.directory.join(resource_name)).await?;
+        }
         Ok(true)
     }
 
     /// Publish the complete ordered track without replacing an existing file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the track is incomplete or publication cannot be synced.
     pub(crate) async fn finish(self) -> Result<(), String> {
         if self.next_resource_index != self.resources.len() {
             return Err(
@@ -235,36 +386,285 @@ impl OrderedTrackWriter {
         crate::file_names::rename_noreplace(&self.part, &self.target)
             .map_err(|error| format!("Could not publish the ordered DASH track: {error}"))?;
         sync_directory(&self.directory).await?;
-        remove_regular_file_if_present(&self.checkpoint_path).await?;
-        sync_directory(&self.directory).await
+        if self.checkpoint_policy == CheckpointPolicy::RemoveAfterPublish {
+            remove_regular_file_if_present(&self.checkpoint_path).await?;
+            remove_regular_file_if_present(&self.journal_path).await?;
+            sync_directory(&self.directory).await?;
+        }
+        Ok(())
     }
 }
 
-/// Assemble staged DASH resources in their declared order for writer tests.
-#[cfg(test)]
-pub(crate) async fn write_ordered_track(
+/// Return the resource prefix proven durable by the ordered writer.
+///
+/// A prefix in the `.part` file is sufficient to recover a paused or
+/// interrupted finalization. Missing source files are accepted only for
+/// resources whose byte ranges are verified against that prefix.
+///
+/// # Errors
+///
+/// Returns an error if the checkpoint, digest journal, or committed output bytes are invalid.
+pub(crate) async fn committed_resource_prefix(
     resources: &[String],
     directory: &Path,
     filename: &str,
-    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-) -> Result<bool, String> {
-    let (Some(mut writer), _) =
-        OrderedTrackWriter::open(resources.to_vec(), directory, filename).await?
-    else {
-        return Ok(true);
-    };
-
-    while writer.next_resource_index() < resources.len() {
-        if !writer.append_next(abort).await? {
-            return Ok(false);
+) -> Result<Vec<CommittedResource>, String> {
+    if resources.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !safe_filename(filename) || resources.iter().any(|name| !safe_filename(name)) {
+        return Err("The DASH committed-resource plan is invalid".to_string());
+    }
+    let checkpoint_path = directory.join(format!("{filename}.checkpoint.json"));
+    match tokio::fs::symlink_metadata(&checkpoint_path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err("The DASH writer checkpoint is not a regular file".to_string());
+        }
+        Ok(metadata) if metadata.len() > MAX_CHECKPOINT_BYTES => {
+            return Err("The DASH writer checkpoint exceeds its size limit".to_string());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "Could not inspect {}: {error}",
+                checkpoint_path.display()
+            ));
         }
     }
-    writer.finish().await?;
-    Ok(true)
+    let bytes = tokio::fs::read(&checkpoint_path)
+        .await
+        .map_err(|error| format!("Could not read {}: {error}", checkpoint_path.display()))?;
+    let checkpoint: WriterCheckpoint = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("The DASH writer checkpoint is invalid: {error}"))?;
+    if checkpoint.version == LEGACY_CHECKPOINT_VERSION {
+        return Ok(Vec::new());
+    }
+    if checkpoint.version != CHECKPOINT_VERSION {
+        return Err("The DASH writer checkpoint version is unsupported".to_string());
+    }
+    if checkpoint.plan_fingerprint != plan_fingerprint(resources)? {
+        return Err(
+            "The DASH writer checkpoint does not match the selected resource plan".to_string(),
+        );
+    }
+    if checkpoint.next_resource_index > resources.len() {
+        return Err("The DASH writer checkpoint exceeds the selected resource plan".to_string());
+    }
+
+    let committed = load_resource_records(
+        &directory.join(format!("{filename}.resources")),
+        directory,
+        resources,
+        checkpoint.next_resource_index,
+        checkpoint.committed_offset,
+        true,
+    )
+    .await?;
+
+    let part = directory.join(format!("{filename}.part"));
+    let target = directory.join(filename);
+    let part_metadata = match tokio::fs::symlink_metadata(&part).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err("The interrupted DASH track is not a regular file".to_string());
+        }
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!("Could not inspect {}: {error}", part.display()));
+        }
+    };
+    let target_metadata = match tokio::fs::symlink_metadata(&target).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err("The published DASH track is not a regular file".to_string());
+        }
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!("Could not inspect {}: {error}", target.display()));
+        }
+    };
+    if part_metadata.is_some() && target_metadata.is_some() {
+        return Err("Both the interrupted and published DASH track files exist".to_string());
+    }
+
+    let output_path = if let Some(metadata) = &part_metadata {
+        if metadata.len() < checkpoint.committed_offset {
+            return Err("The interrupted DASH track is shorter than its checkpoint".to_string());
+        }
+        Some(&part)
+    } else if let Some(metadata) = &target_metadata {
+        if checkpoint.next_resource_index != resources.len()
+            || metadata.len() != checkpoint.committed_offset
+        {
+            return Err(
+                "The published DASH track does not match its complete checkpoint".to_string(),
+            );
+        }
+        Some(&target)
+    } else {
+        None
+    };
+
+    if let Some(output_path) = output_path {
+        verify_resource_ranges(output_path, &committed).await?;
+        Ok(committed)
+    } else {
+        // Without output bytes, the runner must continue using staged sources.
+        // The writer validates them before resetting this checkpoint.
+        Ok(Vec::new())
+    }
+}
+
+/// Return a complete published track's verified resource metadata.
+///
+/// # Errors
+///
+/// Returns an error if the published track or its retained checkpoint is invalid.
+pub(crate) async fn committed_resources(
+    resources: &[String],
+    directory: &Path,
+    filename: &str,
+) -> Result<Option<Vec<CommittedResource>>, String> {
+    if resources.is_empty() {
+        return Ok(None);
+    }
+    let committed = committed_resource_prefix(resources, directory, filename).await?;
+    if committed.len() != resources.len() {
+        return Ok(None);
+    }
+    let part = directory.join(format!("{filename}.part"));
+    match tokio::fs::symlink_metadata(&part).await {
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!("Could not inspect {}: {error}", part.display()));
+        }
+    }
+    let target = directory.join(filename);
+    match tokio::fs::symlink_metadata(&target).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err("The published DASH track is not a regular file".to_string())
+        }
+        Ok(_) => Ok(Some(committed)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Could not inspect {}: {error}", target.display())),
+    }
+}
+
+/// Remove one source after its output range and checkpoint are durable.
+///
+/// The directory entry is synced when the full prefix is cleaned on resume or
+/// when the track is published; an interrupted deletion is safe to repeat.
+async fn remove_committed_source_file_after_commit(path: &Path) -> Result<(), String> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err("A staged DASH resource is not a regular file".to_string())
+        }
+        Ok(_) => tokio::fs::remove_file(path)
+            .await
+            .map_err(|error| format!("Could not remove {}: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not inspect {}: {error}", path.display())),
+    }
+}
+
+/// Remove source resources only after their committed output ranges have been
+/// verified. Missing files are expected after a crash during this cleanup.
+async fn remove_committed_source_files(
+    resources: &[String],
+    directory: &Path,
+    committed: &[CommittedResource],
+) -> Result<(), String> {
+    if committed.len() > resources.len() {
+        return Err("The DASH committed prefix exceeds its resource plan".to_string());
+    }
+    let mut removed_any = false;
+    for name in resources.iter().take(committed.len()) {
+        let path = directory.join(name);
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err("A staged DASH resource is not a regular file".to_string());
+            }
+            Ok(_) => {
+                tokio::fs::remove_file(&path)
+                    .await
+                    .map_err(|error| format!("Could not remove {}: {error}", path.display()))?;
+                removed_any = true;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("Could not inspect {}: {error}", path.display()));
+            }
+        }
+    }
+    if removed_any {
+        sync_directory(directory).await?;
+    }
+    Ok(())
+}
+
+async fn verify_resource_ranges(
+    output_path: &Path,
+    committed: &[CommittedResource],
+) -> Result<(), String> {
+    let mut file = tokio::fs::File::open(output_path).await.map_err(|error| {
+        format!(
+            "Could not open {} for DASH verification: {error}",
+            output_path.display()
+        )
+    })?;
+    let mut buffer = [0_u8; 64 * 1024];
+    for resource in committed {
+        let mut remaining = resource.length;
+        let mut digest = Sha256::new();
+        while remaining > 0 {
+            let chunk_length = usize::try_from(remaining.min(64 * 1024))
+                .map_err(|_| "The committed DASH resource length is too large".to_string())?;
+            file.read_exact(&mut buffer[..chunk_length])
+                .await
+                .map_err(|error| {
+                    format!(
+                        "Could not read {} for DASH verification: {error}",
+                        output_path.display()
+                    )
+                })?;
+            digest.update(&buffer[..chunk_length]);
+            remaining -= u64::try_from(chunk_length)
+                .map_err(|_| "The committed DASH resource length is too large".to_string())?;
+        }
+        if digest_hex(&digest.finalize()) != resource.sha256 {
+            return Err("The ordered DASH track contains corrupted committed bytes".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Remove remaining source resources after a complete track is published.
+/// The retained checkpoint and journal make this operation repeatable.
+///
+/// # Errors
+///
+/// Returns an error if the complete output cannot be verified or source cleanup fails.
+pub(crate) async fn cleanup_committed_resources(
+    resources: &[String],
+    directory: &Path,
+    filename: &str,
+) -> Result<(), String> {
+    let committed = committed_resources(resources, directory, filename)
+        .await?
+        .ok_or_else(|| {
+            "The completed DASH track has no retained verified checkpoint".to_string()
+        })?;
+    if committed.len() != resources.len() {
+        return Err("The completed DASH checkpoint has an incomplete resource list".to_string());
+    }
+    remove_committed_source_files(resources, directory, &committed).await
 }
 
 async fn load_checkpoint(
     checkpoint_path: &Path,
+    journal_path: &Path,
     part: &Path,
     target: &Path,
     directory: &Path,
@@ -284,7 +684,8 @@ async fn load_checkpoint(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(format!(
-                "Could not inspect the DASH writer checkpoint: {error}"
+                "Could not inspect {}: {error}",
+                checkpoint_path.display()
             ));
         }
     };
@@ -294,41 +695,19 @@ async fn load_checkpoint(
 
     let bytes = tokio::fs::read(checkpoint_path)
         .await
-        .map_err(|error| format!("Could not read the DASH writer checkpoint: {error}"))?;
-    let checkpoint: WriterCheckpoint = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Could not read {}: {error}", checkpoint_path.display()))?;
+    let mut checkpoint: WriterCheckpoint = serde_json::from_slice(&bytes)
         .map_err(|error| format!("The DASH writer checkpoint is invalid: {error}"))?;
-    if checkpoint.version != CHECKPOINT_VERSION
-        || checkpoint.plan_fingerprint != fingerprint
+    if !matches!(
+        checkpoint.version,
+        LEGACY_CHECKPOINT_VERSION | CHECKPOINT_VERSION
+    ) || checkpoint.plan_fingerprint != fingerprint
         || checkpoint.next_resource_index > resources.len()
         || checkpoint.committed_offset > MAX_TRACK_BYTES
         || (checkpoint.next_resource_index == 0) != (checkpoint.committed_offset == 0)
     {
         return Err(
             "The DASH writer checkpoint does not match the selected resource plan".to_string(),
-        );
-    }
-
-    // Recompute the durable prefix from the exact resource files. This prevents
-    // a truncated or inconsistent checkpoint from skipping bytes on recovery.
-    let mut expected_offset = 0_u64;
-    for resource_name in resources.iter().take(checkpoint.next_resource_index) {
-        let resource_path = directory.join(resource_name);
-        let metadata = tokio::fs::symlink_metadata(&resource_path)
-            .await
-            .map_err(|error| format!("Could not validate a committed DASH resource: {error}"))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
-            return Err("A committed DASH resource is not a valid regular file".to_string());
-        }
-        expected_offset = expected_offset
-            .checked_add(metadata.len())
-            .filter(|offset| *offset <= MAX_TRACK_BYTES)
-            .ok_or_else(|| {
-                "The committed DASH resource prefix exceeds the 1 TiB limit".to_string()
-            })?;
-    }
-    if expected_offset != checkpoint.committed_offset {
-        return Err(
-            "The DASH writer checkpoint offset does not match its committed resources".to_string(),
         );
     }
 
@@ -341,42 +720,199 @@ async fn load_checkpoint(
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            return Err(format!(
-                "Could not inspect the interrupted DASH track: {error}"
-            ));
+            return Err(format!("Could not inspect {}: {error}", part.display()));
         }
     };
-    if let Some(metadata) = part_metadata {
-        if tokio::fs::symlink_metadata(target).await.is_ok() {
-            return Err("Both the interrupted and published DASH track files exist".to_string());
+    let target_metadata = match tokio::fs::symlink_metadata(target).await {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("The published DASH track is not a regular file".to_string());
+            }
+            Some(metadata)
         }
-        if metadata.len() < checkpoint.committed_offset {
-            return Err(
-                "The interrupted DASH track is shorter than its committed checkpoint".to_string(),
-            );
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!("Could not inspect {}: {error}", target.display()));
         }
-        return Ok(CheckpointState::Resume {
-            next_resource_index: checkpoint.next_resource_index,
-            committed_offset: checkpoint.committed_offset,
-        });
+    };
+    if part_metadata.is_some() && target_metadata.is_some() {
+        return Err("Both the interrupted and published DASH track files exist".to_string());
+    }
+    if target_metadata.is_some() && checkpoint.next_resource_index != resources.len() {
+        return Err("A published DASH track has an incomplete checkpoint".to_string());
     }
 
-    if checkpoint.next_resource_index == resources.len()
-        && let Ok(metadata) = tokio::fs::symlink_metadata(target).await
-    {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err("The completed DASH track is not a regular file".to_string());
-        }
-        if metadata.len() == checkpoint.committed_offset {
-            return Ok(CheckpointState::AlreadyComplete {
-                committed_offset: checkpoint.committed_offset,
+    let committed = if checkpoint.version == LEGACY_CHECKPOINT_VERSION {
+        let mut committed = Vec::with_capacity(checkpoint.next_resource_index);
+        let mut offset = 0_u64;
+        for resource_name in resources.iter().take(checkpoint.next_resource_index) {
+            let resource_path = directory.join(resource_name);
+            let metadata = tokio::fs::symlink_metadata(&resource_path)
+                .await
+                .map_err(|error| {
+                    format!("Could not validate a legacy committed DASH resource: {error}")
+                })?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() == 0
+                || metadata.len() > MAX_RESOURCE_BYTES
+            {
+                return Err(
+                    "A legacy committed DASH resource is not a valid regular file".to_string(),
+                );
+            }
+            committed.push(CommittedResource {
+                length: metadata.len(),
+                sha256: hash_file_range(&resource_path, 0, metadata.len()).await?,
             });
+            offset = offset
+                .checked_add(metadata.len())
+                .filter(|value| *value <= MAX_TRACK_BYTES)
+                .ok_or_else(|| {
+                    "The legacy committed DASH prefix exceeds the 1 TiB limit".to_string()
+                })?;
         }
+        if offset != checkpoint.committed_offset {
+            return Err(
+                "The legacy DASH checkpoint offset does not match its resources".to_string(),
+            );
+        }
+        committed
+    } else {
+        load_resource_records(
+            journal_path,
+            directory,
+            resources,
+            checkpoint.next_resource_index,
+            checkpoint.committed_offset,
+            true,
+        )
+        .await?
+    };
+
+    let output_path = if part_metadata.is_some() {
+        Some(part)
+    } else if target_metadata.is_some() {
+        Some(target)
+    } else {
+        None
+    };
+    if let Some(output_path) = output_path {
+        let output_metadata = (if part_metadata.is_some() {
+            part_metadata.as_ref()
+        } else {
+            target_metadata.as_ref()
+        })
+        .ok_or_else(|| "The ordered DASH output metadata is unavailable".to_string())?;
+        let length_is_valid = if part_metadata.is_some() {
+            output_metadata.len() >= checkpoint.committed_offset
+        } else {
+            output_metadata.len() == checkpoint.committed_offset
+        };
+        if !length_is_valid {
+            return Err(
+                "The DASH track length does not match its committed checkpoint".to_string(),
+            );
+        }
+        verify_resource_ranges(output_path, &committed).await?;
+    } else {
+        // Without output bytes, rebuild only while every committed source still
+        // exists and matches its checkpoint. A deleted source must never be lost.
+        for (index, resource_name) in resources
+            .iter()
+            .take(checkpoint.next_resource_index)
+            .enumerate()
+        {
+            let resource_path = directory.join(resource_name);
+            let metadata = tokio::fs::symlink_metadata(&resource_path)
+                .await
+                .map_err(|error| {
+                    format!("A committed DASH source is missing and no track bytes remain: {error}")
+                })?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() != committed[index].length
+                || hash_file_range(&resource_path, 0, metadata.len()).await?
+                    != committed[index].sha256
+            {
+                return Err(
+                    "A committed DASH source is invalid and no track bytes remain".to_string(),
+                );
+            }
+        }
+        remove_regular_file_if_present(checkpoint_path).await?;
+        remove_regular_file_if_present(journal_path).await?;
+        sync_directory(directory).await?;
+        return Ok(CheckpointState::Fresh);
     }
-    // The part file disappeared before the final rename. The source segments
-    // are still authoritative, so safely rebuild the track from offset zero.
-    remove_regular_file_if_present(checkpoint_path).await?;
-    Ok(CheckpointState::Fresh)
+
+    if checkpoint.version == LEGACY_CHECKPOINT_VERSION {
+        write_resource_journal(journal_path, directory, &committed).await?;
+        checkpoint.version = CHECKPOINT_VERSION;
+        persist_checkpoint(checkpoint_path, directory, &checkpoint).await?;
+    }
+
+    if part_metadata.is_some() {
+        Ok(CheckpointState::Resume {
+            next_resource_index: checkpoint.next_resource_index,
+            committed_offset: checkpoint.committed_offset,
+            resources: committed,
+        })
+    } else {
+        Ok(CheckpointState::AlreadyComplete {
+            committed_offset: checkpoint.committed_offset,
+        })
+    }
+}
+
+async fn hash_file_range(path: &Path, offset: u64, length: u64) -> Result<String, String> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .open(path)
+        .await
+        .map_err(|error| {
+            format!(
+                "Could not open {} for DASH byte verification: {error}",
+                path.display()
+            )
+        })?;
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|error| {
+            format!(
+                "Could not seek in {} for DASH byte verification: {error}",
+                path.display()
+            )
+        })?;
+    let mut remaining = length;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut digest = Sha256::new();
+    while remaining > 0 {
+        let chunk_length = usize::try_from(remaining.min(64 * 1024))
+            .map_err(|_| "The committed DASH resource length is too large".to_string())?;
+        file.read_exact(&mut buffer[..chunk_length])
+            .await
+            .map_err(|error| {
+                format!(
+                    "Could not read {} for DASH byte verification: {error}",
+                    path.display()
+                )
+            })?;
+        digest.update(&buffer[..chunk_length]);
+        remaining -= u64::try_from(chunk_length)
+            .map_err(|_| "The committed DASH resource length is too large".to_string())?;
+    }
+    let digest = digest.finalize();
+    Ok(digest_hex(&digest))
+}
+
+fn digest_hex(bytes: &[u8]) -> String {
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut value, "{byte:02x}");
+    }
+    value
 }
 
 async fn persist_checkpoint(
@@ -386,13 +922,11 @@ async fn persist_checkpoint(
 ) -> Result<(), String> {
     let bytes = serde_json::to_vec(checkpoint)
         .map_err(|error| format!("Could not encode the DASH writer checkpoint: {error}"))?;
-    let temporary = directory.join(format!(
-        "{}.checkpoint.tmp",
-        checkpoint_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("track")
-    ));
+    let checkpoint_name = checkpoint_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "The DASH checkpoint filename is invalid".to_string())?;
+    let temporary = directory.join(format!("{checkpoint_name}.tmp"));
     remove_regular_file_if_present(&temporary).await?;
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -416,11 +950,11 @@ async fn persist_checkpoint(
 async fn sync_directory(directory: &Path) -> Result<(), String> {
     let directory_file = tokio::fs::File::open(directory)
         .await
-        .map_err(|error| format!("Could not open the DASH staging directory: {error}"))?;
+        .map_err(|error| format!("Could not open {}: {error}", directory.display()))?;
     directory_file
         .sync_all()
         .await
-        .map_err(|error| format!("Could not sync the DASH staging directory: {error}"))
+        .map_err(|error| format!("Could not sync {}: {error}", directory.display()))
 }
 
 async fn remove_regular_file_if_present(path: &Path) -> Result<(), String> {
@@ -430,9 +964,9 @@ async fn remove_regular_file_if_present(path: &Path) -> Result<(), String> {
         }
         Ok(_) => tokio::fs::remove_file(path)
             .await
-            .map_err(|error| format!("Could not remove stale DASH writer state: {error}")),
+            .map_err(|error| format!("Could not remove {}: {error}", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Could not inspect DASH writer state: {error}")),
+        Err(error) => Err(format!("Could not inspect {}: {error}", path.display())),
     }
 }
 
@@ -458,283 +992,27 @@ fn plan_fingerprint(resources: &[String]) -> Result<String, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
+pub(crate) async fn write_ordered_track(
+    resources: &[String],
+    directory: &Path,
+    filename: &str,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<bool, String> {
+    let (Some(mut writer), _) =
+        OrderedTrackWriter::open(resources.to_vec(), directory, filename).await?
+    else {
+        return Ok(true);
+    };
 
-    fn test_directory() -> PathBuf {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock must follow the Unix epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "grab-ordered-writer-{}-{nonce}",
-            std::process::id()
-        ))
+    while writer.next_resource_index() < resources.len() {
+        if !writer.append_next(abort).await? {
+            return Ok(false);
+        }
     }
-
-    fn stop_channel() -> (
-        tokio::sync::oneshot::Sender<crate::video::StopIntent>,
-        tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-    ) {
-        tokio::sync::oneshot::channel()
-    }
-
-    #[tokio::test]
-    async fn incremental_writer_checkpoints_and_resumes_between_resources() {
-        let directory = test_directory();
-        tokio::fs::create_dir_all(&directory)
-            .await
-            .expect("create staging");
-        tokio::fs::write(directory.join("first.bin"), b"first")
-            .await
-            .expect("write first");
-        tokio::fs::write(directory.join("second.bin"), b"second")
-            .await
-            .expect("write second");
-        let resources = vec!["first.bin".to_string(), "second.bin".to_string()];
-        let (_stop_tx, mut abort) = stop_channel();
-
-        let (Some(mut writer), committed) =
-            OrderedTrackWriter::open(resources.clone(), &directory, "track.mp4")
-                .await
-                .expect("open ordered writer")
-        else {
-            panic!("a fresh track must return an active writer");
-        };
-        assert_eq!(committed, 0);
-        assert_eq!(writer.next_resource_index(), 0);
-        assert!(writer.append_next(&mut abort).await.expect("append first"));
-
-        let checkpoint: WriterCheckpoint = serde_json::from_slice(
-            &tokio::fs::read(directory.join("track.mp4.checkpoint.json"))
-                .await
-                .expect("read checkpoint"),
-        )
-        .expect("decode checkpoint");
-        assert_eq!(checkpoint.next_resource_index, 1);
-        assert_eq!(checkpoint.committed_offset, 5);
-        drop(writer);
-
-        let (Some(mut writer), committed) =
-            OrderedTrackWriter::open(resources, &directory, "track.mp4")
-                .await
-                .expect("resume ordered writer")
-        else {
-            panic!("an interrupted track must return an active writer");
-        };
-        assert_eq!(committed, 5);
-        assert_eq!(writer.next_resource_index(), 1);
-        assert!(writer.append_next(&mut abort).await.expect("append second"));
-        writer.finish().await.expect("publish ordered track");
-
-        assert_eq!(
-            tokio::fs::read(directory.join("track.mp4"))
-                .await
-                .expect("read track"),
-            b"firstsecond"
-        );
-        tokio::fs::remove_dir_all(directory)
-            .await
-            .expect("remove staging");
-    }
-
-    #[tokio::test]
-    async fn writes_resources_in_manifest_order_and_publishes_track() {
-        let directory = test_directory();
-        tokio::fs::create_dir_all(&directory)
-            .await
-            .expect("create staging");
-        tokio::fs::write(directory.join("second.bin"), b"second")
-            .await
-            .expect("write second");
-        tokio::fs::write(directory.join("first.bin"), b"first")
-            .await
-            .expect("write first");
-        let resources = vec!["first.bin".to_string(), "second.bin".to_string()];
-        let (_stop_tx, mut abort) = stop_channel();
-
-        assert!(
-            write_ordered_track(&resources, &directory, "track.mp4", &mut abort)
-                .await
-                .expect("write track")
-        );
-        assert_eq!(
-            tokio::fs::read(directory.join("track.mp4"))
-                .await
-                .expect("read track"),
-            b"firstsecond"
-        );
-        assert!(!directory.join("track.mp4.checkpoint.json").exists());
-        tokio::fs::remove_dir_all(directory)
-            .await
-            .expect("remove staging");
-    }
-
-    #[tokio::test]
-    async fn resumes_from_checkpoint_and_truncates_uncommitted_tail() {
-        let directory = test_directory();
-        tokio::fs::create_dir_all(&directory)
-            .await
-            .expect("create staging");
-        tokio::fs::write(directory.join("first.bin"), b"first")
-            .await
-            .expect("write first");
-        tokio::fs::write(directory.join("second.bin"), b"second")
-            .await
-            .expect("write second");
-        let resources = vec!["first.bin".to_string(), "second.bin".to_string()];
-        let fingerprint = plan_fingerprint(&resources).expect("fingerprint");
-        let checkpoint = WriterCheckpoint {
-            version: CHECKPOINT_VERSION,
-            plan_fingerprint: fingerprint,
-            next_resource_index: 1,
-            committed_offset: 5,
-        };
-        tokio::fs::write(directory.join("track.mp4.part"), b"first-uncommitted-tail")
-            .await
-            .expect("write interrupted output");
-        tokio::fs::write(
-            directory.join("track.mp4.checkpoint.json"),
-            serde_json::to_vec(&checkpoint).expect("serialize checkpoint"),
-        )
-        .await
-        .expect("write checkpoint");
-        let (_stop_tx, mut abort) = stop_channel();
-
-        assert!(
-            write_ordered_track(&resources, &directory, "track.mp4", &mut abort)
-                .await
-                .expect("resume track")
-        );
-        assert_eq!(
-            tokio::fs::read(directory.join("track.mp4"))
-                .await
-                .expect("read track"),
-            b"firstsecond"
-        );
-        tokio::fs::remove_dir_all(directory)
-            .await
-            .expect("remove staging");
-    }
-
-    #[tokio::test]
-    async fn rejects_checkpoint_for_a_different_resource_order() {
-        let directory = test_directory();
-        tokio::fs::create_dir_all(&directory)
-            .await
-            .expect("create staging");
-        let resources = vec!["first.bin".to_string(), "second.bin".to_string()];
-        let checkpoint = WriterCheckpoint {
-            version: CHECKPOINT_VERSION,
-            plan_fingerprint: plan_fingerprint(&[
-                "second.bin".to_string(),
-                "first.bin".to_string(),
-            ])
-            .expect("fingerprint"),
-            next_resource_index: 1,
-            committed_offset: 5,
-        };
-        tokio::fs::write(
-            directory.join("track.mp4.checkpoint.json"),
-            serde_json::to_vec(&checkpoint).expect("serialize checkpoint"),
-        )
-        .await
-        .expect("write checkpoint");
-        let (_stop_tx, mut abort) = stop_channel();
-
-        assert!(
-            write_ordered_track(&resources, &directory, "track.mp4", &mut abort)
-                .await
-                .is_err()
-        );
-        tokio::fs::remove_dir_all(directory)
-            .await
-            .expect("remove staging");
-    }
-
-    #[tokio::test]
-    async fn rejects_checkpoint_when_committed_offset_disagrees_with_resources() {
-        let directory = test_directory();
-        tokio::fs::create_dir_all(&directory)
-            .await
-            .expect("create staging");
-        tokio::fs::write(directory.join("first.bin"), b"first")
-            .await
-            .expect("write first");
-        let resources = vec!["first.bin".to_string(), "second.bin".to_string()];
-        let checkpoint = WriterCheckpoint {
-            version: CHECKPOINT_VERSION,
-            plan_fingerprint: plan_fingerprint(&resources).expect("fingerprint"),
-            next_resource_index: 1,
-            committed_offset: 4,
-        };
-        tokio::fs::write(directory.join("track.mp4.part"), b"first")
-            .await
-            .expect("write part");
-        tokio::fs::write(
-            directory.join("track.mp4.checkpoint.json"),
-            serde_json::to_vec(&checkpoint).expect("serialize checkpoint"),
-        )
-        .await
-        .expect("write checkpoint");
-        let (_stop_tx, mut abort) = stop_channel();
-
-        assert!(
-            write_ordered_track(&resources, &directory, "track.mp4", &mut abort)
-                .await
-                .is_err()
-        );
-        tokio::fs::remove_dir_all(directory)
-            .await
-            .expect("remove staging");
-    }
-
-    #[tokio::test]
-    async fn recovers_crash_after_track_rename_before_checkpoint_removal() {
-        let directory = test_directory();
-        tokio::fs::create_dir_all(&directory)
-            .await
-            .expect("create staging");
-        let resources = vec!["first.bin".to_string()];
-        tokio::fs::write(directory.join("first.bin"), b"complete")
-            .await
-            .expect("write resource");
-        let checkpoint = WriterCheckpoint {
-            version: CHECKPOINT_VERSION,
-            plan_fingerprint: plan_fingerprint(&resources).expect("fingerprint"),
-            next_resource_index: 1,
-            committed_offset: 8,
-        };
-        tokio::fs::write(directory.join("track.mp4"), b"complete")
-            .await
-            .expect("write published track");
-        tokio::fs::write(
-            directory.join("track.mp4.checkpoint.json"),
-            serde_json::to_vec(&checkpoint).expect("serialize checkpoint"),
-        )
-        .await
-        .expect("write checkpoint");
-        let (_stop_tx, mut abort) = stop_channel();
-
-        assert!(
-            write_ordered_track(&resources, &directory, "track.mp4", &mut abort)
-                .await
-                .expect("recover completed track")
-        );
-        assert!(!directory.join("track.mp4.checkpoint.json").exists());
-        tokio::fs::remove_dir_all(directory)
-            .await
-            .expect("remove staging");
-    }
-
-    #[test]
-    fn rejects_unsafe_and_duplicate_resource_names() {
-        assert!(!safe_filename("../outside.bin"));
-        assert!(!safe_filename("nested/file.bin"));
-        assert!(safe_filename("segment.bin"));
-        let names = ["segment.bin".to_string(), "segment.bin".to_string()];
-        let mut unique = std::collections::HashSet::new();
-        assert!(names.iter().any(|name| !unique.insert(name)));
-    }
+    writer.finish().await?;
+    Ok(true)
 }
+
+#[cfg(test)]
+#[path = "manifest_writer_tests.rs"]
+mod tests;

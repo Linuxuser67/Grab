@@ -25,7 +25,7 @@ use crate::manifest_intake::NativeManifest;
 use crate::media_types::{ManifestKind, ManifestSource};
 
 /// Upper bound for one media resource, independent of a server-supplied length.
-const MAX_RESOURCE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_RESOURCE_BYTES: u64 = crate::manifest_writer::MAX_RESOURCE_BYTES;
 /// Aggregate resource ceiling, matching the regular segmented downloader's 1 TiB trust limit.
 const MAX_MANIFEST_DOWNLOAD_BYTES: u64 = 1 << 40;
 /// Idle budget for receiving a response body; progressing transfers are not wall-clock limited.
@@ -387,6 +387,10 @@ impl DashLiveState {
 struct DashLiveTrack {
     directory: PathBuf,
     state: DashLiveState,
+    track_filename: &'static str,
+    // Verified once on load; a non-empty prefix is immutable across refreshes.
+    committed_resource_count: usize,
+    committed_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3037,6 +3041,7 @@ async fn load_dash_live_track(
     representation_key: &str,
     directory: &Path,
     current_plan: Option<&DashRepresentationPlan>,
+    track_filename: &'static str,
 ) -> Result<(DashLiveTrack, u64), ManifestRunError> {
     if current_plan.is_some_and(|plan| plan.representation.live_key != representation_key) {
         return Err(ManifestRunError::Failed(
@@ -3083,14 +3088,63 @@ async fn load_dash_live_track(
     };
     validate_dash_live_state(&state, representation_key)?;
 
+    let resource_names = state
+        .resource_names()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let committed_resources = crate::manifest_writer::committed_resource_prefix(
+        &resource_names,
+        directory,
+        track_filename,
+    )
+    .await
+    .map_err(ManifestRunError::Failed)?;
+    let committed_resource_count = committed_resources.len();
+    let committed_bytes = committed_resources
+        .iter()
+        .try_fold(0_u64, |total, resource| {
+            if resource.length == 0 || resource.length > MAX_RESOURCE_BYTES {
+                return Err(ManifestRunError::Failed(
+                    "A committed dynamic DASH resource has an invalid size".to_string(),
+                ));
+            }
+            total.checked_add(resource.length).ok_or_else(|| {
+                ManifestRunError::Failed(
+                    "The committed dynamic DASH byte total overflowed".to_string(),
+                )
+            })
+        })?;
     let current_resources: std::collections::HashMap<&str, &DashResource> = current_plan
         .into_iter()
         .flat_map(|plan| plan.resources.iter())
         .map(|resource| (resource.filename.as_str(), resource))
         .collect();
     let mut retained_bytes = 0_u64;
-    for filename in state.resource_names() {
+    for (index, filename) in state.resource_names().enumerate() {
         let expected = current_resources.get(filename).copied();
+        if let Some(committed) = committed_resources.get(index) {
+            if committed.length == 0
+                || committed.length > MAX_RESOURCE_BYTES
+                || expected.is_some_and(|resource| {
+                    resource
+                        .range
+                        .is_some_and(|range| range.length != committed.length)
+                })
+            {
+                return Err(ManifestRunError::Failed(
+                    "A committed dynamic DASH resource has an invalid length".to_string(),
+                ));
+            }
+            retained_bytes = retained_bytes
+                .checked_add(committed.length)
+                .ok_or_else(|| {
+                    ManifestRunError::Failed(
+                        "The staged dynamic DASH byte total overflowed".to_string(),
+                    )
+                })?;
+            continue;
+        }
+
         let resource_path = directory.join(filename);
         let metadata = match tokio::fs::symlink_metadata(&resource_path).await {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -3102,30 +3156,34 @@ async fn load_dash_live_track(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(ManifestRunError::Failed(format!(
-                    "Could not inspect a staged dynamic DASH resource: {error}"
+                    "Could not inspect {}: {error}",
+                    resource_path.display()
                 )));
             }
         };
-        let cached_is_valid = metadata.as_ref().is_some_and(|metadata| {
-            metadata.len() > 0
+        if let Some(metadata) = metadata {
+            let cached_is_valid = metadata.len() > 0
                 && metadata.len() <= MAX_RESOURCE_BYTES
                 && expected.is_none_or(|resource| {
                     resource
                         .range
                         .is_none_or(|range| metadata.len() == range.length)
-                })
-        });
-        if cached_is_valid {
-            if let Some(metadata) = metadata.as_ref() {
+                });
+            if cached_is_valid {
                 retained_bytes = retained_bytes.checked_add(metadata.len()).ok_or_else(|| {
                     ManifestRunError::Failed(
                         "The staged dynamic DASH byte total overflowed".to_string(),
                     )
                 })?;
+            } else if expected.is_none() {
+                return Err(ManifestRunError::Failed(
+                    "A captured dynamic DASH resource is missing or invalid and no longer appears in the current MPD"
+                        .to_string(),
+                ));
             }
         } else if expected.is_none() {
             return Err(ManifestRunError::Failed(
-                "A captured dynamic DASH resource is missing or invalid and no longer appears in the current MPD"
+                "A captured dynamic DASH resource is missing and no longer appears in the current MPD"
                     .to_string(),
             ));
         }
@@ -3140,6 +3198,9 @@ async fn load_dash_live_track(
         DashLiveTrack {
             directory: directory.to_path_buf(),
             state,
+            track_filename,
+            committed_resource_count,
+            committed_bytes,
         },
         retained_bytes,
     ))
@@ -3256,12 +3317,22 @@ async fn write_dash_live_state(track: &DashLiveTrack) -> Result<(), ManifestRunE
         .map_err(ManifestRunError::Failed)
 }
 
+// The committed prefix is cached by DashLiveTrack after one full integrity
+// check. Refreshes preserve that prefix and add suffix resources, so rehashing
+// it per poll would turn long recordings into repeated full-track reads.
 async fn dash_live_track_bytes(
     state: &DashLiveState,
     directory: &Path,
+    committed_resource_count: usize,
+    committed_bytes: u64,
 ) -> Result<u64, ManifestRunError> {
-    let mut total = 0_u64;
-    for filename in state.resource_names() {
+    if committed_resource_count > state.resource_names().count() {
+        return Err(ManifestRunError::Failed(
+            "The committed dynamic DASH prefix exceeds its resource state".to_string(),
+        ));
+    }
+    let mut total = committed_bytes;
+    for filename in state.resource_names().skip(committed_resource_count) {
         let metadata = tokio::fs::symlink_metadata(directory.join(filename))
             .await
             .map_err(|error| {
@@ -3362,7 +3433,7 @@ async fn apply_dash_live_snapshot(
     if let Some(initialization) = initialization {
         match candidate.initialization.as_deref() {
             Some(previous) if previous != initialization.filename => {
-                if !candidate.segments.is_empty() {
+                if !candidate.segments.is_empty() || track.committed_resource_count > 0 {
                     tracing::warn!(
                         representation = %plan.representation.live_key,
                         "dynamic DASH initialization changed after media was captured"
@@ -3371,7 +3442,7 @@ async fn apply_dash_live_snapshot(
                 }
                 candidate.initialization = Some(initialization.filename.clone());
             }
-            None if !candidate.segments.is_empty() => {
+            None if !candidate.segments.is_empty() || track.committed_resource_count > 0 => {
                 tracing::warn!(
                     representation = %plan.representation.live_key,
                     "dynamic DASH introduced an initialization resource after media was captured"
@@ -3484,7 +3555,13 @@ async fn apply_dash_live_snapshot(
     if candidate.segments.len() > MAX_DASH_LIVE_SEGMENTS {
         return Ok(DashLiveUpdateOutcome::ContinuityLost);
     }
-    let retained_bytes = dash_live_track_bytes(&candidate, &track.directory).await?;
+    let retained_bytes = dash_live_track_bytes(
+        &candidate,
+        &track.directory,
+        track.committed_resource_count,
+        track.committed_bytes,
+    )
+    .await?;
     if retained_bytes
         .checked_add(other_rendition_bytes)
         .is_none_or(|total| total > MAX_MANIFEST_DOWNLOAD_BYTES)
@@ -3502,6 +3579,9 @@ async fn apply_dash_live_snapshot(
         let next_track = DashLiveTrack {
             directory: track.directory.clone(),
             state: candidate,
+            track_filename: track.track_filename,
+            committed_resource_count: track.committed_resource_count,
+            committed_bytes: track.committed_bytes,
         };
         write_dash_live_state(&next_track).await?;
         track.state = next_track.state;
@@ -3534,7 +3614,7 @@ async fn run_live_dash_tracks(
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<DashLiveCapture, ManifestRunError> {
     let (mut video, video_bytes) =
-        load_dash_live_track(representation_key, video_dir, video_plan).await?;
+        load_dash_live_track(representation_key, video_dir, video_plan, "video-track.mp4").await?;
     let staging_dir = video_dir.parent().unwrap_or(video_dir);
     let mut audio_key = audio_key
         .map(str::to_string)
@@ -3545,7 +3625,7 @@ async fn run_live_dash_tracks(
                 .clone()
                 .unwrap_or_else(|| plan.representation.live_key.clone());
             audio_key = Some(key.clone());
-            Some(load_dash_live_track(&key, audio_dir, Some(plan)).await?)
+            Some(load_dash_live_track(&key, audio_dir, Some(plan), "audio-track.mp4").await?)
         }
         None if dash_live_state_exists(audio_dir).await? => {
             let key = match audio_key.as_deref() {
@@ -3553,7 +3633,7 @@ async fn run_live_dash_tracks(
                 None => read_dash_live_representation_key(audio_dir).await?,
             };
             audio_key = Some(key.clone());
-            Some(load_dash_live_track(&key, audio_dir, None).await?)
+            Some(load_dash_live_track(&key, audio_dir, None, "audio-track.mp4").await?)
         }
         None => None,
     };
@@ -3564,8 +3644,13 @@ async fn run_live_dash_tracks(
                 !video.state.segments.is_empty(),
             );
             if matches!(outcome, DashLiveCaptureOutcome::Unrecoverable) {
-                let staged_video_bytes =
-                    dash_live_track_bytes(&video.state, &video.directory).await?;
+                let staged_video_bytes = dash_live_track_bytes(
+                    &video.state,
+                    &video.directory,
+                    video.committed_resource_count,
+                    video.committed_bytes,
+                )
+                .await?;
                 persist_unrecoverable_live_capture(
                     staging_dir,
                     "dash",
@@ -3670,7 +3755,13 @@ async fn run_live_dash_tracks(
         let Some(plan) = current_audio_plan.as_ref() else {
             finish_capture!(DashLiveCaptureOutcome::FinishVideoOnly);
         };
-        let updated_video_bytes = dash_live_track_bytes(&video.state, &video.directory).await?;
+        let updated_video_bytes = dash_live_track_bytes(
+            &video.state,
+            &video.directory,
+            video.committed_resource_count,
+            video.committed_bytes,
+        )
+        .await?;
         match apply_dash_live_snapshot(
             client,
             plan,
@@ -3800,7 +3891,15 @@ async fn run_live_dash_tracks(
         current_audio_plan = refreshed.1;
         next_refresh_at = dash_next_refresh_deadline(&current_video_plan.presentation)?;
         let current_audio_bytes = match audio.as_ref() {
-            Some((track, _)) => dash_live_track_bytes(&track.state, &track.directory).await?,
+            Some((track, _)) => {
+                dash_live_track_bytes(
+                    &track.state,
+                    &track.directory,
+                    track.committed_resource_count,
+                    track.committed_bytes,
+                )
+                .await?
+            }
             None => 0,
         };
 
@@ -3841,7 +3940,13 @@ async fn run_live_dash_tracks(
 
         match (&mut audio, current_audio_plan.as_ref()) {
             (Some((track, _)), Some(plan)) => {
-                let video_bytes = dash_live_track_bytes(&video.state, &video.directory).await?;
+                let video_bytes = dash_live_track_bytes(
+                    &video.state,
+                    &video.directory,
+                    video.committed_resource_count,
+                    video.committed_bytes,
+                )
+                .await?;
                 match apply_dash_live_snapshot(
                     client,
                     plan,
@@ -3883,8 +3988,15 @@ async fn run_live_dash_tracks(
                 let key = audio_key
                     .clone()
                     .unwrap_or_else(|| plan.representation.live_key.clone());
-                let (mut track, _) = load_dash_live_track(&key, audio_dir, Some(plan)).await?;
-                let video_bytes = dash_live_track_bytes(&video.state, &video.directory).await?;
+                let (mut track, _) =
+                    load_dash_live_track(&key, audio_dir, Some(plan), "audio-track.mp4").await?;
+                let video_bytes = dash_live_track_bytes(
+                    &video.state,
+                    &video.directory,
+                    video.committed_resource_count,
+                    video.committed_bytes,
+                )
+                .await?;
                 match apply_dash_live_snapshot(
                     client,
                     plan,
@@ -3903,7 +4015,13 @@ async fn run_live_dash_tracks(
                             destination_dir,
                             downloaded.load(Ordering::Relaxed),
                         )?;
-                        let bytes = dash_live_track_bytes(&track.state, &track.directory).await?;
+                        let bytes = dash_live_track_bytes(
+                            &track.state,
+                            &track.directory,
+                            track.committed_resource_count,
+                            track.committed_bytes,
+                        )
+                        .await?;
                         audio_key = Some(key);
                         audio = Some((track, bytes));
                     }
@@ -4082,19 +4200,24 @@ async fn concat_dash_resource_names(
     filename: &str,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, String> {
-    let (Some(mut writer), _) =
-        crate::manifest_writer::OrderedTrackWriter::open(resources.to_vec(), directory, filename)
-            .await?
-    else {
-        return Ok(true);
-    };
-
-    while writer.next_resource_index() < resources.len() {
-        if !writer.append_next(abort).await? {
-            return Ok(false);
+    let (writer, _) = crate::manifest_writer::OrderedTrackWriter::open_retaining_checkpoint(
+        resources.to_vec(),
+        directory,
+        filename,
+    )
+    .await?;
+    if let Some(mut writer) = writer {
+        while writer.next_resource_index() < resources.len() {
+            if !writer.append_next(abort).await? {
+                return Ok(false);
+            }
         }
+        writer.finish().await?;
+    } else {
+        // A previously published track may have leftover sources from a
+        // crash after the rename but before the idempotent cleanup completed.
+        crate::manifest_writer::cleanup_committed_resources(resources, directory, filename).await?;
     }
-    writer.finish().await?;
     Ok(true)
 }
 
@@ -5273,13 +5396,15 @@ mod tests {
             .expect("write media resource");
 
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
-        let (Some(mut writer), committed) = crate::manifest_writer::OrderedTrackWriter::open(
-            resources.clone(),
-            &directory,
-            "video-track.mp4",
-        )
-        .await
-        .expect("open live DASH ordered writer") else {
+        let (Some(mut writer), committed) =
+            crate::manifest_writer::OrderedTrackWriter::open_retaining_checkpoint(
+                resources.clone(),
+                &directory,
+                "video-track.mp4",
+            )
+            .await
+            .expect("open live DASH ordered writer")
+        else {
             panic!("a fresh live DASH track must return an active writer");
         };
         assert_eq!(committed, 0);
@@ -5302,7 +5427,9 @@ mod tests {
                 .expect("read finalized live DASH track"),
             b"initsegment"
         );
-        assert!(!directory.join("video-track.mp4.checkpoint.json").exists());
+        assert!(directory.join("video-track.mp4.checkpoint.json").exists());
+        assert!(!directory.join(&resources[0]).exists());
+        assert!(!directory.join(&resources[1]).exists());
         tokio::fs::remove_dir_all(directory)
             .await
             .expect("remove dynamic DASH finalization directory");
@@ -5363,6 +5490,8 @@ mod tests {
 
         let track = DashLiveTrack {
             directory: directory.clone(),
+            committed_resource_count: 0,
+            committed_bytes: 0,
             state: DashLiveState {
                 version: DASH_LIVE_STATE_VERSION,
                 representation_key: representation_key.to_string(),
@@ -5378,6 +5507,7 @@ mod tests {
                     },
                 ],
             },
+            track_filename: "video-track.mp4",
         };
         write_dash_live_state(&track)
             .await
@@ -5395,9 +5525,10 @@ mod tests {
             representation_key
         );
 
-        let (restored, total_bytes) = load_dash_live_track(representation_key, &directory, None)
-            .await
-            .expect("restore persisted dynamic DASH track");
+        let (restored, total_bytes) =
+            load_dash_live_track(representation_key, &directory, None, "video-track.mp4")
+                .await
+                .expect("restore persisted dynamic DASH track");
         assert_eq!(restored.state, track.state);
         assert_eq!(
             restored.state.resource_names().collect::<Vec<_>>(),
@@ -5408,9 +5539,103 @@ mod tests {
             (b"init".len() + b"segment-100".len() + b"segment-101".len()) as u64
         );
         assert_eq!(
-            dash_live_track_bytes(&restored.state, &directory)
+            dash_live_track_bytes(
+                &restored.state,
+                &directory,
+                restored.committed_resource_count,
+                restored.committed_bytes
+            )
+            .await
+            .expect("sum restored staged resources"),
+            total_bytes
+        );
+
+        let resource_names = track
+            .state
+            .resource_names()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+        let (Some(mut writer), _) =
+            crate::manifest_writer::OrderedTrackWriter::open_retaining_checkpoint(
+                resource_names.clone(),
+                &directory,
+                "video-track.mp4",
+            )
+            .await
+            .expect("open live DASH track writer")
+        else {
+            panic!("a fresh live DASH track must return an active writer");
+        };
+        assert!(
+            writer
+                .append_next(&mut abort)
                 .await
-                .expect("sum restored staged resources"),
+                .expect("append first live DASH resource")
+        );
+        drop(writer);
+
+        let (restored_partial, partial_bytes) =
+            load_dash_live_track(representation_key, &directory, None, "video-track.mp4")
+                .await
+                .expect("restore a partial track after source cleanup");
+        assert_eq!(restored_partial.state, track.state);
+        assert_eq!(partial_bytes, total_bytes);
+        assert_eq!(
+            dash_live_track_bytes(
+                &restored_partial.state,
+                &directory,
+                restored_partial.committed_resource_count,
+                restored_partial.committed_bytes
+            )
+            .await
+            .expect("sum partially committed track bytes"),
+            total_bytes
+        );
+
+        let (Some(mut writer), _) =
+            crate::manifest_writer::OrderedTrackWriter::open_retaining_checkpoint(
+                resource_names.clone(),
+                &directory,
+                "video-track.mp4",
+            )
+            .await
+            .expect("resume partially committed live DASH track")
+        else {
+            panic!("an interrupted live DASH track must return an active writer");
+        };
+        while writer.next_resource_index() < resource_names.len() {
+            assert!(
+                writer
+                    .append_next(&mut abort)
+                    .await
+                    .expect("append remaining live DASH resource")
+            );
+        }
+        writer.finish().await.expect("publish live DASH track");
+        crate::manifest_writer::cleanup_committed_resources(
+            &resource_names,
+            &directory,
+            "video-track.mp4",
+        )
+        .await
+        .expect("remove redundant live DASH resources");
+
+        let (restored_without_sources, restored_bytes) =
+            load_dash_live_track(representation_key, &directory, None, "video-track.mp4")
+                .await
+                .expect("restore live DASH state from the verified track checkpoint");
+        assert_eq!(restored_without_sources.state, track.state);
+        assert_eq!(restored_bytes, total_bytes);
+        assert_eq!(
+            dash_live_track_bytes(
+                &restored_without_sources.state,
+                &directory,
+                restored_without_sources.committed_resource_count,
+                restored_without_sources.committed_bytes
+            )
+            .await
+            .expect("sum verified track bytes after source cleanup"),
             total_bytes
         );
 

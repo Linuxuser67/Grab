@@ -53,7 +53,11 @@ enum CheckpointState {
         next_resource_index: usize,
         committed_offset: u64,
         resources: Vec<CommittedResource>,
-        migrate_from_target: bool,
+    },
+    ResumeFromTarget {
+        next_resource_index: usize,
+        committed_offset: u64,
+        resources: Vec<CommittedResource>,
     },
     AlreadyComplete {
         committed_offset: u64,
@@ -270,14 +274,19 @@ impl OrderedTrackWriter {
         )
         .await?;
 
-        let (next_resource_index, committed_offset, committed_resources, migrate_from_target) =
+        let (next_resource_index, committed_offset, committed_resources, migration_source) =
             match checkpoint_state {
                 CheckpointState::AlreadyComplete {
                     committed_offset,
                     resources: completed_resources,
                 } => {
                     if destination_part.is_some() {
-                        (resources.len(), committed_offset, completed_resources, true)
+                        (
+                            resources.len(),
+                            committed_offset,
+                            completed_resources,
+                            Some(target.clone()),
+                        )
                     } else {
                         if checkpoint_policy == CheckpointPolicy::RemoveAfterPublish {
                             remove_regular_file_if_present(&checkpoint_path).await?;
@@ -293,18 +302,22 @@ impl OrderedTrackWriter {
                         remove_regular_file_if_present(&target).await?;
                     }
                     remove_regular_file_if_present(&journal_path).await?;
-                    (0, 0, Vec::new(), false)
+                    (0, 0, Vec::new(), None)
                 }
                 CheckpointState::Resume {
                     next_resource_index,
                     committed_offset,
                     resources,
-                    migrate_from_target,
+                } => (next_resource_index, committed_offset, resources, None),
+                CheckpointState::ResumeFromTarget {
+                    next_resource_index,
+                    committed_offset,
+                    resources,
                 } => (
                     next_resource_index,
                     committed_offset,
                     resources,
-                    migrate_from_target,
+                    Some(target.clone()),
                 ),
             };
         if checkpoint_policy == CheckpointPolicy::RetainAfterPublish {
@@ -328,8 +341,8 @@ impl OrderedTrackWriter {
                 .await
                 .map_err(|error| format!("Could not open the ordered DASH track: {error}"))?
         };
-        if migrate_from_target {
-            let mut input = match open_regular_file_no_follow(&target) {
+        if let Some(migration_source) = migration_source {
+            let mut input = match open_regular_file_no_follow(&migration_source) {
                 Ok(file) => tokio::fs::File::from_std(file),
                 Err(error) => {
                     drop(output);
@@ -346,7 +359,7 @@ impl OrderedTrackWriter {
                     ));
                 }
             };
-            verify_resource_ranges_file(&mut input, &target, &committed_resources).await?;
+            verify_resource_ranges_file(&mut input, &migration_source, &committed_resources).await?;
             input.seek(std::io::SeekFrom::Start(0)).await.map_err(|error| {
                 format!("Could not rewind the completed staging track: {error}")
             })?;
@@ -1007,11 +1020,10 @@ async fn load_checkpoint(
             return Err("The completed staging track does not match its checkpoint".to_string());
         }
         verify_resource_ranges(target, &committed).await?;
-        return Ok(CheckpointState::Resume {
+        return Ok(CheckpointState::ResumeFromTarget {
             next_resource_index: checkpoint.next_resource_index,
             committed_offset: checkpoint.committed_offset,
             resources: committed,
-            migrate_from_target: true,
         });
     }
 
@@ -1082,7 +1094,6 @@ async fn load_checkpoint(
             next_resource_index: checkpoint.next_resource_index,
             committed_offset: checkpoint.committed_offset,
             resources: committed,
-            migrate_from_target: false,
         })
     } else {
         Ok(CheckpointState::AlreadyComplete {

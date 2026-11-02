@@ -56,13 +56,13 @@ pub(super) async fn load_dash_live_track(
     current_plan: Option<&DashRepresentationPlan>,
     track_filename: &'static str,
 ) -> Result<(DashLiveTrack, u64), ManifestRunError> {
-    load_dash_live_track_inner(
+    Box::pin(load_dash_live_track_inner(
         representation_key,
         directory,
         current_plan,
         track_filename,
         None,
-    )
+    ))
     .await
 }
 
@@ -285,7 +285,7 @@ pub(super) async fn load_dash_live_track_for_destination(
     item_id: u64,
     track: crate::manifest_destination::TrackKind,
 ) -> Result<(DashLiveTrack, u64), ManifestRunError> {
-    load_dash_live_track_inner(
+    Box::pin(load_dash_live_track_inner(
         representation_key,
         directory,
         current_plan,
@@ -295,7 +295,7 @@ pub(super) async fn load_dash_live_track_for_destination(
             item_id,
             track,
         }),
-    )
+    ))
     .await
 }
 

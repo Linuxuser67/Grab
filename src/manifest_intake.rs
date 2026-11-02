@@ -1392,8 +1392,8 @@ video/es.m3u8
             legacy_with_tracks.subtitle_key.as_deref(),
             Some("hls-subtitle-0123456789abcdef0123456789abcdef")
         );
-        let encoded = serde_json::to_value(&legacy_with_tracks)
-            .expect("serialize typed manifest identities");
+        let encoded =
+            serde_json::to_value(&legacy_with_tracks).expect("serialize typed manifest identities");
         assert_eq!(
             encoded["representation_key"],
             "hls-variant-0123456789abcdef0123456789abcdef"

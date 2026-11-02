@@ -245,12 +245,15 @@ impl OrderedTrackWriter {
         let fingerprint = plan_fingerprint(&resources)?;
         let target = directory.join(filename);
         let part = match destination_part.as_ref() {
-            Some(destination_part) => crate::manifest_destination::part_path(
-                directory,
-                &destination_part.destination,
-                destination_part.item_id,
-                destination_part.track,
-            )?,
+            Some(destination_part) => {
+                crate::manifest_destination::part_path_async(
+                    directory.to_path_buf(),
+                    destination_part.destination.clone(),
+                    destination_part.item_id,
+                    destination_part.track,
+                )
+                .await?
+            }
             None => directory.join(format!("{filename}.part")),
         };
         let checkpoint_path = directory.join(format!("{filename}.checkpoint.json"));
@@ -258,12 +261,15 @@ impl OrderedTrackWriter {
         if let Some(destination_part) = destination_part.as_ref() {
             match tokio::fs::symlink_metadata(&part).await {
                 Ok(_) => {
-                    drop(crate::manifest_destination::open_owned_part(
-                        directory,
-                        &destination_part.destination,
-                        destination_part.item_id,
-                        destination_part.track,
-                    )?);
+                    drop(
+                        crate::manifest_destination::open_owned_part_async(
+                            directory.to_path_buf(),
+                            destination_part.destination.clone(),
+                            destination_part.item_id,
+                            destination_part.track,
+                        )
+                        .await?,
+                    );
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
@@ -336,12 +342,13 @@ impl OrderedTrackWriter {
         }
 
         let mut output = if let Some(destination_part) = destination_part.as_ref() {
-            tokio::fs::File::from_std(crate::manifest_destination::open_owned_part(
-                directory,
-                &destination_part.destination,
+            crate::manifest_destination::open_owned_part_async(
+                directory.to_path_buf(),
+                destination_part.destination.clone(),
                 destination_part.item_id,
                 destination_part.track,
-            )?)
+            )
+            .await?
         } else {
             tokio::fs::OpenOptions::new()
                 .read(true)
@@ -353,17 +360,18 @@ impl OrderedTrackWriter {
                 .map_err(|error| format!("Could not open the ordered DASH track: {error}"))?
         };
         if let Some(migration_source) = migration_source {
-            let mut input = match open_regular_file_no_follow(&migration_source) {
-                Ok(file) => tokio::fs::File::from_std(file),
+            let mut input = match open_regular_file_no_follow_async(&migration_source).await {
+                Ok(file) => file,
                 Err(error) => {
                     drop(output);
                     if let Some(destination_part) = destination_part.as_ref() {
-                        let _ = crate::manifest_destination::remove_owned_part(
-                            directory,
-                            &destination_part.destination,
+                        let _ = crate::manifest_destination::remove_owned_part_async(
+                            directory.to_path_buf(),
+                            destination_part.destination.clone(),
                             destination_part.item_id,
                             destination_part.track,
-                        );
+                        )
+                        .await;
                     }
                     return Err(format!(
                         "Could not safely open the completed staging track for migration: {error}"
@@ -605,7 +613,13 @@ pub(crate) async fn cleanup_destination_part(
     track: crate::manifest_destination::TrackKind,
     filename: &str,
 ) -> Result<(), String> {
-    crate::manifest_destination::remove_owned_part(staging, destination, item_id, track)?;
+    crate::manifest_destination::remove_owned_part_async(
+        staging.to_path_buf(),
+        destination.to_path_buf(),
+        item_id,
+        track,
+    )
+    .await?;
     remove_regular_file_if_present(&staging.join(format!("{filename}.checkpoint.json"))).await?;
     remove_regular_file_if_present(&staging.join(format!("{filename}.resources"))).await?;
     sync_directory(staging).await
@@ -824,13 +838,7 @@ async fn verify_resource_ranges(
     output_path: &Path,
     committed: &[CommittedResource],
 ) -> Result<(), String> {
-    let file = open_regular_file_no_follow(output_path).map_err(|error| {
-        format!(
-            "Could not safely open {} for DASH verification: {error}",
-            output_path.display()
-        )
-    })?;
-    let mut file = tokio::fs::File::from_std(file);
+    let mut file = open_regular_file_no_follow_async(output_path).await?;
     verify_resource_ranges_file(&mut file, output_path, committed).await
 }
 
@@ -1119,6 +1127,17 @@ async fn load_checkpoint(
             resources: committed,
         })
     }
+}
+
+async fn open_regular_file_no_follow_async(
+    path: &Path,
+) -> Result<tokio::fs::File, String> {
+    let path = path.to_path_buf();
+    let file = tokio::task::spawn_blocking(move || open_regular_file_no_follow(&path))
+        .await
+        .map_err(|error| format!("DASH file open task failed: {error}"))?
+        .map_err(|error| format!("Could not safely open {}: {error}", path.display()))?;
+    Ok(tokio::fs::File::from_std(file))
 }
 
 fn open_regular_file_no_follow(path: &Path) -> Result<std::fs::File, std::io::Error> {

@@ -598,7 +598,8 @@ pub(crate) struct VideoStep {
     /// Native HLS/DASH presentation and selected representation key.
     pub(crate) manifest: Rc<RefCell<Option<crate::manifest_intake::ManifestLookup>>>,
     pub(crate) manifest_choices: Rc<RefCell<Vec<crate::manifest_intake::ManifestChoice>>>,
-    pub(crate) manifest_selection: Rc<RefCell<Option<crate::media_types::ManifestRepresentationKey>>>,
+    pub(crate) manifest_selection:
+        Rc<RefCell<Option<crate::media_types::ManifestRepresentationKey>>>,
     pub(crate) manifest_format: adw::ComboRow,
     /// Audio choices and selected audio key for the active static presentation.
     pub(crate) manifest_audio_choices:

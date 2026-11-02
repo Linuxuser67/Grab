@@ -593,4 +593,138 @@ fn rejects_unsafe_and_duplicate_resource_names() {
     let names = ["segment.bin".to_string(), "segment.bin".to_string()];
     let mut unique = std::collections::HashSet::new();
     assert!(names.iter().any(|name| !unique.insert(name)));
+
+#[tokio::test]
+async fn destination_part_stays_visible_until_final_container_cleanup() {
+    let directory = test_directory();
+    let destination_dir = tempfile::tempdir().expect("create destination");
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .expect("create staging");
+    let destination = destination_dir.path().join("Example.mp4");
+    crate::manifest_destination::ensure_plan(&directory, &destination, 42, false, false)
+        .expect("persist destination plan");
+    tokio::fs::write(directory.join("first.bin"), b"first")
+        .await
+        .expect("write source");
+    let resources = vec!["first.bin".to_string()];
+    let (_stop_tx, mut abort) = stop_channel();
+
+    let (Some(mut writer), committed) = OrderedTrackWriter::open_destination_part(
+        resources,
+        &directory,
+        "video-track.mp4",
+        &destination,
+        42,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .await
+    .expect("open destination writer")
+    else {
+        panic!("a fresh destination track must return an active writer");
+    };
+    assert_eq!(committed, 0);
+    assert!(writer.append_next(&mut abort).await.expect("append resource"));
+    writer.finish().await.expect("finish destination track");
+
+    let part = crate::manifest_destination::part_path(
+        &directory,
+        &destination,
+        42,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("resolve destination part");
+    assert_eq!(tokio::fs::read(&part).await.expect("read visible part"), b"first");
+    assert!(directory.join("video-track.mp4.checkpoint.json").is_file());
+    assert!(!directory.join("video-track.mp4").exists());
+
+    cleanup_destination_part(
+        &directory,
+        &destination,
+        42,
+        crate::manifest_destination::TrackKind::Video,
+        "video-track.mp4",
+    )
+    .await
+    .expect("clean destination part after final publication");
+    assert!(!part.exists());
+    assert!(!directory.join("video-track.mp4.checkpoint.json").exists());
+    tokio::fs::remove_dir_all(directory)
+        .await
+        .expect("remove staging");
+}
+
+#[tokio::test]
+async fn migrates_a_completed_staging_track_to_the_owned_destination_part() {
+    let directory = test_directory();
+    let destination_dir = tempfile::tempdir().expect("create destination");
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .expect("create staging");
+    let destination = destination_dir.path().join("Example.mp4");
+    crate::manifest_destination::ensure_plan(&directory, &destination, 43, false, false)
+        .expect("persist destination plan");
+    let resources = vec!["first.bin".to_string()];
+    tokio::fs::write(directory.join("first.bin"), b"complete")
+        .await
+        .expect("write source");
+    tokio::fs::write(directory.join("video-track.mp4"), b"complete")
+        .await
+        .expect("write previously completed track");
+    let checkpoint = WriterCheckpoint {
+        version: CHECKPOINT_VERSION,
+        plan_fingerprint: plan_fingerprint(&resources).expect("fingerprint"),
+        next_resource_index: 1,
+        committed_offset: 8,
+    };
+    tokio::fs::write(
+        directory.join("video-track.mp4.checkpoint.json"),
+        serde_json::to_vec(&checkpoint).expect("serialize checkpoint"),
+    )
+    .await
+    .expect("write checkpoint");
+    write_resource_journal(
+        &directory.join("video-track.mp4.resources"),
+        &directory,
+        &[resource_checkpoint(b"complete")],
+    )
+    .await
+    .expect("write resource journal");
+
+    let (writer, committed) = OrderedTrackWriter::open_destination_part(
+        resources,
+        &directory,
+        "video-track.mp4",
+        &destination,
+        43,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .await
+    .expect("migrate completed track");
+    assert!(writer.is_none());
+    assert_eq!(committed, 8);
+    let part = crate::manifest_destination::part_path(
+        &directory,
+        &destination,
+        43,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("resolve destination part");
+    assert_eq!(tokio::fs::read(&part).await.expect("read migrated part"), b"complete");
+    assert!(!directory.join("video-track.mp4").exists());
+
+    cleanup_destination_part(
+        &directory,
+        &destination,
+        43,
+        crate::manifest_destination::TrackKind::Video,
+        "video-track.mp4",
+    )
+    .await
+    .expect("clean migrated destination part");
+    tokio::fs::remove_dir_all(directory)
+        .await
+        .expect("remove staging");
+}
+
 }

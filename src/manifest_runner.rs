@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use futures_util::{StreamExt as _, TryStreamExt as _};
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use url::Url;
 
 use crate::engine_msg::EngineMsg;
@@ -814,36 +814,97 @@ async fn transfer_static_manifest_tracks(
             subtitle,
             ..
         } => {
-            if !fetch_resources(
-                client,
-                hls_resources(video),
-                video_dir,
-                concurrency,
-                tx,
-                downloaded,
-                abort,
-            )
-            .await?
-            {
-                return Ok(false);
-            }
-            if let Some(audio) = audio
-                && !fetch_resources(
+            let use_destination_parts = video.is_plain_mpegts_candidate()
+                && audio
+                    .as_ref()
+                    .is_none_or(HlsPlan::is_plain_mpegts_candidate);
+            if use_destination_parts {
+                if !fetch_and_write_hls_track(ManifestHlsTrackTransfer {
                     client,
-                    hls_resources(audio),
-                    audio_dir,
+                    staging,
+                    plan: video,
+                    directory: video_dir,
+                    filename: "video-track.ts",
+                    destination,
+                    item_id,
+                    track: crate::manifest_destination::TrackKind::Video,
+                    connections: concurrency,
+                    tx,
+                    downloaded,
+                    abort,
+                })
+                .await?
+                {
+                    return Ok(false);
+                }
+                if let Some(audio) = audio {
+                    match fetch_and_write_hls_track(ManifestHlsTrackTransfer {
+                        client,
+                        staging,
+                        plan: audio,
+                        directory: audio_dir,
+                        filename: "audio-track.ts",
+                        destination,
+                        item_id,
+                        track: crate::manifest_destination::TrackKind::Audio,
+                        connections: concurrency,
+                        tx,
+                        downloaded,
+                        abort,
+                    })
+                    .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => return Ok(false),
+                        Err(error) => {
+                            if matches!(&error, ManifestRunError::Unsupported(_)) {
+                                crate::manifest_writer::cleanup_destination_part(
+                                    staging,
+                                    video_dir,
+                                    destination,
+                                    item_id,
+                                    crate::manifest_destination::TrackKind::Video,
+                                    "video-track.ts",
+                                )
+                                .await
+                                .map_err(ManifestRunError::Failed)?;
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+            } else {
+                if !fetch_resources(
+                    client,
+                    hls_resources(video),
+                    video_dir,
                     concurrency,
                     tx,
                     downloaded,
                     abort,
                 )
                 .await?
-            {
-                return Ok(false);
-            }
-            write_playlist(video_dir, video).await?;
-            if let Some(audio) = audio {
-                write_playlist(audio_dir, audio).await?;
+                {
+                    return Ok(false);
+                }
+                if let Some(audio) = audio
+                    && !fetch_resources(
+                        client,
+                        hls_resources(audio),
+                        audio_dir,
+                        concurrency,
+                        tx,
+                        downloaded,
+                        abort,
+                    )
+                    .await?
+                {
+                    return Ok(false);
+                }
+                write_playlist(video_dir, video).await?;
+                if let Some(audio) = audio {
+                    write_playlist(audio_dir, audio).await?;
+                }
             }
             if let Some(subtitle) = subtitle {
                 let subtitle_dir = staging.join("subtitles");
@@ -872,6 +933,7 @@ async fn transfer_static_manifest_tracks(
         } => {
             if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client,
+                staging,
                 plan: video,
                 directory: video_dir,
                 filename: "video-track.mp4",
@@ -890,6 +952,7 @@ async fn transfer_static_manifest_tracks(
             if let Some(audio) = audio
                 && !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
+                    staging,
                     plan: audio,
                     directory: audio_dir,
                     filename: "audio-track.mp4",
@@ -910,6 +973,7 @@ async fn transfer_static_manifest_tracks(
                 ensure_track_dir(&subtitle_dir).await?;
                 if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
+                    staging,
                     plan: subtitle,
                     directory: &subtitle_dir,
                     filename: "subtitle-track.mp4",
@@ -1301,7 +1365,17 @@ pub(crate) async fn run_manifest_download(
     }
     finalize_manifest_download(ManifestFinalization {
         job: &job,
-        destination_parts: !live_dash && matches!(&tracks, Tracks::Dash { .. }),
+        destination_parts: !live_dash
+            && !live_hls
+            && (matches!(&tracks, Tracks::Dash { .. })
+                || matches!(
+                    &tracks,
+                    Tracks::Hls { video, audio, .. }
+                        if video.is_plain_mpegts_candidate()
+                            && audio
+                                .as_ref()
+                                .is_none_or(HlsPlan::is_plain_mpegts_candidate)
+                )),
         gate,
         abort,
         tx: &tx,
@@ -1369,6 +1443,14 @@ async fn finalize_manifest_download(
         .ok();
 
     let video_input = match &tracks {
+        Tracks::Hls { .. } if destination_parts => crate::manifest_destination::part_path_async(
+            staging.to_path_buf(),
+            job.dest.clone(),
+            job.item_id,
+            crate::manifest_destination::TrackKind::Video,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?,
         Tracks::Hls { .. } => video_dir.join("local.m3u8"),
         Tracks::Dash { .. } if destination_parts => crate::manifest_destination::part_path_async(
             staging.to_path_buf(),
@@ -1426,7 +1508,13 @@ async fn finalize_manifest_download(
             (crate::manifest_destination::TrackKind::Audio, has_audio),
             (
                 crate::manifest_destination::TrackKind::Subtitles,
-                subtitle_input.is_some(),
+                matches!(
+                    &tracks,
+                    Tracks::Dash {
+                        subtitle: Some(_),
+                        ..
+                    }
+                ),
             ),
         ] {
             if should_verify {
@@ -1539,28 +1627,43 @@ async fn finalize_manifest_download(
     }
     let mut destination_parts_cleaned = true;
     if destination_parts {
-        for (track, filename) in [
+        let (video_filename, audio_filename) = if matches!(&tracks, Tracks::Hls { .. }) {
+            ("video-track.ts", "audio-track.ts")
+        } else {
+            ("video-track.mp4", "audio-track.mp4")
+        };
+        let has_destination_subtitles = matches!(
+            &tracks,
+            Tracks::Dash {
+                subtitle: Some(_),
+                ..
+            }
+        );
+        let subtitle_directory = staging.join("subtitles");
+        for (track, filename, track_directory, should_clean) in [
             (
                 crate::manifest_destination::TrackKind::Video,
-                "video-track.mp4",
+                video_filename,
+                video_dir,
+                true,
             ),
             (
                 crate::manifest_destination::TrackKind::Audio,
-                "audio-track.mp4",
+                audio_filename,
+                audio_dir,
+                has_audio,
             ),
             (
                 crate::manifest_destination::TrackKind::Subtitles,
                 "subtitle-track.mp4",
+                subtitle_directory.as_path(),
+                has_destination_subtitles,
             ),
         ] {
-            let should_clean = match track {
-                crate::manifest_destination::TrackKind::Video => true,
-                crate::manifest_destination::TrackKind::Audio => has_audio,
-                crate::manifest_destination::TrackKind::Subtitles => subtitle_input.is_some(),
-            };
             if should_clean
                 && let Err(error) = crate::manifest_writer::cleanup_destination_part(
                     staging,
+                    track_directory,
                     &job.dest,
                     job.item_id,
                     track,
@@ -2337,6 +2440,7 @@ const DASH_LIVE_STATE_VERSION: u32 = 1;
 
 struct ManifestDashTrackTransfer<'a> {
     client: &'a reqwest::Client,
+    staging: &'a Path,
     plan: &'a DashRepresentationPlan,
     directory: &'a Path,
     filename: &'a str,
@@ -2354,6 +2458,7 @@ async fn fetch_and_write_dash_track(
 ) -> Result<bool, ManifestRunError> {
     let ManifestDashTrackTransfer {
         client,
+        staging,
         plan,
         directory,
         filename,
@@ -2365,15 +2470,123 @@ async fn fetch_and_write_dash_track(
         downloaded,
         abort,
     } = context;
-    let resources = dash_resources(plan);
+    fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
+        client,
+        staging,
+        resources: dash_resources(plan),
+        directory,
+        filename,
+        destination,
+        item_id,
+        track,
+        connections,
+        tx,
+        downloaded,
+        abort,
+        format: OrderedTrackFormat::Any,
+    })
+    .await
+}
+
+struct ManifestHlsTrackTransfer<'a> {
+    client: &'a reqwest::Client,
+    staging: &'a Path,
+    plan: &'a HlsPlan,
+    directory: &'a Path,
+    filename: &'a str,
+    destination: &'a Path,
+    item_id: u64,
+    track: crate::manifest_destination::TrackKind,
+    connections: usize,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'a Arc<AtomicU64>,
+    abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+}
+
+async fn fetch_and_write_hls_track(
+    context: ManifestHlsTrackTransfer<'_>,
+) -> Result<bool, ManifestRunError> {
+    let ManifestHlsTrackTransfer {
+        client,
+        staging,
+        plan,
+        directory,
+        filename,
+        destination,
+        item_id,
+        track,
+        connections,
+        tx,
+        downloaded,
+        abort,
+    } = context;
+    fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
+        client,
+        staging,
+        resources: hls_resources(plan),
+        directory,
+        filename,
+        destination,
+        item_id,
+        track,
+        connections,
+        tx,
+        downloaded,
+        abort,
+        format: OrderedTrackFormat::MpegTs,
+    })
+    .await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OrderedTrackFormat {
+    Any,
+    MpegTs,
+}
+
+struct ManifestOrderedTrackTransfer<'a> {
+    client: &'a reqwest::Client,
+    staging: &'a Path,
+    resources: Vec<Resource>,
+    directory: &'a Path,
+    filename: &'a str,
+    destination: &'a Path,
+    item_id: u64,
+    track: crate::manifest_destination::TrackKind,
+    connections: usize,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'a Arc<AtomicU64>,
+    abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    format: OrderedTrackFormat,
+}
+
+async fn fetch_and_write_ordered_track(
+    context: ManifestOrderedTrackTransfer<'_>,
+) -> Result<bool, ManifestRunError> {
+    let ManifestOrderedTrackTransfer {
+        client,
+        staging,
+        resources,
+        directory,
+        filename,
+        destination,
+        item_id,
+        track,
+        connections,
+        tx,
+        downloaded,
+        abort,
+        format,
+    } = context;
     let resource_names = resources
         .iter()
         .map(|resource| resource.filename.clone())
         .collect::<Vec<_>>();
     let (writer, committed_bytes) =
         crate::manifest_writer::OrderedTrackWriter::open_destination_part(
-            resource_names,
+            resource_names.clone(),
             directory,
+            staging,
             filename,
             destination,
             item_id,
@@ -2427,6 +2640,17 @@ async fn fetch_and_write_dash_track(
                         Some(Ok(index)) => {
                             completed.insert(index);
                             while completed.remove(&next_resource_index) {
+                                if format == OrderedTrackFormat::MpegTs
+                                    && !is_mpegts_segment(
+                                        &directory.join(&resource_names[next_resource_index]),
+                                    )
+                                    .await?
+                                {
+                                    break 'window Err(ManifestRunError::Unsupported(
+                                        "The HLS media segment is not a compatible MPEG-TS fragment"
+                                            .to_string(),
+                                    ));
+                                }
                                 match writer.append_next(abort).await {
                                     Ok(true) => next_resource_index += 1,
                                     Ok(false) => break 'window Ok(false),
@@ -2448,6 +2672,21 @@ async fn fetch_and_write_dash_track(
             Err(error) => {
                 tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
                     .ok();
+                if format == OrderedTrackFormat::MpegTs
+                    && matches!(&error, ManifestRunError::Unsupported(_))
+                {
+                    drop(writer);
+                    crate::manifest_writer::cleanup_destination_part(
+                        staging,
+                        directory,
+                        destination,
+                        item_id,
+                        track,
+                        filename,
+                    )
+                    .await
+                    .map_err(ManifestRunError::Failed)?;
+                }
                 return Err(error);
             }
         }
@@ -2510,6 +2749,38 @@ async fn concat_dash_resource_names(
         // A previously published track may have leftover sources from a
         // crash after the rename but before the idempotent cleanup completed.
         crate::manifest_writer::cleanup_committed_resources(resources, directory, filename).await?;
+    }
+    Ok(true)
+}
+
+async fn is_mpegts_segment(path: &Path) -> Result<bool, ManifestRunError> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| manifest_storage_error("Could not open an HLS media fragment", error))?;
+    let metadata = file.metadata().await.map_err(|error| {
+        manifest_storage_error("Could not inspect an HLS media fragment", error)
+    })?;
+    if metadata.len() < 188 || !metadata.len().is_multiple_of(188) {
+        return Ok(false);
+    }
+
+    let mut offset = 0_u64;
+    let mut sync_byte = [0_u8; 1];
+    while offset < metadata.len().min(564) {
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|error| {
+                manifest_storage_error("Could not inspect an HLS media fragment", error)
+            })?;
+        file.read_exact(&mut sync_byte).await.map_err(|error| {
+            manifest_storage_error("Could not inspect an HLS media fragment", error)
+        })?;
+        if sync_byte[0] != 0x47 {
+            return Ok(false);
+        }
+        offset = offset.checked_add(188).ok_or_else(|| {
+            ManifestRunError::Failed("The HLS media fragment offset overflowed".to_string())
+        })?;
     }
     Ok(true)
 }
@@ -2678,6 +2949,161 @@ async fn run_ffmpeg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mpegts_fragment_validation_requires_aligned_transport_packets() {
+        let directory = tempfile::tempdir().expect("create fragment test directory");
+        let path = directory.path().join("segment.bin");
+        let mut bytes = vec![0_u8; 188 * 3];
+        for offset in [0, 188, 376] {
+            bytes[offset] = 0x47;
+        }
+        tokio::fs::write(&path, &bytes)
+            .await
+            .expect("write MPEG-TS fragment");
+        assert!(
+            is_mpegts_segment(&path)
+                .await
+                .expect("inspect MPEG-TS fragment")
+        );
+
+        bytes[188] = 0;
+        tokio::fs::write(&path, &bytes)
+            .await
+            .expect("write invalid transport fragment");
+        assert!(
+            !is_mpegts_segment(&path)
+                .await
+                .expect("inspect invalid transport fragment")
+        );
+
+        tokio::fs::write(&path, vec![0x47; 187])
+            .await
+            .expect("write truncated transport fragment");
+        assert!(
+            !is_mpegts_segment(&path)
+                .await
+                .expect("inspect truncated transport fragment")
+        );
+    }
+
+    #[tokio::test]
+    async fn static_hls_mpegts_fragments_grow_the_owned_destination_part_in_order() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind HLS fragment server");
+        let address = listener.local_addr().expect("HLS server address");
+        let mut first = vec![0_u8; 188 * 3];
+        let mut second = vec![0_u8; 188 * 3];
+        for offset in [0, 188, 376] {
+            first[offset] = 0x47;
+            second[offset] = 0x47;
+        }
+        first[4] = 1;
+        second[4] = 2;
+        let first_response = first.clone();
+        let second_response = second.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept HLS request");
+                let mut request = [0_u8; 1024];
+                let count = socket.read(&mut request).await.expect("read HLS request");
+                let request = String::from_utf8_lossy(&request[..count]);
+                let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                let payload = if path.contains("segment-1.ts") {
+                    &first_response
+                } else {
+                    &second_response
+                };
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                socket
+                    .write_all(header.as_bytes())
+                    .await
+                    .expect("write HLS response header");
+                socket
+                    .write_all(payload)
+                    .await
+                    .expect("write HLS response body");
+            }
+        });
+
+        let playlist = br#"#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:4
+#EXTINF:4,
+segment-1.ts
+#EXTINF:4,
+segment-2.ts
+#EXT-X-ENDLIST
+"#;
+        let mut plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/playlist.m3u8",
+            playlist,
+        )
+        .expect("plan static HLS media playlist");
+        for (index, resource) in plan.resources.iter_mut().enumerate() {
+            resource.url = url::Url::parse(&format!("http://{address}/segment-{}.ts", index + 1))
+                .expect("set local HLS test resource URL");
+        }
+        assert!(plan.is_plain_mpegts_candidate());
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build direct HLS test client");
+        let staging = tempfile::tempdir().expect("create HLS staging root");
+        let video_dir = staging.path().join("video");
+        tokio::fs::create_dir(&video_dir)
+            .await
+            .expect("create HLS video track directory");
+        let destination_dir = tempfile::tempdir().expect("create HLS destination");
+        let destination = destination_dir.path().join("Example.mp4");
+        crate::manifest_destination::ensure_plan(staging.path(), &destination, 84, false, false)
+            .expect("persist HLS destination plan");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+
+        assert!(
+            fetch_and_write_hls_track(ManifestHlsTrackTransfer {
+                client: &client,
+                staging: staging.path(),
+                plan: &plan,
+                directory: &video_dir,
+                filename: "video-track.ts",
+                destination: &destination,
+                item_id: 84,
+                track: crate::manifest_destination::TrackKind::Video,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+                abort: &mut abort,
+            })
+            .await
+            .expect("fetch and assemble static HLS MPEG-TS fragments")
+        );
+        server.await.expect("HLS fragment server task");
+
+        let part = crate::manifest_destination::part_path(
+            staging.path(),
+            &destination,
+            84,
+            crate::manifest_destination::TrackKind::Video,
+        )
+        .expect("resolve visible HLS destination part");
+        let mut expected = first;
+        expected.extend_from_slice(&second);
+        assert_eq!(
+            tokio::fs::read(part).await.expect("read visible HLS part"),
+            expected
+        );
+        assert_eq!(downloaded.load(Ordering::Relaxed), 188 * 6);
+    }
 
     #[tokio::test]
     async fn track_directory_rejects_existing_non_directory() {
@@ -2895,6 +3321,10 @@ mod tests {
             .build()
             .expect("build direct HTTP client");
         let staging = tempfile::tempdir().expect("create DASH staging");
+        let video_dir = staging.path().join("video");
+        tokio::fs::create_dir(&video_dir)
+            .await
+            .expect("create DASH video track directory");
         let destination_dir = tempfile::tempdir().expect("create DASH destination");
         let destination = destination_dir.path().join("Example.mp4");
         crate::manifest_destination::ensure_plan(staging.path(), &destination, 42, false, false)
@@ -2906,8 +3336,9 @@ mod tests {
         assert!(
             fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client: &client,
+                staging: staging.path(),
                 plan: &plan,
-                directory: staging.path(),
+                directory: &video_dir,
                 filename: "video-track.mp4",
                 destination: &destination,
                 item_id: 42,
@@ -2936,6 +3367,39 @@ mod tests {
                 .await
                 .expect("read assembled DASH track"),
             b"initonetwo"
+        );
+
+        crate::manifest_writer::cleanup_destination_part(
+            staging.path(),
+            &video_dir,
+            &destination,
+            42,
+            crate::manifest_destination::TrackKind::Video,
+            "video-track.mp4",
+        )
+        .await
+        .expect("clean destination part and nested track checkpoint");
+        assert!(
+            !video_dir.join("video-track.mp4.checkpoint.json").exists(),
+            "track checkpoint should be removed from its track directory"
+        );
+        let part_path = crate::manifest_destination::part_path(
+            staging.path(),
+            &destination,
+            42,
+            crate::manifest_destination::TrackKind::Video,
+        )
+        .expect("resolve destination part after cleanup");
+        let part_name = part_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("destination part has a filename");
+        assert!(
+            !staging
+                .path()
+                .join(format!("{part_name}.owner.json"))
+                .exists(),
+            "destination owner record should be removed from the XDG staging root"
         );
     }
 

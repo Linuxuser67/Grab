@@ -93,6 +93,7 @@ pub(crate) struct OrderedTrackWriter {
 }
 
 struct DestinationPart {
+    staging: std::path::PathBuf,
     destination: std::path::PathBuf,
     item_id: u64,
     track: crate::manifest_destination::TrackKind,
@@ -205,6 +206,7 @@ impl OrderedTrackWriter {
     pub(crate) async fn open_destination_part(
         resources: Vec<String>,
         directory: &Path,
+        staging: &Path,
         filename: &str,
         destination: &Path,
         item_id: u64,
@@ -216,6 +218,7 @@ impl OrderedTrackWriter {
             filename,
             CheckpointPolicy::RetainAfterPublish,
             Some(DestinationPart {
+                staging: staging.to_path_buf(),
                 destination: destination.to_path_buf(),
                 item_id,
                 track,
@@ -247,7 +250,7 @@ impl OrderedTrackWriter {
         let part = match destination_part.as_ref() {
             Some(destination_part) => {
                 crate::manifest_destination::part_path_async(
-                    directory.to_path_buf(),
+                    destination_part.staging.clone(),
                     destination_part.destination.clone(),
                     destination_part.item_id,
                     destination_part.track,
@@ -263,7 +266,7 @@ impl OrderedTrackWriter {
                 Ok(_) => {
                     drop(
                         crate::manifest_destination::open_owned_part_async(
-                            directory.to_path_buf(),
+                            destination_part.staging.clone(),
                             destination_part.destination.clone(),
                             destination_part.item_id,
                             destination_part.track,
@@ -343,7 +346,7 @@ impl OrderedTrackWriter {
 
         let mut output = if let Some(destination_part) = destination_part.as_ref() {
             crate::manifest_destination::open_owned_part_async(
-                directory.to_path_buf(),
+                destination_part.staging.clone(),
                 destination_part.destination.clone(),
                 destination_part.item_id,
                 destination_part.track,
@@ -366,7 +369,7 @@ impl OrderedTrackWriter {
                     drop(output);
                     if let Some(destination_part) = destination_part.as_ref() {
                         let _ = crate::manifest_destination::remove_owned_part_async(
-                            directory.to_path_buf(),
+                            destination_part.staging.clone(),
                             destination_part.destination.clone(),
                             destination_part.item_id,
                             destination_part.track,
@@ -401,7 +404,7 @@ impl OrderedTrackWriter {
                     drop(output);
                     if let Some(destination_part) = destination_part.as_ref() {
                         let _ = crate::manifest_destination::remove_owned_part_async(
-                            directory.to_path_buf(),
+                            destination_part.staging.clone(),
                             destination_part.destination.clone(),
                             destination_part.item_id,
                             destination_part.track,
@@ -417,7 +420,7 @@ impl OrderedTrackWriter {
                 drop(output);
                 if let Some(destination_part) = destination_part.as_ref() {
                     let _ = crate::manifest_destination::remove_owned_part_async(
-                        directory.to_path_buf(),
+                        destination_part.staging.clone(),
                         destination_part.destination.clone(),
                         destination_part.item_id,
                         destination_part.track,
@@ -610,11 +613,16 @@ impl OrderedTrackWriter {
 /// Returns an error if the part is no longer owned by this item or metadata cleanup fails.
 pub(crate) async fn cleanup_destination_part(
     staging: &Path,
+    track_directory: &Path,
     destination: &Path,
     item_id: u64,
     track: crate::manifest_destination::TrackKind,
     filename: &str,
 ) -> Result<(), String> {
+    remove_regular_file_if_present(&track_directory.join(format!("{filename}.checkpoint.json")))
+        .await?;
+    remove_regular_file_if_present(&track_directory.join(format!("{filename}.resources"))).await?;
+    sync_directory(track_directory).await?;
     crate::manifest_destination::remove_owned_part_async(
         staging.to_path_buf(),
         destination.to_path_buf(),
@@ -622,8 +630,6 @@ pub(crate) async fn cleanup_destination_part(
         track,
     )
     .await?;
-    remove_regular_file_if_present(&staging.join(format!("{filename}.checkpoint.json"))).await?;
-    remove_regular_file_if_present(&staging.join(format!("{filename}.resources"))).await?;
     sync_directory(staging).await
 }
 

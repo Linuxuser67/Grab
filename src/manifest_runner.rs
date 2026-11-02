@@ -821,6 +821,7 @@ async fn transfer_static_manifest_tracks(
             if use_destination_parts {
                 if !fetch_and_write_hls_track(
                     client,
+                    staging,
                     video,
                     video_dir,
                     "video-track.ts",
@@ -839,6 +840,7 @@ async fn transfer_static_manifest_tracks(
                 if let Some(audio) = audio {
                     match fetch_and_write_hls_track(
                         client,
+                        staging,
                         audio,
                         audio_dir,
                         "audio-track.ts",
@@ -929,6 +931,7 @@ async fn transfer_static_manifest_tracks(
         } => {
             if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client,
+                staging,
                 plan: video,
                 directory: video_dir,
                 filename: "video-track.mp4",
@@ -947,6 +950,7 @@ async fn transfer_static_manifest_tracks(
             if let Some(audio) = audio
                 && !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
+                    staging,
                     plan: audio,
                     directory: audio_dir,
                     filename: "audio-track.mp4",
@@ -967,6 +971,7 @@ async fn transfer_static_manifest_tracks(
                 ensure_track_dir(&subtitle_dir).await?;
                 if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
+                    staging,
                     plan: subtitle,
                     directory: &subtitle_dir,
                     filename: "subtitle-track.mp4",
@@ -2429,6 +2434,7 @@ const DASH_LIVE_STATE_VERSION: u32 = 1;
 
 struct ManifestDashTrackTransfer<'a> {
     client: &'a reqwest::Client,
+    staging: &'a Path,
     plan: &'a DashRepresentationPlan,
     directory: &'a Path,
     filename: &'a str,
@@ -2446,6 +2452,7 @@ async fn fetch_and_write_dash_track(
 ) -> Result<bool, ManifestRunError> {
     let ManifestDashTrackTransfer {
         client,
+        staging,
         plan,
         directory,
         filename,
@@ -2459,6 +2466,7 @@ async fn fetch_and_write_dash_track(
     } = context;
     fetch_and_write_ordered_track(
         client,
+        staging,
         dash_resources(plan),
         directory,
         filename,
@@ -2476,6 +2484,7 @@ async fn fetch_and_write_dash_track(
 
 async fn fetch_and_write_hls_track(
     client: &reqwest::Client,
+    staging: &Path,
     plan: &HlsPlan,
     directory: &Path,
     filename: &str,
@@ -2489,6 +2498,7 @@ async fn fetch_and_write_hls_track(
 ) -> Result<bool, ManifestRunError> {
     fetch_and_write_ordered_track(
         client,
+        staging,
         hls_resources(plan),
         directory,
         filename,
@@ -2507,6 +2517,7 @@ async fn fetch_and_write_hls_track(
 #[allow(clippy::too_many_arguments)]
 async fn fetch_and_write_ordered_track(
     client: &reqwest::Client,
+    staging: &Path,
     resources: Vec<Resource>,
     directory: &Path,
     filename: &str,
@@ -2527,6 +2538,7 @@ async fn fetch_and_write_ordered_track(
         crate::manifest_writer::OrderedTrackWriter::open_destination_part(
             resource_names,
             directory,
+            staging,
             filename,
             destination,
             item_id,
@@ -2615,7 +2627,7 @@ async fn fetch_and_write_ordered_track(
                 if require_mpegts && matches!(&error, ManifestRunError::Unsupported(_)) {
                     drop(writer);
                     crate::manifest_writer::cleanup_destination_part(
-                        directory.parent().unwrap_or(directory),
+                        staging,
                         destination,
                         item_id,
                         track,
@@ -3144,6 +3156,7 @@ mod tests {
         assert!(
             fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client: &client,
+                staging: staging.path(),
                 plan: &plan,
                 directory: staging.path(),
                 filename: "video-track.mp4",

@@ -13,6 +13,7 @@ use crate::media_types::{ManifestKind, ManifestSource};
 
 const RECOVERY_FILE: &str = "manifest-recovery.json";
 const RECOVERY_VERSION: u32 = 1;
+const MAX_RECOVERY_MARKER_BYTES: usize = 4096;
 
 /// Structured failures from manifest recovery metadata operations.
 #[derive(Debug, Error)]
@@ -25,6 +26,8 @@ pub(crate) enum RecoveryError {
     UnsupportedVersion(u32),
     #[error("manifest recovery metadata is not a regular file")]
     NotRegularFile,
+    #[error("manifest recovery metadata exceeds its size limit")]
+    TooLarge,
     #[error(
         "The selected manifest tracks or output container changed; existing staged data was preserved. Remove and add the download again to start a new plan."
     )]
@@ -119,17 +122,18 @@ fn validate_or_initialize_sync(staging: &Path, fingerprint: &str) -> Result<(), 
 }
 
 fn validate_existing_marker(marker_path: &Path, fingerprint: &str) -> Result<(), RecoveryError> {
-    let metadata = fs::symlink_metadata(marker_path).map_err(|source| RecoveryError::Io {
-        operation: "inspecting recovery metadata",
-        source,
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(RecoveryError::NotRegularFile);
-    }
-    let bytes = fs::read(marker_path).map_err(|source| RecoveryError::Io {
-        operation: "reading recovery metadata",
-        source,
-    })?;
+    let bytes =
+        crate::bounded_file::read_regular_file_bounded(marker_path, MAX_RECOVERY_MARKER_BYTES)
+            .map_err(|error| match error {
+                crate::bounded_file::BoundedFileError::NotRegularFile => {
+                    RecoveryError::NotRegularFile
+                }
+                crate::bounded_file::BoundedFileError::TooLarge => RecoveryError::TooLarge,
+                crate::bounded_file::BoundedFileError::Io(source) => RecoveryError::Io {
+                    operation: "reading recovery metadata",
+                    source,
+                },
+            })?;
     let marker: RecoveryMarker =
         serde_json::from_slice(&bytes).map_err(RecoveryError::Malformed)?;
     if marker.version != RECOVERY_VERSION {
@@ -373,6 +377,22 @@ mod tests {
             fs::read(resource).expect("read preserved resource"),
             b"legacy data"
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_recovery_metadata_is_rejected() {
+        let staging = tempfile::tempdir().expect("create staging directory");
+        fs::write(
+            staging.path().join(RECOVERY_FILE),
+            vec![b' '; MAX_RECOVERY_MARKER_BYTES + 1],
+        )
+        .expect("write oversized recovery marker");
+        let expected = fingerprint(&source(), "mp4", true).expect("fingerprint");
+
+        assert!(matches!(
+            validate_or_initialize(staging.path(), expected).await,
+            Err(RecoveryError::TooLarge)
+        ));
     }
 
     #[tokio::test]

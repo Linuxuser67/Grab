@@ -366,12 +366,12 @@ impl OrderedTrackWriter {
                     drop(output);
                     if let Some(destination_part) = destination_part.as_ref() {
                         let _ = crate::manifest_destination::remove_owned_part_async(
-                        directory.to_path_buf(),
-                        destination_part.destination.clone(),
-                        destination_part.item_id,
-                        destination_part.track,
-                    )
-                    .await;
+                            directory.to_path_buf(),
+                            destination_part.destination.clone(),
+                            destination_part.item_id,
+                            destination_part.track,
+                        )
+                        .await;
                     }
                     return Err(format!(
                         "Could not safely open the completed staging track for migration: {error}"
@@ -417,12 +417,12 @@ impl OrderedTrackWriter {
                 drop(output);
                 if let Some(destination_part) = destination_part.as_ref() {
                     let _ = crate::manifest_destination::remove_owned_part_async(
-                            directory.to_path_buf(),
-                            destination_part.destination.clone(),
-                            destination_part.item_id,
-                            destination_part.track,
-                        )
-                        .await;
+                        directory.to_path_buf(),
+                        destination_part.destination.clone(),
+                        destination_part.item_id,
+                        destination_part.track,
+                    )
+                    .await;
                 }
                 return Err(
                     "The completed staging track length does not match its checkpoint".to_string(),

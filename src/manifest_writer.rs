@@ -359,10 +359,14 @@ impl OrderedTrackWriter {
                     ));
                 }
             };
-            verify_resource_ranges_file(&mut input, &migration_source, &committed_resources).await?;
-            input.seek(std::io::SeekFrom::Start(0)).await.map_err(|error| {
-                format!("Could not rewind the completed staging track: {error}")
-            })?;
+            verify_resource_ranges_file(&mut input, &migration_source, &committed_resources)
+                .await?;
+            input
+                .seek(std::io::SeekFrom::Start(0))
+                .await
+                .map_err(|error| {
+                    format!("Could not rewind the completed staging track: {error}")
+                })?;
             output.set_len(0).await.map_err(|error| {
                 format!("Could not reset the destination DASH part for migration: {error}")
             })?;

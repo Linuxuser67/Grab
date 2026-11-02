@@ -621,7 +621,6 @@ mod tests {
         drop(original);
     }
 
-
     #[cfg(unix)]
     #[test]
     fn preexisting_destination_symlink_is_never_followed() {

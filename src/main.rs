@@ -20,6 +20,7 @@ mod install_help;
 mod install_progress;
 mod live_capture_state;
 mod manifest;
+mod manifest_destination;
 mod manifest_intake;
 mod manifest_plan;
 mod manifest_publish;

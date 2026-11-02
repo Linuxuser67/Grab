@@ -858,7 +858,7 @@ async fn transfer_static_manifest_tracks(
                         Ok(false) => return Ok(false),
                         Err(error) => {
                             if matches!(&error, ManifestRunError::Unsupported(_)) {
-                                let _ = crate::manifest_writer::cleanup_destination_part(
+                                crate::manifest_writer::cleanup_destination_part(
                                     staging,
                                     video_dir,
                                     destination,
@@ -866,7 +866,8 @@ async fn transfer_static_manifest_tracks(
                                     crate::manifest_destination::TrackKind::Video,
                                     "video-track.ts",
                                 )
-                                .await;
+                                .await
+                                .map_err(ManifestRunError::Failed)?;
                             }
                             return Err(error);
                         }

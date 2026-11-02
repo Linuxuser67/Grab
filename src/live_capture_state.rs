@@ -274,7 +274,7 @@ mod tests {
             99,
         )
         .await
-            .expect("persist marker");
+        .expect("persist marker");
         assert!(matches!(
             persist(directory.path(), ManifestKind::Dash, "different reason", 99).await,
             Err(LiveCaptureStateError::ConflictingDecision)

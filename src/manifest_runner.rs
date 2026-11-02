@@ -2891,6 +2891,16 @@ mod tests {
             .build()
             .expect("build direct HTTP client");
         let staging = tempfile::tempdir().expect("create DASH staging");
+        let destination_dir = tempfile::tempdir().expect("create DASH destination");
+        let destination = destination_dir.path().join("Example.mp4");
+        crate::manifest_destination::ensure_plan(
+            staging.path(),
+            &destination,
+            42,
+            false,
+            false,
+        )
+        .expect("persist DASH destination plan");
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let downloaded = Arc::new(AtomicU64::new(0));
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
@@ -2901,6 +2911,9 @@ mod tests {
                 plan: &plan,
                 directory: staging.path(),
                 filename: "video-track.mp4",
+                destination: &destination,
+                item_id: 42,
+                track: crate::manifest_destination::TrackKind::Video,
                 connections: 2,
                 tx: &tx,
                 downloaded: &downloaded,
@@ -2913,8 +2926,15 @@ mod tests {
 
         assert_eq!(maximum.load(Ordering::Relaxed), 2);
         assert_eq!(downloaded.load(Ordering::Relaxed), 10);
+        let part = crate::manifest_destination::part_path(
+            staging.path(),
+            &destination,
+            42,
+            crate::manifest_destination::TrackKind::Video,
+        )
+        .expect("resolve assembled DASH part");
         assert_eq!(
-            tokio::fs::read(staging.path().join("video-track.mp4"))
+            tokio::fs::read(part)
                 .await
                 .expect("read assembled DASH track"),
             b"initonetwo"

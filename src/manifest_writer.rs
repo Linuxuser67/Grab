@@ -47,6 +47,7 @@ struct WriterCheckpoint {
 enum CheckpointPolicy {
     RemoveAfterPublish,
     RetainAfterPublish,
+    RetainSources,
 }
 
 #[derive(Debug)]
@@ -262,6 +263,38 @@ impl OrderedTrackWriter {
             directory,
             filename,
             CheckpointPolicy::RetainAfterPublish,
+            Some(DestinationPart {
+                staging: staging.to_path_buf(),
+                destination: destination.to_path_buf(),
+                item_id,
+                track,
+            }),
+            true,
+        ))
+        .await
+    }
+
+    /// Open a growing destination part while retaining source resources in XDG staging.
+    ///
+    /// Live HLS keeps its committed local playlist and segments as its recovery index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plan, checkpoint, ownership record, or files are invalid.
+    pub(crate) async fn open_appendable_destination_part_retaining_sources(
+        resources: Vec<String>,
+        directory: &Path,
+        staging: &Path,
+        filename: &str,
+        destination: &Path,
+        item_id: u64,
+        track: crate::manifest_destination::TrackKind,
+    ) -> Result<(Option<Self>, u64), String> {
+        Box::pin(Self::open_with_policy(
+            resources,
+            directory,
+            filename,
+            CheckpointPolicy::RetainSources,
             Some(DestinationPart {
                 staging: staging.to_path_buf(),
                 destination: destination.to_path_buf(),

@@ -213,6 +213,7 @@ pub(super) async fn load_live_hls_track(
         snapshot_at: Instant::now(),
         ended: false,
         next_poll_at: None,
+        destination_part: None,
     })
 }
 
@@ -319,6 +320,16 @@ pub(super) async fn apply_live_hls_snapshot(
             "The live HLS playlist state is inconsistent".to_string(),
         ));
     }
+    if track.destination_part.is_some() && !plan.is_plain_mpegts_presentation() {
+        if track.accumulator.segment_count() > 0 {
+            return Ok(LiveHlsSnapshotOutcome::Stopped(
+                crate::video::StopIntent::Finish,
+            ));
+        }
+        return Err(ManifestRunError::Unsupported(
+            "The live HLS playlist is not a plain MPEG-TS presentation".to_string(),
+        ));
+    }
     let playlist_url = plan.playlist_url.clone();
     let update = match track.accumulator.prepare_update(plan) {
         Ok(update) => update,
@@ -402,6 +413,23 @@ pub(super) async fn apply_live_hls_snapshot(
 
     let added_resource_bytes =
         fetched_hls_resource_bytes(&track.directory, &update.resources).await?;
+    if track.destination_part.is_some() {
+        for resource in &update.resources {
+            if resource.kind != HlsResourceKind::Segment
+                || resource.range.is_some()
+                || !super::is_mpegts_segment(&track.directory.join(&resource.filename)).await?
+            {
+                if track.accumulator.segment_count() > 0 {
+                    return Ok(LiveHlsSnapshotOutcome::Stopped(
+                        crate::video::StopIntent::Finish,
+                    ));
+                }
+                return Err(ManifestRunError::Unsupported(
+                    "A live HLS segment is not a compatible MPEG-TS fragment".to_string(),
+                ));
+            }
+        }
+    }
     match track.accumulator.commit_update_with_budget(
         update,
         added_resource_bytes,
@@ -428,10 +456,152 @@ pub(super) async fn apply_live_hls_snapshot(
     write_live_playlist(&track.directory, &track.accumulator)
         .await
         .map_err(ManifestRunError::Failed)?;
+    if let Some(intent) = append_live_hls_destination_part(track, abort).await? {
+        return Ok(LiveHlsSnapshotOutcome::Stopped(intent));
+    }
     track.playlist_url = playlist_url;
     track.ended = end_list;
     track.next_poll_at = next_poll_at;
     Ok(LiveHlsSnapshotOutcome::Committed)
+}
+
+async fn live_hls_track_has_only_mpegts_resources(
+    track: &LiveHlsTrack,
+) -> Result<bool, ManifestRunError> {
+    let Some(resources) = track.accumulator.plain_mpegts_resource_names() else {
+        return Ok(false);
+    };
+    for filename in resources {
+        if !super::is_mpegts_segment(&track.directory.join(filename)).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn append_live_hls_destination_part(
+    track: &LiveHlsTrack,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<Option<crate::video::StopIntent>, ManifestRunError> {
+    let Some(destination) = track.destination_part.as_ref() else {
+        return Ok(None);
+    };
+    let resources = track
+        .accumulator
+        .plain_mpegts_resource_names()
+        .ok_or_else(|| {
+            ManifestRunError::Failed(
+                "The live HLS recording no longer matches its MPEG-TS destination part".to_string(),
+            )
+        })?;
+    if resources.is_empty() {
+        return Ok(None);
+    }
+
+    let (writer, _) =
+        crate::manifest_writer::OrderedTrackWriter::open_appendable_destination_part_retaining_sources(
+            resources.clone(),
+            &track.directory,
+            &destination.staging,
+            destination.filename,
+            &destination.destination,
+            destination.item_id,
+            destination.track,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    let Some(mut writer) = writer else {
+        return Ok(None);
+    };
+
+    while writer.next_resource_index() < resources.len() {
+        let index = writer.next_resource_index();
+        let filename = resources.get(index).ok_or_else(|| {
+            ManifestRunError::Failed(
+                "The live HLS destination-part checkpoint exceeds its resource plan".to_string(),
+            )
+        })?;
+        if !super::is_mpegts_segment(&track.directory.join(filename)).await? {
+            return Err(ManifestRunError::Failed(
+                "A staged live HLS segment is not a compatible MPEG-TS fragment".to_string(),
+            ));
+        }
+        match writer
+            .append_next_outcome(abort)
+            .await
+            .map_err(ManifestRunError::Failed)?
+        {
+            crate::manifest_writer::AppendNextOutcome::Committed => {}
+            crate::manifest_writer::AppendNextOutcome::Stopped(intent) => {
+                return Ok(Some(intent));
+            }
+        }
+    }
+
+    writer.finish().await.map_err(ManifestRunError::Failed)?;
+    Ok(None)
+}
+
+pub(super) struct SavedLiveHlsDestinationParts<'a> {
+    pub(super) source_url: &'a str,
+    pub(super) staging: &'a Path,
+    pub(super) destination: &'a Path,
+    pub(super) item_id: u64,
+    pub(super) video_dir: &'a Path,
+    pub(super) audio_dir: &'a Path,
+    pub(super) has_audio: bool,
+}
+
+pub(super) async fn complete_saved_live_hls_destination_parts(
+    context: SavedLiveHlsDestinationParts<'_>,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<Option<crate::video::StopIntent>, ManifestRunError> {
+    let SavedLiveHlsDestinationParts {
+        source_url,
+        staging,
+        destination,
+        item_id,
+        video_dir,
+        audio_dir,
+        has_audio,
+    } = context;
+    let Some(video_plan) = read_local_live_hls_plan(source_url, video_dir).await? else {
+        return Ok(None);
+    };
+    if !video_plan.is_plain_mpegts_presentation() {
+        return Ok(None);
+    }
+
+    let mut video = load_live_hls_track(&video_plan, video_dir).await?;
+    video.destination_part = Some(LiveHlsDestination {
+        staging: staging.to_path_buf(),
+        destination: destination.to_path_buf(),
+        item_id,
+        track: crate::manifest_destination::TrackKind::Video,
+        filename: "video-track.ts",
+    });
+    if let Some(intent) = append_live_hls_destination_part(&video, abort).await? {
+        return Ok(Some(intent));
+    }
+
+    if has_audio
+        && let Some(audio_plan) = read_local_live_hls_plan(source_url, audio_dir).await?
+        && audio_plan.is_plain_mpegts_presentation()
+    {
+        let mut audio = load_live_hls_track(&audio_plan, audio_dir).await?;
+        audio.destination_part = Some(LiveHlsDestination {
+            staging: staging.to_path_buf(),
+            destination: destination.to_path_buf(),
+            item_id,
+            track: crate::manifest_destination::TrackKind::Audio,
+            filename: "audio-track.ts",
+        });
+        if let Some(intent) = append_live_hls_destination_part(&audio, abort).await? {
+            return Ok(Some(intent));
+        }
+    }
+
+    Ok(None)
 }
 
 #[expect(
@@ -521,6 +691,9 @@ pub(super) async fn run_live_hls_tracks(
     client: &reqwest::Client,
     source_url: &str,
     destination_dir: &Path,
+    destination: &Path,
+    item_id: u64,
+    staging: &Path,
     video_plan: &HlsPlan,
     audio_plan: Option<&HlsPlan>,
     finish_only: bool,
@@ -531,11 +704,42 @@ pub(super) async fn run_live_hls_tracks(
     downloaded: &Arc<AtomicU64>,
     guarded_child_hosts: &mut std::collections::HashSet<String>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-) -> Result<LiveHlsCaptureOutcome, ManifestRunError> {
+) -> Result<LiveHlsCapture, ManifestRunError> {
     let mut video = load_live_hls_track(video_plan, video_dir).await?;
     let mut audio = match audio_plan {
         Some(plan) => Some(load_live_hls_track(plan, audio_dir).await?),
         None => None,
+    };
+    let mut use_destination_parts = video_plan.is_plain_mpegts_presentation()
+        && audio_plan.is_none_or(HlsPlan::is_plain_mpegts_presentation);
+    if use_destination_parts {
+        use_destination_parts = live_hls_track_has_only_mpegts_resources(&video).await?;
+        if use_destination_parts && let Some(track) = audio.as_ref() {
+            use_destination_parts = live_hls_track_has_only_mpegts_resources(track).await?;
+        }
+    }
+    if use_destination_parts {
+        video.destination_part = Some(LiveHlsDestination {
+            staging: staging.to_path_buf(),
+            destination: destination.to_path_buf(),
+            item_id,
+            track: crate::manifest_destination::TrackKind::Video,
+            filename: "video-track.ts",
+        });
+        if let Some(track) = audio.as_mut() {
+            track.destination_part = Some(LiveHlsDestination {
+                staging: staging.to_path_buf(),
+                destination: destination.to_path_buf(),
+                item_id,
+                track: crate::manifest_destination::TrackKind::Audio,
+                filename: "audio-track.ts",
+            });
+        }
+    }
+    let output = if use_destination_parts {
+        super::LiveHlsOutput::DestinationParts
+    } else {
+        super::LiveHlsOutput::LocalPlaylist
     };
     let retained_bytes = video
         .accumulator
@@ -552,11 +756,35 @@ pub(super) async fn run_live_hls_tracks(
             )
         })?;
     downloaded.store(retained_bytes, Ordering::Relaxed);
-    let staging_dir = video_dir.parent().unwrap_or(video_dir);
-    ensure_manifest_mux_spaces(staging_dir, destination_dir, retained_bytes)?;
-    if finish_only {
-        return Ok(LiveHlsCaptureOutcome::Finish);
+    ensure_manifest_mux_spaces(staging, destination_dir, retained_bytes)?;
+    if use_destination_parts {
+        if let Some(intent) = append_live_hls_destination_part(&video, abort).await? {
+            return Ok(LiveHlsCapture::new(
+                match intent {
+                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
+                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                },
+                output,
+            ));
+        }
+        if let Some(audio) = audio.as_ref()
+            && let Some(intent) = append_live_hls_destination_part(audio, abort).await?
+        {
+            return Ok(LiveHlsCapture::new(
+                match intent {
+                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
+                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                },
+                output,
+            ));
+        }
     }
+    if finish_only {
+        return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Finish, output));
+    }
+    let staging_dir = staging;
 
     let audio_resource_bytes = audio
         .as_ref()
@@ -567,11 +795,14 @@ pub(super) async fn run_live_hls_tracks(
         .checked_add(audio_resource_bytes)
         .is_none_or(|total| total > crate::manifest::MAX_HLS_LIVE_CAPTURE_BYTES)
     {
-        return Ok(if video.accumulator.segment_count() > 0 {
-            LiveHlsCaptureOutcome::FinishVideoOnly
-        } else {
-            LiveHlsCaptureOutcome::Discard
-        });
+        return Ok(LiveHlsCapture::new(
+            if video.accumulator.segment_count() > 0 {
+                LiveHlsCaptureOutcome::FinishVideoOnly
+            } else {
+                LiveHlsCaptureOutcome::Discard
+            },
+            output,
+        ));
     }
 
     let all_tracks_ended = video_plan.end_list && audio_plan.is_none_or(|plan| plan.end_list);
@@ -604,15 +835,18 @@ pub(super) async fn run_live_hls_tracks(
             )?;
         }
         LiveHlsSnapshotOutcome::Stopped(intent) => {
-            return Ok(match intent {
-                crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-            });
+            return Ok(LiveHlsCapture::new(
+                match intent {
+                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
+                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                },
+                output,
+            ));
         }
         LiveHlsSnapshotOutcome::ContinuityLost => {
             if video.accumulator.segment_count() == 0 {
-                return Ok(LiveHlsCaptureOutcome::Discard);
+                return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Discard, output));
             }
             persist_unrecoverable_live_capture(
                 staging_dir,
@@ -623,7 +857,10 @@ pub(super) async fn run_live_hls_tracks(
                 tx,
             )
             .await?;
-            return Ok(LiveHlsCaptureOutcome::Unrecoverable);
+            return Ok(LiveHlsCapture::new(
+                LiveHlsCaptureOutcome::Unrecoverable,
+                output,
+            ));
         }
     }
     if let (Some(plan), Some(track)) = (audio_plan, audio.as_mut()) {
@@ -645,7 +882,10 @@ pub(super) async fn run_live_hls_tracks(
                     error = %error,
                     "live HLS audio rendition is no longer supported; preserving video capture"
                 );
-                return Ok(LiveHlsCaptureOutcome::FinishVideoOnly);
+                return Ok(LiveHlsCapture::new(
+                    LiveHlsCaptureOutcome::FinishVideoOnly,
+                    output,
+                ));
             }
             Err(error) => return Err(error),
             Ok(outcome) => outcome,
@@ -659,15 +899,18 @@ pub(super) async fn run_live_hls_tracks(
                 )?;
             }
             LiveHlsSnapshotOutcome::Stopped(intent) => {
-                return Ok(match intent {
-                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
-                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                });
+                return Ok(LiveHlsCapture::new(
+                    match intent {
+                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
+                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                    },
+                    output,
+                ));
             }
             LiveHlsSnapshotOutcome::ContinuityLost => {
                 if video.accumulator.segment_count() == 0 {
-                    return Ok(LiveHlsCaptureOutcome::Discard);
+                    return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Discard, output));
                 }
                 persist_unrecoverable_live_capture(
                     staging_dir,
@@ -678,7 +921,10 @@ pub(super) async fn run_live_hls_tracks(
                     tx,
                 )
                 .await?;
-                return Ok(LiveHlsCaptureOutcome::Unrecoverable);
+                return Ok(LiveHlsCapture::new(
+                    LiveHlsCaptureOutcome::Unrecoverable,
+                    output,
+                ));
             }
         }
     }
@@ -702,11 +948,14 @@ pub(super) async fn run_live_hls_tracks(
         tokio::select! {
             biased;
             stop = &mut *abort => {
-                return Ok(match stop.unwrap_or(crate::video::StopIntent::Discard) {
-                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                });
+                return Ok(LiveHlsCapture::new(
+                    match stop.unwrap_or(crate::video::StopIntent::Discard) {
+                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
+                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                    },
+                    output,
+                ));
             }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_poll)) => {}
         }
@@ -736,15 +985,18 @@ pub(super) async fn run_live_hls_tracks(
                     )?;
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
-                    return Ok(match intent {
-                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                    });
+                    return Ok(LiveHlsCapture::new(
+                        match intent {
+                            crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                            crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
+                            crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                        },
+                        output,
+                    ));
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
                     if video.accumulator.segment_count() == 0 {
-                        return Ok(LiveHlsCaptureOutcome::Discard);
+                        return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Discard, output));
                     }
                     persist_unrecoverable_live_capture(
                         staging_dir,
@@ -755,7 +1007,10 @@ pub(super) async fn run_live_hls_tracks(
                         tx,
                     )
                     .await?;
-                    return Ok(LiveHlsCaptureOutcome::Unrecoverable);
+                    return Ok(LiveHlsCapture::new(
+                        LiveHlsCaptureOutcome::Unrecoverable,
+                        output,
+                    ));
                 }
             }
         }
@@ -786,15 +1041,20 @@ pub(super) async fn run_live_hls_tracks(
                     )?;
                 }
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
-                    return Ok(match intent {
-                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
-                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                    });
+                    return Ok(LiveHlsCapture::new(
+                        match intent {
+                            crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                            crate::video::StopIntent::Finish => {
+                                LiveHlsCaptureOutcome::FinishVideoOnly
+                            }
+                            crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                        },
+                        output,
+                    ));
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
                     if video.accumulator.segment_count() == 0 {
-                        return Ok(LiveHlsCaptureOutcome::Discard);
+                        return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Discard, output));
                     }
                     persist_unrecoverable_live_capture(
                         staging_dir,
@@ -805,11 +1065,190 @@ pub(super) async fn run_live_hls_tracks(
                         tx,
                     )
                     .await?;
-                    return Ok(LiveHlsCaptureOutcome::Unrecoverable);
+                    return Ok(LiveHlsCapture::new(
+                        LiveHlsCaptureOutcome::Unrecoverable,
+                        output,
+                    ));
                 }
             }
         }
     }
 
-    Ok(LiveHlsCaptureOutcome::Ended)
+    Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Ended, output))
+}
+
+#[cfg(test)]
+mod destination_part_tests {
+    use super::*;
+
+    const BASE_URL: &str = "https://cdn.example.test/live.m3u8";
+
+    fn transport_stream(seed: u8) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 188 * 3];
+        for offset in [0, 188, 376] {
+            bytes[offset] = 0x47;
+        }
+        bytes[4] = seed;
+        bytes
+    }
+
+    async fn stage_update_resources(
+        resources: &[HlsResource],
+        directory: &Path,
+        first_seed: u8,
+    ) -> (Vec<Vec<u8>>, u64) {
+        let mut bodies = Vec::with_capacity(resources.len());
+        let mut bytes = 0_u64;
+        for (index, resource) in resources.iter().enumerate() {
+            let body = transport_stream(first_seed.saturating_add(index as u8));
+            tokio::fs::write(directory.join(&resource.filename), &body)
+                .await
+                .expect("stage live HLS MPEG-TS resource");
+            bytes = bytes
+                .checked_add(body.len() as u64)
+                .expect("test fixture byte count stays in range");
+            bodies.push(body);
+        }
+        (bodies, bytes)
+    }
+
+    #[tokio::test]
+    async fn live_hls_destination_part_appends_in_playlist_order_and_resumes_without_duplication() {
+        let staging = tempfile::tempdir().expect("create live HLS staging");
+        let video_dir = staging.path().join("video");
+        tokio::fs::create_dir(&video_dir)
+            .await
+            .expect("create live HLS video directory");
+        let destination_dir = tempfile::tempdir().expect("create live HLS destination");
+        let destination = destination_dir.path().join("recording.mp4");
+        crate::manifest_destination::ensure_plan(staging.path(), &destination, 73, false, false)
+            .expect("persist live HLS destination plan");
+
+        let first_plan = crate::manifest::plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4,\n100.ts\n#EXTINF:4,\n101.ts\n",
+        )
+        .expect("plan initial live HLS window");
+        let mut accumulator = HlsLiveAccumulator::new();
+        let first_update = accumulator
+            .prepare_update(&first_plan)
+            .expect("prepare first HLS window");
+        let (first_bodies, first_bytes) =
+            stage_update_resources(&first_update.resources, &video_dir, 1).await;
+        accumulator
+            .commit_update_with_budget(first_update, first_bytes, 0)
+            .expect("commit first HLS window");
+        write_live_playlist(&video_dir, &accumulator)
+            .await
+            .expect("persist first local HLS playlist");
+
+        let destination_state = LiveHlsDestination {
+            staging: staging.path().to_path_buf(),
+            destination: destination.clone(),
+            item_id: 73,
+            track: crate::manifest_destination::TrackKind::Video,
+            filename: "video-track.ts",
+        };
+        let mut track = LiveHlsTrack {
+            playlist_url: first_plan.playlist_url.clone(),
+            directory: video_dir.clone(),
+            accumulator,
+            snapshot_at: Instant::now(),
+            ended: false,
+            next_poll_at: None,
+            destination_part: Some(destination_state.clone()),
+        };
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+        assert_eq!(
+            append_live_hls_destination_part(&track, &mut abort)
+                .await
+                .expect("append initial live HLS window"),
+            None
+        );
+
+        let part = crate::manifest_destination::part_path(
+            staging.path(),
+            &destination,
+            73,
+            crate::manifest_destination::TrackKind::Video,
+        )
+        .expect("resolve visible HLS destination part");
+        let expected_first = first_bodies.concat();
+        assert_eq!(
+            tokio::fs::read(&part).await.expect("read initial HLS part"),
+            expected_first
+        );
+        for resource in &first_plan.resources {
+            assert!(
+                tokio::fs::symlink_metadata(video_dir.join(&resource.filename))
+                    .await
+                    .is_ok(),
+                "source resources remain available to playlist-based recovery"
+            );
+        }
+
+        let next_plan = crate::manifest::plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:101\n#EXTINF:4,\n101.ts\n#EXTINF:4,\n102.ts\n",
+        )
+        .expect("plan overlapping live HLS window");
+        let next_update = track
+            .accumulator
+            .prepare_update(&next_plan)
+            .expect("prepare next HLS window");
+        let (next_bodies, next_bytes) =
+            stage_update_resources(&next_update.resources, &video_dir, 20).await;
+        track
+            .accumulator
+            .commit_update_with_budget(next_update, next_bytes, 0)
+            .expect("commit next HLS window");
+        write_live_playlist(&video_dir, &track.accumulator)
+            .await
+            .expect("persist extended local HLS playlist");
+        assert_eq!(
+            append_live_hls_destination_part(&track, &mut abort)
+                .await
+                .expect("append next live HLS window"),
+            None
+        );
+
+        let mut expected = expected_first;
+        expected.extend_from_slice(&next_bodies.concat());
+        assert_eq!(
+            tokio::fs::read(&part)
+                .await
+                .expect("read extended HLS part"),
+            expected
+        );
+
+        let mut resumed = load_live_hls_track(&next_plan, &video_dir)
+            .await
+            .expect("restore saved live HLS capture");
+        resumed.destination_part = Some(destination_state);
+        assert_eq!(
+            append_live_hls_destination_part(&resumed, &mut abort)
+                .await
+                .expect("resume already committed HLS part"),
+            None
+        );
+        assert_eq!(
+            tokio::fs::read(&part).await.expect("read resumed HLS part"),
+            expected,
+            "a resumed writer must not duplicate its committed prefix"
+        );
+        assert!(
+            tokio::fs::symlink_metadata(video_dir.join("video-track.ts.checkpoint.json"))
+                .await
+                .is_ok(),
+            "the HLS writer checkpoint remains in XDG staging"
+        );
+        for resource in resumed.accumulator.resource_names() {
+            assert!(
+                tokio::fs::symlink_metadata(video_dir.join(resource))
+                    .await
+                    .is_ok(),
+                "committed HLS source resources remain in XDG staging"
+            );
+        }
+    }
 }

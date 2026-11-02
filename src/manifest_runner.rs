@@ -336,6 +336,16 @@ struct LiveHlsTrack {
     snapshot_at: Instant,
     ended: bool,
     next_poll_at: Option<Instant>,
+    destination_part: Option<LiveHlsDestination>,
+}
+
+#[derive(Clone, Debug)]
+struct LiveHlsDestination {
+    staging: PathBuf,
+    destination: PathBuf,
+    item_id: u64,
+    track: crate::manifest_destination::TrackKind,
+    filename: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -346,6 +356,24 @@ enum LiveHlsCaptureOutcome {
     FinishVideoOnly,
     Unrecoverable,
     Discard,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveHlsOutput {
+    LocalPlaylist,
+    DestinationParts,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LiveHlsCapture {
+    outcome: LiveHlsCaptureOutcome,
+    output: LiveHlsOutput,
+}
+
+impl LiveHlsCapture {
+    fn new(outcome: LiveHlsCaptureOutcome, output: LiveHlsOutput) -> Self {
+        Self { outcome, output }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1014,6 +1042,7 @@ enum LiveCapturePreparation {
     Ready {
         has_audio: bool,
         finish_stop_sender: Option<tokio::sync::oneshot::Sender<crate::video::StopIntent>>,
+        destination_parts: bool,
     },
     Stopped(ManifestOutcome),
 }
@@ -1023,7 +1052,10 @@ struct ManifestLiveHlsFinalization<'a> {
     client: &'a reqwest::Client,
     source_url: &'a str,
     dest_dir: &'a Path,
+    destination: &'a Path,
+    item_id: u64,
     staging: &'a Path,
+    finish_only: bool,
     video: &'a HlsPlan,
     audio: Option<&'a HlsPlan>,
     video_dir: &'a Path,
@@ -1036,6 +1068,53 @@ struct ManifestLiveHlsFinalization<'a> {
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
+async fn cleanup_live_hls_destination_part_if_present(
+    staging: &Path,
+    destination: &Path,
+    item_id: u64,
+    track_directory: &Path,
+    track: crate::manifest_destination::TrackKind,
+    filename: &str,
+) -> Result<(), ManifestRunError> {
+    let part = crate::manifest_destination::part_path_async(
+        staging.to_path_buf(),
+        destination.to_path_buf(),
+        item_id,
+        track,
+    )
+    .await
+    .map_err(ManifestRunError::Failed)?;
+    match tokio::fs::symlink_metadata(&part).await {
+        Ok(_) => {
+            crate::manifest_destination::verify_owned_part_async(
+                staging.to_path_buf(),
+                destination.to_path_buf(),
+                item_id,
+                track,
+            )
+            .await
+            .map_err(ManifestRunError::Failed)?;
+            crate::manifest_writer::cleanup_destination_part(
+                staging,
+                track_directory,
+                destination,
+                item_id,
+                track,
+                filename,
+            )
+            .await
+            .map_err(ManifestRunError::Failed)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ManifestRunError::Failed(format!(
+                "Could not inspect the live HLS destination part: {error}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Capture live HLS tracks, persist the finish decision, and prepare local playlists.
 ///
 /// The returned stop sender keeps the replacement receiver open while FFmpeg finalizes.
@@ -1046,7 +1125,10 @@ async fn prepare_live_hls_finalization(
         client,
         source_url,
         dest_dir,
+        destination,
+        item_id,
         staging,
+        finish_only,
         video,
         audio,
         video_dir,
@@ -1063,9 +1145,12 @@ async fn prepare_live_hls_finalization(
         client,
         source_url,
         dest_dir,
+        destination,
+        item_id,
+        staging,
         video,
         audio,
-        false,
+        finish_only,
         video_dir,
         audio_dir,
         concurrency,
@@ -1076,8 +1161,10 @@ async fn prepare_live_hls_finalization(
     )
     .await?;
 
+    let destination_parts = capture.output == LiveHlsOutput::DestinationParts;
+    let has_destination_audio = audio.is_some() && has_audio;
     let mut finish_stop_sender = None;
-    match capture {
+    match capture.outcome {
         LiveHlsCaptureOutcome::Ended => {}
         LiveHlsCaptureOutcome::Paused => {
             return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Paused));
@@ -1089,10 +1176,20 @@ async fn prepare_live_hls_finalization(
                 return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Aborted));
             }
             if matches!(
-                capture,
+                capture.outcome,
                 LiveHlsCaptureOutcome::FinishVideoOnly | LiveHlsCaptureOutcome::Unrecoverable
             ) {
-                // Persist the video-only decision by removing any stale audio playlist.
+                if destination_parts && has_destination_audio {
+                    cleanup_live_hls_destination_part_if_present(
+                        staging,
+                        destination,
+                        item_id,
+                        audio_dir,
+                        crate::manifest_destination::TrackKind::Audio,
+                        "audio-track.ts",
+                    )
+                    .await?;
+                }
                 remove_regular_file_if_present(&audio_dir.join("local.m3u8"))
                     .await
                     .map_err(ManifestRunError::Failed)?;
@@ -1113,6 +1210,50 @@ async fn prepare_live_hls_finalization(
     if has_audio && !staged_regular_file_exists(&audio_dir.join("local.m3u8")).await {
         has_audio = false;
     }
+    if destination_parts && has_destination_audio && !has_audio {
+        cleanup_live_hls_destination_part_if_present(
+            staging,
+            destination,
+            item_id,
+            audio_dir,
+            crate::manifest_destination::TrackKind::Audio,
+            "audio-track.ts",
+        )
+        .await?;
+    }
+
+    if destination_parts {
+        loop {
+            match hls_live::complete_saved_live_hls_destination_parts(
+                hls_live::SavedLiveHlsDestinationParts {
+                    source_url,
+                    staging,
+                    destination,
+                    item_id,
+                    video_dir,
+                    audio_dir,
+                    has_audio,
+                },
+                abort,
+            )
+            .await?
+            {
+                None => break,
+                Some(crate::video::StopIntent::Pause) => {
+                    return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Paused));
+                }
+                Some(crate::video::StopIntent::Discard) => {
+                    return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Aborted));
+                }
+                Some(crate::video::StopIntent::Finish) => {
+                    let (sender, receiver) = tokio::sync::oneshot::channel();
+                    finish_stop_sender = Some(sender);
+                    *abort = receiver;
+                }
+            }
+        }
+    }
+
     ensure_live_finish_marker(staging, downloaded.load(Ordering::Relaxed))
         .await
         .map_err(ManifestRunError::Failed)?;
@@ -1121,6 +1262,7 @@ async fn prepare_live_hls_finalization(
     Ok(LiveCapturePreparation::Ready {
         has_audio,
         finish_stop_sender,
+        destination_parts,
     })
 }
 
@@ -1249,6 +1391,7 @@ async fn prepare_live_dash_finalization(
     Ok(LiveCapturePreparation::Ready {
         has_audio,
         finish_stop_sender,
+        destination_parts: true,
     })
 }
 
@@ -1281,22 +1424,8 @@ pub(crate) async fn run_manifest_download(
         downloaded,
     } = prepare_manifest_attempt(&job, &tx).await?;
     let mut _finish_stop_sender = None;
-    if finish_requested {
-        // Older live DASH captures stored their completed tracks in XDG staging.
-        // Reopen through the journal so they are migrated into destination parts.
-        if live_dash {
-            dash_live::ensure_live_dash_destination_parts(
-                job.source.representation_key.as_str(),
-                job.source.audio_key.as_deref(),
-                &video_dir,
-                &audio_dir,
-                &job.dest,
-                job.item_id,
-                has_audio,
-            )
-            .await?;
-        }
-    } else if live_hls {
+    let mut live_destination_parts = live_dash;
+    if live_hls {
         let Tracks::Hls { video, audio, .. } = &tracks else {
             return Err(ManifestRunError::Failed(
                 "Live HLS capture requires HLS media tracks".to_string(),
@@ -1306,7 +1435,10 @@ pub(crate) async fn run_manifest_download(
             client: &client,
             source_url: &job.source.url,
             dest_dir: &dest_dir,
+            destination: &job.dest,
+            item_id: job.item_id,
             staging: &staging,
+            finish_only: finish_requested,
             video,
             audio: audio.as_ref(),
             video_dir: &video_dir,
@@ -1323,11 +1455,28 @@ pub(crate) async fn run_manifest_download(
             LiveCapturePreparation::Ready {
                 has_audio: live_has_audio,
                 finish_stop_sender,
+                destination_parts,
             } => {
                 has_audio = live_has_audio;
+                live_destination_parts = destination_parts;
                 _finish_stop_sender = finish_stop_sender;
             }
             LiveCapturePreparation::Stopped(outcome) => return Ok(outcome),
+        }
+    } else if finish_requested {
+        // Older live DASH captures stored their completed tracks in XDG staging.
+        // Reopen through the journal so they are migrated into destination parts.
+        if live_dash {
+            dash_live::ensure_live_dash_destination_parts(
+                job.source.representation_key.as_str(),
+                job.source.audio_key.as_deref(),
+                &video_dir,
+                &audio_dir,
+                &job.dest,
+                job.item_id,
+                has_audio,
+            )
+            .await?;
         }
     } else if live_dash {
         let (video_plan, audio_plan) = match &tracks {
@@ -1363,8 +1512,10 @@ pub(crate) async fn run_manifest_download(
             LiveCapturePreparation::Ready {
                 has_audio: live_has_audio,
                 finish_stop_sender,
+                destination_parts,
             } => {
                 has_audio = live_has_audio;
+                live_destination_parts = destination_parts;
                 _finish_stop_sender = finish_stop_sender;
             }
             LiveCapturePreparation::Stopped(outcome) => return Ok(outcome),
@@ -1388,8 +1539,9 @@ pub(crate) async fn run_manifest_download(
     }
     finalize_manifest_download(ManifestFinalization {
         job: &job,
-        destination_parts: live_dash
+        destination_parts: live_destination_parts
             || (!live_hls
+                && !live_dash
                 && (matches!(&tracks, Tracks::Dash { .. })
                     || matches!(
                         &tracks,

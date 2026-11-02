@@ -29,6 +29,120 @@ fn resource_checkpoint(bytes: &[u8]) -> CommittedResource {
     }
 }
 
+
+#[tokio::test]
+async fn appendable_destination_writer_resumes_after_the_resource_plan_grows() {
+    let root = test_directory();
+    let staging = root.join("staging");
+    let track_directory = staging.join("video");
+    let destination = root.join("destination");
+    tokio::fs::create_dir_all(&track_directory)
+        .await
+        .expect("create track staging");
+    tokio::fs::create_dir_all(&destination)
+        .await
+        .expect("create destination");
+    let output = destination.join("recording.mp4");
+    crate::manifest_destination::ensure_plan(&staging, &output, 77, false, false)
+        .expect("create destination plan");
+    tokio::fs::write(track_directory.join("first.bin"), b"first")
+        .await
+        .expect("write first resource");
+    let first = vec!["first.bin".to_string()];
+    let (_stop_tx, mut abort) = stop_channel();
+
+    let (Some(mut writer), _) = OrderedTrackWriter::open_appendable_destination_part(
+        first,
+        &track_directory,
+        &staging,
+        "video-track.mp4",
+        &output,
+        77,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .await
+    .expect("open initial appendable destination part")
+    else {
+        panic!("a fresh destination part must return an active writer");
+    };
+    assert!(writer.append_next(&mut abort).await.expect("append first"));
+    writer.finish().await.expect("flush first prefix");
+    let part = crate::manifest_destination::part_path(
+        &staging,
+        &output,
+        77,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("resolve initial destination part");
+    crate::manifest_destination::verify_owned_part(
+        &staging,
+        &output,
+        77,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("verify destination part ownership");
+    assert_eq!(
+        crate::manifest_writer::committed_resource_prefix_at(
+            &["first.bin".to_string()],
+            &track_directory,
+            "video-track.mp4",
+            &part,
+        )
+        .await
+        .expect("verify append-only committed prefix"),
+        vec![resource_checkpoint(b"first")]
+    );
+
+    tokio::fs::write(track_directory.join("second.bin"), b"second")
+        .await
+        .expect("write second resource");
+    let expanded = vec!["first.bin".to_string(), "second.bin".to_string()];
+    let (Some(mut writer), committed) = OrderedTrackWriter::open_appendable_destination_part(
+        expanded.clone(),
+        &track_directory,
+        &staging,
+        "video-track.mp4",
+        &output,
+        77,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .await
+    .expect("resume with expanded resource plan")
+    else {
+        panic!("an appendable destination part must remain open");
+    };
+    assert_eq!(committed, 5);
+    assert_eq!(writer.next_resource_index(), 1);
+    assert!(writer.append_next(&mut abort).await.expect("append second"));
+    writer.finish().await.expect("flush expanded prefix");
+
+    let part = crate::manifest_destination::part_path(
+        &staging,
+        &output,
+        77,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("resolve destination part");
+    assert_eq!(
+        tokio::fs::read(&part).await.expect("read destination part"),
+        b"firstsecond"
+    );
+    let checkpoint: WriterCheckpoint = serde_json::from_slice(
+        &tokio::fs::read(track_directory.join("video-track.mp4.checkpoint.json"))
+            .await
+            .expect("read append-only checkpoint"),
+    )
+    .expect("decode append-only checkpoint");
+    assert!(checkpoint.append_only);
+    assert_eq!(
+        checkpoint.plan_fingerprint,
+        plan_fingerprint(&expanded).expect("fingerprint expanded plan")
+    );
+    tokio::fs::remove_dir_all(root)
+        .await
+        .expect("remove test directory");
+}
+
 #[tokio::test]
 async fn incremental_writer_checkpoints_and_resumes_between_resources() {
     let directory = test_directory();
@@ -183,6 +297,7 @@ async fn resumes_from_checkpoint_and_truncates_uncommitted_tail() {
         plan_fingerprint: fingerprint,
         next_resource_index: 1,
         committed_offset: 5,
+        append_only: false,
     };
     tokio::fs::write(directory.join("track.mp4.part"), b"first-uncommitted-tail")
         .await
@@ -245,6 +360,7 @@ async fn rejects_checkpoint_for_a_different_resource_order() {
             .expect("fingerprint"),
         next_resource_index: 1,
         committed_offset: 5,
+        append_only: false,
     };
     tokio::fs::write(
         directory.join("track.mp4.checkpoint.json"),
@@ -279,6 +395,7 @@ async fn rejects_checkpoint_when_committed_offset_disagrees_with_resources() {
         plan_fingerprint: plan_fingerprint(&resources).expect("fingerprint"),
         next_resource_index: 1,
         committed_offset: 4,
+        append_only: false,
     };
     tokio::fs::write(directory.join("track.mp4.part"), b"first")
         .await
@@ -323,6 +440,7 @@ async fn recovers_crash_after_track_rename_before_checkpoint_removal() {
         plan_fingerprint: plan_fingerprint(&resources).expect("fingerprint"),
         next_resource_index: 1,
         committed_offset: 8,
+        append_only: false,
     };
     tokio::fs::write(directory.join("track.mp4"), b"complete")
         .await
@@ -371,6 +489,7 @@ async fn migrates_legacy_checkpoint_before_resuming() {
         plan_fingerprint: plan_fingerprint(&resources).expect("fingerprint"),
         next_resource_index: 1,
         committed_offset: 5,
+        append_only: false,
     };
     tokio::fs::write(directory.join("track.mp4.part"), b"first")
         .await
@@ -452,6 +571,7 @@ async fn rebuilds_a_missing_digest_journal_from_retained_sources() {
         plan_fingerprint: plan_fingerprint(&resources).expect("fingerprint"),
         next_resource_index: 1,
         committed_offset: 5,
+        append_only: false,
     };
     tokio::fs::write(
         directory.join("track.mp4.checkpoint.json"),
@@ -686,6 +806,7 @@ async fn migrates_a_completed_staging_track_to_the_owned_destination_part() {
         plan_fingerprint: plan_fingerprint(&resources).expect("fingerprint"),
         next_resource_index: 1,
         committed_offset: 8,
+        append_only: false,
     };
     tokio::fs::write(
         directory.join("video-track.mp4.checkpoint.json"),
@@ -701,7 +822,7 @@ async fn migrates_a_completed_staging_track_to_the_owned_destination_part() {
     .await
     .expect("write resource journal");
 
-    let (writer, committed) = OrderedTrackWriter::open_destination_part(
+    let (writer, committed) = OrderedTrackWriter::open_appendable_destination_part(
         resources,
         &directory,
         &directory,
@@ -763,6 +884,7 @@ async fn resumes_a_crash_during_staging_to_destination_part_migration() {
         plan_fingerprint: plan_fingerprint(&resources).expect("fingerprint"),
         next_resource_index: 1,
         committed_offset: 8,
+        append_only: false,
     };
     tokio::fs::write(
         directory.join("video-track.mp4.checkpoint.json"),
@@ -789,7 +911,26 @@ async fn resumes_a_crash_during_staging_to_destination_part_migration() {
     interrupted.sync_all().expect("sync interrupted prefix");
     drop(interrupted);
 
-    let (writer, committed) = OrderedTrackWriter::open_destination_part(
+    let part = crate::manifest_destination::part_path(
+        &directory,
+        &destination,
+        44,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("resolve interrupted destination part");
+    assert_eq!(
+        crate::manifest_writer::committed_resource_prefix_at(
+            &resources,
+            &directory,
+            "video-track.mp4",
+            &part,
+        )
+        .await
+        .expect("verify completed staging track during migration"),
+        vec![resource_checkpoint(b"complete")]
+    );
+
+    let (writer, committed) = OrderedTrackWriter::open_appendable_destination_part(
         resources,
         &directory,
         &directory,

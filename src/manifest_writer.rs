@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
-const CHECKPOINT_VERSION: u32 = 2;
+const CHECKPOINT_VERSION: u32 = 3;
+const PREVIOUS_CHECKPOINT_VERSION: u32 = 2;
 const LEGACY_CHECKPOINT_VERSION: u32 = 1;
 const MAX_TRACK_BYTES: u64 = 1 << 40;
 /// Maximum size of one staged DASH resource.
@@ -38,6 +39,8 @@ struct WriterCheckpoint {
     plan_fingerprint: String,
     next_resource_index: usize,
     committed_offset: u64,
+    #[serde(default)]
+    append_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +56,11 @@ struct CheckpointPaths<'a> {
     part: &'a Path,
     target: &'a Path,
     directory: &'a Path,
+}
+
+pub(crate) enum AppendNextOutcome {
+    Committed,
+    Stopped(crate::video::StopIntent),
 }
 
 enum CheckpointState {
@@ -90,6 +98,7 @@ pub(crate) struct OrderedTrackWriter {
     committed_offset: u64,
     checkpoint_policy: CheckpointPolicy,
     destination_part: Option<DestinationPart>,
+    append_only: bool,
 }
 
 struct DestinationPart {
@@ -169,6 +178,7 @@ impl OrderedTrackWriter {
             filename,
             CheckpointPolicy::RemoveAfterPublish,
             None,
+            false,
         ))
         .await
     }
@@ -192,6 +202,7 @@ impl OrderedTrackWriter {
             filename,
             CheckpointPolicy::RetainAfterPublish,
             None,
+            false,
         ))
         .await
     }
@@ -223,6 +234,40 @@ impl OrderedTrackWriter {
                 item_id,
                 track,
             }),
+            false,
+        ))
+        .await
+    }
+
+    /// Open a destination-side part whose resource plan may grow between MPD refreshes.
+    ///
+    /// The checkpoint fingerprint covers only the committed resource prefix; every
+    /// resumed prefix is still checked against the digest journal and owned part.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the destination part, checkpoint, or committed prefix is invalid.
+    pub(crate) async fn open_appendable_destination_part(
+        resources: Vec<String>,
+        directory: &Path,
+        staging: &Path,
+        filename: &str,
+        destination: &Path,
+        item_id: u64,
+        track: crate::manifest_destination::TrackKind,
+    ) -> Result<(Option<Self>, u64), String> {
+        Box::pin(Self::open_with_policy(
+            resources,
+            directory,
+            filename,
+            CheckpointPolicy::RetainAfterPublish,
+            Some(DestinationPart {
+                staging: staging.to_path_buf(),
+                destination: destination.to_path_buf(),
+                item_id,
+                track,
+            }),
+            true,
         ))
         .await
     }
@@ -233,6 +278,7 @@ impl OrderedTrackWriter {
         filename: &str,
         checkpoint_policy: CheckpointPolicy,
         destination_part: Option<DestinationPart>,
+        append_only: bool,
     ) -> Result<(Option<Self>, u64), String> {
         if resources.is_empty() {
             return Err("The DASH recording contains no media resources".to_string());
@@ -291,6 +337,7 @@ impl OrderedTrackWriter {
             &fingerprint,
             &resources,
             destination_part.is_some(),
+            append_only,
         )
         .await?;
 
@@ -464,6 +511,7 @@ impl OrderedTrackWriter {
                 committed_offset,
                 checkpoint_policy,
                 destination_part,
+                append_only,
             }),
             committed_offset,
         ))
@@ -472,6 +520,11 @@ impl OrderedTrackWriter {
     #[must_use]
     pub(crate) fn next_resource_index(&self) -> usize {
         self.next_resource_index
+    }
+
+    #[must_use]
+    pub(crate) fn committed_offset(&self) -> u64 {
+        self.committed_offset
     }
 
     /// Append exactly the next resource in manifest order.
@@ -486,6 +539,16 @@ impl OrderedTrackWriter {
         &mut self,
         abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     ) -> Result<bool, String> {
+        Ok(matches!(
+            self.append_next_outcome(abort).await?,
+            AppendNextOutcome::Committed
+        ))
+    }
+
+    pub(crate) async fn append_next_outcome(
+        &mut self,
+        abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    ) -> Result<AppendNextOutcome, String> {
         let Some(resource_name) = self.resources.get(self.next_resource_index) else {
             return Err("All DASH resources have already been committed".to_string());
         };
@@ -511,13 +574,15 @@ impl OrderedTrackWriter {
         let mut hashing_output = HashingWriter::new(&mut self.output);
         let copied = tokio::select! {
             biased;
-            _ = &mut *abort => {
+            stop = &mut *abort => {
                 drop(hashing_output);
                 self.output.set_len(self.committed_offset).await
                     .map_err(|error| format!("Could not roll back an interrupted DASH write: {error}"))?;
                 self.output.sync_all().await
                     .map_err(|error| format!("Could not sync the interrupted DASH track: {error}"))?;
-                return Ok(false);
+                return Ok(AppendNextOutcome::Stopped(
+                    stop.unwrap_or(crate::video::StopIntent::Discard),
+                ));
             }
             result = tokio::io::copy(&mut input, &mut hashing_output) => {
                 result.map_err(|error| format!("Could not append a DASH segment in order: {error}"))?
@@ -557,9 +622,14 @@ impl OrderedTrackWriter {
             &self.directory,
             &WriterCheckpoint {
                 version: CHECKPOINT_VERSION,
-                plan_fingerprint: self.fingerprint.clone(),
+                plan_fingerprint: if self.append_only {
+                    plan_fingerprint(&self.resources[..next_resource_index])?
+                } else {
+                    self.fingerprint.clone()
+                },
                 next_resource_index,
                 committed_offset: next_offset,
+                append_only: self.append_only,
             },
         )
         .await?;
@@ -569,7 +639,7 @@ impl OrderedTrackWriter {
         if self.checkpoint_policy == CheckpointPolicy::RetainAfterPublish {
             remove_committed_source_file_after_commit(&self.directory.join(resource_name)).await?;
         }
-        Ok(true)
+        Ok(AppendNextOutcome::Committed)
     }
 
     /// Publish the complete ordered track without replacing an existing file.
@@ -647,6 +717,25 @@ pub(crate) async fn committed_resource_prefix(
     directory: &Path,
     filename: &str,
 ) -> Result<Vec<CommittedResource>, String> {
+    committed_resource_prefix_inner(resources, directory, filename, None).await
+}
+
+/// Verify a committed prefix stored in a caller-supplied output part.
+pub(crate) async fn committed_resource_prefix_at(
+    resources: &[String],
+    directory: &Path,
+    filename: &str,
+    part: &Path,
+) -> Result<Vec<CommittedResource>, String> {
+    committed_resource_prefix_inner(resources, directory, filename, Some(part)).await
+}
+
+async fn committed_resource_prefix_inner(
+    resources: &[String],
+    directory: &Path,
+    filename: &str,
+    part_override: Option<&Path>,
+) -> Result<Vec<CommittedResource>, String> {
     if resources.is_empty() {
         return Ok(Vec::new());
     }
@@ -678,10 +767,18 @@ pub(crate) async fn committed_resource_prefix(
     if checkpoint.version == LEGACY_CHECKPOINT_VERSION {
         return Ok(Vec::new());
     }
-    if checkpoint.version != CHECKPOINT_VERSION {
+    if !matches!(checkpoint.version, PREVIOUS_CHECKPOINT_VERSION | CHECKPOINT_VERSION) {
         return Err("The DASH writer checkpoint version is unsupported".to_string());
     }
-    if checkpoint.plan_fingerprint != plan_fingerprint(resources)? {
+    let fingerprint_matches = if checkpoint.append_only {
+        checkpoint.version == CHECKPOINT_VERSION
+            && checkpoint.next_resource_index <= resources.len()
+            && plan_fingerprint(&resources[..checkpoint.next_resource_index])?
+                == checkpoint.plan_fingerprint
+    } else {
+        checkpoint.plan_fingerprint == plan_fingerprint(resources)?
+    };
+    if !fingerprint_matches {
         return Err(
             "The DASH writer checkpoint does not match the selected resource plan".to_string(),
         );
@@ -700,7 +797,10 @@ pub(crate) async fn committed_resource_prefix(
     )
     .await?;
 
-    let part = directory.join(format!("{filename}.part"));
+    let part = part_override.map_or_else(
+        || directory.join(format!("{filename}.part")),
+        Path::to_path_buf,
+    );
     let target = directory.join(filename);
     let part_metadata = match tokio::fs::symlink_metadata(&part).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -723,7 +823,17 @@ pub(crate) async fn committed_resource_prefix(
         }
     };
     if part_metadata.is_some() && target_metadata.is_some() {
-        return Err("Both the interrupted and published DASH track files exist".to_string());
+        if part_override.is_none() || checkpoint.next_resource_index != resources.len() {
+            return Err("Both the interrupted and published DASH track files exist".to_string());
+        }
+        let target_length = target_metadata
+            .as_ref()
+            .map_or(0, |metadata| metadata.len());
+        if target_length != checkpoint.committed_offset {
+            return Err("The completed staging track does not match its checkpoint".to_string());
+        }
+        verify_resource_ranges(&target, &committed).await?;
+        return Ok(committed);
     }
 
     let output_path = if let Some(metadata) = &part_metadata {
@@ -916,6 +1026,7 @@ async fn load_checkpoint(
     fingerprint: &str,
     resources: &[String],
     allow_part_and_target: bool,
+    append_only: bool,
 ) -> Result<CheckpointState, String> {
     let CheckpointPaths {
         checkpoint: checkpoint_path,
@@ -951,10 +1062,18 @@ async fn load_checkpoint(
         .map_err(|error| format!("Could not read {}: {error}", checkpoint_path.display()))?;
     let mut checkpoint: WriterCheckpoint = serde_json::from_slice(&bytes)
         .map_err(|error| format!("The DASH writer checkpoint is invalid: {error}"))?;
+    let fingerprint_matches = if append_only && checkpoint.append_only {
+        checkpoint.version == CHECKPOINT_VERSION
+            && checkpoint.next_resource_index <= resources.len()
+            && plan_fingerprint(&resources[..checkpoint.next_resource_index])?
+                == checkpoint.plan_fingerprint
+    } else {
+        !checkpoint.append_only && checkpoint.plan_fingerprint == fingerprint
+    };
     if !matches!(
         checkpoint.version,
-        LEGACY_CHECKPOINT_VERSION | CHECKPOINT_VERSION
-    ) || checkpoint.plan_fingerprint != fingerprint
+        LEGACY_CHECKPOINT_VERSION | PREVIOUS_CHECKPOINT_VERSION | CHECKPOINT_VERSION
+    ) || !fingerprint_matches
         || checkpoint.next_resource_index > resources.len()
         || checkpoint.committed_offset > MAX_TRACK_BYTES
         || (checkpoint.next_resource_index == 0) != (checkpoint.committed_offset == 0)
@@ -1120,6 +1239,7 @@ async fn load_checkpoint(
     if checkpoint.version == LEGACY_CHECKPOINT_VERSION {
         write_resource_journal(journal_path, directory, &committed).await?;
         checkpoint.version = CHECKPOINT_VERSION;
+        checkpoint.append_only = false;
         persist_checkpoint(checkpoint_path, directory, &checkpoint).await?;
     }
 

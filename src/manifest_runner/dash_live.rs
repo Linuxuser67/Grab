@@ -55,6 +55,16 @@ pub(super) async fn load_dash_live_track(
     current_plan: Option<&DashRepresentationPlan>,
     track_filename: &'static str,
 ) -> Result<(DashLiveTrack, u64), ManifestRunError> {
+    load_dash_live_track_inner(representation_key, directory, current_plan, track_filename, None).await
+}
+
+async fn load_dash_live_track_inner(
+    representation_key: &str,
+    directory: &Path,
+    current_plan: Option<&DashRepresentationPlan>,
+    track_filename: &'static str,
+    destination_part: Option<DashLiveDestination>,
+) -> Result<(DashLiveTrack, u64), ManifestRunError> {
     if current_plan.is_some_and(|plan| plan.representation.live_key != representation_key) {
         return Err(ManifestRunError::Failed(
             "The refreshed DASH representation no longer matches the queued selection".to_string(),
@@ -104,13 +114,51 @@ pub(super) async fn load_dash_live_track(
         .resource_names()
         .map(str::to_string)
         .collect::<Vec<_>>();
-    let committed_resources = crate::manifest_writer::committed_resource_prefix(
-        &resource_names,
-        directory,
-        track_filename,
-    )
-    .await
-    .map_err(ManifestRunError::Failed)?;
+    let committed_resources = if let Some(destination_part) = destination_part.as_ref() {
+        let staging = directory.parent().unwrap_or(directory);
+        let part = crate::manifest_destination::part_path_async(
+            staging.to_path_buf(),
+            destination_part.destination.clone(),
+            destination_part.item_id,
+            destination_part.track,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?;
+        match tokio::fs::symlink_metadata(&part).await {
+            Ok(_) => {
+                crate::manifest_destination::verify_owned_part_async(
+                    staging.to_path_buf(),
+                    destination_part.destination.clone(),
+                    destination_part.item_id,
+                    destination_part.track,
+                )
+                .await
+                .map_err(ManifestRunError::Failed)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ManifestRunError::Failed(format!(
+                    "Could not inspect the live DASH destination part: {error}"
+                )));
+            }
+        }
+        crate::manifest_writer::committed_resource_prefix_at(
+            &resource_names,
+            directory,
+            track_filename,
+            &part,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?
+    } else {
+        crate::manifest_writer::committed_resource_prefix(
+            &resource_names,
+            directory,
+            track_filename,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?
+    };
     let committed_resource_count = committed_resources.len();
     let committed_bytes = committed_resources
         .iter()
@@ -213,9 +261,139 @@ pub(super) async fn load_dash_live_track(
             track_filename,
             committed_resource_count,
             committed_bytes,
+            destination_part,
         },
         retained_bytes,
     ))
+}
+
+
+/// Load a live DASH rendition while binding its output to the owned destination part.
+pub(super) async fn load_dash_live_track_for_destination(
+    representation_key: &str,
+    directory: &Path,
+    current_plan: Option<&DashRepresentationPlan>,
+    track_filename: &'static str,
+    destination: &Path,
+    item_id: u64,
+    track: crate::manifest_destination::TrackKind,
+) -> Result<(DashLiveTrack, u64), ManifestRunError> {
+    load_dash_live_track_inner(
+        representation_key,
+        directory,
+        current_plan,
+        track_filename,
+        Some(DashLiveDestination {
+            destination: destination.to_path_buf(),
+            item_id,
+            track,
+        }),
+    )
+    .await
+}
+
+async fn append_live_dash_destination_part(
+    track: &mut DashLiveTrack,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<Option<crate::video::StopIntent>, ManifestRunError> {
+    let Some(destination_part) = track.destination_part.as_ref() else {
+        return Ok(None);
+    };
+    let resources = track.state.resource_names().map(str::to_string).collect::<Vec<_>>();
+    if resources.is_empty() {
+        return Ok(None);
+    }
+    let staging = track.directory.parent().unwrap_or(&track.directory);
+    let resource_count = resources.len();
+    let (Some(mut writer), _) =
+        crate::manifest_writer::OrderedTrackWriter::open_appendable_destination_part(
+            resources,
+            &track.directory,
+            staging,
+            track.track_filename,
+            &destination_part.destination,
+            destination_part.item_id,
+            destination_part.track,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?
+    else {
+        return Ok(None);
+    };
+    while writer.next_resource_index() < resource_count {
+        match writer
+            .append_next_outcome(abort)
+            .await
+            .map_err(ManifestRunError::Failed)?
+        {
+            crate::manifest_writer::AppendNextOutcome::Committed => {}
+            crate::manifest_writer::AppendNextOutcome::Stopped(intent) => {
+                return Ok(Some(intent));
+            }
+        }
+    }
+    track.committed_resource_count = writer.next_resource_index();
+    track.committed_bytes = writer.committed_offset();
+    writer.finish().await.map_err(ManifestRunError::Failed)?;
+    Ok(None)
+}
+
+
+/// Ensure a previously finished live DASH capture has owned destination-side track parts.
+pub(super) async fn ensure_live_dash_destination_parts(
+    representation_key: &str,
+    audio_key: Option<&str>,
+    video_dir: &Path,
+    audio_dir: &Path,
+    destination: &Path,
+    item_id: u64,
+    include_audio: bool,
+) -> Result<(), ManifestRunError> {
+    let (mut video, _) = load_dash_live_track_for_destination(
+        representation_key,
+        video_dir,
+        None,
+        "video-track.mp4",
+        destination,
+        item_id,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .await?;
+    let (_keep_alive, mut never_abort) = tokio::sync::oneshot::channel();
+    if append_live_dash_destination_part(&mut video, &mut never_abort)
+        .await?
+        .is_some()
+    {
+        return Err(ManifestRunError::Failed(
+            "The completed live DASH video track was unexpectedly interrupted".to_string(),
+        ));
+    }
+
+    if include_audio && dash_live_state_exists(audio_dir).await? {
+        let key = match audio_key {
+            Some(key) => key.to_string(),
+            None => read_dash_live_representation_key(audio_dir).await?,
+        };
+        let (mut audio, _) = load_dash_live_track_for_destination(
+            &key,
+            audio_dir,
+            None,
+            "audio-track.mp4",
+            destination,
+            item_id,
+            crate::manifest_destination::TrackKind::Audio,
+        )
+        .await?;
+        if append_live_dash_destination_part(&mut audio, &mut never_abort)
+            .await?
+            .is_some()
+        {
+            return Err(ManifestRunError::Failed(
+                "The completed live DASH audio track was unexpectedly interrupted".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn validate_dash_live_state(
@@ -436,6 +614,11 @@ pub(super) async fn apply_dash_live_snapshot(
     }
 
     let mut candidate = track.state.clone();
+    let committed_resource_names: std::collections::HashSet<&str> = track
+        .state
+        .resource_names()
+        .take(track.committed_resource_count)
+        .collect();
     let mut resources_to_fetch = Vec::new();
     let mut filenames_to_fetch = std::collections::HashSet::new();
     let initialization = plan
@@ -466,7 +649,10 @@ pub(super) async fn apply_dash_live_snapshot(
             }
             Some(_) => {}
         }
-        if dash_live_resource_needs_fetch(&track.directory, initialization).await?
+        let initialization_is_committed =
+            committed_resource_names.contains(initialization.filename.as_str());
+        if !initialization_is_committed
+            && dash_live_resource_needs_fetch(&track.directory, initialization).await?
             && filenames_to_fetch.insert(initialization.filename.clone())
         {
             resources_to_fetch.push(initialization.clone());
@@ -538,7 +724,10 @@ pub(super) async fn apply_dash_live_snapshot(
             });
         }
 
-        if dash_live_resource_needs_fetch(&track.directory, resource).await?
+        let resource_is_committed =
+            committed_resource_names.contains(resource.filename.as_str());
+        if !resource_is_committed
+            && dash_live_resource_needs_fetch(&track.directory, resource).await?
             && filenames_to_fetch.insert(resource.filename.clone())
         {
             resources_to_fetch.push(resource.clone());
@@ -594,9 +783,13 @@ pub(super) async fn apply_dash_live_snapshot(
             track_filename: track.track_filename,
             committed_resource_count: track.committed_resource_count,
             committed_bytes: track.committed_bytes,
+            destination_part: track.destination_part.clone(),
         };
         write_dash_live_state(&next_track).await?;
         track.state = next_track.state;
+    }
+    if let Some(intent) = append_live_dash_destination_part(track, abort).await? {
+        return Ok(DashLiveUpdateOutcome::Stopped(intent));
     }
     downloaded.store(
         retained_bytes.saturating_add(other_rendition_bytes),
@@ -613,6 +806,8 @@ pub(super) async fn run_live_dash_tracks(
     client: &reqwest::Client,
     source_url: &str,
     destination_dir: &Path,
+    destination: &Path,
+    item_id: u64,
     representation_key: &str,
     audio_key: Option<&str>,
     video_plan: Option<&DashRepresentationPlan>,
@@ -625,8 +820,16 @@ pub(super) async fn run_live_dash_tracks(
     guarded_child_hosts: &mut std::collections::HashSet<String>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<DashLiveCapture, ManifestRunError> {
-    let (mut video, video_bytes) =
-        load_dash_live_track(representation_key, video_dir, video_plan, "video-track.mp4").await?;
+    let (mut video, video_bytes) = load_dash_live_track_for_destination(
+        representation_key,
+        video_dir,
+        video_plan,
+        "video-track.mp4",
+        destination,
+        item_id,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .await?;
     let staging_dir = video_dir.parent().unwrap_or(video_dir);
     let mut audio_key = audio_key
         .map(str::to_string)
@@ -637,7 +840,15 @@ pub(super) async fn run_live_dash_tracks(
                 .clone()
                 .unwrap_or_else(|| plan.representation.live_key.clone());
             audio_key = Some(key.clone());
-            Some(load_dash_live_track(&key, audio_dir, Some(plan), "audio-track.mp4").await?)
+            Some(load_dash_live_track_for_destination(
+                &key,
+                audio_dir,
+                Some(plan),
+                "audio-track.mp4",
+                destination,
+                item_id,
+                crate::manifest_destination::TrackKind::Audio,
+            ).await?)
         }
         None if dash_live_state_exists(audio_dir).await? => {
             let key = match audio_key.as_deref() {
@@ -645,7 +856,15 @@ pub(super) async fn run_live_dash_tracks(
                 None => read_dash_live_representation_key(audio_dir).await?,
             };
             audio_key = Some(key.clone());
-            Some(load_dash_live_track(&key, audio_dir, None, "audio-track.mp4").await?)
+            Some(load_dash_live_track_for_destination(
+                &key,
+                audio_dir,
+                None,
+                "audio-track.mp4",
+                destination,
+                item_id,
+                crate::manifest_destination::TrackKind::Audio,
+            ).await?)
         }
         None => None,
     };
@@ -698,6 +917,23 @@ pub(super) async fn run_live_dash_tracks(
                 audio_resources,
             });
         }};
+    }
+
+    if let Some(intent) = append_live_dash_destination_part(&mut video, abort).await? {
+        finish_capture!(match intent {
+            crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
+            crate::video::StopIntent::Finish => DashLiveCaptureOutcome::Finish,
+            crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
+        });
+    }
+    if let Some((track, _)) = audio.as_mut()
+        && let Some(intent) = append_live_dash_destination_part(track, abort).await?
+    {
+        finish_capture!(match intent {
+            crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
+            crate::video::StopIntent::Finish => DashLiveCaptureOutcome::Finish,
+            crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
+        });
     }
 
     let audio_bytes = audio.as_ref().map_or(0, |(track, bytes)| {
@@ -1003,7 +1239,15 @@ pub(super) async fn run_live_dash_tracks(
                     .clone()
                     .unwrap_or_else(|| plan.representation.live_key.clone());
                 let (mut track, _) =
-                    load_dash_live_track(&key, audio_dir, Some(plan), "audio-track.mp4").await?;
+                    load_dash_live_track_for_destination(
+                        &key,
+                        audio_dir,
+                        Some(plan),
+                        "audio-track.mp4",
+                        destination,
+                        item_id,
+                        crate::manifest_destination::TrackKind::Audio,
+                    ).await?;
                 let video_bytes = dash_live_track_bytes(
                     &video.state,
                     &video.directory,

@@ -399,6 +399,13 @@ impl DashLiveState {
     }
 }
 
+#[derive(Clone, Debug)]
+struct DashLiveDestination {
+    destination: PathBuf,
+    item_id: u64,
+    track: crate::manifest_destination::TrackKind,
+}
+
 #[derive(Debug)]
 struct DashLiveTrack {
     directory: PathBuf,
@@ -407,6 +414,7 @@ struct DashLiveTrack {
     // Verified once on load; a non-empty prefix is immutable across refreshes.
     committed_resource_count: usize,
     committed_bytes: u64,
+    destination_part: Option<DashLiveDestination>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1120,6 +1128,8 @@ struct ManifestLiveDashFinalization<'a> {
     client: &'a reqwest::Client,
     source_url: &'a str,
     dest_dir: &'a Path,
+    destination: &'a Path,
+    item_id: u64,
     representation_key: &'a str,
     audio_key: Option<&'a str>,
     video_plan: Option<&'a DashRepresentationPlan>,
@@ -1142,6 +1152,8 @@ async fn prepare_live_dash_finalization(
         client,
         source_url,
         dest_dir,
+        destination,
+        item_id,
         representation_key,
         audio_key,
         video_plan,
@@ -1160,6 +1172,8 @@ async fn prepare_live_dash_finalization(
         client,
         source_url,
         dest_dir,
+        destination,
+        item_id,
         representation_key,
         audio_key,
         video_plan,
@@ -1215,27 +1229,21 @@ async fn prepare_live_dash_finalization(
         })
     };
 
+    dash_live::ensure_live_dash_destination_parts(
+        representation_key,
+        audio_key,
+        video_dir,
+        audio_dir,
+        destination,
+        item_id,
+        has_audio,
+    )
+    .await?;
+
     ensure_live_finish_marker(staging, downloaded.load(Ordering::Relaxed))
         .await
         .map_err(ManifestRunError::Failed)?;
     tx.send(EngineMsg::LiveFinalizing).ok();
-
-    if !concat_dash_resource_names(
-        &capture.video_resources,
-        video_dir,
-        "video-track.mp4",
-        abort,
-    )
-    .await?
-    {
-        return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Aborted));
-    }
-    if has_audio
-        && let Some(audio_resources) = capture.audio_resources.as_ref()
-        && !concat_dash_resource_names(audio_resources, audio_dir, "audio-track.mp4", abort).await?
-    {
-        return Ok(LiveCapturePreparation::Stopped(ManifestOutcome::Aborted));
-    }
 
     Ok(LiveCapturePreparation::Ready {
         has_audio,
@@ -1273,8 +1281,20 @@ pub(crate) async fn run_manifest_download(
     } = prepare_manifest_attempt(&job, &tx).await?;
     let mut _finish_stop_sender = None;
     if finish_requested {
-        // The durable finish marker means the local playlists / concatenated
-        // DASH tracks are ready; retry finalization without polling the source.
+        // Older live DASH captures stored their completed tracks in XDG staging.
+        // Reopen through the journal so they are migrated into destination parts.
+        if live_dash {
+            dash_live::ensure_live_dash_destination_parts(
+                job.source.representation_key.as_str(),
+                job.source.audio_key.as_deref(),
+                &video_dir,
+                &audio_dir,
+                &job.dest,
+                job.item_id,
+                has_audio,
+            )
+            .await?;
+        }
     } else if live_hls {
         let Tracks::Hls { video, audio, .. } = &tracks else {
             return Err(ManifestRunError::Failed(
@@ -1322,6 +1342,8 @@ pub(crate) async fn run_manifest_download(
             client: &client,
             source_url: &job.source.url,
             dest_dir: &dest_dir,
+            destination: &job.dest,
+            item_id: job.item_id,
             representation_key: job.source.representation_key.as_str(),
             audio_key: job.source.audio_key.as_deref(),
             video_plan,
@@ -1365,8 +1387,8 @@ pub(crate) async fn run_manifest_download(
     }
     finalize_manifest_download(ManifestFinalization {
         job: &job,
-        destination_parts: !live_dash
-            && !live_hls
+        destination_parts: live_dash
+            || (!live_hls
             && (matches!(&tracks, Tracks::Dash { .. })
                 || matches!(
                     &tracks,
@@ -1375,7 +1397,7 @@ pub(crate) async fn run_manifest_download(
                             && audio
                                 .as_ref()
                                 .is_none_or(HlsPlan::is_plain_mpegts_candidate)
-                )),
+                ))),
         gate,
         abort,
         tx: &tx,
@@ -1460,7 +1482,16 @@ async fn finalize_manifest_download(
         )
         .await
         .map_err(ManifestRunError::Failed)?,
-        Tracks::Dash { .. } | Tracks::DashLiveOffline { .. } => video_dir.join("video-track.mp4"),
+        Tracks::Dash { .. } => video_dir.join("video-track.mp4"),
+        Tracks::DashLiveOffline { .. } if destination_parts => crate::manifest_destination::part_path_async(
+            staging.to_path_buf(),
+            job.dest.clone(),
+            job.item_id,
+            crate::manifest_destination::TrackKind::Video,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?,
+        Tracks::DashLiveOffline { .. } => video_dir.join("video-track.mp4"),
     };
     let audio_input = if has_audio {
         Some(if destination_parts {
@@ -2726,6 +2757,7 @@ async fn concat_dash_track(
     crate::manifest_writer::write_ordered_track(&resources, directory, filename, abort).await
 }
 
+#[cfg(test)]
 async fn concat_dash_resource_names(
     resources: &[String],
     directory: &Path,

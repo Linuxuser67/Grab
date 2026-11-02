@@ -728,7 +728,7 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
     }
     let video_key_is_valid = match source.kind {
         crate::media_types::ManifestKind::Hls => {
-            (source.representation_key == "hls-media"
+            (source.representation_key.as_str() == "hls-media"
                 && source.audio_key.is_none()
                 && source.subtitle_key.is_none())
                 || has_hex_fingerprint(&source.representation_key, "hls-variant-", 32)
@@ -1167,19 +1167,19 @@ second.m3u8
     fn preferred_choice_index_matches_configured_height_and_best_uses_highest() {
         let choices = [
             ManifestChoice {
-                key: "720".to_string(),
+                key: "720".into(),"
                 label: "720p".to_string(),
                 height: Some(720),
                 bandwidth: Some(1_000_000),
             },
             ManifestChoice {
-                key: "1080".to_string(),
+                key: "1080".into(),"
                 label: "1080p".to_string(),
                 height: Some(1080),
                 bandwidth: Some(2_500_000),
             },
             ManifestChoice {
-                key: "1440".to_string(),
+                key: "1440".into(),"
                 label: "1440p".to_string(),
                 height: Some(1440),
                 bandwidth: Some(4_000_000),
@@ -1213,8 +1213,12 @@ video/es.m3u8
             manifest: NativeManifest::HlsMaster(master),
         };
 
-        let english_video_key = video_keys[0].as_deref().expect("stable English video key");
-        let spanish_video_key = video_keys[1].as_deref().expect("stable Spanish video key");
+        let english_video_key = crate::media_types::ManifestRepresentationKey::from(
+            video_keys[0].as_deref().expect("stable English video key"),
+        );
+        let spanish_video_key = crate::media_types::ManifestRepresentationKey::from(
+            video_keys[1].as_deref().expect("stable Spanish video key"),
+        );
         let english_choices = lookup.audio_choices(english_video_key);
         assert_eq!(english_choices.len(), 2);
         assert!(english_choices[0].is_default);
@@ -1319,12 +1323,15 @@ video/es.m3u8
             body,
         )
         .expect("valid static DASH presentation");
-        let video_key = dash.video_representations[0].key.clone();
-        let main_audio_key = dash
-            .default_audio()
-            .expect("DASH main audio representation")
-            .key
-            .clone();
+        let video_key = crate::media_types::ManifestRepresentationKey::from(
+            dash.video_representations[0].key.clone(),
+        );
+        let main_audio_key = crate::media_types::ManifestAudioKey::from(
+            dash.default_audio()
+                .expect("DASH main audio representation")
+                .key
+                .clone(),
+        );
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/manifest.mpd".to_string(),
             manifest: NativeManifest::Dash(dash),
@@ -1365,8 +1372,8 @@ video/es.m3u8
         let mut source = crate::media_types::ManifestSource {
             url: "https://cdn.example.test/master.m3u8".to_string(),
             kind: crate::media_types::ManifestKind::Hls,
-            representation_key: "hls-variant-0123456789abcdef0123456789abcdef".to_string(),
-            audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".to_string()),
+            representation_key: "hls-variant-0123456789abcdef0123456789abcdef".into(),
+            audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".into()),
             subtitle_key: None,
             subtitle_language: None,
         };
@@ -1377,23 +1384,23 @@ video/es.m3u8
             "extensionless endpoint kind is carried by the persisted source"
         );
         source.url = "https://cdn.example.test/master.m3u8".to_string();
-        source.audio_key = Some("not-a-stable-audio-key".to_string());
+        source.audio_key = Some("not-a-stable-audio-key".into());
         assert!(!valid_source(&source));
         source.audio_key = None;
-        source.subtitle_key = Some("hls-audio-0123456789abcdef0123456789abcdef".to_string());
+        source.subtitle_key = Some("hls-audio-0123456789abcdef0123456789abcdef".into());
         assert!(!valid_source(&source));
-        source.subtitle_key = Some("hls-subtitle-0123456789abcdef0123456789abcdef".to_string());
+        source.subtitle_key = Some("hls-subtitle-0123456789abcdef0123456789abcdef".into());
         assert!(valid_source(&source));
         source.subtitle_key = None;
-        source.representation_key = format!("hls-variant-{}", "0".repeat(64));
+        source.representation_key = format!("hls-variant-{}", "0".repeat(64)).into();
         assert!(
             valid_source(&source),
             "legacy queue keys remain restorable so the runner can fall back to yt-dlp"
         );
-        source.representation_key = "hls-media".to_string();
+        source.representation_key = "hls-media".into();
         source.audio_key = None;
         assert!(valid_source(&source));
-        source.subtitle_key = Some("hls-subtitle-0123456789abcdef0123456789abcdef".to_string());
+        source.subtitle_key = Some("hls-subtitle-0123456789abcdef0123456789abcdef".into());
         assert!(!valid_source(&source));
     }
 
@@ -1550,8 +1557,12 @@ video/720.m3u8
         assert!(
             lookup
                 .selected_source(
-                    "hls-variant-00000000000000000000000000000000",
-                    Some(&current_audio_key),
+                    &crate::media_types::ManifestRepresentationKey::from(
+                        "hls-variant-00000000000000000000000000000000",
+                    ),
+                    Some(&crate::media_types::ManifestAudioKey::from(
+                        current_audio_key.as_str(),
+                    )),
                     None,
                 )
                 .is_none()
@@ -1559,8 +1570,10 @@ video/720.m3u8
         assert!(
             lookup
                 .selected_source(
-                    &current_video_key,
-                    Some("hls-audio-00000000000000000000000000000000"),
+                    &crate::media_types::ManifestRepresentationKey::from(current_video_key.as_str()),
+                    Some(&crate::media_types::ManifestAudioKey::from(
+                        "hls-audio-00000000000000000000000000000000",
+                    )),
                     None,
                 )
                 .is_none()

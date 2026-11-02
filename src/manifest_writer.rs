@@ -240,6 +240,20 @@ impl OrderedTrackWriter {
         };
         let checkpoint_path = directory.join(format!("{filename}.checkpoint.json"));
         let journal_path = directory.join(format!("{filename}.resources"));
+        if let Some(destination_part) = destination_part.as_ref() {
+            match tokio::fs::symlink_metadata(&part).await {
+                Ok(_) => {
+                    drop(crate::manifest_destination::open_owned_part(
+                        directory,
+                        &destination_part.destination,
+                        destination_part.item_id,
+                        destination_part.track,
+                    )?);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("Could not inspect destination DASH part: {error}")),
+            }
+        }
         let checkpoint_state = load_checkpoint(
             &checkpoint_path,
             &journal_path,
@@ -248,6 +262,7 @@ impl OrderedTrackWriter {
             directory,
             &fingerprint,
             &resources,
+            destination_part.is_some(),
         )
         .await?;
 
@@ -629,7 +644,7 @@ pub(crate) async fn committed_resource_prefix(
             return Err(format!("Could not inspect {}: {error}", target.display()));
         }
     };
-    if part_metadata.is_some() && target_metadata.is_some() {
+    if part_metadata.is_some() && target_metadata.is_some() && !allow_part_and_target {
         return Err("Both the interrupted and published DASH track files exist".to_string());
     }
 
@@ -815,6 +830,7 @@ async fn load_checkpoint(
     directory: &Path,
     fingerprint: &str,
     resources: &[String],
+    allow_part_and_target: bool,
 ) -> Result<CheckpointState, String> {
     let checkpoint_metadata = match tokio::fs::symlink_metadata(checkpoint_path).await {
         Ok(metadata) => {
@@ -934,6 +950,21 @@ async fn load_checkpoint(
         )
         .await?
     };
+
+    if part_metadata.is_some() && target_metadata.is_some() {
+        if checkpoint.next_resource_index != resources.len() {
+            return Err("A destination DASH part and a staging track both exist for an incomplete checkpoint".to_string());
+        }
+        let part_length = part_metadata.as_ref().map_or(0, |metadata| metadata.len());
+        let target_length = target_metadata.as_ref().map_or(0, |metadata| metadata.len());
+        if part_length < checkpoint.committed_offset || target_length != checkpoint.committed_offset {
+            return Err("The duplicate DASH tracks do not match their complete checkpoint".to_string());
+        }
+        verify_resource_ranges(part, &committed).await?;
+        verify_resource_ranges(target, &committed).await?;
+        remove_regular_file_if_present(target).await?;
+        sync_directory(directory).await?;
+    }
 
     let output_path = if part_metadata.is_some() {
         Some(part)

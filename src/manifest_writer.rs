@@ -8,7 +8,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWrite as _, AsyncWriteExt as _};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
 const CHECKPOINT_VERSION: u32 = 2;
 const LEGACY_CHECKPOINT_VERSION: u32 = 1;
@@ -341,12 +341,7 @@ impl OrderedTrackWriter {
             length: copied,
             sha256,
         };
-        append_resource_record(
-            &self.journal_path,
-            &self.directory,
-            self.next_resource_index,
-            &resource,
-        )
+        append_resource_record(&self.journal_path, self.next_resource_index, &resource)
         .await?;
 
         let next_resource_index = self
@@ -550,7 +545,7 @@ pub(crate) async fn committed_resources(
     let target = directory.join(filename);
     match tokio::fs::symlink_metadata(&target).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err("The published DASH track is not a regular file".to_string());
+            Err("The published DASH track is not a regular file".to_string())
         }
         Ok(_) => Ok(Some(committed)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),

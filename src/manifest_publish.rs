@@ -33,6 +33,79 @@ impl Drop for DiscardOnDrop {
     }
 }
 
+/// A filesystem rollback that must finish before discard cleanup inspects delivery.
+struct RollbackJob {
+    path: PathBuf,
+    restore_to: Option<PathBuf>,
+}
+
+impl RollbackJob {
+    fn run(self, gate: &crate::attempt_gate::AttemptGate) {
+        let rollback = match self.restore_to.as_deref() {
+            Some(source) => crate::file_names::rename_noreplace_same_device(&self.path, source),
+            None => std::fs::remove_file(&self.path),
+        };
+        if let Err(error) = rollback
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %self.path.display(),
+                error = %error,
+                "could not roll back an uncommitted manifest destination"
+            );
+            // The discard finalizer removes a destination whose rollback failed.
+            gate.mark_delivered();
+            return;
+        }
+
+        if let Some(source) = self.restore_to.as_deref() {
+            for path in [source, self.path.as_path()] {
+                if let Some(parent) = path.parent()
+                    && let Err(error) = std::fs::File::open(parent).and_then(|dir| dir.sync_all())
+                {
+                    tracing::warn!(
+                        path = %parent.display(),
+                        error = %error,
+                        "could not sync a rolled-back manifest directory"
+                    );
+                }
+            }
+        } else if let Some(parent) = self.path.parent()
+            && let Err(error) = std::fs::File::open(parent).and_then(|dir| dir.sync_all())
+        {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %error,
+                "could not sync a rolled-back manifest directory"
+            );
+        }
+    }
+}
+
+/// Completes the attempt's rollback registration even when the worker unwinds.
+struct RollbackCompletion(Arc<crate::attempt_gate::AttemptGate>);
+
+impl Drop for RollbackCompletion {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.mark_delivered();
+        }
+        self.0.finish_rollback();
+    }
+}
+
+fn spawn_rollback(
+    runtime: &tokio::runtime::Handle,
+    job: RollbackJob,
+    gate: Arc<crate::attempt_gate::AttemptGate>,
+) -> tokio::task::JoinHandle<()> {
+    gate.begin_rollback();
+    runtime.spawn_blocking(move || {
+        let _completion = RollbackCompletion(Arc::clone(&gate));
+        job.run(&gate);
+    })
+}
+
 /// Removes a destination created by this attempt unless its gate claims delivery.
 struct PendingDestination {
     path: PathBuf,
@@ -63,49 +136,50 @@ impl PendingDestination {
     fn disarm(&mut self) {
         self.armed = false;
     }
+
+    fn take_rollback_job(&mut self) -> Option<RollbackJob> {
+        if !self.armed {
+            return None;
+        }
+        self.armed = false;
+        Some(RollbackJob {
+            path: std::mem::take(&mut self.path),
+            restore_to: self.restore_to.take(),
+        })
+    }
+
+    /// Roll back on Tokio's blocking pool and wait for completion on normal exits.
+    async fn rollback(mut self) {
+        let Some(job) = self.take_rollback_job() else {
+            return;
+        };
+        let gate = Arc::clone(&self.gate);
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                if let Err(error) = spawn_rollback(&runtime, job, Arc::clone(&gate)).await {
+                    gate.mark_delivered();
+                    tracing::warn!(
+                        error = %error,
+                        "manifest destination rollback worker failed"
+                    );
+                }
+            }
+            Err(_) => job.run(&gate),
+        }
+    }
 }
 
 impl Drop for PendingDestination {
     fn drop(&mut self) {
-        if !self.armed {
+        let Some(job) = self.take_rollback_job() else {
             return;
-        }
-        let rollback = match self.restore_to.as_deref() {
-            Some(source) => crate::file_names::rename_noreplace_same_device(&self.path, source),
-            None => std::fs::remove_file(&self.path),
         };
-        if let Err(error) = rollback
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                path = %self.path.display(),
-                error = %error,
-                "could not roll back an uncommitted manifest destination"
-            );
-            // The discard finalizer checks this after joining the async owner.
-            self.gate.mark_delivered();
-            return;
-        }
-        if let Some(source) = self.restore_to.as_deref() {
-            for path in [source, self.path.as_path()] {
-                if let Some(parent) = path.parent()
-                    && let Err(error) = std::fs::File::open(parent).and_then(|dir| dir.sync_all())
-                {
-                    tracing::warn!(
-                        path = %parent.display(),
-                        error = %error,
-                        "could not sync a rolled-back manifest directory"
-                    );
-                }
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                // The finalizer waits for this registered job after joining the owner.
+                drop(spawn_rollback(&runtime, job, Arc::clone(&self.gate)));
             }
-        } else if let Some(parent) = self.path.parent()
-            && let Err(error) = std::fs::File::open(parent).and_then(|dir| dir.sync_all())
-        {
-            tracing::warn!(
-                path = %parent.display(),
-                error = %error,
-                "could not sync a rolled-back manifest directory"
-            );
+            Err(_) => job.run(&self.gate),
         }
     }
 }
@@ -191,8 +265,12 @@ async fn persist_prepared_copy(
     drop(published_file);
 
     pending.arm();
-    sync_parent_directory(destination).await?;
+    if let Err(error) = sync_parent_directory(destination).await {
+        pending.rollback().await;
+        return Err(error);
+    }
     if !gate.try_commit() {
+        pending.rollback().await;
         return Ok(ManifestPublishOutcome::Aborted);
     }
 
@@ -204,14 +282,21 @@ async fn persist_prepared_copy(
 /// Commit a same-filesystem rename or link after installing a rollback guard.
 async fn commit_renamed_destination(
     gate: &Arc<crate::attempt_gate::AttemptGate>,
-    pending: &mut PendingDestination,
+    mut pending: PendingDestination,
     source: &Path,
     destination: &Path,
 ) -> std::io::Result<ManifestPublishOutcome> {
     pending.arm();
-    sync_parent_directory(destination).await?;
-    sync_parent_directory(source).await?;
+    if let Err(error) = sync_parent_directory(destination).await {
+        pending.rollback().await;
+        return Err(error);
+    }
+    if let Err(error) = sync_parent_directory(source).await {
+        pending.rollback().await;
+        return Err(error);
+    }
     if !gate.try_commit() {
+        pending.rollback().await;
         return Ok(ManifestPublishOutcome::Aborted);
     }
 
@@ -232,8 +317,8 @@ pub(crate) async fn publish(
 
     match crate::file_names::rename_noreplace_same_device(source, destination) {
         Ok(()) => {
-            let mut pending = PendingDestination::new(destination, Arc::clone(gate), Some(source));
-            return commit_renamed_destination(gate, &mut pending, source, destination).await;
+            let pending = PendingDestination::new(destination, Arc::clone(gate), Some(source));
+            return commit_renamed_destination(gate, pending, source, destination).await;
         }
         Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {}
         Err(error) => return Err(error),
@@ -431,4 +516,60 @@ mod tests {
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
         assert!(source.exists(), "the staged source must remain intact");
     }
+
+    #[tokio::test]
+    async fn dropping_pending_destination_restores_renamed_source_before_finalization() {
+        let directory = tempfile::tempdir().expect("create publication root");
+        let source = directory.path().join("source.part");
+        let destination = directory.path().join("final.mp4");
+        std::fs::write(&source, b"staged output").expect("write staged output");
+        crate::file_names::rename_noreplace_same_device(&source, &destination)
+            .expect("move staged output into pending destination");
+        let gate = crate::attempt_gate::AttemptGate::new();
+        let mut pending = PendingDestination::new(&destination, Arc::clone(&gate), Some(&source));
+        pending.arm();
+
+        drop(pending);
+        gate.wait_for_rollbacks().await;
+
+        assert!(source.exists(), "rollback restores the staging source");
+        assert!(!destination.exists(), "rollback removes the published name");
+        assert!(!gate.was_delivered(), "successful rollback is not a delivery");
+    }
+
+    #[tokio::test]
+    async fn dropping_pending_copy_destination_removes_it_before_finalization() {
+        let directory = tempfile::tempdir().expect("create publication root");
+        let destination = directory.path().join("final.mp4");
+        std::fs::write(&destination, b"published orphan").expect("write destination");
+        let gate = crate::attempt_gate::AttemptGate::new();
+        let mut pending = PendingDestination::new(&destination, Arc::clone(&gate), None);
+        pending.arm();
+
+        drop(pending);
+        gate.wait_for_rollbacks().await;
+
+        assert!(!destination.exists(), "rollback removes the copied destination");
+        assert!(!gate.was_delivered(), "successful rollback is not a delivery");
+    }
+
+    #[tokio::test]
+    async fn failed_pending_destination_rollback_marks_the_orphan_delivered() {
+        let directory = tempfile::tempdir().expect("create publication root");
+        let source = directory.path().join("source.part");
+        let destination = directory.path().join("final.mp4");
+        std::fs::write(&source, b"existing source").expect("write source");
+        std::fs::write(&destination, b"published orphan").expect("write destination");
+        let gate = crate::attempt_gate::AttemptGate::new();
+        let mut pending = PendingDestination::new(&destination, Arc::clone(&gate), Some(&source));
+        pending.arm();
+
+        drop(pending);
+        gate.wait_for_rollbacks().await;
+
+        assert!(gate.was_delivered(), "failed rollback must be visible to the finalizer");
+        assert!(destination.exists(), "a no-clobber rollback preserves the existing source");
+        assert_eq!(std::fs::read(&source).expect("read source"), b"existing source");
+    }
+
 }

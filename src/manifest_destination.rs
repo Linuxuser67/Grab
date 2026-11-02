@@ -381,6 +381,28 @@ pub(crate) fn remove_owned_part(
                     "The manifest part was replaced; existing data was preserved".to_string(),
                 );
             }
+            let opened = open_part_no_follow(&path)?;
+            let opened_identity = file_identity(&opened)?;
+            if opened_identity.device != owner.device || opened_identity.inode != owner.inode {
+                return Err(
+                    "The manifest part changed during cleanup; existing data was preserved"
+                        .to_string(),
+                );
+            }
+            drop(opened);
+            let final_metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("Could not recheck owned manifest part: {error}"))?;
+            let final_identity = metadata_identity(&final_metadata)?;
+            if final_metadata.file_type().is_symlink()
+                || !final_metadata.is_file()
+                || final_identity.device != owner.device
+                || final_identity.inode != owner.inode
+            {
+                return Err(
+                    "The manifest part changed before cleanup; existing data was preserved"
+                        .to_string(),
+                );
+            }
             fs::remove_file(&path).map_err(|error| {
                 format!(
                     "Could not remove owned manifest part {}: {error}",

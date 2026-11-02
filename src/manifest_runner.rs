@@ -4082,43 +4082,20 @@ async fn concat_dash_resource_names(
     filename: &str,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, String> {
-    if resources.is_empty() {
-        return Err("The DASH recording contains no media resources".to_string());
-    }
-    let target = directory.join(filename);
-    let part = directory.join(format!("{filename}.part"));
-    remove_regular_file_if_present(&target).await?;
-    remove_regular_file_if_present(&part).await?;
-    let mut output = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&part)
-        .await
-        .map_err(|error| format!("Could not create a DASH track file: {error}"))?;
-    for filename in resources {
-        let input_path = directory.join(filename);
-        let mut input = tokio::fs::File::open(&input_path)
-            .await
-            .map_err(|error| format!("Could not open a DASH segment: {error}"))?;
-        tokio::select! {
-            biased;
-            _ = &mut *abort => return Ok(false),
-            result = tokio::io::copy(&mut input, &mut output) => {
-                result.map_err(|error| format!("Could not assemble a DASH track: {error}"))?;
-            }
+    let (Some(mut writer), _) =
+        crate::manifest_writer::OrderedTrackWriter::open(resources.to_vec(), directory, filename)
+            .await?
+    else {
+        return Ok(true);
+    };
+
+    while writer.next_resource_index() < resources.len() {
+        if !writer.append_next(abort).await? {
+            return Ok(false);
         }
     }
-    tokio::select! {
-        biased;
-        _ = &mut *abort => return Ok(false),
-        result = output.sync_all() => {
-            result.map_err(|error| format!("Could not flush a DASH track: {error}"))?;
-        }
-    }
-    drop(output);
-    crate::file_names::rename_noreplace(&part, &target)
-        .map(|()| true)
-        .map_err(|error| format!("Could not publish a DASH track: {error}"))
+    writer.finish().await?;
+    Ok(true)
 }
 
 async fn remove_regular_file_if_present(path: &Path) -> Result<(), String> {
@@ -5276,6 +5253,61 @@ mod tests {
             "grab-dash-live-{label}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    #[tokio::test]
+    async fn dynamic_dash_finalization_resumes_from_ordered_writer_checkpoint() {
+        let directory = dynamic_dash_test_directory("finalize-resume");
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .expect("create dynamic DASH finalization directory");
+        let resources = vec![
+            "dash-live-init-0123456789abcdef0123456789abcdef.bin".to_string(),
+            "dash-live-segment-0123456789abcdef0123456789abcdef.bin".to_string(),
+        ];
+        tokio::fs::write(directory.join(&resources[0]), b"init")
+            .await
+            .expect("write initialization resource");
+        tokio::fs::write(directory.join(&resources[1]), b"segment")
+            .await
+            .expect("write media resource");
+
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+        let (Some(mut writer), committed) =
+            crate::manifest_writer::OrderedTrackWriter::open(
+                resources.clone(),
+                &directory,
+                "video-track.mp4",
+            )
+            .await
+            .expect("open live DASH ordered writer")
+        else {
+            panic!("a fresh live DASH track must return an active writer");
+        };
+        assert_eq!(committed, 0);
+        assert!(writer.append_next(&mut abort).await.expect("commit initialization"));
+        drop(writer);
+
+        assert!(
+            concat_dash_resource_names(
+                &resources,
+                &directory,
+                "video-track.mp4",
+                &mut abort,
+            )
+            .await
+            .expect("resume live DASH finalization")
+        );
+        assert_eq!(
+            tokio::fs::read(directory.join("video-track.mp4"))
+                .await
+                .expect("read finalized live DASH track"),
+            b"initsegment"
+        );
+        assert!(!directory.join("video-track.mp4.checkpoint.json").exists());
+        tokio::fs::remove_dir_all(directory)
+            .await
+            .expect("remove dynamic DASH finalization directory");
     }
 
     #[test]

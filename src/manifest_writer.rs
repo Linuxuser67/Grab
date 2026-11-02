@@ -20,9 +20,9 @@ const MAX_CHECKPOINT_BYTES: u64 = 1024 * 1024;
 #[path = "manifest_writer_journal.rs"]
 mod journal;
 
-use journal::{append_resource_record, load_resource_records, write_resource_journal};
 #[cfg(test)]
 use journal::read_resource_journal;
+use journal::{append_resource_record, load_resource_records, write_resource_journal};
 
 /// Length and SHA-256 digest of one resource committed to an ordered track.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -226,12 +226,7 @@ impl OrderedTrackWriter {
             } => (next_resource_index, committed_offset, resources),
         };
         if checkpoint_policy == CheckpointPolicy::RetainAfterPublish {
-            remove_committed_source_files(
-                &resources,
-                directory,
-                &committed_resources,
-            )
-            .await?;
+            remove_committed_source_files(&resources, directory, &committed_resources).await?;
         }
 
         let mut output = tokio::fs::OpenOptions::new()
@@ -328,7 +323,9 @@ impl OrderedTrackWriter {
             self.output
                 .set_len(self.committed_offset)
                 .await
-                .map_err(|error| format!("Could not roll back an incomplete DASH write: {error}"))?;
+                .map_err(|error| {
+                    format!("Could not roll back an incomplete DASH write: {error}")
+                })?;
             self.output
                 .sync_all()
                 .await
@@ -371,10 +368,7 @@ impl OrderedTrackWriter {
         self.committed_offset = next_offset;
         self.next_resource_index = next_resource_index;
         if self.checkpoint_policy == CheckpointPolicy::RetainAfterPublish {
-            remove_committed_source_file_after_commit(
-                &self.directory.join(resource_name),
-            )
-            .await?;
+            remove_committed_source_file_after_commit(&self.directory.join(resource_name)).await?;
         }
         Ok(true)
     }
@@ -438,7 +432,10 @@ pub(crate) async fn committed_resource_prefix(
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
-            return Err(format!("Could not inspect {}: {error}", checkpoint_path.display()));
+            return Err(format!(
+                "Could not inspect {}: {error}",
+                checkpoint_path.display()
+            ));
         }
     }
     let bytes = tokio::fs::read(&checkpoint_path)
@@ -453,7 +450,9 @@ pub(crate) async fn committed_resource_prefix(
         return Err("The DASH writer checkpoint version is unsupported".to_string());
     }
     if checkpoint.plan_fingerprint != plan_fingerprint(resources)? {
-        return Err("The DASH writer checkpoint does not match the selected resource plan".to_string());
+        return Err(
+            "The DASH writer checkpoint does not match the selected resource plan".to_string(),
+        );
     }
     if checkpoint.next_resource_index > resources.len() {
         return Err("The DASH writer checkpoint exceeds the selected resource plan".to_string());
@@ -504,7 +503,9 @@ pub(crate) async fn committed_resource_prefix(
         if checkpoint.next_resource_index != resources.len()
             || metadata.len() != checkpoint.committed_offset
         {
-            return Err("The published DASH track does not match its complete checkpoint".to_string());
+            return Err(
+                "The published DASH track does not match its complete checkpoint".to_string(),
+            );
         }
         Some(&target)
     } else {
@@ -553,9 +554,7 @@ pub(crate) async fn committed_resources(
         }
         Ok(_) => Ok(Some(committed)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => {
-            Err(format!("Could not inspect {}: {error}", target.display()))
-        }
+        Err(error) => Err(format!("Could not inspect {}: {error}", target.display())),
     }
 }
 
@@ -611,14 +610,16 @@ async fn remove_committed_source_files(
     Ok(())
 }
 
-
 async fn verify_resource_ranges(
     output_path: &Path,
     committed: &[CommittedResource],
 ) -> Result<(), String> {
-    let mut file = tokio::fs::File::open(output_path)
-        .await
-        .map_err(|error| format!("Could not open {} for DASH verification: {error}", output_path.display()))?;
+    let mut file = tokio::fs::File::open(output_path).await.map_err(|error| {
+        format!(
+            "Could not open {} for DASH verification: {error}",
+            output_path.display()
+        )
+    })?;
     let mut buffer = [0_u8; 64 * 1024];
     for resource in committed {
         let mut remaining = resource.length;
@@ -628,7 +629,12 @@ async fn verify_resource_ranges(
                 .map_err(|_| "The committed DASH resource length is too large".to_string())?;
             file.read_exact(&mut buffer[..chunk_length])
                 .await
-                .map_err(|error| format!("Could not read {} for DASH verification: {error}", output_path.display()))?;
+                .map_err(|error| {
+                    format!(
+                        "Could not read {} for DASH verification: {error}",
+                        output_path.display()
+                    )
+                })?;
             digest.update(&buffer[..chunk_length]);
             remaining -= u64::try_from(chunk_length)
                 .map_err(|_| "The committed DASH resource length is too large".to_string())?;
@@ -653,7 +659,9 @@ pub(crate) async fn cleanup_committed_resources(
 ) -> Result<(), String> {
     let committed = committed_resources(resources, directory, filename)
         .await?
-        .ok_or_else(|| "The completed DASH track has no retained verified checkpoint".to_string())?;
+        .ok_or_else(|| {
+            "The completed DASH track has no retained verified checkpoint".to_string()
+        })?;
     if committed.len() != resources.len() {
         return Err("The completed DASH checkpoint has an incomplete resource list".to_string());
     }
@@ -681,7 +689,10 @@ async fn load_checkpoint(
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            return Err(format!("Could not inspect {}: {error}", checkpoint_path.display()));
+            return Err(format!(
+                "Could not inspect {}: {error}",
+                checkpoint_path.display()
+            ));
         }
     };
     let Some(_metadata) = checkpoint_metadata else {
@@ -701,7 +712,9 @@ async fn load_checkpoint(
         || checkpoint.committed_offset > MAX_TRACK_BYTES
         || (checkpoint.next_resource_index == 0) != (checkpoint.committed_offset == 0)
     {
-        return Err("The DASH writer checkpoint does not match the selected resource plan".to_string());
+        return Err(
+            "The DASH writer checkpoint does not match the selected resource plan".to_string(),
+        );
     }
 
     let part_metadata = match tokio::fs::symlink_metadata(part).await {
@@ -742,13 +755,17 @@ async fn load_checkpoint(
             let resource_path = directory.join(resource_name);
             let metadata = tokio::fs::symlink_metadata(&resource_path)
                 .await
-                .map_err(|error| format!("Could not validate a legacy committed DASH resource: {error}"))?;
+                .map_err(|error| {
+                    format!("Could not validate a legacy committed DASH resource: {error}")
+                })?;
             if metadata.file_type().is_symlink()
                 || !metadata.is_file()
                 || metadata.len() == 0
                 || metadata.len() > MAX_RESOURCE_BYTES
             {
-                return Err("A legacy committed DASH resource is not a valid regular file".to_string());
+                return Err(
+                    "A legacy committed DASH resource is not a valid regular file".to_string(),
+                );
             }
             committed.push(CommittedResource {
                 length: metadata.len(),
@@ -757,10 +774,14 @@ async fn load_checkpoint(
             offset = offset
                 .checked_add(metadata.len())
                 .filter(|value| *value <= MAX_TRACK_BYTES)
-                .ok_or_else(|| "The legacy committed DASH prefix exceeds the 1 TiB limit".to_string())?;
+                .ok_or_else(|| {
+                    "The legacy committed DASH prefix exceeds the 1 TiB limit".to_string()
+                })?;
         }
         if offset != checkpoint.committed_offset {
-            return Err("The legacy DASH checkpoint offset does not match its resources".to_string());
+            return Err(
+                "The legacy DASH checkpoint offset does not match its resources".to_string(),
+            );
         }
         committed
     } else {
@@ -795,7 +816,9 @@ async fn load_checkpoint(
             output_metadata.len() == checkpoint.committed_offset
         };
         if !length_is_valid {
-            return Err("The DASH track length does not match its committed checkpoint".to_string());
+            return Err(
+                "The DASH track length does not match its committed checkpoint".to_string(),
+            );
         }
         verify_resource_ranges(output_path, &committed).await?;
     } else {
@@ -809,13 +832,18 @@ async fn load_checkpoint(
             let resource_path = directory.join(resource_name);
             let metadata = tokio::fs::symlink_metadata(&resource_path)
                 .await
-                .map_err(|error| format!("A committed DASH source is missing and no track bytes remain: {error}"))?;
+                .map_err(|error| {
+                    format!("A committed DASH source is missing and no track bytes remain: {error}")
+                })?;
             if metadata.file_type().is_symlink()
                 || !metadata.is_file()
                 || metadata.len() != committed[index].length
-                || hash_file_range(&resource_path, 0, metadata.len()).await? != committed[index].sha256
+                || hash_file_range(&resource_path, 0, metadata.len()).await?
+                    != committed[index].sha256
             {
-                return Err("A committed DASH source is invalid and no track bytes remain".to_string());
+                return Err(
+                    "A committed DASH source is invalid and no track bytes remain".to_string(),
+                );
             }
         }
         remove_regular_file_if_present(checkpoint_path).await?;
@@ -843,16 +871,25 @@ async fn load_checkpoint(
     }
 }
 
-
 async fn hash_file_range(path: &Path, offset: u64, length: u64) -> Result<String, String> {
     let mut file = tokio::fs::OpenOptions::new()
         .read(true)
         .open(path)
         .await
-        .map_err(|error| format!("Could not open {} for DASH byte verification: {error}", path.display()))?;
+        .map_err(|error| {
+            format!(
+                "Could not open {} for DASH byte verification: {error}",
+                path.display()
+            )
+        })?;
     file.seek(std::io::SeekFrom::Start(offset))
         .await
-        .map_err(|error| format!("Could not seek in {} for DASH byte verification: {error}", path.display()))?;
+        .map_err(|error| {
+            format!(
+                "Could not seek in {} for DASH byte verification: {error}",
+                path.display()
+            )
+        })?;
     let mut remaining = length;
     let mut buffer = [0_u8; 64 * 1024];
     let mut digest = Sha256::new();
@@ -861,7 +898,12 @@ async fn hash_file_range(path: &Path, offset: u64, length: u64) -> Result<String
             .map_err(|_| "The committed DASH resource length is too large".to_string())?;
         file.read_exact(&mut buffer[..chunk_length])
             .await
-            .map_err(|error| format!("Could not read {} for DASH byte verification: {error}", path.display()))?;
+            .map_err(|error| {
+                format!(
+                    "Could not read {} for DASH byte verification: {error}",
+                    path.display()
+                )
+            })?;
         digest.update(&buffer[..chunk_length]);
         remaining -= u64::try_from(chunk_length)
             .map_err(|_| "The committed DASH resource length is too large".to_string())?;

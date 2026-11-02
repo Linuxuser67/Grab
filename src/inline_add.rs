@@ -598,12 +598,13 @@ pub(crate) struct VideoStep {
     /// Native HLS/DASH presentation and selected representation key.
     pub(crate) manifest: Rc<RefCell<Option<crate::manifest_intake::ManifestLookup>>>,
     pub(crate) manifest_choices: Rc<RefCell<Vec<crate::manifest_intake::ManifestChoice>>>,
-    pub(crate) manifest_selection: Rc<RefCell<Option<String>>>,
+    pub(crate) manifest_selection:
+        Rc<RefCell<Option<crate::media_types::ManifestRepresentationKey>>>,
     pub(crate) manifest_format: adw::ComboRow,
     /// Audio choices and selected audio key for the active static presentation.
     pub(crate) manifest_audio_choices:
         Rc<RefCell<Vec<crate::manifest_intake::ManifestAudioChoice>>>,
-    pub(crate) manifest_audio_selection: Rc<RefCell<Option<String>>>,
+    pub(crate) manifest_audio_selection: Rc<RefCell<Option<crate::media_types::ManifestAudioKey>>>,
     pub(crate) manifest_audio_format: adw::ComboRow,
     /// Output container for native HLS/DASH downloads; the filename extension is kept in sync.
     pub(crate) manifest_container: adw::ComboRow,
@@ -797,7 +798,10 @@ fn clear_manifest_preview(step: &VideoStep) {
 }
 
 /// Refresh the audio picker for the selected video representation.
-fn refresh_manifest_audio_picker(step: &VideoStep, video_key: Option<&str>) {
+fn refresh_manifest_audio_picker(
+    step: &VideoStep,
+    video_key: Option<&crate::media_types::ManifestRepresentationKey>,
+) {
     let choices = video_key
         .and_then(|key| {
             step.manifest
@@ -893,7 +897,7 @@ fn show_manifest_ready(
         .set_selected(u32::try_from(selected_index).unwrap_or_default());
     step.manifest_format.set_visible(true);
     drop(manifest_state);
-    refresh_manifest_audio_picker(step, selected_video_key.as_deref());
+    refresh_manifest_audio_picker(step, selected_video_key.as_ref());
     if step.name.text().trim().is_empty() {
         step.name.set_text("Stream.mp4");
     }
@@ -2411,7 +2415,7 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                 .map(|choice| choice.key.clone());
             selection.replace(selected_key.clone());
             if let Some(step) = step_weak.upgrade() {
-                refresh_manifest_audio_picker(&step, selected_key.as_deref());
+                refresh_manifest_audio_picker(&step, selected_key.as_ref());
             }
         });
     }
@@ -3490,13 +3494,13 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                         .as_ref()
                         .filter(|manifest| manifest.source_url == url)
                         .and_then(|manifest| {
-                            selected.as_deref().and_then(|key| {
+                            selected.as_ref().and_then(|key| {
                                 let subtitle_key =
                                     manifest.preferred_subtitle_key(key, Some(&subtitle_language));
                                 manifest.selected_source(
                                     key,
-                                    selected_audio.as_deref(),
-                                    subtitle_key.as_deref(),
+                                    selected_audio.as_ref(),
+                                    subtitle_key.as_ref(),
                                 )
                             })
                         })

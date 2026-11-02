@@ -5,6 +5,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::media_types::ManifestKind;
+
 const MARKER_NAME: &str = ".grab-live-unrecoverable.json";
 const MARKER_VERSION: u32 = 1;
 const MAX_MARKER_BYTES: usize = 4096;
@@ -38,15 +40,44 @@ pub(crate) enum LiveCaptureStateError {
 #[serde(deny_unknown_fields)]
 pub(crate) struct UnrecoverableLiveCapture {
     version: u32,
-    pub(crate) protocol: String,
+    #[serde(with = "manifest_protocol")]
+    pub(crate) protocol: ManifestKind,
     pub(crate) reason: String,
     pub(crate) staged_bytes: u64,
+}
+
+mod manifest_protocol {
+    use crate::media_types::ManifestKind;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S>(protocol: &ManifestKind, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match protocol {
+            ManifestKind::Hls => "hls",
+            ManifestKind::Dash => "dash",
+        })
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<ManifestKind, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "hls" => Ok(ManifestKind::Hls),
+            "dash" => Ok(ManifestKind::Dash),
+            protocol => Err(serde::de::Error::unknown_variant(
+                protocol,
+                &["hls", "dash"],
+            )),
+        }
+    }
 }
 
 impl UnrecoverableLiveCapture {
     fn validate(&self) -> Result<(), LiveCaptureStateError> {
         if self.version != MARKER_VERSION
-            || !matches!(self.protocol.as_str(), "hls" | "dash")
             || self.reason.trim().is_empty()
             || self.reason.len() > 512
         {
@@ -59,14 +90,14 @@ impl UnrecoverableLiveCapture {
 /// Persist a terminal continuity decision before finalization can begin.
 pub(crate) async fn persist(
     staging: &Path,
-    protocol: &str,
+    protocol: ManifestKind,
     reason: &str,
     staged_bytes: u64,
 ) -> Result<(), LiveCaptureStateError> {
     let staging = staging.to_path_buf();
     let marker = UnrecoverableLiveCapture {
         version: MARKER_VERSION,
-        protocol: protocol.to_string(),
+        protocol,
         reason: reason.to_string(),
         staged_bytes,
     };
@@ -189,29 +220,63 @@ mod tests {
     async fn marker_is_durable_and_idempotent() {
         let directory = tempfile::tempdir().expect("create staging");
         let reason = "HLS playlist sequence continuity was lost";
-        persist(directory.path(), "hls", reason, 1234)
+        persist(directory.path(), ManifestKind::Hls, reason, 1234)
             .await
             .expect("persist marker");
-        persist(directory.path(), "hls", reason, 1234)
+        persist(directory.path(), ManifestKind::Hls, reason, 1234)
             .await
             .expect("repeat identical marker");
         let marker = read(directory.path())
             .await
             .expect("read marker")
             .expect("marker exists");
-        assert_eq!(marker.protocol, "hls");
+        assert_eq!(marker.protocol, ManifestKind::Hls);
         assert_eq!(marker.reason, reason);
         assert_eq!(marker.staged_bytes, 1234);
+    }
+
+    #[test]
+    fn protocol_marker_keeps_the_legacy_lowercase_wire_format() {
+        let marker = UnrecoverableLiveCapture {
+            version: MARKER_VERSION,
+            protocol: ManifestKind::Hls,
+            reason: "HLS continuity was lost".to_string(),
+            staged_bytes: 42,
+        };
+
+        let encoded = serde_json::to_value(&marker).expect("serialize marker");
+        assert_eq!(encoded["protocol"], "hls");
+        assert_eq!(
+            serde_json::from_value::<UnrecoverableLiveCapture>(encoded)
+                .expect("deserialize marker")
+                .protocol,
+            ManifestKind::Hls
+        );
+        assert!(
+            serde_json::from_value::<UnrecoverableLiveCapture>(serde_json::json!({
+                "version": MARKER_VERSION,
+                "protocol": "unknown",
+                "reason": "HLS continuity was lost",
+                "staged_bytes": 42
+            }))
+            .is_err(),
+            "unknown protocols must not be accepted"
+        );
     }
 
     #[tokio::test]
     async fn marker_rejects_conflicting_decisions() {
         let directory = tempfile::tempdir().expect("create staging");
-        persist(directory.path(), "dash", "DASH timeline changed", 99)
-            .await
-            .expect("persist marker");
+        persist(
+            directory.path(),
+            ManifestKind::Dash,
+            "DASH timeline changed",
+            99,
+        )
+        .await
+        .expect("persist marker");
         assert!(matches!(
-            persist(directory.path(), "dash", "different reason", 99).await,
+            persist(directory.path(), ManifestKind::Dash, "different reason", 99).await,
             Err(LiveCaptureStateError::ConflictingDecision)
         ));
     }

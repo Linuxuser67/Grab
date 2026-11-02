@@ -505,6 +505,23 @@ async fn prepare_manifest_attempt(
     crate::manifest_recovery::validate_or_initialize(&staging, recovery_fingerprint)
         .await
         .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
+    let item_id = job.item_id;
+    let destination_path = job.dest.clone();
+    let has_audio = job.source.audio_key.is_some();
+    let has_subtitles = job.source.subtitle_key.is_some();
+    let staging_for_plan = staging.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::manifest_destination::ensure_plan(
+            &staging_for_plan,
+            &destination_path,
+            item_id,
+            has_audio,
+            has_subtitles,
+        )
+    })
+    .await
+    .map_err(|error| format!("Could not prepare destination-side manifest files: {error}"))?
+    .map_err(ManifestRunError::Failed)?;
 
     // Reclaim either supported container left by an interrupted attempt only
     // after validating both the state-dir owner marker and the recovery plan.

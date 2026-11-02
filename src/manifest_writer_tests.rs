@@ -29,7 +29,6 @@ fn resource_checkpoint(bytes: &[u8]) -> CommittedResource {
     }
 }
 
-
 #[tokio::test]
 async fn appendable_destination_writer_resumes_after_the_resource_plan_grows() {
     let root = test_directory();
@@ -61,8 +60,7 @@ async fn appendable_destination_writer_resumes_after_the_resource_plan_grows() {
         crate::manifest_destination::TrackKind::Video,
     )
     .await
-    .expect("open initial appendable destination part")
-    else {
+    .expect("open initial appendable destination part") else {
         panic!("a fresh destination part must return an active writer");
     };
     assert!(writer.append_next(&mut abort).await.expect("append first"));
@@ -107,8 +105,7 @@ async fn appendable_destination_writer_resumes_after_the_resource_plan_grows() {
         crate::manifest_destination::TrackKind::Video,
     )
     .await
-    .expect("resume with expanded resource plan")
-    else {
+    .expect("resume with expanded resource plan") else {
         panic!("an appendable destination part must remain open");
     };
     assert_eq!(committed, 5);

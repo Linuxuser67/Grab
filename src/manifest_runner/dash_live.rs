@@ -55,7 +55,14 @@ pub(super) async fn load_dash_live_track(
     current_plan: Option<&DashRepresentationPlan>,
     track_filename: &'static str,
 ) -> Result<(DashLiveTrack, u64), ManifestRunError> {
-    load_dash_live_track_inner(representation_key, directory, current_plan, track_filename, None).await
+    load_dash_live_track_inner(
+        representation_key,
+        directory,
+        current_plan,
+        track_filename,
+        None,
+    )
+    .await
 }
 
 async fn load_dash_live_track_inner(
@@ -267,7 +274,6 @@ async fn load_dash_live_track_inner(
     ))
 }
 
-
 /// Load a live DASH rendition while binding its output to the owned destination part.
 pub(super) async fn load_dash_live_track_for_destination(
     representation_key: &str,
@@ -299,7 +305,11 @@ async fn append_live_dash_destination_part(
     let Some(destination_part) = track.destination_part.as_ref() else {
         return Ok(None);
     };
-    let resources = track.state.resource_names().map(str::to_string).collect::<Vec<_>>();
+    let resources = track
+        .state
+        .resource_names()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     if resources.is_empty() {
         return Ok(None);
     }
@@ -337,7 +347,6 @@ async fn append_live_dash_destination_part(
     writer.finish().await.map_err(ManifestRunError::Failed)?;
     Ok(None)
 }
-
 
 /// Ensure a previously finished live DASH capture has owned destination-side track parts.
 pub(super) async fn ensure_live_dash_destination_parts(
@@ -724,8 +733,7 @@ pub(super) async fn apply_dash_live_snapshot(
             });
         }
 
-        let resource_is_committed =
-            committed_resource_names.contains(resource.filename.as_str());
+        let resource_is_committed = committed_resource_names.contains(resource.filename.as_str());
         if !resource_is_committed
             && dash_live_resource_needs_fetch(&track.directory, resource).await?
             && filenames_to_fetch.insert(resource.filename.clone())
@@ -840,15 +848,18 @@ pub(super) async fn run_live_dash_tracks(
                 .clone()
                 .unwrap_or_else(|| plan.representation.live_key.clone());
             audio_key = Some(key.clone());
-            Some(load_dash_live_track_for_destination(
-                &key,
-                audio_dir,
-                Some(plan),
-                "audio-track.mp4",
-                destination,
-                item_id,
-                crate::manifest_destination::TrackKind::Audio,
-            ).await?)
+            Some(
+                load_dash_live_track_for_destination(
+                    &key,
+                    audio_dir,
+                    Some(plan),
+                    "audio-track.mp4",
+                    destination,
+                    item_id,
+                    crate::manifest_destination::TrackKind::Audio,
+                )
+                .await?,
+            )
         }
         None if dash_live_state_exists(audio_dir).await? => {
             let key = match audio_key.as_deref() {
@@ -856,15 +867,18 @@ pub(super) async fn run_live_dash_tracks(
                 None => read_dash_live_representation_key(audio_dir).await?,
             };
             audio_key = Some(key.clone());
-            Some(load_dash_live_track_for_destination(
-                &key,
-                audio_dir,
-                None,
-                "audio-track.mp4",
-                destination,
-                item_id,
-                crate::manifest_destination::TrackKind::Audio,
-            ).await?)
+            Some(
+                load_dash_live_track_for_destination(
+                    &key,
+                    audio_dir,
+                    None,
+                    "audio-track.mp4",
+                    destination,
+                    item_id,
+                    crate::manifest_destination::TrackKind::Audio,
+                )
+                .await?,
+            )
         }
         None => None,
     };
@@ -1238,16 +1252,16 @@ pub(super) async fn run_live_dash_tracks(
                 let key = audio_key
                     .clone()
                     .unwrap_or_else(|| plan.representation.live_key.clone());
-                let (mut track, _) =
-                    load_dash_live_track_for_destination(
-                        &key,
-                        audio_dir,
-                        Some(plan),
-                        "audio-track.mp4",
-                        destination,
-                        item_id,
-                        crate::manifest_destination::TrackKind::Audio,
-                    ).await?;
+                let (mut track, _) = load_dash_live_track_for_destination(
+                    &key,
+                    audio_dir,
+                    Some(plan),
+                    "audio-track.mp4",
+                    destination,
+                    item_id,
+                    crate::manifest_destination::TrackKind::Audio,
+                )
+                .await?;
                 let video_bytes = dash_live_track_bytes(
                     &video.state,
                     &video.directory,

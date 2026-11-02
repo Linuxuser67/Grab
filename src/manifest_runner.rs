@@ -1389,15 +1389,15 @@ pub(crate) async fn run_manifest_download(
         job: &job,
         destination_parts: live_dash
             || (!live_hls
-            && (matches!(&tracks, Tracks::Dash { .. })
-                || matches!(
-                    &tracks,
-                    Tracks::Hls { video, audio, .. }
-                        if video.is_plain_mpegts_candidate()
-                            && audio
-                                .as_ref()
-                                .is_none_or(HlsPlan::is_plain_mpegts_candidate)
-                ))),
+                && (matches!(&tracks, Tracks::Dash { .. })
+                    || matches!(
+                        &tracks,
+                        Tracks::Hls { video, audio, .. }
+                            if video.is_plain_mpegts_candidate()
+                                && audio
+                                    .as_ref()
+                                    .is_none_or(HlsPlan::is_plain_mpegts_candidate)
+                    ))),
         gate,
         abort,
         tx: &tx,
@@ -1483,14 +1483,16 @@ async fn finalize_manifest_download(
         .await
         .map_err(ManifestRunError::Failed)?,
         Tracks::Dash { .. } => video_dir.join("video-track.mp4"),
-        Tracks::DashLiveOffline { .. } if destination_parts => crate::manifest_destination::part_path_async(
-            staging.to_path_buf(),
-            job.dest.clone(),
-            job.item_id,
-            crate::manifest_destination::TrackKind::Video,
-        )
-        .await
-        .map_err(ManifestRunError::Failed)?,
+        Tracks::DashLiveOffline { .. } if destination_parts => {
+            crate::manifest_destination::part_path_async(
+                staging.to_path_buf(),
+                job.dest.clone(),
+                job.item_id,
+                crate::manifest_destination::TrackKind::Video,
+            )
+            .await
+            .map_err(ManifestRunError::Failed)?
+        }
         Tracks::DashLiveOffline { .. } => video_dir.join("video-track.mp4"),
     };
     let audio_input = if has_audio {

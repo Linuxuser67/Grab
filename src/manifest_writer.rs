@@ -767,7 +767,10 @@ async fn committed_resource_prefix_inner(
     if checkpoint.version == LEGACY_CHECKPOINT_VERSION {
         return Ok(Vec::new());
     }
-    if !matches!(checkpoint.version, PREVIOUS_CHECKPOINT_VERSION | CHECKPOINT_VERSION) {
+    if !matches!(
+        checkpoint.version,
+        PREVIOUS_CHECKPOINT_VERSION | CHECKPOINT_VERSION
+    ) {
         return Err("The DASH writer checkpoint version is unsupported".to_string());
     }
     let fingerprint_matches = if checkpoint.append_only {

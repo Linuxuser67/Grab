@@ -643,6 +643,9 @@ pub(crate) async fn enumerate_gallery_files_with_proxy(
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Limit queued gallery metadata to keep a fast extractor from outrunning GTK.
+pub(crate) const GALLERY_ENUMERATION_CHANNEL_CAPACITY: usize = 8;
+
 /// Streamed gallery enumeration: gallery-dl runs with `output.jsonl=true`,
 /// so every flushed line is one message and items are pushed to `items_tx`
 /// as they arrive — the picker can open on the first one. Returns the number
@@ -657,7 +660,7 @@ pub(crate) async fn enumerate_gallery_files_streamed(
     cookies_file: Option<&Path>,
     user_agent: Option<&str>,
     filter: crate::gallery_argv::GalleryFilter,
-    items_tx: tokio::sync::mpsc::UnboundedSender<GalleryItem>,
+    items_tx: tokio::sync::mpsc::Sender<GalleryItem>,
 ) -> Result<usize, GalleryError> {
     enumerate_gallery_files_streamed_with_proxy(
         tool,
@@ -678,7 +681,7 @@ pub(crate) async fn enumerate_gallery_files_streamed_with_proxy(
     tool: &Path,
     url: &str,
     options: GalleryEnumerationOptions<'_>,
-    items_tx: tokio::sync::mpsc::UnboundedSender<GalleryItem>,
+    items_tx: tokio::sync::mpsc::Sender<GalleryItem>,
 ) -> Result<usize, GalleryError> {
     // Same line-streaming shape as the yt-dlp runner (see video_runner.rs).
     let mut cmd = enumerate_command(tool, url, options, true)?;
@@ -744,7 +747,7 @@ pub(crate) async fn enumerate_gallery_files_streamed_with_proxy(
         };
         if let Some(item) = reader.feed(&m) {
             // A closed receiver means the UI is gone: stop early.
-            if items_tx.send(item).is_err() {
+            if items_tx.send(item).await.is_err() {
                 return Ok(count);
             }
             count += 1;
@@ -783,7 +786,7 @@ pub(crate) async fn enumerate_gallery_files_streamed_with_proxy(
     if count == 0 && !items_tx.is_closed() {
         let batched = enumerate_gallery_files_with_proxy(tool, url, options);
         for item in batched.await? {
-            if items_tx.send(item).is_err() {
+            if items_tx.send(item).await.is_err() {
                 break;
             }
             count += 1;
@@ -1135,25 +1138,23 @@ pub async fn count_gallery_files_with_proxy(
     };
     let mut cmd = tokio::process::Command::new(&argv[0]);
     crate::video_spawn::prepend_user_lib_to_path(&mut cmd);
-    // See probe_gallery: a timed-out count must not orphan gallery-dl.
-    cmd.kill_on_drop(true);
     cmd.args(&argv[1..]);
     crate::video_spawn::apply_configured_proxy_env(&mut cmd, proxy);
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
-    // Debug: log the full argv before spawning.
-    crate::backend_debug::log_command(&cmd);
-    let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
+    // The shared runner bounds stdout/stderr, kills the process group on timeout,
+    // and drains both pipes concurrently instead of buffering unbounded output.
+    let output = run_to_completion(cmd, PROBE_TIMEOUT, "gallery-dl count")
         .await
-        .ok()?
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let count = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.trim().is_empty())
+    let count = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| line.iter().any(|byte| !byte.is_ascii_whitespace()))
         .count();
-    Some(count as u32)
+    u32::try_from(count).ok()
 }
 
 #[cfg(test)]
@@ -1403,7 +1404,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(GALLERY_ENUMERATION_CHANNEL_CAPACITY);
         let count = enumerate_gallery_files_streamed(
             &script,
             "https://example.com/",
@@ -1421,6 +1422,80 @@ mod tests {
         }
         assert_eq!(names, ["1.jpg", "2.jpg"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A receiver with one slot forces the producer to await each consumed item.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn streamed_enumeration_backpressures_without_losing_items() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory =
+            std::env::temp_dir().join(format!("grab-stream-bounded-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("fake-gallery-dl.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+i=1
+while [ "$i" -le 12 ]; do
+  printf '[3, "https://example.com/%s.jpg", {"filename": "%s.jpg"}]\n' "$i" "$i"
+  i=$((i + 1))
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let handle = tokio::spawn(async move {
+            enumerate_gallery_files_streamed(
+                &script,
+                "https://example.com/",
+                None,
+                None,
+                crate::gallery_argv::GalleryFilter::All,
+                tx,
+            )
+            .await
+        });
+
+        let mut names = Vec::new();
+        while let Some(item) = rx.recv().await {
+            names.push(item.filename);
+        }
+        let count = handle.await.unwrap().unwrap();
+        assert_eq!(count, 12);
+        assert_eq!(names.len(), 12);
+        assert_eq!(names.first().map(String::as_str), Some("1.jpg"));
+        assert_eq!(names.last().map(String::as_str), Some("12.jpg"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gallery_count_rejects_output_over_the_probe_limit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory =
+            std::env::temp_dir().join(format!("grab-gallery-count-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("gallery-dl");
+        std::fs::write(&script, "#!/bin/sh\nhead -c 67108865 /dev/zero\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let count = count_gallery_files_with_proxy(
+            &script,
+            "https://example.com/gallery",
+            None,
+            None,
+            None,
+            crate::gallery_argv::GalleryFilter::All,
+            None,
+        )
+        .await;
+        assert_eq!(count, None);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// Streaming: items must reach the receiver while the child is still
@@ -1447,7 +1522,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(GALLERY_ENUMERATION_CHANNEL_CAPACITY);
         let handle = tokio::spawn(async move {
             enumerate_gallery_files_streamed(
                 &script,
@@ -1492,7 +1567,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(GALLERY_ENUMERATION_CHANNEL_CAPACITY);
         let result = enumerate_gallery_files_streamed(
             &script,
             "https://example.com/",
@@ -1533,7 +1608,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(GALLERY_ENUMERATION_CHANNEL_CAPACITY);
         let count = enumerate_gallery_files_streamed(
             &script,
             "https://example.com/",
@@ -1575,7 +1650,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(GALLERY_ENUMERATION_CHANNEL_CAPACITY);
         let result = enumerate_gallery_files_streamed(
             &script,
             "https://example.com/",

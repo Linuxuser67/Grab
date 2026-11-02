@@ -1012,6 +1012,12 @@ fn parses_rates() {
     assert_eq!(parse_rate(""), None);
     assert_eq!(parse_rate("0"), None);
     assert_eq!(parse_rate("500K"), Some(500 * 1024));
+    assert_eq!(parse_rate("0.5K"), Some(512));
+    assert_eq!(parse_rate("0.0001K"), None);
+    assert_eq!(parse_rate("infK"), None);
+    assert_eq!(parse_rate("NaNK"), None);
+    assert_eq!(parse_rate("1e309K"), None);
+    assert_eq!(parse_rate("18446744073709551616"), None);
     assert_eq!(parse_rate("2M"), Some(2 * 1024 * 1024));
     assert_eq!(parse_rate("1.5M"), Some(1572864));
     assert_eq!(parse_rate("3G"), Some(3 * 1024 * 1024 * 1024));

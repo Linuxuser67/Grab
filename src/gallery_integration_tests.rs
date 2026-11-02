@@ -42,13 +42,22 @@ async fn enumerate_all(
     url: &str,
     filter: GalleryFilter,
 ) -> Result<Vec<GalleryItem>, crate::gallery_tools::GalleryError> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let enumeration = enumerate_gallery_files_streamed(tool, url, None, None, filter, tx);
-    let result = enumeration.await;
+    let (tx, mut rx) =
+        tokio::sync::mpsc::channel(crate::gallery_probe::GALLERY_ENUMERATION_CHANNEL_CAPACITY);
+    let tool = tool.to_path_buf();
+    let url = url.to_string();
+    let enumeration = tokio::spawn(async move {
+        enumerate_gallery_files_streamed(&tool, &url, None, None, filter, tx).await
+    });
     let mut items = Vec::new();
-    while let Ok(item) = rx.try_recv() {
+    while let Some(item) = rx.recv().await {
         items.push(item);
     }
+    let result = enumeration.await.map_err(|error| {
+        crate::gallery_tools::GalleryError::probe(format!(
+            "gallery enumeration task failed: {error}"
+        ))
+    })?;
     result.map(|_| items)
 }
 

@@ -830,57 +830,50 @@ async fn transfer_static_manifest_tracks(
             subtitle,
             ..
         } => {
-            if !fetch_resources(
+            if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client,
-                dash_resources(video),
-                video_dir,
-                concurrency,
+                plan: video,
+                directory: video_dir,
+                filename: "video-track.mp4",
+                connections: concurrency,
                 tx,
                 downloaded,
                 abort,
-            )
+            })
             .await?
             {
                 return Ok(false);
             }
-            if !concat_dash_track(video, video_dir, "video-track.mp4", abort).await? {
-                return Ok(false);
-            }
-            if let Some(audio) = audio {
-                if !fetch_resources(
+            if let Some(audio) = audio
+                && !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
-                    dash_resources(audio),
-                    audio_dir,
-                    concurrency,
+                    plan: audio,
+                    directory: audio_dir,
+                    filename: "audio-track.mp4",
+                    connections: concurrency,
                     tx,
                     downloaded,
                     abort,
-                )
+                })
                 .await?
-                {
-                    return Ok(false);
-                }
-                if !concat_dash_track(audio, audio_dir, "audio-track.mp4", abort).await? {
-                    return Ok(false);
-                }
+            {
+                return Ok(false);
             }
             if let Some(subtitle) = subtitle {
                 let subtitle_dir = staging.join("subtitles");
                 ensure_track_dir(&subtitle_dir).await?;
-                if !fetch_resources(
+                if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
-                    dash_resources(subtitle),
-                    &subtitle_dir,
-                    concurrency,
+                    plan: subtitle,
+                    directory: &subtitle_dir,
+                    filename: "subtitle-track.mp4",
+                    connections: concurrency,
                     tx,
                     downloaded,
                     abort,
-                )
+                })
                 .await?
                 {
-                    return Ok(false);
-                }
-                if !concat_dash_track(subtitle, &subtitle_dir, "subtitle-track.mp4", abort).await? {
                     return Ok(false);
                 }
             }
@@ -3944,6 +3937,131 @@ async fn run_live_dash_tracks(
     }
 }
 
+struct ManifestDashTrackTransfer<'a> {
+    client: &'a reqwest::Client,
+    plan: &'a DashRepresentationPlan,
+    directory: &'a Path,
+    filename: &'a str,
+    connections: usize,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'a Arc<AtomicU64>,
+    abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+}
+
+async fn fetch_and_write_dash_track(
+    context: ManifestDashTrackTransfer<'_>,
+) -> Result<bool, ManifestRunError> {
+    let ManifestDashTrackTransfer {
+        client,
+        plan,
+        directory,
+        filename,
+        connections,
+        tx,
+        downloaded,
+        abort,
+    } = context;
+    let resources = dash_resources(plan);
+    let resource_names = resources
+        .iter()
+        .map(|resource| resource.filename.clone())
+        .collect::<Vec<_>>();
+    let (writer, committed_bytes) =
+        crate::manifest_writer::OrderedTrackWriter::open(resource_names, directory, filename)
+            .await?;
+    if committed_bytes > 0 {
+        let total = reserve_download_bytes(downloaded, committed_bytes)?;
+        tx.send(progress_message(total)).ok();
+    }
+    let Some(mut writer) = writer else {
+        return Ok(true);
+    };
+
+    // Each bounded window fetches out of order. Completed indices wait in a
+    // small reorder set until the single writer can commit the next index.
+    let window_size = connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
+    let resource_count = resources.len();
+    let mut next_resource_index = writer.next_resource_index();
+    let mut remaining_resources = resources.into_iter().enumerate().skip(next_resource_index);
+    loop {
+        let window = remaining_resources
+            .by_ref()
+            .take(window_size)
+            .collect::<Vec<_>>();
+        if window.is_empty() {
+            break;
+        }
+        let window_end = next_resource_index + window.len();
+        let mut completed = std::collections::BTreeSet::new();
+        let fetches = futures_util::stream::iter(window.into_iter().map(|(index, resource)| {
+            let client = client.clone();
+            let directory = directory.to_path_buf();
+            let tx = tx.clone();
+            let downloaded = Arc::clone(downloaded);
+            async move {
+                fetch_resource(&client, resource, &directory, &tx, &downloaded)
+                    .await
+                    .map(|_| index)
+            }
+        }))
+        .buffer_unordered(window_size);
+
+        let window_outcome = {
+            tokio::pin!(fetches);
+            'window: loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut *abort => break Ok(false),
+                    result = fetches.next() => match result {
+                        Some(Ok(index)) => {
+                            completed.insert(index);
+                            while completed.remove(&next_resource_index) {
+                                match writer.append_next(abort).await {
+                                    Ok(true) => next_resource_index += 1,
+                                    Ok(false) => break 'window Ok(false),
+                                    Err(error) => {
+                                        break 'window Err(ManifestRunError::Failed(error));
+                                    }
+                                }
+                            }
+                        }
+                        Some(Err(error)) => break Err(error),
+                        None => break Ok(true),
+                    }
+                }
+            }
+        };
+        match window_outcome {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(error) => {
+                tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                    .ok();
+                return Err(error);
+            }
+        }
+        if next_resource_index != window_end {
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                .ok();
+            return Err(ManifestRunError::Failed(
+                "The ordered DASH fetch window ended before its resources were committed"
+                    .to_string(),
+            ));
+        }
+    }
+
+    // Dropping each bounded window cancels outstanding requests and refunds
+    // partial byte reservations before publishing the corrected progress.
+    tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+        .ok();
+    if next_resource_index != resource_count {
+        return Ok(false);
+    }
+    writer.finish().await?;
+    Ok(true)
+}
+
+#[cfg(test)]
 async fn concat_dash_track(
     plan: &DashRepresentationPlan,
     directory: &Path,
@@ -4296,6 +4414,122 @@ mod tests {
             ManifestRunError::Failed(message)
                 if message == "Not enough free disk space to finalize this stream"
         ));
+    }
+
+    #[tokio::test]
+    async fn static_dash_fetches_concurrently_and_writes_in_manifest_order() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="5" initialization="init.mp4" media="seg-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000" codecs="avc1.64001f"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let parsed =
+            crate::manifest::dash::parse_dash_manifest("https://example.test/manifest.mpd", body)
+                .expect("parse static DASH fixture");
+        let representation_key = parsed.video_representations[0].key.clone();
+        let mut plan =
+            crate::manifest::dash::plan_dash_representation(&parsed, &representation_key)
+                .expect("plan video representation");
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind DASH resource server");
+        let address = listener.local_addr().expect("resource server address");
+        for resource in plan.resources.iter_mut() {
+            let filename = match resource.kind {
+                DashResourceKind::Initialization => "init.mp4".to_string(),
+                DashResourceKind::Segment => {
+                    format!("seg-{}.m4s", resource.segment_number.unwrap_or_default())
+                }
+            };
+            resource.url =
+                Url::parse(&format!("http://{address}/{filename}")).expect("local resource URL");
+        }
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let server_active = Arc::clone(&active);
+        let server_maximum = Arc::clone(&maximum);
+        let server = tokio::spawn(async move {
+            let mut tasks = Vec::new();
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.expect("accept DASH resource");
+                let active = Arc::clone(&server_active);
+                let maximum = Arc::clone(&server_maximum);
+                tasks.push(tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let count = socket.read(&mut request).await.expect("read request");
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                    let (payload, delay): (&[u8], u64) = match path {
+                        "/init.mp4" => (b"init", 100),
+                        "/seg-1.m4s" => (b"one", 5),
+                        "/seg-2.m4s" => (b"two", 1),
+                        _ => (b"unexpected", 0),
+                    };
+                    let current = active.fetch_add(1, Ordering::AcqRel) + 1;
+                    maximum.fetch_max(current, Ordering::AcqRel);
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    );
+                    socket
+                        .write_all(header.as_bytes())
+                        .await
+                        .expect("write response header");
+                    socket
+                        .write_all(payload)
+                        .await
+                        .expect("write response body");
+                    active.fetch_sub(1, Ordering::AcqRel);
+                }));
+            }
+            for task in tasks {
+                task.await.expect("resource request task");
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build direct HTTP client");
+        let staging = tempfile::tempdir().expect("create DASH staging");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+
+        assert!(
+            fetch_and_write_dash_track(ManifestDashTrackTransfer {
+                client: &client,
+                plan: &plan,
+                directory: staging.path(),
+                filename: "video-track.mp4",
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+                abort: &mut abort,
+            })
+            .await
+            .expect("fetch and write DASH track")
+        );
+        server.await.expect("DASH resource server task");
+
+        assert_eq!(maximum.load(Ordering::Relaxed), 2);
+        assert_eq!(downloaded.load(Ordering::Relaxed), 10);
+        assert_eq!(
+            tokio::fs::read(staging.path().join("video-track.mp4"))
+                .await
+                .expect("read assembled DASH track"),
+            b"initonetwo"
+        );
     }
 
     #[tokio::test]

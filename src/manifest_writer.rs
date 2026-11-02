@@ -619,6 +619,10 @@ pub(crate) async fn cleanup_destination_part(
     track: crate::manifest_destination::TrackKind,
     filename: &str,
 ) -> Result<(), String> {
+    remove_regular_file_if_present(&track_directory.join(format!("{filename}.checkpoint.json")))
+        .await?;
+    remove_regular_file_if_present(&track_directory.join(format!("{filename}.resources"))).await?;
+    sync_directory(track_directory).await?;
     crate::manifest_destination::remove_owned_part_async(
         staging.to_path_buf(),
         destination.to_path_buf(),
@@ -626,10 +630,6 @@ pub(crate) async fn cleanup_destination_part(
         track,
     )
     .await?;
-    remove_regular_file_if_present(&track_directory.join(format!("{filename}.checkpoint.json")))
-        .await?;
-    remove_regular_file_if_present(&track_directory.join(format!("{filename}.resources"))).await?;
-    sync_directory(track_directory).await?;
     sync_directory(staging).await
 }
 

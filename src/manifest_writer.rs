@@ -644,8 +644,9 @@ pub(crate) async fn committed_resource_prefix(
             return Err(format!("Could not inspect {}: {error}", target.display()));
         }
     };
-    if part_metadata.is_some() && target_metadata.is_some() && !allow_part_and_target {
+    if part_metadata.is_some() && target_metadata.is_some() {
         return Err("Both the interrupted and published DASH track files exist".to_string());
+    }exist".to_string());
     }
 
     let output_path = if let Some(metadata) = &part_metadata {
@@ -896,7 +897,7 @@ async fn load_checkpoint(
             return Err(format!("Could not inspect {}: {error}", target.display()));
         }
     };
-    if part_metadata.is_some() && target_metadata.is_some() {
+    if part_metadata.is_some() && target_metadata.is_some() && !allow_part_and_target {
         return Err("Both the interrupted and published DASH track files exist".to_string());
     }
     if target_metadata.is_some() && checkpoint.next_resource_index != resources.len() {

@@ -597,7 +597,6 @@ fn write_part_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     #[test]
     fn plan_records_visible_track_part_names() {

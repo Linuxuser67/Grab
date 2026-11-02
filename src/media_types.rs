@@ -84,12 +84,18 @@ macro_rules! manifest_key {
     };
 }
 
-/// Stable, protocol-specific identity for a selected native video representation.
-manifest_key!(ManifestRepresentationKey);
-/// Stable, protocol-specific identity for a selected native audio rendition.
-manifest_key!(ManifestAudioKey);
-/// Stable, protocol-specific identity for a selected native subtitle rendition.
-manifest_key!(ManifestSubtitleKey);
+manifest_key!(
+    ManifestRepresentationKey,
+    "Stable, protocol-specific identity for a selected native video representation."
+);
+manifest_key!(
+    ManifestAudioKey,
+    "Stable, protocol-specific identity for a selected native audio rendition."
+);
+manifest_key!(
+    ManifestSubtitleKey,
+    "Stable, protocol-specific identity for a selected native subtitle rendition."
+);
 
 /// Stable native-manifest selection; signed child URLs are deliberately not persisted.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -113,7 +113,10 @@ fn safe_file_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
-        && Path::new(name).file_name().and_then(|file_name| file_name.to_str()) == Some(name)
+        && Path::new(name)
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            == Some(name)
         && !name.chars().any(char::is_control)
 }
 
@@ -199,8 +202,7 @@ mod tests {
         let staging = tempfile::tempdir().expect("create staging");
         let destination = destination_dir.path().join("Example video.mp4");
 
-        ensure_plan(staging.path(), &destination, 42, true, true)
-            .expect("write destination plan");
+        ensure_plan(staging.path(), &destination, 42, true, true).expect("write destination plan");
 
         let plan = read_plan(&staging.path().join(PLAN_FILE))
             .expect("read destination plan")
@@ -225,8 +227,7 @@ mod tests {
         let staging = tempfile::tempdir().expect("create staging");
         let destination = destination_dir.path().join("Example.mp4");
 
-        ensure_plan(staging.path(), &destination, 7, false, false)
-            .expect("write initial plan");
+        ensure_plan(staging.path(), &destination, 7, false, false).expect("write initial plan");
         let path = staging.path().join(PLAN_FILE);
         let before = fs::read(&path).expect("read initial metadata");
 
@@ -262,14 +263,16 @@ mod tests {
         std::os::unix::fs::symlink(&victim, staging.path().join(PLAN_FILE))
             .expect("create metadata symlink");
 
-        assert!(ensure_plan(
-            staging.path(),
-            &destination_dir.path().join("Example.mp4"),
-            7,
-            false,
-            false,
-        )
-        .is_err());
+        assert!(
+            ensure_plan(
+                staging.path(),
+                &destination_dir.path().join("Example.mp4"),
+                7,
+                false,
+                false,
+            )
+            .is_err()
+        );
         assert_eq!(fs::read(victim).expect("read victim"), b"preserve");
     }
 }

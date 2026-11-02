@@ -860,6 +860,7 @@ async fn transfer_static_manifest_tracks(
                             if matches!(&error, ManifestRunError::Unsupported(_)) {
                                 let _ = crate::manifest_writer::cleanup_destination_part(
                                     staging,
+                                    video_dir,
                                     destination,
                                     item_id,
                                     crate::manifest_destination::TrackKind::Video,
@@ -1637,28 +1638,31 @@ async fn finalize_manifest_download(
                 ..
             }
         );
-        for (track, filename) in [
+        let subtitle_directory = staging.join("subtitles");
+        for (track, filename, track_directory, should_clean) in [
             (
                 crate::manifest_destination::TrackKind::Video,
                 video_filename,
+                video_dir,
+                true,
             ),
             (
                 crate::manifest_destination::TrackKind::Audio,
                 audio_filename,
+                audio_dir,
+                has_audio,
             ),
             (
                 crate::manifest_destination::TrackKind::Subtitles,
                 "subtitle-track.mp4",
+                subtitle_directory.as_path(),
+                has_destination_subtitles,
             ),
         ] {
-            let should_clean = match track {
-                crate::manifest_destination::TrackKind::Video => true,
-                crate::manifest_destination::TrackKind::Audio => has_audio,
-                crate::manifest_destination::TrackKind::Subtitles => has_destination_subtitles,
-            };
             if should_clean
                 && let Err(error) = crate::manifest_writer::cleanup_destination_part(
                     staging,
+                    track_directory,
                     &job.dest,
                     job.item_id,
                     track,
@@ -2629,6 +2633,7 @@ async fn fetch_and_write_ordered_track(
                     drop(writer);
                     crate::manifest_writer::cleanup_destination_part(
                         staging,
+                        directory,
                         destination,
                         item_id,
                         track,

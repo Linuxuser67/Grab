@@ -532,7 +532,11 @@ async fn prepare_manifest_attempt(
     }
     let finish_requested = finish_marker_bytes.is_some();
     let dash_live_requested = job.source.kind == ManifestKind::Dash
-        && job.source.representation_key.as_str().starts_with("dash-live-");
+        && job
+            .source
+            .representation_key
+            .as_str()
+            .starts_with("dash-live-");
     // A crash may occur after the unrecoverable marker is synced but before
     // the stale audio index is removed. Enforce the video-only decision before
     // restoring either protocol's local track state.

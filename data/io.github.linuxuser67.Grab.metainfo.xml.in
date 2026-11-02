@@ -50,6 +50,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.4" date="2026-11-02">
+      <description>
+        <ul>
+          <li>Reduce the staged footprint of native HLS/DASH downloads by writing track fragments as destination-visible parts instead of committing unrelated files to staging.</li>
+          <li>Make live recording intake and recovery more reliable with typed identities, bounded metadata reads, resume coverage, and safer finish and rollback handling.</li>
+          <li>Improve manifest routing for native streams, including content-derived HLS identities, low-latency media playlist support, and more predictable fallback behavior.</li>
+          <li>Add and refine structured staging tooling for repeated native stream tests, while keeping prior versions' update metadata and compatibility.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.3" date="2026-11-01">
       <description>
         <ul>

@@ -1548,7 +1548,7 @@ fn native_manifest_source_survives_queue_restore() {
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".into(),
         audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".into()),
-        subtitle_key: Some("hls-subtitle-0123456789abcdef0123456789abcdef".to_string()),
+        subtitle_key: Some("hls-subtitle-0123456789abcdef0123456789abcdef".into()),
         subtitle_language: Some("en".to_string()),
     };
 

@@ -261,8 +261,20 @@ impl OrderedTrackWriter {
                         destination_part.track,
                     )?;
                     let mut output = tokio::fs::File::from_std(owned);
-                    let mut input = tokio::fs::File::open(&target).await
-                        .map_err(|error| format!("Could not open the recovered DASH track: {error}"))?;
+                    let source = match open_regular_file_no_follow(&target) {
+                        Ok(file) => tokio::fs::File::from_std(file),
+                        Err(error) => {
+                            drop(output);
+                            let _ = crate::manifest_destination::remove_owned_part(
+                                directory,
+                                &destination_part.destination,
+                                destination_part.item_id,
+                                destination_part.track,
+                            );
+                            return Err(format!("Could not safely open the recovered DASH track: {error}"));
+                        }
+                    };
+                    let mut input = source;
                     let copied = match tokio::io::copy(&mut input, &mut output).await {
                         Ok(copied) => copied,
                         Err(error) => {
@@ -996,6 +1008,25 @@ async fn load_checkpoint(
             committed_offset: checkpoint.committed_offset,
         })
     }
+}
+
+
+fn open_regular_file_no_follow(path: &Path) -> Result<std::fs::File, std::io::Error> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path is not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 async fn hash_file_range(path: &Path, offset: u64, length: u64) -> Result<String, String> {

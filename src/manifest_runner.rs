@@ -2488,20 +2488,38 @@ async fn fetch_and_write_dash_track(
     .await
 }
 
-async fn fetch_and_write_hls_track(
-    client: &reqwest::Client,
-    staging: &Path,
-    plan: &HlsPlan,
-    directory: &Path,
-    filename: &str,
-    destination: &Path,
+struct ManifestHlsTrackTransfer<'a> {
+    client: &'a reqwest::Client,
+    staging: &'a Path,
+    plan: &'a HlsPlan,
+    directory: &'a Path,
+    filename: &'a str,
+    destination: &'a Path,
     item_id: u64,
     track: crate::manifest_destination::TrackKind,
     connections: usize,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &Arc<AtomicU64>,
-    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'a Arc<AtomicU64>,
+    abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+}
+
+async fn fetch_and_write_hls_track(
+    context: ManifestHlsTrackTransfer<'_>,
 ) -> Result<bool, ManifestRunError> {
+    let ManifestHlsTrackTransfer {
+        client,
+        staging,
+        plan,
+        directory,
+        filename,
+        destination,
+        item_id,
+        track,
+        connections,
+        tx,
+        downloaded,
+        abort,
+    } = context;
     fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
         client,
         staging,

@@ -614,6 +614,7 @@ async fn destination_part_stays_visible_until_final_container_cleanup() {
     let (Some(mut writer), committed) = OrderedTrackWriter::open_destination_part(
         resources,
         &directory,
+        &directory,
         "video-track.mp4",
         &destination,
         42,
@@ -647,6 +648,7 @@ async fn destination_part_stays_visible_until_final_container_cleanup() {
     assert!(!directory.join("video-track.mp4").exists());
 
     cleanup_destination_part(
+        &directory,
         &directory,
         &destination,
         42,
@@ -702,6 +704,7 @@ async fn migrates_a_completed_staging_track_to_the_owned_destination_part() {
     let (writer, committed) = OrderedTrackWriter::open_destination_part(
         resources,
         &directory,
+        &directory,
         "video-track.mp4",
         &destination,
         43,
@@ -727,6 +730,7 @@ async fn migrates_a_completed_staging_track_to_the_owned_destination_part() {
     assert!(!directory.join("video-track.mp4").exists());
 
     cleanup_destination_part(
+        &directory,
         &directory,
         &destination,
         43,
@@ -788,6 +792,7 @@ async fn resumes_a_crash_during_staging_to_destination_part_migration() {
     let (writer, committed) = OrderedTrackWriter::open_destination_part(
         resources,
         &directory,
+        &directory,
         "video-track.mp4",
         &destination,
         44,
@@ -813,6 +818,7 @@ async fn resumes_a_crash_during_staging_to_destination_part_migration() {
     );
     assert!(!directory.join("video-track.mp4").exists());
     cleanup_destination_part(
+        &directory,
         &directory,
         &destination,
         44,

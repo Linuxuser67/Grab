@@ -75,6 +75,13 @@ pub(crate) struct OrderedTrackWriter {
     next_resource_index: usize,
     committed_offset: u64,
     checkpoint_policy: CheckpointPolicy,
+    destination_part: Option<DestinationPart>,
+}
+
+struct DestinationPart {
+    destination: std::path::PathBuf,
+    item_id: u64,
+    track: crate::manifest_destination::TrackKind,
 }
 
 struct HashingWriter<'a> {
@@ -145,6 +152,7 @@ impl OrderedTrackWriter {
             directory,
             filename,
             CheckpointPolicy::RemoveAfterPublish,
+            None,
         )
         .await
     }
@@ -167,6 +175,36 @@ impl OrderedTrackWriter {
             directory,
             filename,
             CheckpointPolicy::RetainAfterPublish,
+            None,
+        )
+        .await
+    }
+
+    /// Open a writer whose output is an exclusively claimed part beside the
+    /// user's final destination. Recovery metadata and source resources remain
+    /// in the XDG staging directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plan, checkpoint, ownership record, or files are invalid.
+    pub(crate) async fn open_destination_part(
+        resources: Vec<String>,
+        directory: &Path,
+        filename: &str,
+        destination: &Path,
+        item_id: u64,
+        track: crate::manifest_destination::TrackKind,
+    ) -> Result<(Option<Self>, u64), String> {
+        Self::open_with_policy(
+            resources,
+            directory,
+            filename,
+            CheckpointPolicy::RetainAfterPublish,
+            Some(DestinationPart {
+                destination: destination.to_path_buf(),
+                item_id,
+                track,
+            }),
         )
         .await
     }
@@ -176,6 +214,7 @@ impl OrderedTrackWriter {
         directory: &Path,
         filename: &str,
         checkpoint_policy: CheckpointPolicy,
+        destination_part: Option<DestinationPart>,
     ) -> Result<(Option<Self>, u64), String> {
         if resources.is_empty() {
             return Err("The DASH recording contains no media resources".to_string());
@@ -190,7 +229,15 @@ impl OrderedTrackWriter {
 
         let fingerprint = plan_fingerprint(&resources)?;
         let target = directory.join(filename);
-        let part = directory.join(format!("{filename}.part"));
+        let part = match destination_part.as_ref() {
+            Some(destination_part) => crate::manifest_destination::part_path(
+                directory,
+                &destination_part.destination,
+                destination_part.item_id,
+                destination_part.track,
+            )?,
+            None => directory.join(format!("{filename}.part")),
+        };
         let checkpoint_path = directory.join(format!("{filename}.checkpoint.json"));
         let journal_path = directory.join(format!("{filename}.resources"));
         let checkpoint_state = load_checkpoint(
@@ -214,8 +261,10 @@ impl OrderedTrackWriter {
                 return Ok((None, committed_offset));
             }
             CheckpointState::Fresh => {
-                remove_regular_file_if_present(&part).await?;
-                remove_regular_file_if_present(&target).await?;
+                if destination_part.is_none() {
+                    remove_regular_file_if_present(&part).await?;
+                    remove_regular_file_if_present(&target).await?;
+                }
                 remove_regular_file_if_present(&journal_path).await?;
                 (0, 0, Vec::new())
             }
@@ -229,14 +278,23 @@ impl OrderedTrackWriter {
             remove_committed_source_files(&resources, directory, &committed_resources).await?;
         }
 
-        let mut output = tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&part)
-            .await
-            .map_err(|error| format!("Could not open the ordered DASH track: {error}"))?;
+        let mut output = if let Some(destination_part) = destination_part.as_ref() {
+            tokio::fs::File::from_std(crate::manifest_destination::open_owned_part(
+                directory,
+                &destination_part.destination,
+                destination_part.item_id,
+                destination_part.track,
+            )?)
+        } else {
+            tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&part)
+                .await
+                .map_err(|error| format!("Could not open the ordered DASH track: {error}"))?
+        };
         output
             .set_len(committed_offset)
             .await
@@ -259,6 +317,7 @@ impl OrderedTrackWriter {
                 next_resource_index,
                 committed_offset,
                 checkpoint_policy,
+                destination_part,
             }),
             committed_offset,
         ))
@@ -383,9 +442,14 @@ impl OrderedTrackWriter {
             .await
             .map_err(|error| format!("Could not flush the completed DASH track: {error}"))?;
         drop(self.output);
-        crate::file_names::rename_noreplace(&self.part, &self.target)
-            .map_err(|error| format!("Could not publish the ordered DASH track: {error}"))?;
-        sync_directory(&self.directory).await?;
+        if let Some(parent) = self.part.parent() {
+            sync_directory(parent).await?;
+        }
+        if self.destination_part.is_none() {
+            crate::file_names::rename_noreplace(&self.part, &self.target)
+                .map_err(|error| format!("Could not publish the ordered DASH track: {error}"))?;
+            sync_directory(&self.directory).await?;
+        }
         if self.checkpoint_policy == CheckpointPolicy::RemoveAfterPublish {
             remove_regular_file_if_present(&self.checkpoint_path).await?;
             remove_regular_file_if_present(&self.journal_path).await?;
@@ -393,6 +457,25 @@ impl OrderedTrackWriter {
         }
         Ok(())
     }
+}
+
+/// Remove the owned destination part and its XDG recovery metadata after
+/// the final container has been published successfully.
+///
+/// # Errors
+///
+/// Returns an error if the part is no longer owned by this item or metadata cleanup fails.
+pub(crate) async fn cleanup_destination_part(
+    staging: &Path,
+    destination: &Path,
+    item_id: u64,
+    track: crate::manifest_destination::TrackKind,
+    filename: &str,
+) -> Result<(), String> {
+    crate::manifest_destination::remove_owned_part(staging, destination, item_id, track)?;
+    remove_regular_file_if_present(&staging.join(format!("{filename}.checkpoint.json"))).await?;
+    remove_regular_file_if_present(&staging.join(format!("{filename}.resources"))).await?;
+    sync_directory(staging).await
 }
 
 /// Return the resource prefix proven durable by the ordered writer.

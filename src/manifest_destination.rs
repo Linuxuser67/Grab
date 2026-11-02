@@ -643,6 +643,8 @@ mod tests {
             .expect("reopen owned part");
         assert_eq!(reopened.metadata().expect("part metadata").len(), 13);
         drop(reopened);
+        verify_owned_part(staging.path(), &destination, 42, TrackKind::Video)
+            .expect("verify owned destination part");
         assert_eq!(fs::read(&part).expect("read part"), b"partial media");
 
         remove_owned_part(staging.path(), &destination, 42, TrackKind::Video)
@@ -681,6 +683,7 @@ mod tests {
         fs::write(&part, b"replacement").expect("write replacement");
 
         assert!(open_owned_part(staging.path(), &destination, 42, TrackKind::Video).is_err());
+        assert!(verify_owned_part(staging.path(), &destination, 42, TrackKind::Video).is_err());
         assert!(remove_owned_part(staging.path(), &destination, 42, TrackKind::Video).is_err());
         assert_eq!(fs::read(part).expect("read replacement"), b"replacement");
         drop(original);

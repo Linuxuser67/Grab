@@ -13,7 +13,7 @@ use crate::media_types::{ManifestKind, ManifestSource};
 
 const RECOVERY_FILE: &str = "manifest-recovery.json";
 const RECOVERY_VERSION: u32 = 1;
-const MAX_RECOVERY_MARKER_BYTES: u64 = 4096;
+const MAX_RECOVERY_MARKER_BYTES: usize = 4096;
 
 /// Structured failures from manifest recovery metadata operations.
 #[derive(Debug, Error)]
@@ -384,7 +384,7 @@ mod tests {
         let staging = tempfile::tempdir().expect("create staging directory");
         fs::write(
             staging.path().join(RECOVERY_FILE),
-            vec![b' '; MAX_RECOVERY_MARKER_BYTES as usize + 1],
+            vec![b' '; MAX_RECOVERY_MARKER_BYTES + 1],
         )
         .expect("write oversized recovery marker");
         let expected = fingerprint(&source(), "mp4", true).expect("fingerprint");

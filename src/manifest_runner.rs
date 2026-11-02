@@ -5293,8 +5293,8 @@ mod tests {
 
         assert!(
             concat_dash_resource_names(&resources, &directory, "video-track.mp4", &mut abort,)
-            .await
-            .expect("resume live DASH finalization")
+                .await
+                .expect("resume live DASH finalization")
         );
         assert_eq!(
             tokio::fs::read(directory.join("video-track.mp4"))

@@ -391,15 +391,15 @@ pub(crate) fn remove_owned_part(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("Could not inspect owned manifest part: {error}")),
     }
-    fs::remove_file(&owner_path)
-        .map_err(|error| format!("Could not remove manifest part ownership record: {error}"))?;
-    sync_staging_directory(staging)?;
     let parent = path
         .parent()
         .ok_or_else(|| "The manifest part has no parent directory".to_string())?;
     File::open(parent)
         .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("Could not sync destination directory: {error}"))
+        .map_err(|error| format!("Could not sync destination directory: {error}"))?;
+    fs::remove_file(&owner_path)
+        .map_err(|error| format!("Could not remove manifest part ownership record: {error}"))?;
+    sync_staging_directory(staging)
 }
 
 #[derive(Clone, Copy)]

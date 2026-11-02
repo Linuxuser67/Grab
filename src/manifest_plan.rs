@@ -307,9 +307,7 @@ impl ManifestLookup {
         let choice = choices.get(index)?;
         let audio_choices = self.audio_choices(&choice.key);
         let audio_index = Self::preferred_audio_choice_index(&audio_choices);
-        let audio_key = audio_choices
-            .get(audio_index)
-            .map(|audio| &audio.key);
+        let audio_key = audio_choices.get(audio_index).map(|audio| &audio.key);
         let subtitle_key = self.preferred_subtitle_key(&choice.key, subtitle_language);
         self.selected_source(&choice.key, audio_key, subtitle_key.as_ref())
     }

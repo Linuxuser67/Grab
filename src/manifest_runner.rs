@@ -2887,6 +2887,37 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn mpegts_fragment_validation_requires_aligned_transport_packets() {
+        let directory = tempfile::tempdir().expect("create fragment test directory");
+        let path = directory.path().join("segment.bin");
+        let mut bytes = vec![0_u8; 188 * 3];
+        for offset in [0, 188, 376] {
+            bytes[offset] = 0x47;
+        }
+        tokio::fs::write(&path, &bytes)
+            .await
+            .expect("write MPEG-TS fragment");
+        assert!(is_mpegts_segment(&path)
+            .await
+            .expect("inspect MPEG-TS fragment"));
+
+        bytes[188] = 0;
+        tokio::fs::write(&path, &bytes)
+            .await
+            .expect("write invalid transport fragment");
+        assert!(!is_mpegts_segment(&path)
+            .await
+            .expect("inspect invalid transport fragment"));
+
+        tokio::fs::write(&path, vec![0x47; 187])
+            .await
+            .expect("write truncated transport fragment");
+        assert!(!is_mpegts_segment(&path)
+            .await
+            .expect("inspect truncated transport fragment"));
+    }
+
+    #[tokio::test]
     async fn track_directory_rejects_existing_non_directory() {
         let directory = tempfile::tempdir().expect("create staging parent");
         let path = directory.path().join("track");

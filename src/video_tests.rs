@@ -6906,6 +6906,7 @@ fn dump_json_flat_playlist_flag_per_caller() {
                 std::time::Duration::from_secs(30),
                 None,
                 flat,
+                None,
             ))
             .expect("fake dump parses");
         let argv = fake_bin_argv(&bin);

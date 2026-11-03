@@ -300,6 +300,7 @@ fn hash_field(hasher: &mut Sha256, name: &[u8], value: &[u8]) {
     hasher.update(value);
 }
 
+#[cfg(not(unix))]
 fn hash_system_time(hasher: &mut Sha256, name: &[u8], time: SystemTime) {
     if let Ok(duration) = time.duration_since(UNIX_EPOCH) {
         hash_field(hasher, name, &duration.as_nanos().to_be_bytes());

@@ -662,6 +662,7 @@ where
     }
 
     let permissions = temporary.as_file().metadata()?.permissions();
+    claim.file.set_permissions(permissions)?;
     let mut source = temporary.as_file();
     let mut buffer = [0_u8; 256 * 1024];
     loop {
@@ -677,7 +678,6 @@ where
         }
         claim.file.write_all(&buffer[..read])?;
     }
-    claim.file.set_permissions(permissions)?;
     claim.file.flush()?;
     claim.file.sync_all()?;
 

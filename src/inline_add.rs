@@ -385,12 +385,19 @@ enum NativePriorityOutcome<M, T> {
     },
 }
 
+enum FirstLookupCompletion<M, T> {
+    Native {
+        result: Result<M, String>,
+        native_ms: u64,
+    },
+    Extractors(T),
+}
+
 /// Race native intake against all extractor work while preserving native priority.
 ///
 /// If the extractor path completes first, retain its result until native intake
-/// finishes: a valid native plan must still win. Returning from the native arm
-/// drops the extractor future, whose existing abort guards terminate its child
-/// processes and nested probe task.
+/// finishes: a valid native plan must still win. When native wins, dropping the
+/// extractor future triggers its abort-on-drop guard for any active subprocesses.
 async fn prefer_native_manifest<M, N, E>(
     native_future: N,
     extractor_future: E,
@@ -402,26 +409,39 @@ where
     tokio::pin!(native_future);
     tokio::pin!(extractor_future);
 
-    tokio::select! {
+    // Native is deliberately first: if both futures are ready in the same poll,
+    // a valid native plan must take precedence.
+    let first_completion = tokio::select! {
         biased;
 
-        native = &mut native_future => {
-            let (native_result, native_ms) = native;
-            match native_result {
-                Ok(manifest) => NativePriorityOutcome::Native {
-                    manifest,
-                    native_ms,
-                    extractor_future_dropped: true,
-                },
-                Err(native_error) => NativePriorityOutcome::Fallback {
-                    native_error,
-                    native_ms,
-                    extractor_result: extractor_future.await,
-                },
-            }
-        }
+        (result, native_ms) = &mut native_future => FirstLookupCompletion::Native {
+            result,
+            native_ms,
+        },
 
         extractor_result = &mut extractor_future => {
+            FirstLookupCompletion::Extractors(extractor_result)
+        }
+    };
+
+    match first_completion {
+        FirstLookupCompletion::Native {
+            result: Ok(manifest),
+            native_ms,
+        } => NativePriorityOutcome::Native {
+            manifest,
+            native_ms,
+            extractor_future_dropped: true,
+        },
+        FirstLookupCompletion::Native {
+            result: Err(native_error),
+            native_ms,
+        } => NativePriorityOutcome::Fallback {
+            native_error,
+            native_ms,
+            extractor_result: extractor_future.await,
+        },
+        FirstLookupCompletion::Extractors(extractor_result) => {
             let (native_result, native_ms) = native_future.await;
             match native_result {
                 Ok(manifest) => NativePriorityOutcome::Native {
@@ -581,9 +601,8 @@ async fn lookup_extractors_inner(
         },
         "lookup tool resolution timing"
     );
-    let youtube_bin = youtube_result.map_err(|error| {
-        MediaLookupFailure::MissingTools(error.to_string())
-    })?;
+    let youtube_bin = youtube_result
+        .map_err(|error| MediaLookupFailure::MissingTools(error.to_string()))?;
     let gallery_tool = match gallery_result {
         Some(Ok(path)) => Some(path),
         Some(Err(error)) => {
@@ -621,7 +640,9 @@ async fn lookup_extractors_inner(
         let _abort_probe_on_drop = AbortTaskOnDrop(probe_handle.abort_handle());
         let outcome = probe_handle.await.map_err(|error| {
             tracing::error!(error = %error, "dual-backend probe task failed");
-            MediaLookupFailure::Failed(gettext("The lookup failed unexpectedly. Please try again."))
+            MediaLookupFailure::Failed(gettext(
+                "The lookup failed unexpectedly. Please try again.",
+            ))
         })?;
         let crate::inline_gallery::DualProbeOutcome::Complete { gallery, ytdlp } = outcome;
 

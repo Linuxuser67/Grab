@@ -721,9 +721,7 @@ where
                 ))
             }
         }
-        Err(error)
-            if link_unsupported(&error.error) || noreplace_unsupported(&error.error) =>
-        {
+        Err(error) if link_unsupported(&error.error) || noreplace_unsupported(&error.error) => {
             publish_by_exclusive_copy(error.file, destination, should_continue)
         }
         Err(error) => Err(error.error),

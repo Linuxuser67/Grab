@@ -459,7 +459,10 @@ mod tests {
 
         assert!(!stale.exists(), "pre-startup publish leftovers are removed");
         assert!(fresh.exists(), "files created after startup are preserved");
-        assert!(unrelated.exists(), "unrelated temporary files are preserved");
+        assert!(
+            unrelated.exists(),
+            "unrelated temporary files are preserved"
+        );
     }
 
     #[cfg(unix)]

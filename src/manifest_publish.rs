@@ -381,7 +381,7 @@ async fn commit_pending_copy(
 
 /// O_EXCL fallback when the destination filesystem cannot publish an unnamed inode.
 async fn persist_by_exclusive_copy(
-    source: std::fs::File,
+    mut source: std::fs::File,
     destination: &Path,
     gate: &Arc<crate::attempt_gate::AttemptGate>,
 ) -> std::io::Result<ManifestPublishOutcome> {

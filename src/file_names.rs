@@ -1096,12 +1096,12 @@ mod tests {
     fn exclusive_copy_fallback_removes_its_claim_on_cancellation() {
         let dir = tempfile::tempdir().unwrap();
         let temporary = publish_temp_in(dir.path()).unwrap();
-        std::fs::write(temporary.path(), b"new payload").unwrap();
+        std::fs::write(temporary.path(), vec![0x5a; 1024 * 1024]).unwrap();
         let destination = dir.path().join("cancelled");
         let mut checks = 0;
         let result = publish_by_exclusive_copy(temporary, &destination, || {
             checks += 1;
-            checks < 3
+            checks < 4
         });
 
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);

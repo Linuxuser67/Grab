@@ -893,21 +893,7 @@ async fn transfer_static_manifest_tracks(
                     {
                         Ok(true) => {}
                         Ok(false) => return Ok(false),
-                        Err(error) => {
-                            if matches!(&error, ManifestRunError::Unsupported(_)) {
-                                crate::manifest_writer::cleanup_destination_part(
-                                    staging,
-                                    video_dir,
-                                    destination,
-                                    item_id,
-                                    crate::manifest_destination::TrackKind::Video,
-                                    "video-track.ts",
-                                )
-                                .await
-                                .map_err(ManifestRunError::Failed)?;
-                            }
-                            return Err(error);
-                        }
+                        Err(error) => return Err(error),
                     }
                 }
             } else {
@@ -2749,9 +2735,6 @@ async fn fetch_and_write_hls_track(
         {
             Ok(true) => {}
             Ok(false) => return Ok(false),
-            Err(ManifestRunError::Unsupported(message)) => {
-                return Err(ManifestRunError::Failed(message));
-            }
             Err(error) => return Err(error),
         }
     }
@@ -2897,7 +2880,7 @@ async fn fetch_hls_resource_to_writer(
                 .checked_add(chunk_len)
                 .filter(|size| *size <= MAX_RESOURCE_BYTES)
                 .ok_or_else(|| {
-                    ManifestRunError::Unsupported("An HLS fragment exceeds the 1 GiB limit".to_string())
+                    ManifestRunError::Failed("An HLS fragment exceeds the 1 GiB limit".to_string())
                 })?;
             validator.observe(&chunk);
             writer

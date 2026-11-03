@@ -339,9 +339,10 @@ fn append_native_fallback_reason(message: &str, native_reason: Option<&str>) -> 
     }
 }
 
-/// Resolve tool paths and run the appropriate extractor probe(s). Cancellation
-/// drops this future; a dual probe has an abort-on-drop guard so its subprocesses
-/// do not outlive the lookup that owns them.
+/// Resolve media metadata by racing native HLS/DASH intake against extractor probes.
+///
+/// Dropping this future cancels native I/O and drops the extractor future; its
+/// abort-on-drop guard terminates any active dual-probe subprocesses.
 async fn lookup_media(
     url: String,
     browser: String,
@@ -675,7 +676,6 @@ async fn lookup_extractors_inner(
         native_fallback_reason: None,
     })))
 }
-
 
 /// The video preview block inside the form: exactly one state shows at a
 /// time (ready rows, tools row, or the centered error card), driven by the
@@ -5260,6 +5260,42 @@ mod tests {
             NativePriorityOutcome::Native { .. } => {
                 panic!("an unsupported native manifest must fall back");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_native_intake_falls_back_when_extractors_finish_first() {
+        let native = async {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            (Err("unsupported manifest".to_string()), 5)
+        };
+        let extractor = std::future::ready(Ok::<_, String>("extractor"));
+
+        match prefer_native_manifest(native, extractor).await {
+            NativePriorityOutcome::Fallback {
+                native_error,
+                native_ms,
+                extractor_result,
+            } => {
+                assert_eq!(native_error, "unsupported manifest");
+                assert_eq!(native_ms, 5);
+                assert_eq!(extractor_result, Ok("extractor"));
+            }
+            NativePriorityOutcome::Native { .. } => {
+                panic!("an unsupported native manifest must fall back");
+            }
+        }
+    }
+
+    #[test]
+    fn native_fallback_reason_is_attached_to_extractor_failures() {
+        let result = Err(MediaLookupFailure::MissingTools("yt-dlp missing".into()));
+        match attach_native_fallback_reason(result, "manifest was unsupported".into()) {
+            Err(MediaLookupFailure::MissingTools(message)) => {
+                assert!(message.contains("yt-dlp missing"));
+                assert!(message.contains("manifest was unsupported"));
+            }
+            _ => panic!("the extractor failure must be preserved"),
         }
     }
 

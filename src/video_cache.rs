@@ -213,6 +213,25 @@ pub(crate) fn cache_key(
     for argument in identity_args {
         hash_field(&mut hasher, b"identity-arg", argument.as_bytes());
     }
+    if let Some(runtime) = identity_args
+        .windows(2)
+        .find(|pair| pair[0] == "--js-runtimes")
+        .and_then(|pair| pair[1].strip_prefix("deno:"))
+    {
+        let path = Path::new(runtime);
+        let metadata = std::fs::metadata(path).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        hash_field(&mut hasher, b"deno-path", path.as_os_str().to_string_lossy().as_bytes());
+        hash_field(&mut hasher, b"deno-size", &metadata.len().to_be_bytes());
+        if let Ok(modified) = metadata.modified() {
+            hash_system_time(&mut hasher, b"deno-modified", modified);
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        hash_field(&mut hasher, b"PATH", path.to_string_lossy().as_bytes());
+    }
 
     if let Some(path) = cookie_path {
         let metadata = std::fs::metadata(path).ok()?;
@@ -318,7 +337,75 @@ fn has_rotating_auth_query(url: &url::Url) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::has_rotating_auth_query;
+    use super::{cache_key, has_rotating_auth_query};
+    use crate::net_types::ResolvedProxy;
+    use std::path::Path;
+
+    fn fake_binary(directory: &Path) -> std::path::PathBuf {
+        let binary = directory.join("yt-dlp");
+        std::fs::write(&binary, b"fake yt-dlp binary").expect("write fake binary");
+        binary
+    }
+
+    #[test]
+    fn cache_key_scopes_proxy_and_extractor_identity() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = fake_binary(directory.path());
+        let url = "https://example.test/watch?v=1";
+        let args = vec!["--".to_string(), url.to_string()];
+        let base = cache_key(url, &binary, "2026.10.23", "none", None, &args)
+            .expect("anonymous lookup should be cacheable");
+        assert_eq!(
+            cache_key(url, &binary, "2026.10.23", "none", None, &args),
+            Some(base.clone())
+        );
+
+        let changed_args = vec![
+            "--user-agent".to_string(),
+            "Browser/1".to_string(),
+            "--".to_string(),
+            url.to_string(),
+        ];
+        assert_ne!(
+            cache_key(url, &binary, "2026.10.23", "none", None, &changed_args),
+            Some(base.clone())
+        );
+
+        let proxy = ResolvedProxy {
+            proxies: Vec::new(),
+            cli_url: "http://user:password@proxy.example:8080".to_string(),
+            no_proxy_env: "localhost".to_string(),
+        };
+        assert_ne!(
+            cache_key(url, &binary, "2026.10.23", "none", Some(&proxy), &args),
+            Some(base)
+        );
+    }
+
+    #[test]
+    fn browser_profile_cache_requires_the_exact_handoff_jar() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = fake_binary(directory.path());
+        let url = "https://example.test/watch?v=1";
+        let no_cookies = vec!["--".to_string(), url.to_string()];
+        assert!(
+            cache_key(url, &binary, "2026.10.23", "chrome", None, &no_cookies).is_none()
+        );
+
+        let cookie_file = directory.path().join("handoff.cookies");
+        std::fs::write(&cookie_file, "# Netscape HTTP Cookie File\n").expect("write cookie jar");
+        let with_handoff = vec![
+            "--cookies".to_string(),
+            cookie_file.to_string_lossy().into_owned(),
+            "--user-agent".to_string(),
+            "Browser/1".to_string(),
+            "--".to_string(),
+            url.to_string(),
+        ];
+        assert!(
+            cache_key(url, &binary, "2026.10.23", "chrome", None, &with_handoff).is_some()
+        );
+    }
 
     #[test]
     fn rejects_rotating_auth_query_parameters() {

@@ -99,7 +99,8 @@ fn to_cached_playlist(key: &str, info: &PlaylistInfo) -> Option<Playlist> {
         let Ok(url) = url::Url::parse(&item.page_url) else {
             return true;
         };
-        crate::video_cache::has_rotating_auth_query(&url)
+        !matches!(url.scheme(), "http" | "https")
+            || crate::video_cache::has_rotating_auth_query(&url)
     }) {
         return None;
     }
@@ -150,7 +151,11 @@ fn from_cached_playlist(key: &str, playlist: Playlist) -> Option<PlaylistInfo> {
     }
 
     let page_url = playlist.url?;
-    if !crate::video_probe::is_http_url(&page_url)
+    let Ok(parsed_page_url) = url::Url::parse(&page_url) else {
+        return None;
+    };
+    if !matches!(parsed_page_url.scheme(), "http" | "https")
+        || crate::video_cache::has_rotating_auth_query(&parsed_page_url)
         || playlist.title.trim().is_empty()
         || playlist.entries.is_empty()
         || playlist.entries.len() >= crate::video_probe::MAX_PLAYLIST_ITEMS
@@ -167,7 +172,11 @@ fn from_cached_playlist(key: &str, playlist: Playlist) -> Option<PlaylistInfo> {
         .entries
         .into_iter()
         .map(|entry| {
-            if entry.id.is_empty() || !crate::video_probe::is_http_url(&entry.url) {
+            let parsed_url = url::Url::parse(&entry.url).ok()?;
+            if entry.id.is_empty()
+                || !matches!(parsed_url.scheme(), "http" | "https")
+                || crate::video_cache::has_rotating_auth_query(&parsed_url)
+            {
                 return None;
             }
             Some(crate::media_types::PlaylistItem {
@@ -304,6 +313,17 @@ mod tests {
 
         let mut info = playlist();
         info.kind = PlaylistKind::Highlights;
+        assert!(to_cached_playlist("key", &info).is_none());
+    }
+
+    #[test]
+    fn rotating_or_non_http_item_urls_are_not_cached() {
+        let mut info = playlist();
+        info.items[0].page_url = "https://cdn.example/item?signature=rotating".to_string();
+        assert!(to_cached_playlist("key", &info).is_none());
+
+        let mut info = playlist();
+        info.items[0].page_url = "ftp://example.test/item".to_string();
         assert!(to_cached_playlist("key", &info).is_none());
     }
 

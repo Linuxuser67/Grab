@@ -421,12 +421,29 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             gtk4::gio::ListStore::new::<crate::download::DownloadItem>(),
             settings.clone(),
         );
-        manager.store().append(&crate::download::DownloadItem::new(
+        let queued = crate::download::DownloadItem::new(
             1,
-            "https://example.com/file",
-            "Example file",
+            "https://example.com/queued",
+            "queued.bin",
             "/tmp",
-        ));
+        );
+        let active = crate::download::DownloadItem::new(
+            2,
+            "https://example.com/active",
+            "active.bin",
+            "/tmp",
+        );
+        active.set_status(crate::download::DownloadStatus::Paused);
+        let downloaded = crate::download::DownloadItem::new(
+            3,
+            "https://example.com/downloaded",
+            "downloaded.bin",
+            "/tmp",
+        );
+        downloaded.set_status(crate::download::DownloadStatus::Done);
+        manager.store().append(&queued);
+        manager.store().append(&active);
+        manager.store().append(&downloaded);
         let toasts = std::rc::Rc::new(libadwaita::ToastOverlay::new());
         let (window, _, add_card) =
             crate::window::build_window(&app, manager, settings, toasts);
@@ -504,18 +521,21 @@ fn status_views_use_gnome_adaptive_view_switcher() {
                 expected_parent,
                 "the single queue scroller follows the selected page"
             );
-            if name == "queued" || name == "all" {
-                assert!(queued_section.is_visible());
-            } else {
-                assert!(
-                    !queued_section.is_visible(),
-                    "a queued row is filtered out of the {name} view"
-                );
-            }
-            if name != "all" {
-                assert!(!active_section.is_visible());
-                assert!(!downloaded_section.is_visible());
-            }
+            assert_eq!(
+                active_section.is_visible(),
+                name == "active" || name == "all",
+                "active rows are shown only in the Active and All views"
+            );
+            assert_eq!(
+                queued_section.is_visible(),
+                name == "queued" || name == "all",
+                "queued rows are shown only in the Queued and All views"
+            );
+            assert_eq!(
+                downloaded_section.is_visible(),
+                name == "downloaded" || name == "all",
+                "downloaded rows are shown only in the Downloaded and All views"
+            );
         }
 
         assert!(

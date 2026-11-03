@@ -419,7 +419,7 @@ mod tests {
         assert!(cache_key(url, &binary, "2026.10.23", "chrome", None, &anonymous).is_none());
 
         let cookie_file = directory.path().join("handoff.cookies");
-        std::fs::write(&cookie_file, "# Netscape HTTP Cookie File\\n").expect("write cookie jar");
+        std::fs::write(&cookie_file, "# Netscape HTTP Cookie File\n").expect("write cookie jar");
         let with_handoff = vec![
             "--cookies".to_string(),
             cookie_file.to_string_lossy().into_owned(),

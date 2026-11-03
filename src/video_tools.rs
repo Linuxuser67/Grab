@@ -464,7 +464,6 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
 /// Filesystem identity used to invalidate executable-probe caches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileStamp {
-    modified: Option<std::time::SystemTime>,
     len: u64,
     #[cfg(unix)]
     device: u64,
@@ -474,6 +473,12 @@ struct FileStamp {
     changed: i64,
     #[cfg(unix)]
     changed_nsec: i64,
+    #[cfg(unix)]
+    modified: i64,
+    #[cfg(unix)]
+    modified_nsec: i64,
+    #[cfg(not(unix))]
+    modified: Option<std::time::SystemTime>,
 }
 
 const FAILED_PROBE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -566,24 +571,24 @@ where
 
 fn file_stamp(binary: &Path) -> Option<FileStamp> {
     let metadata = std::fs::metadata(binary).ok()?;
-    let modified = metadata.modified().ok();
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
         Some(FileStamp {
-            modified,
             len: metadata.len(),
             device: metadata.dev(),
             inode: metadata.ino(),
             changed: metadata.ctime(),
             changed_nsec: metadata.ctime_nsec(),
+            modified: metadata.mtime(),
+            modified_nsec: metadata.mtime_nsec(),
         })
     }
     #[cfg(not(unix))]
     {
         Some(FileStamp {
-            modified,
             len: metadata.len(),
+            modified: metadata.modified().ok(),
         })
     }
 }

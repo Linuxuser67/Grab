@@ -460,8 +460,7 @@ mod tests {
         let similar_but_unowned = directory
             .path()
             .join(".episode.mkv.publish-user-file.partial");
-        std::fs::write(&similar_but_unowned, b"user file")
-            .expect("write similar user file");
+        std::fs::write(&similar_but_unowned, b"user file").expect("write similar user file");
 
         sweep_stale_publish_temporaries(directory.path(), startup_started_at);
 
@@ -631,8 +630,7 @@ mod tests {
         std::fs::write(&source, vec![0x31; 1024 * 1024]).unwrap();
         let mut source_file = std::fs::File::open(&source).unwrap();
         let final_destination = directory.path().join("final.mp4");
-        let mut temporary =
-            crate::file_names::publish_temp_for(&final_destination).unwrap();
+        let mut temporary = crate::file_names::publish_temp_for(&final_destination).unwrap();
         let gate = crate::attempt_gate::AttemptGate::new();
         let mut destination = DiscardAfterFirstWrite {
             file: temporary.as_file_mut(),

@@ -599,11 +599,7 @@ fn publish_temp_prefix(destination: &std::path::Path) -> std::ffi::OsString {
     {
         let name = name.to_string_lossy();
         let end = name.floor_char_boundary(MAX_PREFIX_NAME_BYTES);
-        std::ffi::OsString::from(format!(
-            ".{}{}",
-            &name[..end],
-            PUBLISH_TEMPORARY_MARKER
-        ))
+        std::ffi::OsString::from(format!(".{}{}", &name[..end], PUBLISH_TEMPORARY_MARKER))
     }
 }
 
@@ -1174,7 +1170,9 @@ mod tests {
 
     #[test]
     fn publish_temporary_name_filter_rejects_unrelated_files() {
-        assert!(!is_publish_temporary_name(std::ffi::OsStr::new(".notes.partial")));
+        assert!(!is_publish_temporary_name(std::ffi::OsStr::new(
+            ".notes.partial"
+        )));
         assert!(!is_publish_temporary_name(std::ffi::OsStr::new(
             ".notes.publish-user-file.partial"
         )));

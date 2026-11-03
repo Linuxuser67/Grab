@@ -376,7 +376,7 @@ enum NativePriorityOutcome<M, T> {
     Native {
         manifest: M,
         native_ms: u64,
-        extractors_cancelled: bool,
+        extractor_future_dropped: bool,
     },
     Fallback {
         native_error: String,
@@ -411,7 +411,7 @@ where
                 Ok(manifest) => NativePriorityOutcome::Native {
                     manifest,
                     native_ms,
-                    extractors_cancelled: true,
+                    extractor_future_dropped: true,
                 },
                 Err(native_error) => NativePriorityOutcome::Fallback {
                     native_error,
@@ -427,7 +427,7 @@ where
                 Ok(manifest) => NativePriorityOutcome::Native {
                     manifest,
                     native_ms,
-                    extractors_cancelled: false,
+                    extractor_future_dropped: false,
                 },
                 Err(native_error) => NativePriorityOutcome::Fallback {
                     native_error,
@@ -452,13 +452,13 @@ fn attach_native_fallback_reason(
         Err(MediaLookupFailure::MissingTools(message)) => {
             Err(MediaLookupFailure::MissingTools(append_native_fallback_reason(
                 &message,
-                Some(&native_error),
+                Some(native_error.as_str()),
             )))
         }
         Err(MediaLookupFailure::Failed(message)) => {
             Err(MediaLookupFailure::Failed(append_native_fallback_reason(
                 &message,
-                Some(&native_error),
+                Some(native_error.as_str()),
             )))
         }
         other => other,
@@ -506,13 +506,13 @@ async fn lookup_media_inner(
         NativePriorityOutcome::Native {
             manifest,
             native_ms,
-            extractors_cancelled,
+            extractor_future_dropped,
         } => {
             tracing::info!(
                 url_host = %host,
                 native_ms,
                 lookup_winner = "native",
-                extractors_cancelled,
+                extractor_future_dropped,
                 "concurrent media lookup arbitration"
             );
             Ok(MediaLookupOutcome::Manifest(Box::new(manifest)))
@@ -526,7 +526,7 @@ async fn lookup_media_inner(
                 url_host = %host,
                 native_ms,
                 lookup_winner = "extractors",
-                extractors_cancelled = false,
+                extractor_future_dropped = false,
                 native_error = %native_error,
                 "concurrent media lookup arbitration"
             );
@@ -5203,11 +5203,11 @@ mod tests {
             NativePriorityOutcome::Native {
                 manifest,
                 native_ms,
-                extractors_cancelled,
+                extractor_future_dropped,
             } => {
                 assert_eq!(manifest, "native");
                 assert_eq!(native_ms, 3);
-                assert!(extractors_cancelled);
+                assert!(extractor_future_dropped);
             }
             NativePriorityOutcome::Fallback { .. } => {
                 panic!("a valid native plan must win");
@@ -5227,11 +5227,11 @@ mod tests {
         match prefer_native_manifest(native, extractor).await {
             NativePriorityOutcome::Native {
                 manifest,
-                extractors_cancelled,
+                extractor_future_dropped,
                 ..
             } => {
                 assert_eq!(manifest, "native");
-                assert!(!extractors_cancelled);
+                assert!(!extractor_future_dropped);
             }
             NativePriorityOutcome::Fallback { .. } => {
                 panic!("extractor completion must not outrank native intake");

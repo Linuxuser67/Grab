@@ -206,6 +206,7 @@ pub fn build_window(
         .default_width(settings.window_width().max(400))
         .default_height(settings.window_height().max(300))
         .width_request(360)
+        .height_request(300)
         .build();
 
     settings

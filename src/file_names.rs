@@ -1176,7 +1176,7 @@ mod tests {
     fn publish_temporary_name_filter_rejects_unrelated_files() {
         assert!(!is_publish_temporary_name(std::ffi::OsStr::new(".notes.partial")));
         assert!(!is_publish_temporary_name(std::ffi::OsStr::new(
-            ".notes.publish-manual.partial"
+            ".notes.publish-user-file.partial"
         )));
     }
 

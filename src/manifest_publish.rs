@@ -457,6 +457,11 @@ mod tests {
         std::fs::write(&fresh, b"active media").expect("write fresh temporary");
         let unrelated = directory.path().join(".other-temp.partial");
         std::fs::write(&unrelated, b"unrelated").expect("write unrelated file");
+        let similar_but_unowned = directory
+            .path()
+            .join(".episode.mkv.publish-user-file.partial");
+        std::fs::write(&similar_but_unowned, b"user file")
+            .expect("write similar user file");
 
         sweep_stale_publish_temporaries(directory.path(), startup_started_at);
 
@@ -465,6 +470,10 @@ mod tests {
         assert!(
             unrelated.exists(),
             "unrelated temporary files are preserved"
+        );
+        assert!(
+            similar_but_unowned.exists(),
+            "a similar user filename with a non-random suffix is preserved"
         );
     }
 

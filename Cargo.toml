@@ -52,10 +52,9 @@ tracing-subscriber = "0.3"
 # unifies with Grab's own dependency (same major, no duplicate stack).
 librqbit = { version = "9", default-features = false, features = ["rust-tls"] }
 gettext-rs = "0.8"
-# Video-page extraction (YouTube etc). Wrapper around the yt-dlp + ffmpeg
-# binaries: rustls keeps the rustls-only posture; no cache backend in v1
-# (metadata is refetched, CDN URLs expire in ~6h anyway).
-yt-dlp = { version = "2.9.1", default-features = false, features = ["rustls"] }
+# Video-page extraction (YouTube etc). Use the crate's tiered Moka + Redb
+# metadata cache; Grab scopes entries to the full extraction identity.
+yt-dlp = { version = "2.9.1", default-features = false, features = ["rustls", "cache-memory", "cache-redb"] }
 libc = "0.2"
 # Mozilla Public Suffix List for validating browser cookie domains.
 psl = "=2.1.241"

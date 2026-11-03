@@ -635,7 +635,7 @@ fn publish_by_exclusive_copy<F>(
 where
     F: FnMut() -> bool,
 {
-    use std::io::{Read as _, Write as _};
+    use std::io::{Read as _, Seek as _, Write as _};
 
     if !should_continue() {
         return Err(std::io::Error::new(
@@ -666,6 +666,9 @@ where
     }
 
     let permissions = temporary.as_file().metadata()?.permissions();
+    temporary
+        .as_file_mut()
+        .seek(std::io::SeekFrom::Start(0))?;
     let mut source = temporary.as_file();
     let mut buffer = [0_u8; 256 * 1024];
     loop {
@@ -1152,9 +1155,14 @@ mod tests {
 
     #[test]
     fn exclusive_copy_fallback_publishes_complete_bytes() {
+        use std::io::Write as _;
+
         let dir = tempfile::tempdir().unwrap();
-        let temporary = publish_temp_in(dir.path()).unwrap();
-        std::fs::write(temporary.path(), b"complete payload").unwrap();
+        let mut temporary = publish_temp_in(dir.path()).unwrap();
+        temporary
+            .as_file_mut()
+            .write_all(b"complete payload")
+            .unwrap();
         let destination = dir.path().join("published");
 
         publish_by_exclusive_copy(temporary, &destination, || true).unwrap();

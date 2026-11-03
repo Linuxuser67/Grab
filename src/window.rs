@@ -461,29 +461,13 @@ pub fn build_window(
     let downloaded_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     downloaded_page.set_widget_name("status-page-downloaded");
 
-    view_stack.add_titled_with_icon(
-        &all_page,
-        Some("all"),
-        &gettext("All"),
-        "view-list-symbolic",
-    );
-    view_stack.add_titled_with_icon(
-        &active_page,
-        Some("active"),
-        &gettext("Active"),
-        "emblem-synchronizing-symbolic",
-    );
-    view_stack.add_titled_with_icon(
-        &queued_page,
-        Some("queued"),
-        &gettext("Queued"),
-        "hourglass-symbolic",
-    );
-    view_stack.add_titled_with_icon(
+    view_stack.add_titled(&all_page, Some("all"), &gettext("All"));
+    view_stack.add_titled(&active_page, Some("active"), &gettext("Active"));
+    view_stack.add_titled(&queued_page, Some("queued"), &gettext("Queued"));
+    view_stack.add_titled(
         &downloaded_page,
         Some("downloaded"),
         &gettext("Downloaded"),
-        "folder-download-symbolic",
     );
     all_page.append(&scroll);
     view_stack.set_visible_child_name("all");

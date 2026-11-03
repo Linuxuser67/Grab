@@ -1,8 +1,8 @@
-//! Crash-safe ordered assembly for native manifest tracks.
+//! Crash-safe ordered writes for native manifest tracks.
 //!
-//! Segment requests remain concurrent and bounded by the runner. This module
-//! commits their completed files to one track in manifest order. The checkpoint
-//! advances only after the output bytes and their digest record are synced.
+//! Static HLS resources stream into the destination part; other manifest
+//! resources can be assembled from staged files. A digest journal and checkpoint
+//! protect each committed resource prefix.
 
 use std::path::Path;
 

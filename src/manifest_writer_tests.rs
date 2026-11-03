@@ -1011,6 +1011,15 @@ async fn streamed_destination_writer_resumes_without_staged_source_files() {
         .commit_streamed_resource()
         .await
         .expect("checkpoint first network resource");
+    writer
+        .write_streamed_chunk(b"discarded partial fragment")
+        .await
+        .expect("write partial fragment before rollback");
+    writer
+        .rollback_streamed_resource()
+        .await
+        .expect("discard uncommitted fragment bytes");
+    assert_eq!(writer.committed_offset(), 5);
     drop(writer);
 
     let part = crate::manifest_destination::part_path(&staging, &destination, 78, track)

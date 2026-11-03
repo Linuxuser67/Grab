@@ -885,7 +885,7 @@ async fn transfer_static_manifest_tracks(
                         destination,
                         item_id,
                         track: crate::manifest_destination::TrackKind::Audio,
-                            tx,
+                        tx,
                         downloaded,
                         abort,
                     })

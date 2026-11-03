@@ -431,8 +431,7 @@ fn status_filters_adapt_between_header_and_compact_dropdown() {
             "/tmp",
         ));
         let toasts = std::rc::Rc::new(libadwaita::ToastOverlay::new());
-        let (window, _, add_card) =
-            crate::window::build_window(&app, manager, settings, toasts);
+        let (window, _, add_card) = crate::window::build_window(&app, manager, settings, toasts);
         window.set_default_size(width, 500);
         window.present();
         drain_gtk_events();

@@ -338,9 +338,7 @@ async fn persist_prepared_copy(
     .await
     {
         Ok(Ok(pending)) => pending,
-        Ok(Err(error))
-            if error.kind() == std::io::ErrorKind::Interrupted && !gate.is_active() =>
-        {
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::Interrupted && !gate.is_active() => {
             return Ok(ManifestPublishOutcome::Aborted);
         }
         Ok(Err(error)) => return Err(error),

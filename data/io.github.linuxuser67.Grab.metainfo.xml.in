@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.7" date="2026-11-03">
+      <description>
+        <ul>
+          <li>Remove native manifest partials when deleting a download's local files, and move download filters into a compact adaptive header.</li>
+          <li>Preserve the destination and native manifest behavior accumulated across the current 6.5 beta line.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.6" date="2026-11-03">
       <description>
         <ul>

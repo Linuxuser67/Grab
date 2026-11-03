@@ -334,12 +334,13 @@ fn copy_to_exclusive_destination(
         return Ok(None);
     }
 
-    let mut destination_file = std::fs::OpenOptions::new()
+    let mut options = std::fs::OpenOptions::new();
+    options
         .write(true)
         .create_new(true)
         .mode(0o600);
+    let mut destination_file = options.open(destination)?;
     let mut pending = PendingDestination::new(destination, Arc::clone(gate), None);
-    let mut destination_file = destination_file.open(destination)?;
     pending.arm();
     if !copy_staged_bytes(source, &mut destination_file, gate)? {
         return Ok(None);
@@ -387,12 +388,18 @@ async fn persist_by_exclusive_copy(
     destination: &Path,
     gate: &Arc<crate::attempt_gate::AttemptGate>,
 ) -> std::io::Result<ManifestPublishOutcome> {
-    let destination = destination.to_path_buf();
+    let destination_path = destination.to_path_buf();
+    let destination_for_copy = destination_path.clone();
     let copy_gate = Arc::clone(gate);
     let pending = tokio::task::spawn_blocking(move || {
         let permissions = source.metadata()?.permissions();
         std::io::Seek::seek(&mut source, std::io::SeekFrom::Start(0))?;
-        copy_to_exclusive_destination(&mut source, permissions, &destination, &copy_gate)
+        copy_to_exclusive_destination(
+            &mut source,
+            permissions,
+            &destination_for_copy,
+            &copy_gate,
+        )
     })
     .await
     .map_err(std::io::Error::other)??;
@@ -400,7 +407,7 @@ async fn persist_by_exclusive_copy(
     let Some(pending) = pending else {
         return Ok(ManifestPublishOutcome::Aborted);
     };
-    commit_pending_copy(pending, &destination, gate).await
+    commit_pending_copy(pending, &destination_path, gate).await
 }
 
 /// Atomically link the anonymous inode, or use O_EXCL when the filesystem cannot.

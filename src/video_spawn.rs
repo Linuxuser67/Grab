@@ -239,6 +239,28 @@ pub async fn fetch_video_infos(
             version_ms = phase_started.elapsed().as_millis() as u64;
             let yt_version = version_result?;
             tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
+            // A persistent metadata hit avoids starting yt-dlp (and Deno) for
+            // a repeat preview. The raw JSON is intentionally absent on a hit:
+            // the download worker must obtain fresh extraction data later.
+            if let Some(video) = crate::video_cache::lookup_video(
+                &url,
+                &youtube_bin,
+                &yt_version,
+                &cookies_browser,
+                fetch_proxy.as_ref(),
+            )
+            .await
+            {
+                tracing::info!(
+                    url_host = %page_host(&url),
+                    video_id = %video.id,
+                    "yt-dlp lookup cache hit"
+                );
+                return Ok((
+                    ProbeResult::Single(VideoInfo::from(&video, &url, newest_first)),
+                    None,
+                ));
+            }
             // Deno is Grab's JavaScript runtime for YouTube; make sure it's
             // installed before a YouTube spawn that may need to solve JS challenges.
             let phase_started = std::time::Instant::now();
@@ -278,6 +300,15 @@ pub async fn fetch_video_infos(
                 serde_json::from_value(value).map_err(VideoError::fetch);
             parse_ms = phase_started.elapsed().as_millis() as u64;
             let video = parsed_video?;
+            crate::video_cache::store_video(
+                &url,
+                &youtube_bin,
+                &yt_version,
+                &cookies_browser,
+                fetch_proxy.as_ref(),
+                &video,
+            )
+            .await;
             Ok((
                 ProbeResult::Single(VideoInfo::from(&video, &url, newest_first)),
                 Some(raw_json),

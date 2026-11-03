@@ -57,6 +57,7 @@ mod video_progress;
 mod video_quality;
 mod video_runner;
 mod video_spawn;
+mod video_cache;
 mod video_staging;
 mod video_tools;
 mod video_types;

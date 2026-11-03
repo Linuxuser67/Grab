@@ -381,8 +381,9 @@ pub(crate) fn title_from_manifest_url(url_str: &str) -> String {
         return "video".to_string();
     };
 
-    const GENERIC_ENDPOINTS: &[&str] =
-        &["master", "playlist", "manifest", "index", "stream", "hls", "video", "videos", "dash"];
+    const GENERIC_ENDPOINTS: &[&str] = &[
+        "master", "playlist", "manifest", "index", "stream", "hls", "video", "videos", "dash",
+    ];
     let path_title = parsed
         .path_segments()
         .into_iter()

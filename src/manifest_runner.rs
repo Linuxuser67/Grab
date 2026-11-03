@@ -851,10 +851,10 @@ async fn transfer_static_manifest_tracks(
             subtitle,
             ..
         } => {
-            let use_destination_parts = video.is_plain_mpegts_candidate()
+            let use_destination_parts = video.is_destination_assemblable_candidate()
                 && audio
                     .as_ref()
-                    .is_none_or(HlsPlan::is_plain_mpegts_candidate);
+                    .is_none_or(HlsPlan::is_destination_assemblable_candidate);
             if use_destination_parts {
                 if !fetch_and_write_hls_track(ManifestHlsTrackTransfer {
                     client,
@@ -1546,10 +1546,10 @@ pub(crate) async fn run_manifest_download(
                     || matches!(
                         &tracks,
                         Tracks::Hls { video, audio, .. }
-                            if video.is_plain_mpegts_candidate()
+                            if video.is_destination_assemblable_candidate()
                                 && audio
                                     .as_ref()
-                                    .is_none_or(HlsPlan::is_plain_mpegts_candidate)
+                                    .is_none_or(HlsPlan::is_destination_assemblable_candidate)
                     ))),
         gate,
         abort,
@@ -2719,7 +2719,11 @@ async fn fetch_and_write_hls_track(
         tx,
         downloaded,
         abort,
-        format: OrderedTrackFormat::MpegTs,
+        format: if plan.is_single_init_fmp4_presentation() {
+            OrderedTrackFormat::Fmp4
+        } else {
+            OrderedTrackFormat::MpegTs
+        },
     })
     .await
 }
@@ -2728,6 +2732,7 @@ async fn fetch_and_write_hls_track(
 enum OrderedTrackFormat {
     Any,
     MpegTs,
+    Fmp4,
 }
 
 struct ManifestOrderedTrackTransfer<'a> {
@@ -2826,15 +2831,28 @@ async fn fetch_and_write_ordered_track(
                         Some(Ok(index)) => {
                             completed.insert(index);
                             while completed.remove(&next_resource_index) {
-                                if format == OrderedTrackFormat::MpegTs
-                                    && !is_mpegts_segment(
-                                        &directory.join(&resource_names[next_resource_index]),
-                                    )
-                                    .await?
-                                {
+                                let resource_path =
+                                    directory.join(&resource_names[next_resource_index]);
+                                let compatible = match format {
+                                    OrderedTrackFormat::Any => true,
+                                    OrderedTrackFormat::MpegTs => {
+                                        is_mpegts_segment(&resource_path).await?
+                                    }
+                                    OrderedTrackFormat::Fmp4 => {
+                                        is_fmp4_resource(&resource_path).await?
+                                    }
+                                };
+                                if !compatible {
+                                    let message = match format {
+                                        OrderedTrackFormat::Fmp4 => {
+                                            "The HLS media resource is not a compatible fMP4 fragment"
+                                        }
+                                        _ => {
+                                            "The HLS media segment is not a compatible MPEG-TS fragment"
+                                        }
+                                    };
                                     break 'window Err(ManifestRunError::Unsupported(
-                                        "The HLS media segment is not a compatible MPEG-TS fragment"
-                                            .to_string(),
+                                        message.to_string(),
                                     ));
                                 }
                                 match writer.append_next(abort).await {
@@ -2858,7 +2876,7 @@ async fn fetch_and_write_ordered_track(
             Err(error) => {
                 tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
                     .ok();
-                if format == OrderedTrackFormat::MpegTs
+                if format != OrderedTrackFormat::Any
                     && matches!(&error, ManifestRunError::Unsupported(_))
                 {
                     drop(writer);
@@ -2970,6 +2988,26 @@ async fn is_mpegts_segment(path: &Path) -> Result<bool, ManifestRunError> {
         })?;
     }
     Ok(true)
+}
+
+/// Whether a fetched fMP4 resource starts with a plausible ISO BMFF box header.
+///
+/// A CDN or proxy error page served with a 200 status would otherwise be
+/// committed to a destination-visible part that resume can never repair.
+async fn is_fmp4_resource(path: &Path) -> Result<bool, ManifestRunError> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| manifest_storage_error("Could not open an HLS media fragment", error))?;
+    let mut header = [0_u8; 8];
+    if file.read_exact(&mut header).await.is_err() {
+        return Ok(false);
+    }
+    let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+    let plausible_size = size == 1 || size >= 8;
+    let plausible_type = header[4..8]
+        .iter()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+    Ok(plausible_size && plausible_type)
 }
 
 async fn remove_regular_file_if_present(path: &Path) -> Result<(), String> {
@@ -3175,6 +3213,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fmp4_fragment_validation_requires_box_headers() {
+        let directory = tempfile::tempdir().expect("create fragment test directory");
+        let path = directory.path().join("segment.bin");
+
+        tokio::fs::write(&path, b"\x00\x00\x00\x0cmoof\x00\x00\x00\x01")
+            .await
+            .expect("write fMP4 fragment");
+        assert!(
+            is_fmp4_resource(&path)
+                .await
+                .expect("inspect fMP4 fragment")
+        );
+
+        tokio::fs::write(&path, b"moof")
+            .await
+            .expect("write truncated fMP4 fragment");
+        assert!(
+            !is_fmp4_resource(&path)
+                .await
+                .expect("inspect truncated fMP4 fragment")
+        );
+
+        tokio::fs::write(&path, b"<!DOCTYPE html>")
+            .await
+            .expect("write HTML error page");
+        assert!(
+            !is_fmp4_resource(&path)
+                .await
+                .expect("inspect HTML error page")
+        );
+    }
+
+    #[tokio::test]
     async fn static_hls_mpegts_fragments_grow_the_owned_destination_part_in_order() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -3237,7 +3308,7 @@ segment-2.ts
             resource.url = url::Url::parse(&format!("http://{address}/segment-{}.ts", index + 1))
                 .expect("set local HLS test resource URL");
         }
-        assert!(plan.is_plain_mpegts_candidate());
+        assert!(plan.is_plain_mpegts_presentation());
 
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -3290,6 +3361,134 @@ segment-2.ts
             expected
         );
         assert_eq!(downloaded.load(Ordering::Relaxed), 188 * 6);
+    }
+
+    #[tokio::test]
+    async fn static_hls_fmp4_fragments_grow_the_owned_destination_part_in_order() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fMP4 fragment server");
+        let address = listener.local_addr().expect("fMP4 server address");
+        let init = b"\x00\x00\x00\x10ftyp\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        let first = b"\x00\x00\x00\x0cmoof\x00\x00\x00\x01".to_vec();
+        let second = b"\x00\x00\x00\x0cmdat\x00\x00\x00\x02".to_vec();
+        let init_response = init.clone();
+        let first_response = first.clone();
+        let second_response = second.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.expect("accept fMP4 request");
+                let mut request = [0_u8; 1024];
+                let count = socket.read(&mut request).await.expect("read fMP4 request");
+                assert_ne!(count, 0, "fMP4 request ended before its headers");
+                let request = String::from_utf8_lossy(&request[..count]);
+                let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                let payload = if path.contains("init.mp4") {
+                    &init_response
+                } else if path.contains("segment-1.m4s") {
+                    &first_response
+                } else {
+                    &second_response
+                };
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                socket
+                    .write_all(header.as_bytes())
+                    .await
+                    .expect("write fMP4 response header");
+                socket
+                    .write_all(payload)
+                    .await
+                    .expect("write fMP4 response body");
+            }
+        });
+
+        let playlist = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4,
+segment-1.m4s
+#EXTINF:4,
+segment-2.m4s
+#EXT-X-ENDLIST
+"#;
+        let mut plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/playlist.m3u8",
+            playlist,
+        )
+        .expect("plan static fMP4 HLS media playlist");
+        for (index, resource) in plan.resources.iter_mut().enumerate() {
+            let name = match index {
+                0 => "init.mp4".to_string(),
+                other => format!("segment-{other}.m4s"),
+            };
+            resource.url = url::Url::parse(&format!("http://{address}/{name}"))
+                .expect("set local fMP4 test resource URL");
+        }
+        assert!(plan.is_destination_assemblable_candidate());
+        assert!(plan.is_single_init_fmp4_presentation());
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build direct fMP4 test client");
+        let staging = tempfile::tempdir().expect("create fMP4 staging root");
+        let video_dir = staging.path().join("video");
+        tokio::fs::create_dir(&video_dir)
+            .await
+            .expect("create fMP4 video track directory");
+        let destination_dir = tempfile::tempdir().expect("create fMP4 destination");
+        let destination = destination_dir.path().join("Example.mp4");
+        crate::manifest_destination::ensure_plan(staging.path(), &destination, 85, false, false)
+            .expect("persist fMP4 destination plan");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+
+        assert!(
+            fetch_and_write_hls_track(ManifestHlsTrackTransfer {
+                client: &client,
+                staging: staging.path(),
+                plan: &plan,
+                directory: &video_dir,
+                filename: "video-track.ts",
+                destination: &destination,
+                item_id: 85,
+                track: crate::manifest_destination::TrackKind::Video,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+                abort: &mut abort,
+            })
+            .await
+            .expect("fetch and assemble static HLS fMP4 fragments")
+        );
+        server.await.expect("fMP4 fragment server task");
+
+        let part = crate::manifest_destination::part_path(
+            staging.path(),
+            &destination,
+            85,
+            crate::manifest_destination::TrackKind::Video,
+        )
+        .expect("resolve visible fMP4 destination part");
+        assert_eq!(
+            downloaded.load(Ordering::Relaxed),
+            (init.len() + first.len() + second.len()) as u64
+        );
+        let mut expected = init;
+        expected.extend_from_slice(&first);
+        expected.extend_from_slice(&second);
+        assert_eq!(
+            tokio::fs::read(part).await.expect("read visible fMP4 part"),
+            expected
+        );
     }
 
     #[tokio::test]

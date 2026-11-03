@@ -363,7 +363,7 @@ pub fn build_window(
     // HIG: keep the status filter and all download sections in one
     // centered column on wide windows. AdwClamp shrinks with the available
     // width, so tiled and narrow windows retain their existing layout.
-    const DOWNLOAD_LIST_MAX_WIDTH: i32 = 960;
+    const DOWNLOAD_LIST_MAX_WIDTH: i32 = 800;
     let list_clamp = adw::Clamp::builder()
         .maximum_size(DOWNLOAD_LIST_MAX_WIDTH)
         .build();

@@ -612,6 +612,26 @@ fn remove_claimed_file(path: &std::path::Path, file: &std::fs::File) {
 /// cannot provide atomic publication without either primitive, so readers may
 /// observe the file while this fallback copies it. Existing destinations are
 /// never opened or truncated.
+struct ClaimedDestination<'path> {
+    path: &'path std::path::Path,
+    file: std::fs::File,
+    armed: bool,
+}
+
+impl Drop for ClaimedDestination<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_claimed_file(self.path, &self.file);
+        }
+    }
+}
+
+/// Exclusive-create fallback for filesystems without hard links or no-replace rename.
+///
+/// The final name is reserved with `create_new` before copying. Such filesystems
+/// cannot provide atomic publication without either primitive, so readers may
+/// observe the file while this fallback copies it. Existing destinations are
+/// never opened or truncated.
 fn publish_by_exclusive_copy<F>(
     temporary: tempfile::NamedTempFile,
     destination: &std::path::Path,
@@ -629,46 +649,39 @@ where
         ));
     }
 
-    let mut claim = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(destination)?;
-    let mut armed = true;
-    let result = (|| {
-        if !should_continue() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "publication was cancelled",
-            ));
-        }
+    let mut claim = ClaimedDestination {
+        path: destination,
+        file,
+        armed: true,
+    };
 
-        let permissions = temporary.as_file().metadata()?.permissions();
-        let mut source = temporary.as_file();
-        std::io::copy(&mut source, &mut claim)?;
-        claim.set_permissions(permissions)?;
-        claim.flush()?;
-        claim.sync_all()?;
-
-        if !should_continue() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "publication was cancelled",
-            ));
-        }
-        Ok(())
-    })();
-
-    if result.is_err() && armed {
-        remove_claimed_file(destination, &claim);
-        armed = false;
+    if !should_continue() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "publication was cancelled",
+        ));
     }
-    if result.is_ok() {
-        armed = false;
+
+    let permissions = temporary.as_file().metadata()?.permissions();
+    let mut source = temporary.as_file();
+    std::io::copy(&mut source, &mut claim.file)?;
+    claim.file.set_permissions(permissions)?;
+    claim.file.flush()?;
+    claim.file.sync_all()?;
+
+    if !should_continue() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "publication was cancelled",
+        ));
     }
-    drop(claim);
-    drop(temporary);
-    let _ = armed;
-    result
+
+    claim.armed = false;
+    Ok(())
 }
 
 /// Persist a temporary without clobbering, using an exclusive-copy fallback when

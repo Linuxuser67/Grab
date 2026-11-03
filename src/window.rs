@@ -277,8 +277,8 @@ pub fn build_window(
         .build();
     menu_btn.set_widget_name("main-menu-button");
     menu_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Main Menu"))]);
-    // GNOME's primary menu belongs at the trailing edge, beside the window controls.
-    header.pack_end(&menu_btn);
+    // Keep the primary menu on the leading edge, as in the original header layout.
+    header.pack_start(&menu_btn);
 
     let search_toggle = gtk4::ToggleButton::builder()
         .icon_name("system-search-symbolic")
@@ -316,8 +316,8 @@ pub fn build_window(
             }
         });
     }
-    // "New Download" is the primary window action, so keep it at the leading edge.
-    header.pack_start(&add_btn);
+    // Keep the primary New Download action on the trailing edge.
+    header.pack_end(&add_btn);
     header.pack_start(&search_toggle);
 
     let content_stack = gtk4::Stack::new();

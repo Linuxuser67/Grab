@@ -1049,6 +1049,54 @@ video/720.m3u8
     }
 
     #[test]
+    fn hls_download_plan_keeps_audio_embedded_when_the_rendition_has_no_uri() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Embedded",LANGUAGE="en",DEFAULT=YES,STABLE-RENDITION-ID="embedded-audio"
+#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=1280x720,CODECS="avc1.64001f,mp4a.40.2",AUDIO="audio",STABLE-VARIANT-ID="variant-720"
+video/720.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("valid HLS master playlist with embedded audio");
+
+        assert_eq!(master.audio_renditions.len(), 1);
+        assert!(
+            master.audio_renditions[0].url.is_none(),
+            "a rendition without URI is carried by the selected variant"
+        );
+
+        let video_key = ManifestRepresentationKey::from(
+            hls_variant_keys(&master.variants)[0]
+                .as_deref()
+                .expect("stable video key"),
+        );
+        let audio_key = ManifestAudioKey::from(
+            hls_audio_rendition_keys(&master.audio_renditions)[0]
+                .as_deref()
+                .expect("stable embedded audio key"),
+        );
+        let lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/master.m3u8".to_string(),
+            manifest: NativeManifest::HlsMaster(master),
+        };
+        let source = lookup
+            .selected_source(&video_key, Some(&audio_key), None)
+            .expect("valid embedded audio selection");
+
+        let plan = download_plan(lookup, &source).expect("valid embedded HLS plan");
+        let ManifestDownloadPlan::HlsMaster(plan) = plan else {
+            panic!("expected an HLS master plan");
+        };
+
+        assert!(
+            plan.audio_url.is_none(),
+            "embedded audio must not create a separate audio transfer"
+        );
+    }
+
+    #[test]
     fn download_plan_rejects_a_stale_hls_track_selection() {
         let body = br#"#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,STABLE-VARIANT-ID="variant-720"

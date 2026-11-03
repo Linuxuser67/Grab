@@ -656,14 +656,21 @@ pub fn setup(app: &adw::Application) {
             // cold-start handoff. Queue restoration runs asynchronously after
             // the listener starts; sweeping there could delete a fresh cookie
             // jar staged by the request that woke this process.
-            let cookie_sweep_started_at = std::time::SystemTime::now();
+            let startup_started_at = std::time::SystemTime::now();
             let cookie_sweep = crate::runtime::tokio_rt().spawn_blocking(move || {
-                crate::cookies::sweep_cookie_staging_before(cookie_sweep_started_at);
+                crate::cookies::sweep_cookie_staging_before(startup_started_at);
             });
 
             let settings = AppSettings::new();
             let store = gio::ListStore::new::<crate::download::DownloadItem>();
             let manager = DownloadManager::new(store, settings.clone());
+            let publish_sweep_dir = std::path::PathBuf::from(manager.effective_download_dir());
+            let publish_sweep = crate::runtime::tokio_rt().spawn_blocking(move || {
+                crate::manifest_publish::sweep_stale_publish_temporaries(
+                    &publish_sweep_dir,
+                    startup_started_at,
+                );
+            });
             manager.restore_queue();
             manager.start_scheduler();
 
@@ -682,6 +689,9 @@ pub fn setup(app: &adw::Application) {
             crate::runtime::tokio_rt().spawn(async move {
                 if let Err(error) = cookie_sweep.await {
                     tracing::warn!(%error, "cookie staging startup sweep task failed");
+                }
+                if let Err(error) = publish_sweep.await {
+                    tracing::warn!(%error, "manifest publication startup sweep task failed");
                 }
                 crate::extension_server::serve(ext_tx).await;
             });

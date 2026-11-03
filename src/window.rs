@@ -349,6 +349,8 @@ pub fn build_window(
 
     let view_stack = adw::ViewStack::new();
     view_stack.set_widget_name("download-status-stack");
+    // The one shared queue scroller moves between page containers on selection.
+    view_stack.set_enable_transitions(false);
     let view_switcher = adw::ViewSwitcher::new();
     view_switcher.set_widget_name("download-status-view-switcher");
     view_switcher.set_stack(Some(&view_stack));
@@ -459,10 +461,30 @@ pub fn build_window(
     let downloaded_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     downloaded_page.set_widget_name("status-page-downloaded");
 
-    view_stack.add_titled_with_icon(&all_page, Some("all"), &gettext("All"), "view-list-symbolic");
-    view_stack.add_titled_with_icon(&active_page, Some("active"), &gettext("Active"), "emblem-synchronizing-symbolic");
-    view_stack.add_titled_with_icon(&queued_page, Some("queued"), &gettext("Queued"), "hourglass-symbolic");
-    view_stack.add_titled_with_icon(&downloaded_page, Some("downloaded"), &gettext("Downloaded"), "folder-download-symbolic");
+    view_stack.add_titled_with_icon(
+        &all_page,
+        Some("all"),
+        &gettext("All"),
+        "view-list-symbolic",
+    );
+    view_stack.add_titled_with_icon(
+        &active_page,
+        Some("active"),
+        &gettext("Active"),
+        "emblem-synchronizing-symbolic",
+    );
+    view_stack.add_titled_with_icon(
+        &queued_page,
+        Some("queued"),
+        &gettext("Queued"),
+        "hourglass-symbolic",
+    );
+    view_stack.add_titled_with_icon(
+        &downloaded_page,
+        Some("downloaded"),
+        &gettext("Downloaded"),
+        "folder-download-symbolic",
+    );
     all_page.append(&scroll);
     view_stack.set_visible_child_name("all");
     content_stack.add_named(&view_stack, Some("list"));
@@ -686,7 +708,7 @@ pub fn build_window(
         });
     }
 
-        // hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
+    // hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
     let ever_shown = Rc::new(Cell::new(false));
     {
         let m = Rc::clone(&manager);

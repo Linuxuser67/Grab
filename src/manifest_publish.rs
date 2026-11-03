@@ -226,7 +226,7 @@ fn prepare_destination_copy(
     })?;
     let mut source_file = std::fs::File::open(source)?;
     let permissions = source_file.metadata()?.permissions();
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    let mut temporary = crate::file_names::publish_temp_in(parent)?;
     if !copy_staged_bytes(&mut source_file, temporary.as_file_mut(), gate)? {
         return Ok(None);
     }
@@ -240,6 +240,70 @@ fn prepare_destination_copy(
     }
 
     Ok(Some(temporary))
+}
+
+/// Remove stale Grab-owned publication temporaries from the download directory.
+///
+/// Only regular files with Grab's private prefix/suffix, owned by the current
+/// user and older than the startup cutoff are removed. The directory is never
+/// traversed recursively, and symlinked roots or entries are refused.
+pub(crate) fn sweep_stale_publish_temporaries(
+    download_dir: &Path,
+    startup_started_at: std::time::SystemTime,
+) {
+    let Ok(directory_metadata) = std::fs::symlink_metadata(download_dir) else {
+        return;
+    };
+    if !directory_metadata.file_type().is_dir() {
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if directory_metadata.uid() != crate::download_net::current_uid() {
+            return;
+        }
+    }
+
+    let Ok(entries) = std::fs::read_dir(download_dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(".grab-publish-") || !name.ends_with(".partial") {
+            continue;
+        }
+
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if metadata.uid() != crate::download_net::current_uid() {
+                continue;
+            }
+        }
+        if metadata
+            .modified()
+            .is_ok_and(|modified| modified < startup_started_at)
+            && let Err(error) = std::fs::remove_file(&path)
+        {
+            tracing::debug!(
+                path = %path.display(),
+                error = %error,
+                "could not remove stale manifest publication temporary"
+            );
+        }
+    }
 }
 
 /// Persist a fully synced temporary and claim delivery only after its final name exists.
@@ -258,13 +322,21 @@ async fn persist_prepared_copy(
     destination: &Path,
     gate: &Arc<crate::attempt_gate::AttemptGate>,
 ) -> std::io::Result<ManifestPublishOutcome> {
-    let mut pending = PendingDestination::new(destination, Arc::clone(gate), None);
-    let published_file = temporary
-        .persist_noclobber(destination)
-        .map_err(|error| error.error)?;
-    drop(published_file);
-
-    pending.arm();
+    let destination_for_worker = destination.to_path_buf();
+    let gate_for_worker = Arc::clone(gate);
+    let mut pending = tokio::task::spawn_blocking(move || {
+        let mut pending =
+            PendingDestination::new(&destination_for_worker, Arc::clone(&gate_for_worker), None);
+        crate::file_names::persist_noclobber_with_fallback(
+            temporary,
+            &destination_for_worker,
+            || gate_for_worker.is_active(),
+        )?;
+        pending.arm();
+        Ok::<_, std::io::Error>(pending)
+    })
+    .await
+    .map_err(std::io::Error::other)??;
     if let Err(error) = sync_parent_directory(destination).await {
         pending.rollback().await;
         return Err(error);

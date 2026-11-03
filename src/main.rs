@@ -52,6 +52,7 @@ mod video;
 mod video_argv;
 mod video_cache;
 mod video_plan;
+mod video_playlist_cache;
 mod video_prefs;
 mod video_probe;
 mod video_progress;

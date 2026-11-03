@@ -254,6 +254,23 @@ pub async fn fetch_video_infos(
                 fetch_proxy.as_ref(),
                 &identity_args,
             );
+            // Playlist metadata uses the same extraction identity, but a
+            // separate namespace and the crate's dedicated playlist cache.
+            // The download worker still re-resolves each selected item.
+            let playlist_cache_key = cache_key
+                .as_deref()
+                .map(crate::video_playlist_cache::cache_key);
+            if let Some(playlist) = match playlist_cache_key.as_deref() {
+                Some(key) => crate::video_playlist_cache::lookup(key).await,
+                None => None,
+            } {
+                tracing::info!(
+                    url_host = %page_host(&url),
+                    item_count = playlist.items.len(),
+                    "yt-dlp playlist lookup cache hit"
+                );
+                return Ok((ProbeResult::Playlist(playlist), None));
+            }
             // A persistent metadata hit avoids starting yt-dlp (and Deno) for
             // a repeat preview. The raw JSON is intentionally absent on a hit:
             // the download worker must obtain fresh extraction data later.
@@ -300,6 +317,9 @@ pub async fn fetch_video_infos(
             let phase_started = std::time::Instant::now();
             if let Some(mut playlist) = parse_playlist_json(&value, &url) {
                 retarget_story_items(&url, &mut playlist);
+                if let Some(key) = playlist_cache_key.as_deref() {
+                    crate::video_playlist_cache::store(key, &playlist).await;
+                }
                 parse_ms = phase_started.elapsed().as_millis() as u64;
                 return Ok((ProbeResult::Playlist(playlist), None));
             }

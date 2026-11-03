@@ -90,7 +90,7 @@ async fn video_cache() -> Option<&'static VideoCache> {
 
 /// Use the stable XDG cache location, not the runtime directory used for
 /// transient cookie handoff files. The database contains extractor URLs.
-fn secure_cache_directory() -> std::io::Result<PathBuf> {
+pub(crate) fn secure_cache_directory() -> std::io::Result<PathBuf> {
     let directory = glib::user_cache_dir().join(crate::APP_ID).join("yt-dlp");
     std::fs::create_dir_all(&directory)?;
 
@@ -117,7 +117,7 @@ fn secure_cache_directory() -> std::io::Result<PathBuf> {
 /// Reject an unsafe existing database path before Redb opens it.
 ///
 /// A missing file is valid: Redb creates it during initialization.
-fn validate_cache_file_path(path: &Path) -> std::io::Result<()> {
+pub(crate) fn validate_cache_file_path(path: &Path) -> std::io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(std::io::Error::new(
@@ -132,7 +132,7 @@ fn validate_cache_file_path(path: &Path) -> std::io::Result<()> {
 }
 
 /// Restrict the persistent database itself as well as its containing directory.
-fn secure_cache_file(path: &Path) -> std::io::Result<()> {
+pub(crate) fn secure_cache_file(path: &Path) -> std::io::Result<()> {
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(std::io::Error::new(
@@ -342,7 +342,7 @@ fn hash_file_identity(hasher: &mut Sha256, name: &[u8], path: &Path, metadata: &
 }
 
 /// URLs carrying rotating authentication/signature parameters are not reusable.
-fn has_rotating_auth_query(url: &url::Url) -> bool {
+pub(crate) fn has_rotating_auth_query(url: &url::Url) -> bool {
     url.query_pairs().any(|(name, _)| {
         matches!(
             name.to_ascii_lowercase().as_str(),

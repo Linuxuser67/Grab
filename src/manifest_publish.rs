@@ -618,7 +618,10 @@ mod tests {
         assert_eq!(outcome, ManifestPublishOutcome::Published);
         assert!(gate.was_delivered());
         assert_eq!(std::fs::read(destination).unwrap(), contents);
-        assert!(source.exists(), "the staged source remains for normal cleanup");
+        assert!(
+            source.exists(),
+            "the staged source remains for normal cleanup"
+        );
     }
 
     #[tokio::test]

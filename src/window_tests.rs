@@ -501,8 +501,8 @@ fn status_views_use_gnome_adaptive_view_switcher() {
                 .expect("each status view is registered");
             assert_eq!(
                 view_stack.page(&child).icon_name().as_deref(),
-                if narrow { Some(expected_icon) } else { None },
-                "the {name} tab has a symbolic icon only for the narrow bottom switcher"
+                Some(expected_icon),
+                "the {name} tab keeps its symbolic icon in both navigation layouts"
             );
         }
 

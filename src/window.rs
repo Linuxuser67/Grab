@@ -471,13 +471,13 @@ pub fn build_window(
         &active_page,
         Some("active"),
         &gettext("Active"),
-        "emblem-synchronizing-symbolic",
+        "content-loading-symbolic",
     );
     view_stack.add_titled_with_icon(
         &queued_page,
         Some("queued"),
         &gettext("Queued"),
-        "hourglass-symbolic",
+        "task-due-symbolic",
     );
     view_stack.add_titled_with_icon(
         &downloaded_page,

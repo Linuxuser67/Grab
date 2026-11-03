@@ -461,8 +461,25 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
     Ok(Libraries::new(youtube, ffmpeg_dir.join("ffmpeg")))
 }
 
-/// Modification time and size used to invalidate executable-probe caches.
-type FileStamp = (Option<std::time::SystemTime>, u64);
+/// Filesystem identity used to invalidate executable-probe caches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed: i64,
+    #[cfg(unix)]
+    changed_nsec: i64,
+    #[cfg(unix)]
+    modified: i64,
+    #[cfg(unix)]
+    modified_nsec: i64,
+    #[cfg(not(unix))]
+    modified: Option<std::time::SystemTime>,
+}
 
 const FAILED_PROBE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -517,7 +534,8 @@ where
         let stamp = file_stamp(binary);
         {
             let mut values = self.values.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(entry) = values.get(&key)
+            if let Some(stamp) = stamp
+                && let Some(entry) = values.get(&key)
                 && entry.stamp == stamp
                 && (entry.result.is_ok() || entry.cached_at.elapsed() < failure_ttl)
             {
@@ -527,8 +545,10 @@ where
         }
 
         let result = probe().await;
-        let after = file_stamp(binary);
-        if stamp != (None, 0) && stamp == after && (result.is_ok() || !failure_ttl.is_zero()) {
+        if let Some(stamp) = stamp
+            && file_stamp(binary) == Some(stamp)
+            && (result.is_ok() || !failure_ttl.is_zero())
+        {
             let mut values = self.values.lock().unwrap_or_else(|p| p.into_inner());
             if values.len() >= 128 {
                 let evict = values.keys().find(|existing| *existing != &key).cloned();
@@ -549,10 +569,28 @@ where
     }
 }
 
-fn file_stamp(binary: &Path) -> FileStamp {
-    std::fs::metadata(binary)
-        .map(|m| (m.modified().ok(), m.len()))
-        .unwrap_or((None, 0))
+fn file_stamp(binary: &Path) -> Option<FileStamp> {
+    let metadata = std::fs::metadata(binary).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(FileStamp {
+            len: metadata.len(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            changed: metadata.ctime(),
+            changed_nsec: metadata.ctime_nsec(),
+            modified: metadata.mtime(),
+            modified_nsec: metadata.mtime_nsec(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Some(FileStamp {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
 }
 
 static IMPERSONATE_CACHE: OnceLock<ProbeCache<PathBuf, bool, ToolProbeError>> = OnceLock::new();
@@ -2466,6 +2504,34 @@ mod tests {
             "cached-two-longer"
         );
         assert_eq!(std::fs::read(&counter).unwrap(), b"xx");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_probe_invalidates_same_size_rewrite_with_restored_mtime() {
+        let base = unique_dir("version-probe-identity");
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("yt-dlp");
+        write_test_script(&binary, "#!/bin/sh\nprintf 'cached-one\\n'\n");
+        let original_mtime = std::fs::metadata(&binary).unwrap().modified().unwrap();
+
+        assert_eq!(
+            probe_first_line(&binary, "--version").await.unwrap(),
+            "cached-one"
+        );
+        write_test_script(&binary, "#!/bin/sh\nprintf 'cached-two\\n'\n");
+        std::fs::File::options()
+            .write(true)
+            .open(&binary)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .unwrap();
+
+        assert_eq!(
+            probe_first_line(&binary, "--version").await.unwrap(),
+            "cached-two"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 

@@ -464,7 +464,6 @@ mod tests {
         assert_ne!(before, after);
     }
 
-
     #[cfg(unix)]
     #[test]
     fn rejects_database_symlinks_before_redb_initialization() {

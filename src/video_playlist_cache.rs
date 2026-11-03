@@ -95,13 +95,22 @@ fn to_cached_playlist(key: &str, info: &PlaylistInfo) -> Option<Playlist> {
         return None;
     }
 
-    if info.items.iter().any(|item| {
-        let Ok(url) = url::Url::parse(&item.page_url) else {
-            return true;
-        };
-        !matches!(url.scheme(), "http" | "https")
-            || crate::video_cache::has_rotating_auth_query(&url)
-    }) {
+    let Ok(page_url) = url::Url::parse(&info.page_url) else {
+        return None;
+    };
+    if !matches!(page_url.scheme(), "http" | "https")
+        || crate::video_cache::has_rotating_auth_query(&page_url)
+        || info.title.trim().is_empty()
+        || info.items.iter().any(|item| {
+            let Ok(url) = url::Url::parse(&item.page_url) else {
+                return true;
+            };
+            !matches!(url.scheme(), "http" | "https")
+                || item.id.is_empty()
+                || item.title.trim().is_empty()
+                || crate::video_cache::has_rotating_auth_query(&url)
+        })
+    {
         return None;
     }
 
@@ -174,6 +183,7 @@ fn from_cached_playlist(key: &str, playlist: Playlist) -> Option<PlaylistInfo> {
         .map(|entry| {
             let parsed_url = url::Url::parse(&entry.url).ok()?;
             if entry.id.is_empty()
+                || entry.title.trim().is_empty()
                 || !matches!(parsed_url.scheme(), "http" | "https")
                 || crate::video_cache::has_rotating_auth_query(&parsed_url)
             {
@@ -324,6 +334,13 @@ mod tests {
 
         let mut info = playlist();
         info.items[0].page_url = "ftp://example.test/item".to_string();
+        assert!(to_cached_playlist("key", &info).is_none());
+    }
+
+    #[test]
+    fn rotating_collection_urls_are_not_cached() {
+        let mut info = playlist();
+        info.page_url = "https://example.test/playlist?token=rotating".into();
         assert!(to_cached_playlist("key", &info).is_none());
     }
 

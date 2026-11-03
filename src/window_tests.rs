@@ -445,8 +445,7 @@ fn status_views_use_gnome_adaptive_view_switcher() {
         manager.store().append(&active);
         manager.store().append(&downloaded);
         let toasts = std::rc::Rc::new(libadwaita::ToastOverlay::new());
-        let (window, _, add_card) =
-            crate::window::build_window(&app, manager, settings, toasts);
+        let (window, _, add_card) = crate::window::build_window(&app, manager, settings, toasts);
         window.set_default_size(width, 500);
         window.present();
         drain_gtk_events();
@@ -476,13 +475,11 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             );
         }
 
-        let switcher_bar = find_widget_by_name(
-            window.upcast_ref(),
-            "download-status-view-switcher-bar",
-        )
-        .expect("bottom AdwViewSwitcherBar exists")
-        .downcast::<libadwaita::ViewSwitcherBar>()
-        .expect("bottom navigation uses AdwViewSwitcherBar");
+        let switcher_bar =
+            find_widget_by_name(window.upcast_ref(), "download-status-view-switcher-bar")
+                .expect("bottom AdwViewSwitcherBar exists")
+                .downcast::<libadwaita::ViewSwitcherBar>()
+                .expect("bottom navigation uses AdwViewSwitcherBar");
         assert_eq!(
             switcher_bar.reveals(),
             narrow,

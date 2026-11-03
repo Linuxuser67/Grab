@@ -463,10 +463,20 @@ mod tests {
         let binary = fake_binary(directory.path());
         let url = "https://example.test/watch?v=1";
         let args = vec!["--".to_string(), url.to_string()];
+        let original_mtime = std::fs::metadata(&binary)
+            .expect("binary metadata")
+            .modified()
+            .expect("binary modification time");
         let before = cache_key(url, &binary, "2026.10.23", "none", None, &args)
             .expect("initial binary identity");
 
         std::fs::write(&binary, b"other fake binary!").expect("rewrite binary");
+        std::fs::File::options()
+            .write(true)
+            .open(&binary)
+            .expect("open rewritten binary")
+            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .expect("restore binary modification time");
         let after = cache_key(url, &binary, "2026.10.23", "none", None, &args)
             .expect("updated binary identity");
         assert_ne!(before, after);
@@ -486,10 +496,20 @@ mod tests {
             "--".to_string(),
             url.to_string(),
         ];
+        let original_mtime = std::fs::metadata(&cookie_file)
+            .expect("cookie metadata")
+            .modified()
+            .expect("cookie modification time");
         let before = cache_key(url, &binary, "2026.10.23", "none", None, &args)
             .expect("initial cookie identity");
 
         std::fs::write(&cookie_file, "cookie=two").expect("rewrite cookie jar");
+        std::fs::File::options()
+            .write(true)
+            .open(&cookie_file)
+            .expect("open rewritten cookie jar")
+            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .expect("restore cookie modification time");
         let after = cache_key(url, &binary, "2026.10.23", "none", None, &args)
             .expect("updated cookie identity");
         assert_ne!(before, after);

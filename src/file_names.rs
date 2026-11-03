@@ -1055,6 +1055,58 @@ mod tests {
     }
 
     #[test]
+    fn publish_temporary_uses_a_sweepable_owned_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let temporary = publish_temp_in(dir.path()).unwrap();
+        let name = temporary.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with(".grab-publish-"));
+        assert!(name.ends_with(".partial"));
+    }
+
+    #[test]
+    fn exclusive_copy_fallback_never_clobbers_an_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let temporary = publish_temp_in(dir.path()).unwrap();
+        std::fs::write(temporary.path(), b"new payload").unwrap();
+        let destination = dir.path().join("existing");
+        std::fs::write(&destination, b"user data").unwrap();
+
+        let error = publish_by_exclusive_copy(temporary, &destination, || true)
+            .expect_err("create_new must reject an existing destination");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"user data");
+    }
+
+    #[test]
+    fn exclusive_copy_fallback_removes_its_claim_on_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let temporary = publish_temp_in(dir.path()).unwrap();
+        std::fs::write(temporary.path(), b"new payload").unwrap();
+        let destination = dir.path().join("cancelled");
+        let mut checks = 0;
+        let result = publish_by_exclusive_copy(temporary, &destination, || {
+            checks += 1;
+            checks < 3
+        });
+
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+        assert!(!destination.exists(), "cancelled claim must be removed");
+    }
+
+    #[test]
+    fn exclusive_copy_fallback_publishes_complete_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let temporary = publish_temp_in(dir.path()).unwrap();
+        std::fs::write(temporary.path(), b"complete payload").unwrap();
+        let destination = dir.path().join("published");
+
+        publish_by_exclusive_copy(temporary, &destination, || true).unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete payload");
+    }
+
+    #[test]
     fn cross_device_copy_helper_uses_a_complete_no_clobber_publication() {
         let dir = unique_dir("copy-noreplace");
         std::fs::create_dir_all(&dir).unwrap();

@@ -95,6 +95,15 @@ fn to_cached_playlist(key: &str, info: &PlaylistInfo) -> Option<Playlist> {
         return None;
     }
 
+    if info.items.iter().any(|item| {
+        let Ok(url) = url::Url::parse(&item.page_url) else {
+            return true;
+        };
+        crate::video_cache::has_rotating_auth_query(&url)
+    }) {
+        return None;
+    }
+
     let metadata = CacheMetadata {
         version: 1,
         kind: CachedPlaylistKind::Playlist,

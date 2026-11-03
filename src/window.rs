@@ -339,6 +339,70 @@ pub fn build_window(
     }
     content_stack.add_named(&empty, Some("empty"));
 
+    // The queue filters are views in one AdwViewStack. This lets libadwaita
+    // provide the same adaptive header/bottom navigation used by GNOME Software.
+    let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let status_sel: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+    let narrow_layout = Rc::new(Cell::new(false));
+    let has_items = Rc::new(Cell::new(false));
+    let queue_view_visible = Rc::new(Cell::new(true));
+
+    let view_stack = adw::ViewStack::new();
+    view_stack.set_widget_name("download-status-stack");
+    let view_switcher = adw::ViewSwitcher::new();
+    view_switcher.set_widget_name("download-status-view-switcher");
+    view_switcher.set_stack(Some(&view_stack));
+    view_switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
+    header.set_title_widget(Some(&view_switcher));
+
+    let switcher_bar = adw::ViewSwitcherBar::new();
+    switcher_bar.set_widget_name("download-status-view-switcher-bar");
+    switcher_bar.set_stack(Some(&view_stack));
+
+    // Four destinations need room for their wide labels. 550sp is the
+    // libadwaita recommendation for a four-page view switcher.
+    let breakpoint = adw::Breakpoint::new(
+        adw::BreakpointCondition::parse("max-width: 550sp")
+            .expect("the static view-switcher breakpoint is valid"),
+    );
+    {
+        let narrow = Rc::clone(&narrow_layout);
+        let header = header.clone();
+        let switcher = view_switcher.clone();
+        let switcher_bar = switcher_bar.clone();
+        let has_items = Rc::clone(&has_items);
+        let queue_visible = Rc::clone(&queue_view_visible);
+        breakpoint.connect_apply(move |_| {
+            narrow.set(true);
+            // Clearing the title widget makes AdwHeaderBar show the window
+            // title ("Grab"), while the same stack is exposed by the bottom bar.
+            header.set_title_widget(None::<&gtk4::Widget>);
+            let show_navigation = has_items.get() && queue_visible.get();
+            switcher.set_visible(show_navigation);
+            switcher_bar.set_reveal(show_navigation);
+        });
+    }
+    {
+        let narrow = Rc::clone(&narrow_layout);
+        let header = header.clone();
+        let switcher = view_switcher.clone();
+        let switcher_bar = switcher_bar.clone();
+        let has_items = Rc::clone(&has_items);
+        let queue_visible = Rc::clone(&queue_view_visible);
+        breakpoint.connect_unapply(move |_| {
+            narrow.set(false);
+            switcher_bar.set_reveal(false);
+            let show_navigation = has_items.get() && queue_visible.get();
+            switcher.set_visible(show_navigation);
+            if show_navigation {
+                header.set_title_widget(Some(&switcher));
+            } else {
+                header.set_title_widget(None::<&gtk4::Widget>);
+            }
+        });
+    }
+    window.add_breakpoint(breakpoint);
+
     fn section_list(title: &str) -> (gtk4::Box, gtk4::ListBox) {
         let label = gtk4::Label::builder()
             .label(title)
@@ -411,7 +475,7 @@ pub fn build_window(
     fn is_queued(it: &crate::download::DownloadItem) -> bool {
         it.status() == crate::download::DownloadStatus::Queued
     }
-    /// DropDown bucket for a status (0 = All); order must match the model.
+    /// View-stack bucket for a status (0 = All); order matches the pages.
     /// Active deliberately covers everything in flight or stalled —
     /// including the terminal Failed/Cancelled states, so one bucket shows
     /// anything still needing attention. Queued is the waiting, Downloaded
@@ -425,70 +489,7 @@ pub fn build_window(
         }
     }
 
-    // The queue filters are views in one AdwViewStack. This lets libadwaita
-    // provide the same adaptive header/bottom navigation used by GNOME Software.
-    let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-    let status_sel: Rc<Cell<u32>> = Rc::new(Cell::new(0));
-    let narrow_layout = Rc::new(Cell::new(false));
-    let has_items = Rc::new(Cell::new(false));
-    let queue_view_visible = Rc::new(Cell::new(true));
-
-    let view_stack = adw::ViewStack::new();
-    view_stack.set_widget_name("download-status-stack");
-    let view_switcher = adw::ViewSwitcher::new();
-    view_switcher.set_widget_name("download-status-view-switcher");
-    view_switcher.set_stack(Some(&view_stack));
-    view_switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
-    header.set_title_widget(Some(&view_switcher));
-
-    let switcher_bar = adw::ViewSwitcherBar::new();
-    switcher_bar.set_widget_name("download-status-view-switcher-bar");
-    switcher_bar.set_stack(Some(&view_stack));
-
-    // Four destinations need room for their wide labels. 550sp is the
-    // libadwaita recommendation for a four-page view switcher.
-    let breakpoint = adw::Breakpoint::new(
-        adw::BreakpointCondition::parse("max-width: 550sp")
-            .expect("the static view-switcher breakpoint is valid"),
-    );
-    {
-        let narrow = Rc::clone(&narrow_layout);
-        let header = header.clone();
-        let switcher = view_switcher.clone();
-        let switcher_bar = switcher_bar.clone();
-        let has_items = Rc::clone(&has_items);
-        let queue_visible = Rc::clone(&queue_view_visible);
-        breakpoint.connect_apply(move |_| {
-            narrow.set(true);
-            // Clearing the title widget makes AdwHeaderBar show the window
-            // title ("Grab"), while the same stack is exposed by the bottom bar.
-            header.set_title_widget(None::<&gtk4::Widget>);
-            let show_navigation = has_items.get() && queue_visible.get();
-            switcher.set_visible(show_navigation);
-            switcher_bar.set_reveal(show_navigation);
-        });
-    }
-    {
-        let narrow = Rc::clone(&narrow_layout);
-        let header = header.clone();
-        let switcher = view_switcher.clone();
-        let switcher_bar = switcher_bar.clone();
-        let has_items = Rc::clone(&has_items);
-        let queue_visible = Rc::clone(&queue_view_visible);
-        breakpoint.connect_unapply(move |_| {
-            narrow.set(false);
-            switcher_bar.set_reveal(false);
-            let show_navigation = has_items.get() && queue_visible.get();
-            switcher.set_visible(show_navigation);
-            if show_navigation {
-                header.set_title_widget(Some(&switcher));
-            } else {
-                header.set_title_widget(None::<&gtk4::Widget>);
-            }
-        });
-    }
-    window.add_breakpoint(breakpoint);
-        // The toggle shows/hides the search bar below the header (HIG pattern);
+    // The toggle shows/hides the search bar below the header (HIG pattern);
     // Escape in the entry closes it too.
     {
         let bar = search_bar.clone();
@@ -839,7 +840,7 @@ pub fn build_window(
                     glib::idle_add_local_once(move || {
                         if content_stack.is_visible() {
                             sync();
-                            stack.queue_resize();
+                            content_stack.queue_resize();
                         }
                     });
                 }

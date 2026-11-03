@@ -259,12 +259,17 @@ pub(crate) fn sweep_stale_publish_temporaries(
     }
 
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if directory_metadata.uid() != crate::download_net::current_uid() {
+    let my_uid = {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let uid = crate::download_net::current_uid();
+        let mode = directory_metadata.permissions().mode();
+        let is_user_owned = directory_metadata.uid() == uid;
+        let is_sticky_shared_directory = mode & 0o1000 != 0 && mode & 0o0002 != 0;
+        if !is_user_owned && !is_sticky_shared_directory {
             return;
         }
-    }
+        uid
+    };
 
     let Ok(entries) = std::fs::read_dir(download_dir) else {
         return;
@@ -288,7 +293,7 @@ pub(crate) fn sweep_stale_publish_temporaries(
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
-            if metadata.uid() != crate::download_net::current_uid() {
+            if metadata.uid() != my_uid {
                 continue;
             }
         }

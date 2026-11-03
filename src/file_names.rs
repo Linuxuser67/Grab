@@ -628,7 +628,7 @@ impl Drop for ClaimedDestination<'_> {
 /// observe the file while this fallback copies it. Existing destinations are
 /// never opened or truncated.
 fn publish_by_exclusive_copy<F>(
-    temporary: tempfile::NamedTempFile,
+    mut temporary: tempfile::NamedTempFile,
     destination: &std::path::Path,
     mut should_continue: F,
 ) -> std::io::Result<()>

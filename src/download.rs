@@ -1357,7 +1357,7 @@ impl DownloadManager {
             .map(str::to_string)
             .unwrap_or_else(|| {
                 format!(
-                    "{}.mp4",
+                    "{}.mkv",
                     crate::file_names::title_from_manifest_url(&source.url)
                 )
             });
@@ -1373,7 +1373,7 @@ impl DownloadManager {
                     "Native HLS/DASH downloads require an MP4 or MKV filename",
                 ));
             }
-            None => requested_name.push_str(".mp4"),
+            None => requested_name.push_str(".mkv"),
         }
         let name = self.finalize_filename(&requested_name);
         let name = dedupe_filename(&name, |candidate| {

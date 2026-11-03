@@ -5255,7 +5255,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_native_intake_waits_for_and_returns_the_extractor_result() {
-        let native = async { (Err("unsupported manifest".to_string()), 1) };
+        let native = async { (Err::<&str, _>("unsupported manifest".to_string()), 1) };
         let extractor = async {
             tokio::task::yield_now().await;
             Ok::<_, String>("extractor")
@@ -5282,7 +5282,7 @@ mod tests {
         let (native_ready_tx, native_ready_rx) = tokio::sync::oneshot::channel();
         let native = async move {
             let _ = native_ready_rx.await;
-            (Err("unsupported manifest".to_string()), 5)
+            (Err::<&str, _>("unsupported manifest".to_string()), 5)
         };
         let extractor = async move {
             native_ready_tx.send(()).expect("native waiter is alive");

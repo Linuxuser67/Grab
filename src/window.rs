@@ -468,7 +468,6 @@ pub fn build_window(
     compact_filter_row.append(&compact_filter_label);
     compact_filter_row.append(&status_dropdown);
     compact_filter_row.set_visible(false);
-    content.prepend(&compact_filter_row);
 
     let narrow_layout = Rc::new(Cell::new(false));
     let has_items = Rc::new(Cell::new(false));
@@ -835,6 +834,7 @@ pub fn build_window(
     // toolbar bars compact and place the card in the content area instead.
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     content.append(add_card.widget());
+    content.append(&compact_filter_row);
     stack.set_vexpand(true);
     // A picker page is a selection task that needs height: while one is
     // visible, the card takes the content area. The queue gets its space

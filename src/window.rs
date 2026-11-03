@@ -285,7 +285,7 @@ pub fn build_window(
         .build();
     search_toggle.set_widget_name("search-downloads-button");
     search_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext("Search"))]);
-    header.pack_start(&search_toggle);
+
 
     // Stateful toggle: reflects the card's open state (set_on_state_changed
     // mirrors Escape / successful-add / toggle closes too), so the button
@@ -318,6 +318,7 @@ pub fn build_window(
     }
     // "New Download" is the primary window action, so keep it at the leading edge.
     header.pack_start(&add_btn);
+    header.pack_start(&search_toggle);
 
     let stack = adw::ViewStack::new();
     let empty = adw::StatusPage::builder()
@@ -428,10 +429,7 @@ pub fn build_window(
     ))]);
     seg_wrap.append(&seg);
 
-    let window_title = adw::WindowTitle::new(
-        &gettext("Grab"),
-        &gettext("Download Manager"),
-    );
+    let window_title = adw::WindowTitle::new(&gettext("Grab"), &gettext("Download Manager"));
     let header_title_stack = gtk4::Stack::new();
     header_title_stack.set_widget_name("header-title-stack");
     header_title_stack.add_named(&window_title, Some("title"));
@@ -566,7 +564,6 @@ pub fn build_window(
         let query = Rc::clone(&query);
         let status_sel = Rc::clone(&status_sel);
         let seg = seg.clone();
-        let dropdown = status_dropdown.clone();
         let compact = compact_filter_row.clone();
         let title = header_title_stack.clone();
         let narrow = Rc::clone(&narrow_layout);

@@ -830,8 +830,7 @@ mod tests {
         let destination_dir = tempfile::tempdir().expect("create destination");
         let staging = tempfile::tempdir().expect("create staging");
         let destination = destination_dir.path().join("Example video.mp4");
-        ensure_plan(staging.path(), &destination, 45, true, false)
-            .expect("write destination plan");
+        ensure_plan(staging.path(), &destination, 45, true, false).expect("write destination plan");
 
         use std::io::Write as _;
         let mut file = open_owned_part(staging.path(), &destination, 45, TrackKind::Video)
@@ -839,21 +838,25 @@ mod tests {
         file.write_all(b"partial media").expect("write video part");
         drop(file);
         fs::write(
-            staging.path().join("Example video.45.audio.part.owner.json"),
+            staging
+                .path()
+                .join("Example video.45.audio.part.owner.json"),
             b"{}",
         )
         .expect("create unplanned owner record");
 
-        let video_part =
-            part_path(staging.path(), &destination, 45, TrackKind::Video)
-                .expect("resolve video part");
+        let video_part = part_path(staging.path(), &destination, 45, TrackKind::Video)
+            .expect("resolve video part");
         let error = remove_planned_parts(staging.path(), destination_dir.path(), 45)
             .expect_err("unplanned ownership records must be rejected");
         assert!(
             error.contains("absent from the destination plan"),
             "unexpected cleanup error: {error}"
         );
-        assert!(video_part.exists(), "no partial is removed before validation");
+        assert!(
+            video_part.exists(),
+            "no partial is removed before validation"
+        );
         assert!(
             staging
                 .path()

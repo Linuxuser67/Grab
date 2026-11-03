@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(test)]
 use reqwest::cookie::CookieStore as _;
@@ -105,9 +105,12 @@ pub(crate) fn jar_from_export(text: &str) -> (Arc<reqwest::cookie::Jar>, usize) 
     (jar, count)
 }
 
-/// Sweep stale cookie dumps left by crashes: runs at startup before any
-/// worker starts, so nothing live is removed.
-pub(crate) fn sweep_cookie_staging() {
+/// Sweep cookie files that existed before startup began.
+///
+/// The caller captures the cutoff before workers or the extension listener can
+/// create new files. A delayed blocking-pool sweep therefore cannot delete a
+/// cookie jar staged by a cold-start handoff or a worker started meanwhile.
+pub(crate) fn sweep_cookie_staging_before(startup_started_at: SystemTime) {
     // Only delete files owned by our uid: /tmp is shared, and another
     // user's grab-cookies-*.txt is not ours to remove.
     #[cfg(unix)]
@@ -130,6 +133,9 @@ pub(crate) fn sweep_cookie_staging() {
             true
         }
     };
+    let existed_before_startup = |path: &std::path::Path| {
+        is_owned_cookie_file_older_than(path, startup_started_at, &owned_by_me)
+    };
     // Clean the current dir (runtime dir, or cache fallback).
     if let Some(dir) = crate::download_net::cookie_staging_dir()
         && let Ok(entries) = std::fs::read_dir(&dir)
@@ -141,7 +147,7 @@ pub(crate) fn sweep_cookie_staging() {
             // latter are staged here too); never touch anything else.
             if ((name.starts_with("grab-cookies-") && name.ends_with(".txt"))
                 || name.starts_with("grab-handoff-cookies-"))
-                && owned_by_me(&entry.path())
+                && existed_before_startup(&entry.path())
             {
                 let _ = std::fs::remove_file(entry.path());
             }
@@ -151,7 +157,18 @@ pub(crate) fn sweep_cookie_staging() {
     // builds. Unlike the current private staging directory, /tmp is shared:
     // never scan the legacy path unless it is a real directory owned by us.
     let legacy_dir = crate::video::staging_root();
-    sweep_legacy_cookie_dumps(&legacy_dir, &owned_by_me);
+    sweep_legacy_cookie_dumps(&legacy_dir, &existed_before_startup);
+}
+
+fn is_owned_cookie_file_older_than(
+    path: &Path,
+    startup_started_at: SystemTime,
+    owned_by_me: &impl Fn(&Path) -> bool,
+) -> bool {
+    owned_by_me(path)
+        && std::fs::symlink_metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| modified < startup_started_at)
 }
 
 /// Remove stale legacy cookie dumps from a validated directory. Kept separate
@@ -376,7 +393,12 @@ pub(crate) fn cookie_header_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{StagedCookies, parse_netscape_line, sweep_legacy_cookie_dumps};
+    use super::{
+        StagedCookies, is_owned_cookie_file_older_than, parse_netscape_line,
+        sweep_legacy_cookie_dumps,
+    };
+    use std::path::Path;
+    use std::time::{Duration, SystemTime};
 
     #[cfg(unix)]
     #[test]
@@ -534,5 +556,27 @@ mod tests {
             cookie.contains("9999"),
             "expected clamped to 9999: {cookie}"
         );
+    }
+
+    #[test]
+    fn startup_cutoff_preserves_cookie_files_created_after_start() {
+        let dir = tempfile::tempdir().expect("temporary cookie directory");
+        let path = dir.path().join("grab-handoff-cookies-test");
+        std::fs::write(&path, "fixture").expect("write cookie fixture");
+        let before_creation = SystemTime::now() - Duration::from_secs(1);
+        let owned = |_: &Path| true;
+
+        assert!(!is_owned_cookie_file_older_than(
+            &path,
+            before_creation,
+            &owned
+        ));
+
+        let after_creation = SystemTime::now() + Duration::from_secs(1);
+        assert!(is_owned_cookie_file_older_than(
+            &path,
+            after_creation,
+            &owned
+        ));
     }
 }

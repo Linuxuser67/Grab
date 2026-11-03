@@ -5149,7 +5149,6 @@ impl DownloadManager {
             crate::video::sweep_dest_staging(std::path::Path::new(&dest_dir), &plan.live);
         }
         crate::video::sweep_state_staging(&plan.state_keep);
-        crate::cookies::sweep_cookie_staging();
         // Hashing reads each torrent archive: do it here, on the blocking pool,
         // not while building the plan on the GTK thread.
         plan.session_urls.map(|urls| {

@@ -423,6 +423,34 @@ mod tests {
     }
 
     #[test]
+    fn gallery_auth_resolves_the_extension_cookie_jar_and_paired_user_agent() {
+        let url = "https://gallery-handoff.example.test/collection";
+        let cookies = [crate::extension_server::Cookie {
+            name: "session".to_string(),
+            value: "fixture".to_string(),
+            domain: None,
+            host_only: None,
+            path: None,
+            secure: None,
+            expiration_date: None,
+        }];
+        let path = crate::extension_server::write_handoff_cookies(url, &cookies)
+            .expect("stage extension cookie fixture");
+        crate::extension_server::store_handoff_cookies(
+            url,
+            path.clone(),
+            Some("Grab-Test-UA".to_string()),
+        );
+
+        let auth = resolve_gallery_auth(url, "none");
+        assert_eq!(auth.cookies_path.as_deref(), Some(path.as_path()));
+        assert_eq!(auth.user_agent.as_deref(), Some("Grab-Test-UA"));
+        assert!(auth.cookies_browser.is_none());
+
+        crate::extension_server::discard_handoff_cookies(url);
+    }
+
+    #[test]
     fn preferred_probe_error_cases() {
         // A surfaced gallery error wins when yt-dlp found nothing.
         let surfaced = Err(crate::gallery_tools::GalleryError::probe("HttpError: 403"));

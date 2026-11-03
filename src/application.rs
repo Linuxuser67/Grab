@@ -652,6 +652,15 @@ pub fn setup(app: &adw::Application) {
             // Browser extension integration via HTTP (see extension_server):
             // the server forwards URLs here, and we enqueue them like
             // pasted links.
+            // Sweep crash leftovers before the extension listener can accept a
+            // cold-start handoff. Queue restoration runs asynchronously after
+            // the listener starts; sweeping there could delete a fresh cookie
+            // jar staged by the request that woke this process.
+            let cookie_sweep_started_at = std::time::SystemTime::now();
+            let cookie_sweep = crate::runtime::tokio_rt().spawn_blocking(move || {
+                crate::cookies::sweep_cookie_staging_before(cookie_sweep_started_at);
+            });
+
             let settings = AppSettings::new();
             let store = gio::ListStore::new::<crate::download::DownloadItem>();
             let manager = DownloadManager::new(store, settings.clone());
@@ -667,7 +676,15 @@ pub fn setup(app: &adw::Application) {
             let (ext_tx, mut ext_rx) = tokio::sync::mpsc::channel::<
                 crate::extension_server::Handoff,
             >(crate::extension_server::QUEUE_DEPTH);
-            crate::runtime::tokio_rt().spawn(crate::extension_server::serve(ext_tx));
+            // Keep filesystem cleanup off the GTK thread, but do not expose
+            // /hello until it has finished: a handoff jar staged after the
+            // listener starts must never be mistaken for startup debris.
+            crate::runtime::tokio_rt().spawn(async move {
+                if let Err(error) = cookie_sweep.await {
+                    tracing::warn!(%error, "cookie staging startup sweep task failed");
+                }
+                crate::extension_server::serve(ext_tx).await;
+            });
 
             let toasts = Rc::new(adw::ToastOverlay::new());
             register_actions(app, &st, &shutdown_requested);

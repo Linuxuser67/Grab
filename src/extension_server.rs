@@ -2149,10 +2149,10 @@ mod tests {
     #[tokio::test]
     async fn handle_add_with_cookies_stages_file_for_probe() {
         let _g = exclusive();
+        clear_handoff_cookies();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
-        let body =
-            r#"{"url":"https://example.com/watch?v=7","cookies":[{"name":"cf","value":"abc"}]}"#;
+        let body = r#"{"url":"https://example.com/watch?v=7","cookies":[{"name":"cf","value":"abc"}],"user_agent":"Grab-Test-UA"}"#;
         let tok = token(body);
         let r = request(
             srv.port,
@@ -2174,6 +2174,14 @@ mod tests {
         assert_eq!(args[0], "--cookies");
         let staged = PathBuf::from(&args[1]);
         assert!(staged.exists(), "staged file must exist");
+
+        // This models the authenticated POST that follows the extension's cold-start
+        // wake. The server must stage the jar before queuing the URL so gallery-dl
+        // can resolve it immediately when GTK drains the handoff and starts probing.
+        assert_eq!(
+            handoff_user_agent(&handoff.url, "none").as_deref(),
+            Some("Grab-Test-UA")
+        );
         let text = std::fs::read_to_string(&staged).unwrap();
         assert!(
             text.contains("example.com\tTRUE\t/\tFALSE\t0\tcf\tabc"),

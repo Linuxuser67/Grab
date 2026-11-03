@@ -4,8 +4,9 @@
 //! resources remain remote until the queue/fetch phase consumes the selected
 //! representation.
 
-use std::collections::HashSet;
-use std::time::{Duration, SystemTime};
+use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use gettextrs::gettext;
 use url::Url;
@@ -23,6 +24,157 @@ const MANIFEST_LOOKUP_BUDGET: Duration = Duration::from_secs(10);
 const MAX_MANIFEST_ATTEMPTS: u32 = 3;
 const MAX_PREVIEW_MANIFEST_ATTEMPTS: u32 = 2;
 const MANIFEST_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+
+// Preview metadata is short-lived: HLS/DASH source manifests can change, and
+// signed child URLs may expire. Dynamic presentations are never cached.
+const MANIFEST_PREVIEW_CACHE_TTL: Duration = Duration::from_secs(15);
+const MANIFEST_PREVIEW_CACHE_CAPACITY: usize = 32;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ManifestPreviewCacheKey {
+    url: String,
+    cookies_browser: String,
+    handoff_cookie_path: Option<std::path::PathBuf>,
+    proxy: Option<String>,
+}
+
+static MANIFEST_PREVIEW_CACHE: LazyLock<
+    Mutex<HashMap<ManifestPreviewCacheKey, (Instant, ManifestLookup)>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Build a cache key only when the preview's authentication identity is stable.
+///
+/// Browser-profile cookies can rotate independently of Grab, so they bypass
+/// this cache. Extension handoff jars have a unique staged path and therefore
+/// form a stable, short-lived identity. Anonymous requests are cacheable.
+fn manifest_preview_cache_key(
+    raw_url: &str,
+    cookies_browser: &str,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
+) -> Option<ManifestPreviewCacheKey> {
+    let mut url = Url::parse(raw_url).ok()?;
+    url.set_fragment(None);
+    if has_rotating_auth_query(&url) {
+        return None;
+    }
+
+    let effective_browser =
+        preview_cookie_browser(&url, cookies_browser, ManifestTransportPolicy::HttpsOnly);
+    let handoff_cookie_path =
+        crate::extension_server::live_handoff_identity(raw_url, effective_browser)
+            .map(|(path, _)| path)
+            .filter(|path| std::fs::File::open(path).is_ok());
+
+    // A live browser profile is mutable outside this process. Do not reuse
+    // metadata unless the exact extension snapshot is the active cookie source.
+    if !effective_browser.is_empty() && effective_browser != "none" && handoff_cookie_path.is_none()
+    {
+        return None;
+    }
+
+    Some(ManifestPreviewCacheKey {
+        url: url.to_string(),
+        cookies_browser: effective_browser.to_string(),
+        handoff_cookie_path,
+        proxy: proxy.map(|resolved| resolved.cli_url.clone()),
+    })
+}
+
+/// Whether a URL carries a known rotating signature or authentication parameter.
+fn has_rotating_auth_query(url: &Url) -> bool {
+    url.query_pairs().any(|(name, _)| {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "token"
+                | "access_token"
+                | "auth"
+                | "authorization"
+                | "sig"
+                | "signature"
+                | "expires"
+                | "expiry"
+                | "policy"
+                | "key-pair-id"
+                | "hmac"
+                | "hdnea"
+                | "hdnts"
+                | "awsaccesskeyid"
+                | "googleaccessid"
+                | "x-amz-algorithm"
+                | "x-amz-credential"
+                | "x-amz-date"
+                | "x-amz-expires"
+                | "x-amz-security-token"
+                | "x-amz-signature"
+                | "x-goog-algorithm"
+                | "x-goog-credential"
+                | "x-goog-date"
+                | "x-goog-expires"
+                | "x-goog-signature"
+        )
+    })
+}
+
+fn manifest_preview_cache_get(key: &ManifestPreviewCacheKey) -> Option<ManifestLookup> {
+    let mut cache = MANIFEST_PREVIEW_CACHE.lock().ok()?;
+    let expired = cache
+        .get(key)
+        .is_some_and(|(cached_at, _)| cached_at.elapsed() >= MANIFEST_PREVIEW_CACHE_TTL);
+    if expired {
+        cache.remove(key);
+        return None;
+    }
+    cache.get(key).map(|(_, lookup)| lookup.clone())
+}
+
+fn manifest_preview_cache_insert(key: ManifestPreviewCacheKey, lookup: &ManifestLookup) {
+    if !is_cacheable_static_manifest(lookup) {
+        return;
+    }
+    let Ok(mut cache) = MANIFEST_PREVIEW_CACHE.lock() else {
+        return;
+    };
+    if cache.len() >= MANIFEST_PREVIEW_CACHE_CAPACITY && !cache.contains_key(&key) {
+        cache.clear();
+    }
+    cache.insert(key, (Instant::now(), lookup.clone()));
+}
+
+fn is_cacheable_static_manifest(lookup: &ManifestLookup) -> bool {
+    match &lookup.manifest {
+        // A master caches only short-lived track-selection metadata. The child
+        // media playlist is still fetched at download time, so live windows are
+        // never reused here. Signed child URLs are excluded.
+        crate::manifest_types::NativeManifest::HlsMaster(plan) => {
+            !plan
+                .variants
+                .iter()
+                .any(|variant| has_rotating_auth_query(&variant.url))
+                && !plan
+                    .audio_renditions
+                    .iter()
+                    .filter_map(|rendition| rendition.url.as_ref())
+                    .any(has_rotating_auth_query)
+                && !plan
+                    .subtitle_renditions
+                    .iter()
+                    .any(|rendition| has_rotating_auth_query(&rendition.url))
+        }
+        crate::manifest_types::NativeManifest::HlsMedia(plan) => {
+            !plan.is_live
+                && !plan
+                    .resources
+                    .iter()
+                    .any(|resource| has_rotating_auth_query(&resource.url))
+        }
+        crate::manifest_types::NativeManifest::Dash(plan) => {
+            matches!(
+                &plan.presentation,
+                crate::manifest::dash::DashPresentation::Static
+            )
+        }
+    }
+}
 
 #[must_use]
 #[derive(Debug)]
@@ -225,12 +377,23 @@ pub(crate) async fn lookup(
     if !is_native_manifest_candidate(&requested_url, ManifestTransportPolicy::HttpsOnly) {
         return Ok(None);
     }
+    let cache_key = manifest_preview_cache_key(raw_url, cookies_browser, proxy);
+    if let Some(key) = cache_key.as_ref()
+        && let Some(mut cached) = manifest_preview_cache_get(key)
+    {
+        // Cache identity is canonical, but the card's freshness check is tied
+        // to the exact text the user entered for this lookup.
+        cached.source_url = raw_url.to_string();
+        tracing::debug!(url_host = %requested_url.host_str().unwrap_or_default(), "native manifest preview cache hit");
+        return Ok(Some(cached));
+    }
+
     let cookies_browser = preview_cookie_browser(
         &requested_url,
         cookies_browser,
         ManifestTransportPolicy::HttpsOnly,
     );
-    tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
+    let result = tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
         let client = client_for_manifest(raw_url, cookies_browser, proxy).await?;
         lookup_preview_with_client(&client, raw_url)
             .await
@@ -242,7 +405,11 @@ pub(crate) async fn lookup(
             "Native manifest lookup exceeded its {} second preview budget",
             MANIFEST_LOOKUP_BUDGET.as_secs()
         ))
-    })
+    })?;
+    if let (Some(key), Some(lookup)) = (cache_key, result.as_ref()) {
+        manifest_preview_cache_insert(key, lookup);
+    }
+    Ok(result)
 }
 
 /// Build an attempt-scoped client, preferring a valid extension handoff jar and
@@ -1861,5 +2028,127 @@ video/720.m3u8
                 "the cookie provider must apply the in-scope cookie on every redirect hop: {request}"
             );
         }
+    }
+
+    #[test]
+    fn preview_cache_accepts_static_hls_and_returns_a_clone() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:10,
+segment.ts
+#EXT-X-ENDLIST
+"#;
+        let plan = crate::manifest::plan_hls_media_playlist(
+            "https://cache-preview.example.test/media.m3u8",
+            body,
+        )
+        .expect("valid static HLS media playlist");
+        let lookup = ManifestLookup {
+            source_url: "https://cache-preview.example.test/media.m3u8".to_string(),
+            manifest: crate::manifest_types::NativeManifest::HlsMedia(Box::new(plan)),
+        };
+        assert!(is_cacheable_static_manifest(&lookup));
+
+        let key = ManifestPreviewCacheKey {
+            url: lookup.source_url.clone(),
+            cookies_browser: "none".to_string(),
+            handoff_cookie_path: None,
+            proxy: None,
+        };
+        manifest_preview_cache_insert(key.clone(), &lookup);
+        let cached = manifest_preview_cache_get(&key).expect("cache hit");
+        assert_eq!(cached.source_url, lookup.source_url);
+        assert_eq!(cached.choices(), lookup.choices());
+    }
+
+    #[test]
+    fn preview_cache_accepts_master_selection_metadata_without_signed_children() {
+        let body = br#"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720
+video/720.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cache-preview.example.test/master.m3u8",
+            body,
+        )
+        .expect("valid HLS master");
+        let lookup = ManifestLookup {
+            source_url: "https://cache-preview.example.test/master.m3u8".to_string(),
+            manifest: crate::manifest_types::NativeManifest::HlsMaster(master),
+        };
+        assert!(is_cacheable_static_manifest(&lookup));
+    }
+
+    #[test]
+    fn preview_cache_rejects_live_hls_media_playlists() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:10,
+segment.ts
+"#;
+        let plan = crate::manifest::plan_hls_media_playlist(
+            "https://cache-preview.example.test/live.m3u8",
+            body,
+        )
+        .expect("valid live HLS media playlist");
+        let lookup = ManifestLookup {
+            source_url: "https://cache-preview.example.test/live.m3u8".to_string(),
+            manifest: crate::manifest_types::NativeManifest::HlsMedia(Box::new(plan)),
+        };
+        assert!(!is_cacheable_static_manifest(&lookup));
+    }
+
+    #[test]
+    fn preview_cache_expires_entries_after_the_ttl() {
+        let key = ManifestPreviewCacheKey {
+            url: "https://cache-expiry.example.test/media.m3u8".to_string(),
+            cookies_browser: "none".to_string(),
+            handoff_cookie_path: None,
+            proxy: None,
+        };
+        MANIFEST_PREVIEW_CACHE.lock().expect("cache lock").insert(
+            key.clone(),
+            (
+                Instant::now() - MANIFEST_PREVIEW_CACHE_TTL - Duration::from_secs(1),
+                ManifestLookup {
+                    source_url: key.url.clone(),
+                    manifest: crate::manifest_types::NativeManifest::HlsMedia(Box::new(
+                        crate::manifest::plan_hls_media_playlist(
+                            &key.url,
+                            br#"#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:10,
+segment.ts
+#EXT-X-ENDLIST
+"#,
+                        )
+                        .expect("valid static HLS media playlist"),
+                    )),
+                },
+            ),
+        );
+        assert!(manifest_preview_cache_get(&key).is_none());
+    }
+
+    #[test]
+    fn preview_cache_rejects_signed_and_mutable_browser_urls() {
+        assert!(
+            manifest_preview_cache_key(
+                "https://cache-preview.example.test/master.m3u8?X-Amz-Signature=secret",
+                "none",
+                None,
+            )
+            .is_none(),
+            "signed manifest URLs must not be retained"
+        );
+        assert!(
+            manifest_preview_cache_key(
+                "https://cache-preview.example.test/master.m3u8",
+                "firefox",
+                None,
+            )
+            .is_none(),
+            "mutable browser-profile cookies must bypass preview caching"
+        );
     }
 }

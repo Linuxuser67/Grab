@@ -31,7 +31,7 @@ pub(crate) struct ManifestSubtitleChoice {
 }
 
 /// Parsed native presentation, before the user's representation selection is applied.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum NativeManifest {
     HlsMaster(HlsMasterPlan),
     HlsMedia(Box<HlsPlan>),
@@ -42,7 +42,7 @@ pub(crate) enum NativeManifest {
 ///
 /// The source URL is the freshness key used by the inline card. Child resources
 /// have already been resolved against the post-redirect URL.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ManifestLookup {
     pub(crate) source_url: String,
     pub(crate) manifest: NativeManifest,

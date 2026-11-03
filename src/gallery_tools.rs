@@ -276,7 +276,7 @@ mod tests {
         std::fs::write(
             &binary,
             format!(
-                "#!/bin/sh\\nprintf x >> '{}'\\nsleep 0.1\\nprintf '1.32.17\\n'\\n",
+                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.1\nprintf '1.32.17\\n'\n",
                 counter.display()
             ),
         )

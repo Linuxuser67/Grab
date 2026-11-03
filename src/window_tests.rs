@@ -416,8 +416,7 @@ fn status_filters_adapt_between_header_and_compact_dropdown() {
     app.register(None::<&gtk4::gio::Cancellable>)
         .expect("register test application before building its window");
 
-    for (width, expected_title, expected_compact) in
-        [(620, "title", true), (960, "filters", false)]
+    for (width, expected_title, expected_compact) in [(620, "title", true), (960, "filters", false)]
     {
         let settings = crate::settings::AppSettings::new();
         let manager = crate::download::DownloadManager::new(

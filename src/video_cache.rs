@@ -69,11 +69,13 @@ async fn video_cache() -> Option<&'static VideoCache> {
     match VIDEO_CACHE
         .get_or_try_init(|| async {
             let cache_dir = secure_cache_directory().map_err(|error| error.to_string())?;
+            let database = cache_dir.join("videos.redb");
+            validate_cache_file_path(&database).map_err(|error| error.to_string())?;
             let config = CacheConfig::builder().cache_dir(cache_dir.clone()).build();
             let cache = VideoCache::new(&config, Some(VIDEO_CACHE_TTL.as_secs()))
                 .await
                 .map_err(|error| error.to_string())?;
-            secure_cache_file(&cache_dir.join("videos.redb")).map_err(|error| error.to_string())?;
+            secure_cache_file(&database).map_err(|error| error.to_string())?;
             Ok::<VideoCache, String>(cache)
         })
         .await
@@ -110,6 +112,23 @@ fn secure_cache_directory() -> std::io::Result<PathBuf> {
         }
     }
     Ok(directory)
+}
+
+/// Reject an unsafe existing database path before Redb opens it.
+///
+/// A missing file is valid: Redb creates it during initialization.
+fn validate_cache_file_path(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "yt-dlp cache database is not a regular file",
+            ))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Restrict the persistent database itself as well as its containing directory.
@@ -199,14 +218,7 @@ pub(crate) fn cache_key(
     if !binary_metadata.is_file() {
         return None;
     }
-    hash_field(
-        &mut hasher,
-        b"binary-size",
-        &binary_metadata.len().to_be_bytes(),
-    );
-    if let Ok(modified) = binary_metadata.modified() {
-        hash_system_time(&mut hasher, b"binary-modified", modified);
-    }
+    hash_file_identity(&mut hasher, b"binary", youtube_bin, &binary_metadata);
 
     // This exact argv snapshot is also passed to the child process. It includes
     // extractor args, Deno runtime, cookies, and the paired User-Agent.
@@ -228,10 +240,7 @@ pub(crate) fn cache_key(
             b"deno-path",
             path.as_os_str().to_string_lossy().as_bytes(),
         );
-        hash_field(&mut hasher, b"deno-size", &metadata.len().to_be_bytes());
-        if let Ok(modified) = metadata.modified() {
-            hash_system_time(&mut hasher, b"deno-modified", modified);
-        }
+        hash_file_identity(&mut hasher, b"deno", path, &metadata);
     }
     if let Some(path) = std::env::var_os("PATH") {
         hash_field(&mut hasher, b"PATH", path.to_string_lossy().as_bytes());
@@ -247,14 +256,7 @@ pub(crate) fn cache_key(
             b"handoff-cookie-path",
             path.as_os_str().to_string_lossy().as_bytes(),
         );
-        hash_field(
-            &mut hasher,
-            b"handoff-cookie-size",
-            &metadata.len().to_be_bytes(),
-        );
-        if let Ok(modified) = metadata.modified() {
-            hash_system_time(&mut hasher, b"handoff-cookie-modified", modified);
-        }
+        hash_file_identity(&mut hasher, b"handoff-cookie", path, &metadata);
     }
 
     if let Some(proxy) = proxy {
@@ -304,6 +306,53 @@ fn hash_system_time(hasher: &mut Sha256, name: &[u8], time: SystemTime) {
     }
 }
 
+/// Include stable filesystem identity and high-resolution change times.
+///
+/// Size plus modification time alone can collide when a binary or cookie jar is
+/// replaced in place while preserving its length and mtime. Unix ctime and the
+/// device/inode pair distinguish those updates without hashing file contents.
+fn hash_file_identity(
+    hasher: &mut Sha256,
+    name: &[u8],
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) {
+    hash_field(
+        hasher,
+        name,
+        path.as_os_str().to_string_lossy().as_bytes(),
+    );
+    hash_field(
+        hasher,
+        b"file-size",
+        &metadata.len().to_be_bytes(),
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        hash_field(hasher, b"file-device", &metadata.dev().to_be_bytes());
+        hash_field(hasher, b"file-inode", &metadata.ino().to_be_bytes());
+        hash_field(hasher, b"file-ctime", &metadata.ctime().to_be_bytes());
+        hash_field(
+            hasher,
+            b"file-ctime-nsec",
+            &metadata.ctime_nsec().to_be_bytes(),
+        );
+        hash_field(hasher, b"file-mtime", &metadata.mtime().to_be_bytes());
+        hash_field(
+            hasher,
+            b"file-mtime-nsec",
+            &metadata.mtime_nsec().to_be_bytes(),
+        );
+    }
+
+    #[cfg(not(unix))]
+    if let Ok(modified) = metadata.modified() {
+        hash_system_time(hasher, b"file-modified", modified);
+    }
+}
+
 /// URLs carrying rotating authentication/signature parameters are not reusable.
 fn has_rotating_auth_query(url: &url::Url) -> bool {
     url.query_pairs().any(|(name, _)| {
@@ -341,7 +390,7 @@ fn has_rotating_auth_query(url: &url::Url) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_key, has_rotating_auth_query};
+    use super::{cache_key, has_rotating_auth_query, validate_cache_file_path};
     use crate::net_types::ResolvedProxy;
     use std::path::Path;
 
@@ -405,6 +454,68 @@ mod tests {
             url.to_string(),
         ];
         assert!(cache_key(url, &binary, "2026.10.23", "chrome", None, &with_handoff).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_key_changes_when_binary_is_rewritten_with_same_length() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = fake_binary(directory.path());
+        let url = "https://example.test/watch?v=1";
+        let args = vec!["--".to_string(), url.to_string()];
+        let before = cache_key(url, &binary, "2026.10.23", "none", None, &args)
+            .expect("initial binary identity");
+
+        std::fs::write(&binary, b"other fake binary!").expect("rewrite binary");
+        let after = cache_key(url, &binary, "2026.10.23", "none", None, &args)
+            .expect("updated binary identity");
+        assert_ne!(before, after);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_key_changes_when_cookie_snapshot_is_rewritten_with_same_length() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = fake_binary(directory.path());
+        let cookie_file = directory.path().join("handoff.cookies");
+        std::fs::write(&cookie_file, "cookie=one").expect("write cookie jar");
+        let url = "https://example.test/watch?v=1";
+        let args = vec![
+            "--cookies".to_string(),
+            cookie_file.to_string_lossy().into_owned(),
+            "--".to_string(),
+            url.to_string(),
+        ];
+        let before = cache_key(url, &binary, "2026.10.23", "none", None, &args)
+            .expect("initial cookie identity");
+
+        std::fs::write(&cookie_file, "cookie=two").expect("rewrite cookie jar");
+        let after = cache_key(url, &binary, "2026.10.23", "none", None, &args)
+            .expect("updated cookie identity");
+        assert_ne!(before, after);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_database_symlinks_before_redb_initialization() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let target = directory.path().join("target");
+        let database = directory.path().join("videos.redb");
+        std::fs::write(&target, b"outside database").expect("write target");
+        symlink(&target, &database).expect("create database symlink");
+
+        assert!(validate_cache_file_path(&database).is_err());
+        assert!(validate_cache_file_path(&directory.path().join("missing.redb")).is_ok());
+    }
+
+    #[test]
+    fn accepts_regular_database_path_before_redb_initialization() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("videos.redb");
+        std::fs::write(&database, b"database").expect("write database");
+        assert!(validate_cache_file_path(&database).is_ok());
     }
 
     #[test]

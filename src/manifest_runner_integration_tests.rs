@@ -1,6 +1,6 @@
 //! End-to-end tests for native HLS/DASH resource fetching and MP4 finalization.
 //!
-//! These tests generate short fragmented-MP4 fixtures with FFmpeg, serve their
+//! These tests generate short HLS and fragmented-MP4 fixtures with FFmpeg, serve their
 //! resources over loopback HTTP, and exercise the production transfer, track
 //! assembly, and FFmpeg finalization helpers. Manifest URLs are parsed as HTTPS;
 //! only the already-planned child resource URLs are redirected to loopback so
@@ -85,17 +85,17 @@ fn assert_has_audio_and_video(ffprobe: &Path, output: &Path) {
         ])
         .arg(output)
         .output()
-        .expect("run ffprobe on finalized manifest download");
-    assert_command_succeeded(&probe, "ffprobe rejected the finalized media file");
+        .expect("run ffprobe on manifest media output");
+    assert_command_succeeded(&probe, "ffprobe rejected the media file");
 
     let streams = String::from_utf8_lossy(&probe.stdout);
     assert!(
         streams.lines().any(|line| line == "codec_type=video"),
-        "finalized media file has no video stream: {streams}"
+        "media file has no video stream: {streams}"
     );
     assert!(
         streams.lines().any(|line| line == "codec_type=audio"),
-        "finalized media file has no audio stream: {streams}"
+        "media file has no audio stream: {streams}"
     );
 }
 

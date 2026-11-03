@@ -39,7 +39,6 @@ fn ensure_queue_view_switcher_css() {
     }
 }
 
-
 /// Suspend block held through the desktop portal. `sub` watches its Response so
 /// a denial clears the hold instead of pretending to block. Both die with the
 /// process, which also releases the lock server-side.
@@ -386,7 +385,6 @@ pub fn build_window(
     switcher_bar.set_widget_name("download-status-view-switcher-bar");
     switcher_bar.set_stack(Some(&view_stack));
 
-
     fn section_list(title: &str) -> (gtk4::Box, gtk4::ListBox) {
         let label = gtk4::Label::builder()
             .label(title)
@@ -444,15 +442,10 @@ pub fn build_window(
     downloaded_page.set_widget_name("status-page-downloaded");
 
     let all_stack_page = view_stack.add_titled(&all_page, Some("all"), &gettext("All"));
-    let active_stack_page =
-        view_stack.add_titled(&active_page, Some("active"), &gettext("Active"));
-    let queued_stack_page =
-        view_stack.add_titled(&queued_page, Some("queued"), &gettext("Queued"));
-    let downloaded_stack_page = view_stack.add_titled(
-        &downloaded_page,
-        Some("downloaded"),
-        &gettext("Downloaded"),
-    );
+    let active_stack_page = view_stack.add_titled(&active_page, Some("active"), &gettext("Active"));
+    let queued_stack_page = view_stack.add_titled(&queued_page, Some("queued"), &gettext("Queued"));
+    let downloaded_stack_page =
+        view_stack.add_titled(&downloaded_page, Some("downloaded"), &gettext("Downloaded"));
     all_page.append(&scroll);
     view_stack.set_visible_child_name("all");
 

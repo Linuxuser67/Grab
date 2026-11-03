@@ -246,14 +246,35 @@ pub async fn fetch_video_infos(
             // extension handoff cannot change the identity between those steps.
             let identity_args =
                 crate::extension_server::ytdlp_spawn_identity(&cookies_browser, &url);
-            let cache_key = crate::video_cache::cache_key(
-                &url,
-                &youtube_bin,
-                &yt_version,
-                &cookies_browser,
-                fetch_proxy.as_ref(),
-                &identity_args,
-            );
+            // Cache identity performs filesystem metadata checks and reads
+            // process environment; keep that synchronous work off Tokio workers.
+            let cache_url = url.clone();
+            let cache_binary = youtube_bin.clone();
+            let cache_version = yt_version.clone();
+            let cache_cookies_browser = cookies_browser.clone();
+            let cache_proxy = fetch_proxy.clone();
+            let cache_identity_args = identity_args.clone();
+            let cache_key = match tokio::task::spawn_blocking(move || {
+                crate::video_cache::cache_key(
+                    &cache_url,
+                    &cache_binary,
+                    &cache_version,
+                    &cache_cookies_browser,
+                    cache_proxy.as_ref(),
+                    &cache_identity_args,
+                )
+            })
+            .await
+            {
+                Ok(key) => key,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "yt-dlp cache identity task failed; probing without cache"
+                    );
+                    None
+                }
+            };
             // Playlist metadata uses the same extraction identity, but a
             // separate namespace and the crate's dedicated playlist cache.
             // The download worker still re-resolves each selected item.

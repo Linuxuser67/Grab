@@ -194,13 +194,13 @@ pub(crate) fn cache_key(
 
     let browser_profile_is_active =
         crate::video_tools::cookies_browser_spec(cookies_browser).is_some();
-    let cookie_path = identity_args
-        .windows(2)
-        .find(|pair| pair[0] == "--cookies")
-        .map(|pair| Path::new(&pair[1]));
-    // Browser-profile cookies rotate outside Grab. Cache only when this exact
-    // spawn will use a concrete extension cookie snapshot instead.
-    if browser_profile_is_active && cookie_path.is_none() {
+    let has_cookie_file = identity_args
+        .iter()
+        .any(|argument| argument == "--cookies" || argument.starts_with("--cookies="));
+    // Authenticated extraction can return session-bound metadata and media
+    // URLs. Do not persist it: extension handoff cookie files are temporary,
+    // and browser-profile cookies can change independently of this process.
+    if browser_profile_is_active || has_cookie_file {
         return None;
     }
 
@@ -244,19 +244,6 @@ pub(crate) fn cache_key(
     }
     if let Some(path) = std::env::var_os("PATH") {
         hash_field(&mut hasher, b"PATH", path.to_string_lossy().as_bytes());
-    }
-
-    if let Some(path) = cookie_path {
-        let metadata = std::fs::metadata(path).ok()?;
-        if !metadata.is_file() || std::fs::File::open(path).is_err() {
-            return None;
-        }
-        hash_field(
-            &mut hasher,
-            b"handoff-cookie-path",
-            path.as_os_str().to_string_lossy().as_bytes(),
-        );
-        hash_file_identity(&mut hasher, b"handoff-cookie", path, &metadata);
     }
 
     if let Some(proxy) = proxy {
@@ -424,15 +411,15 @@ mod tests {
     }
 
     #[test]
-    fn browser_profile_cache_requires_the_exact_handoff_jar() {
+    fn authenticated_extractions_are_not_persistently_cached() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let binary = fake_binary(directory.path());
         let url = "https://example.test/watch?v=1";
-        let no_cookies = vec!["--".to_string(), url.to_string()];
-        assert!(cache_key(url, &binary, "2026.10.23", "chrome", None, &no_cookies).is_none());
+        let anonymous = vec!["--".to_string(), url.to_string()];
+        assert!(cache_key(url, &binary, "2026.10.23", "chrome", None, &anonymous).is_none());
 
         let cookie_file = directory.path().join("handoff.cookies");
-        std::fs::write(&cookie_file, "# Netscape HTTP Cookie File\n").expect("write cookie jar");
+        std::fs::write(&cookie_file, "# Netscape HTTP Cookie File\\n").expect("write cookie jar");
         let with_handoff = vec![
             "--cookies".to_string(),
             cookie_file.to_string_lossy().into_owned(),
@@ -441,7 +428,14 @@ mod tests {
             "--".to_string(),
             url.to_string(),
         ];
-        assert!(cache_key(url, &binary, "2026.10.23", "chrome", None, &with_handoff).is_some());
+        assert!(cache_key(url, &binary, "2026.10.23", "none", None, &with_handoff).is_none());
+
+        let equals_form = vec![
+            format!("--cookies={}", cookie_file.display()),
+            "--".to_string(),
+            url.to_string(),
+        ];
+        assert!(cache_key(url, &binary, "2026.10.23", "none", None, &equals_form).is_none());
     }
 
     #[cfg(unix)]

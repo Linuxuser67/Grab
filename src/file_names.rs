@@ -606,12 +606,7 @@ fn remove_claimed_file(path: &std::path::Path, file: &std::fs::File) {
     }
 }
 
-/// Exclusive-create fallback for filesystems without hard links or no-replace rename.
-///
-/// The final name is reserved with `create_new` before copying. Such filesystems
-/// cannot provide atomic publication without either primitive, so readers may
-/// observe the file while this fallback copies it. Existing destinations are
-/// never opened or truncated.
+// Owns the exclusive destination claim and removes only the inode it created on failure.
 struct ClaimedDestination<'path> {
     path: &'path std::path::Path,
     file: std::fs::File,

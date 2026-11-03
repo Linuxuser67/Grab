@@ -460,6 +460,32 @@ fn status_filters_adapt_between_header_and_compact_dropdown() {
             "the main menu remains in the header"
         );
 
+        let dropdown = find_widget_by_name(window.upcast_ref(), "status-filter-dropdown")
+            .expect("compact status filter exists")
+            .downcast::<gtk4::DropDown>()
+            .expect("compact filter is a GtkDropDown");
+        let segmented = find_widget_by_name(window.upcast_ref(), "status-filter-segmented")
+            .expect("wide status filter exists")
+            .downcast::<libadwaita::ToggleGroup>()
+            .expect("wide filter is an AdwToggleGroup");
+        if width == 620 {
+            dropdown.set_selected(2);
+            drain_gtk_events();
+            assert_eq!(
+                segmented.active_name().as_deref(),
+                Some("queued"),
+                "the narrow filter selection must update the shared status filter"
+            );
+        } else {
+            segmented.set_active_name(Some("downloaded"));
+            drain_gtk_events();
+            assert_eq!(
+                dropdown.selected(),
+                3,
+                "the wide filter selection must update the compact filter"
+            );
+        }
+
         if width == 960 {
             let picker_child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
             let picker_page = libadwaita::NavigationPage::builder()

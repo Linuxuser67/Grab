@@ -16,29 +16,6 @@ use crate::window_rows::ngettext_count;
 
 pub const BACKGROUND_NOTIF_ID: &str = "grab-background";
 
-/// Remove the empty icon slot from the wide/header view switcher.
-///
-/// AdwViewSwitcher always builds its buttons with an image and a label. The
-/// page icons are cleared while wide, so collapse the corresponding box gap
-/// only for this header switcher. The bottom ViewSwitcherBar is unaffected.
-fn ensure_queue_view_switcher_css() {
-    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    let Some(display) = gtk4::gdk::Display::default() else {
-        return;
-    };
-    if ONCE.set(()).is_ok() {
-        let provider = gtk4::CssProvider::new();
-        provider.load_from_bytes(&glib::Bytes::from_static(
-            b"#download-status-view-switcher viewswitcher > button.toggle > stack > box.wide { border-spacing: 0; }",
-        ));
-        gtk4::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
-}
-
 /// Suspend block held through the desktop portal. `sub` watches its Response so
 /// a denial clears the hold instead of pretending to block. Both die with the
 /// process, which also releases the lock server-side.
@@ -376,7 +353,6 @@ pub fn build_window(
     view_stack.set_enable_transitions(false);
     let view_switcher = adw::ViewSwitcher::new();
     view_switcher.set_widget_name("download-status-view-switcher");
-    ensure_queue_view_switcher_css();
     view_switcher.set_stack(Some(&view_stack));
     view_switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
     header.set_title_widget(Some(&view_switcher));
@@ -441,11 +417,30 @@ pub fn build_window(
     let downloaded_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     downloaded_page.set_widget_name("status-page-downloaded");
 
-    let all_stack_page = view_stack.add_titled(&all_page, Some("all"), &gettext("All"));
-    let active_stack_page = view_stack.add_titled(&active_page, Some("active"), &gettext("Active"));
-    let queued_stack_page = view_stack.add_titled(&queued_page, Some("queued"), &gettext("Queued"));
-    let downloaded_stack_page =
-        view_stack.add_titled(&downloaded_page, Some("downloaded"), &gettext("Downloaded"));
+    view_stack.add_titled_with_icon(
+        &all_page,
+        Some("all"),
+        &gettext("All"),
+        "view-list-symbolic",
+    );
+    view_stack.add_titled_with_icon(
+        &active_page,
+        Some("active"),
+        &gettext("Active"),
+        "content-loading-symbolic",
+    );
+    view_stack.add_titled_with_icon(
+        &queued_page,
+        Some("queued"),
+        &gettext("Queued"),
+        "task-due-symbolic",
+    );
+    view_stack.add_titled_with_icon(
+        &downloaded_page,
+        Some("downloaded"),
+        &gettext("Downloaded"),
+        "folder-download-symbolic",
+    );
     all_page.append(&scroll);
     view_stack.set_visible_child_name("all");
 
@@ -462,16 +457,8 @@ pub fn build_window(
         let switcher_bar = switcher_bar.clone();
         let has_items = Rc::clone(&has_items);
         let queue_visible = Rc::clone(&queue_view_visible);
-        let all_page = all_stack_page.clone();
-        let active_page = active_stack_page.clone();
-        let queued_page = queued_stack_page.clone();
-        let downloaded_page = downloaded_stack_page.clone();
         breakpoint.connect_apply(move |_| {
             narrow.set(true);
-            all_page.set_icon_name(Some("view-list-symbolic"));
-            active_page.set_icon_name(Some("content-loading-symbolic"));
-            queued_page.set_icon_name(Some("task-due-symbolic"));
-            downloaded_page.set_icon_name(Some("folder-download-symbolic"));
             // Clearing the title widget makes AdwHeaderBar show the window
             // title ("Grab"), while the same stack is exposed by the bottom bar.
             header.set_title_widget(None::<&gtk4::Widget>);
@@ -487,16 +474,8 @@ pub fn build_window(
         let switcher_bar = switcher_bar.clone();
         let has_items = Rc::clone(&has_items);
         let queue_visible = Rc::clone(&queue_view_visible);
-        let all_page = all_stack_page.clone();
-        let active_page = active_stack_page.clone();
-        let queued_page = queued_stack_page.clone();
-        let downloaded_page = downloaded_stack_page.clone();
         breakpoint.connect_unapply(move |_| {
             narrow.set(false);
-            all_page.set_icon_name(None);
-            active_page.set_icon_name(None);
-            queued_page.set_icon_name(None);
-            downloaded_page.set_icon_name(None);
             switcher_bar.set_reveal(false);
             let show_navigation = has_items.get() && queue_visible.get();
             switcher.set_visible(show_navigation);

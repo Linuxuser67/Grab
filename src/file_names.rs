@@ -644,10 +644,14 @@ where
         ));
     }
 
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(destination)?;
     let mut claim = ClaimedDestination {
         path: destination,
         file,
@@ -662,7 +666,6 @@ where
     }
 
     let permissions = temporary.as_file().metadata()?.permissions();
-    claim.file.set_permissions(permissions)?;
     let mut source = temporary.as_file();
     let mut buffer = [0_u8; 256 * 1024];
     loop {
@@ -679,6 +682,8 @@ where
         claim.file.write_all(&buffer[..read])?;
     }
     claim.file.flush()?;
+    claim.file.sync_all()?;
+    claim.file.set_permissions(permissions)?;
     claim.file.sync_all()?;
 
     if !should_continue() {

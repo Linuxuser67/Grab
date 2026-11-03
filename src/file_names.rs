@@ -1058,7 +1058,7 @@ mod tests {
     fn publish_temporary_uses_a_sweepable_owned_name() {
         let dir = tempfile::tempdir().unwrap();
         let temporary = publish_temp_in(dir.path()).unwrap();
-        let name = temporary.file_name().unwrap().to_str().unwrap();
+        let name = temporary.path().file_name().unwrap().to_str().unwrap();
         assert!(name.starts_with(".grab-publish-"));
         assert!(name.ends_with(".partial"));
     }

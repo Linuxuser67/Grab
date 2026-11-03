@@ -490,6 +490,16 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             .expect("queue AdwViewStack exists")
             .downcast::<libadwaita::ViewStack>()
             .expect("status navigation is backed by AdwViewStack");
+        for name in ["all", "active", "queued", "downloaded"] {
+            let child = view_stack
+                .child_by_name(name)
+                .expect("each status view is registered");
+            assert!(
+                view_stack.page(&child).icon_name().is_none(),
+                "the {name} tab must not reserve space for an icon"
+            );
+        }
+
         let scroll = find_widget_by_name(window.upcast_ref(), "download-list-scroll")
             .expect("the shared queue scroller exists");
         let active_section = find_widget_by_name(window.upcast_ref(), "download-section-active")

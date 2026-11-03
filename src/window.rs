@@ -221,6 +221,7 @@ pub fn build_window(
         .build();
 
     let header = adw::HeaderBar::new();
+    header.set_widget_name("main-header");
     // Inline New Download card, pinned under the header above the list (and
     // the empty state). The queue stays usable underneath it.
     let add_card = crate::inline_add::build_add_card(Rc::clone(&manager));

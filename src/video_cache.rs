@@ -223,7 +223,11 @@ pub(crate) fn cache_key(
         if !metadata.is_file() {
             return None;
         }
-        hash_field(&mut hasher, b"deno-path", path.as_os_str().to_string_lossy().as_bytes());
+        hash_field(
+            &mut hasher,
+            b"deno-path",
+            path.as_os_str().to_string_lossy().as_bytes(),
+        );
         hash_field(&mut hasher, b"deno-size", &metadata.len().to_be_bytes());
         if let Ok(modified) = metadata.modified() {
             hash_system_time(&mut hasher, b"deno-modified", modified);
@@ -388,9 +392,7 @@ mod tests {
         let binary = fake_binary(directory.path());
         let url = "https://example.test/watch?v=1";
         let no_cookies = vec!["--".to_string(), url.to_string()];
-        assert!(
-            cache_key(url, &binary, "2026.10.23", "chrome", None, &no_cookies).is_none()
-        );
+        assert!(cache_key(url, &binary, "2026.10.23", "chrome", None, &no_cookies).is_none());
 
         let cookie_file = directory.path().join("handoff.cookies");
         std::fs::write(&cookie_file, "# Netscape HTTP Cookie File\n").expect("write cookie jar");
@@ -402,9 +404,7 @@ mod tests {
             "--".to_string(),
             url.to_string(),
         ];
-        assert!(
-            cache_key(url, &binary, "2026.10.23", "chrome", None, &with_handoff).is_some()
-        );
+        assert!(cache_key(url, &binary, "2026.10.23", "chrome", None, &with_handoff).is_some());
     }
 
     #[test]

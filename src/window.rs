@@ -206,7 +206,6 @@ pub fn build_window(
         .default_width(settings.window_width().max(400))
         .default_height(settings.window_height().max(300))
         .width_request(360)
-        .height_request(300)
         .build();
 
     settings
@@ -845,7 +844,6 @@ pub fn build_window(
         let seg = seg.clone();
         let compact = compact_filter_row.clone();
         let title = header_title_stack.clone();
-        let search_btn = search_toggle.clone();
         let search_toggle = search_toggle.clone();
         add_card
             .navigation()
@@ -857,7 +855,7 @@ pub fn build_window(
                 if picker {
                     seg.set_visible(false);
                     compact.set_visible(false);
-                    search_btn.set_visible(false);
+                    search_toggle.set_visible(false);
                     search_toggle.set_active(false);
                     title.set_visible_child_name("title");
                 }

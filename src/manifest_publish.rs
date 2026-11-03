@@ -213,36 +213,154 @@ fn copy_staged_bytes(
 ///
 /// The returned temporary is not visible under the final name. Persist it with
 /// no-clobber semantics only after the copy and file sync have succeeded.
+enum AnonymousPublishResult {
+    Linked(PendingDestination),
+    LinkUnsupported(std::fs::File),
+    Aborted,
+}
+
+/// Prepare an unnamed destination-filesystem inode using Linux O_TMPFILE.
+///
+/// There is no directory entry while the copy is being populated. Filesystems
+/// without O_TMPFILE support return None and use the exclusive-create fallback.
 fn prepare_destination_copy(
     source: &Path,
     destination: &Path,
     gate: &crate::attempt_gate::AttemptGate,
-) -> std::io::Result<Option<tempfile::NamedTempFile>> {
-    let parent = destination.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "destination has no parent directory",
-        )
-    })?;
-    let mut source_file = std::fs::File::open(source)?;
-    let permissions = source_file.metadata()?.permissions();
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    if !copy_staged_bytes(&mut source_file, temporary.as_file_mut(), gate)? {
-        return Ok(None);
+) -> std::io::Result<Option<std::fs::File>> {
+    #[cfg(target_os = "linux")]
+    {
+        let parent = destination.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "destination has no parent directory",
+            )
+        })?;
+        let descriptor = match rustix::fs::openat(
+            rustix::fs::CWD,
+            parent,
+            rustix::fs::OFlags::TMPFILE
+                | rustix::fs::OFlags::RDWR
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::from_bits_truncate(0o600),
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    libc::EOPNOTSUPP | libc::EINVAL | libc::EISDIR | libc::ENOSYS | libc::EPERM
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(std::io::Error::from(error)),
+        };
+        let mut temporary = std::fs::File::from(descriptor);
+        let mut source_file = std::fs::File::open(source)?;
+        let permissions = source_file.metadata()?.permissions();
+        if !copy_staged_bytes(&mut source_file, &mut temporary, gate)? {
+            return Ok(None);
+        }
+
+        temporary.set_permissions(permissions)?;
+        temporary.sync_all()?;
+        if !gate.is_active() {
+            return Ok(None);
+        }
+
+        Ok(Some(temporary))
     }
 
-    // Apply source permissions through the open descriptor before flushing the file.
-    temporary.as_file().set_permissions(permissions)?;
-    temporary.as_file().sync_all()?;
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (source, destination, gate);
+        Ok(None)
+    }
+}
+
+/// Atomically link the completed O_TMPFILE inode without assigning it a temporary
+/// name. The procfs descriptor path avoids AT_EMPTY_PATH's capability requirement.
+fn link_anonymous_copy(
+    temporary: std::fs::File,
+    destination: &Path,
+    gate: &Arc<crate::attempt_gate::AttemptGate>,
+) -> std::io::Result<AnonymousPublishResult> {
+    if !gate.is_active() {
+        return Ok(AnonymousPublishResult::Aborted);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+
+        let fd_path = PathBuf::from(format!("/proc/self/fd/{}", temporary.as_raw_fd()));
+        match rustix::fs::linkat(
+            rustix::fs::CWD,
+            &fd_path,
+            rustix::fs::CWD,
+            destination,
+            rustix::fs::AtFlags::SYMLINK_FOLLOW,
+        ) {
+            Ok(()) => {
+                let mut pending =
+                    PendingDestination::new(destination, Arc::clone(gate), None);
+                pending.arm();
+                Ok(AnonymousPublishResult::Linked(pending))
+            }
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    libc::ENOSYS
+                        | libc::EINVAL
+                        | libc::EOPNOTSUPP
+                        | libc::ENOENT
+                        | libc::EPERM
+                ) =>
+            {
+                Ok(AnonymousPublishResult::LinkUnsupported(temporary))
+            }
+            Err(error) => Err(std::io::Error::from(error)),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (destination, gate);
+        Ok(AnonymousPublishResult::LinkUnsupported(temporary))
+    }
+}
+
+/// Copy to an exclusively created final path when unnamed-inode publication is
+/// unavailable. No intermediate pathname is created, and existing files win.
+fn copy_to_exclusive_destination(
+    source: &mut impl std::io::Read,
+    permissions: std::fs::Permissions,
+    destination: &Path,
+    gate: &Arc<crate::attempt_gate::AttemptGate>,
+) -> std::io::Result<Option<PendingDestination>> {
+    use std::os::unix::fs::OpenOptionsExt as _;
 
     if !gate.is_active() {
         return Ok(None);
     }
 
-    Ok(Some(temporary))
+    let mut destination_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600);
+    let mut pending = PendingDestination::new(destination, Arc::clone(gate), None);
+    let mut destination_file = destination_file.open(destination)?;
+    pending.arm();
+    if !copy_staged_bytes(source, &mut destination_file, gate)? {
+        return Ok(None);
+    }
+
+    destination_file.set_permissions(permissions)?;
+    destination_file.sync_all()?;
+    Ok(Some(pending))
 }
 
-/// Persist a fully synced temporary and claim delivery only after its final name exists.
+/// Make the directory entry durable after publication.
 async fn sync_parent_directory(destination: &Path) -> std::io::Result<()> {
     let parent = destination.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -253,18 +371,12 @@ async fn sync_parent_directory(destination: &Path) -> std::io::Result<()> {
     tokio::fs::File::open(parent).await?.sync_all().await
 }
 
-async fn persist_prepared_copy(
-    temporary: tempfile::NamedTempFile,
+/// Sync the destination directory and commit the attempt's delivery claim.
+async fn commit_pending_copy(
+    mut pending: PendingDestination,
     destination: &Path,
     gate: &Arc<crate::attempt_gate::AttemptGate>,
 ) -> std::io::Result<ManifestPublishOutcome> {
-    let mut pending = PendingDestination::new(destination, Arc::clone(gate), None);
-    let published_file = temporary
-        .persist_noclobber(destination)
-        .map_err(|error| error.error)?;
-    drop(published_file);
-
-    pending.arm();
     if let Err(error) = sync_parent_directory(destination).await {
         pending.rollback().await;
         return Err(error);
@@ -277,6 +389,53 @@ async fn persist_prepared_copy(
     gate.mark_delivered();
     pending.disarm();
     Ok(ManifestPublishOutcome::Published)
+}
+
+/// O_EXCL fallback when the destination filesystem cannot publish an unnamed inode.
+async fn persist_by_exclusive_copy(
+    mut source: std::fs::File,
+    destination: &Path,
+    gate: &Arc<crate::attempt_gate::AttemptGate>,
+) -> std::io::Result<ManifestPublishOutcome> {
+    let destination = destination.to_path_buf();
+    let copy_gate = Arc::clone(gate);
+    let pending = tokio::task::spawn_blocking(move || {
+        let permissions = source.metadata()?.permissions();
+        std::io::Seek::seek(&mut source, std::io::SeekFrom::Start(0))?;
+        copy_to_exclusive_destination(&mut source, permissions, &destination, &copy_gate)
+    })
+    .await
+    .map_err(std::io::Error::other)??;
+
+    let Some(pending) = pending else {
+        return Ok(ManifestPublishOutcome::Aborted);
+    };
+    commit_pending_copy(pending, &destination, gate).await
+}
+
+/// Atomically link the anonymous inode, or use O_EXCL when the filesystem cannot.
+async fn persist_prepared_copy(
+    temporary: std::fs::File,
+    destination: &Path,
+    gate: &Arc<crate::attempt_gate::AttemptGate>,
+) -> std::io::Result<ManifestPublishOutcome> {
+    let destination_for_link = destination.to_path_buf();
+    let link_gate = Arc::clone(gate);
+    let linked = tokio::task::spawn_blocking(move || {
+        link_anonymous_copy(temporary, &destination_for_link, &link_gate)
+    })
+    .await
+    .map_err(std::io::Error::other)??;
+
+    match linked {
+        AnonymousPublishResult::Linked(pending) => {
+            commit_pending_copy(pending, destination, gate).await
+        }
+        AnonymousPublishResult::LinkUnsupported(temporary) => {
+            persist_by_exclusive_copy(temporary, destination, gate).await
+        }
+        AnonymousPublishResult::Aborted => Ok(ManifestPublishOutcome::Aborted),
+    }
 }
 
 /// Commit a same-filesystem rename or link after installing a rollback guard.
@@ -335,7 +494,16 @@ pub(crate) async fn publish(
     .map_err(std::io::Error::other)??;
 
     let Some(temporary) = temporary else {
-        return Ok(ManifestPublishOutcome::Aborted);
+        if !gate.is_active() {
+            return Ok(ManifestPublishOutcome::Aborted);
+        }
+        let source_path = source.to_path_buf();
+        let source_file = tokio::task::spawn_blocking(move || std::fs::File::open(source_path))
+            .await
+            .map_err(std::io::Error::other)??;
+        let outcome = persist_by_exclusive_copy(source_file, destination, gate).await?;
+        cancellation.disarm();
+        return Ok(outcome);
     };
     if !gate.is_active() {
         return Ok(ManifestPublishOutcome::Aborted);
@@ -400,7 +568,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn destination_local_copy_is_private_until_no_clobber_persist() {
+    async fn destination_local_copy_stays_unnamed_until_no_clobber_publish() {
+        use std::io::Seek as _;
+
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.part");
         let destination = directory.path().join("final.mp4");
@@ -408,16 +578,24 @@ mod tests {
         std::fs::write(&source, &contents).unwrap();
         let gate = crate::attempt_gate::AttemptGate::new();
 
-        let temporary = prepare_destination_copy(&source, &destination, &gate)
+        let Some(mut temporary) = prepare_destination_copy(&source, &destination, &gate)
             .unwrap()
-            .expect("copy should prepare while the gate is active");
+        else {
+            // The test filesystem may not implement O_TMPFILE; the exclusive
+            // create fallback is covered independently below.
+            return;
+        };
 
-        assert!(
-            !destination.exists(),
-            "the final name stays absent before persist"
+        assert!(!destination.exists(), "the final name stays absent before link");
+        assert_eq!(
+            std::fs::read_dir(directory.path()).unwrap().count(),
+            1,
+            "the anonymous inode must not add a directory entry"
         );
-        assert_eq!(temporary.path().parent(), destination.parent());
-        assert_eq!(std::fs::read(temporary.path()).unwrap(), contents);
+        temporary.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut copied = Vec::new();
+        std::io::Read::read_to_end(&mut temporary, &mut copied).unwrap();
+        assert_eq!(copied, contents);
 
         let outcome = persist_prepared_copy(temporary, &destination, &gate)
             .await
@@ -425,31 +603,52 @@ mod tests {
         assert_eq!(outcome, ManifestPublishOutcome::Published);
         assert!(gate.was_delivered());
         assert_eq!(std::fs::read(&destination).unwrap(), contents);
-        assert!(
-            source.exists(),
-            "the source remains for normal staging cleanup"
-        );
+        assert!(source.exists(), "the source remains for normal staging cleanup");
     }
 
     #[tokio::test]
-    async fn no_clobber_persist_preserves_an_existing_destination() {
+    async fn exclusive_copy_fallback_publishes_complete_bytes_without_clobbering() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.part");
+        let destination = directory.path().join("final.mp4");
+        let contents = vec![0x6b; 512 * 1024];
+        std::fs::write(&source, &contents).unwrap();
+        let gate = crate::attempt_gate::AttemptGate::new();
+
+        let outcome = persist_by_exclusive_copy(
+            std::fs::File::open(&source).unwrap(),
+            &destination,
+            &gate,
+        )
+        .await
+        .expect("exclusive create fallback should publish");
+
+        assert_eq!(outcome, ManifestPublishOutcome::Published);
+        assert!(gate.was_delivered());
+        assert_eq!(std::fs::read(destination).unwrap(), contents);
+        assert!(source.exists(), "the staged source remains for normal cleanup");
+    }
+
+    #[tokio::test]
+    async fn exclusive_copy_fallback_preserves_an_existing_destination() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.part");
         let destination = directory.path().join("final.mp4");
         std::fs::write(&source, b"source").unwrap();
         std::fs::write(&destination, b"user file").unwrap();
         let gate = crate::attempt_gate::AttemptGate::new();
-        let temporary = prepare_destination_copy(&source, &destination, &gate)
-            .unwrap()
-            .expect("temporary copy should complete");
 
-        let error = persist_prepared_copy(temporary, &destination, &gate)
-            .await
-            .expect_err("an existing destination must win");
+        let error = persist_by_exclusive_copy(
+            std::fs::File::open(&source).unwrap(),
+            &destination,
+            &gate,
+        )
+        .await
+        .expect_err("create_new must reject an existing destination");
 
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-        assert_eq!(std::fs::read(&destination).unwrap(), b"user file");
-        assert!(gate.is_active(), "a failed persist does not claim delivery");
+        assert_eq!(std::fs::read(destination).unwrap(), b"user file");
+        assert!(gate.is_active(), "a failed exclusive create does not claim delivery");
         assert!(!gate.was_delivered());
     }
 
@@ -489,10 +688,10 @@ mod tests {
         let source = directory.path().join("source.part");
         std::fs::write(&source, vec![0x31; 1024 * 1024]).unwrap();
         let mut source_file = std::fs::File::open(&source).unwrap();
-        let mut temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        let mut temporary = tempfile::tempfile_in(directory.path()).unwrap();
         let gate = crate::attempt_gate::AttemptGate::new();
         let mut destination = DiscardAfterFirstWrite {
-            file: temporary.as_file_mut(),
+            file: &mut temporary,
             gate: Arc::clone(&gate),
             discarded: false,
         };

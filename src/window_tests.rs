@@ -431,7 +431,7 @@ fn status_filters_adapt_between_header_and_compact_dropdown() {
             "/tmp",
         ));
         let toasts = std::rc::Rc::new(libadwaita::ToastOverlay::new());
-        let (window, _, _) =
+        let (window, _, add_card) =
             crate::window::build_window(&app, manager, settings, toasts);
         window.set_default_size(width, 500);
         window.present();
@@ -459,6 +459,39 @@ fn status_filters_adapt_between_header_and_compact_dropdown() {
             find_widget_by_name(window.upcast_ref(), "main-menu-button").is_some(),
             "the main menu remains in the header"
         );
+
+        if width == 960 {
+            let picker_child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            let picker_page = libadwaita::NavigationPage::builder()
+                .tag("header-filter-test-picker")
+                .title("Picker")
+                .child(&picker_child)
+                .build();
+            add_card.navigation().push(&picker_page);
+            drain_gtk_events();
+            assert_eq!(
+                title.property::<String>("visible-child-name"),
+                "title",
+                "queue filters must leave the header while the picker is visible"
+            );
+            assert!(
+                !find_widget_by_name(window.upcast_ref(), "search-downloads-button")
+                    .expect("search button exists")
+                    .is_visible(),
+                "queue search must leave the header while the picker is visible"
+            );
+
+            assert!(
+                add_card.navigation().pop(),
+                "the picker page should return to the download form"
+            );
+            drain_gtk_events();
+            assert_eq!(
+                title.property::<String>("visible-child-name"),
+                "filters",
+                "queue filters must return when the queue becomes visible"
+            );
+        }
         window.destroy();
         drain_gtk_events();
     }

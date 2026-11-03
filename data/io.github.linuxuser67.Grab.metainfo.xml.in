@@ -50,6 +50,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.6" date="2026-11-03">
+      <description>
+        <ul>
+          <li>Use anonymous Unix files for manifest publication and preserve named file-derived output in the working tree.</li>
+          <li>Harden yt-dlp metadata caching, including identity checks, atomic cache writes, and cleanup of stale entries.</li>
+          <li>Carry forward destination-visible HLS/DASH parts, MKV-default output, native stream probing, and packaging fixes.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.5" date="2026-11-03">
       <description>
         <ul>

@@ -1129,7 +1129,11 @@ mod tests {
         publish_by_exclusive_copy(temporary, &destination, || {
             checks += 1;
             if checks == 2 {
-                let mode = std::fs::metadata(&destination).unwrap().permissions().mode() & 0o777;
+                let mode = std::fs::metadata(&destination)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
                 assert_eq!(mode, 0o600, "partial destination stays private");
             }
             true

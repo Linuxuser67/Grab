@@ -209,8 +209,8 @@ fn from_cached_playlist(key: &str, playlist: Playlist) -> Option<PlaylistInfo> {
 async fn playlist_cache() -> Option<&'static PlaylistCache> {
     match PLAYLIST_CACHE
         .get_or_try_init(|| async {
-            let cache_dir = crate::video_cache::secure_cache_directory()
-                .map_err(|error| error.to_string())?;
+            let cache_dir =
+                crate::video_cache::secure_cache_directory().map_err(|error| error.to_string())?;
             let database = cache_dir.join("playlists.redb");
             crate::video_cache::validate_cache_file_path(&database)
                 .map_err(|error| error.to_string())?;
@@ -218,8 +218,7 @@ async fn playlist_cache() -> Option<&'static PlaylistCache> {
             let cache = PlaylistCache::new(&config, Some(PLAYLIST_CACHE_TTL.as_secs()))
                 .await
                 .map_err(|error| error.to_string())?;
-            crate::video_cache::secure_cache_file(&database)
-                .map_err(|error| error.to_string())?;
+            crate::video_cache::secure_cache_file(&database).map_err(|error| error.to_string())?;
             Ok::<PlaylistCache, String>(cache)
         })
         .await

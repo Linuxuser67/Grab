@@ -50,6 +50,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.5" date="2026-11-03">
+      <description>
+        <ul>
+          <li>Stream static HLS fragments directly to destination parts, including single-init fMP4 playlists with safe byte concatenation.</li>
+          <li>Extend native HLS/DASH streaming to run alongside extractor probes, with on-demand subtitle fetching and a MKV default output.</li>
+          <li>Cache complete yt-dlp playlists and successful video lookups, and harden persistent video cache identity, database path checks, and cold-start gallery cookies.</li>
+          <li>Consolidate media-tool version probes and tighten native manifest preview, staging, and destination-part handling.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.4" date="2026-11-02">
       <description>
         <ul>

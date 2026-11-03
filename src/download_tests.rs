@@ -9077,3 +9077,113 @@ fn finished_name_adoption_retries_after_stale_listing_collision() {
     assert_eq!(std::fs::read(dir.join(adopted)).unwrap(), b"downloaded");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn deleting_native_manifest_download_removes_visible_track_parts() {
+    let destination_dir = tempfile::tempdir().expect("create destination directory");
+    let destination = destination_dir.path().join("Live stream.mp4");
+    let item_id = 9_876_543u64;
+    let staging =
+        crate::video_staging::ensure_manifest_staging_dir(destination_dir.path(), item_id)
+            .expect("create owned native manifest staging");
+    crate::manifest_destination::ensure_plan(&staging, &destination, item_id, true, true)
+        .expect("write native destination plan");
+
+    use std::io::Write as _;
+    for track in [
+        crate::manifest_destination::TrackKind::Video,
+        crate::manifest_destination::TrackKind::Audio,
+    ] {
+        let mut file =
+            crate::manifest_destination::open_owned_part(&staging, &destination, item_id, track)
+                .expect("create owned native track part");
+        file.write_all(b"partial stream")
+            .expect("write native track part");
+        file.sync_all().expect("sync native track part");
+    }
+    let unrelated = destination_dir.path().join("Live stream.notes");
+    std::fs::write(&unrelated, b"user data").expect("create unrelated user file");
+    let part_paths = [
+        crate::manifest_destination::TrackKind::Video,
+        crate::manifest_destination::TrackKind::Audio,
+        crate::manifest_destination::TrackKind::Subtitles,
+    ]
+    .into_iter()
+    .map(|track| crate::manifest_destination::part_path(&staging, &destination, item_id, track))
+    .collect::<Result<Vec<_>, _>>()
+    .expect("resolve planned native parts");
+
+    cleanup_discarded_video_files(&destination, item_id)
+        .expect("delete native partials and staging");
+
+    for path in part_paths {
+        assert!(
+            !path.exists(),
+            "native partial must be removed: {}",
+            path.display()
+        );
+    }
+    assert!(!staging.exists(), "native staging metadata must be removed");
+    assert!(
+        unrelated.exists(),
+        "unrelated destination files must be preserved"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn deleting_native_manifest_download_preserves_replaced_parts_and_metadata() {
+    let destination_dir = tempfile::tempdir().expect("create destination directory");
+    let destination = destination_dir.path().join("Live stream.mp4");
+    let item_id = 9_876_544u64;
+    let staging =
+        crate::video_staging::ensure_manifest_staging_dir(destination_dir.path(), item_id)
+            .expect("create owned native manifest staging");
+    crate::manifest_destination::ensure_plan(&staging, &destination, item_id, true, false)
+        .expect("write native destination plan");
+
+    use std::io::Write as _;
+    let mut file = crate::manifest_destination::open_owned_part(
+        &staging,
+        &destination,
+        item_id,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("create owned native video part");
+    file.write_all(b"partial stream")
+        .expect("write native video part");
+    drop(file);
+
+    let part = crate::manifest_destination::part_path(
+        &staging,
+        &destination,
+        item_id,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("resolve native video part");
+    let replacement = destination_dir.path().join("replacement.tmp");
+    std::fs::write(&replacement, b"user replacement").expect("create replacement");
+    std::fs::remove_file(&part).expect("remove original native part");
+    std::fs::rename(&replacement, &part).expect("replace native part");
+
+    let error = cleanup_discarded_video_files(&destination, item_id)
+        .expect_err("discard cleanup must preserve a replaced destination file");
+    assert!(
+        error.contains("replaced"),
+        "unexpected discard cleanup error: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&part).expect("read preserved replacement"),
+        b"user replacement"
+    );
+    assert!(
+        staging.exists(),
+        "native ownership metadata must be preserved"
+    );
+    assert!(
+        staging
+            .join("Live stream.9876544.video.part.owner.json")
+            .exists(),
+        "the original part ownership record must remain"
+    );
+}

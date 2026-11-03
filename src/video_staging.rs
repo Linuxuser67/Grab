@@ -617,6 +617,59 @@ fn clean_legacy_manifest_staging_files(dest_dir: &Path, item_id: u64) {
     }
 }
 
+/// Resolve this row's validated native-manifest staging directory for teardown.
+///
+/// The caller must remove planned destination parts while this directory still
+/// contains their ownership records, then call `clean_staging_files`.
+///
+/// # Errors
+///
+/// Returns an error if the destination or staging ownership cannot be verified.
+pub(crate) fn manifest_staging_dir_for_cleanup(
+    dest_dir: &Path,
+    item_id: u64,
+) -> Result<Option<PathBuf>, String> {
+    let root = manifest_staging_root();
+    manifest_staging_dir_for_cleanup_in(dest_dir, item_id, &root)
+}
+
+fn manifest_staging_dir_for_cleanup_in(
+    dest_dir: &Path,
+    item_id: u64,
+    root: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let canonical_dest_dir = std::fs::canonicalize(dest_dir)
+        .map_err(|error| format!("Could not resolve native manifest destination: {error}"))?;
+    let destination_key = dest_key(&canonical_dest_dir);
+    let dir = root.join(manifest_staging_name(item_id, &destination_key));
+    match std::fs::symlink_metadata(&dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Could not inspect native manifest staging: {error}"
+            ));
+        }
+        Ok(_) => {}
+    }
+    if !manifest_staging_is_owned(
+        &dir,
+        root,
+        item_id,
+        &destination_key,
+        Some(&canonical_dest_dir),
+    ) {
+        return Err(
+            "Native manifest staging ownership could not be verified; files were preserved"
+                .to_string(),
+        );
+    }
+    let canonical_dir = guarded_staging_dir(root, &dir).ok_or_else(|| {
+        "Native manifest staging directory escaped its trusted root; files were preserved"
+            .to_string()
+    })?;
+    Ok(Some(canonical_dir))
+}
+
 /// Remove only a native-manifest staging directory carrying this row's marker.
 /// The new state-dir path and the legacy destination-side path are both handled
 /// so row removal also reclaims staging created by the previous release.
@@ -2599,6 +2652,72 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_cleanup_resolves_only_a_staging_dir_owned_by_the_row() {
+        let dest_dir = unique_dir("manifest-resolve-dest");
+        let root = unique_dir("manifest-resolve-state");
+        std::fs::create_dir_all(&dest_dir).expect("create destination directory");
+        ensure_private_dir(&root).expect("create private staging root");
+        let id = 8_000_006u64;
+        let canonical_dest_dir =
+            std::fs::canonicalize(&dest_dir).expect("canonicalize destination directory");
+        let destination_key = dest_key(&canonical_dest_dir);
+        let staging = root.join(manifest_staging_name(id, &destination_key));
+        create_manifest_staging_directory(&staging, id, &destination_key, &canonical_dest_dir)
+            .expect("create owned native staging directory");
+
+        assert_eq!(
+            manifest_staging_dir_for_cleanup_in(&dest_dir, id, &root)
+                .expect("resolve owned staging directory"),
+            Some(std::fs::canonicalize(&staging).expect("canonicalize staging directory"))
+        );
+        assert_eq!(
+            manifest_staging_dir_for_cleanup_in(&dest_dir, id + 1, &root)
+                .expect("missing staging directory is not an error"),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&dest_dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_cleanup_refuses_staging_with_a_foreign_owner_marker() {
+        let dest_dir = unique_dir("manifest-resolve-foreign-dest");
+        let root = unique_dir("manifest-resolve-foreign-state");
+        std::fs::create_dir_all(&dest_dir).expect("create destination directory");
+        ensure_private_dir(&root).expect("create private staging root");
+        let id = 8_000_007u64;
+        let canonical_dest_dir =
+            std::fs::canonicalize(&dest_dir).expect("canonicalize destination directory");
+        let destination_key = dest_key(&canonical_dest_dir);
+        let staging = root.join(manifest_staging_name(id, &destination_key));
+        create_manifest_staging_directory(&staging, id, &destination_key, &canonical_dest_dir)
+            .expect("create owned native staging directory");
+        std::fs::write(
+            staging.join(".grab-manifest-owner"),
+            format!(
+                "grab-manifest-v2\n{}\n{}\n{}\n",
+                id + 1,
+                destination_key,
+                canonical_dest_dir.display()
+            ),
+        )
+        .expect("replace staging owner marker");
+
+        let error = manifest_staging_dir_for_cleanup_in(&dest_dir, id, &root)
+            .expect_err("foreign staging ownership must be rejected");
+        assert!(
+            error.contains("ownership"),
+            "unexpected staging ownership error: {error}"
+        );
+        assert!(staging.exists(), "foreign staging must be preserved");
+
+        let _ = std::fs::remove_dir_all(&dest_dir);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Discarding a row removes its state manifest and both probe temps,

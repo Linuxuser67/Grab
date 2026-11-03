@@ -342,7 +342,7 @@ fn hash_file_identity(hasher: &mut Sha256, name: &[u8], path: &Path, metadata: &
 }
 
 /// URLs carrying rotating authentication/signature parameters are not reusable.
-fn has_rotating_auth_query(url: &url::Url) -> bool {
+pub(crate) fn has_rotating_auth_query(url: &url::Url) -> bool {
     url.query_pairs().any(|(name, _)| {
         matches!(
             name.to_ascii_lowercase().as_str(),

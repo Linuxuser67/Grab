@@ -395,7 +395,6 @@ fn count_queue_rows(widget: &gtk4::Widget) -> usize {
     count
 }
 
-
 /// The status filters use the header's centered title area on wide windows
 /// and move into the list as a dropdown when the window becomes narrow.
 #[test]

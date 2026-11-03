@@ -442,9 +442,8 @@ pub fn build_window(
         gettext("Queued"),
         gettext("Downloaded"),
     ];
-    let filter_model = gtk4::StringList::new(
-        &filter_names.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    let filter_model =
+        gtk4::StringList::new(&filter_names.iter().map(String::as_str).collect::<Vec<_>>());
     let status_dropdown = gtk4::DropDown::builder()
         .model(&filter_model)
         .selected(0)

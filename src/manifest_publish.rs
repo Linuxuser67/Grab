@@ -335,10 +335,7 @@ fn copy_to_exclusive_destination(
     }
 
     let mut options = std::fs::OpenOptions::new();
-    options
-        .write(true)
-        .create_new(true)
-        .mode(0o600);
+    options.write(true).create_new(true).mode(0o600);
     let mut destination_file = options.open(destination)?;
     let mut pending = PendingDestination::new(destination, Arc::clone(gate), None);
     pending.arm();
@@ -394,12 +391,7 @@ async fn persist_by_exclusive_copy(
     let pending = tokio::task::spawn_blocking(move || {
         let permissions = source.metadata()?.permissions();
         std::io::Seek::seek(&mut source, std::io::SeekFrom::Start(0))?;
-        copy_to_exclusive_destination(
-            &mut source,
-            permissions,
-            &destination_for_copy,
-            &copy_gate,
-        )
+        copy_to_exclusive_destination(&mut source, permissions, &destination_for_copy, &copy_gate)
     })
     .await
     .map_err(std::io::Error::other)??;

@@ -553,6 +553,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_prepared_publication_returns_aborted() {
+        let directory = tempfile::tempdir().unwrap();
+        let temporary = crate::file_names::publish_temp_in(directory.path()).unwrap();
+        std::fs::write(temporary.path(), b"prepared output").unwrap();
+        let destination = directory.path().join("final.mp4");
+        let gate = crate::attempt_gate::AttemptGate::new();
+        assert!(gate.discard());
+
+        let outcome = persist_prepared_copy(temporary, &destination, &gate)
+            .await
+            .expect("cancellation is an aborted publication");
+
+        assert_eq!(outcome, ManifestPublishOutcome::Aborted);
+        assert!(!destination.exists());
+    }
+
+    #[tokio::test]
     async fn no_clobber_persist_preserves_an_existing_destination() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.part");

@@ -209,10 +209,7 @@ fn copy_staged_bytes(
     Ok(gate.is_active())
 }
 
-/// Copy a staged output into a private temporary in the destination directory.
-///
-/// The returned temporary is not visible under the final name. Persist it with
-/// no-clobber semantics only after the copy and file sync have succeeded.
+/// Result of publishing an unnamed destination inode without a temporary pathname.
 enum AnonymousPublishResult {
     Linked(PendingDestination),
     LinkUnsupported(std::fs::File),

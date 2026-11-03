@@ -373,6 +373,49 @@ pub(crate) fn title_from_url(url_str: &str) -> String {
     }
 }
 
+/// Derive a displayable filename stem from a direct HLS/DASH manifest URL.
+pub(crate) fn title_from_manifest_url(url_str: &str) -> String {
+    let Ok(parsed) = url::Url::parse(url_str) else {
+        return "video".to_string();
+    };
+
+    const GENERIC_ENDPOINTS: &[&str] = &[
+        "master", "playlist", "manifest", "index", "stream", "hls", "video", "videos", "dash",
+        "chunklist",
+    ];
+    let path_title = parsed
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .filter(|segment| !segment.is_empty())
+        .rev()
+        .find_map(|segment| {
+            let decoded = percent_decode(segment);
+            let stem = decoded
+                .rsplit_once('.')
+                .filter(|(_, extension)| {
+                    extension.eq_ignore_ascii_case("m3u8")
+                        || extension.eq_ignore_ascii_case("mpd")
+                })
+                .map_or(decoded.as_str(), |(stem, _)| stem);
+            let stem = stem.trim_matches('.');
+            let lower = stem.to_ascii_lowercase();
+            (!stem.is_empty() && !GENERIC_ENDPOINTS.contains(&lower.as_str()))
+                .then(|| stem.to_string())
+        });
+    let candidate = path_title.unwrap_or_else(|| {
+        let host = parsed.host_str().unwrap_or("video").strip_prefix("www.");
+        host.unwrap_or_else(|| parsed.host_str().unwrap_or("video"))
+            .replace('.', " ")
+    });
+    let title = sanitize_folder_name(&candidate.replace(['-', '_'], " "));
+    if title == "collection" {
+        "video".to_string()
+    } else {
+        title
+    }
+}
+
 /// Percent-decode a URL component once. Invalid UTF-8 and decoded NULs retain
 /// the original component, so this never manufactures an invalid filesystem name.
 pub(crate) fn percent_decode(s: &str) -> String {
@@ -881,6 +924,26 @@ mod tests {
 #[cfg(test)]
 mod url_title_tests {
     use super::*;
+
+    #[test]
+    fn manifest_title_skips_generic_endpoints_and_uses_the_url_path() {
+        assert_eq!(
+            title_from_manifest_url("https://cdn.example.test/media/my_video.m3u8?token=secret"),
+            "my video"
+        );
+        assert_eq!(
+            title_from_manifest_url("https://cdn.example.test/channels/42/master.m3u8"),
+            "42"
+        );
+        assert_eq!(
+            title_from_manifest_url("https://cdn.example.test/master.m3u8?signature=secret"),
+            "cdn example test"
+        );
+        assert_eq!(
+            title_from_manifest_url("https://cdn.example.test/playlist.MPD"),
+            "cdn example test"
+        );
+    }
 
     #[test]
     fn title_from_url_uses_collection_query_id_or_readable_path_slug() {

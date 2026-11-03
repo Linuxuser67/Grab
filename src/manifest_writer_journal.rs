@@ -1,4 +1,4 @@
-//! Fixed-size, append-only digest records for ordered DASH track recovery.
+//! Fixed-size, append-only digest records for ordered manifest track recovery.
 
 use std::path::Path;
 
@@ -11,7 +11,7 @@ use super::{
 
 // Each record is an 8-byte big-endian length followed by 32 raw SHA-256 bytes.
 const RESOURCE_RECORD_BYTES: usize = 40;
-// 100,001 live-DASH resources need about 4 MiB at 40 bytes per record.
+// 100,001 live-manifest resources need about 4 MiB at 40 bytes per record.
 const MAX_RESOURCE_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Load a checkpointed prefix, rebuilding the journal only from retained sources.
@@ -29,7 +29,7 @@ pub(super) async fn load_resource_records(
 ) -> Result<Vec<CommittedResource>, String> {
     match tokio::fs::symlink_metadata(journal_path).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err("The DASH resource digest journal is not a regular file".to_string());
+            return Err("The manifest resource digest journal is not a regular file".to_string());
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -63,7 +63,7 @@ pub(super) async fn load_resource_records(
             .await
             .map_err(|error| {
                 format!(
-                    "Could not read {} to rebuild its DASH digest: {error}",
+                    "Could not read {} to rebuild its manifest digest: {error}",
                     source.display()
                 )
             })?;
@@ -72,7 +72,7 @@ pub(super) async fn load_resource_records(
             || metadata.len() == 0
             || metadata.len() > MAX_RESOURCE_BYTES
         {
-            return Err("A staged DASH resource cannot rebuild its committed digest".to_string());
+            return Err("A staged manifest resource cannot rebuild its committed digest".to_string());
         }
         rebuilt.push(CommittedResource {
             length: metadata.len(),
@@ -96,22 +96,22 @@ pub(super) async fn read_resource_journal(
     truncate_uncommitted_tail: bool,
 ) -> Result<Vec<CommittedResource>, String> {
     let record_count = u64::try_from(resource_count)
-        .map_err(|_| "The DASH resource count is too large".to_string())?;
+        .map_err(|_| "The manifest resource count is too large".to_string())?;
     let expected_length = record_count
         .checked_mul(RESOURCE_RECORD_BYTES as u64)
         .filter(|length| *length <= MAX_RESOURCE_JOURNAL_BYTES)
-        .ok_or_else(|| "The DASH resource digest journal exceeds its size limit".to_string())?;
+        .ok_or_else(|| "The manifest resource digest journal exceeds its size limit".to_string())?;
 
     let metadata = match tokio::fs::symlink_metadata(journal_path).await {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err("The DASH resource digest journal is not a regular file".to_string());
+                return Err("The manifest resource digest journal is not a regular file".to_string());
             }
             Some(metadata)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && resource_count == 0 => None,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err("The DASH resource digest journal is missing".to_string());
+            return Err("The manifest resource digest journal is missing".to_string());
         }
         Err(error) => {
             return Err(format!(
@@ -124,13 +124,13 @@ pub(super) async fn read_resource_journal(
     if let Some(metadata) = metadata {
         if metadata.len() < expected_length {
             return Err(
-                "The DASH resource digest journal is shorter than its checkpoint".to_string(),
+                "The manifest resource digest journal is shorter than its checkpoint".to_string(),
             );
         }
         if metadata.len() > expected_length {
             if !truncate_uncommitted_tail {
                 return Err(
-                    "The DASH resource digest journal contains uncommitted records".to_string(),
+                    "The manifest resource digest journal contains uncommitted records".to_string(),
                 );
             }
             let file = tokio::fs::OpenOptions::new()
@@ -187,22 +187,22 @@ pub(super) async fn append_resource_record(
     resource: &CommittedResource,
 ) -> Result<(), String> {
     let index = u64::try_from(resource_index)
-        .map_err(|_| "The DASH resource index is too large".to_string())?;
+        .map_err(|_| "The manifest resource index is too large".to_string())?;
     let expected_offset = index
         .checked_mul(RESOURCE_RECORD_BYTES as u64)
-        .ok_or_else(|| "The DASH resource digest journal exceeds its size limit".to_string())?;
+        .ok_or_else(|| "The manifest resource digest journal exceeds its size limit".to_string())?;
     let next_length = expected_offset
         .checked_add(RESOURCE_RECORD_BYTES as u64)
         .filter(|length| *length <= MAX_RESOURCE_JOURNAL_BYTES)
-        .ok_or_else(|| "The DASH resource digest journal exceeds its size limit".to_string())?;
+        .ok_or_else(|| "The manifest resource digest journal exceeds its size limit".to_string())?;
 
     match tokio::fs::symlink_metadata(journal_path).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err("The DASH resource digest journal is not a regular file".to_string());
+            return Err("The manifest resource digest journal is not a regular file".to_string());
         }
         Ok(metadata) if metadata.len() < expected_offset => {
             return Err(
-                "The DASH resource digest journal is shorter than its checkpoint".to_string(),
+                "The manifest resource digest journal is shorter than its checkpoint".to_string(),
             );
         }
         Ok(metadata) if metadata.len() > expected_offset => {
@@ -224,7 +224,7 @@ pub(super) async fn append_resource_record(
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && resource_index == 0 => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err("The DASH resource digest journal is missing".to_string());
+            return Err("The manifest resource digest journal is missing".to_string());
         }
         Err(error) => {
             return Err(format!(
@@ -260,7 +260,7 @@ pub(super) async fn append_resource_record(
     })?;
     file.sync_all()
         .await
-        .map_err(|error| format!("Could not sync the DASH resource digest record: {error}"))?;
+        .map_err(|error| format!("Could not sync the manifest resource digest record: {error}"))?;
     Ok(())
 }
 
@@ -275,15 +275,15 @@ pub(super) async fn write_resource_journal(
     resources: &[CommittedResource],
 ) -> Result<(), String> {
     let record_count = u64::try_from(resources.len())
-        .map_err(|_| "The DASH resource count is too large".to_string())?;
+        .map_err(|_| "The manifest resource count is too large".to_string())?;
     let _journal_length = record_count
         .checked_mul(RESOURCE_RECORD_BYTES as u64)
         .filter(|length| *length <= MAX_RESOURCE_JOURNAL_BYTES)
-        .ok_or_else(|| "The DASH resource digest journal exceeds its size limit".to_string())?;
+        .ok_or_else(|| "The manifest resource digest journal exceeds its size limit".to_string())?;
     let journal_name = journal_path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| "The DASH resource journal filename is invalid".to_string())?;
+        .ok_or_else(|| "The manifest resource journal filename is invalid".to_string())?;
     let temporary = directory.join(format!("{journal_name}.tmp"));
     remove_regular_file_if_present(&temporary).await?;
     let mut file = tokio::fs::OpenOptions::new()
@@ -312,7 +312,7 @@ fn encode_resource_record(
     resource: &CommittedResource,
 ) -> Result<[u8; RESOURCE_RECORD_BYTES], String> {
     if resource.length == 0 || resource.length > MAX_RESOURCE_BYTES {
-        return Err("A DASH resource digest record has an invalid length".to_string());
+        return Err("A manifest resource digest record has an invalid length".to_string());
     }
     let digest = parse_digest(&resource.sha256)?;
     let mut record = [0_u8; RESOURCE_RECORD_BYTES];
@@ -324,14 +324,14 @@ fn encode_resource_record(
 fn parse_digest(value: &str) -> Result<[u8; 32], String> {
     let bytes = value.as_bytes();
     if bytes.len() != 64 {
-        return Err("A DASH resource digest is not a SHA-256 value".to_string());
+        return Err("A manifest resource digest is not a SHA-256 value".to_string());
     }
     let mut digest = [0_u8; 32];
     for (index, byte) in digest.iter_mut().enumerate() {
         let high = hex_nibble(bytes[index * 2])
-            .ok_or_else(|| "A DASH resource digest is invalid".to_string())?;
+            .ok_or_else(|| "A manifest resource digest is invalid".to_string())?;
         let low = hex_nibble(bytes[index * 2 + 1])
-            .ok_or_else(|| "A DASH resource digest is invalid".to_string())?;
+            .ok_or_else(|| "A manifest resource digest is invalid".to_string())?;
         *byte = (high << 4) | low;
     }
     Ok(digest)
@@ -352,7 +352,7 @@ fn validate_committed_resources(
     committed_offset: u64,
 ) -> Result<(), String> {
     if resources.len() != resource_count {
-        return Err("The DASH resource digest journal has an invalid record count".to_string());
+        return Err("The manifest resource digest journal has an invalid record count".to_string());
     }
     let mut offset = 0_u64;
     for resource in resources {
@@ -360,18 +360,18 @@ fn validate_committed_resources(
             || resource.length > MAX_RESOURCE_BYTES
             || parse_digest(&resource.sha256).is_err()
         {
-            return Err("The DASH resource digest journal contains invalid metadata".to_string());
+            return Err("The manifest resource digest journal contains invalid metadata".to_string());
         }
         offset = offset
             .checked_add(resource.length)
             .filter(|value| *value <= MAX_TRACK_BYTES)
             .ok_or_else(|| {
-                "The committed DASH resource prefix exceeds the 1 TiB limit".to_string()
+                "The committed manifest resource prefix exceeds the 1 TiB limit".to_string()
             })?;
     }
     if offset != committed_offset {
         return Err(
-            "The DASH checkpoint offset does not match its resource digest journal".to_string(),
+            "The manifest checkpoint offset does not match its resource digest journal".to_string(),
         );
     }
     Ok(())

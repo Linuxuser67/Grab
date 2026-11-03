@@ -1,8 +1,7 @@
-//! Crash-safe ordered assembly for native DASH tracks.
+//! Crash-safe ordered writes of native manifest tracks.
 //!
-//! Segment requests remain concurrent and bounded by the runner. This module
-//! commits their completed files to one track in manifest order. The checkpoint
-//! advances only after the output bytes and their digest record are synced.
+//! Concurrent DASH resources are committed in manifest order; static HLS
+//! resources stream serially into the same checkpointed destination writer.
 
 use std::path::Path;
 
@@ -14,7 +13,7 @@ const CHECKPOINT_VERSION: u32 = 3;
 const PREVIOUS_CHECKPOINT_VERSION: u32 = 2;
 const LEGACY_CHECKPOINT_VERSION: u32 = 1;
 const MAX_TRACK_BYTES: u64 = 1 << 40;
-/// Maximum size of one staged DASH resource.
+/// Maximum size of one manifest resource.
 pub(crate) const MAX_RESOURCE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_CHECKPOINT_BYTES: u64 = 1024 * 1024;
 
@@ -82,7 +81,7 @@ enum CheckpointState {
     },
 }
 
-/// Incrementally assemble staged DASH resources in manifest order.
+/// Write native manifest resources in order with durable per-resource checkpoints.
 ///
 /// Each committed resource has a fixed-size SHA-256 record in an append-only
 /// journal. The small atomic checkpoint records the committed prefix length.
@@ -97,6 +96,8 @@ pub(crate) struct OrderedTrackWriter {
     output: tokio::fs::File,
     next_resource_index: usize,
     committed_offset: u64,
+    pending_resource_digest: Sha256,
+    pending_resource_bytes: u64,
     checkpoint_policy: CheckpointPolicy,
     destination_part: Option<DestinationPart>,
     append_only: bool,
@@ -186,7 +187,7 @@ impl OrderedTrackWriter {
 
     /// Open a writer whose checkpoint remains available after publication.
     ///
-    /// Live DASH recovery uses the retained checkpoint and digest journal to
+    /// Live manifest recovery uses the retained checkpoint and digest journal to
     /// prove that staged source resources can be removed without losing resume.
     ///
     /// # Errors
@@ -315,14 +316,14 @@ impl OrderedTrackWriter {
         append_only: bool,
     ) -> Result<(Option<Self>, u64), String> {
         if resources.is_empty() {
-            return Err("The DASH recording contains no media resources".to_string());
+            return Err("The manifest recording contains no media resources".to_string());
         }
         if !safe_filename(filename) || resources.iter().any(|name| !safe_filename(name)) {
-            return Err("The DASH track contains an unsafe staging filename".to_string());
+            return Err("The manifest track contains an unsafe staging filename".to_string());
         }
         let mut unique = std::collections::HashSet::with_capacity(resources.len());
         if resources.iter().any(|name| !unique.insert(name)) {
-            return Err("The DASH track contains duplicate resource identities".to_string());
+            return Err("The manifest track contains duplicate resource identities".to_string());
         }
 
         let fingerprint = plan_fingerprint(&resources)?;
@@ -356,7 +357,7 @@ impl OrderedTrackWriter {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    return Err(format!("Could not inspect destination DASH part: {error}"));
+                    return Err(format!("Could not inspect destination manifest part: {error}"));
                 }
             }
         }
@@ -441,7 +442,7 @@ impl OrderedTrackWriter {
                 .truncate(false)
                 .open(&part)
                 .await
-                .map_err(|error| format!("Could not open the ordered DASH track: {error}"))?
+                .map_err(|error| format!("Could not open the ordered manifest track: {error}"))?
         };
         if let Some(migration_source) = migration_source {
             let mut input = match open_regular_file_no_follow_async(&migration_source).await {
@@ -471,13 +472,13 @@ impl OrderedTrackWriter {
                     format!("Could not rewind the completed staging track: {error}")
                 })?;
             output.set_len(0).await.map_err(|error| {
-                format!("Could not reset the destination DASH part for migration: {error}")
+                format!("Could not reset the destination manifest part for migration: {error}")
             })?;
             output
                 .seek(std::io::SeekFrom::Start(0))
                 .await
                 .map_err(|error| {
-                    format!("Could not seek to the start of the destination DASH part: {error}")
+                    format!("Could not seek to the start of the destination manifest part: {error}")
                 })?;
             let copied = match tokio::io::copy(&mut input, &mut output).await {
                 Ok(copied) => copied,
@@ -513,7 +514,7 @@ impl OrderedTrackWriter {
                 );
             }
             output.sync_all().await.map_err(|error| {
-                format!("Could not sync the migrated destination DASH part: {error}")
+                format!("Could not sync the migrated destination manifest part: {error}")
             })?;
             if let Some(parent) = part.parent() {
                 sync_directory(parent).await?;
@@ -524,11 +525,11 @@ impl OrderedTrackWriter {
             output
                 .set_len(committed_offset)
                 .await
-                .map_err(|error| format!("Could not restore the DASH track checkpoint: {error}"))?;
+                .map_err(|error| format!("Could not restore the manifest track checkpoint: {error}"))?;
             output
                 .seek(std::io::SeekFrom::Start(committed_offset))
                 .await
-                .map_err(|error| format!("Could not seek to the DASH track checkpoint: {error}"))?;
+                .map_err(|error| format!("Could not seek to the manifest track checkpoint: {error}"))?;
         }
 
         Ok((
@@ -543,6 +544,8 @@ impl OrderedTrackWriter {
                 output,
                 next_resource_index,
                 committed_offset,
+                pending_resource_digest: Sha256::new(),
+                pending_resource_bytes: 0,
                 checkpoint_policy,
                 destination_part,
                 append_only,
@@ -559,6 +562,112 @@ impl OrderedTrackWriter {
     #[must_use]
     pub(crate) fn committed_offset(&self) -> u64 {
         self.committed_offset
+    }
+
+    /// Append one network chunk to the active resource in the destination part.
+    ///
+    /// Bytes remain uncommitted until the streamed resource is durably checkpointed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a size limit is exceeded or output writing fails.
+    pub(crate) async fn write_streamed_chunk(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let chunk_length = u64::try_from(bytes.len())
+            .map_err(|_| "The streamed HLS fragment is too large".to_string())?;
+        if self.next_resource_index >= self.resources.len() {
+            return Err("All manifest resources have already been committed".to_string());
+        }
+        let next_resource_bytes = self
+            .pending_resource_bytes
+            .checked_add(chunk_length)
+            .filter(|length| *length <= MAX_RESOURCE_BYTES)
+            .ok_or_else(|| "An HLS fragment exceeds the 1 GiB limit".to_string())?;
+        self.committed_offset
+            .checked_add(next_resource_bytes)
+            .filter(|offset| *offset <= MAX_TRACK_BYTES)
+            .ok_or_else(|| "The assembled HLS track exceeds the 1 TiB limit".to_string())?;
+
+        self.output
+            .write_all(bytes)
+            .await
+            .map_err(|error| format!("Could not write a streamed HLS fragment: {error}"))?;
+        self.pending_resource_digest.update(bytes);
+        self.pending_resource_bytes = next_resource_bytes;
+        Ok(())
+    }
+
+    /// Commit the streamed resource and advance its durable manifest-order checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the resource is empty or durable output, journal, or checkpoint I/O fails.
+    pub(crate) async fn commit_streamed_resource(&mut self) -> Result<u64, String> {
+        if self.pending_resource_bytes == 0 {
+            return Err("The stream server returned an empty HLS fragment".to_string());
+        }
+        if self.next_resource_index >= self.resources.len() {
+            return Err("All HLS resources have already been committed".to_string());
+        }
+        let next_offset = self
+            .committed_offset
+            .checked_add(self.pending_resource_bytes)
+            .filter(|offset| *offset <= MAX_TRACK_BYTES)
+            .ok_or_else(|| "The assembled HLS track exceeds the 1 TiB limit".to_string())?;
+        self.output
+            .sync_all()
+            .await
+            .map_err(|error| format!("Could not sync streamed HLS track data: {error}"))?;
+
+        let resource = CommittedResource {
+            length: self.pending_resource_bytes,
+            sha256: digest_hex(&self.pending_resource_digest.clone().finalize()),
+        };
+        append_resource_record(&self.journal_path, self.next_resource_index, &resource).await?;
+        let next_resource_index = self
+            .next_resource_index
+            .checked_add(1)
+            .ok_or_else(|| "The HLS resource index overflowed".to_string())?;
+        persist_checkpoint(
+            &self.checkpoint_path,
+            &self.directory,
+            &WriterCheckpoint {
+                version: CHECKPOINT_VERSION,
+                plan_fingerprint: self.fingerprint.clone(),
+                next_resource_index,
+                committed_offset: next_offset,
+                append_only: false,
+            },
+        )
+        .await?;
+
+        self.committed_offset = next_offset;
+        self.next_resource_index = next_resource_index;
+        self.pending_resource_digest = Sha256::new();
+        self.pending_resource_bytes = 0;
+        Ok(next_offset)
+    }
+
+    /// Discard bytes from an incomplete streamed resource, preserving the committed prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if truncating or syncing the destination part fails.
+    pub(crate) async fn rollback_streamed_resource(&mut self) -> Result<(), String> {
+        self.output
+            .set_len(self.committed_offset)
+            .await
+            .map_err(|error| format!("Could not roll back an incomplete HLS fragment: {error}"))?;
+        self.output
+            .seek(std::io::SeekFrom::Start(self.committed_offset))
+            .await
+            .map_err(|error| format!("Could not reposition the HLS destination part: {error}"))?;
+        self.output
+            .sync_all()
+            .await
+            .map_err(|error| format!("Could not sync the rolled-back HLS destination part: {error}"))?;
+        self.pending_resource_digest = Sha256::new();
+        self.pending_resource_bytes = 0;
+        Ok(())
     }
 
     /// Append exactly the next resource in manifest order.
@@ -584,26 +693,26 @@ impl OrderedTrackWriter {
         abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     ) -> Result<AppendNextOutcome, String> {
         let Some(resource_name) = self.resources.get(self.next_resource_index) else {
-            return Err("All DASH resources have already been committed".to_string());
+            return Err("All manifest resources have already been committed".to_string());
         };
         let resource_path = self.directory.join(resource_name);
         let metadata = tokio::fs::symlink_metadata(&resource_path)
             .await
-            .map_err(|error| format!("Could not inspect a staged DASH segment: {error}"))?;
+            .map_err(|error| format!("Could not inspect a staged manifest segment: {error}"))?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err("A staged DASH segment is not a regular file".to_string());
+            return Err("A staged manifest segment is not a regular file".to_string());
         }
         if metadata.len() == 0 || metadata.len() > MAX_RESOURCE_BYTES {
-            return Err("A staged DASH segment has an invalid size".to_string());
+            return Err("A staged manifest segment has an invalid size".to_string());
         }
         let next_offset = self
             .committed_offset
             .checked_add(metadata.len())
             .filter(|offset| *offset <= MAX_TRACK_BYTES)
-            .ok_or_else(|| "The assembled DASH track exceeds the 1 TiB limit".to_string())?;
+            .ok_or_else(|| "The assembled manifest track exceeds the 1 TiB limit".to_string())?;
         let mut input = tokio::fs::File::open(&resource_path)
             .await
-            .map_err(|error| format!("Could not open a staged DASH segment: {error}"))?;
+            .map_err(|error| format!("Could not open a staged manifest segment: {error}"))?;
 
         let mut hashing_output = HashingWriter::new(&mut self.output);
         let copied = tokio::select! {
@@ -611,15 +720,15 @@ impl OrderedTrackWriter {
             stop = &mut *abort => {
                 drop(hashing_output);
                 self.output.set_len(self.committed_offset).await
-                    .map_err(|error| format!("Could not roll back an interrupted DASH write: {error}"))?;
+                    .map_err(|error| format!("Could not roll back an interrupted manifest write: {error}"))?;
                 self.output.sync_all().await
-                    .map_err(|error| format!("Could not sync the interrupted DASH track: {error}"))?;
+                    .map_err(|error| format!("Could not sync the interrupted manifest track: {error}"))?;
                 return Ok(AppendNextOutcome::Stopped(
                     stop.unwrap_or(crate::video::StopIntent::Discard),
                 ));
             }
             result = tokio::io::copy(&mut input, &mut hashing_output) => {
-                result.map_err(|error| format!("Could not append a DASH segment in order: {error}"))?
+                result.map_err(|error| format!("Could not append a manifest segment in order: {error}"))?
             }
         };
         let sha256 = hashing_output.finish();
@@ -628,19 +737,19 @@ impl OrderedTrackWriter {
                 .set_len(self.committed_offset)
                 .await
                 .map_err(|error| {
-                    format!("Could not roll back an incomplete DASH write: {error}")
+                    format!("Could not roll back an incomplete manifest write: {error}")
                 })?;
             self.output
                 .sync_all()
                 .await
-                .map_err(|error| format!("Could not sync the incomplete DASH track: {error}"))?;
-            return Err("A staged DASH segment changed while it was being assembled".to_string());
+                .map_err(|error| format!("Could not sync the incomplete manifest track: {error}"))?;
+            return Err("A staged manifest segment changed while it was being assembled".to_string());
         }
 
         self.output
             .sync_all()
             .await
-            .map_err(|error| format!("Could not sync ordered DASH track data: {error}"))?;
+            .map_err(|error| format!("Could not sync ordered manifest track data: {error}"))?;
         let resource = CommittedResource {
             length: copied,
             sha256,
@@ -650,7 +759,7 @@ impl OrderedTrackWriter {
         let next_resource_index = self
             .next_resource_index
             .checked_add(1)
-            .ok_or_else(|| "The DASH resource index overflowed".to_string())?;
+            .ok_or_else(|| "The manifest resource index overflowed".to_string())?;
         persist_checkpoint(
             &self.checkpoint_path,
             &self.directory,
@@ -682,22 +791,25 @@ impl OrderedTrackWriter {
     ///
     /// Returns an error if the track is incomplete or publication cannot be synced.
     pub(crate) async fn finish(self) -> Result<(), String> {
+        if self.pending_resource_bytes != 0 {
+            return Err("The ordered track has an uncommitted streamed resource".to_string());
+        }
         if self.next_resource_index != self.resources.len() {
             return Err(
-                "The DASH track cannot be published before all resources are committed".to_string(),
+                "The manifest track cannot be published before all resources are committed".to_string(),
             );
         }
         self.output
             .sync_all()
             .await
-            .map_err(|error| format!("Could not flush the completed DASH track: {error}"))?;
+            .map_err(|error| format!("Could not flush the completed manifest track: {error}"))?;
         drop(self.output);
         if let Some(parent) = self.part.parent() {
             sync_directory(parent).await?;
         }
         if self.destination_part.is_none() {
             crate::file_names::rename_noreplace(&self.part, &self.target)
-                .map_err(|error| format!("Could not publish the ordered DASH track: {error}"))?;
+                .map_err(|error| format!("Could not publish the ordered manifest track: {error}"))?;
             sync_directory(&self.directory).await?;
         }
         if self.checkpoint_policy == CheckpointPolicy::RemoveAfterPublish {
@@ -774,15 +886,15 @@ async fn committed_resource_prefix_inner(
         return Ok(Vec::new());
     }
     if !safe_filename(filename) || resources.iter().any(|name| !safe_filename(name)) {
-        return Err("The DASH committed-resource plan is invalid".to_string());
+        return Err("The manifest committed-resource plan is invalid".to_string());
     }
     let checkpoint_path = directory.join(format!("{filename}.checkpoint.json"));
     match tokio::fs::symlink_metadata(&checkpoint_path).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err("The DASH writer checkpoint is not a regular file".to_string());
+            return Err("The manifest writer checkpoint is not a regular file".to_string());
         }
         Ok(metadata) if metadata.len() > MAX_CHECKPOINT_BYTES => {
-            return Err("The DASH writer checkpoint exceeds its size limit".to_string());
+            return Err("The manifest writer checkpoint exceeds its size limit".to_string());
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -797,7 +909,7 @@ async fn committed_resource_prefix_inner(
         .await
         .map_err(|error| format!("Could not read {}: {error}", checkpoint_path.display()))?;
     let checkpoint: WriterCheckpoint = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("The DASH writer checkpoint is invalid: {error}"))?;
+        .map_err(|error| format!("The manifest writer checkpoint is invalid: {error}"))?;
     if checkpoint.version == LEGACY_CHECKPOINT_VERSION {
         return Ok(Vec::new());
     }
@@ -805,7 +917,7 @@ async fn committed_resource_prefix_inner(
         checkpoint.version,
         PREVIOUS_CHECKPOINT_VERSION | CHECKPOINT_VERSION
     ) {
-        return Err("The DASH writer checkpoint version is unsupported".to_string());
+        return Err("The manifest writer checkpoint version is unsupported".to_string());
     }
     let fingerprint_matches = if checkpoint.append_only {
         checkpoint.version == CHECKPOINT_VERSION
@@ -817,11 +929,11 @@ async fn committed_resource_prefix_inner(
     };
     if !fingerprint_matches {
         return Err(
-            "The DASH writer checkpoint does not match the selected resource plan".to_string(),
+            "The manifest writer checkpoint does not match the selected resource plan".to_string(),
         );
     }
     if checkpoint.next_resource_index > resources.len() {
-        return Err("The DASH writer checkpoint exceeds the selected resource plan".to_string());
+        return Err("The manifest writer checkpoint exceeds the selected resource plan".to_string());
     }
 
     let committed = load_resource_records(
@@ -841,7 +953,7 @@ async fn committed_resource_prefix_inner(
     let target = directory.join(filename);
     let part_metadata = match tokio::fs::symlink_metadata(&part).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err("The interrupted DASH track is not a regular file".to_string());
+            return Err("The interrupted manifest track is not a regular file".to_string());
         }
         Ok(metadata) => Some(metadata),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -851,7 +963,7 @@ async fn committed_resource_prefix_inner(
     };
     let target_metadata = match tokio::fs::symlink_metadata(&target).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err("The published DASH track is not a regular file".to_string());
+            return Err("The published manifest track is not a regular file".to_string());
         }
         Ok(metadata) => Some(metadata),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -861,7 +973,7 @@ async fn committed_resource_prefix_inner(
     };
     if part_metadata.is_some() && target_metadata.is_some() {
         if part_override.is_none() || checkpoint.next_resource_index != resources.len() {
-            return Err("Both the interrupted and published DASH track files exist".to_string());
+            return Err("Both the interrupted and published manifest track files exist".to_string());
         }
         let target_length = target_metadata
             .as_ref()
@@ -875,7 +987,7 @@ async fn committed_resource_prefix_inner(
 
     let output_path = if let Some(metadata) = &part_metadata {
         if metadata.len() < checkpoint.committed_offset {
-            return Err("The interrupted DASH track is shorter than its checkpoint".to_string());
+            return Err("The interrupted manifest track is shorter than its checkpoint".to_string());
         }
         Some(&part)
     } else if let Some(metadata) = &target_metadata {
@@ -883,7 +995,7 @@ async fn committed_resource_prefix_inner(
             || metadata.len() != checkpoint.committed_offset
         {
             return Err(
-                "The published DASH track does not match its complete checkpoint".to_string(),
+                "The published manifest track does not match its complete checkpoint".to_string(),
             );
         }
         Some(&target)
@@ -930,7 +1042,7 @@ pub(crate) async fn committed_resources(
     let target = directory.join(filename);
     match tokio::fs::symlink_metadata(&target).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            Err("The published DASH track is not a regular file".to_string())
+            Err("The published manifest track is not a regular file".to_string())
         }
         Ok(_) => Ok(Some(committed)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -945,7 +1057,7 @@ pub(crate) async fn committed_resources(
 async fn remove_committed_source_file_after_commit(path: &Path) -> Result<(), String> {
     match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            Err("A staged DASH resource is not a regular file".to_string())
+            Err("A staged manifest resource is not a regular file".to_string())
         }
         Ok(_) => tokio::fs::remove_file(path)
             .await
@@ -963,14 +1075,14 @@ async fn remove_committed_source_files(
     committed: &[CommittedResource],
 ) -> Result<(), String> {
     if committed.len() > resources.len() {
-        return Err("The DASH committed prefix exceeds its resource plan".to_string());
+        return Err("The manifest committed prefix exceeds its resource plan".to_string());
     }
     let mut removed_any = false;
     for name in resources.iter().take(committed.len()) {
         let path = directory.join(name);
         match tokio::fs::symlink_metadata(&path).await {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                return Err("A staged DASH resource is not a regular file".to_string());
+                return Err("A staged manifest resource is not a regular file".to_string());
             }
             Ok(_) => {
                 tokio::fs::remove_file(&path)
@@ -1007,7 +1119,7 @@ async fn verify_resource_ranges_file(
         .await
         .map_err(|error| {
             format!(
-                "Could not seek {} for DASH verification: {error}",
+                "Could not seek {} for manifest verification: {error}",
                 output_path.display()
             )
         })?;
@@ -1017,21 +1129,21 @@ async fn verify_resource_ranges_file(
         let mut digest = Sha256::new();
         while remaining > 0 {
             let chunk_length = usize::try_from(remaining.min(64 * 1024))
-                .map_err(|_| "The committed DASH resource length is too large".to_string())?;
+                .map_err(|_| "The committed manifest resource length is too large".to_string())?;
             file.read_exact(&mut buffer[..chunk_length])
                 .await
                 .map_err(|error| {
                     format!(
-                        "Could not read {} for DASH verification: {error}",
+                        "Could not read {} for manifest verification: {error}",
                         output_path.display()
                     )
                 })?;
             digest.update(&buffer[..chunk_length]);
             remaining -= u64::try_from(chunk_length)
-                .map_err(|_| "The committed DASH resource length is too large".to_string())?;
+                .map_err(|_| "The committed manifest resource length is too large".to_string())?;
         }
         if digest_hex(&digest.finalize()) != resource.sha256 {
-            return Err("The ordered DASH track contains corrupted committed bytes".to_string());
+            return Err("The ordered manifest track contains corrupted committed bytes".to_string());
         }
     }
     Ok(())
@@ -1052,10 +1164,10 @@ pub(crate) async fn cleanup_committed_resources(
     let committed = committed_resources(resources, directory, filename)
         .await?
         .ok_or_else(|| {
-            "The completed DASH track has no retained verified checkpoint".to_string()
+            "The completed manifest track has no retained verified checkpoint".to_string()
         })?;
     if committed.len() != resources.len() {
-        return Err("The completed DASH checkpoint has an incomplete resource list".to_string());
+        return Err("The completed manifest checkpoint has an incomplete resource list".to_string());
     }
     remove_committed_source_files(resources, directory, &committed).await
 }
@@ -1077,10 +1189,10 @@ async fn load_checkpoint(
     let checkpoint_metadata = match tokio::fs::symlink_metadata(checkpoint_path).await {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err("The DASH writer checkpoint is not a regular file".to_string());
+                return Err("The manifest writer checkpoint is not a regular file".to_string());
             }
             if metadata.len() > MAX_CHECKPOINT_BYTES {
-                return Err("The DASH writer checkpoint exceeds its size limit".to_string());
+                return Err("The manifest writer checkpoint exceeds its size limit".to_string());
             }
             Some(metadata)
         }
@@ -1100,7 +1212,7 @@ async fn load_checkpoint(
         .await
         .map_err(|error| format!("Could not read {}: {error}", checkpoint_path.display()))?;
     let mut checkpoint: WriterCheckpoint = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("The DASH writer checkpoint is invalid: {error}"))?;
+        .map_err(|error| format!("The manifest writer checkpoint is invalid: {error}"))?;
     let fingerprint_matches = if append_only && checkpoint.append_only {
         checkpoint.version == CHECKPOINT_VERSION
             && checkpoint.next_resource_index <= resources.len()
@@ -1118,14 +1230,14 @@ async fn load_checkpoint(
         || (checkpoint.next_resource_index == 0) != (checkpoint.committed_offset == 0)
     {
         return Err(
-            "The DASH writer checkpoint does not match the selected resource plan".to_string(),
+            "The manifest writer checkpoint does not match the selected resource plan".to_string(),
         );
     }
 
     let part_metadata = match tokio::fs::symlink_metadata(part).await {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err("The interrupted DASH track is not a regular file".to_string());
+                return Err("The interrupted manifest track is not a regular file".to_string());
             }
             Some(metadata)
         }
@@ -1137,7 +1249,7 @@ async fn load_checkpoint(
     let target_metadata = match tokio::fs::symlink_metadata(target).await {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err("The published DASH track is not a regular file".to_string());
+                return Err("The published manifest track is not a regular file".to_string());
             }
             Some(metadata)
         }
@@ -1147,10 +1259,10 @@ async fn load_checkpoint(
         }
     };
     if part_metadata.is_some() && target_metadata.is_some() && !allow_part_and_target {
-        return Err("Both the interrupted and published DASH track files exist".to_string());
+        return Err("Both the interrupted and published manifest track files exist".to_string());
     }
     if target_metadata.is_some() && checkpoint.next_resource_index != resources.len() {
-        return Err("A published DASH track has an incomplete checkpoint".to_string());
+        return Err("A published manifest track has an incomplete checkpoint".to_string());
     }
 
     let committed = if checkpoint.version == LEGACY_CHECKPOINT_VERSION {
@@ -1161,7 +1273,7 @@ async fn load_checkpoint(
             let metadata = tokio::fs::symlink_metadata(&resource_path)
                 .await
                 .map_err(|error| {
-                    format!("Could not validate a legacy committed DASH resource: {error}")
+                    format!("Could not validate a legacy committed manifest resource: {error}")
                 })?;
             if metadata.file_type().is_symlink()
                 || !metadata.is_file()
@@ -1169,7 +1281,7 @@ async fn load_checkpoint(
                 || metadata.len() > MAX_RESOURCE_BYTES
             {
                 return Err(
-                    "A legacy committed DASH resource is not a valid regular file".to_string(),
+                    "A legacy committed manifest resource is not a valid regular file".to_string(),
                 );
             }
             committed.push(CommittedResource {
@@ -1180,12 +1292,12 @@ async fn load_checkpoint(
                 .checked_add(metadata.len())
                 .filter(|value| *value <= MAX_TRACK_BYTES)
                 .ok_or_else(|| {
-                    "The legacy committed DASH prefix exceeds the 1 TiB limit".to_string()
+                    "The legacy committed manifest prefix exceeds the 1 TiB limit".to_string()
                 })?;
         }
         if offset != checkpoint.committed_offset {
             return Err(
-                "The legacy DASH checkpoint offset does not match its resources".to_string(),
+                "The legacy manifest checkpoint offset does not match its resources".to_string(),
             );
         }
         committed
@@ -1203,7 +1315,7 @@ async fn load_checkpoint(
 
     if part_metadata.is_some() && target_metadata.is_some() {
         if !allow_part_and_target || checkpoint.next_resource_index != resources.len() {
-            return Err("Both interrupted and published DASH tracks exist for an unsupported checkpoint state".to_string());
+            return Err("Both interrupted and published manifest tracks exist for an unsupported checkpoint state".to_string());
         }
         let target_length = target_metadata
             .as_ref()
@@ -1232,7 +1344,7 @@ async fn load_checkpoint(
         } else {
             target_metadata.as_ref()
         })
-        .ok_or_else(|| "The ordered DASH output metadata is unavailable".to_string())?;
+        .ok_or_else(|| "The ordered manifest output metadata is unavailable".to_string())?;
         let length_is_valid = if part_metadata.is_some() {
             output_metadata.len() >= checkpoint.committed_offset
         } else {
@@ -1240,7 +1352,7 @@ async fn load_checkpoint(
         };
         if !length_is_valid {
             return Err(
-                "The DASH track length does not match its committed checkpoint".to_string(),
+                "The manifest track length does not match its committed checkpoint".to_string(),
             );
         }
         verify_resource_ranges(output_path, &committed).await?;
@@ -1256,7 +1368,7 @@ async fn load_checkpoint(
             let metadata = tokio::fs::symlink_metadata(&resource_path)
                 .await
                 .map_err(|error| {
-                    format!("A committed DASH source is missing and no track bytes remain: {error}")
+                    format!("A committed manifest source is missing and no track bytes remain: {error}")
                 })?;
             if metadata.file_type().is_symlink()
                 || !metadata.is_file()
@@ -1265,7 +1377,7 @@ async fn load_checkpoint(
                     != committed[index].sha256
             {
                 return Err(
-                    "A committed DASH source is invalid and no track bytes remain".to_string(),
+                    "A committed manifest source is invalid and no track bytes remain".to_string(),
                 );
             }
         }
@@ -1301,7 +1413,7 @@ async fn open_regular_file_no_follow_async(path: &Path) -> Result<tokio::fs::Fil
     let display_path = path.display().to_string();
     let file = tokio::task::spawn_blocking(move || open_regular_file_no_follow(&path))
         .await
-        .map_err(|error| format!("DASH file open task failed: {error}"))?
+        .map_err(|error| format!("manifest file open task failed: {error}"))?
         .map_err(|error| format!("Could not safely open {display_path}: {error}"))?;
     Ok(tokio::fs::File::from_std(file))
 }
@@ -1331,7 +1443,7 @@ async fn hash_file_range(path: &Path, offset: u64, length: u64) -> Result<String
         .await
         .map_err(|error| {
             format!(
-                "Could not open {} for DASH byte verification: {error}",
+                "Could not open {} for manifest byte verification: {error}",
                 path.display()
             )
         })?;
@@ -1339,7 +1451,7 @@ async fn hash_file_range(path: &Path, offset: u64, length: u64) -> Result<String
         .await
         .map_err(|error| {
             format!(
-                "Could not seek in {} for DASH byte verification: {error}",
+                "Could not seek in {} for manifest byte verification: {error}",
                 path.display()
             )
         })?;
@@ -1348,18 +1460,18 @@ async fn hash_file_range(path: &Path, offset: u64, length: u64) -> Result<String
     let mut digest = Sha256::new();
     while remaining > 0 {
         let chunk_length = usize::try_from(remaining.min(64 * 1024))
-            .map_err(|_| "The committed DASH resource length is too large".to_string())?;
+            .map_err(|_| "The committed manifest resource length is too large".to_string())?;
         file.read_exact(&mut buffer[..chunk_length])
             .await
             .map_err(|error| {
                 format!(
-                    "Could not read {} for DASH byte verification: {error}",
+                    "Could not read {} for manifest byte verification: {error}",
                     path.display()
                 )
             })?;
         digest.update(&buffer[..chunk_length]);
         remaining -= u64::try_from(chunk_length)
-            .map_err(|_| "The committed DASH resource length is too large".to_string())?;
+            .map_err(|_| "The committed manifest resource length is too large".to_string())?;
     }
     let digest = digest.finalize();
     Ok(digest_hex(&digest))
@@ -1380,11 +1492,11 @@ async fn persist_checkpoint(
     checkpoint: &WriterCheckpoint,
 ) -> Result<(), String> {
     let bytes = serde_json::to_vec(checkpoint)
-        .map_err(|error| format!("Could not encode the DASH writer checkpoint: {error}"))?;
+        .map_err(|error| format!("Could not encode the manifest writer checkpoint: {error}"))?;
     let checkpoint_name = checkpoint_path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| "The DASH checkpoint filename is invalid".to_string())?;
+        .ok_or_else(|| "The manifest checkpoint filename is invalid".to_string())?;
     let temporary = directory.join(format!("{checkpoint_name}.tmp"));
     remove_regular_file_if_present(&temporary).await?;
     let mut file = tokio::fs::OpenOptions::new()
@@ -1392,17 +1504,17 @@ async fn persist_checkpoint(
         .create_new(true)
         .open(&temporary)
         .await
-        .map_err(|error| format!("Could not create the DASH writer checkpoint: {error}"))?;
+        .map_err(|error| format!("Could not create the manifest writer checkpoint: {error}"))?;
     file.write_all(&bytes)
         .await
-        .map_err(|error| format!("Could not write the DASH writer checkpoint: {error}"))?;
+        .map_err(|error| format!("Could not write the manifest writer checkpoint: {error}"))?;
     file.sync_all()
         .await
-        .map_err(|error| format!("Could not sync the DASH writer checkpoint: {error}"))?;
+        .map_err(|error| format!("Could not sync the manifest writer checkpoint: {error}"))?;
     drop(file);
     tokio::fs::rename(&temporary, checkpoint_path)
         .await
-        .map_err(|error| format!("Could not publish the DASH writer checkpoint: {error}"))?;
+        .map_err(|error| format!("Could not publish the manifest writer checkpoint: {error}"))?;
     sync_directory(directory).await
 }
 
@@ -1419,7 +1531,7 @@ async fn sync_directory(directory: &Path) -> Result<(), String> {
 async fn remove_regular_file_if_present(path: &Path) -> Result<(), String> {
     match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            Err("A DASH writer staging path is not a regular file".to_string())
+            Err("A manifest writer staging path is not a regular file".to_string())
         }
         Ok(_) => tokio::fs::remove_file(path)
             .await
@@ -1440,7 +1552,7 @@ fn safe_filename(filename: &str) -> bool {
 
 fn plan_fingerprint(resources: &[String]) -> Result<String, String> {
     let encoded = serde_json::to_vec(resources)
-        .map_err(|error| format!("Could not encode the DASH resource plan: {error}"))?;
+        .map_err(|error| format!("Could not encode the manifest resource plan: {error}"))?;
     let digest = Sha256::digest(encoded);
     let mut fingerprint = String::with_capacity(digest.len() * 2);
     for byte in digest {

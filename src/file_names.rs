@@ -1141,7 +1141,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            std::fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&destination)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o644
         );
     }

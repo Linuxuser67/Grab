@@ -846,6 +846,7 @@ pub fn build_window(
         let compact = compact_filter_row.clone();
         let title = header_title_stack.clone();
         let search_btn = search_toggle.clone();
+        let search_toggle = search_toggle.clone();
         add_card
             .navigation()
             .connect_notify_local(Some("visible-page"), move |nav, _| {
@@ -857,6 +858,7 @@ pub fn build_window(
                     seg.set_visible(false);
                     compact.set_visible(false);
                     search_btn.set_visible(false);
+                    search_toggle.set_active(false);
                     title.set_visible_child_name("title");
                 }
                 stack.set_visible(!picker);

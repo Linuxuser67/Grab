@@ -287,7 +287,6 @@ pub fn build_window(
     search_toggle.set_widget_name("search-downloads-button");
     search_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext("Search"))]);
 
-
     // Stateful toggle: reflects the card's open state (set_on_state_changed
     // mirrors Escape / successful-add / toggle closes too), so the button
     // itself is the dismissal affordance — no separate close button needed.
@@ -647,7 +646,7 @@ pub fn build_window(
             // The header holds the primary action once there are rows; the empty
             // state supplies its own call to action when the queue is empty.
             add.set_visible(has_items);
-            search_btn.set_visible(has_items);
+            search_btn.set_visible(has_items && queue_visible.get());
             let show_filters = has_items && queue_visible.get();
             seg.set_visible(show_filters);
             if narrow.get() {
@@ -846,6 +845,7 @@ pub fn build_window(
         let seg = seg.clone();
         let compact = compact_filter_row.clone();
         let title = header_title_stack.clone();
+        let search_btn = search_toggle.clone();
         add_card
             .navigation()
             .connect_notify_local(Some("visible-page"), move |nav, _| {
@@ -856,6 +856,7 @@ pub fn build_window(
                 if picker {
                     seg.set_visible(false);
                     compact.set_visible(false);
+                    search_btn.set_visible(false);
                     title.set_visible_child_name("title");
                 }
                 stack.set_visible(!picker);

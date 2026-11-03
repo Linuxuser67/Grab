@@ -317,16 +317,8 @@ fn hash_file_identity(
     path: &Path,
     metadata: &std::fs::Metadata,
 ) {
-    hash_field(
-        hasher,
-        name,
-        path.as_os_str().to_string_lossy().as_bytes(),
-    );
-    hash_field(
-        hasher,
-        b"file-size",
-        &metadata.len().to_be_bytes(),
-    );
+    hash_field(hasher, name, path.as_os_str().to_string_lossy().as_bytes());
+    hash_field(hasher, b"file-size", &metadata.len().to_be_bytes());
 
     #[cfg(unix)]
     {

@@ -830,7 +830,7 @@ mod tests {
         let destination_dir = tempfile::tempdir().expect("create destination");
         let staging = tempfile::tempdir().expect("create staging");
         let destination = destination_dir.path().join("Example video.mp4");
-        ensure_plan(staging.path(), &destination, 45, true, false).expect("write destination plan");
+        ensure_plan(staging.path(), &destination, 45, false, false).expect("write destination plan");
 
         use std::io::Write as _;
         let mut file = open_owned_part(staging.path(), &destination, 45, TrackKind::Video)

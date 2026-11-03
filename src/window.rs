@@ -472,6 +472,7 @@ pub fn build_window(
 
     let narrow_layout = Rc::new(Cell::new(false));
     let has_items = Rc::new(Cell::new(false));
+    let queue_view_visible = Rc::new(Cell::new(true));
     let breakpoint = adw::Breakpoint::new(
         adw::BreakpointCondition::parse("max-width: 700sp")
             .expect("the static compact-header breakpoint is valid"),
@@ -481,9 +482,13 @@ pub fn build_window(
         let compact = compact_filter_row.clone();
         let title = header_title_stack.clone();
         let has_items = Rc::clone(&has_items);
+        let queue_visible = Rc::clone(&queue_view_visible);
+        let seg = seg.clone();
         breakpoint.connect_apply(move |_| {
             narrow.set(true);
-            compact.set_visible(has_items.get());
+            let show_filters = has_items.get() && queue_visible.get();
+            seg.set_visible(show_filters);
+            compact.set_visible(show_filters);
             title.set_visible_child_name("title");
         });
     }
@@ -492,14 +497,14 @@ pub fn build_window(
         let compact = compact_filter_row.clone();
         let title = header_title_stack.clone();
         let has_items = Rc::clone(&has_items);
+        let queue_visible = Rc::clone(&queue_view_visible);
+        let seg = seg.clone();
         breakpoint.connect_unapply(move |_| {
             narrow.set(false);
             compact.set_visible(false);
-            title.set_visible_child_name(if has_items.get() {
-                "filters"
-            } else {
-                "title"
-            });
+            let show_filters = has_items.get() && queue_visible.get();
+            seg.set_visible(show_filters);
+            title.set_visible_child_name(if show_filters { "filters" } else { "title" });
         });
     }
     window.add_breakpoint(breakpoint);
@@ -569,6 +574,7 @@ pub fn build_window(
         let title = header_title_stack.clone();
         let narrow = Rc::clone(&narrow_layout);
         let has_items_state = Rc::clone(&has_items);
+        let queue_visible = Rc::clone(&queue_view_visible);
         Rc::new(move || {
             let store = m.store();
             let q = query.borrow();
@@ -643,13 +649,14 @@ pub fn build_window(
             // state supplies its own call to action when the queue is empty.
             add.set_visible(has_items);
             search_btn.set_visible(has_items);
-            seg.set_visible(has_items);
+            let show_filters = has_items && queue_visible.get();
+            seg.set_visible(show_filters);
             if narrow.get() {
-                compact.set_visible(has_items);
+                compact.set_visible(show_filters);
                 title.set_visible_child_name("title");
             } else {
                 compact.set_visible(false);
-                title.set_visible_child_name(if has_items { "filters" } else { "title" });
+                title.set_visible_child_name(if show_filters { "filters" } else { "title" });
             }
             if !has_items {
                 // List is gone, so nothing to search.
@@ -835,12 +842,22 @@ pub fn build_window(
     {
         let stack = stack.clone();
         let sync = Rc::clone(&sync);
+        let queue_visible = Rc::clone(&queue_view_visible);
+        let seg = seg.clone();
+        let compact = compact_filter_row.clone();
+        let title = header_title_stack.clone();
         add_card
             .navigation()
             .connect_notify_local(Some("visible-page"), move |nav, _| {
                 let picker = nav
                     .visible_page_tag()
                     .is_some_and(|tag| tag.as_str() != "form");
+                queue_visible.set(!picker);
+                if picker {
+                    seg.set_visible(false);
+                    compact.set_visible(false);
+                    title.set_visible_child_name("title");
+                }
                 stack.set_visible(!picker);
                 if !picker {
                     // Let the navigation transition settle before reconciling.

@@ -1663,7 +1663,7 @@ fn native_manifest_without_a_supplied_name_uses_a_title_from_the_manifest_url() 
         .enqueue_manifest_staged(source, &directory, None, &[])
         .expect("enqueue manifest with a derived filename");
 
-    assert_eq!(item.filename(), "my video.mp4");
+    assert_eq!(item.filename(), "my video.mkv");
     let _ = std::fs::remove_dir_all(&dest);
 }
 

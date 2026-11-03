@@ -417,20 +417,125 @@ pub(crate) fn remove_owned_part(
     track: TrackKind,
 ) -> Result<(), String> {
     let path = part_path(staging, destination, item_id, track)?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "The manifest part filename is invalid".to_string())?;
-    let owner_path = staging.join(format!("{file_name}.owner.json"));
-    let Some(owner) = read_part_owner(&owner_path)? else {
-        return Err("The manifest part has no ownership record; it was preserved".to_string());
-    };
     let destination_dir = destination
         .parent()
         .ok_or_else(|| "The download destination has no parent directory".to_string())?;
     let canonical_destination_dir = fs::canonicalize(destination_dir)
         .map_err(|error| format!("Could not resolve destination directory: {error}"))?;
     let destination_key = crate::video_staging::dest_key(&canonical_destination_dir);
+    remove_owned_part_path(staging, &path, item_id, &destination_key)
+}
+
+/// Remove every part recorded by a download's destination plan.
+///
+/// This is used before its staging directory is removed, while the per-part
+/// ownership records are still available. Planned tracks that were never
+/// created are accepted; existing files without a matching owner are kept.
+///
+/// # Errors
+///
+/// Returns an error if the plan or any part's ownership cannot be verified.
+pub(crate) fn remove_planned_parts(
+    staging: &Path,
+    destination_dir: &Path,
+    item_id: u64,
+) -> Result<(), String> {
+    let plan_path = staging.join(PLAN_FILE);
+    let Some(plan) = read_plan(&plan_path)? else {
+        let entries = fs::read_dir(staging)
+            .map_err(|error| format!("Could not inspect manifest staging directory: {error}"))?;
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| format!("Could not inspect manifest staging entry: {error}"))?;
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".owner.json"))
+            {
+                return Err(
+                    "Manifest part ownership records exist without a destination plan; files were preserved"
+                        .to_string(),
+                );
+            }
+        }
+        return Ok(());
+    };
+    let canonical_destination_dir = fs::canonicalize(destination_dir)
+        .map_err(|error| format!("Could not resolve destination directory: {error}"))?;
+    let destination_key = crate::video_staging::dest_key(&canonical_destination_dir);
+    if plan.version != PLAN_VERSION
+        || plan.item_id != item_id
+        || plan.destination_key != destination_key
+    {
+        return Err(
+            "The manifest destination plan belongs to a different download; files were preserved"
+                .to_string(),
+        );
+    }
+    if !plan.parts.iter().any(|part| part.track == TrackKind::Video) {
+        return Err(
+            "The manifest destination plan has no video track; files were preserved".to_string(),
+        );
+    }
+    for (index, part) in plan.parts.iter().enumerate() {
+        if plan.parts[..index]
+            .iter()
+            .any(|previous| previous.track == part.track || previous.file_name == part.file_name)
+        {
+            return Err(
+                "The manifest destination plan contains duplicate tracks or filenames; files were preserved"
+                    .to_string(),
+            );
+        }
+    }
+    let entries = fs::read_dir(staging)
+        .map_err(|error| format!("Could not inspect manifest staging directory: {error}"))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("Could not inspect manifest staging entry: {error}"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(owner_name) = name.strip_suffix(".owner.json") else {
+            continue;
+        };
+        if !plan.parts.iter().any(|part| part.file_name == owner_name) {
+            return Err(
+                "Manifest staging contains an ownership record absent from the destination plan; files were preserved"
+                    .to_string(),
+            );
+        }
+    }
+
+    for part in &plan.parts {
+        if !safe_file_name(&part.file_name) {
+            return Err("The manifest destination plan contains an unsafe filename".to_string());
+        }
+        let path = canonical_destination_dir.join(&part.file_name);
+        remove_owned_part_path(staging, &path, item_id, &destination_key)?;
+    }
+    Ok(())
+}
+
+/// Verify ownership before unlinking; filename similarity alone never authorizes deletion.
+fn remove_owned_part_path(
+    staging: &Path,
+    path: &Path,
+    item_id: u64,
+    destination_key: &str,
+) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "The manifest part filename is invalid".to_string())?;
+    let owner_path = staging.join(format!("{file_name}.owner.json"));
+    let Some(owner) = read_part_owner(&owner_path)? else {
+        return match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err("The manifest part has no ownership record; it was preserved".to_string()),
+            Err(error) => Err(format!("Could not inspect unowned manifest part: {error}")),
+        };
+    };
     if owner.version != 1
         || owner.item_id != item_id
         || owner.destination_key != destination_key
@@ -438,7 +543,7 @@ pub(crate) fn remove_owned_part(
     {
         return Err("The manifest part ownership record does not match this download".to_string());
     }
-    match fs::symlink_metadata(&path) {
+    match fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 return Err(
@@ -451,7 +556,7 @@ pub(crate) fn remove_owned_part(
                     "The manifest part was replaced; existing data was preserved".to_string(),
                 );
             }
-            let opened = open_part_no_follow(&path)?;
+            let opened = open_part_no_follow(path)?;
             let opened_identity = file_identity(&opened)?;
             if opened_identity.device != owner.device || opened_identity.inode != owner.inode {
                 return Err(
@@ -460,7 +565,7 @@ pub(crate) fn remove_owned_part(
                 );
             }
             drop(opened);
-            let final_metadata = fs::symlink_metadata(&path)
+            let final_metadata = fs::symlink_metadata(path)
                 .map_err(|error| format!("Could not recheck owned manifest part: {error}"))?;
             let final_identity = metadata_identity(&final_metadata)?;
             if final_metadata.file_type().is_symlink()
@@ -473,7 +578,7 @@ pub(crate) fn remove_owned_part(
                         .to_string(),
                 );
             }
-            fs::remove_file(&path).map_err(|error| {
+            fs::remove_file(path).map_err(|error| {
                 format!(
                     "Could not remove owned manifest part {}: {error}",
                     path.display()
@@ -671,6 +776,160 @@ mod tests {
                 "Example video.42.audio.part",
                 "Example video.42.subtitles.part",
             ]
+        );
+    }
+
+    /// Removes only plan-listed parts with matching durable owner records.
+    #[cfg(unix)]
+    #[test]
+    fn discard_cleanup_removes_planned_parts_and_allows_unopened_tracks() {
+        let destination_dir = tempfile::tempdir().expect("create destination");
+        let staging = tempfile::tempdir().expect("create staging");
+        let destination = destination_dir.path().join("Example video.mp4");
+        ensure_plan(staging.path(), &destination, 42, true, true).expect("write destination plan");
+
+        use std::io::Write as _;
+        for track in [TrackKind::Video, TrackKind::Audio] {
+            let mut file = open_owned_part(staging.path(), &destination, 42, track)
+                .expect("create owned track part");
+            file.write_all(b"partial media").expect("write track part");
+            file.sync_all().expect("sync track part");
+        }
+        let user_file = destination_dir.path().join("Example video.keep.part");
+        fs::write(&user_file, b"user data").expect("create unrelated user file");
+
+        remove_planned_parts(staging.path(), destination_dir.path(), 42)
+            .expect("remove all planned owned parts");
+
+        for track in [TrackKind::Video, TrackKind::Audio, TrackKind::Subtitles] {
+            let path = part_path(staging.path(), &destination, 42, track);
+            if track == TrackKind::Subtitles {
+                assert!(
+                    !path.expect("resolve subtitle part").exists(),
+                    "a planned but unopened track stays absent"
+                );
+            } else {
+                assert!(
+                    !path.expect("resolve track part").exists(),
+                    "owned track part must be removed"
+                );
+            }
+        }
+        assert!(user_file.exists(), "unrelated user files must survive");
+        assert!(
+            !staging
+                .path()
+                .join("Example video.42.video.part.owner.json")
+                .exists(),
+            "ownership records are removed with their part"
+        );
+    }
+
+    #[test]
+    fn discard_cleanup_rejects_owner_records_absent_from_the_plan() {
+        let destination_dir = tempfile::tempdir().expect("create destination");
+        let staging = tempfile::tempdir().expect("create staging");
+        let destination = destination_dir.path().join("Example video.mp4");
+        ensure_plan(staging.path(), &destination, 45, false, false)
+            .expect("write destination plan");
+
+        use std::io::Write as _;
+        let mut file = open_owned_part(staging.path(), &destination, 45, TrackKind::Video)
+            .expect("create owned video part");
+        file.write_all(b"partial media").expect("write video part");
+        drop(file);
+        fs::write(
+            staging
+                .path()
+                .join("Example video.45.audio.part.owner.json"),
+            b"{}",
+        )
+        .expect("create unplanned owner record");
+
+        let video_part = part_path(staging.path(), &destination, 45, TrackKind::Video)
+            .expect("resolve video part");
+        let error = remove_planned_parts(staging.path(), destination_dir.path(), 45)
+            .expect_err("unplanned ownership records must be rejected");
+        assert!(
+            error.contains("absent from the destination plan"),
+            "unexpected cleanup error: {error}"
+        );
+        assert!(
+            video_part.exists(),
+            "no partial is removed before validation"
+        );
+        assert!(
+            staging
+                .path()
+                .join("Example video.45.video.part.owner.json")
+                .exists(),
+            "existing owner metadata must remain"
+        );
+    }
+
+    #[test]
+    fn discard_cleanup_rejects_a_plan_without_a_video_track() {
+        let destination_dir = tempfile::tempdir().expect("create destination");
+        let staging = tempfile::tempdir().expect("create staging");
+        let destination = destination_dir.path().join("Example video.mp4");
+        ensure_plan(staging.path(), &destination, 44, false, false)
+            .expect("write destination plan");
+
+        let mut plan = read_plan(&staging.path().join(PLAN_FILE))
+            .expect("read destination plan")
+            .expect("destination plan exists");
+        plan.parts.clear();
+        fs::write(
+            staging.path().join(PLAN_FILE),
+            serde_json::to_vec(&plan).expect("encode incomplete destination plan"),
+        )
+        .expect("replace destination plan");
+
+        let error = remove_planned_parts(staging.path(), destination_dir.path(), 44)
+            .expect_err("plan without video must be rejected");
+        assert!(
+            error.contains("no video track"),
+            "unexpected plan validation error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discard_cleanup_preserves_replaced_parts_and_their_ownership_record() {
+        let destination_dir = tempfile::tempdir().expect("create destination");
+        let staging = tempfile::tempdir().expect("create staging");
+        let destination = destination_dir.path().join("Example video.mp4");
+        ensure_plan(staging.path(), &destination, 43, true, false).expect("write destination plan");
+
+        use std::io::Write as _;
+        let mut file = open_owned_part(staging.path(), &destination, 43, TrackKind::Video)
+            .expect("create owned video part");
+        file.write_all(b"partial media").expect("write video part");
+        drop(file);
+
+        let part = part_path(staging.path(), &destination, 43, TrackKind::Video)
+            .expect("resolve video part");
+        let replacement = destination_dir.path().join("replacement.tmp");
+        fs::write(&replacement, b"user replacement").expect("create replacement");
+        fs::remove_file(&part).expect("remove original part");
+        fs::rename(&replacement, &part).expect("replace part with foreign file");
+
+        let error = remove_planned_parts(staging.path(), destination_dir.path(), 43)
+            .expect_err("replacement must not be deleted");
+        assert!(
+            error.contains("replaced"),
+            "unexpected cleanup error: {error}"
+        );
+        assert_eq!(
+            fs::read(&part).expect("read preserved replacement"),
+            b"user replacement"
+        );
+        assert!(
+            staging
+                .path()
+                .join("Example video.43.video.part.owner.json")
+                .exists(),
+            "ownership metadata must remain when cleanup cannot verify a part"
         );
     }
 

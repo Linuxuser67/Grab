@@ -72,16 +72,32 @@ struct PendingDiscard {
     finalizer: tokio::task::JoinHandle<()>,
 }
 
+/// Remove a discarded download's owned files, preserving native ownership records on error.
+fn cleanup_discarded_video_files(dest: &std::path::Path, id: u64) -> Result<(), String> {
+    if let Some(dest_dir) = dest.parent() {
+        if let Some(staging) = crate::video_staging::manifest_staging_dir_for_cleanup(dest_dir, id)?
+        {
+            crate::manifest_destination::remove_planned_parts(&staging, dest_dir, id)?;
+        }
+        crate::video::clean_staging_files(dest_dir, id);
+    }
+    crate::video::clean_dest_parts(dest);
+    Ok(())
+}
+
 /// Reclaim the removed row's filesystem scratch on Tokio's blocking pool.
 /// The caller retains the destination reservation until this future completes.
 async fn cleanup_discarded_files(dest: std::path::PathBuf, id: u64, remove_delivered_orphan: bool) {
     let worker_dest = dest.clone();
     if let Err(error) = crate::runtime::tokio_rt()
         .spawn_blocking(move || {
-            if let Some(dest_dir) = worker_dest.parent() {
-                crate::video::clean_staging_files(dest_dir, id);
+            if let Err(error) = cleanup_discarded_video_files(&worker_dest, id) {
+                tracing::warn!(
+                    item_id = id,
+                    error = %error,
+                    "discard cleanup failed; preserving native manifest ownership metadata"
+                );
             }
-            crate::video::clean_dest_parts(&worker_dest);
             if remove_delivered_orphan {
                 // The worker committed after its row was removed. This is the
                 // narrowly scoped orphan case; normal finished files survive.

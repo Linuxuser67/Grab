@@ -339,9 +339,10 @@ fn append_native_fallback_reason(message: &str, native_reason: Option<&str>) -> 
     }
 }
 
-/// Resolve tool paths and run the appropriate extractor probe(s). Cancellation
-/// drops this future; a dual probe has an abort-on-drop guard so its subprocesses
-/// do not outlive the lookup that owns them.
+/// Resolve media metadata by racing native HLS/DASH intake against extractor probes.
+///
+/// Dropping this future cancels native I/O and drops the extractor future; its
+/// abort-on-drop guard terminates any active dual-probe subprocesses.
 async fn lookup_media(
     url: String,
     browser: String,
@@ -360,70 +361,199 @@ async fn lookup_media(
             Ok(MediaLookupOutcome::Video(_)) => "video",
             Err(_) => "error",
         },
+        lookup_winner = match &result {
+            Ok(MediaLookupOutcome::Manifest(_)) => "native",
+            Ok(_) => "extractors",
+            Err(_) => "none",
+        },
         "media lookup timing"
     );
     result
 }
 
+/// Outcome of racing native manifest intake against the established extractor path.
+enum NativePriorityOutcome<M, T> {
+    Native {
+        manifest: M,
+        native_ms: u64,
+        extractor_future_dropped: bool,
+    },
+    Fallback {
+        native_error: String,
+        native_ms: u64,
+        extractor_result: T,
+    },
+}
+
+enum FirstLookupCompletion<M, T> {
+    Native {
+        result: Result<M, String>,
+        native_ms: u64,
+    },
+    Extractors(T),
+}
+
+/// Race native intake against all extractor work while preserving native priority.
+///
+/// If the extractor path completes first, retain its result until native intake
+/// finishes: a valid native plan must still win. When native wins, dropping the
+/// extractor future triggers its abort-on-drop guard for any active subprocesses.
+async fn prefer_native_manifest<M, N, E>(
+    native_future: N,
+    extractor_future: E,
+) -> NativePriorityOutcome<M, E::Output>
+where
+    N: std::future::Future<Output = (Result<M, String>, u64)>,
+    E: std::future::Future,
+{
+    tokio::pin!(native_future);
+    tokio::pin!(extractor_future);
+
+    // Native is deliberately first: if both futures are ready in the same poll,
+    // a valid native plan must take precedence.
+    let first_completion = tokio::select! {
+        biased;
+
+        (result, native_ms) = &mut native_future => FirstLookupCompletion::Native {
+            result,
+            native_ms,
+        },
+
+        extractor_result = &mut extractor_future => {
+            FirstLookupCompletion::Extractors(extractor_result)
+        }
+    };
+
+    match first_completion {
+        FirstLookupCompletion::Native {
+            result: Ok(manifest),
+            native_ms,
+        } => NativePriorityOutcome::Native {
+            manifest,
+            native_ms,
+            extractor_future_dropped: true,
+        },
+        FirstLookupCompletion::Native {
+            result: Err(native_error),
+            native_ms,
+        } => NativePriorityOutcome::Fallback {
+            native_error,
+            native_ms,
+            extractor_result: extractor_future.await,
+        },
+        FirstLookupCompletion::Extractors(extractor_result) => {
+            let (native_result, native_ms) = native_future.await;
+            match native_result {
+                Ok(manifest) => NativePriorityOutcome::Native {
+                    manifest,
+                    native_ms,
+                    extractor_future_dropped: false,
+                },
+                Err(native_error) => NativePriorityOutcome::Fallback {
+                    native_error,
+                    native_ms,
+                    extractor_result,
+                },
+            }
+        }
+    }
+}
+
+/// Preserve the native-intake diagnostic when the existing extractor path fails.
+fn attach_native_fallback_reason(
+    result: Result<MediaLookupOutcome, MediaLookupFailure>,
+    native_error: String,
+) -> Result<MediaLookupOutcome, MediaLookupFailure> {
+    match result {
+        Ok(MediaLookupOutcome::Video(mut video)) => {
+            video.native_fallback_reason = Some(native_error);
+            Ok(MediaLookupOutcome::Video(video))
+        }
+        Err(MediaLookupFailure::MissingTools(message)) => Err(MediaLookupFailure::MissingTools(
+            append_native_fallback_reason(&message, Some(native_error.as_str())),
+        )),
+        Err(MediaLookupFailure::Failed(message)) => Err(MediaLookupFailure::Failed(
+            append_native_fallback_reason(&message, Some(native_error.as_str())),
+        )),
+        other => other,
+    }
+}
+
+/// Start native HLS/DASH intake alongside tool resolution and yt-dlp/gallery-dl.
+///
+/// URLs outside the native candidate set retain the extractor-only path without
+/// paying for native intake or arbitration.
 async fn lookup_media_inner(
     url: String,
     browser: String,
     newest_first: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
-    // Native HLS/DASH intake runs before extraction. Unsupported or malformed
-    // manifests continue through the established yt-dlp/gallery fallback.
-    let mut native_fallback_reason = None;
-    if crate::manifest_intake::supports(&url) {
-        let manifest_url = url.clone();
-        let manifest_browser = browser.clone();
-        let manifest_proxy = proxy.clone();
-        let handle = crate::runtime::tokio_rt().spawn(async move {
-            crate::manifest_intake::lookup(
-                &manifest_url,
-                &manifest_browser,
-                manifest_proxy.as_ref(),
-            )
-            .await
-        });
-        let native_result = {
-            let _abort = AbortTaskOnDrop(handle.abort_handle());
-            handle.await
-        };
-        match native_result {
-            Ok(Ok(Some(manifest))) => {
-                return Ok(MediaLookupOutcome::Manifest(Box::new(manifest)));
-            }
-            Ok(Ok(None)) => {
-                let reason = gettext("The URL did not resolve to a supported HLS or DASH manifest");
-                tracing::info!(
-                    url_host = %crate::video_probe::page_host(&url),
-                    error = %reason,
-                    "native manifest preview fell back to yt-dlp"
-                );
-                native_fallback_reason = Some(reason);
-            }
-            Ok(Err(error)) => {
-                let reason = error;
-                tracing::info!(
-                    url_host = %crate::video_probe::page_host(&url),
-                    error = %reason,
-                    "native manifest preview fell back to yt-dlp"
-                );
-                native_fallback_reason = Some(reason);
-            }
-            Err(error) => {
-                let reason = error.to_string();
-                tracing::info!(
-                    url_host = %crate::video_probe::page_host(&url),
-                    error = %reason,
-                    "native manifest preview task failed; falling back to yt-dlp"
-                );
-                native_fallback_reason = Some(reason);
-            }
-        }
+    if !crate::manifest_intake::supports(&url) {
+        return lookup_extractors_inner(url, browser, newest_first, proxy).await;
     }
 
+    let host = crate::video_probe::page_host(&url);
+    let native_started = std::time::Instant::now();
+    let native_url = url.clone();
+    let native_browser = browser.clone();
+    let native_proxy = proxy.clone();
+    let native_future = async move {
+        let result =
+            crate::manifest_intake::lookup(&native_url, &native_browser, native_proxy.as_ref())
+                .await
+                .and_then(|manifest| {
+                    manifest.ok_or_else(|| {
+                        gettext("The URL did not resolve to a supported HLS or DASH manifest")
+                    })
+                });
+        (result, native_started.elapsed().as_millis() as u64)
+    };
+
+    // Tool lookup is part of this future, so it starts as soon as native intake
+    // first yields. It is not awaited as a prerequisite to the native request.
+    let extractor_future = lookup_extractors_inner(url, browser, newest_first, proxy);
+    match prefer_native_manifest(native_future, extractor_future).await {
+        NativePriorityOutcome::Native {
+            manifest,
+            native_ms,
+            extractor_future_dropped,
+        } => {
+            tracing::info!(
+                url_host = %host,
+                native_ms,
+                lookup_winner = "native",
+                extractor_future_dropped,
+                "concurrent media lookup arbitration"
+            );
+            Ok(MediaLookupOutcome::Manifest(Box::new(manifest)))
+        }
+        NativePriorityOutcome::Fallback {
+            native_error,
+            native_ms,
+            extractor_result,
+        } => {
+            tracing::info!(
+                url_host = %host,
+                native_ms,
+                lookup_winner = "extractors",
+                extractor_future_dropped = false,
+                native_error = %native_error,
+                "concurrent media lookup arbitration"
+            );
+            attach_native_fallback_reason(extractor_result, native_error)
+        }
+    }
+}
+
+/// Resolve tools and run the existing yt-dlp/gallery-dl lookup without changing
+/// its routing, playlist, gallery-toggle, or failure semantics.
+async fn lookup_extractors_inner(
+    url: String,
+    browser: String,
+    newest_first: bool,
+    proxy: Option<crate::net_types::ResolvedProxy>,
+) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     let needs_gallery_tool = needs_gallery_probe(&url);
     let tool_started = std::time::Instant::now();
     let local_tools_result = crate::runtime::tokio_rt()
@@ -444,9 +574,8 @@ async fn lookup_media_inner(
                 "lookup tool resolution timing"
             );
             tracing::error!(error = %error, "lookup tool resolution task failed");
-            return Err(MediaLookupFailure::Failed(append_native_fallback_reason(
-                &gettext("The lookup failed unexpectedly. Please try again."),
-                native_fallback_reason.as_deref(),
+            return Err(MediaLookupFailure::Failed(gettext(
+                "The lookup failed unexpectedly. Please try again.",
             )));
         }
     };
@@ -463,12 +592,8 @@ async fn lookup_media_inner(
         },
         "lookup tool resolution timing"
     );
-    let youtube_bin = youtube_result.map_err(|error| {
-        MediaLookupFailure::MissingTools(append_native_fallback_reason(
-            &error.to_string(),
-            native_fallback_reason.as_deref(),
-        ))
-    })?;
+    let youtube_bin =
+        youtube_result.map_err(|error| MediaLookupFailure::MissingTools(error.to_string()))?;
     let gallery_tool = match gallery_result {
         Some(Ok(path)) => Some(path),
         Some(Err(error)) => {
@@ -506,10 +631,7 @@ async fn lookup_media_inner(
         let _abort_probe_on_drop = AbortTaskOnDrop(probe_handle.abort_handle());
         let outcome = probe_handle.await.map_err(|error| {
             tracing::error!(error = %error, "dual-backend probe task failed");
-            MediaLookupFailure::Failed(append_native_fallback_reason(
-                &gettext("The lookup failed unexpectedly. Please try again."),
-                native_fallback_reason.as_deref(),
-            ))
+            MediaLookupFailure::Failed(gettext("The lookup failed unexpectedly. Please try again."))
         })?;
         let crate::inline_gallery::DualProbeOutcome::Complete { gallery, ytdlp } = outcome;
 
@@ -561,7 +683,7 @@ async fn lookup_media_inner(
         ytdlp_result,
         gallery_error,
         toggle_items,
-        native_fallback_reason,
+        native_fallback_reason: None,
     })))
 }
 
@@ -5063,6 +5185,136 @@ mod tests {
         assert!(!st.is_open());
         st.set(true);
         assert_eq!(*seen.borrow(), vec![true, false, true]);
+    }
+
+    #[tokio::test]
+    async fn native_manifest_wins_and_drops_a_pending_extractor_future() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = DropFlag(Arc::clone(&dropped));
+        let native = async { (Ok::<_, String>("native"), 3) };
+        let extractor = async move {
+            let _guard = guard;
+            std::future::pending::<&'static str>().await
+        };
+
+        match prefer_native_manifest(native, extractor).await {
+            NativePriorityOutcome::Native {
+                manifest,
+                native_ms,
+                extractor_future_dropped,
+            } => {
+                assert_eq!(manifest, "native");
+                assert_eq!(native_ms, 3);
+                assert!(extractor_future_dropped);
+            }
+            NativePriorityOutcome::Fallback { .. } => {
+                panic!("a valid native plan must win");
+            }
+        }
+        assert!(dropped.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn native_manifest_overrides_an_already_completed_extractor_result() {
+        let (native_ready_tx, native_ready_rx) = tokio::sync::oneshot::channel();
+        let native = async move {
+            let _ = native_ready_rx.await;
+            (Ok::<_, String>("native"), 5)
+        };
+        let extractor = async move {
+            native_ready_tx.send(()).expect("native waiter is alive");
+            "extractor"
+        };
+
+        match prefer_native_manifest(native, extractor).await {
+            NativePriorityOutcome::Native {
+                manifest,
+                extractor_future_dropped,
+                ..
+            } => {
+                assert_eq!(manifest, "native");
+                assert!(!extractor_future_dropped);
+            }
+            NativePriorityOutcome::Fallback { .. } => {
+                panic!("extractor completion must not outrank native intake");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_native_intake_waits_for_and_returns_the_extractor_result() {
+        let native = async { (Err::<&str, _>("unsupported manifest".to_string()), 1) };
+        let extractor = async {
+            tokio::task::yield_now().await;
+            Ok::<_, String>("extractor")
+        };
+
+        match prefer_native_manifest(native, extractor).await {
+            NativePriorityOutcome::Fallback {
+                native_error,
+                native_ms,
+                extractor_result,
+            } => {
+                assert_eq!(native_error, "unsupported manifest");
+                assert_eq!(native_ms, 1);
+                assert_eq!(extractor_result, Ok("extractor"));
+            }
+            NativePriorityOutcome::Native { .. } => {
+                panic!("an unsupported native manifest must fall back");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_native_intake_falls_back_when_extractors_finish_first() {
+        let (native_ready_tx, native_ready_rx) = tokio::sync::oneshot::channel();
+        let native = async move {
+            let _ = native_ready_rx.await;
+            (Err::<&str, _>("unsupported manifest".to_string()), 5)
+        };
+        let extractor = async move {
+            native_ready_tx.send(()).expect("native waiter is alive");
+            Ok::<_, String>("extractor")
+        };
+
+        match prefer_native_manifest(native, extractor).await {
+            NativePriorityOutcome::Fallback {
+                native_error,
+                native_ms,
+                extractor_result,
+            } => {
+                assert_eq!(native_error, "unsupported manifest");
+                assert_eq!(native_ms, 5);
+                assert_eq!(extractor_result, Ok("extractor"));
+            }
+            NativePriorityOutcome::Native { .. } => {
+                panic!("an unsupported native manifest must fall back");
+            }
+        }
+    }
+
+    #[test]
+    fn native_fallback_reason_is_attached_to_extractor_failures() {
+        let result = Err(MediaLookupFailure::MissingTools("yt-dlp missing".into()));
+        match attach_native_fallback_reason(result, "manifest was unsupported".into()) {
+            Err(MediaLookupFailure::MissingTools(message)) => {
+                assert!(message.contains("yt-dlp missing"));
+                assert!(message.contains("manifest was unsupported"));
+            }
+            _ => panic!("the extractor failure must be preserved"),
+        }
     }
 
     #[test]

@@ -395,11 +395,11 @@ fn count_queue_rows(widget: &gtk4::Widget) -> usize {
     count
 }
 
-/// The status filters use the header's centered title area on wide windows
-/// and move into the list as a dropdown when the window becomes narrow.
+/// Queue status navigation uses libadwaita's adaptive view-switcher pattern.
+/// The selected page owns the shared queue scroller; no row widgets are duplicated.
 #[test]
 #[ignore = "needs a display; run under Xvfb (see ci.yml)"]
-fn status_filters_adapt_between_header_and_compact_dropdown() {
+fn status_views_use_gnome_adaptive_view_switcher() {
     // SAFETY: UI tests run serially; no other thread reads these variables
     // while this process-global setup runs.
     unsafe {
@@ -409,112 +409,180 @@ fn status_filters_adapt_between_header_and_compact_dropdown() {
     gtk4::init().expect("gtk::init (run under Xvfb)");
 
     let app = libadwaita::Application::builder()
-        .application_id("io.github.linuxuser67.Grab.HeaderFilterTest")
+        .application_id("io.github.linuxuser67.Grab.AdaptiveViewSwitcherTest")
         .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
         .build();
     app.register(None::<&gtk4::gio::Cancellable>)
         .expect("register test application before building its window");
 
-    for (width, expected_title, expected_compact) in [(620, "title", true), (960, "filters", false)]
-    {
+    for (width, narrow) in [(460, true), (960, false)] {
         let settings = crate::settings::AppSettings::new();
         let manager = crate::download::DownloadManager::new(
             gtk4::gio::ListStore::new::<crate::download::DownloadItem>(),
             settings.clone(),
         );
-        manager.store().append(&crate::download::DownloadItem::new(
+        let queued = crate::download::DownloadItem::new(
             1,
-            "https://example.com/file",
-            "Example file",
+            "https://example.com/queued",
+            "queued.bin",
             "/tmp",
-        ));
+        );
+        let active = crate::download::DownloadItem::new(
+            2,
+            "https://example.com/active",
+            "active.bin",
+            "/tmp",
+        );
+        active.set_status(crate::download::DownloadStatus::Paused);
+        let downloaded = crate::download::DownloadItem::new(
+            3,
+            "https://example.com/downloaded",
+            "downloaded.bin",
+            "/tmp",
+        );
+        downloaded.set_status(crate::download::DownloadStatus::Done);
+        manager.store().append(&queued);
+        manager.store().append(&active);
+        manager.store().append(&downloaded);
         let toasts = std::rc::Rc::new(libadwaita::ToastOverlay::new());
         let (window, _, add_card) = crate::window::build_window(&app, manager, settings, toasts);
         window.set_default_size(width, 500);
         window.present();
         drain_gtk_events();
 
-        let title = find_widget_by_name(window.upcast_ref(), "header-title-stack")
-            .expect("header title stack exists");
         assert_eq!(
-            title.property::<String>("visible-child-name"),
-            expected_title,
-            "unexpected header title layout at {width}px"
+            window.title().as_deref(),
+            Some("Grab"),
+            "the window title must be the application name without a subtitle"
         );
-        let compact = find_widget_by_name(window.upcast_ref(), "status-filter-compact-row")
-            .expect("compact status filter exists");
+        let header = find_widget_by_name(window.upcast_ref(), "main-header")
+            .expect("main header exists")
+            .downcast::<libadwaita::HeaderBar>()
+            .expect("main header is an AdwHeaderBar");
         assert_eq!(
-            compact.is_visible(),
-            expected_compact,
-            "unexpected compact filter visibility at {width}px"
+            header.title_widget().is_some(),
+            !narrow,
+            "wide mode owns the header title widget; narrow mode restores the window title"
         );
+        if !narrow {
+            assert_eq!(
+                header
+                    .title_widget()
+                    .expect("wide header contains the view switcher")
+                    .widget_name()
+                    .as_str(),
+                "download-status-view-switcher"
+            );
+        }
+
+        let switcher_bar =
+            find_widget_by_name(window.upcast_ref(), "download-status-view-switcher-bar")
+                .expect("bottom AdwViewSwitcherBar exists")
+                .downcast::<libadwaita::ViewSwitcherBar>()
+                .expect("bottom navigation uses AdwViewSwitcherBar");
+        assert_eq!(
+            switcher_bar.reveals(),
+            narrow,
+            "the bottom navigation is revealed only at narrow widths"
+        );
+
+        let view_stack = find_widget_by_name(window.upcast_ref(), "download-status-stack")
+            .expect("queue AdwViewStack exists")
+            .downcast::<libadwaita::ViewStack>()
+            .expect("status navigation is backed by AdwViewStack");
+        let scroll = find_widget_by_name(window.upcast_ref(), "download-list-scroll")
+            .expect("the shared queue scroller exists");
+        let active_section = find_widget_by_name(window.upcast_ref(), "download-section-active")
+            .expect("active downloads section exists");
+        let queued_section = find_widget_by_name(window.upcast_ref(), "download-section-queued")
+            .expect("queued downloads section exists");
+        let downloaded_section =
+            find_widget_by_name(window.upcast_ref(), "download-section-downloaded")
+                .expect("downloaded downloads section exists");
+
+        for name in ["active", "queued", "downloaded", "all"] {
+            view_stack.set_visible_child_name(name);
+            drain_gtk_events();
+            assert_eq!(
+                view_stack.visible_child_name().as_deref(),
+                Some(name),
+                "the view switcher changes the selected status page"
+            );
+            let expected_parent = format!("status-page-{name}");
+            assert_eq!(
+                scroll
+                    .parent()
+                    .expect("the scroller is attached to the selected page")
+                    .widget_name()
+                    .to_string(),
+                expected_parent,
+                "the single queue scroller follows the selected page"
+            );
+            assert_eq!(
+                active_section.is_visible(),
+                name == "active" || name == "all",
+                "active rows are shown only in the Active and All views"
+            );
+            assert_eq!(
+                queued_section.is_visible(),
+                name == "queued" || name == "all",
+                "queued rows are shown only in the Queued and All views"
+            );
+            assert_eq!(
+                downloaded_section.is_visible(),
+                name == "downloaded" || name == "all",
+                "downloaded rows are shown only in the Downloaded and All views"
+            );
+        }
+
         assert!(
             find_widget_by_name(window.upcast_ref(), "add-download-button").is_some(),
-            "the New Download action remains in the header"
+            "New Download remains in the header"
         );
         assert!(
             find_widget_by_name(window.upcast_ref(), "main-menu-button").is_some(),
-            "the main menu remains in the header"
+            "the primary menu remains beside the window controls"
         );
 
-        let dropdown = find_widget_by_name(window.upcast_ref(), "status-filter-dropdown")
-            .expect("compact status filter exists")
-            .downcast::<gtk4::DropDown>()
-            .expect("compact filter is a GtkDropDown");
-        let segmented = find_widget_by_name(window.upcast_ref(), "status-filter-segmented")
-            .expect("wide status filter exists")
-            .downcast::<libadwaita::ToggleGroup>()
-            .expect("wide filter is an AdwToggleGroup");
-        if width == 620 {
-            dropdown.set_selected(2);
-            drain_gtk_events();
-            assert_eq!(
-                segmented.active_name().as_deref(),
-                Some("queued"),
-                "the narrow filter selection must update the shared status filter"
-            );
-        } else {
-            segmented.set_active_name(Some("downloaded"));
-            drain_gtk_events();
-            assert_eq!(
-                dropdown.selected(),
-                3,
-                "the wide filter selection must update the compact filter"
-            );
-        }
+        let picker_child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let picker_page = libadwaita::NavigationPage::builder()
+            .tag("adaptive-view-switcher-test-picker")
+            .title("Picker")
+            .child(&picker_child)
+            .build();
+        add_card.navigation().push(&picker_page);
+        drain_gtk_events();
+        assert!(
+            !switcher_bar.reveals(),
+            "queue navigation is hidden while a picker page is visible"
+        );
+        assert!(
+            header.title_widget().is_none(),
+            "the queue view switcher leaves the header while a picker is visible"
+        );
+        assert!(
+            !find_widget_by_name(window.upcast_ref(), "search-downloads-button")
+                .expect("search button exists")
+                .is_visible(),
+            "queue search is hidden while a picker is visible"
+        );
 
-        if width == 960 {
-            let picker_child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-            let picker_page = libadwaita::NavigationPage::builder()
-                .tag("header-filter-test-picker")
-                .title("Picker")
-                .child(&picker_child)
-                .build();
-            add_card.navigation().push(&picker_page);
-            drain_gtk_events();
-            assert_eq!(
-                title.property::<String>("visible-child-name"),
-                "title",
-                "queue filters must leave the header while the picker is visible"
-            );
-            assert!(
-                !find_widget_by_name(window.upcast_ref(), "search-downloads-button")
-                    .expect("search button exists")
-                    .is_visible(),
-                "queue search must leave the header while the picker is visible"
-            );
+        assert!(
+            add_card.navigation().pop(),
+            "the picker page should return to the download form"
+        );
+        drain_gtk_events();
+        assert_eq!(
+            header.title_widget().is_some(),
+            !narrow,
+            "wide header navigation is restored after leaving the picker"
+        );
+        assert_eq!(
+            switcher_bar.reveals(),
+            narrow,
+            "narrow bottom navigation is restored after leaving the picker"
+        );
 
-            assert!(
-                add_card.navigation().pop(),
-                "the picker page should return to the download form"
-            );
-            drain_gtk_events();
-            assert_eq!(
-                title.property::<String>("visible-child-name"),
-                "filters",
-                "queue filters must return when the queue becomes visible"
-            );
-        }
         window.destroy();
         drain_gtk_events();
     }

@@ -277,8 +277,8 @@ pub fn build_window(
         .build();
     menu_btn.set_widget_name("main-menu-button");
     menu_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Main Menu"))]);
-    // GNOME's primary menu belongs at the trailing edge, beside the window controls.
-    header.pack_end(&menu_btn);
+    // Keep the primary menu on the leading edge, as in the original header layout.
+    header.pack_start(&menu_btn);
 
     let search_toggle = gtk4::ToggleButton::builder()
         .icon_name("system-search-symbolic")
@@ -316,11 +316,12 @@ pub fn build_window(
             }
         });
     }
-    // "New Download" is the primary window action, so keep it at the leading edge.
-    header.pack_start(&add_btn);
+    // Keep the primary New Download action on the trailing edge.
+    header.pack_end(&add_btn);
     header.pack_start(&search_toggle);
 
-    let stack = adw::ViewStack::new();
+    let content_stack = gtk4::Stack::new();
+    content_stack.set_widget_name("queue-content-stack");
     let empty = adw::StatusPage::builder()
         .icon_name("folder-download-symbolic")
         .title(gettext("No Downloads Yet"))
@@ -336,7 +337,73 @@ pub fn build_window(
         let card = add_card.clone();
         empty_add.connect_clicked(move |_| card.toggle());
     }
-    stack.add_named(&empty, Some("empty"));
+    content_stack.add_named(&empty, Some("empty"));
+
+    // The queue filters are views in one AdwViewStack. This lets libadwaita
+    // provide the same adaptive header/bottom navigation used by GNOME Software.
+    let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let status_sel: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+    let narrow_layout = Rc::new(Cell::new(false));
+    let has_items = Rc::new(Cell::new(false));
+    let queue_view_visible = Rc::new(Cell::new(true));
+
+    let view_stack = adw::ViewStack::new();
+    view_stack.set_widget_name("download-status-stack");
+    // The one shared queue scroller moves between page containers on selection.
+    view_stack.set_enable_transitions(false);
+    let view_switcher = adw::ViewSwitcher::new();
+    view_switcher.set_widget_name("download-status-view-switcher");
+    view_switcher.set_stack(Some(&view_stack));
+    view_switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
+    header.set_title_widget(Some(&view_switcher));
+
+    let switcher_bar = adw::ViewSwitcherBar::new();
+    switcher_bar.set_widget_name("download-status-view-switcher-bar");
+    switcher_bar.set_stack(Some(&view_stack));
+
+    // Four destinations need room for their wide labels. 550sp is the
+    // libadwaita recommendation for a four-page view switcher.
+    let breakpoint = adw::Breakpoint::new(
+        adw::BreakpointCondition::parse("max-width: 550sp")
+            .expect("the static view-switcher breakpoint is valid"),
+    );
+    {
+        let narrow = Rc::clone(&narrow_layout);
+        let header = header.clone();
+        let switcher = view_switcher.clone();
+        let switcher_bar = switcher_bar.clone();
+        let has_items = Rc::clone(&has_items);
+        let queue_visible = Rc::clone(&queue_view_visible);
+        breakpoint.connect_apply(move |_| {
+            narrow.set(true);
+            // Clearing the title widget makes AdwHeaderBar show the window
+            // title ("Grab"), while the same stack is exposed by the bottom bar.
+            header.set_title_widget(None::<&gtk4::Widget>);
+            let show_navigation = has_items.get() && queue_visible.get();
+            switcher.set_visible(show_navigation);
+            switcher_bar.set_reveal(show_navigation);
+        });
+    }
+    {
+        let narrow = Rc::clone(&narrow_layout);
+        let header = header.clone();
+        let switcher = view_switcher.clone();
+        let switcher_bar = switcher_bar.clone();
+        let has_items = Rc::clone(&has_items);
+        let queue_visible = Rc::clone(&queue_view_visible);
+        breakpoint.connect_unapply(move |_| {
+            narrow.set(false);
+            switcher_bar.set_reveal(false);
+            let show_navigation = has_items.get() && queue_visible.get();
+            switcher.set_visible(show_navigation);
+            if show_navigation {
+                header.set_title_widget(Some(&switcher));
+            } else {
+                header.set_title_widget(None::<&gtk4::Widget>);
+            }
+        });
+    }
+    window.add_breakpoint(breakpoint);
 
     fn section_list(title: &str) -> (gtk4::Box, gtk4::ListBox) {
         let label = gtk4::Label::builder()
@@ -359,6 +426,9 @@ pub fn build_window(
     let (active_section, active_list) = section_list(&gettext("Active"));
     let (queued_section, queued_list) = section_list(&gettext("Queued"));
     let (downloaded_section, downloaded_list) = section_list(&gettext("Downloaded"));
+    active_section.set_widget_name("download-section-active");
+    queued_section.set_widget_name("download-section-queued");
+    downloaded_section.set_widget_name("download-section-downloaded");
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     content.set_margin_top(12);
     content.set_margin_bottom(12);
@@ -378,7 +448,48 @@ pub fn build_window(
         .vexpand(true)
         .child(&list_clamp)
         .build();
-    stack.add_named(&scroll, Some("list"));
+    scroll.set_widget_name("download-list-scroll");
+
+    // Share one scroller and its row widgets across every view. The selected
+    // page owns the scroller, so row signals and progress sources are not duplicated.
+    let all_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    all_page.set_widget_name("status-page-all");
+    let active_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    active_page.set_widget_name("status-page-active");
+    let queued_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    queued_page.set_widget_name("status-page-queued");
+    let downloaded_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    downloaded_page.set_widget_name("status-page-downloaded");
+
+    view_stack.add_titled_with_icon(
+        &all_page,
+        Some("all"),
+        &gettext("All"),
+        "view-list-symbolic",
+    );
+    view_stack.add_titled_with_icon(
+        &active_page,
+        Some("active"),
+        &gettext("Active"),
+        "emblem-synchronizing-symbolic",
+    );
+    view_stack.add_titled_with_icon(
+        &queued_page,
+        Some("queued"),
+        &gettext("Queued"),
+        "hourglass-symbolic",
+    );
+    view_stack.add_titled_with_icon(
+        &downloaded_page,
+        Some("downloaded"),
+        &gettext("Downloaded"),
+        "folder-download-symbolic",
+    );
+    all_page.append(&scroll);
+    view_stack.set_visible_child_name("all");
+    content_stack.add_named(&view_stack, Some("list"));
+    content_stack.set_visible_child_name("empty");
+    view_stack.set_vexpand(true);
 
     fn is_done(it: &crate::download::DownloadItem) -> bool {
         it.status() == crate::download::DownloadStatus::Done
@@ -386,7 +497,7 @@ pub fn build_window(
     fn is_queued(it: &crate::download::DownloadItem) -> bool {
         it.status() == crate::download::DownloadStatus::Queued
     }
-    /// DropDown bucket for a status (0 = All); order must match the model.
+    /// View-stack bucket for a status (0 = All); order matches the pages.
     /// Active deliberately covers everything in flight or stalled —
     /// including the terminal Failed/Cancelled states, so one bucket shows
     /// anything still needing attention. Queued is the waiting, Downloaded
@@ -400,111 +511,6 @@ pub fn build_window(
         }
     }
 
-    // Search above the sections: non-matching rows are hidden in sync(), and
-    // empty sections collapse as usual.
-    let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-    let status_sel: Rc<Cell<u32>> = Rc::new(Cell::new(0));
-    // The status filters use the header's centered title area on wide
-    // windows. Narrow windows get a single compact dropdown above the list.
-    // Both controls share this selected bucket: 0 = All, 1 = Active,
-    // 2 = Queued, 3 = Downloaded.
-    let seg = adw::ToggleGroup::new();
-    for (name, label) in [
-        ("all", gettext("All")),
-        ("active", gettext("Active")),
-        ("queued", gettext("Queued")),
-        ("downloaded", gettext("Downloaded")),
-    ] {
-        let toggle = adw::Toggle::builder().name(name).label(&label).build();
-        seg.add(toggle);
-    }
-    seg.set_active_name(Some("all"));
-    seg.set_widget_name("status-filter-segmented");
-
-    // The wrapper provides an accessible name for AdwToggleGroup.
-    let seg_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-    seg_wrap.set_halign(gtk4::Align::Center);
-    seg_wrap.update_property(&[gtk4::accessible::Property::Label(&gettext(
-        "Filter by status",
-    ))]);
-    seg_wrap.append(&seg);
-
-    let window_title = adw::WindowTitle::new(&gettext("Grab"), &gettext("Download Manager"));
-    let header_title_stack = gtk4::Stack::new();
-    header_title_stack.set_widget_name("header-title-stack");
-    header_title_stack.add_named(&window_title, Some("title"));
-    header_title_stack.add_named(&seg_wrap, Some("filters"));
-    header_title_stack.set_visible_child_name("title");
-    header.set_title_widget(Some(&header_title_stack));
-
-    let filter_names = [
-        gettext("All"),
-        gettext("Active"),
-        gettext("Queued"),
-        gettext("Downloaded"),
-    ];
-    let filter_model =
-        gtk4::StringList::new(&filter_names.iter().map(String::as_str).collect::<Vec<_>>());
-    let status_dropdown = gtk4::DropDown::builder()
-        .model(&filter_model)
-        .selected(0)
-        .tooltip_text(gettext("Filter downloads"))
-        .build();
-    status_dropdown.set_widget_name("status-filter-dropdown");
-    status_dropdown.update_property(&[gtk4::accessible::Property::Label(&gettext(
-        "Filter by status",
-    ))]);
-
-    let compact_filter_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-    compact_filter_row.set_widget_name("status-filter-compact-row");
-    compact_filter_row.set_halign(gtk4::Align::Center);
-    compact_filter_row.set_margin_top(6);
-    compact_filter_row.set_margin_bottom(6);
-    compact_filter_row.set_margin_start(12);
-    compact_filter_row.set_margin_end(12);
-    let compact_filter_label = gtk4::Label::new(Some(&gettext("Show")));
-    compact_filter_row.append(&compact_filter_label);
-    compact_filter_row.append(&status_dropdown);
-    compact_filter_row.set_visible(false);
-
-    let narrow_layout = Rc::new(Cell::new(false));
-    let has_items = Rc::new(Cell::new(false));
-    let queue_view_visible = Rc::new(Cell::new(true));
-    let breakpoint = adw::Breakpoint::new(
-        adw::BreakpointCondition::parse("max-width: 700sp")
-            .expect("the static compact-header breakpoint is valid"),
-    );
-    {
-        let narrow = Rc::clone(&narrow_layout);
-        let compact = compact_filter_row.clone();
-        let title = header_title_stack.clone();
-        let has_items = Rc::clone(&has_items);
-        let queue_visible = Rc::clone(&queue_view_visible);
-        let seg = seg.clone();
-        breakpoint.connect_apply(move |_| {
-            narrow.set(true);
-            let show_filters = has_items.get() && queue_visible.get();
-            seg.set_visible(show_filters);
-            compact.set_visible(show_filters);
-            title.set_visible_child_name("title");
-        });
-    }
-    {
-        let narrow = Rc::clone(&narrow_layout);
-        let compact = compact_filter_row.clone();
-        let title = header_title_stack.clone();
-        let has_items = Rc::clone(&has_items);
-        let queue_visible = Rc::clone(&queue_view_visible);
-        let seg = seg.clone();
-        breakpoint.connect_unapply(move |_| {
-            narrow.set(false);
-            compact.set_visible(false);
-            let show_filters = has_items.get() && queue_visible.get();
-            seg.set_visible(show_filters);
-            title.set_visible_child_name(if show_filters { "filters" } else { "title" });
-        });
-    }
-    window.add_breakpoint(breakpoint);
     // The toggle shows/hides the search bar below the header (HIG pattern);
     // Escape in the entry closes it too.
     {
@@ -557,7 +563,7 @@ pub fn build_window(
         let r = Rc::clone(&rows);
         let add = add_btn.clone();
         let search_btn = search_toggle.clone();
-        let s = stack.clone();
+        let s = content_stack.clone();
         let l_active = active_list.clone();
         let l_queued = queued_list.clone();
         let l_downloaded = downloaded_list.clone();
@@ -566,9 +572,9 @@ pub fn build_window(
         let sec_downloaded = downloaded_section.clone();
         let query = Rc::clone(&query);
         let status_sel = Rc::clone(&status_sel);
-        let seg = seg.clone();
-        let compact = compact_filter_row.clone();
-        let title = header_title_stack.clone();
+        let header = header.clone();
+        let view_switcher = view_switcher.clone();
+        let switcher_bar = switcher_bar.clone();
         let narrow = Rc::clone(&narrow_layout);
         let has_items_state = Rc::clone(&has_items);
         let queue_visible = Rc::clone(&queue_view_visible);
@@ -646,14 +652,18 @@ pub fn build_window(
             // state supplies its own call to action when the queue is empty.
             add.set_visible(has_items);
             search_btn.set_visible(has_items && queue_visible.get());
-            let show_filters = has_items && queue_visible.get();
-            seg.set_visible(show_filters);
+            let show_navigation = has_items && queue_visible.get();
+            view_switcher.set_visible(show_navigation);
             if narrow.get() {
-                compact.set_visible(show_filters);
-                title.set_visible_child_name("title");
+                header.set_title_widget(None::<&gtk4::Widget>);
+                switcher_bar.set_reveal(show_navigation);
             } else {
-                compact.set_visible(false);
-                title.set_visible_child_name(if show_filters { "filters" } else { "title" });
+                switcher_bar.set_reveal(false);
+                if show_navigation {
+                    header.set_title_widget(Some(&view_switcher));
+                } else {
+                    header.set_title_widget(None::<&gtk4::Widget>);
+                }
             }
             if !has_items {
                 // List is gone, so nothing to search.
@@ -673,48 +683,28 @@ pub fn build_window(
     }
     {
         let sync = Rc::clone(&sync);
-        let sel = Rc::clone(&status_sel);
-        let dropdown = status_dropdown.clone();
-        seg.connect_active_name_notify(move |group| {
-            let idx = match group.active_name().as_deref() {
-                Some("active") => 1,
-                Some("queued") => 2,
-                Some("downloaded") => 3,
-                _ => 0,
+        let status_sel = Rc::clone(&status_sel);
+        let scroll = scroll.clone();
+        let all_page = all_page.clone();
+        let active_page = active_page.clone();
+        let queued_page = queued_page.clone();
+        let downloaded_page = downloaded_page.clone();
+        view_stack.connect_visible_child_name_notify(move |stack| {
+            let Some(name) = stack.visible_child_name() else {
+                return;
             };
-            if sel.get() != idx {
-                sel.set(idx);
-                if dropdown.selected() != idx {
-                    dropdown.set_selected(idx);
-                }
-                sync();
-            }
-        });
-    }
-    {
-        let sync = Rc::clone(&sync);
-        let sel = Rc::clone(&status_sel);
-        let seg = seg.clone();
-        status_dropdown.connect_selected_notify(move |dropdown| {
-            let idx = match dropdown.selected() {
-                1 => 1,
-                2 => 2,
-                3 => 3,
-                _ => 0,
+            let (bucket, page) = match name.as_str() {
+                "active" => (1, &active_page),
+                "queued" => (2, &queued_page),
+                "downloaded" => (3, &downloaded_page),
+                _ => (0, &all_page),
             };
-            if sel.get() != idx {
-                sel.set(idx);
-                let name = match idx {
-                    1 => "active",
-                    2 => "queued",
-                    3 => "downloaded",
-                    _ => "all",
-                };
-                if seg.active_name().as_deref() != Some(name) {
-                    seg.set_active_name(Some(name));
-                }
-                sync();
+            status_sel.set(bucket);
+            if let Some(parent) = scroll.parent().and_downcast::<gtk4::Box>() {
+                parent.remove(&scroll);
             }
+            page.append(&scroll);
+            sync();
         });
     }
 
@@ -826,24 +816,25 @@ pub fn build_window(
     toolbar.add_top_bar(&header);
     toolbar.add_top_bar(&search_clamp);
     toolbar.add_top_bar(&banner);
+    toolbar.add_bottom_bar(&switcher_bar);
     // The add card's gallery/playlist picker pages can be much taller than
     // a toolbar. Keeping it as a top bar can produce an invalid `for_size`
     // measurement when the window is probed at its minimum size. Keep the
     // toolbar bars compact and place the card in the content area instead.
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     content.append(add_card.widget());
-    content.append(&compact_filter_row);
-    stack.set_vexpand(true);
+    content_stack.set_vexpand(true);
     // A picker page is a selection task that needs height: while one is
     // visible, the card takes the content area. The queue gets its space
     // back as soon as the form page returns (pop, Escape, or card close).
     {
-        let stack = stack.clone();
+        let content_stack = content_stack.clone();
         let sync = Rc::clone(&sync);
         let queue_visible = Rc::clone(&queue_view_visible);
-        let seg = seg.clone();
-        let compact = compact_filter_row.clone();
-        let title = header_title_stack.clone();
+        let view_switcher = view_switcher.clone();
+        let switcher_bar = switcher_bar.clone();
+        let header = header.clone();
+        let narrow = Rc::clone(&narrow_layout);
         let search_toggle = search_toggle.clone();
         add_card
             .navigation()
@@ -853,29 +844,31 @@ pub fn build_window(
                     .is_some_and(|tag| tag.as_str() != "form");
                 queue_visible.set(!picker);
                 if picker {
-                    seg.set_visible(false);
-                    compact.set_visible(false);
+                    view_switcher.set_visible(false);
+                    switcher_bar.set_reveal(false);
+                    if !narrow.get() {
+                        header.set_title_widget(None::<&gtk4::Widget>);
+                    }
                     search_toggle.set_visible(false);
                     search_toggle.set_active(false);
-                    title.set_visible_child_name("title");
                 }
-                stack.set_visible(!picker);
+                content_stack.set_visible(!picker);
                 if !picker {
                     // Let the navigation transition settle before reconciling.
                     // Queue changes can land while the stack is hidden, and the
                     // first visible allocation must see the latest model.
-                    let stack = stack.clone();
+                    let content_stack = content_stack.clone();
                     let sync = Rc::clone(&sync);
                     glib::idle_add_local_once(move || {
-                        if stack.is_visible() {
+                        if content_stack.is_visible() {
                             sync();
-                            stack.queue_resize();
+                            content_stack.queue_resize();
                         }
                     });
                 }
             });
     }
-    content.append(&stack);
+    content.append(&content_stack);
     toolbar.set_content(Some(&content));
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(toasts.as_ref()));

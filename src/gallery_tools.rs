@@ -259,6 +259,7 @@ pub async fn gallerydl_display_version(path: &Path) -> Result<String, GalleryErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
 
     #[tokio::test]
     async fn gallerydl_version_uses_shared_single_flight_cache() {

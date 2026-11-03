@@ -3058,7 +3058,23 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                 };
                 let browser = settings_b.cookies_browser();
                 let newest_first = settings_b.video_codec_newest();
-                let outcome = lookup_media(url.clone(), browser, newest_first, proxy.clone()).await;
+                // Native preview uses Tokio timers and Tokio-backed I/O. The
+                // outer card flow is polled by GLib, so run this entire backend
+                // lookup as a Tokio task and keep GTK updates on this context.
+                let lookup_url = url.clone();
+                let lookup_task = crate::runtime::tokio_rt().spawn(async move {
+                    lookup_media(lookup_url, browser, newest_first, proxy).await
+                });
+                let _abort_lookup_on_drop = AbortTaskOnDrop(lookup_task.abort_handle());
+                let outcome = match lookup_task.await {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        tracing::error!(%error, "media lookup task failed");
+                        Err(MediaLookupFailure::Failed(gettext(
+                            "The lookup failed unexpectedly. Please try again.",
+                        )))
+                    }
+                };
                 let outcome = match outcome {
                     Ok(outcome) => outcome,
                     Err(MediaLookupFailure::MissingTools(message)) => {

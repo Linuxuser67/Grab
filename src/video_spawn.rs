@@ -77,6 +77,7 @@ pub(crate) async fn fetch_raw_dump_json(
     timeout: Duration,
     fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
     flat_playlist: bool,
+    identity_args: Option<&[String]>,
 ) -> Result<serde_json::Value, VideoError> {
     let mut args = vec!["--ignore-config".to_string(), "--no-progress".to_string()];
     if flat_playlist {
@@ -89,9 +90,9 @@ pub(crate) async fn fetch_raw_dump_json(
     // media download spawn yt-dlp separately and need it too; the finished
     // download discards it. The tail ends with `-- <url>`, past which yt-dlp
     // reads positionals.
-    args.extend(crate::extension_server::ytdlp_spawn_identity(
-        cookies_browser,
-        url,
+    args.extend(identity_args.map_or_else(
+        || crate::extension_server::ytdlp_spawn_identity(cookies_browser, url),
+        |args| args.to_vec(),
     ));
     let guarded_proxy = guard_untrusted_args(&args)?;
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
@@ -182,6 +183,7 @@ pub(crate) async fn fetch_video_page(
         timeout,
         fetch_proxy,
         false,
+        None,
     )
     .await?;
     if let Some(playlist) = parse_playlist_json(&value, url) {
@@ -239,18 +241,26 @@ pub async fn fetch_video_infos(
             version_ms = phase_started.elapsed().as_millis() as u64;
             let yt_version = version_result?;
             tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
-            // A persistent metadata hit avoids starting yt-dlp (and Deno) for
-            // a repeat preview. The raw JSON is intentionally absent on a hit:
-            // the download worker must obtain fresh extraction data later.
-            if let Some(video) = crate::video_cache::lookup_video(
+            // Capture the authentication and extractor argv once. The same
+            // snapshot keys the cache and is passed to yt-dlp, so a concurrent
+            // extension handoff cannot change the identity between those steps.
+            let identity_args =
+                crate::extension_server::ytdlp_spawn_identity(&cookies_browser, &url);
+            let cache_key = crate::video_cache::cache_key(
                 &url,
                 &youtube_bin,
                 &yt_version,
                 &cookies_browser,
                 fetch_proxy.as_ref(),
-            )
-            .await
-            {
+                &identity_args,
+            );
+            // A persistent metadata hit avoids starting yt-dlp (and Deno) for
+            // a repeat preview. The raw JSON is intentionally absent on a hit:
+            // the download worker must obtain fresh extraction data later.
+            if let Some(video) = match cache_key.as_deref() {
+                Some(key) => crate::video_cache::lookup_video(key).await,
+                None => None,
+            } {
                 tracing::info!(
                     url_host = %page_host(&url),
                     video_id = %video.id,
@@ -277,6 +287,7 @@ pub async fn fetch_video_infos(
                     Duration::from_secs(300),
                     fetch_proxy.as_ref(),
                     true,
+                    Some(&identity_args),
                 ),
             )
             .await;
@@ -300,15 +311,9 @@ pub async fn fetch_video_infos(
                 serde_json::from_value(value).map_err(VideoError::fetch);
             parse_ms = phase_started.elapsed().as_millis() as u64;
             let video = parsed_video?;
-            crate::video_cache::store_video(
-                &url,
-                &youtube_bin,
-                &yt_version,
-                &cookies_browser,
-                fetch_proxy.as_ref(),
-                &video,
-            )
-            .await;
+            if let Some(key) = cache_key.as_deref() {
+                crate::video_cache::store_video(key, &video).await;
+            }
             Ok((
                 ProbeResult::Single(VideoInfo::from(&video, &url, newest_first)),
                 Some(raw_json),

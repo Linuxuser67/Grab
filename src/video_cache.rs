@@ -20,14 +20,7 @@ static LAST_CLEAN_AT: AtomicU64 = AtomicU64::new(0);
 
 /// Return cached metadata only when the URL and current extraction identity
 /// match. Errors in the optional cache never prevent a normal yt-dlp lookup.
-pub(crate) async fn lookup_video(
-    raw_url: &str,
-    youtube_bin: &Path,
-    yt_version: &str,
-    cookies_browser: &str,
-    proxy: Option<&crate::net_types::ResolvedProxy>,
-) -> Option<Video> {
-    let key = cache_key(raw_url, youtube_bin, yt_version, cookies_browser, proxy)?;
+pub(crate) async fn lookup_video(key: &str) -> Option<Video> {
     let cache = video_cache().await?;
     clean_expired_if_due(cache).await;
 
@@ -52,25 +45,15 @@ pub(crate) async fn lookup_video(
 
 /// Store only parsed, static single-video metadata. Never cache playlist
 /// stubs, live streams, or failed/empty extractions.
-pub(crate) async fn store_video(
-    raw_url: &str,
-    youtube_bin: &Path,
-    yt_version: &str,
-    cookies_browser: &str,
-    proxy: Option<&crate::net_types::ResolvedProxy>,
-    video: &Video,
-) {
+pub(crate) async fn store_video(key: &str, video: &Video) {
     if !is_cacheable_video(video) {
         return;
     }
-    let Some(key) = cache_key(raw_url, youtube_bin, yt_version, cookies_browser, proxy) else {
-        return;
-    };
     let Some(cache) = video_cache().await else {
         return;
     };
 
-    if let Err(error) = cache.put(key, video.clone()).await {
+    if let Err(error) = cache.put(key.to_string(), video.clone()).await {
         tracing::warn!(error = %error, "yt-dlp metadata cache write failed");
         return;
     }
@@ -179,12 +162,13 @@ async fn clean_expired_if_due(cache: &VideoCache) {
 
 /// Cache identity includes all inputs that can affect extractor output. Hash
 /// credentials and proxy URLs instead of writing them into the Redb keys.
-fn cache_key(
+pub(crate) fn cache_key(
     raw_url: &str,
     youtube_bin: &Path,
     yt_version: &str,
     cookies_browser: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
+    identity_args: &[String],
 ) -> Option<String> {
     let mut url = url::Url::parse(raw_url).ok()?;
     url.set_fragment(None);
@@ -192,12 +176,15 @@ fn cache_key(
         return None;
     }
 
-    let handoff = crate::extension_server::live_handoff_identity(raw_url, cookies_browser);
     let browser_profile_is_active =
         crate::video_tools::cookies_browser_spec(cookies_browser).is_some();
-    // A browser profile can rotate outside Grab. Only a concrete, current
-    // extension snapshot makes that authentication context cacheable.
-    if browser_profile_is_active && handoff.is_none() {
+    let cookie_path = identity_args
+        .windows(2)
+        .find(|pair| pair[0] == "--cookies")
+        .map(|pair| Path::new(&pair[1]));
+    // Browser-profile cookies rotate outside Grab. Cache only when this exact
+    // spawn will use a concrete extension cookie snapshot instead.
+    if browser_profile_is_active && cookie_path.is_none() {
         return None;
     }
 
@@ -216,24 +203,21 @@ fn cache_key(
         hash_system_time(&mut hasher, b"binary-modified", modified);
     }
 
-    // This contains the selected extractor args, Deno runtime path, staged
-    // cookie path, and paired User-Agent. It is hashed, never stored verbatim.
-    for argument in crate::extension_server::ytdlp_spawn_identity(cookies_browser, raw_url) {
+    // This exact argv snapshot is also passed to the child process. It includes
+    // extractor args, Deno runtime, cookies, and the paired User-Agent.
+    for argument in identity_args {
         hash_field(&mut hasher, b"identity-arg", argument.as_bytes());
     }
 
-    if let Some((path, user_agent)) = handoff {
-        let metadata = std::fs::metadata(&path).ok()?;
-        if !metadata.is_file() || std::fs::File::open(&path).is_err() {
+    if let Some(path) = cookie_path {
+        let metadata = std::fs::metadata(path).ok()?;
+        if !metadata.is_file() || std::fs::File::open(path).is_err() {
             return None;
         }
         hash_field(&mut hasher, b"handoff-cookie-path", path.as_os_str().to_string_lossy().as_bytes());
         hash_field(&mut hasher, b"handoff-cookie-size", &metadata.len().to_be_bytes());
         if let Ok(modified) = metadata.modified() {
             hash_system_time(&mut hasher, b"handoff-cookie-modified", modified);
-        }
-        if let Some(user_agent) = user_agent {
-            hash_field(&mut hasher, b"handoff-user-agent", user_agent.as_bytes());
         }
     }
 

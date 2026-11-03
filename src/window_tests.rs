@@ -490,6 +490,22 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             .expect("queue AdwViewStack exists")
             .downcast::<libadwaita::ViewStack>()
             .expect("status navigation is backed by AdwViewStack");
+        for (name, expected_icon) in [
+            ("all", "view-list-symbolic"),
+            ("active", "content-loading-symbolic"),
+            ("queued", "task-due-symbolic"),
+            ("downloaded", "folder-download-symbolic"),
+        ] {
+            let child = view_stack
+                .child_by_name(name)
+                .expect("each status view is registered");
+            assert_eq!(
+                view_stack.page(&child).icon_name().as_deref(),
+                Some(expected_icon),
+                "the {name} tab uses its Adwaita symbolic icon"
+            );
+        }
+
         let scroll = find_widget_by_name(window.upcast_ref(), "download-list-scroll")
             .expect("the shared queue scroller exists");
         let active_section = find_widget_by_name(window.upcast_ref(), "download-section-active")

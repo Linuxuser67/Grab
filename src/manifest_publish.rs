@@ -453,12 +453,27 @@ mod tests {
             .path()
             .join(".episode.mkv.publish-stale123.partial");
         std::fs::write(&stale, b"orphaned media").expect("write stale temporary");
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::File::open(&stale)
+            .expect("open stale temporary")
+            .set_times(
+                std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
+                ),
+            )
+            .expect("set stale temporary timestamp");
+
         let startup_started_at = std::time::SystemTime::now();
         let fresh = directory
             .path()
             .join(".episode.mkv.publish-fresh123.partial");
         std::fs::write(&fresh, b"active media").expect("write fresh temporary");
+        std::fs::File::open(&fresh)
+            .expect("open fresh temporary")
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(startup_started_at + std::time::Duration::from_secs(60)),
+            )
+            .expect("set fresh temporary timestamp");
         let unrelated = directory.path().join(".other-temp.partial");
         std::fs::write(&unrelated, b"unrelated").expect("write unrelated file");
         let similar_but_unowned = directory

@@ -24,13 +24,13 @@ pub(crate) async fn lookup_video(key: &str) -> Option<Video> {
     let cache = video_cache().await?;
     clean_expired_if_due(cache).await;
 
-    match cache.get(&key).await {
+    match cache.get(key).await {
         Ok(Some(video)) if is_cacheable_video(&video) && video.are_format_urls_fresh() => {
-            tracing::debug!(url_host = %crate::video_probe::page_host(raw_url), "yt-dlp metadata cache hit");
+            tracing::debug!("yt-dlp metadata cache hit");
             Some(video)
         }
         Ok(Some(_)) => {
-            if let Err(error) = cache.remove(&key).await {
+            if let Err(error) = cache.remove(key).await {
                 tracing::warn!(error = %error, "could not remove stale yt-dlp metadata cache entry");
             }
             None
@@ -243,7 +243,12 @@ pub(crate) fn cache_key(
     let impersonation = crate::settings::AppSettings::new().impersonate_browser();
     hash_field(&mut hasher, b"impersonation", impersonation.as_bytes());
 
-    Some(format!("grab-ytdlp-video-v1:{:x}", hasher.finalize()))
+    use std::fmt::Write as _;
+    let mut digest_hex = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        let _ = write!(&mut digest_hex, "{byte:02x}");
+    }
+    Some(format!("grab-ytdlp-video-v1:{digest_hex}"))
 }
 
 fn hash_field(hasher: &mut Sha256, name: &[u8], value: &[u8]) {

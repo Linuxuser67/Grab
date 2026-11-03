@@ -236,9 +236,7 @@ fn prepare_destination_copy(
         let descriptor = match rustix::fs::openat(
             rustix::fs::CWD,
             parent,
-            rustix::fs::OFlags::TMPFILE
-                | rustix::fs::OFlags::RDWR
-                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::OFlags::TMPFILE | rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::from_bits_truncate(0o600),
         ) {
             Ok(descriptor) => descriptor,
@@ -299,19 +297,14 @@ fn link_anonymous_copy(
             rustix::fs::AtFlags::SYMLINK_FOLLOW,
         ) {
             Ok(()) => {
-                let mut pending =
-                    PendingDestination::new(destination, Arc::clone(gate), None);
+                let mut pending = PendingDestination::new(destination, Arc::clone(gate), None);
                 pending.arm();
                 Ok(AnonymousPublishResult::Linked(pending))
             }
             Err(error)
                 if matches!(
                     error.raw_os_error(),
-                    libc::ENOSYS
-                        | libc::EINVAL
-                        | libc::EOPNOTSUPP
-                        | libc::ENOENT
-                        | libc::EPERM
+                    libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP | libc::ENOENT | libc::EPERM
                 ) =>
             {
                 Ok(AnonymousPublishResult::LinkUnsupported(temporary))
@@ -575,15 +568,17 @@ mod tests {
         std::fs::write(&source, &contents).unwrap();
         let gate = crate::attempt_gate::AttemptGate::new();
 
-        let Some(mut temporary) = prepare_destination_copy(&source, &destination, &gate)
-            .unwrap()
+        let Some(mut temporary) = prepare_destination_copy(&source, &destination, &gate).unwrap()
         else {
             // The test filesystem may not implement O_TMPFILE; the exclusive
             // create fallback is covered independently below.
             return;
         };
 
-        assert!(!destination.exists(), "the final name stays absent before link");
+        assert!(
+            !destination.exists(),
+            "the final name stays absent before link"
+        );
         assert_eq!(
             std::fs::read_dir(directory.path()).unwrap().count(),
             1,
@@ -600,7 +595,10 @@ mod tests {
         assert_eq!(outcome, ManifestPublishOutcome::Published);
         assert!(gate.was_delivered());
         assert_eq!(std::fs::read(&destination).unwrap(), contents);
-        assert!(source.exists(), "the source remains for normal staging cleanup");
+        assert!(
+            source.exists(),
+            "the source remains for normal staging cleanup"
+        );
     }
 
     #[tokio::test]
@@ -612,13 +610,10 @@ mod tests {
         std::fs::write(&source, &contents).unwrap();
         let gate = crate::attempt_gate::AttemptGate::new();
 
-        let outcome = persist_by_exclusive_copy(
-            std::fs::File::open(&source).unwrap(),
-            &destination,
-            &gate,
-        )
-        .await
-        .expect("exclusive create fallback should publish");
+        let outcome =
+            persist_by_exclusive_copy(std::fs::File::open(&source).unwrap(), &destination, &gate)
+                .await
+                .expect("exclusive create fallback should publish");
 
         assert_eq!(outcome, ManifestPublishOutcome::Published);
         assert!(gate.was_delivered());
@@ -635,17 +630,17 @@ mod tests {
         std::fs::write(&destination, b"user file").unwrap();
         let gate = crate::attempt_gate::AttemptGate::new();
 
-        let error = persist_by_exclusive_copy(
-            std::fs::File::open(&source).unwrap(),
-            &destination,
-            &gate,
-        )
-        .await
-        .expect_err("create_new must reject an existing destination");
+        let error =
+            persist_by_exclusive_copy(std::fs::File::open(&source).unwrap(), &destination, &gate)
+                .await
+                .expect_err("create_new must reject an existing destination");
 
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(destination).unwrap(), b"user file");
-        assert!(gate.is_active(), "a failed exclusive create does not claim delivery");
+        assert!(
+            gate.is_active(),
+            "a failed exclusive create does not claim delivery"
+        );
         assert!(!gate.was_delivered());
     }
 

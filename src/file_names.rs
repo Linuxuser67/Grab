@@ -615,7 +615,7 @@ pub(crate) fn publish_temp_for(
     })?;
     let prefix = publish_temp_prefix(destination);
     let mut builder = tempfile::Builder::new();
-    builder.prefix(prefix).suffix(PUBLISH_TEMPORARY_SUFFIX);
+    builder.prefix(&prefix).suffix(PUBLISH_TEMPORARY_SUFFIX);
     builder.tempfile_in(parent)
 }
 

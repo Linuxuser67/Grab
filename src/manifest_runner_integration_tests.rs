@@ -1539,6 +1539,70 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
     crate::file_names::rename_noreplace(&mkv_part, &mkv_output)
         .expect("publish finalized Matroska fixture");
     assert_has_audio_and_video(Path::new("ffprobe"), &mkv_output);
+
+    // The static destination-part fast path assembles the same track without a
+    // local playlist, so the concatenated part must still be muxable.
+    let staging = root.path().join("staging");
+    let destination_dir = root.path().join("destination");
+    std::fs::create_dir_all(&destination_dir).expect("create HLS destination directory");
+    let destination = destination_dir.join("Example.mp4");
+    crate::manifest_destination::ensure_plan(&staging, &destination, 91, false, false)
+        .expect("persist HLS fMP4 destination plan");
+    let resource_names = plan
+        .resources
+        .iter()
+        .map(|resource| resource.filename.clone())
+        .collect::<Vec<_>>();
+    let (writer, committed) = crate::manifest_writer::OrderedTrackWriter::open_destination_part(
+        resource_names,
+        &video_dir,
+        &staging,
+        "video-track.ts",
+        &destination,
+        91,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .await
+    .expect("open HLS fMP4 destination part");
+    assert_eq!(
+        committed, 0,
+        "a fresh destination part has no committed bytes"
+    );
+    let mut writer = writer.expect("fresh HLS fMP4 destination part");
+    while writer.next_resource_index() < plan.resources.len() {
+        assert!(
+            writer
+                .append_next(&mut abort)
+                .await
+                .expect("append HLS fMP4 resource to the destination part")
+        );
+    }
+    writer
+        .finish()
+        .await
+        .expect("finish HLS fMP4 destination part");
+    let part = crate::manifest_destination::part_path(
+        &staging,
+        &destination,
+        91,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("resolve HLS fMP4 destination part");
+    let part_output = root.path().join("hls-part-output.mp4");
+    assert!(
+        run_ffmpeg(
+            Path::new("ffmpeg"),
+            &part,
+            None,
+            SubtitleOutput::default(),
+            &part_output,
+            &mut abort,
+        )
+        .await
+        .expect("finalize the assembled HLS fMP4 destination part"),
+        "destination part FFmpeg finalization unexpectedly aborted"
+    );
+    assert_has_audio_and_video(Path::new("ffprobe"), &part_output);
 }
 
 #[tokio::test]

@@ -285,9 +285,43 @@ impl HlsPlan {
         })
     }
 
-    /// Whether non-empty static HLS resources can be assembled as a plain MPEG-TS track.
-    pub(crate) fn is_plain_mpegts_candidate(&self) -> bool {
-        !self.resources.is_empty() && self.is_plain_mpegts_presentation()
+    /// Whether static HLS resources can be concatenated straight into a
+    /// destination-visible part: plain MPEG-TS, or fMP4 with one leading init section.
+    pub(crate) fn is_destination_assemblable_candidate(&self) -> bool {
+        !self.resources.is_empty()
+            && (self.is_plain_mpegts_presentation() || self.is_single_init_fmp4_presentation())
+    }
+
+    /// Whether one leading `EXT-X-MAP` section followed by media segments can be
+    /// byte-concatenated. A later map, byte range, key, or discontinuity would
+    /// change the stream mid-track, so those keep the playlist-based path.
+    pub(crate) fn is_single_init_fmp4_presentation(&self) -> bool {
+        if self.local_playlist.segments.is_empty() {
+            return false;
+        }
+
+        let mut resources = self.resources.iter();
+        if !resources.next().is_some_and(|resource| {
+            resource.kind == HlsResourceKind::InitMap && resource.range.is_none()
+        }) {
+            return false;
+        }
+        if resources
+            .any(|resource| resource.kind != HlsResourceKind::Segment || resource.range.is_some())
+        {
+            return false;
+        }
+
+        let Ok(bytes) = self.local_playlist_bytes() else {
+            return false;
+        };
+        let Ok(playlist) = std::str::from_utf8(&bytes) else {
+            return false;
+        };
+
+        !playlist.lines().any(|line| {
+            line == "#EXT-X-DISCONTINUITY" || line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:")
+        })
     }
 
     /// Whether the playlist can be concatenated as a plain MPEG-TS byte stream.
@@ -1376,7 +1410,7 @@ mod tests {
     const BASE_URL: &str = "https://cdn.example.test/path/master.m3u8";
 
     #[test]
-    fn plain_mpegts_candidate_excludes_non_concatenable_hls_features() {
+    fn plain_mpegts_presentation_excludes_non_concatenable_hls_features() {
         let plain = br#"#EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:4
@@ -1388,7 +1422,7 @@ segment-2.ts
 "#;
         let plan = plan_hls_media_playlist(BASE_URL, plain)
             .expect("plain static HLS playlist should be accepted");
-        assert!(plan.is_plain_mpegts_candidate());
+        assert!(plan.is_plain_mpegts_presentation());
 
         let fragmented_mp4 = br#"#EXTM3U
 #EXT-X-VERSION:6
@@ -1400,7 +1434,7 @@ segment-1.m4s
 "#;
         let plan = plan_hls_media_playlist(BASE_URL, fragmented_mp4)
             .expect("fMP4 HLS playlist should be accepted for FFmpeg");
-        assert!(!plan.is_plain_mpegts_candidate());
+        assert!(!plan.is_plain_mpegts_presentation());
 
         let encrypted = br#"#EXTM3U
 #EXT-X-VERSION:3
@@ -1412,7 +1446,7 @@ segment-1.ts
 "#;
         let plan = plan_hls_media_playlist(BASE_URL, encrypted)
             .expect("AES-128 HLS playlist should be accepted for FFmpeg");
-        assert!(!plan.is_plain_mpegts_candidate());
+        assert!(!plan.is_plain_mpegts_presentation());
 
         let discontinuous = br#"#EXTM3U
 #EXT-X-VERSION:3
@@ -1426,7 +1460,97 @@ segment-2.ts
 "#;
         let plan = plan_hls_media_playlist(BASE_URL, discontinuous)
             .expect("discontinuous HLS playlist should be accepted for FFmpeg");
-        assert!(!plan.is_plain_mpegts_candidate());
+        assert!(!plan.is_plain_mpegts_presentation());
+    }
+
+    #[test]
+    fn destination_assemblable_candidate_accepts_one_leading_init_section() {
+        let fragmented_mp4 = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4,
+segment-1.m4s
+#EXTINF:4,
+segment-2.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, fragmented_mp4)
+            .expect("fMP4 HLS playlist should be accepted");
+        assert!(plan.is_destination_assemblable_candidate());
+        assert!(plan.is_single_init_fmp4_presentation());
+        assert!(!plan.is_plain_mpegts_presentation());
+
+        let repeated_map = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4,
+segment-1.m4s
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4,
+segment-2.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, repeated_map)
+            .expect("repeated fMP4 init section should plan");
+        assert!(plan.is_destination_assemblable_candidate());
+        assert_eq!(plan.resources.len(), 3, "one init section and two segments");
+
+        let late_map = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXTINF:4,
+segment-1.m4s
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4,
+segment-2.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, late_map)
+            .expect("late fMP4 init section should still plan");
+        assert!(!plan.is_destination_assemblable_candidate());
+
+        let ranged_map = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init.mp4",BYTERANGE="720@0"
+#EXTINF:4,
+segment-1.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, ranged_map)
+            .expect("ranged fMP4 init section should still plan");
+        assert!(!plan.is_destination_assemblable_candidate());
+
+        let encrypted_map = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x00000000000000000000000000000001
+#EXTINF:4,
+segment-1.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, encrypted_map)
+            .expect("encrypted fMP4 playlist should still plan");
+        assert!(!plan.is_destination_assemblable_candidate());
+
+        let discontinuous_map = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4,
+segment-1.m4s
+#EXT-X-DISCONTINUITY
+#EXTINF:4,
+segment-2.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, discontinuous_map)
+            .expect("discontinuous fMP4 playlist should still plan");
+        assert!(!plan.is_destination_assemblable_candidate());
     }
 
     #[test]

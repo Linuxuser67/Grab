@@ -455,11 +455,9 @@ mod tests {
         std::fs::write(&stale, b"orphaned media").expect("write stale temporary");
         std::fs::File::open(&stale)
             .expect("open stale temporary")
-            .set_times(
-                std::fs::FileTimes::new().set_modified(
-                    std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
-                ),
-            )
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
+            ))
             .expect("set stale temporary timestamp");
 
         let startup_started_at = std::time::SystemTime::now();
